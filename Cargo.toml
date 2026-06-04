@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# Shared metadata inherited by member crates via `field.workspace = true`.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["bchapuis <bchapuis@gmail.com>"]
+repository = "https://github.com/bchapuis/harness"
+rust-version = "1.85"
+
+# Centralized dependency versions. Member crates opt in with
+# `some-dep.workspace = true`, keeping versions consistent across the workspace.
+[workspace.dependencies]
+harness-core = { path = "crates/harness-core", version = "0.1.0" }
+harness-utils = { path = "crates/harness-utils", version = "0.1.0" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
