@@ -1,6 +1,6 @@
 # Distributed Actor Framework for Rust — Specification
 
-**Status:** Draft v3
+**Status:** Draft v4
 **Scope:** A location-transparent, fault-tolerant distributed actor system for Rust, with a **message-first** API.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** are to be interpreted as in RFC 2119.
@@ -8,6 +8,8 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, 
 `dactor` is used throughout as the placeholder crate/namespace name.
 
 > **Design stance.** The framework uses only ordinary Rust traits and generics; it provides **no macros of its own**. Actors exchange **messages** — serializable value types — and declare one `Handler<M>` for each message type they accept. Each message has a hand-written `const` wire identity (its *manifest*), and each actor lists the messages it accepts over the network in a hand-written `register` function (§4.4). The only macros in user code are serde's `Serialize`/`Deserialize`.
+>
+> This is a **deliberate trade-off**, not a free win. Hand-written manifests and `register` lists keep the *framework* simple and the wire contract explicit, inspectable, and versionable — at the cost of pushing mechanical boilerplate onto the *user* (one `const` per message, one `accept` line per remote message). Because that boilerplate is derivable, an **optional** derive MAY generate both (§4.4); the goal is *no required codegen* (§1.1), not *no codegen permitted*. The hand-written form is normative and remains the override path for anyone who needs to pin a manifest by hand.
 
 ---
 
@@ -19,7 +21,7 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, 
 - **Explicit wire contract.** Every cross-node payload is a named, serializable message type. You can version, log, persist, and inspect the protocol; it is not an implicit side effect of a method signature.
 - **Robustness.** Node and actor failure are first-class, observable events. The system tolerates partial failure and network partitions, and never drops a request without reporting an error.
 - **Pluggability.** Serialization, transport, and the actor system itself are traits. The cluster runtime is one implementation, not the only one.
-- **No required codegen.** The whole framework is plain generic code; serde's derives are the only macros it relies on.
+- **No required codegen.** The whole framework is plain generic code; serde's derives are the only macros it *relies on*. An optional derive that defaults a message's manifest or an actor's `register` list (§4.4) is permitted as a convenience — it lowers user boilerplate without becoming a dependency of the model. What is excluded is *required* codegen: nothing the framework mandates may need a macro.
 
 ### 1.2 Non-goals
 - **Generic message handlers over the wire.** A message that crosses the wire MUST be a concrete type (Rust monomorphizes; there is no runtime type to send). Generic actors are fine, but the *message* and its *reply* MUST be concrete, serializable types.
@@ -89,7 +91,7 @@ A **message** is a serializable value type that declares its reply type and its 
 pub trait Message: SerializationRequirement {
     type Reply: SerializationRequirement;
     /// Stable, author-controlled wire identity and dispatch key (§4.4).
-    /// Written by hand — there is no derive. Stable across recompiles and renames.
+    /// Written by hand, or defaulted by an optional derive (§4.4). Stable across recompiles and renames.
     const MANIFEST: Manifest;
 }
 ```
@@ -201,10 +203,13 @@ impl<A: Actor> ActorRef<A> {
 
 An `ActorId` MUST:
 - Be unique within a cluster for the cluster's lifetime.
-- Encode the **owning node** (so any node can route to it without a lookup) and a **local incarnation** that tells a fresh actor apart from a resigned one that reused the same name.
+- Let any node identify the target's **owning node** and classify it as local or remote, from the id alone, without a network round-trip (the capability `resolve` depends on, §4.3).
+- Carry an **incarnation** that distinguishes a fresh actor from a resigned one that reused the same name.
 - Be `Clone + Eq + Hash + Send + Sync + Serialize + DeserializeOwned`.
 
-Recommended structure:
+These are requirements on what an `ActorId` lets a node *do*, not on how it is laid out. The structure below satisfies them and is RECOMMENDED, but a conforming id MAY be represented differently (e.g. an opaque key resolved against the node's local routing state) as long as locality stays classifiable without contacting another node.
+
+Recommended (non-normative) structure:
 
 ```
 ActorId = {
@@ -284,15 +289,15 @@ Invariants (MUST):
 
 `resolve(id)` returns an `ActorRef` and classifies the target without any network round-trip:
 
-- If `id.node` is the local node and a live mailbox exists → a **local** `ActorRef` (fast path: messages enqueue directly, by value, without serialization).
-- If `id.node` is the local node but no live mailbox exists → an `ActorRef` that dead-letters (the actor has resigned).
-- If `id.node` is remote → a **remote** `ActorRef` (messages serialize and route through a transport).
+- If the id's owning node is the local node and a live mailbox exists → a **local** `ActorRef` (fast path: messages enqueue directly, by value, without serialization).
+- If the id's owning node is the local node but no live mailbox exists → an `ActorRef` that dead-letters (the actor has resigned).
+- If the id's owning node is remote → a **remote** `ActorRef` (messages serialize and route through a transport).
 
 `resolve` MUST NOT block or contact the remote node to check existence. Liveness is found when a message is sent, or via failure detection (§10). On a malformed or foreign `id`, it MUST return `ResolveError`.
 
 ### 4.4 Manifests, dispatch, and message flow
 
-Every message type carries a stable **manifest** (`Message::MANIFEST`, §3.2): its wire identity and its dispatch key. There is exactly one such identifier per message, and it is written by hand.
+Every message type carries a stable **manifest** (`Message::MANIFEST`, §3.2): its wire identity and its dispatch key. There is exactly one such identifier per message, and it is author-controlled.
 
 - The manifest MUST be stable across recompiles and renames. An explicit string (e.g. `"myapp.Greet"`) is RECOMMENDED. A breaking change to the message's shape SHOULD become a new message type with a new manifest, rather than a silent redefinition of an existing one.
 - The **dispatch registry** maps `(actor type, manifest) → typed dispatch entry`. A dispatch entry knows how to deserialize `M` from a payload, enqueue `Handler::<M>::handle` on the resolved local actor's executor, and serialize `M::Reply`.
@@ -315,6 +320,8 @@ impl<A: Actor> HandlerRegistry<A> {
 - `spawn` (§4.1) MUST call `A::register` the first time it spawns an actor of a `RemoteActor` type, filling the registry before any message can arrive. No separate setup step or link-time collection is needed.
 - Registration is **inbound-remote only**: a purely local actor (never registered, never sent across nodes) needs no `RemoteActor` impl — its messages flow by value (§4.3).
 - A network-delivered message whose `(actor type, manifest)` is not registered MUST yield `CallError::Unhandled`. The registry is also the deserialization allowlist (§5.3, §15.3): only listed message types are ever built from network bytes.
+
+> **Optional derive (non-normative).** Both hand-written pieces above — a message's `MANIFEST` and an actor's `register` body — are mechanical and MAY be generated by an optional derive (e.g. `#[derive(Message)]` defaulting the manifest from the type path; `#[derive(RemoteActor)]` emitting one `accept::<M>()` per `Handler<M>` impl). Such a derive is a convenience layered *above* the model, not part of it: an implementation MUST work with the manifests and `register` lists written by hand, and a hand-written manifest MUST always override a derived default. This keeps the explicit-wire-contract guarantee while removing the per-message boilerplate (see the design stance above §1, and the §1.1 codegen goal).
 
 **Outbound — `ActorRef::ask<M>` (typed layer above the trait):**
 1. Resolve locality of `self.id`.
@@ -367,7 +374,9 @@ pub trait Entropy: Send + Sync + 'static {
 
 /// Task spawning. The mailbox executors, gossip, and the failure detector run through this.
 pub trait Spawner: Send + Sync + 'static {
-    fn spawn(&self, task: BoxFuture<'static, ()>);
+    /// Named `launch`, not `spawn`, so a raw task is never confused with
+    /// spawning an actor (`ActorSystem::spawn` / `Ctx::spawn`, §3.4, §4.1).
+    fn launch(&self, task: BoxFuture<'static, ()>);
 }
 ```
 
@@ -486,6 +495,19 @@ Failures the system MUST represent explicitly (never mask):
 | Association lost | transport | `CallError::Unreachable` |
 
 Actor-level faults (a handler panics or the actor stops) are handled by **supervision** (§11). Node-level faults are handled by **membership + failure detection** (§9–10) and propagated to watchers via **lifecycle monitoring** (§12).
+
+### 8.1 The node-down cascade
+
+Declaring a node `down` is one event whose consequences are owned by five different subsystems. The detail lives with each owner; this is the single trace tying them together. When node `N` is declared `down`:
+
+1. **Detection → decision (§10, §9.2.4).** SWIM suspicion that goes unrefuted for `T_suspect` makes `N` `unreachable`; the downing policy then moves `unreachable → down`. `unreachable` is a suspicion, `down` is the decision.
+2. **Membership (§9.1).** The transition is gossiped; `down` is **terminal** — `N` MUST NOT reappear `up` under the same incarnation and MUST restart with a new `NodeId` to rejoin. The entry is later tombstoned (`removed`).
+3. **In-flight callers (§7.2, §14).** Every pending `ask` whose target is on `N` completes with `CallError::Unreachable` — it never hangs (invariant §18.5 #2). This is the guarantee plain request/response cannot give.
+4. **Watchers (§12.2).** No stop message can arrive from a dead node, so each local failure detector **synthesizes** a `Terminated { reason: NodeDown }` for every watched actor on `N`, delivered into each watcher's mailbox in serial order (§12.4).
+5. **Receptionist (§13.3).** Because the receptionist watches the actors it lists, step 4 drives it: every registration originating from `N` is pruned and subscribers receive a fresh `Listing`.
+6. **Routing afterward (§4.3).** `resolve` of any `ActorId` on `N` still returns a (remote) `ActorRef`; sends to it fail with `Unreachable` rather than blocking, since liveness is discovered on send, not in `resolve`.
+
+A graceful **leave** (§9.3) reaches the same terminal `down`/`removed` state and the same steps 3–6, differing only in step 1: the node announces `leaving` and drains instead of being suspected.
 
 ---
 
@@ -645,6 +667,23 @@ pub enum CallError {
 - A panic inside a handler is contained by supervision (§11) and never crosses the wire as a panic; it becomes `Terminated`/`Restart` locally and `Unreachable`/`DeadLetter` to in-flight callers.
 - Timeouts are mandatory on `ask`: every request MUST carry an effective deadline (explicit or a system default).
 
+### 14.3 Reading a call result
+
+The two nested layers of §14.1 — the **outer** `CallError` (did the call *complete*?) and the **inner** application `E` (what did the handler decide?) — are distinct on purpose and MUST NOT be collapsed in the type: a transport failure the caller may retry is not an application failure it must not.
+
+The type stays two-level; the *handling* need not be re-derived at every call site. A system SHOULD offer one canonical way to consume the common case where a caller treats any failure uniformly:
+
+```rust
+// Convenience over `ask` for callers that want a single error channel.
+// Available when the application error can absorb a transport failure.
+impl<A: Actor> ActorRef<A> {
+    pub async fn ask_flat<M, T, E>(&self, msg: M) -> Result<T, E>
+    where A: Handler<M>, M: Message<Reply = Result<T, E>>, E: From<CallError>;
+}
+```
+
+`ask_flat` collapses `Result<Result<T, E>, CallError>` into `Result<T, E>` by mapping a `CallError` through `E: From<CallError>`. Callers that must tell "did not complete" apart from "handler failed" keep using `ask`; callers that react to any failure the same way use `ask_flat`. Either way the two-level match is written once — here — not repeated per call site.
+
 ---
 
 ## 15. Security (RECOMMENDED)
@@ -667,30 +706,32 @@ The same events also drive deterministic simulation: a simulator subscribes to t
 
 ---
 
-## 17. Conformance checklist
+## 17. Conformance
 
-An implementation conforms to this specification if and only if:
+An implementation conforms to this specification **iff** every property below holds. This section is an index, not a restatement: each property is *defined* normatively by the cited section's MUSTs, and *verified* by the listed method — for runtime properties, the numbered invariant a simulator checks continuously (§18.5). The cited sections and the §18.5 catalogue are the single statements of each requirement; this table only points at them.
 
-- [ ] Actors expose state through no path other than their own handlers (§3.5).
-- [ ] An invalid `ask`/`tell` (a message the actor has no `Handler` for) is a compile error, via the `A: Handler<M>` bound (§3.3).
-- [ ] Sending a message is syntactically identical for local and remote targets (§3.3).
-- [ ] The `ActorSystem` lifecycle (`assign_id` → `actor_ready` → `resign_id`) holds the ordering and exactly-once invariants of §4.2.
-- [ ] `resolve` classifies locality without a network round-trip (§4.3).
-- [ ] A message's manifest (`Message::MANIFEST`) is its single, stable, hand-written wire identity and dispatch key; unregistered messages yield `CallError::Unhandled` (§4.4).
-- [ ] Remote dispatch is registered via a hand-written `RemoteActor::register` list invoked by `spawn`; the framework requires no macro of its own (§1.1, §4.4).
-- [ ] Local sends to a local actor occur by value, without serialization (§4.3–4.4).
-- [ ] `ActorRef` values in messages/replies are rebound to the receiving system on decode (§4.4).
-- [ ] Every message and reply type satisfies `SerializationRequirement` by ordinary trait bound (§5).
-- [ ] Each actor executes messages serially with FIFO per-sender ordering and bounded, non-dropping mailboxes (§6).
-- [ ] Associations are established via an authenticated, version-checked handshake (§7, §15).
-- [ ] Delivery is at-most-once and no `ask` ever completes silently (§7.2).
-- [ ] Membership is gossiped with incarnation-based refutation and converges (§9).
-- [ ] A SWIM-style detector with indirect probing and suspicion/refutation drives reachability (§10).
-- [ ] Local actor faults are contained by supervision; the default is `Stop`; restarts back off (§11).
-- [ ] `watch` yields exactly-once `Terminated`, including `NodeDown` when a peer is declared down (§12).
-- [ ] A cluster-replicated receptionist provides typed registration, lookup, and live subscription, pruned on node down (§13).
-- [ ] Transport/system failures are surfaced as exhaustive `CallError` values; application errors live in `M::Reply` (§14).
-- [ ] The system is constructible over a virtual clock, network, and randomness source; a single seed reproduces a run exactly; and the invariants of §18.5 hold under fault injection (§18).
+| Property | Defined in | Verified by |
+|---|---|---|
+| Actor state reachable only through the actor's own handlers | §3.5 | construction (ownership); §18.5 #4 |
+| An invalid `ask`/`tell` does not compile | §3.3 | §18.5 #20 (compile-fail) |
+| The call site is identical for local and remote targets | §3.3 | §18.5 #21 (differential) |
+| Lifecycle `assign_id → actor_ready → resign_id`: ordering and exactly-once | §4.2 | §18.5 #6 |
+| `resolve` classifies locality with no network round-trip | §4.3 | §18.5 #7 |
+| Stable hand-written manifest; unregistered `(actor, manifest)` → `Unhandled` | §4.4 | §18.5 #8; construction |
+| Remote dispatch listed by a hand-written `RemoteActor::register`; no framework macro | §1.1, §4.4 | construction |
+| Local sends enqueue by value, without serialization | §4.3–4.4 | §18.5 #9 |
+| `ActorRef`s in messages/replies are rebound on decode | §4.4 | §18.5 #10 |
+| Every message and reply satisfies `SerializationRequirement` | §5 | compile-time (trait bound) |
+| Serial execution, per-sender FIFO, bounded non-dropping mailbox | §6 | §18.5 #3, #4, #5 |
+| Associations established by an authenticated, version-checked handshake | §7, §15 | construction; transport tests |
+| At-most-once delivery; no `ask` completes silently | §7.2 | §18.5 #1, #2 |
+| Membership gossips with incarnation refutation and converges | §9 | §18.5 #14, #15, #16, #17 |
+| SWIM indirect probing with suspicion/refutation drives reachability | §10 | §18.5 #17 (underlies #14–16) |
+| Local faults contained by supervision; default `Stop`; restarts back off | §11 | §18.5 #18 |
+| `watch` yields exactly-once `Terminated`, including `NodeDown` | §12 | §18.5 #11, #12, #13 |
+| Receptionist: typed register/lookup/subscribe, pruned on node `down` | §13 | §18.5 #19 |
+| Transport/system failures are exhaustive `CallError`; app errors in `M::Reply` | §14 | compile-time (exhaustive enum); §18.5 #1 |
+| Runs over virtual clock/network/entropy; one seed reproduces a run; every property above holds under fault injection | §18 | §18.1; §18.5 under §18.3 |
 
 ---
 
@@ -739,7 +780,7 @@ Tests are expressed as **workloads** over the cluster: a `setup` that builds act
 
 ### 18.5 Invariant catalogue
 
-These invariants appear as MUSTs throughout this specification. Collected here, they are the contract a simulator checks **continuously** during every run and at final quiescence. Each MUST hold even under the faults of §18.3.
+These invariants appear as MUSTs throughout this specification; those inline MUSTs are their normative statements. Collected here, they are the contract a simulator checks **continuously** during every run and at final quiescence, and the targets §17 verifies against. Each MUST hold even under the faults of §18.3.
 
 1. **No silent loss (§7.2, §14).** Every `ask` issued terminates in exactly one of `Ok(reply)`, `Timeout`, `Unreachable`, `DeadLetter`, or `Unhandled`; at final quiescence no `ask` remains pending.
 2. **Crash completes in-flight calls (§7.2, §10.5).** An `ask` whose target node is declared `down` completes with `Unreachable`; it never hangs.
@@ -835,4 +876,4 @@ dactor-simulation/       # TEST-ONLY. Virtual Clock/Entropy/Spawner + in-memory 
                          #   the deterministic simulator, fault injection, invariant checkers (§18)
 ```
 
-Message identity is a `const`, remote dispatch is a hand-written `RemoteActor::register` list, and the call path is ordinary generic code in `dactor-core`. There is no macro crate.
+Message identity is a `const`, remote dispatch is a hand-written `RemoteActor::register` list, and the call path is ordinary generic code in `dactor-core`. There is no *required* macro crate; any `#[derive(Message)]`/`#[derive(RemoteActor)]` (§4.4) is an optional convenience layered above the model, not a dependency of it.
