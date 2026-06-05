@@ -1,13 +1,13 @@
 # Distributed Actor Framework for Rust — Specification
 
-**Status:** Draft v2
+**Status:** Draft v3
 **Scope:** A location-transparent, fault-tolerant distributed actor system for Rust, distilled from Swift's distributed actor model (SE-0336, SE-0344) and the `swift-distributed-actors` cluster runtime, adapted to a **programmatic, message-first** Rust API.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** are to be interpreted as in RFC 2119.
 
 `dactor` is used throughout as the placeholder crate/namespace name.
 
-> **Design stance.** The framework is built entirely from ordinary Rust traits and generics — it ships **no procedural macros of its own**. Actors exchange **messages** that are first-class, serializable value types; an actor declares a `Handler<M>` per message it accepts. A message's wire identity is a hand-written `const`, and the set of messages an actor accepts over the network is a hand-written `register` list that `spawn` invokes (§4.4). The only derive macros in user code are serde's `Serialize`/`Deserialize`, which are external and universally used for any serializable type. An optional method-call sugar layer (Appendix D) is available but never load-bearing.
+> **Design stance.** The framework is built entirely from ordinary Rust traits and generics — it ships **no procedural macros of its own**. Actors exchange **messages** that are first-class, serializable value types; an actor declares a `Handler<M>` per message it accepts. A message's wire identity is a hand-written `const`, and the set of messages an actor accepts over the network is a hand-written `register` list that `spawn` invokes (§4.4). The only derive macros in user code are serde's `Serialize`/`Deserialize`, which are external and universally used for any serializable type. Method-call sugar is possible but deliberately out of scope (Appendix D).
 
 ---
 
@@ -350,6 +350,37 @@ impl ReplyHandle {
 
 `deliver` MUST resolve exactly one of these per `ask`. Because application errors live inside `M::Reply` (§3.2.4), `send` carries both successful and application-failed outcomes; `fail` is reserved for transport/system failures the handler never produced.
 
+### 4.6 Runtime environment (clock, entropy, concurrency)
+
+The runtime depends on three ambient capabilities. A system MUST obtain them **only through injected seams**, never from the host environment directly. This is what makes a system deterministically simulable (§18); it is also good hygiene independent of testing, and it is consonant with the trait-based, macro-free stance of §1.1 — each capability is one ordinary trait.
+
+```rust
+/// Virtual or real time. No subsystem may read wall-clock time directly.
+pub trait Clock: Send + Sync + 'static {
+    fn now(&self) -> Instant;
+    async fn sleep(&self, dur: Duration);
+    async fn timeout<F: Future>(&self, within: Duration, f: F) -> Result<F::Output, Elapsed>;
+}
+
+/// The single source of entropy. Seedable; the only randomness in the system.
+pub trait Entropy: Send + Sync + 'static {
+    fn next_u64(&self) -> u64;
+}
+
+/// Task spawning. The mailbox executors, gossip, and the failure detector run through this.
+pub trait Spawner: Send + Sync + 'static {
+    fn spawn(&self, task: BoxFuture<'static, ()>);
+}
+```
+
+Rules (MUST):
+1. **All timing** — `ask` deadlines (§14.2), SWIM intervals (§10), gossip periods (§9.2), supervision backoff (§11.2) — MUST derive from `Clock`. No subsystem reads the wall clock or a host timer directly.
+2. **All randomness** — gossip peer selection (§9.2), SWIM's `k` members (§10.2), backoff jitter (§11.2), `NodeId` generation (§3.6, §9.1) — MUST derive from `Entropy`.
+3. **All background concurrency** MUST be created through `Spawner`. The mailbox executor (§6) and detector loops (§10) MUST NOT bind themselves to a specific async runtime.
+4. **No observable nondeterminism.** Anything that crosses the wire or surfaces through §16 events MUST have deterministic ordering: a system MUST NOT let unordered iteration (e.g. `HashMap` order) leak into message ordering, peer selection, or reply timing.
+
+The production runtime supplies a wall-clock `Clock`, an OS-seeded `Entropy`, and a multi-threaded `Spawner`. The simulator (§18) supplies virtual equivalents driven by a single seed; no other code changes.
+
 ---
 
 ## 5. Serialization
@@ -389,6 +420,24 @@ A transport is pluggable behind a trait; the default is TCP with length-delimite
 2. **Multiplexing.** Many actor conversations share one association. Each request carries a correlation id; responses reference it.
 3. **Framing.** Messages are length-delimited; a malformed frame MUST tear down the association, not the node.
 4. **Lifecycle signals.** The transport MUST report association establishment and loss to the membership/failure-detection subsystems (§9, §10).
+
+Like `ActorSystem` (§4.1), the transport is a concrete trait, so the default TCP transport and the simulator's in-memory network (§18) are two implementations of one seam; nothing above this layer distinguishes them:
+
+```rust
+pub trait Transport: Send + Sync + 'static {
+    /// Establish (or reuse) an authenticated association to a node (§7.1, §15).
+    async fn connect(&self, peer: &NodeId) -> Result<(), TransportError>;
+
+    /// Send one frame to `peer` over its association. At-most-once (§7.2).
+    async fn send(&self, peer: &NodeId, frame: Frame) -> Result<(), TransportError>;
+
+    /// Inbound frames from all associations, demultiplexed by the receive loop (§4.4).
+    fn inbound(&self) -> impl Stream<Item = (NodeId, Frame)> + Send;
+
+    /// Association lifecycle, feeding membership and failure detection (§9, §10).
+    fn events(&self) -> impl Stream<Item = TransportEvent> + Send; // Associated | Lost
+}
+```
 
 ### 7.1 Wire protocol
 
@@ -616,6 +665,8 @@ A conforming system SHOULD expose:
 - **Tracing:** propagate a trace/correlation context through envelopes so a logical request can be followed across nodes.
 - **Lifecycle logging:** spawn/resign, membership transitions, downing decisions, supervision actions — each at a defined, filterable level.
 
+The structured event stream is **dual-use**: the same lifecycle/membership/dispatch events that feed human-facing logs and metrics are the tap a deterministic simulator subscribes to for continuous invariant checking (§18.5). A conforming system SHOULD emit, as structured events: `assign_id`/`actor_ready`/`resign_id` (§4.2), mailbox enqueue and dispatch (§6), every `ask` outcome (§14), membership and reachability transitions (§9–10), supervision decisions (§11), and `Terminated` deliveries (§12).
+
 ---
 
 ## 17. Conformance checklist
@@ -641,6 +692,85 @@ An implementation conforms to this specification if and only if:
 - [ ] `watch` yields exactly-once `Terminated`, including `NodeDown` when a peer is declared down (§12).
 - [ ] A cluster-replicated receptionist provides typed registration, lookup, and live subscription, pruned on node down (§13).
 - [ ] Transport/system failures are surfaced as exhaustive `CallError` values; application errors live in `M::Reply` (§14).
+- [ ] The system is constructible over a virtual clock, network, and entropy source; a single seed reproduces a run exactly; and the invariants of §18.5 hold under fault injection (§18).
+
+---
+
+## 18. Testability and deterministic simulation
+
+A conforming implementation SHOULD be testable by **deterministic simulation**: an entire cluster runs in one process, on one logical thread, over virtualized time, network, and entropy, so that a single seed reproduces a whole multi-node run — including its failures — exactly. This section is normative for the seams that make such testing possible and enumerates the invariants a simulator checks. It is the methodology distilled from FoundationDB's simulation testing, adapted to this framework's traits.
+
+### 18.1 Determinism contract
+
+A system that supports simulation MUST satisfy:
+
+1. **Seed-reproducibility.** Given the same seed, configuration, and workload, two runs MUST produce byte-identical event streams (§16). All nondeterminism MUST funnel through the `Clock`, `Entropy`, and `Spawner` seams (§4.6) and the `Transport` seam (§7).
+2. **Quiescence-driven time.** In simulation, logical time MUST advance only when no task is ready to run. A timeout, SWIM interval, or backoff therefore costs no wall-clock time, letting a run cover hours of cluster time per CPU-second.
+3. **No ambient nondeterminism.** A simulation build MUST NOT read the wall clock, spawn OS threads, or draw from a non-seeded RNG. Implementations SHOULD enforce this statically (e.g. a lint forbidding the offending APIs), because a single leak silently destroys reproducibility.
+
+### 18.2 Virtualized seams
+
+Simulation reuses the seams the production runtime already uses; only the implementations differ:
+
+| Seam | Production | Simulation |
+|---|---|---|
+| `Clock` (§4.6) | wall clock | logical clock; advances only at quiescence |
+| `Entropy` (§4.6) | OS-seeded | one seeded PRNG — the only entropy in the run |
+| `Spawner` (§4.6) | multi-thread runtime | single-thread cooperative scheduler |
+| `Transport` (§7) | TCP | in-memory network with seeded latency / loss / reorder |
+| codec (§5) | production codec | unchanged — exercises real (de)serialization |
+
+Because these are the *same* traits production uses, simulation exercises the real `ActorSystem`, mailbox, membership, SWIM, supervision, and receptionist code paths — not a model of them. The codec deliberately stays real so wire encoding is tested on every cross-node hop.
+
+### 18.3 Fault injection
+
+A simulator MUST be able to inject, under seed control, at least:
+
+- **Transport:** frame drop, duplication, delay, reordering; corruption (which MUST tear down the association, not the node — §7.3); association loss.
+- **Mailbox:** induced `MailboxFull` (§6.4); maximal cross-sender reordering subject to per-sender FIFO (§6.5).
+- **Scheduling:** seed-randomized selection among ready tasks.
+- **Membership / SWIM:** dropped or delayed pings, partitions, stale or replayed gossip, stale incarnations (§9–10).
+- **Supervision:** induced handler and `started()` faults (§11).
+- **Nodes:** abrupt crash (no graceful leave) at an arbitrary step, which MUST surface as `NodeDown`/`Terminated` to watchers (§12.2) and `Unreachable` to in-flight callers (§7.2).
+
+Each run SHOULD enable a randomized subset of faults at randomized intensities ("swarm" testing); a run with no faults injected is the degenerate case and MUST still pass.
+
+### 18.4 Workloads
+
+Tests are expressed as **workloads** over the cluster: a `setup` that builds actors and registrations, a `start` that drives traffic, and a `check` that asserts the invariants of §18.5. A workload MUST observe the cluster only through public API and the §16 event stream — never through actor state directly (§3.5), except via `when_local` (§3.5.1) where explicitly intended.
+
+### 18.5 Invariant catalogue
+
+These invariants appear as MUSTs scattered across this specification; collected here, they are the checkable contract a simulator asserts **continuously** during every run and at final quiescence. Each MUST hold in the presence of the faults of §18.3.
+
+1. **No silent loss (§7.2, §14).** Every `ask` issued terminates in exactly one of `Ok(reply)`, `Timeout`, `Unreachable`, `DeadLetter`, or `Unhandled`; at final quiescence no `ask` remains pending.
+2. **Crash completes in-flight calls (§7.2, §10.5).** An `ask` whose target node is declared `down` completes with `Unreachable`; it never hangs.
+3. **Per-pair FIFO (§6.5).** Messages from one sender to one recipient are observed in send order, even under maximal reordering injection; no ordering is assumed across senders.
+4. **Serial, non-reentrant execution (§6.2–6.3).** An actor never processes two messages concurrently; `&mut self` is never aliased.
+5. **Bounded, non-dropping mailbox (§6.4).** A full mailbox blocks or returns `MailboxFull`; it never drops silently.
+6. **Lifecycle order and exactly-once (§4.2).** `assign_id` → `actor_ready` → `resign_id` occur in order; `assign_id` and `actor_ready` exactly once; `resign_id` exactly once even when spawn fails between steps 1 and 3; the id is undeliverable between assign and ready.
+7. **`resolve` is local (§4.3).** Locality classification performs no network round-trip.
+8. **Manifest dispatch and allowlist (§4.4, §5.3, §15.3).** An unregistered `(actor type, manifest)` yields `Unhandled`; no type outside the registry is ever constructed from network bytes.
+9. **Local sends skip serialization (§4.3–4.4).** A local `ask`/`tell` performs no encode/decode, yet its observable result is identical to the remote path (cf. 21).
+10. **`ActorRef` rebinding (§4.4).** An `ActorRef` carried in a message or reply is rebound to the receiving system on decode and is usable there.
+11. **Death-watch exactly-once (§12.1–12.2).** After `watch`, the watcher receives exactly one `Terminated` for any cause, including `NodeDown` when the target's node is declared `down`.
+12. **Watch-after-death (§12.3).** Watching an already-terminated actor yields `Terminated` immediately.
+13. **Signal ordering (§12.4).** `Terminated` is delivered through the mailbox in serial order, never out of band.
+14. **Membership convergence (§9.2).** Once faults cease and partitions heal, all `up` members converge on one membership set within bounded logical time.
+15. **`down` is terminal (§9.1).** A node observed `down` never reappears `up` under the same incarnation.
+16. **Partition tolerance (§9.2.4).** Under the default downing policy, a partition alone never moves a member to `down`, only to `unreachable`.
+17. **SWIM refutation (§10.4).** A node that sees itself suspected refutes via a higher incarnation, clearing the suspicion cluster-wide.
+18. **Supervision containment (§11).** A handler panic never crashes the node; the default directive is `Stop`; restarts back off; exceeding `max` within the window escalates.
+19. **Receptionist consistency (§13).** Registrations from a `down` node are pruned and subscribers notified; `subscribe` delivers the current snapshot first, then every change; concurrent registrations merge (eventual consistency).
+20. **Type-safety (§3.3).** An `ask`/`tell` of a message an actor has no `Handler` for does not compile. (Asserted by compile-fail tests, not at runtime — see §18.6.)
+21. **Location transparency (§3.3).** Running the same workload with a target local versus remote produces observably identical replies and ordering. (Differential check.)
+
+### 18.6 Reproduction, layering, and CI
+
+- **Reproduction.** A failing run MUST be replayable from its `(seed, configuration)` alone. The seed is the bug report.
+- **Layered checks.** Simulation covers the distributed invariants (1–19, 21). Invariant 20 is covered by **compile-fail tests** — a compiler run asserting invalid sends are rejected. The low-level mailbox/executor (§6) SHOULD additionally be model-checked across all interleavings, independent of the simulator.
+- **Regression corpus.** Every historical failure SHOULD be retained as a `(seed, configuration)` and replayed permanently.
+- **Continuous fleet.** CI SHOULD run many fresh seeds per change across swarm configurations; cluster-hours exercised per change is the coverage metric, not test count.
 
 ---
 
@@ -703,10 +833,11 @@ dactor-core/             # Actor, Message, Handler, ActorRef, Ctx, ActorSystem,
 dactor-serialization/    # SerializationRequirement, dispatch registry, codecs (§5, §4.4)
 dactor-cluster/          # ClusterSystem: transport, membership, SWIM, supervision,
                          #   death watch, receptionist (§7–13) — the reference ActorSystem
-dactor-macros/           # OPTIONAL. Only the method-call sugar of Appendix D. Not required by anything.
+dactor-simulation/       # TEST-ONLY. Virtual Clock/Entropy/Spawner + in-memory Transport,
+                         #   the deterministic simulator, fault injection, invariant checkers (§18)
 ```
 
-There is **no required macro crate**. Message identity is a `const`, remote dispatch is a hand-written `RemoteActor::register` list, and the call path is ordinary generic code in `dactor-core`. `dactor-macros` exists only if a project opts into the Appendix D sugar; the rest of the framework never depends on it.
+There is **no macro crate**. Message identity is a `const`, remote dispatch is a hand-written `RemoteActor::register` list, and the call path is ordinary generic code in `dactor-core`. The framework supplies no procedural macro of its own at all.
 
 ## Appendix C — Mapping to Swift distributed actors
 
@@ -730,20 +861,8 @@ There is **no required macro crate**. Message identity is a `const`, remote disp
 | `LifecycleWatch` / `Terminated` | death watch (§12) |
 | `Receptionist` / reception `Key` | receptionist (§13) |
 
-## Appendix D — Optional method-call sugar
+## Appendix D — Method-call sugar (out of scope)
 
-The core framework requires no macros (§1.1). Purely for keystroke savings, a project MAY opt into a sugar macro (the only macro in the whole design, and entirely optional) that, for each method, generates a message type, its `Message` impl (including a `MANIFEST`), the matching `Handler`, the `RemoteActor::register` entry, and an extension trait on `ActorRef`. It is **optional and non-load-bearing**: it expands to exactly the code an author would otherwise write by hand in §3.2 and §4.4.
+The framework specifies no macros (§1.1). Because every message is a hand-written type plus its `Message`/`Handler`/`RemoteActor::register` entries (§3.2, §4.4), a project may find a method-call sugar convenient — a macro that, per method, generates the message type, its `Message` impl (including a `MANIFEST`), the matching `Handler`, the `register` entry, and an extension trait on `ActorRef`, all desugaring to `ActorRef::ask`/`tell`.
 
-```rust
-#[dactor::messages]   // sugar only; expands to Greet{..}, Message (+MANIFEST), Handler, register entry, ext trait
-impl Greeter {
-    pub async fn greet(&mut self, name: String) -> String {
-        format!("{}, {name}!", self.greeting)
-    }
-}
-
-// then, via the generated extension trait:
-let msg = greeter.greet("world".into()).await?;   // == greeter.ask(Greet { name }).await
-```
-
-The generated method MUST desugar to `ActorRef::ask`/`tell` and MUST NOT introduce any capability (state access, new wire identity scheme, or dispatch path) beyond what §3–4 already define. A conforming implementation need not provide this layer, and nothing else in the framework depends on it.
+Such a layer is **deliberately out of scope**. It would be a pure keystroke optimization, introducing no capability (state access, wire-identity scheme, or dispatch path) beyond what §3–4 already define, and it can be built externally with no cooperation from the core. Specifying it here would dilute the framework's central guarantee — that the entire system is ordinary generic code with no codegen — so it is left to third parties.
