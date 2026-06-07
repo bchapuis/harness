@@ -1,0 +1,17 @@
+[package]
+name = "actor-serialization"
+description = "Serialization bound, dispatch registry, and codecs for the actor framework (spec §5, §4.4)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+erased-serde.workspace = true

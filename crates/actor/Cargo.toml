@@ -1,0 +1,16 @@
+[package]
+name = "actor"
+description = "Umbrella crate re-exporting the distributed actor framework (Appendix B)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+actor-core.workspace = true
+actor-serialization.workspace = true

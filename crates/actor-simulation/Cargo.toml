@@ -1,0 +1,24 @@
+[package]
+name = "actor-simulation"
+description = "Deterministic simulation: virtual Clock/Entropy/Spawner and a single-thread executor (spec §18)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-serialization.workspace = true
+async-channel.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+serde = { workspace = true }

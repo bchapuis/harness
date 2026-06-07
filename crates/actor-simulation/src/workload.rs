@@ -1,0 +1,135 @@
+//! Workloads and the swarm runner (spec §18.4, §18.6).
+//!
+//! A [`Workload`] drives the cluster through its public API; the runner executes
+//! it under a seeded [`Simulation`], with a per-seed [`FaultConfig`] sampled from
+//! the same stream, while a [`Checker`] watches the event stream. A failing run
+//! is reported as a [`RunFailure`] carrying the `(seed, faults)` needed to
+//! replay it deterministically (spec §18.6).
+//!
+//! The FoundationDB loop: define a few workloads and invariants, then sweep many
+//! seeds ([`run_swarm`]); coverage is cluster-time exercised, not test count.
+
+use actor_core::BoxFuture;
+use actor_core::LocalSystem;
+use actor_core::LocalSystemBuilder;
+
+use crate::SimClock;
+use crate::SimEntropy;
+use crate::SimSpawner;
+use crate::Simulation;
+use crate::check::Checker;
+use crate::check::Violation;
+use crate::invariant::Invariant;
+use crate::invariant::default_invariants;
+
+/// The concrete system a simulated workload runs on.
+pub type SimSystem = LocalSystem<SimClock, SimEntropy, SimSpawner>;
+
+/// A test scenario expressed against the cluster's public API (spec §18.4).
+///
+/// `run` builds actors and drives traffic; the runner then advances the
+/// simulation to quiescence and checks the workload's [`invariants`]. A workload
+/// MUST observe the cluster only through the public API and the event stream,
+/// never through actor state directly.
+///
+/// [`invariants`]: Workload::invariants
+pub trait Workload: Send + 'static {
+    /// A stable name for reporting.
+    fn name(&self) -> &'static str;
+
+    /// Build actors and drive traffic to completion. The returned future
+    /// resolves when the workload's own traffic is done; the runner still drives
+    /// the simulation to full quiescence afterwards.
+    fn run(&self, system: SimSystem) -> BoxFuture<'static, ()>;
+
+    /// Invariants checked continuously and at quiescence (spec §18.5). Defaults
+    /// to [`default_invariants`].
+    fn invariants(&self) -> Vec<Box<dyn Invariant>> {
+        default_invariants()
+    }
+}
+
+/// A seed-sampled fault configuration applied to a run (spec §18.3).
+///
+/// Single-node faults are modest for now — the bounded mailbox capacity is
+/// randomized so invariants are exercised across the backpressure spectrum.
+/// Transport/membership faults join this struct as those subsystems land.
+#[derive(Clone, Copy, Debug)]
+pub struct FaultConfig {
+    /// Per-actor bounded mailbox capacity for this run.
+    pub mailbox_capacity: usize,
+}
+
+impl FaultConfig {
+    /// Sample a configuration from the run's entropy. Drawing here keeps the
+    /// choice deterministic per seed.
+    pub fn sample(entropy: &SimEntropy) -> FaultConfig {
+        use actor_core::Entropy;
+        FaultConfig {
+            mailbox_capacity: 1 + (entropy.next_u64() % 64) as usize,
+        }
+    }
+}
+
+/// A failing run, with everything needed to replay it (spec §18.6).
+#[derive(Clone, Debug)]
+pub struct RunFailure {
+    pub workload: &'static str,
+    pub seed: u64,
+    pub faults: FaultConfig,
+    pub violations: Vec<Violation>,
+}
+
+impl std::fmt::Display for RunFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "workload '{}' failed at seed {} ({:?}); replay with run_seed(.., {}):",
+            self.workload, self.seed, self.faults, self.seed
+        )?;
+        for v in &self.violations {
+            writeln!(f, "  - {v}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RunFailure {}
+
+/// Run a workload once under a given seed, returning any invariant violations.
+pub fn run_seed<W: Workload>(workload: &W, seed: u64) -> Result<(), RunFailure> {
+    let sim = Simulation::new(seed);
+    let faults = FaultConfig::sample(&sim.entropy());
+    let checker = Checker::new(workload.invariants());
+
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
+        .mailbox_capacity(faults.mailbox_capacity)
+        .events(checker.sink())
+        .build();
+
+    sim.block_on(workload.run(system));
+
+    let violations = checker.finish();
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(RunFailure {
+            workload: workload.name(),
+            seed,
+            faults,
+            violations,
+        })
+    }
+}
+
+/// Sweep a workload across many seeds (swarm testing, spec §18.6), stopping at
+/// the first failing seed so it can be replayed.
+pub fn run_swarm<W: Workload>(
+    workload: &W,
+    seeds: impl IntoIterator<Item = u64>,
+) -> Result<(), RunFailure> {
+    for seed in seeds {
+        run_seed(workload, seed)?;
+    }
+    Ok(())
+}

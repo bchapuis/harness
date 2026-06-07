@@ -1,0 +1,32 @@
+[package]
+name = "actor-runtime"
+description = "Production runtime: a tokio-backed Clock/Spawner, OS-seeded Entropy, and a mutual-TLS TCP transport (spec §4.6, §7, §15)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-serialization.workspace = true
+async-channel.workspace = true
+futures.workspace = true
+serde.workspace = true
+tokio.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+getrandom.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true }
+erased-serde.workspace = true
+rcgen.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
