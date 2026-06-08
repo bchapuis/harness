@@ -253,30 +253,33 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystem<C, E, S> {
             None,
         )
     }
-}
 
-impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
-    fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A> {
-        // A value-spawned actor yields once; a restart directive degrades to Stop.
+    /// Spawn from a one-shot factory: the actor yields once, so a `Restart`
+    /// directive degrades to `Stop`. Shared by [`spawn`](ActorSystem::spawn)
+    /// (no parent) and [`spawn_child`](ActorSystem::spawn_child) (with parent).
+    fn spawn_one_shot<A: Actor<System = Self>>(
+        &self,
+        actor: A,
+        parent: Option<ActorId>,
+    ) -> ActorRef<A> {
         let mut once = Some(actor);
         self.inner.host.spawn_actor(
             self.clone(),
             self.inner.clock.clone(),
             &self.inner.spawner,
             Box::new(move || once.take()),
-            None,
+            parent,
         )
+    }
+}
+
+impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
+    fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A> {
+        self.spawn_one_shot(actor, None)
     }
 
     fn spawn_child<A: Actor<System = Self>>(&self, child: A, parent: ActorId) -> ActorRef<A> {
-        let mut once = Some(child);
-        self.inner.host.spawn_actor(
-            self.clone(),
-            self.inner.clock.clone(),
-            &self.inner.spawner,
-            Box::new(move || once.take()),
-            Some(parent),
-        )
+        self.spawn_one_shot(child, Some(parent))
     }
 
     fn spawn_child_with<A, F>(&self, mut factory: F, parent: ActorId) -> ActorRef<A>

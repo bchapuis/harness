@@ -34,8 +34,26 @@ use crate::runtime::BoxFuture;
 /// returns the future that drives the handler.
 type Runner<A> = Box<dyn for<'a> FnOnce(&'a mut A, &'a Ctx<A>) -> BoxFuture<'a, ()> + Send>;
 
+/// The fire-and-forget runner shared by [`Mailbox::tell`] and
+/// [`Mailbox::try_tell`]: drives the handler to completion and discards the
+/// reply. The two methods differ only in how they enqueue it, not in the work.
+fn tell_runner<A, M>(msg: M) -> Runner<A>
+where
+    A: Actor + Handler<M>,
+    M: Message,
+{
+    Box::new(move |actor, ctx| {
+        Box::pin(async move {
+            let _ = actor.handle(msg, ctx).await;
+        })
+    })
+}
+
 /// One unit of work queued on a mailbox: the message's manifest (for the
-/// `Dispatch` event) plus the runner that executes it.
+/// `Dispatch` event) plus the runner that executes it. This is the **local,
+/// by-value** envelope (spec §6) — the in-memory counterpart of the cluster
+/// wire frame, holding a live closure rather than serialized bytes. The remote
+/// path rebuilds an equivalent `Envelope` after deserializing.
 pub(crate) struct Envelope<A: Actor> {
     pub(crate) manifest: &'static str,
     pub(crate) run: Runner<A>,
@@ -114,12 +132,7 @@ impl<A: Actor> Mailbox<A> {
         A: Handler<M>,
         M: Message,
     {
-        let run: Runner<A> = Box::new(move |actor, ctx| {
-            Box::pin(async move {
-                let _ = actor.handle(msg, ctx).await;
-            })
-        });
-        self.enqueue(M::MANIFEST.as_str(), run).await
+        self.enqueue(M::MANIFEST.as_str(), tell_runner(msg)).await
     }
 
     /// Non-blocking fire-and-forget: [`CallError::MailboxFull`] when full,
@@ -130,11 +143,7 @@ impl<A: Actor> Mailbox<A> {
         M: Message,
     {
         let manifest = M::MANIFEST.as_str();
-        let run: Runner<A> = Box::new(move |actor, ctx| {
-            Box::pin(async move {
-                let _ = actor.handle(msg, ctx).await;
-            })
-        });
+        let run = tell_runner(msg);
         match self.sender.try_send(Envelope { manifest, run }) {
             Ok(()) => {
                 self.events.emit(Event::Enqueue {
