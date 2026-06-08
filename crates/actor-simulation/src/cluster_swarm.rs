@@ -6,7 +6,7 @@
 //! virtual time (the failure detector never quiesces) and reproducible from its
 //! seed; a failure is reported with the seed for replay.
 //!
-//! This is the FoundationDB loop applied to the distributed paths: faults across
+//! This is the swarm loop applied to the distributed paths: faults across
 //! seeds, invariants attached, coverage measured in cluster-time exercised.
 
 use std::sync::Arc;
@@ -141,10 +141,24 @@ async fn nemesis(
     }
 }
 
-/// Run a cluster workload once under `seed`, returning any invariant violations.
-pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(), ClusterFailure> {
+/// The outcome of driving one cluster run: whether the workload's traffic
+/// completed within the time budget, and the fault activity the run exercised
+/// (so a swarm can assert faults actually fired — spec §18.3).
+pub(crate) struct ClusterRun {
+    pub completed: bool,
+    pub faults: crate::transport::FaultStats,
+}
+
+/// Build and drive a cluster workload once under `seed`, routing every node's
+/// event stream to `events`. Shared by [`run_cluster_seed`] (which feeds a
+/// [`Checker`]) and the reproducibility harness (which feeds a
+/// [`Recorder`](crate::Recorder)), so both observe the *identical* run.
+pub(crate) fn drive_cluster<W: ClusterWorkload>(
+    workload: &W,
+    seed: u64,
+    events: Arc<dyn actor_core::EventSink>,
+) -> ClusterRun {
     let sim = Simulation::new(seed);
-    let checker = Checker::new(workload.invariants());
     // Seed-sampled transport faults: modest drop, duplication, and latency, so
     // the run exercises loss, dups, and reordering on top of the nemesis's
     // partitions/crashes (spec §18.3). Sampled from the run's entropy, so it
@@ -159,7 +173,7 @@ pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(
     };
     let net = SimNetwork::new(&sim)
         .with_swim(workload.swim())
-        .with_events(checker.sink())
+        .with_events(events)
         .with_faults(faults);
 
     let nodes: Vec<SimCluster> = (1..=workload.node_count() as u64)
@@ -182,7 +196,7 @@ pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(
 
     let node_ids: Vec<NodeId> = nodes.iter().map(|n| n.node()).collect();
     sim.spawner().launch(Box::pin(nemesis(
-        net,
+        net.clone(),
         sim.entropy(),
         sim.clock(),
         node_ids,
@@ -199,14 +213,35 @@ pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(
     // Let post-traffic signals (terminations, prunes) flush.
     sim.run_for(Duration::from_secs(2));
 
+    ClusterRun {
+        completed: done.load(Ordering::SeqCst),
+        faults: net.fault_stats(),
+    }
+}
+
+/// Drive one run and evaluate it: the invariant violations observed (plus a
+/// synthesized liveness violation if the workload hung) and the faults the run
+/// exercised. Shared by the seed runner and the coverage sweep.
+fn eval_cluster<W: ClusterWorkload>(
+    workload: &W,
+    seed: u64,
+) -> (Vec<Violation>, crate::transport::FaultStats) {
+    let checker = Checker::new(workload.invariants());
+    let run = drive_cluster(workload, seed, checker.sink());
+
     let mut violations = checker.finish();
-    if !done.load(Ordering::SeqCst) {
+    if !run.completed {
         violations.push(Violation {
             invariant: "liveness",
             detail: "workload did not complete within the time budget (a call may hang)".into(),
         });
     }
+    (violations, run.faults)
+}
 
+/// Run a cluster workload once under `seed`, returning any invariant violations.
+pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(), ClusterFailure> {
+    let (violations, _) = eval_cluster(workload, seed);
     if violations.is_empty() {
         Ok(())
     } else {
@@ -227,4 +262,28 @@ pub fn run_cluster_swarm<W: ClusterWorkload>(
         run_cluster_seed(workload, seed)?;
     }
     Ok(())
+}
+
+/// Sweep a cluster workload across many seeds, checking invariants on each run
+/// and returning the *aggregate* fault activity the sweep exercised (spec
+/// §18.3). A test asserts each fault type fired at least once, so a green sweep
+/// provably covered loss, duplication, reordering, and partition/crash — not
+/// just the happy path (fault-injection coverage).
+pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
+    workload: &W,
+    seeds: impl IntoIterator<Item = u64>,
+) -> Result<crate::transport::FaultStats, ClusterFailure> {
+    let mut total = crate::transport::FaultStats::default();
+    for seed in seeds {
+        let (violations, faults) = eval_cluster(workload, seed);
+        if !violations.is_empty() {
+            return Err(ClusterFailure {
+                workload: workload.name(),
+                seed,
+                violations,
+            });
+        }
+        total = total + faults;
+    }
+    Ok(total)
 }

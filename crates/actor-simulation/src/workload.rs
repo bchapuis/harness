@@ -6,10 +6,13 @@
 //! is reported as a [`RunFailure`] carrying the `(seed, faults)` needed to
 //! replay it deterministically (spec §18.6).
 //!
-//! The FoundationDB loop: define a few workloads and invariants, then sweep many
+//! The swarm loop: define a few workloads and invariants, then sweep many
 //! seeds ([`run_swarm`]); coverage is cluster-time exercised, not test count.
 
+use std::sync::Arc;
+
 use actor_core::BoxFuture;
+use actor_core::EventSink;
 use actor_core::LocalSystem;
 use actor_core::LocalSystemBuilder;
 
@@ -96,18 +99,32 @@ impl std::fmt::Display for RunFailure {
 
 impl std::error::Error for RunFailure {}
 
-/// Run a workload once under a given seed, returning any invariant violations.
-pub fn run_seed<W: Workload>(workload: &W, seed: u64) -> Result<(), RunFailure> {
+/// Build and run a workload once under `seed`, routing its event stream to
+/// `events`. Shared by [`run_seed`] (which feeds a [`Checker`]) and the
+/// reproducibility harness (which feeds a [`Recorder`](crate::Recorder)), so both
+/// observe the *identical* run — the construction lives in exactly one place.
+/// Returns the seed-sampled [`FaultConfig`] so callers can report it.
+pub(crate) fn drive_local<W: Workload>(
+    workload: &W,
+    seed: u64,
+    events: Arc<dyn EventSink>,
+) -> FaultConfig {
     let sim = Simulation::new(seed);
     let faults = FaultConfig::sample(&sim.entropy());
-    let checker = Checker::new(workload.invariants());
 
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
         .mailbox_capacity(faults.mailbox_capacity)
-        .events(checker.sink())
+        .events(events)
         .build();
 
     sim.block_on(workload.run(system));
+    faults
+}
+
+/// Run a workload once under a given seed, returning any invariant violations.
+pub fn run_seed<W: Workload>(workload: &W, seed: u64) -> Result<(), RunFailure> {
+    let checker = Checker::new(workload.invariants());
+    let faults = drive_local(workload, seed, checker.sink());
 
     let violations = checker.finish();
     if violations.is_empty() {

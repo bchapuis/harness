@@ -1,7 +1,7 @@
 //! Continuously-checked invariants over the event stream (spec §18.5).
 //!
-//! In the FoundationDB style, correctness is expressed as a small set of
-//! invariants checked on **every** run, not as bespoke example tests. Each
+//! Correctness is expressed as a small set of invariants checked on **every**
+//! run, not as bespoke example tests. Each
 //! [`Invariant`] observes the [`Event`] stream live and reports a violation
 //! string; the [`Checker`](crate::Checker) collects them. Four ship as
 //! continuous checkers; the rest are verified by example tests.

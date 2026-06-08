@@ -1,4 +1,4 @@
-//! FoundationDB-style swarm testing (spec §18.4, §18.6): a few workloads run
+//! Swarm testing (spec §18.4, §18.6): a few workloads run
 //! across many seeds, each with randomized scheduling and mailbox capacity,
 //! while the default invariants are checked continuously. Coverage is
 //! cluster-time exercised, not test count.

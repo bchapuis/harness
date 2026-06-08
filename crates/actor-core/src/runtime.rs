@@ -126,9 +126,8 @@ pub trait Entropy: Send + Sync + 'static {
         }
     }
 
-    /// A fault gate for deterministic fault injection (spec §18.3), in the style
-    /// of FoundationDB's "buggify". Returns `true` with probability
-    /// `numerator / denominator`, drawn from this stream.
+    /// A fault gate for deterministic fault injection (spec §18.3). Returns
+    /// `true` with probability `numerator / denominator`, drawn from this stream.
     ///
     /// Production entropy leaves it **off** (the default always returns
     /// `false`), so buggify call-sites in the runtime cost nothing outside

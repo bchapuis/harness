@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use actor_cluster::Authorizer;
@@ -73,6 +75,63 @@ impl FaultPolicy {
     }
 }
 
+/// A tally of the faults a run actually exercised (spec §18.3). Fault-injection
+/// coverage: a swarm that configures faults but, by seed luck, never triggers
+/// one gives false confidence. The swarm asserts, across its seed range, that
+/// each fault type fired at least once — so a green sweep provably covered loss,
+/// duplication, reordering, and partition/crash, not just the happy path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FaultStats {
+    /// Frames dropped by a seeded loss roll (excludes partition/crash blocking).
+    pub dropped: u64,
+    /// Frames delivered twice by a seeded duplication roll.
+    pub duplicated: u64,
+    /// Frames delayed by a non-zero seeded latency (i.e. reordered in time).
+    pub delayed: u64,
+    /// Frames dropped because their directed pair was partitioned or crashed.
+    pub blocked: u64,
+}
+
+impl FaultStats {
+    /// Total number of fault events of any kind. Zero means the run exercised
+    /// only the happy path.
+    pub fn total(&self) -> u64 {
+        self.dropped + self.duplicated + self.delayed + self.blocked
+    }
+}
+
+impl std::ops::Add for FaultStats {
+    type Output = FaultStats;
+
+    fn add(self, rhs: FaultStats) -> FaultStats {
+        FaultStats {
+            dropped: self.dropped + rhs.dropped,
+            duplicated: self.duplicated + rhs.duplicated,
+            delayed: self.delayed + rhs.delayed,
+            blocked: self.blocked + rhs.blocked,
+        }
+    }
+}
+
+#[derive(Default)]
+struct StatsInner {
+    dropped: AtomicU64,
+    duplicated: AtomicU64,
+    delayed: AtomicU64,
+    blocked: AtomicU64,
+}
+
+impl StatsInner {
+    fn snapshot(&self) -> FaultStats {
+        FaultStats {
+            dropped: self.dropped.load(Ordering::Relaxed),
+            duplicated: self.duplicated.load(Ordering::Relaxed),
+            delayed: self.delayed.load(Ordering::Relaxed),
+            blocked: self.blocked.load(Ordering::Relaxed),
+        }
+    }
+}
+
 struct NetInner {
     /// Each node's inbound frame sender (its receive loop holds the receiver).
     nodes: BTreeMap<NodeId, async_channel::Sender<(NodeId, Frame)>>,
@@ -97,6 +156,7 @@ pub struct SimNetwork {
     events: Arc<dyn EventSink>,
     authorizer: Option<Arc<dyn Authorizer>>,
     faults: FaultPolicy,
+    stats: Arc<StatsInner>,
 }
 
 impl SimNetwork {
@@ -118,7 +178,13 @@ impl SimNetwork {
             events: Arc::new(()),
             authorizer: None,
             faults: FaultPolicy::default(),
+            stats: Arc::new(StatsInner::default()),
         }
+    }
+
+    /// A snapshot of the faults this network has exercised so far (spec §18.3).
+    pub fn fault_stats(&self) -> FaultStats {
+        self.stats.snapshot()
     }
 
     /// Enable seed-controlled transport faults (spec §18.3).
@@ -265,6 +331,7 @@ impl SimNetwork {
         let sender = {
             let inner = self.inner.lock().expect("network mutex poisoned");
             if inner.blocked.contains(&(from, to)) {
+                self.stats.blocked.fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
             match inner.nodes.get(&to) {
@@ -285,6 +352,7 @@ impl SimNetwork {
             .entropy
             .buggify(self.faults.drop_num, self.faults.drop_den)
         {
+            self.stats.dropped.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
 
@@ -294,12 +362,16 @@ impl SimNetwork {
             .entropy
             .buggify(self.faults.duplicate_num, self.faults.duplicate_den)
         {
+            self.stats.duplicated.fetch_add(1, Ordering::Relaxed);
             2
         } else {
             1
         };
         for _ in 0..copies {
             let deliver_at = self.reserve_pair_slot(from, to);
+            if deliver_at > self.clock.now() {
+                self.stats.delayed.fetch_add(1, Ordering::Relaxed);
+            }
             let now = self.clock.now();
             let clock = self.clock.clone();
             let sender = sender.clone();
