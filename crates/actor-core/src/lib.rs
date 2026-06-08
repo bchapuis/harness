@@ -28,13 +28,11 @@ pub use actor::{Actor, BoxError, Handler, StopReason, Terminated, TerminationRea
 pub use context::Ctx;
 pub use error::CallError;
 pub use event::{Event, EventSink, SupervisionDecision};
-pub use host::ActorFactory;
-pub use host::{LocalHost, WatchDelivery};
 pub use id::{ActorId, NodeId, Path};
 pub use mailbox::Mailbox;
 pub use message::{Manifest, Message};
 pub use rebind::with_decoding_system;
-pub use receptionist::{Key, Listing, Receptionist, ReceptionistState};
+pub use receptionist::{Key, Listing, Receptionist};
 pub use refs::ActorRef;
 pub use registry::{DispatchFn, HandlerRegistry};
 pub use reply::{ReplyHandle, ReplyResult};

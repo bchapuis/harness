@@ -110,8 +110,6 @@ pub enum Event {
         watcher: ActorId,
         reason: TerminationReason,
     },
-    /// A diagnostic marker, used by tests to punctuate an event stream.
-    Mark(String),
 }
 
 /// A sink the runtime emits [`Event`]s to (spec §16).

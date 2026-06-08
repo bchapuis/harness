@@ -23,6 +23,8 @@ use actor_core::Spawner;
 
 use crate::Checker;
 use crate::FaultPolicy;
+use crate::FaultStats;
+use crate::RunFailure;
 use crate::SimClock;
 use crate::SimCluster;
 use crate::SimEntropy;
@@ -31,6 +33,30 @@ use crate::Simulation;
 use crate::Violation;
 use crate::invariant::Invariant;
 use crate::invariant::default_invariants;
+
+// Swarm intensity for the cluster harness (spec §18.3): how hard each run is
+// faulted and how long it may take. Collected here as named constants so the
+// driver reads as policy, not scattered magic numbers — and so the one place to
+// retune the sweep is obvious.
+//
+/// Denominator of the per-frame drop and duplication probabilities.
+const CLUSTER_FAULT_DEN: u64 = 20;
+/// A run draws a drop probability in `0..CLUSTER_MAX_DROP_NUM / CLUSTER_FAULT_DEN`.
+const CLUSTER_MAX_DROP_NUM: u64 = 4;
+/// A run draws a duplication probability in `0..CLUSTER_MAX_DUP_NUM / CLUSTER_FAULT_DEN`.
+const CLUSTER_MAX_DUP_NUM: u64 = 3;
+/// Frames are delayed by a seeded amount in `0..CLUSTER_MAX_LATENCY_MS` ms.
+const CLUSTER_MAX_LATENCY_MS: u64 = 30;
+/// Partition/crash/heal rounds the nemesis runs per run.
+const CLUSTER_NEMESIS_ROUNDS: usize = 6;
+/// Upper bound on a run's virtual time, so a hung call cannot loop forever (the
+/// failure detector itself never quiesces).
+const CLUSTER_TIME_BUDGET: Duration = Duration::from_secs(120);
+/// Virtual-time step between workload-completion checks while driving.
+const CLUSTER_STEP: Duration = Duration::from_millis(500);
+/// Window after traffic completes for post-traffic signals (terminations,
+/// prunes) to flush.
+const CLUSTER_FLUSH: Duration = Duration::from_secs(2);
 
 /// The running cluster handed to a [`ClusterWorkload`].
 pub struct ClusterCtx {
@@ -74,30 +100,6 @@ pub trait ClusterWorkload {
         default_invariants()
     }
 }
-
-/// A failing cluster run, with the seed needed to replay it (spec §18.6).
-#[derive(Clone, Debug)]
-pub struct ClusterFailure {
-    pub workload: &'static str,
-    pub seed: u64,
-    pub violations: Vec<Violation>,
-}
-
-impl std::fmt::Display for ClusterFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "cluster workload '{}' failed at seed {} (replay with run_cluster_seed(.., {})):",
-            self.workload, self.seed, self.seed
-        )?;
-        for v in &self.violations {
-            writeln!(f, "  - {v}")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for ClusterFailure {}
 
 /// A seeded fault injector (spec §18.3): over several rounds it partitions,
 /// crashes, and heals at random, so a run exercises the failure paths.
@@ -146,7 +148,7 @@ async fn nemesis(
 /// (so a swarm can assert faults actually fired — spec §18.3).
 pub(crate) struct ClusterRun {
     pub completed: bool,
-    pub faults: crate::transport::FaultStats,
+    pub faults: FaultStats,
 }
 
 /// Build and drive a cluster workload once under `seed`, routing every node's
@@ -165,11 +167,11 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
     // stays deterministic per seed.
     let entropy = sim.entropy();
     let faults = FaultPolicy {
-        drop_num: entropy.next_u64() % 4,
-        drop_den: 20,
-        duplicate_num: entropy.next_u64() % 3,
-        duplicate_den: 20,
-        max_latency: Duration::from_millis(entropy.next_u64() % 30),
+        drop_num: entropy.next_u64() % CLUSTER_MAX_DROP_NUM,
+        drop_den: CLUSTER_FAULT_DEN,
+        duplicate_num: entropy.next_u64() % CLUSTER_MAX_DUP_NUM,
+        duplicate_den: CLUSTER_FAULT_DEN,
+        max_latency: Duration::from_millis(entropy.next_u64() % CLUSTER_MAX_LATENCY_MS),
     };
     let net = SimNetwork::new(&sim)
         .with_swim(workload.swim())
@@ -200,18 +202,17 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
         sim.entropy(),
         sim.clock(),
         node_ids,
-        6,
+        CLUSTER_NEMESIS_ROUNDS,
     )));
 
     // Drive until the traffic completes, bounded so a hung call cannot loop
     // forever (the failure detector itself never quiesces).
-    let budget = Duration::from_secs(120);
-    let deadline = sim.now() + budget;
+    let deadline = sim.now() + CLUSTER_TIME_BUDGET;
     while !done.load(Ordering::SeqCst) && sim.now() < deadline {
-        sim.run_for(Duration::from_millis(500));
+        sim.run_for(CLUSTER_STEP);
     }
     // Let post-traffic signals (terminations, prunes) flush.
-    sim.run_for(Duration::from_secs(2));
+    sim.run_for(CLUSTER_FLUSH);
 
     ClusterRun {
         completed: done.load(Ordering::SeqCst),
@@ -222,10 +223,7 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
 /// Drive one run and evaluate it: the invariant violations observed (plus a
 /// synthesized liveness violation if the workload hung) and the faults the run
 /// exercised. Shared by the seed runner and the coverage sweep.
-fn eval_cluster<W: ClusterWorkload>(
-    workload: &W,
-    seed: u64,
-) -> (Vec<Violation>, crate::transport::FaultStats) {
+fn eval_cluster<W: ClusterWorkload>(workload: &W, seed: u64) -> (Vec<Violation>, FaultStats) {
     let checker = Checker::new(workload.invariants());
     let run = drive_cluster(workload, seed, checker.sink());
 
@@ -240,12 +238,12 @@ fn eval_cluster<W: ClusterWorkload>(
 }
 
 /// Run a cluster workload once under `seed`, returning any invariant violations.
-pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(), ClusterFailure> {
+pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(), RunFailure> {
     let (violations, _) = eval_cluster(workload, seed);
     if violations.is_empty() {
         Ok(())
     } else {
-        Err(ClusterFailure {
+        Err(RunFailure {
             workload: workload.name(),
             seed,
             violations,
@@ -257,7 +255,7 @@ pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(
 pub fn run_cluster_swarm<W: ClusterWorkload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
-) -> Result<(), ClusterFailure> {
+) -> Result<(), RunFailure> {
     for seed in seeds {
         run_cluster_seed(workload, seed)?;
     }
@@ -272,12 +270,12 @@ pub fn run_cluster_swarm<W: ClusterWorkload>(
 pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
-) -> Result<crate::transport::FaultStats, ClusterFailure> {
-    let mut total = crate::transport::FaultStats::default();
+) -> Result<FaultStats, RunFailure> {
+    let mut total = FaultStats::default();
     for seed in seeds {
         let (violations, faults) = eval_cluster(workload, seed);
         if !violations.is_empty() {
-            return Err(ClusterFailure {
+            return Err(RunFailure {
                 workload: workload.name(),
                 seed,
                 violations,

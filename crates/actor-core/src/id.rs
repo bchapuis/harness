@@ -64,9 +64,9 @@ impl std::fmt::Display for Path {
 /// on a fresh actor never collides with a resigned predecessor.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct ActorId {
-    pub node: NodeId,
-    pub path: Path,
-    pub incarnation: u64,
+    node: NodeId,
+    path: Path,
+    incarnation: u64,
 }
 
 impl ActorId {
@@ -77,6 +77,23 @@ impl ActorId {
             path,
             incarnation,
         }
+    }
+
+    /// The node that owns this actor — the locality key (spec §3.6, §4.3). Any
+    /// node classifies a target as local or remote by comparing this to its own.
+    pub fn node(&self) -> NodeId {
+        self.node
+    }
+
+    /// This actor's hierarchical path, e.g. `/user/greeter` (spec §3.6).
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The incarnation distinguishing a fresh actor from a resigned predecessor
+    /// that reused the same path (spec §3.6).
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
     }
 }
 

@@ -1,16 +1,34 @@
-//! The local actor host (spec §4.2, §6, §12).
+//! The node-local actor runtime — the implementor-facing seam (spec §4.2, §6, §12).
 //!
-//! `LocalHost` owns the actors running on one node: it assigns identities,
+//! [`LocalHost`] owns the actors running on one node: it assigns identities,
 //! stores each actor's mailbox plus its dispatch table, runs the serial
-//! executor, resolves ids to local mailboxes, and tracks death-watch
-//! subscriptions. It is the machinery both [`LocalSystem`](crate::LocalSystem)
-//! and the cluster runtime build on — the cluster adds the network boundary.
+//! executor, resolves ids to local mailboxes, dispatches inbound messages, and
+//! tracks death-watch subscriptions. It is the machinery an [`ActorSystem`]
+//! *implementor* builds on: the single-node [`LocalSystem`](crate::LocalSystem)
+//! is a thin wrapper over it, and the cluster runtime composes it with a
+//! transport to add the network boundary.
 //!
-//! Watch delivery is node-local: when a watched actor on this node stops, its
-//! local watchers receive a [`Terminated`]; when a peer node is declared `down`,
-//! [`synthesize_node_down`](LocalHost::synthesize_node_down) sends each local
-//! watcher of an actor on that node a `Terminated { NodeDown }` (spec §8.1 step
-//! 4), since no stop message can arrive from a dead node.
+//! **This module is not application API.** Programs use
+//! [`Actor`], [`ActorRef`], [`Ctx`], and the [`ActorSystem`] trait; only code
+//! implementing a
+//! *new* `ActorSystem` reaches for [`LocalHost`], [`WatchDelivery`], or
+//! [`ActorFactory`]. They are `pub` for exactly that reason but deliberately
+//! kept out of the crate's top-level prelude, so the user-facing surface stays
+//! the model, not its runtime. This is the one boundary the cluster crate
+//! crosses into core; the ~dozen methods below are its whole contract.
+//!
+//! **Death-watch is split across the boundary by design, not by accident.** The
+//! host owns *local* delivery: when a watched actor on this node stops, its local
+//! watchers receive a [`Terminated`] through their mailbox, and when a peer node
+//! is declared `down`,
+//! [`synthesize_node_down`](LocalHost::synthesize_node_down) manufactures a
+//! `Terminated { NodeDown }` for each local watcher of an actor on that node
+//! (spec §8.1 step 4) — no stop message can arrive from a dead node. Delivery to
+//! a *remote* watcher is the implementor's job: it supplies a [`WatchDelivery`]
+//! closure that forwards the signal over its transport, because the host is
+//! transport-agnostic and must not know how a frame reaches another node. The
+//! host stores and fires that closure ([`add_watch`](LocalHost::add_watch)); the
+//! implementor decides what crossing the network means.
 
 use std::any::Any;
 use std::any::TypeId;
@@ -269,7 +287,7 @@ impl HostState {
             .lock()
             .expect("watchers mutex poisoned")
             .keys()
-            .filter(|id| id.node == node)
+            .filter(|id| id.node() == node)
             .cloned()
             .collect();
         for target in targets {
@@ -312,7 +330,7 @@ impl LocalHost {
 
     /// Whether `id` is owned by this node (spec §4.3).
     pub fn is_local(&self, id: &ActorId) -> bool {
-        id.node == self.state.node
+        id.node() == self.state.node
     }
 
     /// Whether a live local actor with `id` currently exists.
@@ -522,6 +540,18 @@ enum End<A> {
     Released(TerminationReason),
 }
 
+/// The executor's next step in an actor's life (spec §6, §11): (re)start the
+/// instance, run its message loop, or end it. The loop and [`handle_fault`] both
+/// speak this, so the start/run/terminate transitions live in one vocabulary.
+enum Step<A> {
+    /// Run `started` (first start or a restart), then process messages.
+    Start(A),
+    /// Process messages until the next stop or fault.
+    Run(A),
+    /// Terminate, via the shared end-of-life path.
+    End(End<A>),
+}
+
 /// The serial executor + supervisor for one actor (spec §6, §11). Processes one
 /// message to completion before the next (so `&mut self` is never aliased), and
 /// on a fault applies the actor's [`Supervision`] strategy: `Resume` keeps the
@@ -546,107 +576,47 @@ async fn run_actor<A, C>(
     let supervision = A::supervision();
     let mut restarts: Vec<Instant> = Vec::new();
 
-    let Some(mut actor) = factory() else {
+    let Some(actor) = factory() else {
         release(&state, &id, TerminationReason::Stopped).await;
         return;
     };
-    let mut need_start = true;
     let mut ever_started = false;
 
+    // The actor's life is a small state machine over `Step`: `Start` runs
+    // `started`, `Run` processes messages, and a fault from either phase flows
+    // through the one `handle_fault` procedure, which returns the next `Step` —
+    // re-start, keep running, or terminate. The supervision policy thus lives in
+    // exactly one place instead of once per phase.
+    let mut step = Step::Start(actor);
     let end = loop {
-        if need_start {
-            if let Err(_err) = actor.started(&ctx).await {
-                let decision = supervise(
-                    &supervision,
-                    Fault::Started,
-                    &clock,
-                    &mut restarts,
-                    &|| ctx.system().next_random(),
-                )
-                .await;
-                match decision {
-                    Decision::Resume => {
-                        emit_supervision(&state, &id, Fault::Started, &Decision::Resume);
-                        need_start = false;
+        step = match step {
+            Step::Start(mut actor) => match actor.started(&ctx).await {
+                Ok(()) => {
+                    // `ActorReady` fires once (spec §4.2); a restart re-runs
+                    // `started` but the id stays resolvable, so it emits
+                    // `Restarted` instead.
+                    if ever_started {
+                        state.events.emit(Event::Restarted { actor: id.clone() });
+                    } else {
+                        state.events.emit(Event::ActorReady { id: id.clone() });
+                        ever_started = true;
                     }
-                    Decision::StopFailed => {
-                        emit_supervision(&state, &id, Fault::Started, &Decision::StopFailed);
-                        break End::Stop(actor, StopReason::Failed);
-                    }
-                    Decision::Escalate => {
-                        emit_supervision(&state, &id, Fault::Started, &Decision::Escalate);
-                        escalate(&state, &parent, &id);
-                        break End::Stop(actor, StopReason::Failed);
-                    }
-                    Decision::Restart => {
-                        // The faulted instance stops with `Failed` (spec §11.2);
-                        // `resolve_restart` emits the effective decision (a real
-                        // restart, or a degrade to stop if the factory is spent).
-                        actor.stopped(StopReason::Failed).await;
-                        match resolve_restart(&state, &id, Fault::Started, &mut factory) {
-                            Some(fresh) => {
-                                actor = fresh;
-                                continue;
-                            }
-                            None => break End::Released(TerminationReason::Failed),
-                        }
-                    }
+                    Step::Run(actor)
                 }
-            } else {
-                // `ActorReady` fires once (spec §4.2); a restart re-runs `started`
-                // but the id stays resolvable, so it emits `Restarted` instead.
-                if ever_started {
-                    state.events.emit(Event::Restarted { actor: id.clone() });
-                } else {
-                    state.events.emit(Event::ActorReady { id: id.clone() });
-                    ever_started = true;
+                Err(_err) => {
+                    handle_fault(Fault::Started, actor, &supervision, &clock, &mut restarts, &ctx, &state, &id, &parent, &mut factory).await
                 }
-                need_start = false;
+            },
+            Step::Run(mut actor) => {
+                let fault = match message_loop(&mut actor, &ctx, &inbox, &escalation, &state, &id).await {
+                    Outcome::Stopped => break End::Stop(actor, StopReason::Stopped),
+                    Outcome::Faulted => Fault::Message,
+                    Outcome::Escalated => Fault::Escalation,
+                };
+                handle_fault(fault, actor, &supervision, &clock, &mut restarts, &ctx, &state, &id, &parent, &mut factory).await
             }
-        }
-
-        let fault = match message_loop(&mut actor, &ctx, &inbox, &escalation, &state, &id).await {
-            Outcome::Stopped => break End::Stop(actor, StopReason::Stopped),
-            Outcome::Faulted => Fault::Message,
-            Outcome::Escalated => Fault::Escalation,
+            Step::End(end) => break end,
         };
-        let decision = supervise(
-            &supervision,
-            fault,
-            &clock,
-            &mut restarts,
-            &|| ctx.system().next_random(),
-        )
-        .await;
-        match decision {
-            Decision::Resume => {
-                emit_supervision(&state, &id, fault, &Decision::Resume);
-                continue;
-            }
-            Decision::StopFailed => {
-                emit_supervision(&state, &id, fault, &Decision::StopFailed);
-                break End::Stop(actor, StopReason::Failed);
-            }
-            Decision::Escalate => {
-                emit_supervision(&state, &id, fault, &Decision::Escalate);
-                escalate(&state, &parent, &id);
-                break End::Stop(actor, StopReason::Failed);
-            }
-            Decision::Restart => {
-                // The faulted instance stops with `Failed` (spec §11.2);
-                // `resolve_restart` emits the effective decision (a real restart,
-                // or a degrade to stop if the factory is spent).
-                actor.stopped(StopReason::Failed).await;
-                match resolve_restart(&state, &id, fault, &mut factory) {
-                    Some(fresh) => {
-                        actor = fresh;
-                        need_start = true;
-                        continue;
-                    }
-                    None => break End::Released(TerminationReason::Failed),
-                }
-            }
-        }
     };
 
     // Dead-letter anything still queued so callers waiting on a reply do not
@@ -658,6 +628,62 @@ async fn run_actor<A, C>(
     match end {
         End::Stop(actor, reason) => finish(actor, reason, &state, &id).await,
         End::Released(reason) => release(&state, &id, reason).await,
+    }
+}
+
+/// Apply supervision to one fault and report what the executor should do next
+/// (spec §11.2). Shared by the `started`-fault and message-loop-fault paths, so
+/// both resume, restart, escalate, and degrade through exactly one procedure.
+///
+/// Takes the live `actor` by value: `Restart`/`Stop`/`Escalate` consume it
+/// (a restart runs its `stopped` hook first), while `Resume` hands it back
+/// unchanged. The `Restart` arm defers its event to [`resolve_restart`], which
+/// emits the *effective* decision once it knows whether a fresh instance exists.
+#[allow(clippy::too_many_arguments)]
+async fn handle_fault<A, C>(
+    fault: Fault,
+    actor: A,
+    supervision: &Supervision,
+    clock: &C,
+    restarts: &mut Vec<Instant>,
+    ctx: &Ctx<A>,
+    state: &HostState,
+    id: &ActorId,
+    parent: &Option<ActorId>,
+    factory: &mut ActorFactory<A>,
+) -> Step<A>
+where
+    A: Actor,
+    C: Clock,
+{
+    let decision = supervise(supervision, fault, clock, restarts, &|| {
+        ctx.system().next_random()
+    })
+    .await;
+    match decision {
+        Decision::Resume => {
+            emit_supervision(state, id, fault, &Decision::Resume);
+            Step::Run(actor)
+        }
+        Decision::StopFailed => {
+            emit_supervision(state, id, fault, &Decision::StopFailed);
+            Step::End(End::Stop(actor, StopReason::Failed))
+        }
+        Decision::Escalate => {
+            emit_supervision(state, id, fault, &Decision::Escalate);
+            escalate(state, parent, id);
+            Step::End(End::Stop(actor, StopReason::Failed))
+        }
+        Decision::Restart => {
+            // The faulted instance stops with `Failed` (spec §11.2); then
+            // `resolve_restart` emits the effective decision — a real restart, or
+            // a degrade to stop when the factory is spent.
+            actor.stopped(StopReason::Failed).await;
+            match resolve_restart(state, id, fault, factory) {
+                Some(fresh) => Step::Start(fresh),
+                None => Step::End(End::Released(TerminationReason::Failed)),
+            }
+        }
     }
 }
 

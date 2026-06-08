@@ -52,11 +52,13 @@ pub trait Workload: Send + 'static {
     }
 }
 
-/// A seed-sampled fault configuration applied to a run (spec §18.3).
+/// A seed-sampled fault configuration for a single-node run (spec §18.3).
 ///
-/// Single-node faults are modest for now — the bounded mailbox capacity is
+/// A single-node workload runs on a [`LocalSystem`] with no transport or
+/// membership, so the only fault dimension here is the bounded mailbox capacity,
 /// randomized so invariants are exercised across the backpressure spectrum.
-/// Transport/membership faults join this struct as those subsystems land.
+/// Transport faults (drop/duplicate/latency) are a *cluster* concern and live in
+/// [`FaultPolicy`](crate::FaultPolicy), applied to the in-memory network.
 #[derive(Clone, Copy, Debug)]
 pub struct FaultConfig {
     /// Per-actor bounded mailbox capacity for this run.
@@ -74,12 +76,14 @@ impl FaultConfig {
     }
 }
 
-/// A failing run, with everything needed to replay it (spec §18.6).
+/// A failing run, with everything needed to replay it (spec §18.6). One type
+/// covers both single-node and cluster runs: the `(workload, seed)` pair alone
+/// replays either deterministically — the seed regenerates the run's faults — so
+/// there is nothing run-shaped to carry beyond it.
 #[derive(Clone, Debug)]
 pub struct RunFailure {
     pub workload: &'static str,
     pub seed: u64,
-    pub faults: FaultConfig,
     pub violations: Vec<Violation>,
 }
 
@@ -87,8 +91,8 @@ impl std::fmt::Display for RunFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
             f,
-            "workload '{}' failed at seed {} ({:?}); replay with run_seed(.., {}):",
-            self.workload, self.seed, self.faults, self.seed
+            "workload '{}' failed at seed {} (replay from seed {}):",
+            self.workload, self.seed, self.seed
         )?;
         for v in &self.violations {
             writeln!(f, "  - {v}")?;
@@ -103,12 +107,7 @@ impl std::error::Error for RunFailure {}
 /// `events`. Shared by [`run_seed`] (which feeds a [`Checker`]) and the
 /// reproducibility harness (which feeds a [`Recorder`](crate::Recorder)), so both
 /// observe the *identical* run — the construction lives in exactly one place.
-/// Returns the seed-sampled [`FaultConfig`] so callers can report it.
-pub(crate) fn drive_local<W: Workload>(
-    workload: &W,
-    seed: u64,
-    events: Arc<dyn EventSink>,
-) -> FaultConfig {
+pub(crate) fn drive_local<W: Workload>(workload: &W, seed: u64, events: Arc<dyn EventSink>) {
     let sim = Simulation::new(seed);
     let faults = FaultConfig::sample(&sim.entropy());
 
@@ -118,13 +117,12 @@ pub(crate) fn drive_local<W: Workload>(
         .build();
 
     sim.block_on(workload.run(system));
-    faults
 }
 
 /// Run a workload once under a given seed, returning any invariant violations.
 pub fn run_seed<W: Workload>(workload: &W, seed: u64) -> Result<(), RunFailure> {
     let checker = Checker::new(workload.invariants());
-    let faults = drive_local(workload, seed, checker.sink());
+    drive_local(workload, seed, checker.sink());
 
     let violations = checker.finish();
     if violations.is_empty() {
@@ -133,7 +131,6 @@ pub fn run_seed<W: Workload>(workload: &W, seed: u64) -> Result<(), RunFailure> 
         Err(RunFailure {
             workload: workload.name(),
             seed,
-            faults,
             violations,
         })
     }

@@ -102,6 +102,36 @@ fn first_divergence(
     None
 }
 
+/// Run a workload twice under one seed and diff the two event streams, reporting
+/// the first [`Divergence`] (spec §18.1 #1). The `record` closure captures which
+/// driver — single-node or cluster — produced the stream, so the determinism
+/// check itself lives once for both. Boxed because a `Divergence` carries two
+/// full events and dwarfs the `Ok` path.
+fn check_twice(
+    name: &'static str,
+    seed: u64,
+    record: impl Fn(u64) -> Vec<Event>,
+) -> Result<(), Box<Divergence>> {
+    let first = record(seed);
+    let second = record(seed);
+    match first_divergence(name, seed, &first, &second) {
+        Some(d) => Err(Box::new(d)),
+        None => Ok(()),
+    }
+}
+
+/// Sweep a per-seed determinism check across many seeds, stopping at the first
+/// divergence — the standing reproducibility corpus (spec §18.6).
+fn sweep(
+    seeds: impl IntoIterator<Item = u64>,
+    mut check: impl FnMut(u64) -> Result<(), Box<Divergence>>,
+) -> Result<(), Box<Divergence>> {
+    for seed in seeds {
+        check(seed)?;
+    }
+    Ok(())
+}
+
 /// Record the event stream of a single-node workload run under `seed`.
 pub fn record_seed<W: Workload>(workload: &W, seed: u64) -> Vec<Event> {
     let recorder = Recorder::new();
@@ -114,12 +144,7 @@ pub fn record_seed<W: Workload>(workload: &W, seed: u64) -> Vec<Event> {
 /// [`Divergence`] otherwise (boxed — it carries two full events, so it dwarfs the
 /// `Ok` path).
 pub fn check_reproducible<W: Workload>(workload: &W, seed: u64) -> Result<(), Box<Divergence>> {
-    let first = record_seed(workload, seed);
-    let second = record_seed(workload, seed);
-    match first_divergence(workload.name(), seed, &first, &second) {
-        Some(d) => Err(Box::new(d)),
-        None => Ok(()),
-    }
+    check_twice(workload.name(), seed, |s| record_seed(workload, s))
 }
 
 /// Sweep the determinism contract across seeds for a single-node workload — the
@@ -128,10 +153,7 @@ pub fn replay_swarm<W: Workload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
 ) -> Result<(), Box<Divergence>> {
-    for seed in seeds {
-        check_reproducible(workload, seed)?;
-    }
-    Ok(())
+    sweep(seeds, |s| check_reproducible(workload, s))
 }
 
 /// Record the event stream of a cluster workload run under `seed`. The cluster
@@ -151,12 +173,7 @@ pub fn check_cluster_reproducible<W: ClusterWorkload>(
     workload: &W,
     seed: u64,
 ) -> Result<(), Box<Divergence>> {
-    let first = record_cluster_seed(workload, seed);
-    let second = record_cluster_seed(workload, seed);
-    match first_divergence(workload.name(), seed, &first, &second) {
-        Some(d) => Err(Box::new(d)),
-        None => Ok(()),
-    }
+    check_twice(workload.name(), seed, |s| record_cluster_seed(workload, s))
 }
 
 /// Sweep the determinism contract across seeds for a cluster workload (spec
@@ -165,10 +182,7 @@ pub fn replay_cluster_swarm<W: ClusterWorkload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
 ) -> Result<(), Box<Divergence>> {
-    for seed in seeds {
-        check_cluster_reproducible(workload, seed)?;
-    }
-    Ok(())
+    sweep(seeds, |s| check_cluster_reproducible(workload, s))
 }
 
 #[cfg(test)]

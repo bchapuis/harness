@@ -386,20 +386,6 @@ impl Membership {
         self.leader() == Some(self.node)
     }
 
-    /// Advance time-based transitions (spec §10) and, when this node is the
-    /// leader, the lifecycle transitions it owns (spec §9.2, §9.3):
-    ///
-    /// - a suspicion older than `suspect_timeout` becomes `Unreachable`, and the
-    ///   downing policy may move `Unreachable` to `Down`;
-    /// - the leader admits reachable `Joining` members (itself included) to `Up`,
-    ///   and finalizes `Leaving` members to `Down`.
-    ///
-    /// Promotion uses a deliberately simple convergence rule — the leader admits
-    /// any reachable joiner — which is safe because the lifecycle is monotonic
-    /// and admission is idempotent (a split-brain leader would reach the same
-    /// `Up`); full seen-by gossip convergence (spec §9.2) is a follow-up. Returns
-    /// the nodes newly declared `down`, so the caller can run the cascade
-    /// (spec §8.1 step 3).
     /// `T_suspect` scaled for a cluster of `cluster_size` members (spec §10).
     /// Logarithmic in the size and clamped to the base for small clusters: the
     /// factor is `max(1, floor(log2(cluster_size)))`, so ≤3 members keep the base
@@ -409,20 +395,47 @@ impl Membership {
         self.suspect_timeout * factor
     }
 
+    /// Advance time-based transitions (spec §10) and, when this node is the
+    /// leader, the lifecycle transitions it owns (spec §9.2, §9.3):
+    ///
+    /// - a suspicion older than `suspect_timeout` becomes `Unreachable`, and the
+    ///   downing policy may move `Unreachable` to `Down`;
+    /// - the leader admits reachable `Joining` members (itself included) to `Up`,
+    ///   and finalizes `Leaving` members to `Down`;
+    /// - long-`Down` members are tombstoned `Removed`, then pruned.
+    ///
+    /// Returns the nodes newly declared `down`, so the caller can run the cascade
+    /// (spec §8.1 step 3). The three passes run under one lock, so the roster
+    /// never changes underneath them within a tick.
     pub fn tick(&self, now: Instant) -> Vec<NodeId> {
         let mut downed = Vec::new();
         let mut members = self.members.lock().expect("members mutex poisoned");
+        self.advance_reachability(&mut members, now, &mut downed);
+        self.advance_lifecycle(&mut members, now, &mut downed);
+        Self::gc_tombstones(&mut members, now);
+        downed
+    }
 
-        // Declaring a member `down` is a cluster decision the leader owns (spec
-        // §9.2 #3), so only the leader runs the downing transition below; other
-        // nodes adopt the `down` once it reaches them by gossip (`merge`). This
-        // gives a single decider and avoids two nodes downing each other. Note we
-        // deliberately do *not* gate downing on the reachable-convergence rule
-        // used for promotion: the node being downed is by definition unreachable,
-        // so that rule could never hold — leadership alone supplies the
-        // single-decider property. Reachability (`Suspect`→`Unreachable`) is a
-        // local detector state, not a cluster decision, so it stays per-node.
-        let is_leader = self.compute_leader(&members) == Some(self.node);
+    /// Reachability timeouts and reachability-driven downing (spec §10, §9.2): a
+    /// suspicion older than the (size-scaled) suspect timeout becomes
+    /// `Unreachable`, and the leader moves an `Unreachable` member to `Down`
+    /// under a `Timeout` policy.
+    ///
+    /// Declaring a member `down` is a cluster decision the leader owns (spec
+    /// §9.2 #3), so only the leader runs the downing transition; other nodes
+    /// adopt the `down` once it reaches them by gossip (`merge`). This downing is
+    /// deliberately *not* gated on the reachable-convergence rule used for
+    /// promotion: the node being downed is by definition unreachable, so that
+    /// rule could never hold — leadership alone supplies the single-decider
+    /// property. Reachability (`Suspect`→`Unreachable`) is a local detector
+    /// state, not a cluster decision, so it stays per-node.
+    fn advance_reachability(
+        &self,
+        members: &mut BTreeMap<NodeId, Member>,
+        now: Instant,
+        downed: &mut Vec<NodeId>,
+    ) {
+        let is_leader = self.compute_leader(members) == Some(self.node);
         // `T_suspect` scales with cluster size (spec §10): a larger cluster needs
         // a longer suspicion window to hold the false-positive rate down. The
         // scaling is logarithmic and stays at the base for small clusters
@@ -457,50 +470,65 @@ impl Membership {
                 }
             }
         }
+    }
 
-        // Leader-driven lifecycle transitions (spec §9.2, §9.3), gated on
-        // convergence: the leader acts only when every live member is reachable,
-        // so it never makes membership decisions while the cluster is in flux or
-        // partitioned (avoiding split decisions). This is a partition-safe
-        // approximation of §9.2's "all up members agree on the set"; a full
-        // vector-clock seen-set is deeper future work. Reachability-driven downing
-        // (the pass above) is independent and still proceeds.
+    /// Leader-driven lifecycle transitions (spec §9.2, §9.3), gated on
+    /// convergence: the leader acts only when every live member is reachable, so
+    /// it never makes membership decisions while the cluster is in flux or
+    /// partitioned (avoiding split decisions). This is a partition-safe
+    /// approximation of §9.2's "all up members agree on the set"; a full
+    /// vector-clock seen-set is deeper future work. Reachability-driven downing
+    /// ([`advance_reachability`](Self::advance_reachability)) is independent and
+    /// still proceeds.
+    ///
+    /// Promotion uses a deliberately simple rule — the leader admits any
+    /// reachable joiner — which is safe because the lifecycle is monotonic and
+    /// admission is idempotent (a split-brain leader would reach the same `Up`).
+    fn advance_lifecycle(
+        &self,
+        members: &mut BTreeMap<NodeId, Member>,
+        now: Instant,
+        downed: &mut Vec<NodeId>,
+    ) {
         let converged = members
             .values()
             .all(|m| m.status.is_terminal() || m.reachability == Reachability::Reachable);
-        if converged && self.compute_leader(&members) == Some(self.node) {
-            for (node, m) in members.iter_mut() {
-                match m.status {
-                    MemberStatus::Joining if m.reachability == Reachability::Reachable => {
-                        m.status = MemberStatus::Up;
-                        m.changed_at = now;
-                        self.events.emit(Event::MemberUp {
-                            observer: self.node,
-                            node: *node,
-                        });
-                    }
-                    MemberStatus::Leaving => {
-                        m.status = MemberStatus::Down;
-                        m.changed_at = now;
-                        self.events.emit(Event::NodeDown {
-                            observer: self.node,
-                            node: *node,
-                        });
-                        downed.push(*node);
-                    }
-                    _ => {}
+        if !(converged && self.compute_leader(members) == Some(self.node)) {
+            return;
+        }
+        for (node, m) in members.iter_mut() {
+            match m.status {
+                MemberStatus::Joining if m.reachability == Reachability::Reachable => {
+                    m.status = MemberStatus::Up;
+                    m.changed_at = now;
+                    self.events.emit(Event::MemberUp {
+                        observer: self.node,
+                        node: *node,
+                    });
                 }
-            }
-            // The leader admits itself, too (bootstrapping a fresh cluster).
-            if self.self_status() == MemberStatus::Joining {
-                self.advance_self(MemberStatus::Up);
+                MemberStatus::Leaving => {
+                    m.status = MemberStatus::Down;
+                    m.changed_at = now;
+                    self.events.emit(Event::NodeDown {
+                        observer: self.node,
+                        node: *node,
+                    });
+                    downed.push(*node);
+                }
+                _ => {}
             }
         }
+        // The leader admits itself, too (bootstrapping a fresh cluster).
+        if self.self_status() == MemberStatus::Joining {
+            self.advance_self(MemberStatus::Up);
+        }
+    }
 
-        // Tombstone GC (spec §9.1): a member `Down` long enough is tombstoned
-        // `Removed`; a `Removed` tombstone that has lingered long enough is pruned
-        // from the roster, bounding its growth under churn. A pruned node's id is
-        // never reused (§9.1), so this never resurrects it.
+    /// Tombstone GC (spec §9.1): a member `Down` long enough is tombstoned
+    /// `Removed`; a `Removed` tombstone that has lingered long enough is pruned
+    /// from the roster, bounding its growth under churn. A pruned node's id is
+    /// never reused (§9.1), so this never resurrects it.
+    fn gc_tombstones(members: &mut BTreeMap<NodeId, Member>, now: Instant) {
         for m in members.values_mut() {
             if m.status == MemberStatus::Down && now.duration_since(m.changed_at) >= TOMBSTONE_AFTER
             {
@@ -511,8 +539,6 @@ impl Membership {
         members.retain(|_, m| {
             m.status != MemberStatus::Removed || now.duration_since(m.changed_at) < PRUNE_AFTER
         });
-
-        downed
     }
 
     /// This node's own incarnation, carried in gossip so peers can clear a stale

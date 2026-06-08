@@ -14,12 +14,8 @@
 //! broadcast-on-change plus periodic anti-entropy (spec §12, §13). Full seen-by
 //! gossip-convergence detection remains a follow-up.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::Weak;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use actor_core::Actor;
@@ -32,25 +28,26 @@ use actor_core::Clock;
 use actor_core::Entropy;
 use actor_core::Event;
 use actor_core::EventSink;
-use actor_core::LocalHost;
+use actor_core::host::LocalHost;
 use actor_core::Mailbox;
 use actor_core::NodeId;
-use actor_core::ReceptionistState;
+use actor_core::receptionist::ReceptionistState;
 use actor_core::ReplyHandle;
 use actor_core::ReplyResult;
 use actor_core::Spawner;
 use actor_core::Terminated;
 use actor_core::TerminationReason;
-use actor_core::WatchDelivery;
+use actor_core::host::WatchDelivery;
 use actor_serialization::Codec;
 use async_channel::Receiver;
 use futures::channel::oneshot;
 
+use crate::correlator::Correlator;
 use crate::membership::Membership;
 use crate::membership::SwimConfig;
-use crate::transport::CallId;
-use crate::transport::Frame;
-use crate::transport::ReceptionistEntry;
+use crate::protocol::CallId;
+use crate::protocol::Frame;
+use crate::protocol::ReceptionistEntry;
 use crate::transport::Transport;
 
 /// Authorizes inbound messages per association (spec §15). Consulted before an
@@ -107,16 +104,15 @@ struct Inner<C, E, S, T> {
     /// relayed indirect probe) can still read `rtt`/`k` (spec §10).
     swim: SwimConfig,
     events: Arc<dyn EventSink>,
-    /// In-flight `ask`s awaiting a reply: correlation id → (target node, waiter).
-    /// The target node lets the cascade complete them on a node-down (spec §8.1).
-    pending: Mutex<BTreeMap<CallId, (NodeId, oneshot::Sender<ReplyResult>)>>,
+    /// In-flight `ask`s awaiting a reply, keyed by correlation id. Each waiter
+    /// carries its target node so the cascade can complete it on a node-down
+    /// (spec §8.1 step 3).
+    calls: Correlator<CallId, (NodeId, oneshot::Sender<ReplyResult>)>,
     /// In-flight SWIM probes awaiting an `Ack` (direct, indirect, or a helper's
     /// relayed probe), keyed by seq. The completion carries the target's
     /// incarnation, so a relay can report it back to the requester (spec §10).
-    pending_pings: Mutex<BTreeMap<u64, oneshot::Sender<u64>>>,
+    pings: Correlator<u64, oneshot::Sender<u64>>,
     receptionist: Arc<ReceptionistState>,
-    next_call: AtomicU64,
-    next_ping: AtomicU64,
     /// Set on a graceful stop (spec §9.3): the detector and receptionist gossip
     /// loops return once they see it. Default `false`, so a system that never
     /// stops (every simulation run) behaves exactly as before.
@@ -171,11 +167,9 @@ where
                 membership,
                 swim,
                 events: config.events,
-                pending: Mutex::new(BTreeMap::new()),
-                pending_pings: Mutex::new(BTreeMap::new()),
+                calls: Correlator::new(),
+                pings: Correlator::new(),
                 receptionist: Arc::new(ReceptionistState::new()),
-                next_call: AtomicU64::new(0),
-                next_ping: AtomicU64::new(0),
                 shutdown: std::sync::atomic::AtomicBool::new(false),
                 authorizer: config.authorizer,
             }),
@@ -278,25 +272,22 @@ where
     /// Complete every in-flight `ask` to `node` with `err` — the node-down
     /// cascade for in-flight callers (spec §8.1 step 3).
     fn fail_pending_to(&self, node: NodeId, err: CallError) {
-        let mut pending = self.inner.pending.lock().expect("pending mutex poisoned");
-        let ids: Vec<CallId> = pending
-            .iter()
-            .filter(|(_, (target, _))| *target == node)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids {
-            if let Some((_, waiter)) = pending.remove(&id) {
-                let _ = waiter.send(Err(err.clone()));
-            }
+        for (_, waiter) in self.inner.calls.take_matching(|(target, _)| *target == node) {
+            let _ = waiter.send(Err(err.clone()));
         }
     }
 
     fn pending_remove(&self, call: CallId) {
-        self.inner
-            .pending
-            .lock()
-            .expect("pending mutex poisoned")
-            .remove(&call);
+        self.inner.calls.take(call);
+    }
+
+    /// Run the node-down cascade for `node` (spec §8.1): complete its in-flight
+    /// callers with `Unreachable` (step 3) and synthesize `Terminated { NodeDown }`
+    /// for local watchers of its actors (step 4). Reached from both the gossip
+    /// merge and the detector, which down a node by independent paths.
+    async fn node_down_cascade(&self, node: NodeId) {
+        self.fail_pending_to(node, CallError::Unreachable);
+        self.inner.host.synthesize_node_down(node).await;
     }
 
     async fn remote_ask_inner(
@@ -307,17 +298,13 @@ where
         within: Duration,
     ) -> Result<Vec<u8>, CallError> {
         // Routing afterward: a known-down node fails fast (spec §8.1 step 6).
-        if self.inner.membership.is_down(recipient.node) {
+        if self.inner.membership.is_down(recipient.node()) {
             return Err(CallError::Unreachable);
         }
 
-        let call = CallId(self.inner.next_call.fetch_add(1, Ordering::Relaxed));
+        let call = self.inner.calls.next_id();
         let (tx, rx) = oneshot::channel::<ReplyResult>();
-        self.inner
-            .pending
-            .lock()
-            .expect("pending mutex poisoned")
-            .insert(call, (recipient.node, tx));
+        self.inner.calls.register(call, (recipient.node(), tx));
 
         let frame = Frame::Envelope {
             recipient: recipient.clone(),
@@ -328,7 +315,7 @@ where
         if self
             .inner
             .transport
-            .send(recipient.node, frame)
+            .send(recipient.node(), frame)
             .await
             .is_err()
         {
@@ -437,7 +424,7 @@ where
         manifest: &'static str,
         payload: Vec<u8>,
     ) -> Result<(), CallError> {
-        if self.inner.membership.is_down(recipient.node) {
+        if self.inner.membership.is_down(recipient.node()) {
             return Err(CallError::Unreachable);
         }
         let frame = Frame::Envelope {
@@ -448,7 +435,7 @@ where
         };
         self.inner
             .transport
-            .send(recipient.node, frame)
+            .send(recipient.node(), frame)
             .await
             .map_err(|_| CallError::Unreachable)
     }
@@ -473,7 +460,7 @@ where
                     .launch(deliver(Terminated { id: target, reason }));
                 return;
             }
-        } else if self.inner.membership.is_down(target.node) {
+        } else if self.inner.membership.is_down(target.node()) {
             self.inner.spawner.launch(deliver(Terminated {
                 id: target,
                 reason: TerminationReason::NodeDown,
@@ -494,7 +481,7 @@ where
                 watcher,
             };
             let transport = self.inner.transport.clone();
-            let node = target.node;
+            let node = target.node();
             self.inner.spawner.launch(Box::pin(async move {
                 let _ = transport.send(node, frame).await;
             }));
@@ -509,7 +496,7 @@ where
                 watcher: watcher.clone(),
             };
             let transport = self.inner.transport.clone();
-            let node = target.node;
+            let node = target.node();
             self.inner.spawner.launch(Box::pin(async move {
                 let _ = transport.send(node, frame).await;
             }));
@@ -619,14 +606,7 @@ async fn receive_loop<C, E, S, T>(
                 correlation,
                 outcome,
             } => {
-                let waiter = system
-                    .inner
-                    .pending
-                    .lock()
-                    .expect("pending mutex poisoned")
-                    .remove(&correlation)
-                    .map(|(_, tx)| tx);
-                if let Some(tx) = waiter {
+                if let Some((_, tx)) = system.inner.calls.take(correlation) {
                     let _ = tx.send(outcome);
                 }
             }
@@ -661,13 +641,7 @@ async fn receive_loop<C, E, S, T>(
                     .membership
                     .mark_alive_direct(from, incarnation, now);
                 gossip_merge(&system, digest, now).await;
-                let waiter = system
-                    .inner
-                    .pending_pings
-                    .lock()
-                    .expect("pending pings mutex poisoned")
-                    .remove(&seq);
-                if let Some(tx) = waiter {
+                if let Some(tx) = system.inner.pings.take(seq) {
                     // Hand the prober the target's incarnation, so a relayed
                     // probe can report it in its `IndirectAck` (spec §10).
                     let _ = tx.send(incarnation);
@@ -708,13 +682,7 @@ async fn receive_loop<C, E, S, T>(
                     .membership
                     .mark_alive_direct(target, incarnation, now);
                 gossip_merge(&system, digest, now).await;
-                let waiter = system
-                    .inner
-                    .pending_pings
-                    .lock()
-                    .expect("pending pings mutex poisoned")
-                    .remove(&seq);
-                if let Some(tx) = waiter {
+                if let Some(tx) = system.inner.pings.take(seq) {
                     let _ = tx.send(incarnation);
                 }
             }
@@ -726,7 +694,7 @@ async fn receive_loop<C, E, S, T>(
                     // the target stops. A `Weak` handle avoids a reference cycle
                     // (system → host → watch closure → system).
                     let weak: Weak<Inner<C, E, S, T>> = Arc::downgrade(&system.inner);
-                    let watcher_node = watcher.node;
+                    let watcher_node = watcher.node();
                     let watcher_id = watcher.clone();
                     let deliver: WatchDelivery = Arc::new(move |signal: Terminated| {
                         if let Some(inner) = weak.upgrade() {
@@ -759,7 +727,7 @@ async fn receive_loop<C, E, S, T>(
                         watcher: watcher.clone(),
                         reason,
                     };
-                    let _ = system.inner.transport.send(watcher.node, frame).await;
+                    let _ = system.inner.transport.send(watcher.node(), frame).await;
                 }
             }
             Frame::Unwatch { target, watcher } => {
@@ -818,8 +786,7 @@ async fn gossip_merge<C, E, S, T>(
     T: Transport,
 {
     for node in system.inner.membership.merge(digest, now) {
-        system.fail_pending_to(node, CallError::Unreachable);
-        system.inner.host.synthesize_node_down(node).await;
+        system.node_down_cascade(node).await;
     }
 }
 
@@ -843,8 +810,7 @@ where
         // Apply suspicion/downing timeouts and run the cascade for newly-downed:
         // complete their in-flight callers (step 3) and notify watchers (step 4).
         for node in system.inner.membership.tick(now) {
-            system.fail_pending_to(node, CallError::Unreachable);
-            system.inner.host.synthesize_node_down(node).await;
+            system.node_down_cascade(node).await;
         }
 
         let Some(target) = system
@@ -855,14 +821,9 @@ where
             continue;
         };
 
-        let seq = system.inner.next_ping.fetch_add(1, Ordering::Relaxed);
+        let seq = system.inner.pings.next_id();
         let (tx, rx) = oneshot::channel::<u64>();
-        system
-            .inner
-            .pending_pings
-            .lock()
-            .expect("pending pings mutex poisoned")
-            .insert(seq, tx);
+        system.inner.pings.register(seq, tx);
         let frame = Frame::Ping {
             seq,
             incarnation: system.inner.membership.self_incarnation(),
@@ -872,12 +833,7 @@ where
 
         // A received `Ack` is handled by the receive loop (mark alive + merge).
         let direct_ok = matches!(system.inner.clock.timeout(config.rtt, rx).await, Ok(Ok(_)));
-        system
-            .inner
-            .pending_pings
-            .lock()
-            .expect("pending pings mutex poisoned")
-            .remove(&seq);
+        system.inner.pings.take(seq);
 
         // On a missed direct probe, enlist `k` helpers to probe indirectly before
         // suspecting — a single bad link should not cause a false suspicion
@@ -915,14 +871,9 @@ where
         return false;
     }
 
-    let seq = system.inner.next_ping.fetch_add(1, Ordering::Relaxed);
+    let seq = system.inner.pings.next_id();
     let (tx, rx) = oneshot::channel::<u64>();
-    system
-        .inner
-        .pending_pings
-        .lock()
-        .expect("pending pings mutex poisoned")
-        .insert(seq, tx);
+    system.inner.pings.register(seq, tx);
 
     let incarnation = system.inner.membership.self_incarnation();
     let digest = system.inner.membership.digest();
@@ -937,12 +888,7 @@ where
     }
 
     let alive = matches!(system.inner.clock.timeout(config.rtt, rx).await, Ok(Ok(_)));
-    system
-        .inner
-        .pending_pings
-        .lock()
-        .expect("pending pings mutex poisoned")
-        .remove(&seq);
+    system.inner.pings.take(seq);
     alive
 }
 
@@ -960,14 +906,9 @@ async fn relay_probe<C, E, S, T>(
     S: Spawner,
     T: Transport,
 {
-    let seq = system.inner.next_ping.fetch_add(1, Ordering::Relaxed);
+    let seq = system.inner.pings.next_id();
     let (tx, rx) = oneshot::channel::<u64>();
-    system
-        .inner
-        .pending_pings
-        .lock()
-        .expect("pending pings mutex poisoned")
-        .insert(seq, tx);
+    system.inner.pings.register(seq, tx);
     let ping = Frame::Ping {
         seq,
         incarnation: system.inner.membership.self_incarnation(),
@@ -988,12 +929,7 @@ async fn relay_probe<C, E, S, T>(
             let _ = system.inner.transport.send(requester, ack).await;
         }
         _ => {
-            system
-                .inner
-                .pending_pings
-                .lock()
-                .expect("pending pings mutex poisoned")
-                .remove(&seq);
+            system.inner.pings.take(seq);
         }
     }
 }

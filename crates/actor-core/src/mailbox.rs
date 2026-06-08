@@ -34,6 +34,12 @@ use crate::runtime::BoxFuture;
 /// returns the future that drives the handler.
 type Runner<A> = Box<dyn for<'a> FnOnce(&'a mut A, &'a Ctx<A>) -> BoxFuture<'a, ()> + Send>;
 
+/// Sentinel manifest for the `when_local` closure (spec §3.5.1). That closure
+/// carries no message type, yet the by-value envelope still needs a manifest for
+/// the `Enqueue`/`Dispatch` event stream. Named, rather than a bare literal, so
+/// the one non-message rider on the mailbox is obvious where it appears.
+const WHEN_LOCAL_MANIFEST: &str = "core.when_local";
+
 /// The fire-and-forget runner shared by [`Mailbox::tell`] and
 /// [`Mailbox::try_tell`]: drives the handler to completion and discards the
 /// reply. The two methods differ only in how they enqueue it, not in the work.
@@ -142,19 +148,7 @@ impl<A: Actor> Mailbox<A> {
         A: Handler<M>,
         M: Message,
     {
-        let manifest = M::MANIFEST.as_str();
-        let run = tell_runner(msg);
-        match self.sender.try_send(Envelope { manifest, run }) {
-            Ok(()) => {
-                self.events.emit(Event::Enqueue {
-                    actor: self.id.clone(),
-                    manifest,
-                });
-                Ok(())
-            }
-            Err(TrySendError::Full(_)) => Err(CallError::MailboxFull),
-            Err(TrySendError::Closed(_)) => Err(CallError::DeadLetter),
-        }
+        self.try_enqueue(M::MANIFEST.as_str(), tell_runner(msg))
     }
 
     /// Run `f` on the actor's serial executor with `&mut A` and return its
@@ -171,20 +165,44 @@ impl<A: Actor> Mailbox<A> {
                 let _ = tx.send(f(actor));
             })
         });
-        self.enqueue("core.when_local", run).await?;
+        self.enqueue(WHEN_LOCAL_MANIFEST, run).await?;
         rx.await.map_err(|_| CallError::DeadLetter)
     }
 
+    /// Awaiting enqueue (spec §6 default backpressure): blocks until the mailbox
+    /// has room, failing only on a closed mailbox. Shared by `ask`, `tell`,
+    /// `run_local`, and the death-watch signal.
     async fn enqueue(&self, manifest: &'static str, run: Runner<A>) -> Result<(), CallError> {
         self.sender
             .send(Envelope { manifest, run })
             .await
             .map_err(|_| CallError::DeadLetter)?;
+        self.emit_enqueue(manifest);
+        Ok(())
+    }
+
+    /// Non-blocking enqueue: returns [`CallError::MailboxFull`] when the queue is
+    /// full rather than awaiting. Shared by `try_tell` (local best-effort) and
+    /// `enqueue_remote` (the receive loop, which must not stall on backpressure).
+    fn try_enqueue(&self, manifest: &'static str, run: Runner<A>) -> Result<(), CallError> {
+        match self.sender.try_send(Envelope { manifest, run }) {
+            Ok(()) => {
+                self.emit_enqueue(manifest);
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => Err(CallError::MailboxFull),
+            Err(TrySendError::Closed(_)) => Err(CallError::DeadLetter),
+        }
+    }
+
+    /// Record that an envelope reached the queue (spec §16). Both enqueue paths
+    /// emit exactly one `Enqueue` here on success, so the event has a single
+    /// origin.
+    fn emit_enqueue(&self, manifest: &'static str) {
         self.events.emit(Event::Enqueue {
             actor: self.id.clone(),
             manifest,
         });
-        Ok(())
     }
 
     /// Enqueue an already-decoded inbound remote message, routing its reply
@@ -201,6 +219,11 @@ impl<A: Actor> Mailbox<A> {
         A: Handler<M>,
         M: Message,
     {
+        // Resolve `reply` explicitly on a rejected enqueue so the caller never
+        // hangs: once the runner below captures `reply`, a failed `try_send`
+        // would drop it silently. This pre-check makes the `try_send` inside
+        // `try_enqueue` infallible under the single-threaded simulator; a
+        // multi-threaded transport will revisit this.
         if self.sender.is_closed() {
             reply.fail(CallError::DeadLetter);
             return Err(CallError::DeadLetter);
@@ -209,24 +232,13 @@ impl<A: Actor> Mailbox<A> {
             reply.fail(CallError::MailboxFull);
             return Err(CallError::MailboxFull);
         }
-        let manifest = M::MANIFEST.as_str();
         let run: Runner<A> = Box::new(move |actor, ctx| {
             Box::pin(async move {
                 let outcome = actor.handle(msg, ctx).await;
                 reply.send(outcome);
             })
         });
-        match self.sender.try_send(Envelope { manifest, run }) {
-            Ok(()) => {
-                self.events.emit(Event::Enqueue {
-                    actor: self.id.clone(),
-                    manifest,
-                });
-                Ok(())
-            }
-            Err(TrySendError::Full(_)) => Err(CallError::MailboxFull),
-            Err(TrySendError::Closed(_)) => Err(CallError::DeadLetter),
-        }
+        self.try_enqueue(M::MANIFEST.as_str(), run)
     }
 
     /// Enqueue a [`Terminated`] death-watch signal (spec §12). It rides the same
@@ -253,14 +265,15 @@ impl<A: Actor> Mailbox<A> {
                 actor.handle(signal, ctx).await;
             })
         });
-        if self.sender.send(Envelope { manifest, run }).await.is_ok() {
-            self.events.emit(Event::Enqueue {
-                actor: self.id.clone(),
-                manifest,
-            });
-            // The watch signal has now reached this watcher's mailbox — the one
-            // and only point a `Terminated` is actually *delivered* (spec §12,
-            // §16). Emitting here, rather than where a node fans a signal out to
+        // Awaiting enqueue: a `Terminated` MUST reach its watcher exactly once
+        // for any cause (invariant #11), so it applies the §6 default
+        // backpressure policy rather than dropping under load. Only a *closed*
+        // mailbox lets it give up — that means the watcher itself is already
+        // gone, so there is no one left to notify.
+        if self.enqueue(manifest, run).await.is_ok() {
+            // The signal has now reached this watcher's mailbox — the one and
+            // only point a `Terminated` is actually *delivered* (spec §12, §16).
+            // Recording it here, rather than where a node fans a signal out to
             // remote watchers, keeps it one event per real delivery: a forward to
             // another node is not a delivery (it is re-emitted there when the
             // frame lands), and a watch-after-death delivery is still counted.

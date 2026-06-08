@@ -17,6 +17,7 @@ use crate::actor::Actor;
 use crate::actor::Handler;
 use crate::error::CallError;
 use crate::id::ActorId;
+use crate::mailbox::Mailbox;
 use crate::message::Message;
 use crate::system::ActorSystem;
 
@@ -83,9 +84,35 @@ impl<'de, A: Actor> serde::Deserialize<'de> for ActorRef<A> {
     }
 }
 
+/// Where a send to an [`ActorRef`] is delivered, classified once per call from
+/// the id alone (spec §4.3). Resolving locality and the live local mailbox in
+/// one place keeps the local-vs-remote branch out of every send method — the
+/// one secret of how a ref reaches its actor.
+enum Target<A: Actor> {
+    /// A live local actor: enqueue by value, no serialization (spec §4.3).
+    Local(Mailbox<A>),
+    /// The id is local but no live actor owns it — it has resigned (spec §4.3).
+    DeadLetter,
+    /// The id is owned by another node: encode and route over the transport.
+    Remote,
+}
+
 impl<A: Actor> ActorRef<A> {
     pub(crate) fn from_parts(id: ActorId, system: A::System) -> ActorRef<A> {
         ActorRef { id, system }
+    }
+
+    /// Classify where a send goes and resolve the local mailbox if any, in one
+    /// place (spec §4.3). Every send method dispatches on this rather than
+    /// re-deriving locality.
+    fn locate(&self) -> Target<A> {
+        if !self.system.is_local(&self.id) {
+            return Target::Remote;
+        }
+        match self.system.resolve_local::<A>(&self.id) {
+            Some(mailbox) => Target::Local(mailbox),
+            None => Target::DeadLetter,
+        }
     }
 
     /// This actor's identity.
@@ -142,12 +169,9 @@ impl<A: Actor> ActorRef<A> {
         F: FnOnce(&mut A) -> R + Send + 'static,
         R: Send + 'static,
     {
-        if !self.system.is_local(&self.id) {
-            return None;
-        }
-        match self.system.resolve_local::<A>(&self.id) {
-            Some(mailbox) => mailbox.run_local(f).await.ok(),
-            None => None,
+        match self.locate() {
+            Target::Local(mailbox) => mailbox.run_local(f).await.ok(),
+            Target::DeadLetter | Target::Remote => None,
         }
     }
 
@@ -156,26 +180,27 @@ impl<A: Actor> ActorRef<A> {
         A: Handler<M>,
         M: Message,
     {
-        if self.system.is_local(&self.id) {
-            return match self.system.resolve_local::<A>(&self.id) {
-                Some(mailbox) => mailbox.ask(msg).await,
-                None => Err(CallError::DeadLetter),
-            };
+        match self.locate() {
+            // Local: enqueue by value and await the typed reply, no serialization.
+            Target::Local(mailbox) => mailbox.ask(msg).await,
+            Target::DeadLetter => Err(CallError::DeadLetter),
+            // Remote: encode, route over the transport, decode the reply.
+            Target::Remote => {
+                let codec = self.system.codec();
+                let payload = actor_serialization::encode(&*codec, &msg)
+                    .map_err(|e| CallError::Serialization(e.to_string()))?;
+                let bytes = self
+                    .system
+                    .remote_ask(&self.id, M::MANIFEST.as_str(), payload, within)
+                    .await?;
+                // Decode under this system so an `ActorRef` in the reply rebinds
+                // here (spec §4.4).
+                crate::rebind::with_decoding_system(&self.system, || {
+                    actor_serialization::decode::<M::Reply>(&*codec, &bytes)
+                        .map_err(|e| CallError::Serialization(e.to_string()))
+                })
+            }
         }
-        // Remote: encode, route over the transport, decode the reply.
-        let codec = self.system.codec();
-        let payload = actor_serialization::encode(&*codec, &msg)
-            .map_err(|e| CallError::Serialization(e.to_string()))?;
-        let bytes = self
-            .system
-            .remote_ask(&self.id, M::MANIFEST.as_str(), payload, within)
-            .await?;
-        // Decode under this system so an `ActorRef` in the reply rebinds here
-        // (spec §4.4).
-        crate::rebind::with_decoding_system(&self.system, || {
-            actor_serialization::decode::<M::Reply>(&*codec, &bytes)
-                .map_err(|e| CallError::Serialization(e.to_string()))
-        })
     }
 
     /// Fire-and-forget (spec §3.3). Errors only for enqueue/transport failure,
@@ -185,18 +210,18 @@ impl<A: Actor> ActorRef<A> {
         A: Handler<M>,
         M: Message,
     {
-        if self.system.is_local(&self.id) {
-            return match self.system.resolve_local::<A>(&self.id) {
-                Some(mailbox) => mailbox.tell(msg).await,
-                None => Err(CallError::DeadLetter),
-            };
+        match self.locate() {
+            Target::Local(mailbox) => mailbox.tell(msg).await,
+            Target::DeadLetter => Err(CallError::DeadLetter),
+            Target::Remote => {
+                let codec = self.system.codec();
+                let payload = actor_serialization::encode(&*codec, &msg)
+                    .map_err(|e| CallError::Serialization(e.to_string()))?;
+                self.system
+                    .remote_tell(&self.id, M::MANIFEST.as_str(), payload)
+                    .await
+            }
         }
-        let codec = self.system.codec();
-        let payload = actor_serialization::encode(&*codec, &msg)
-            .map_err(|e| CallError::Serialization(e.to_string()))?;
-        self.system
-            .remote_tell(&self.id, M::MANIFEST.as_str(), payload)
-            .await
     }
 
     /// Non-blocking local fire-and-forget: returns [`CallError::MailboxFull`]
@@ -209,12 +234,10 @@ impl<A: Actor> ActorRef<A> {
         A: Handler<M>,
         M: Message,
     {
-        if !self.system.is_local(&self.id) {
-            return Err(CallError::Unreachable);
-        }
-        match self.system.resolve_local::<A>(&self.id) {
-            Some(mailbox) => mailbox.try_tell(msg),
-            None => Err(CallError::DeadLetter),
+        match self.locate() {
+            Target::Local(mailbox) => mailbox.try_tell(msg),
+            Target::DeadLetter => Err(CallError::DeadLetter),
+            Target::Remote => Err(CallError::Unreachable),
         }
     }
 }

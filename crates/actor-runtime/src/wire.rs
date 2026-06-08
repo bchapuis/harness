@@ -176,7 +176,7 @@ mod tests {
                 correlation,
                 payload,
             }) => {
-                assert_eq!(recipient.node, NodeId::new(7));
+                assert_eq!(recipient.node(), NodeId::new(7));
                 assert_eq!(manifest, "demo.Greet");
                 assert_eq!(correlation, Some(CallId(42)));
                 assert_eq!(payload, b"{\"name\":\"world\"}");
