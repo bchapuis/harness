@@ -18,6 +18,7 @@ use actor_cluster::Authorizer;
 use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
 use actor_cluster::Frame;
+use actor_cluster::MembershipMode;
 use actor_cluster::SwimConfig;
 use actor_cluster::Transport;
 use actor_cluster::TransportError;
@@ -61,7 +62,7 @@ pub struct SimNetwork {
     entropy: SimEntropy,
     spawner: SimSpawner,
     mailbox_capacity: usize,
-    swim: Option<SwimConfig>,
+    mode: MembershipMode,
     events: Arc<dyn EventSink>,
     authorizer: Option<Arc<dyn Authorizer>>,
     faults: FaultPolicy,
@@ -83,7 +84,7 @@ impl SimNetwork {
             entropy: sim.entropy(),
             spawner: sim.spawner(),
             mailbox_capacity: 64,
-            swim: None,
+            mode: MembershipMode::Static,
             events: Arc::new(()),
             authorizer: None,
             faults: FaultPolicy::default(),
@@ -102,9 +103,27 @@ impl SimNetwork {
         self
     }
 
-    /// Enable SWIM failure detection on every node of this network (spec §10).
+    /// Run every node in **autonomous** mode (spec §9.2, §10): SWIM failure
+    /// detection with an elected leader driving the lifecycle.
     pub fn with_swim(mut self, config: SwimConfig) -> SimNetwork {
-        self.swim = Some(config);
+        self.mode = MembershipMode::Autonomous(config);
+        self
+    }
+
+    /// Run every node in **managed** mode (spec §9.4): the SWIM detector observes
+    /// reachability, but `leader` is the designated control plane — the single
+    /// node whose `admit`/`drain`/`resume`/`decommission` commands take effect.
+    pub fn with_managed(mut self, swim: SwimConfig, leader: NodeId) -> SimNetwork {
+        self.mode = MembershipMode::Managed { swim, leader };
+        self
+    }
+
+    /// Run every node in the given membership [`mode`](MembershipMode) (spec §9.4)
+    /// — the general form of [`with_swim`](Self::with_swim)/
+    /// [`with_managed`](Self::with_managed), so a swarm can sweep the same workload
+    /// across static, autonomous, and managed control planes.
+    pub fn with_mode(mut self, mode: MembershipMode) -> SimNetwork {
+        self.mode = mode;
         self
     }
 
@@ -141,7 +160,7 @@ impl SimNetwork {
             codec,
             mailbox_capacity: self.mailbox_capacity,
             events: Arc::clone(&self.events),
-            swim: self.swim,
+            membership: self.mode,
             joining,
             authorizer: self.authorizer.clone(),
         };

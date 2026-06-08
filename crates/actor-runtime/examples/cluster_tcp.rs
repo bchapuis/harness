@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
+use actor_cluster::MembershipMode;
 use actor_cluster::Reachability;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
@@ -160,7 +161,7 @@ fn start_node(
             codec,
             mailbox_capacity: 64,
             events: Arc::new(()),
-            swim: Some(SwimConfig {
+            membership: MembershipMode::Autonomous(SwimConfig {
                 probe_interval: Duration::from_millis(200),
                 rtt: Duration::from_millis(150),
                 suspect_timeout: Duration::from_millis(600),

@@ -44,6 +44,8 @@ use futures::channel::oneshot;
 
 use crate::correlator::Correlator;
 use crate::membership::Membership;
+use crate::membership::MemberStatus;
+use crate::membership::MembershipMode;
 use crate::membership::SwimConfig;
 use crate::protocol::CallId;
 use crate::protocol::Frame;
@@ -68,11 +70,16 @@ pub struct ClusterConfig {
     pub mailbox_capacity: usize,
     /// Observability sink (spec §16).
     pub events: Arc<dyn EventSink>,
-    /// SWIM failure detection; `None` disables it (no detector loop).
-    pub swim: Option<SwimConfig>,
+    /// Which control plane governs membership (spec §9): a fixed
+    /// [`Static`](MembershipMode::Static) set, a self-organizing
+    /// [`Autonomous`](MembershipMode::Autonomous) SWIM cluster, or an operator-run
+    /// [`Managed`](MembershipMode::Managed) control plane. `Static` and `Managed`
+    /// without a detector run no SWIM loop.
+    pub membership: MembershipMode,
     /// Start this node as a joiner (spec §9.3): it enters the cluster `Joining`
-    /// and is admitted to `Up` by the leader once membership converges. `false`
-    /// (the default) starts it as a founding `Up` member.
+    /// and is admitted to `Up` by the leader (elected, or the operator in managed
+    /// mode) once membership converges. `false` (the default) starts it as a
+    /// founding `Up` member.
     pub joining: bool,
     /// Per-message authorization (spec §15); `None` permits every message that
     /// clears the transport handshake.
@@ -85,7 +92,7 @@ impl Default for ClusterConfig {
             codec: Arc::new(actor_serialization::JsonCodec),
             mailbox_capacity: 64,
             events: Arc::new(()),
-            swim: None,
+            membership: MembershipMode::Static,
             joining: false,
             authorizer: None,
         }
@@ -153,9 +160,10 @@ where
         inbound: Receiver<(NodeId, Frame)>,
         config: ClusterConfig,
     ) -> ClusterSystem<C, E, S, T> {
-        let swim = config.swim.unwrap_or_default();
+        let mode = config.membership;
+        let swim = mode.swim().unwrap_or_default();
         let host = LocalHost::new(node, Arc::clone(&config.events), config.mailbox_capacity);
-        let membership = Membership::new(node, &swim, Arc::clone(&config.events), config.joining);
+        let membership = Membership::new(node, &mode, Arc::clone(&config.events), config.joining);
         let system = ClusterSystem {
             inner: Arc::new(Inner {
                 clock,
@@ -178,7 +186,7 @@ where
             .inner
             .spawner
             .launch(Box::pin(receive_loop(system.clone(), inbound)));
-        if config.swim.is_some() {
+        if mode.swim().is_some() {
             system
                 .inner
                 .spawner
@@ -243,6 +251,47 @@ where
     /// and shuts the node down after announcing.
     pub fn leave(&self) {
         self.inner.membership.begin_leaving();
+    }
+
+    /// **Admit** `node` into the managed member set as a full `Up` member — an
+    /// operator command of the managed control plane (spec §9.4). Authoritative
+    /// only on the designated leader (the single writer of the member set); a
+    /// no-op on any other node. The decision disseminates by gossip. Returns
+    /// whether it was applied.
+    pub fn admit(&self, node: NodeId) -> bool {
+        self.inner.membership.admit(node, self.inner.clock.now())
+    }
+
+    /// **Drain** `node` for maintenance — the reversible cordon (spec §9.4). The
+    /// node stays a member (no `down`, no death watch, in-flight calls
+    /// unaffected); [`resume`](Self::resume) returns it to `Up`. Leader-only;
+    /// no-op elsewhere. Returns whether it was applied.
+    pub fn drain(&self, node: NodeId) -> bool {
+        self.inner.membership.drain(node, self.inner.clock.now())
+    }
+
+    /// **Resume** a drained `node` after maintenance (spec §9.4) — the reverse of
+    /// [`drain`](Self::drain). Leader-only; no-op unless `node` is currently
+    /// draining. Returns whether it was applied.
+    pub fn resume(&self, node: NodeId) -> bool {
+        self.inner.membership.resume(node, self.inner.clock.now())
+    }
+
+    /// **Decommission** `node`: terminally remove it from the cluster (spec §9.4).
+    /// Unlike [`drain`](Self::drain) this is irrevocable (invariant #15) and runs
+    /// the node-down cascade (spec §8.1) — every in-flight `ask` to `node`
+    /// completes `Unreachable`, and watchers of its actors receive
+    /// `Terminated { NodeDown }`. The `down` decision then disseminates by gossip.
+    /// Leader-only; no-op elsewhere. Returns whether it was applied.
+    pub async fn decommission(&self, node: NodeId) -> bool {
+        let downed = self
+            .inner
+            .membership
+            .decommission(node, self.inner.clock.now());
+        if downed {
+            self.node_down_cascade(node).await;
+        }
+        downed
     }
 
     /// The cluster leader as this node sees it (spec §9.2), or `None` if this
@@ -388,6 +437,15 @@ where
 
     fn is_local(&self, id: &ActorId) -> bool {
         self.inner.host.is_local(id)
+    }
+
+    fn is_serving(&self, node: NodeId) -> bool {
+        // Route service discovery away from a node taken out of rotation: one the
+        // operator drained for maintenance, or one that is down (spec §9.4, §13).
+        // A drained node keeps its registrations and still answers
+        // direct calls — it is just not handed out to new callers.
+        !self.inner.membership.is_down(node)
+            && self.inner.membership.status(node) != Some(MemberStatus::Draining)
     }
 
     fn codec(&self) -> Arc<dyn Codec> {

@@ -6,9 +6,11 @@
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
+use actor_cluster::MembershipMode;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorRef;
+use actor_core::NodeId;
 use actor_core::ActorSystem;
 use actor_core::BoxError;
 use actor_core::BoxFuture;
@@ -55,16 +57,35 @@ impl Handler<Greet> for Greeter {
 
 const GREETERS: Key<Greeter> = Key::new("greeters");
 
+/// The SWIM parameters the swarm runs under (when a mode uses a detector).
+fn swarm_swim() -> SwimConfig {
+    SwimConfig {
+        probe_interval: Duration::from_millis(100),
+        rtt: Duration::from_millis(50),
+        suspect_timeout: Duration::from_millis(200),
+        indirect_count: 2,
+        downing: DowningPolicy::Timeout(Duration::from_millis(300)),
+    }
+}
+
 /// Each node hosts and publishes a greeter; node 0 repeatedly discovers and
-/// calls them, tolerating whatever failures the nemesis induces.
+/// calls them, tolerating whatever failures the nemesis induces. Parameterized by
+/// membership `mode` so the *same* workload and nemesis sweep static, autonomous,
+/// and managed control planes (spec §9.4) — the safety invariants must hold under
+/// every mode.
 struct DiscoverAndCall {
     nodes: usize,
     rounds: u64,
+    mode: MembershipMode,
 }
 
 impl ClusterWorkload for DiscoverAndCall {
     fn name(&self) -> &'static str {
-        "discover-and-call"
+        match self.mode {
+            MembershipMode::Static => "discover-and-call/static",
+            MembershipMode::Autonomous(_) => "discover-and-call/autonomous",
+            MembershipMode::Managed { .. } => "discover-and-call/managed",
+        }
     }
 
     fn node_count(&self) -> usize {
@@ -72,13 +93,11 @@ impl ClusterWorkload for DiscoverAndCall {
     }
 
     fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(200),
-            indirect_count: 2,
-            downing: DowningPolicy::Timeout(Duration::from_millis(300)),
-        }
+        swarm_swim()
+    }
+
+    fn mode(&self) -> MembershipMode {
+        self.mode
     }
 
     fn setup(&self, ctx: &ClusterCtx) {
@@ -112,6 +131,43 @@ fn discover_and_call_holds_across_seeds_under_faults() {
     let workload = DiscoverAndCall {
         nodes: 3,
         rounds: 12,
+        mode: MembershipMode::Autonomous(swarm_swim()),
+    };
+    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+        panic!("{failure}");
+    }
+}
+
+#[test]
+fn discover_and_call_holds_across_seeds_in_managed_mode() {
+    // The same chaos under the **managed** control plane (spec §9.4): the detector
+    // is observe-only, so a crashed node is never auto-downed — its in-flight calls
+    // complete by timeout rather than the node-down cascade. The safety invariants
+    // (no silent loss, serial, lifecycle, down-terminal) must still hold on every
+    // seed. Node 1 is the designated leader.
+    let workload = DiscoverAndCall {
+        nodes: 3,
+        rounds: 12,
+        mode: MembershipMode::Managed {
+            swim: swarm_swim(),
+            leader: NodeId::new(1),
+        },
+    };
+    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+        panic!("{failure}");
+    }
+}
+
+#[test]
+fn discover_and_call_holds_across_seeds_in_static_mode() {
+    // And under the **static** control plane (spec §9.4): no detector at all, so
+    // membership never changes under the nemesis and discovery never re-converges.
+    // Calls to crashed nodes complete by timeout; the safety invariants must hold
+    // with no failure detection in the loop.
+    let workload = DiscoverAndCall {
+        nodes: 3,
+        rounds: 12,
+        mode: MembershipMode::Static,
     };
     if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
         panic!("{failure}");
@@ -284,6 +340,7 @@ fn a_cluster_seed_replays() {
     let workload = DiscoverAndCall {
         nodes: 3,
         rounds: 8,
+        mode: MembershipMode::Autonomous(swarm_swim()),
     };
     assert!(run_cluster_seed(&workload, 123).is_ok());
     assert!(run_cluster_seed(&workload, 123).is_ok());

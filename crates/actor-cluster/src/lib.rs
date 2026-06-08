@@ -20,6 +20,7 @@ mod transport;
 pub use membership::DowningPolicy;
 pub use membership::MemberStatus;
 pub use membership::Membership;
+pub use membership::MembershipMode;
 pub use membership::Reachability;
 pub use membership::SwimConfig;
 pub use system::Authorizer;

@@ -50,6 +50,27 @@ fn reachability_event(observer: NodeId, node: NodeId, reachability: Reachability
     }
 }
 
+/// The **status-axis** merge order (spec §9.2): whether an incoming
+/// `(revision, status)` view supersedes the current one. A higher operator
+/// revision wins; at equal revision the more-advanced rank wins (the
+/// `joining → … → removed` lattice). In static/autonomous mode every revision is
+/// `0`, so this is the plain monotonic lattice; in managed mode the leader's
+/// latest decision carries the highest revision, so a reversible `up ⇄ draining`
+/// change converges without rank ordering.
+fn status_supersedes(incoming: (u64, MemberStatus), current: (u64, MemberStatus)) -> bool {
+    incoming.0 > current.0 || (incoming.0 == current.0 && incoming.1.rank() > current.1.rank())
+}
+
+/// The **reachability-axis** merge order (spec §10): whether an incoming
+/// `(incarnation, reachability)` view supersedes the current one. A higher
+/// incarnation wins (a refutation); at equal incarnation the more severe view wins.
+fn reachability_supersedes(
+    incoming: (u64, Reachability),
+    current: (u64, Reachability),
+) -> bool {
+    incoming.0 > current.0 || (incoming.0 == current.0 && severity(incoming.1) > severity(current.1))
+}
+
 /// One node's view of a member, exchanged by gossip (spec §9.2). Serializable so
 /// it can be piggybacked on `Ping`/`Ack` frames over the wire (spec §10).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -58,6 +79,13 @@ pub struct MemberDigest {
     pub status: MemberStatus,
     pub reachability: Reachability,
     pub incarnation: u64,
+    /// The operator-decision **revision** that produced `status`, in managed mode
+    /// (spec §9.4). The designated leader is the single writer, so this is a
+    /// monotonic per-decision counter; the merge takes the higher revision, which
+    /// lets a *reversible* `up ⇄ draining` change converge without rank ordering.
+    /// `0` in static/autonomous mode, where status follows the rank lattice.
+    #[serde(default)]
+    pub revision: u64,
 }
 
 /// A member's lifecycle status (spec §9.1): `joining → up → leaving → down →
@@ -71,6 +99,14 @@ pub enum MemberStatus {
     Joining,
     /// Full member; may host and address actors.
     Up,
+    /// **Reversible** maintenance state, set by the operator in the managed
+    /// control plane (spec §9.4): the node is cordoned — callers route
+    /// away — but it stays a full member and is *not* terminal. A later `resume`
+    /// returns it to [`Up`](MemberStatus::Up). Because it is reversible it does
+    /// not sit on the monotonic `joining → … → removed` ladder; transitions in and
+    /// out of it are ordered by the operator's revision, not by rank (see
+    /// [`Membership::merge`]). It therefore shares [`Up`](MemberStatus::Up)'s rank.
+    Draining,
     /// Graceful shutdown initiated; draining (spec §9.3).
     Leaving,
     /// Declared dead — terminal and irrevocable (spec §9.1).
@@ -87,7 +123,10 @@ impl MemberStatus {
     fn rank(self) -> u8 {
         match self {
             MemberStatus::Joining => 0,
-            MemberStatus::Up => 1,
+            // `Draining` shares `Up`'s rank: it is a reversible off-ladder state
+            // (ordered by operator revision, not rank), so neither dominates the
+            // other on a rank tie — only a higher revision flips between them.
+            MemberStatus::Up | MemberStatus::Draining => 1,
             MemberStatus::Leaving => 2,
             MemberStatus::Down => 3,
             MemberStatus::Removed => 4,
@@ -159,12 +198,89 @@ impl Default for SwimConfig {
     }
 }
 
+/// Which **control plane** governs membership — the single decision that
+/// distinguishes the three membership modes (spec §9). The variants name the
+/// *authority* for the member set, not the mechanism:
+///
+/// - [`Static`](MembershipMode::Static): the set is fixed at startup and never
+///   changes. No failure detector runs; sends to a vanished node just fail.
+/// - [`Autonomous`](MembershipMode::Autonomous): the cluster governs its own
+///   membership — an elected leader admits joiners and the SWIM detector drives
+///   `unreachable → down` (spec §9.2, §9.3, §10). Self-organizing and
+///   self-healing.
+/// - [`Managed`](MembershipMode::Managed): an external control plane governs the
+///   member set through a **designated leader** (not elected). The detector still
+///   runs, but only as a read-only reachability sensor — it never downs a node.
+///   The operator admits, drains, resumes, and decommissions nodes by explicit
+///   command, each stamped with a monotonic revision and disseminated by gossip
+///   (the Kubernetes node-lifecycle model).
+///
+/// `Static`/`Autonomous` carry no revision (it stays `0`), so the gossip merge
+/// falls through to the plain rank-monotonic lattice and behaves exactly as
+/// before; `Managed` bumps the revision so an operator decision wins.
+#[derive(Clone, Copy, Debug)]
+pub enum MembershipMode {
+    /// Fixed member set, no failure detection (spec §9, mode a).
+    Static,
+    /// Self-organizing SWIM with an elected leader (spec §9.2, §9.3, §10, mode b).
+    Autonomous(SwimConfig),
+    /// Operator-governed via a designated control-plane `leader` (spec §9.4).
+    /// The detector observes reachability but never decides `down`.
+    Managed { swim: SwimConfig, leader: NodeId },
+}
+
+impl MembershipMode {
+    /// The SWIM parameters this mode runs the detector with, or `None` for
+    /// [`Static`](MembershipMode::Static) (no detector loop).
+    pub fn swim(&self) -> Option<SwimConfig> {
+        match self {
+            MembershipMode::Static => None,
+            MembershipMode::Autonomous(swim) => Some(*swim),
+            MembershipMode::Managed { swim, .. } => Some(*swim),
+        }
+    }
+
+    /// The designated control-plane leader, set only in
+    /// [`Managed`](MembershipMode::Managed) mode; `None` means the leader is
+    /// elected (spec §9.2).
+    fn designated_leader(&self) -> Option<NodeId> {
+        match self {
+            MembershipMode::Managed { leader, .. } => Some(*leader),
+            _ => None,
+        }
+    }
+
+    /// Whether the leader autonomously drives the lifecycle (admits joiners,
+    /// finalizes leaves, downs the unreachable) — true only for
+    /// [`Autonomous`](MembershipMode::Autonomous). In `Managed` mode those
+    /// transitions are the operator's to make.
+    fn autonomous(&self) -> bool {
+        matches!(self, MembershipMode::Autonomous(_))
+    }
+
+    /// The downing policy in force. `Managed` mode forces
+    /// [`Conservative`](DowningPolicy::Conservative): the detector never downs a
+    /// node — only the operator does (so a maintenance outage is `unreachable`,
+    /// never the terminal `down`).
+    fn downing(&self) -> DowningPolicy {
+        match self {
+            MembershipMode::Managed { .. } => DowningPolicy::Conservative,
+            MembershipMode::Autonomous(swim) => swim.downing,
+            MembershipMode::Static => DowningPolicy::Conservative,
+        }
+    }
+}
+
 struct Member {
     status: MemberStatus,
     reachability: Reachability,
     /// The incarnation this view is tagged with; a higher incarnation wins, and
     /// only a higher one (a refutation) can clear a suspicion (spec §9.2, §10).
     incarnation: u64,
+    /// The operator-decision revision behind `status` (managed mode, spec §9.4);
+    /// `0` otherwise. The merge prefers the higher revision, so a reversible
+    /// `up ⇄ draining` toggle converges; the rank lattice is only the tie-break.
+    revision: u64,
     /// When `reachability` last changed — drives the suspect and downing timers.
     changed_at: Instant,
 }
@@ -174,24 +290,99 @@ pub struct Membership {
     node: NodeId,
     downing: DowningPolicy,
     suspect_timeout: Duration,
+    /// The designated control-plane leader in managed mode (spec §9.4), or `None`
+    /// when the leader is elected (static/autonomous).
+    designated_leader: Option<NodeId>,
+    /// Whether the leader autonomously drives the lifecycle (autonomous mode).
+    /// `false` in managed mode, where the operator drives it by command.
+    autonomous: bool,
     members: Mutex<BTreeMap<NodeId, Member>>,
     /// This node's own lifecycle status, advertised in its gossip digest. A
     /// founding member starts `Up`; a joiner starts `Joining` and is admitted to
-    /// `Up` by the leader once it converges (spec §9.3).
+    /// `Up` by the leader (elected, or the operator in managed mode).
     self_status: Mutex<MemberStatus>,
     /// This node's own incarnation; bumped to refute a suspicion about itself
     /// (spec §10 #4).
     incarnation: AtomicU64,
+    /// The revision of the operator decision behind this node's own `self_status`
+    /// (managed mode). A node only *adopts* status decisions about itself — it is
+    /// never the writer — so this just tracks the highest revision it has accepted.
+    self_revision: AtomicU64,
+    /// The designated leader's monotonic operator-decision counter (managed mode,
+    /// spec §9.4): every `admit`/`drain`/`resume`/`decommission` takes the next
+    /// value, making the leader the single writer of the member set. Kept ahead of
+    /// any revision seen in gossip so it survives a leader restart. Unused (stays
+    /// `0`) off the leader and in other modes.
+    revision: AtomicU64,
     events: Arc<dyn EventSink>,
 }
 
+/// An operator command of the managed control plane (spec §9.4). The four
+/// commands share one protocol — guard, find-or-create, precondition,
+/// revision-stamp, announce (see [`Membership::command`]) — and differ only in
+/// the data captured here: the status they drive a member to, whether they may
+/// introduce a node not yet in the roster, which prior states they are valid
+/// from, and the event they announce.
+#[derive(Clone, Copy)]
+enum OperatorCommand {
+    /// Bring a node into the member set as `Up` (idempotent if already up).
+    Admit,
+    /// Cordon a live member for maintenance — the reversible `Draining` state.
+    Drain,
+    /// Return a drained member to `Up`.
+    Resume,
+    /// Terminally remove a member (`Down`); the caller then runs the cascade.
+    Decommission,
+}
+
+impl OperatorCommand {
+    /// The status the command drives its target to.
+    fn target(self) -> MemberStatus {
+        match self {
+            OperatorCommand::Admit | OperatorCommand::Resume => MemberStatus::Up,
+            OperatorCommand::Drain => MemberStatus::Draining,
+            OperatorCommand::Decommission => MemberStatus::Down,
+        }
+    }
+
+    /// Whether the command may introduce a node not yet in the roster. Only
+    /// admission and decommission name a node the leader has not seen; `drain`
+    /// and `resume` act on an existing member or are a no-op.
+    fn admits_new(self) -> bool {
+        matches!(self, OperatorCommand::Admit | OperatorCommand::Decommission)
+    }
+
+    /// Whether the command is valid against a member's current (non-terminal)
+    /// status — the precondition that makes `drain`/`resume` a matched pair and
+    /// keeps each command idempotent.
+    fn valid_from(self, current: MemberStatus) -> bool {
+        match self {
+            OperatorCommand::Admit | OperatorCommand::Decommission => true,
+            OperatorCommand::Drain => current != MemberStatus::Draining,
+            OperatorCommand::Resume => current == MemberStatus::Draining,
+        }
+    }
+
+    /// The observability event announcing the command (spec §16). Fixed per
+    /// command — an operator action, unlike a passively-observed transition
+    /// ([`Membership::transition_event`]), so it never depends on the prior state.
+    fn event(self, observer: NodeId, node: NodeId) -> Event {
+        match self {
+            OperatorCommand::Admit => Event::MemberUp { observer, node },
+            OperatorCommand::Drain => Event::MemberDraining { observer, node },
+            OperatorCommand::Resume => Event::MemberResumed { observer, node },
+            OperatorCommand::Decommission => Event::NodeDown { observer, node },
+        }
+    }
+}
+
 impl Membership {
-    /// Create an empty roster for `node`. `joining` marks this node as a joiner
-    /// (starts `Joining`, awaiting admission); otherwise it is a founding member
-    /// (starts `Up`).
+    /// Create an empty roster for `node` under `mode`. `joining` marks this node a
+    /// joiner (starts `Joining`, awaiting admission — by the elected leader, or by
+    /// the operator in managed mode); otherwise it is a founding member (`Up`).
     pub fn new(
         node: NodeId,
-        config: &SwimConfig,
+        mode: &MembershipMode,
         events: Arc<dyn EventSink>,
         joining: bool,
     ) -> Membership {
@@ -200,13 +391,18 @@ impl Membership {
         } else {
             MemberStatus::Up
         };
+        let swim = mode.swim().unwrap_or_default();
         Membership {
             node,
-            downing: config.downing,
-            suspect_timeout: config.suspect_timeout,
+            downing: mode.downing(),
+            suspect_timeout: swim.suspect_timeout,
+            designated_leader: mode.designated_leader(),
+            autonomous: mode.autonomous(),
             members: Mutex::new(BTreeMap::new()),
             self_status: Mutex::new(self_status),
             incarnation: AtomicU64::new(0),
+            self_revision: AtomicU64::new(0),
+            revision: AtomicU64::new(0),
             events,
         }
     }
@@ -225,21 +421,6 @@ impl Membership {
         }
     }
 
-    /// Advance this node's own status forward (monotonically), emitting a
-    /// `MemberUp` when it reaches `Up`.
-    fn advance_self(&self, to: MemberStatus) {
-        let mut s = self.self_status.lock().expect("self status mutex poisoned");
-        if to.rank() > s.rank() {
-            *s = to;
-            if to == MemberStatus::Up {
-                self.events.emit(Event::MemberUp {
-                    observer: self.node,
-                    node: self.node,
-                });
-            }
-        }
-    }
-
     /// Add a peer as `Up`/`Reachable` (idempotent — never resurrects a `Down`).
     pub fn add_member(&self, node: NodeId, now: Instant) {
         if node == self.node {
@@ -253,6 +434,7 @@ impl Membership {
                 status: MemberStatus::Up,
                 reachability: Reachability::Reachable,
                 incarnation: 0,
+                revision: 0,
                 changed_at: now,
             });
     }
@@ -317,6 +499,7 @@ impl Membership {
             status: MemberStatus::Joining,
             reachability: Reachability::Reachable,
             incarnation,
+            revision: 0,
             changed_at: now,
         });
         if member.status.is_terminal() {
@@ -352,21 +535,31 @@ impl Membership {
         }
     }
 
-    /// The cluster leader (spec §9.2): the lowest-id reachable, non-`down`
-    /// member, this node included. The leader performs the `up`/`down` lifecycle
-    /// transitions. Returns `None` only if this node has excluded itself by
-    /// leaving or being down.
+    /// The cluster leader (spec §9.2). In autonomous mode it is *elected* — the
+    /// lowest-id reachable, non-`down` member, this node included — and performs
+    /// the `up`/`down` lifecycle transitions; election returns `None` only if this
+    /// node has excluded itself by leaving or being down. In managed mode it is the
+    /// *designated* control-plane node (spec §9.4), returned unconditionally.
     fn compute_leader(&self, members: &BTreeMap<NodeId, Member>) -> Option<NodeId> {
+        // Managed mode (spec §9.4): the leader is *designated*, not elected — the
+        // control plane is a provisioned authority, not the lowest address. It is
+        // the single writer of the member set, which is what gives managed mode a
+        // split-brain-free membership decision (at the cost of pausing membership
+        // changes if the control-plane node is unreachable).
+        if let Some(leader) = self.designated_leader {
+            return Some(leader);
+        }
         let mut best = None;
         let ss = self.self_status();
         if !ss.is_terminal() && ss != MemberStatus::Leaving {
             best = Some(self.node);
         }
         for (node, m) in members.iter() {
-            // A leaving or terminal member is not a leader candidate, so
-            // leadership fails over when the leader itself leaves (spec §9.2, §9.3).
+            // A leaving, draining, or terminal member is not a leader candidate, so
+            // leadership fails over when the leader itself steps aside (spec §9.2, §9.3).
             if !m.status.is_terminal()
                 && m.status != MemberStatus::Leaving
+                && m.status != MemberStatus::Draining
                 && m.reachability == Reachability::Reachable
             {
                 best = Some(best.map_or(*node, |b: NodeId| b.min(*node)));
@@ -384,6 +577,134 @@ impl Membership {
     /// Whether this node is the leader (spec §9.2).
     pub fn is_leader(&self) -> bool {
         self.leader() == Some(self.node)
+    }
+
+    /// Whether this node is the **designated** control-plane leader (managed mode,
+    /// spec §9.4) — the single node whose operator commands take effect. A command
+    /// issued anywhere else is a no-op, which keeps the member set single-writer.
+    fn is_control_leader(&self) -> bool {
+        self.designated_leader == Some(self.node)
+    }
+
+    /// The next operator-decision revision (managed mode, spec §9.4): strictly
+    /// increasing, so the leader's latest decision always wins the gossip merge.
+    fn next_revision(&self) -> u64 {
+        self.revision.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// **Admit** `node` to the managed member set as `Up` (operator command, spec
+    /// §9.4). A new or `joining` node becomes a full member; a decommissioned one
+    /// is *not* revived (`down` is terminal, invariant #15) — it must rejoin with a
+    /// fresh identity. Returns whether this node is the control leader and applied
+    /// it; a command on any other node is a no-op (single-writer member set).
+    pub(crate) fn admit(&self, node: NodeId, now: Instant) -> bool {
+        self.command(node, OperatorCommand::Admit, now)
+    }
+
+    /// **Drain** `node` into the reversible maintenance state (operator command,
+    /// spec §9.4): the node is cordoned but stays a member — no `down`, no death
+    /// watch fires, in-flight calls are unaffected. [`resume`](Self::resume)
+    /// reverses it. No-op unless this is the control leader and `node` is a live
+    /// member.
+    pub(crate) fn drain(&self, node: NodeId, now: Instant) -> bool {
+        self.command(node, OperatorCommand::Drain, now)
+    }
+
+    /// **Resume** a drained `node` back to `Up` after maintenance (operator
+    /// command, spec §9.4) — the reverse of [`drain`](Self::drain). No-op unless
+    /// this is the control leader and `node` is currently `draining`.
+    pub(crate) fn resume(&self, node: NodeId, now: Instant) -> bool {
+        self.command(node, OperatorCommand::Resume, now)
+    }
+
+    /// **Decommission** `node`: declare it terminally `down` (operator command,
+    /// spec §9.4). Unlike [`drain`](Self::drain) this is irrevocable (invariant
+    /// #15): it triggers the node-down cascade (spec §8.1) — in-flight callers fail
+    /// `Unreachable`, watchers get `Terminated { NodeDown }`. Returns whether the
+    /// caller should run that cascade (i.e. this is the control leader and `node`
+    /// was newly downed); the decision then disseminates by gossip.
+    pub(crate) fn decommission(&self, node: NodeId, now: Instant) -> bool {
+        self.command(node, OperatorCommand::Decommission, now)
+    }
+
+    /// Apply an operator [`command`](OperatorCommand) to `node` — the one protocol
+    /// behind `admit`/`drain`/`resume`/`decommission` (spec §9.4). It enforces the
+    /// single-writer rule (only the designated leader acts, never on itself),
+    /// stamps the decision with the next [revision](Self::next_revision) so it wins
+    /// the gossip merge, applies it under the per-command precondition, and
+    /// announces it. Returns whether it was applied — which, for `decommission`, is
+    /// exactly when the caller must run the node-down cascade (spec §8.1).
+    fn command(&self, node: NodeId, command: OperatorCommand, now: Instant) -> bool {
+        if !self.is_control_leader() || node == self.node {
+            return false;
+        }
+        let mut members = self.members.lock().expect("members mutex poisoned");
+        match members.get_mut(&node) {
+            Some(member) => {
+                // A terminal member is gone for good (#15); otherwise the command
+                // applies only from a status it is valid for, keeping each verb
+                // idempotent (re-draining, re-admitting) without a redundant event.
+                if member.status.is_terminal() || !command.valid_from(member.status) {
+                    return false;
+                }
+                member.revision = self.next_revision();
+                if member.status != command.target() {
+                    member.status = command.target();
+                    member.changed_at = now;
+                    self.events.emit(command.event(self.node, node));
+                }
+            }
+            None => {
+                // Only admission and decommission name a node the leader has not
+                // seen; drain/resume on an unknown node are a no-op.
+                if !command.admits_new() {
+                    return false;
+                }
+                members.insert(
+                    node,
+                    Member {
+                        status: command.target(),
+                        reachability: Reachability::Reachable,
+                        incarnation: 0,
+                        revision: self.next_revision(),
+                        changed_at: now,
+                    },
+                );
+                self.events.emit(command.event(self.node, node));
+            }
+        }
+        true
+    }
+
+    /// The single mapping from a **peer** status transition to the observability
+    /// event this node emits for it (spec §16). `prev` is the status we last held
+    /// for the peer, or `None` at first sight; the distinction is what keeps a
+    /// passively-learned already-`up` peer silent while an observed `joining → up`
+    /// or operator admission announces `MemberUp`, and a `draining → up` announces
+    /// `MemberResumed`. `down` maps to `NodeDown` (the caller also drives the
+    /// cascade); `leaving`/`removed` are silent. Self-status events are handled
+    /// separately (a node stays quiet about its own `down`).
+    fn transition_event(
+        &self,
+        node: NodeId,
+        prev: Option<MemberStatus>,
+        new: MemberStatus,
+    ) -> Option<Event> {
+        let observer = self.node;
+        let event = match new {
+            MemberStatus::Joining => Event::MemberJoining { observer, node },
+            MemberStatus::Up => match prev {
+                Some(MemberStatus::Draining) => Event::MemberResumed { observer, node },
+                // A transition from a known prior status is an admission/promotion;
+                // first sight of an already-up peer is passive and stays silent.
+                Some(_) => Event::MemberUp { observer, node },
+                None => return None,
+            },
+            MemberStatus::Draining => Event::MemberDraining { observer, node },
+            MemberStatus::Down => Event::NodeDown { observer, node },
+            MemberStatus::Leaving | MemberStatus::Removed => return None,
+        };
+        Some(event)
     }
 
     /// `T_suspect` scaled for a cluster of `cluster_size` members (spec §10).
@@ -459,12 +780,14 @@ impl Membership {
             if is_leader && m.reachability == Reachability::Unreachable {
                 if let DowningPolicy::Timeout(after) = self.downing {
                     if now.duration_since(m.changed_at) >= after {
+                        let prev = m.status;
                         m.status = MemberStatus::Down;
                         m.changed_at = now;
-                        self.events.emit(Event::NodeDown {
-                            observer: self.node,
-                            node: *node,
-                        });
+                        if let Some(event) =
+                            self.transition_event(*node, Some(prev), MemberStatus::Down)
+                        {
+                            self.events.emit(event);
+                        }
                         downed.push(*node);
                     }
                 }
@@ -490,6 +813,11 @@ impl Membership {
         now: Instant,
         downed: &mut Vec<NodeId>,
     ) {
+        // Managed mode (spec §9.4): the operator drives admission and removal by
+        // command, so the leader never auto-admits or auto-finalizes here.
+        if !self.autonomous {
+            return;
+        }
         let converged = members
             .values()
             .all(|m| m.status.is_terminal() || m.reachability == Reachability::Reachable);
@@ -497,30 +825,26 @@ impl Membership {
             return;
         }
         for (node, m) in members.iter_mut() {
-            match m.status {
+            let new = match m.status {
                 MemberStatus::Joining if m.reachability == Reachability::Reachable => {
-                    m.status = MemberStatus::Up;
-                    m.changed_at = now;
-                    self.events.emit(Event::MemberUp {
-                        observer: self.node,
-                        node: *node,
-                    });
+                    MemberStatus::Up
                 }
-                MemberStatus::Leaving => {
-                    m.status = MemberStatus::Down;
-                    m.changed_at = now;
-                    self.events.emit(Event::NodeDown {
-                        observer: self.node,
-                        node: *node,
-                    });
-                    downed.push(*node);
-                }
-                _ => {}
+                MemberStatus::Leaving => MemberStatus::Down,
+                _ => continue,
+            };
+            let prev = m.status;
+            m.status = new;
+            m.changed_at = now;
+            if let Some(event) = self.transition_event(*node, Some(prev), new) {
+                self.events.emit(event);
+            }
+            if new == MemberStatus::Down {
+                downed.push(*node);
             }
         }
         // The leader admits itself, too (bootstrapping a fresh cluster).
         if self.self_status() == MemberStatus::Joining {
-            self.advance_self(MemberStatus::Up);
+            self.set_self_status(MemberStatus::Up);
         }
     }
 
@@ -558,6 +882,7 @@ impl Membership {
                 status: m.status,
                 reachability: m.reachability,
                 incarnation: m.incarnation,
+                revision: m.revision,
             })
             .collect();
         out.push(MemberDigest {
@@ -565,95 +890,43 @@ impl Membership {
             status: self.self_status(),
             reachability: Reachability::Reachable,
             incarnation: self.incarnation.load(Ordering::Relaxed),
+            revision: self.self_revision.load(Ordering::Relaxed),
         });
         out
     }
 
-    /// Merge a peer's gossiped view into ours (spec §9.2): a higher incarnation
-    /// wins; at equal incarnation the more severe reachability wins; `down` is
-    /// terminal; and a non-reachable claim about *ourselves* is refuted by
-    /// bumping our incarnation above it (spec §10 #4). Returns nodes newly
-    /// declared `down`, for the caller to run the cascade (spec §8.1).
+    /// Merge a peer's gossiped view into ours (spec §9.2). Two axes merge
+    /// independently:
+    ///
+    /// - **Status** (the operator/lifecycle axis): the **higher revision wins**;
+    ///   at equal revision the **rank lattice** is the tie-break (`joining → up →
+    ///   … → removed`). In static/autonomous mode every revision is `0`, so this
+    ///   reduces to the plain monotonic lattice exactly as before. In managed mode
+    ///   the leader's latest operator decision carries the highest revision, so a
+    ///   *reversible* `up ⇄ draining` change converges without rank ordering. A
+    ///   terminal member (`down`/`removed`) is sticky — it only advances toward
+    ///   `removed`, never reverts, regardless of revision (invariant #15).
+    /// - **Reachability** (the detector axis): a higher incarnation wins, else the
+    ///   more severe view; a non-reachable claim about *ourselves* is refuted by
+    ///   bumping our incarnation (spec §10 #4). An operator status *decision* about
+    ///   ourselves (a strictly higher revision) we instead adopt.
+    ///
+    /// Returns nodes newly declared `down`, for the caller to run the cascade
+    /// (spec §8.1).
     pub fn merge(&self, incoming: Vec<MemberDigest>, now: Instant) -> Vec<NodeId> {
         let mut downed = Vec::new();
         let mut to_emit: Vec<Event> = Vec::new();
         {
             let mut members = self.members.lock().expect("members mutex poisoned");
             for d in incoming {
+                // Keep the leader's decision counter ahead of anything in gossip,
+                // so single-writer ordering survives a control-plane restart.
+                self.revision.fetch_max(d.revision, Ordering::Relaxed);
+
                 if d.node == self.node {
-                    if d.reachability != Reachability::Reachable || d.status == MemberStatus::Down {
-                        let cur = self.incarnation.load(Ordering::Relaxed);
-                        if d.incarnation >= cur {
-                            self.incarnation.store(d.incarnation + 1, Ordering::Relaxed);
-                        }
-                    }
-                    // Adopt a forward self-transition (e.g. the leader admitted us
-                    // to `Up`, or finalized our `Leaving` to `Down`).
-                    if d.status.rank() > self.self_status().rank() {
-                        self.advance_self(d.status);
-                    }
-                    continue;
-                }
-                // A node first appears with the status the digest reports — a new
-                // joiner shows up as `Joining`, not silently `Up`. But never
-                // resurrect a tombstone: ignore an unknown node reported `Removed`
-                // (we have already pruned it, or never knew it).
-                let known = members.contains_key(&d.node);
-                if !known && d.status == MemberStatus::Removed {
-                    continue;
-                }
-                let member = members.entry(d.node).or_insert_with(|| {
-                    if d.status == MemberStatus::Joining {
-                        to_emit.push(Event::MemberJoining {
-                            observer: self.node,
-                            node: d.node,
-                        });
-                    }
-                    Member {
-                        status: d.status,
-                        reachability: d.reachability,
-                        incarnation: d.incarnation,
-                        changed_at: now,
-                    }
-                });
-                // A `Removed` member is the most terminal — ignore further gossip.
-                if member.status == MemberStatus::Removed {
-                    continue;
-                }
-                // Status moves forward monotonically (spec §9.1): `down` triggers
-                // the cascade; `removed` advances the tombstone by gossip.
-                if known && d.status.rank() > member.status.rank() {
-                    member.status = d.status;
-                    member.changed_at = now;
-                    match d.status {
-                        MemberStatus::Up => to_emit.push(Event::MemberUp {
-                            observer: self.node,
-                            node: d.node,
-                        }),
-                        MemberStatus::Down => {
-                            to_emit.push(Event::NodeDown {
-                                observer: self.node,
-                                node: d.node,
-                            });
-                            downed.push(d.node);
-                        }
-                        _ => {}
-                    }
-                }
-                // Reachability matters only for a live member; a terminal one is
-                // gone. A higher incarnation wins, else the more severe view.
-                if !member.status.is_terminal() {
-                    let adopt = d.incarnation > member.incarnation
-                        || (d.incarnation == member.incarnation
-                            && severity(d.reachability) > severity(member.reachability));
-                    if adopt {
-                        member.incarnation = member.incarnation.max(d.incarnation);
-                        if member.reachability != d.reachability {
-                            member.reachability = d.reachability;
-                            member.changed_at = now;
-                            to_emit.push(reachability_event(self.node, d.node, d.reachability));
-                        }
-                    }
+                    self.merge_self(d);
+                } else if let Some(node) = self.merge_peer(&mut members, d, now, &mut to_emit) {
+                    downed.push(node);
                 }
             }
         }
@@ -661,6 +934,145 @@ impl Membership {
             self.events.emit(event);
         }
         downed
+    }
+
+    /// Merge one peer's gossiped entry into the roster — the per-entry body of
+    /// [`merge`] for a node other than ourselves. Applies the two-axis precedence
+    /// ([`status_supersedes`] over status, [`reachability_supersedes`] over
+    /// reachability), pushing any observed [transition](Self::transition_event)
+    /// onto `to_emit`, and returns the node if this merge newly declared it `down`
+    /// (so the caller runs the cascade, spec §8.1).
+    fn merge_peer(
+        &self,
+        members: &mut BTreeMap<NodeId, Member>,
+        d: MemberDigest,
+        now: Instant,
+        to_emit: &mut Vec<Event>,
+    ) -> Option<NodeId> {
+        let Some(member) = members.get_mut(&d.node) else {
+            // Never resurrect a tombstone we have already pruned or never knew.
+            if d.status == MemberStatus::Removed {
+                return None;
+            }
+            // First sight: adopt the incoming view verbatim and announce it.
+            members.insert(
+                d.node,
+                Member {
+                    status: d.status,
+                    reachability: d.reachability,
+                    incarnation: d.incarnation,
+                    revision: d.revision,
+                    changed_at: now,
+                },
+            );
+            if let Some(event) = self.transition_event(d.node, None, d.status) {
+                to_emit.push(event);
+            }
+            return (d.status == MemberStatus::Down).then_some(d.node);
+        };
+
+        // A terminal member is sticky: it only advances toward `removed` (the
+        // tombstone disseminating), never reverts (invariant #15), and carries no
+        // reachability.
+        if member.status.is_terminal() {
+            if d.status.rank() > member.status.rank() {
+                member.status = d.status;
+                member.changed_at = now;
+            }
+            return None;
+        }
+
+        // Status axis: operator-revision then rank.
+        let mut downed = None;
+        if status_supersedes((d.revision, d.status), (member.revision, member.status)) {
+            member.revision = member.revision.max(d.revision);
+            if d.status != member.status {
+                let prev = member.status;
+                member.status = d.status;
+                member.changed_at = now;
+                if let Some(event) = self.transition_event(d.node, Some(prev), d.status) {
+                    to_emit.push(event);
+                }
+                if d.status == MemberStatus::Down {
+                    downed = Some(d.node);
+                }
+            }
+        }
+
+        // Reachability axis: incarnation then severity, while the member is live.
+        if !member.status.is_terminal()
+            && reachability_supersedes(
+                (d.incarnation, d.reachability),
+                (member.incarnation, member.reachability),
+            )
+        {
+            member.incarnation = member.incarnation.max(d.incarnation);
+            if member.reachability != d.reachability {
+                member.reachability = d.reachability;
+                member.changed_at = now;
+                to_emit.push(reachability_event(self.node, d.node, d.reachability));
+            }
+        }
+        downed
+    }
+
+    /// Merge a digest entry that is about *this* node (spec §9.2, §10 #4).
+    ///
+    /// A strictly higher **revision** is an operator decision about us (managed
+    /// mode) — admission, drain, resume, or decommission — which we adopt. Anything
+    /// else is the legacy path: refute a stale non-reachable claim by bumping our
+    /// incarnation, and adopt a forward rank transition (e.g. an elected leader
+    /// admitting us `joining → up`).
+    fn merge_self(&self, d: MemberDigest) {
+        if d.revision > self.self_revision.load(Ordering::Relaxed) {
+            self.self_revision.store(d.revision, Ordering::Relaxed);
+            self.set_self_status(d.status);
+            return;
+        }
+        if d.reachability != Reachability::Reachable || d.status == MemberStatus::Down {
+            let cur = self.incarnation.load(Ordering::Relaxed);
+            if d.incarnation >= cur {
+                self.incarnation.store(d.incarnation + 1, Ordering::Relaxed);
+            }
+        }
+        if d.status.rank() > self.self_status().rank() {
+            self.set_self_status(d.status);
+        }
+    }
+
+    /// Set this node's own status and announce the transition — the single
+    /// mutator of `self_status`, whether the move is an operator decision about us
+    /// (managed mode) or a forward lifecycle step the elected leader drove (e.g.
+    /// `joining → up`). Callers gate it on a real transition (a higher rank, or a
+    /// higher revision). A terminal status (decommission) is recorded so the node
+    /// can observe it and shut down, but emits no self event — observers announce
+    /// the `down` (spec §8.1). It never reaches `draining` from `joining` (a node
+    /// cannot be a drain target before it is `up`), so that case needs no arm.
+    fn set_self_status(&self, status: MemberStatus) {
+        let mut s = self.self_status.lock().expect("self status mutex poisoned");
+        if *s == status {
+            return;
+        }
+        let prev = *s;
+        *s = status;
+        let event = match status {
+            MemberStatus::Up if prev == MemberStatus::Draining => Some(Event::MemberResumed {
+                observer: self.node,
+                node: self.node,
+            }),
+            MemberStatus::Up => Some(Event::MemberUp {
+                observer: self.node,
+                node: self.node,
+            }),
+            MemberStatus::Draining => Some(Event::MemberDraining {
+                observer: self.node,
+                node: self.node,
+            }),
+            _ => None,
+        };
+        if let Some(event) = event {
+            self.events.emit(event);
+        }
     }
 
     /// Every live (non-terminal) peer, for broadcasting cluster-wide state

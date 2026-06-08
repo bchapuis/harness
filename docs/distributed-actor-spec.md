@@ -500,25 +500,27 @@ Declaring a node `down` is one event whose consequences belong to five different
 5. **Receptionist (§13).** Because the receptionist watches the actors it lists, step 4 drives it: it prunes every registration originating from `N`, and subscribers receive a fresh `Listing`.
 6. **Routing afterward (§4.3).** `resolve` of any `ActorId` on `N` still returns a (remote) `ActorRef`; sends to it fail with `Unreachable` rather than blocking, because liveness is discovered on send, not in `resolve`.
 
-A graceful **leave** (§9.3) reaches the same terminal `down`/`removed` state and the same steps 3 to 6, differing only in step 1: the node announces `leaving` and drains instead of being suspected.
+A graceful **leave** (§9.3) reaches the same terminal `down`/`removed` state and the same steps 3 to 6, differing only in step 1: the node announces `leaving` and drains instead of being suspected. An operator **decommission** in managed mode (§9.4) reaches it the same way, also differing only in step 1: the designated control plane declares `down` directly, with no detector involved. (A managed-mode **drain** is *not* this cascade — it is reversible and leaves the node a member; only `decommission` declares `down`.)
 
 ---
 
 ## 9. Cluster membership and node lifecycle
 
-Nodes form a cluster by associating with seed nodes and gossiping membership. Membership is **eventually consistent**.
+Nodes share a view of cluster membership, kept **eventually consistent** by gossip. How that member set is *governed* — a fixed list, self-organizing gossip among nodes that associate via seeds, or an external control plane — is a configurable **mode** (§9.4). The state lattice (§9.1), convergence (§9.2), and lifecycle (§9.3) below define what every mode shares and describe the **autonomous** mode's mechanics in full; §9.4 then sets out all three modes and how the static and managed control planes specialize them.
 
 ### 9.1 Member states
 
 ```
 joining → up → leaving → down → removed
-                 ▲          ▲
+          ⇅      ▲          ▲
+       draining
    (reachability: reachable ⇄ unreachable, orthogonal to the above)
 ```
 
 - **joining**: handshake complete, not yet admitted to full participation.
 - **up**: full member; may host and address actors.
-- **leaving**: graceful shutdown initiated; draining.
+- **draining** *(managed mode, §9.4)*: a **reversible** maintenance cordon set by the operator. The node stays a full member, but service discovery routes new work away from it; `resume` returns it to `up`. It sits **off** the monotonic ladder — it is not terminal and never advances toward `removed` on its own — so transitions in and out of it are ordered by the operator's revision rather than by rank (§9.2, §9.4).
+- **leaving**: graceful shutdown initiated; draining its mailboxes before departure.
 - **down**: declared dead, gracefully or by failure detection. **Terminal and irrevocable**: a node that was `down` MUST NOT rejoin under the same incarnation; it MUST restart with a new `NodeId`.
 - **removed**: tombstone, eventually pruned from gossip.
 
@@ -528,7 +530,7 @@ joining → up → leaving → down → removed
 
 1. Membership disseminates by **gossip**: each node periodically exchanges a digest with a random peer and merges newer information.
 2. Each member entry carries an **incarnation** number; the higher incarnation wins, letting a node refute a stale suspicion about itself.
-3. Transitioning a member to `up` or `down` is a cluster decision the elected **leader** (the lowest-address `up`, reachable member) performs. Membership is **eventually consistent with no consensus** (§1.2), so "converged" means the leader acts on a **locally stable, fully-reachable view**: it waits until every live member it can see is `reachable` before admitting a `joining → up` or finalizing a `leaving → down`, so it never transitions members while its own view is in flux. Independently-reached decisions reconcile through the **lattice**: `up` is monotonic and `down` is terminal and leader-gated, so two leaders' views merge without conflict once gossip carries them across. (Reachability-driven `unreachable → down` under a non-default `Timeout` policy is leader-gated but not gated on full reachability — the node being downed is unreachable by definition.)
+3. Transitioning a member to `up` or `down` is a cluster decision the elected **leader** (the lowest-address `up`, reachable member) performs. Membership is **eventually consistent with no consensus** (§1.2), so "converged" means the leader acts on a **locally stable, fully-reachable view**: it waits until every live member it can see is `reachable` before admitting a `joining → up` or finalizing a `leaving → down`, so it never transitions members while its own view is in flux. Independently-reached decisions reconcile through the **lattice**: `up` is monotonic and `down` is terminal and leader-gated, so two leaders' views merge without conflict once gossip carries them across. (Reachability-driven `unreachable → down` under a non-default `Timeout` policy is leader-gated but not gated on full reachability — the node being downed is unreachable by definition.) This convergence rule describes the **autonomous** mode; in **managed** mode the leader is *designated*, not elected (§9.4), and it drives `up`/`down` by explicit operator command rather than through this gate, with each decision ordered by a monotonic revision the merge respects.
 4. A network partition leaves each side seeing the other as `unreachable`. The framework MUST NOT auto-`down` across a partition by default; the downing policy (manual, timeout-based, or quorum-based) is configurable, and the default SHOULD be conservative.
 
 ### 9.3 Joining and leaving
@@ -537,11 +539,37 @@ joining → up → leaving → down → removed
 - **Graceful leave:** the node announces `leaving`, drains, then moves to `down`/`removed`. Watchers (§12) of its actors are notified.
 - **Crash:** §10 detects it; the failure detector marks the node `unreachable`, and the downing policy moves it to `down`.
 
+These are the **autonomous** mode's transitions. In **managed** mode the same lifecycle steps are *operator commands* instead — `admit` (join), `drain`/`resume` (the reversible maintenance cordon), and `decommission` (terminal removal) — and a crash surfaces only as `unreachable`, never an automatic `down` (§9.4). In **static** mode the roster is fixed at startup and none of these transitions occur.
+
+### 9.4 Membership control plane (modes)
+
+Who decides the member set is configurable. The three modes share the lattice of §9.1 — the same states, incarnations, monotonic merge, and terminal `down` — and differ only in **who drives the lifecycle transitions** (`joining → up`, and anything `→ down`) and **whether failure detection runs**. The mode is one choice at node startup; every node in a cluster MUST run the same mode.
+
+| | **Static** | **Autonomous** | **Managed** |
+|---|---|---|---|
+| Member set defined by | a fixed list at startup | the cluster itself (seeds + gossip) | an external control plane |
+| Runtime membership change | none | self-organizing | only by operator command |
+| Failure detection (§10) | none | full SWIM | SWIM, **observe-only** |
+| Drives `up`/`down` | nobody (all start `up`) | the elected **leader** (§9.2) | the **designated** leader |
+| A node that stops answering | nothing changes | `suspect → unreachable →` **`down`** (terminal) | → **`unreachable`** (reversible); stays a member |
+
+- **Static.** The roster is fixed and never changes; no detector runs. A send to a vanished node simply fails (§8). For small, known topologies and tests.
+- **Autonomous.** The self-organizing default of §9.1–§9.3: nodes discover one another, the elected leader admits joiners, and the SWIM detector (§10) drives `unreachable → down` under the downing policy (§9.2). Self-healing.
+- **Managed.** An external authority governs the member set through a **designated leader** — a provisioned control-plane node, not the §9.2 elected one. The detector still runs, but only as a read-only reachability sensor: it MUST NOT move a node to `down` (the downing policy is forced conservative, §9.2). The operator drives the lifecycle by explicit command. This is the Kubernetes node-lifecycle model: a control plane owns the desired set, workers report status, and a node taken out for maintenance is *not* evicted.
+
+**Operator commands (managed mode).** The designated leader is the **single writer** of the member set, which makes its membership decisions split-brain-free (at the cost of pausing membership *changes* while the control-plane node is unreachable — the data plane keeps running). Each command is stamped with a monotonic **revision** and disseminated by gossip; the merge takes the highest revision (§9.2), so even a reversible change converges. A command issued anywhere but the designated leader is a no-op.
+
+- **admit** — bring a node into the set as `up`. A decommissioned node is **not** revived (`down` is terminal, §9.1); it MUST rejoin with a fresh identity.
+- **drain** / **resume** — a **reversible** maintenance cordon. `drain` marks a member `draining`: it stays a full member — no `down`, no death watch (§12) — but service discovery (§13) routes around it, so it sheds new work. `resume` returns it to `up`. A `draining` node that goes offline for maintenance becomes `unreachable` (reversible), never `down`, so it keeps its membership and resumes on return — which requires its node identity to be stable across restarts.
+- **decommission** — terminally remove a node (`down`), running the node-down cascade (§8.1). Irrevocable (§9.1).
+
+`draining` is therefore a reversible status that does not sit on the monotonic `joining → … → removed` ladder; transitions in and out of it are ordered by the operator's revision, not by rank. In static and autonomous mode no revision is ever assigned, so the merge reduces exactly to the §9.1 rank lattice.
+
 ---
 
 ## 10. Failure detection (SWIM)
 
-Each node runs a SWIM-style detector over its associations.
+In the **autonomous** and **managed** modes each node runs a SWIM-style detector over its associations; the **static** mode runs none (§9.4). The detector maintains the reachability axis (`reachable`/`suspect`/`unreachable`) the same way in both: it drives a node to `down` only in autonomous mode — in managed mode it is **observe-only**, surfacing reachability while the operator alone decides `down` (§9.4).
 
 1. **Direct probing.** Periodically (every `T_probe`), pick a member and send `Ping`; expect `Ack` within `T_rtt`.
 2. **Indirect probing.** On a missed `Ack`, ask `k` random members to `PingReq` the target on the prober's behalf. If any relays an `Ack`, the target is alive.
@@ -637,8 +665,9 @@ Requirements:
 1. The receptionist is a well-known actor (§3.6), resolvable on every node without prior introduction.
 2. Registrations are **replicated** across the cluster and **eventually consistent**. A CRDT (an OR-Set keyed by registering node) is RECOMMENDED so that concurrent registrations merge without coordination.
 3. When a node goes `down` (§10), the receptionist MUST prune all registrations originating from it, and subscribers MUST receive an updated `Listing`. (The receptionist watches registered actors to drive this.)
-4. `subscribe` MUST deliver the current listing on subscription and a fresh listing on every change.
-5. `Key` is typed by actor type, so `lookup` and `subscribe` return correctly typed `ActorRef`s.
+4. A `lookup` or `subscribe` listing MUST omit actors on a node that is not currently serving — one an operator has `draining` for maintenance (§9.4), or one that is `down`. Unlike a `down` node's registrations (pruned, requirement 3), a `draining` node's registrations are **retained** and merely routed around, so `resume` restores them without re-registration. This is load-shedding, not removal: a drained node still answers a direct `ask`.
+5. `subscribe` MUST deliver the current listing on subscription and a fresh listing on every change.
+6. `Key` is typed by actor type, so `lookup` and `subscribe` return correctly typed `ActorRef`s.
 
 ---
 
@@ -805,7 +834,7 @@ Verification is **layered**, not uniform (see §18.6). The core *safety* propert
 13. **Signal ordering (§12).** `Terminated` is delivered through the mailbox in serial order, never out of band.
 14. **Membership convergence (§9.2).** Once faults cease and partitions heal, all `up` members converge on one membership set within bounded logical time.
 15. **`down` is terminal (§9.1).** A node observed `down` never reappears `up` under the same incarnation.
-16. **Partition tolerance (§9.2).** Under the default downing policy, a partition alone never moves a member to `down`, only to `unreachable`.
+16. **Partition tolerance (§9.2).** Under the default downing policy, a partition alone never moves a member to `down`, only to `unreachable`. **Managed** mode (§9.4) holds this unconditionally: its detector is observe-only, so only an operator ever declares `down`.
 17. **SWIM refutation (§10).** A node that sees itself suspected refutes via a higher incarnation, clearing the suspicion cluster-wide.
 18. **Supervision containment (§11).** A handler panic never crashes the node; the default directive is `Stop`; restarts back off; exceeding `max` within the window escalates.
 19. **Receptionist consistency (§13).** Registrations from a `down` node are pruned and subscribers notified; `subscribe` delivers the current snapshot first, then every change; concurrent registrations merge (eventual consistency).

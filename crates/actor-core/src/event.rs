@@ -94,6 +94,14 @@ pub enum Event {
     /// `observer` saw `node` become a full `up` member — the leader admitted it
     /// on convergence (spec §9.1, §9.3).
     MemberUp { observer: NodeId, node: NodeId },
+    /// `observer` saw `node` enter the reversible `draining` state — an operator,
+    /// in the managed control plane, cordoned it for maintenance (spec §9.4).
+    /// Unlike `down`, this is not terminal: the node stays a member and a
+    /// later `resume` returns it to `up`.
+    MemberDraining { observer: NodeId, node: NodeId },
+    /// `observer` saw a `draining` `node` return to `up` — the operator resumed it
+    /// after maintenance (spec §9.4). The reverse of [`Event::MemberDraining`].
+    MemberResumed { observer: NodeId, node: NodeId },
     /// Supervision chose a directive for a faulted actor (spec §11.2, §16).
     Supervised {
         actor: ActorId,

@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
+use actor_cluster::MembershipMode;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorSystem;
@@ -196,11 +197,15 @@ fn start_node_cfg(cfg: TcpConfig, listener: TcpListener, swim: Option<SwimConfig
     let node = cfg.node;
     let codec: Arc<dyn Codec> = Arc::clone(&cfg.codec);
     let (transport, inbound) = TcpTransport::start(cfg, listener);
+    let membership = match swim {
+        Some(swim) => MembershipMode::Autonomous(swim),
+        None => MembershipMode::Static,
+    };
     let config = ClusterConfig {
         codec,
         mailbox_capacity: 64,
         events: Arc::new(()),
-        swim,
+        membership,
         joining: false,
         authorizer: None,
     };

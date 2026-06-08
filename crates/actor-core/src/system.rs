@@ -71,6 +71,17 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// Classify `id` as owned by this node, from the id alone (spec §4.3).
     fn is_local(&self, id: &ActorId) -> bool;
 
+    /// Whether `node` is currently accepting new work — used to route service
+    /// discovery away from a node taken out of rotation. The default is `true`
+    /// (a system without membership treats every node as available); a clustered
+    /// system returns `false` for a node an operator has drained for maintenance,
+    /// or one that is down (spec §9.4, §13). It gates which actors a
+    /// receptionist [`lookup`](crate::Receptionist::lookup) hands back, not
+    /// whether a node is reachable — a drained node still answers direct calls.
+    fn is_serving(&self, _node: NodeId) -> bool {
+        true
+    }
+
     /// The system codec, fixed per system (spec §5). The `ActorRef` layer uses
     /// it to (de)serialize messages and replies that cross the wire.
     fn codec(&self) -> Arc<dyn Codec>;

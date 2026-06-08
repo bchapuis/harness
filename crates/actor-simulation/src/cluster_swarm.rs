@@ -14,6 +14,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use actor_cluster::MembershipMode;
 use actor_cluster::SwimConfig;
 use actor_core::BoxFuture;
 use actor_core::Clock;
@@ -86,8 +87,16 @@ pub trait ClusterWorkload {
     /// How many nodes to bring up.
     fn node_count(&self) -> usize;
 
-    /// SWIM configuration for the run.
+    /// SWIM configuration for the run (used by the default
+    /// [`mode`](Self::mode), the autonomous control plane).
     fn swim(&self) -> SwimConfig;
+
+    /// The membership [`mode`](MembershipMode) to sweep under (spec §9.4). Defaults
+    /// to **autonomous** SWIM; a workload overrides this to exercise the static or
+    /// managed control plane under the same nemesis and fault injection.
+    fn mode(&self) -> MembershipMode {
+        MembershipMode::Autonomous(self.swim())
+    }
 
     /// Build actors and registrations before traffic starts.
     fn setup(&self, ctx: &ClusterCtx);
@@ -174,7 +183,7 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
         max_latency: Duration::from_millis(entropy.next_u64() % CLUSTER_MAX_LATENCY_MS),
     };
     let net = SimNetwork::new(&sim)
-        .with_swim(workload.swim())
+        .with_mode(workload.mode())
         .with_events(events)
         .with_faults(faults);
 

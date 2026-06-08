@@ -228,12 +228,16 @@ impl<S: ActorSystem> Receptionist<S> {
             .replicate_registration(key.id(), self.node, who.id().clone());
     }
 
-    /// The current listing for `key` (spec §13).
+    /// The current listing for `key` (spec §13). Actors on a node that is not
+    /// currently serving — drained for maintenance, or down (spec §9.4) — are
+    /// routed around: they stay registered but are omitted here, so a
+    /// caller never discovers a cordoned node, and a later `resume` restores them.
     pub fn lookup<A: Actor<System = S>>(&self, key: Key<A>) -> Listing<A> {
         let refs = self
             .state
             .snapshot(key.id())
             .into_iter()
+            .filter(|id| self.system.is_serving(id.node()))
             .map(|id| self.system.resolve::<A>(id))
             .collect();
         Listing { refs }
@@ -247,7 +251,11 @@ impl<S: ActorSystem> Receptionist<S> {
     ) -> impl Stream<Item = Listing<A>> + Send + use<A, S> {
         let system = self.system.clone();
         self.state.subscribe(key.id()).map(move |ids| Listing {
-            refs: ids.into_iter().map(|id| system.resolve::<A>(id)).collect(),
+            refs: ids
+                .into_iter()
+                .filter(|id| system.is_serving(id.node()))
+                .map(|id| system.resolve::<A>(id))
+                .collect(),
         })
     }
 
