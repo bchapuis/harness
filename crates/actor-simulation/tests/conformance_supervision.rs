@@ -19,6 +19,7 @@ use actor_core::BoxError;
 use actor_core::CallError;
 use actor_core::Clock;
 use actor_core::Ctx;
+use actor_core::Event;
 use actor_core::Fault;
 use actor_core::Handler;
 use actor_core::HandlerRegistry;
@@ -26,6 +27,7 @@ use actor_core::Instant;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::Supervision;
+use actor_core::SupervisionDecision;
 use actor_core::SupervisionDirective;
 use actor_simulation::SimClock;
 use actor_simulation::SimSystem;
@@ -181,6 +183,67 @@ fn repeated_startup_failure_escalates_to_stop() {
     // Initial start + 2 restarts = 3 attempts, then Stop.
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
     assert_eq!(outcome, Err(CallError::DeadLetter));
+}
+
+// --- A by-value Restart degrades to Stop, reported as Stop (spec §11.2, §16) --
+//
+// `Restart` rebuilds an actor from its factory; an actor spawned **by value**
+// (`spawn`, not `spawn_with`) has no factory, so the directive degrades to
+// `Stop` (spec §11.2). The safety property is unaffected — the fault is still
+// contained — but the event stream MUST report the *effective* decision, `Stop`,
+// never the candidate `Restart` (§16): an observer or continuous checker that
+// saw `Restart` would expect a `Restarted` that can never come.
+
+struct RestartByValue;
+impl Actor for RestartByValue {
+    type System = SimSystem;
+    fn supervision() -> Supervision {
+        Supervision::restart(5, Duration::from_secs(3600), Backoff::None)
+    }
+    fn register(r: &mut HandlerRegistry<Self>) {
+        r.accept::<Boom>();
+    }
+}
+impl Handler<Boom> for RestartByValue {
+    async fn handle(&mut self, _msg: Boom, _ctx: &Ctx<Self>) {
+        panic!("boom");
+    }
+}
+
+#[test]
+fn a_by_value_restart_degrades_to_stop_and_reports_stop() {
+    let (sim, system, recorder) = support::local_recorded(7);
+    sim.block_on(async move {
+        let actor = system.spawn(RestartByValue);
+        let _ = actor.tell(Boom).await;
+        // Let the fault propagate through supervision to quiescence.
+        system.clock().clone().sleep(Duration::from_millis(1)).await;
+    });
+    let events = recorder.events();
+    let decisions: Vec<SupervisionDecision> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Supervised {
+                decision,
+                fault: Fault::Message,
+                ..
+            } => Some(*decision),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        decisions,
+        vec![SupervisionDecision::Stop],
+        "a by-value Restart degrades to Stop, and the event reports the effective decision (spec §11.2, §16)"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Restarted { .. })),
+        "the actor never actually restarted, so no Restarted event may be emitted"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::ResignId { .. })),
+        "the degraded actor stops and resigns its id (spec §4.2 step 5)"
+    );
 }
 
 // --- A sibling is unaffected by a child's escalation (spec §11.1, §11.3) ------

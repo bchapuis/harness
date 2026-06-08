@@ -18,7 +18,9 @@ use std::collections::BTreeSet;
 
 use actor_core::ActorId;
 use actor_core::Event;
+use actor_core::Message;
 use actor_core::NodeId;
+use actor_core::Terminated;
 
 /// A property checked continuously during a run and at final quiescence
 /// (spec §18.5). Observation must be side-effect-free apart from the invariant's
@@ -44,6 +46,7 @@ pub fn default_invariants() -> Vec<Box<dyn Invariant>> {
         Box::new(SerialExecution::default()),
         Box::new(LifecycleExactlyOnce::default()),
         Box::new(DownIsTerminal::default()),
+        Box::new(SignalInBand::default()),
     ]
 }
 
@@ -169,7 +172,10 @@ const CATALOGUE: &[CatalogueEntry] = &[
         invariant: 13,
         spec: "§12",
         property: "Signal ordering: Terminated delivered through the mailbox in serial order",
-        verify: &[Verify::SimTest("conformance_deathwatch.rs")],
+        verify: &[
+            Verify::Checker("signal-in-band"),
+            Verify::SimTest("conformance_deathwatch.rs"),
+        ],
     },
     CatalogueEntry {
         invariant: 14,
@@ -393,6 +399,79 @@ impl Invariant for DownIsTerminal {
     }
 }
 
+/// **Signal ordering / in-band delivery** (spec §18.5 #13, §12): a `Terminated`
+/// is delivered through the watcher's mailbox like any other message — never out
+/// of band, straight into a running handler.
+///
+/// A `Terminated` flows through [`enqueue_signal`](actor_core::Mailbox), which
+/// emits an `Enqueue` for the `Terminated` manifest and then lets the serial
+/// message loop dispatch it (a `DispatchStart`). So "in band" is checkable as a
+/// prefix property: a `Terminated` is never *dispatched* on an actor more times
+/// than it was *enqueued* there. An out-of-band delivery — invoking the handler
+/// directly, bypassing the queue — would `DispatchStart` a signal that was never
+/// enqueued, and is caught here. The serial, non-reentrant half of #13 is already
+/// covered by [`SerialExecution`] (#4), which treats the signal like any message.
+///
+/// This is a *per-event* invariant (it holds at every prefix), so it is sound for
+/// both quiescence-driven single-node runs and time-bounded cluster runs.
+#[derive(Default)]
+pub struct SignalInBand {
+    enqueued: BTreeMap<ActorId, u64>,
+    dispatched: BTreeMap<ActorId, u64>,
+}
+
+impl SignalInBand {
+    fn is_terminated(manifest: &str) -> bool {
+        manifest == <Terminated as Message>::MANIFEST.as_str()
+    }
+}
+
+impl Invariant for SignalInBand {
+    fn name(&self) -> &'static str {
+        "signal-in-band"
+    }
+
+    fn observe(&mut self, event: &Event) -> Result<(), String> {
+        match event {
+            Event::Enqueue { actor, manifest } if Self::is_terminated(manifest) => {
+                *self.enqueued.entry(actor.clone()).or_default() += 1;
+            }
+            Event::DispatchStart { actor, manifest } if Self::is_terminated(manifest) => {
+                let dispatched = self.dispatched.entry(actor.clone()).or_default();
+                *dispatched += 1;
+                let enqueued = self.enqueued.get(actor).copied().unwrap_or(0);
+                if *dispatched > enqueued {
+                    return Err(format!(
+                        "{actor} dispatched a Terminated signal never enqueued on its \
+                         mailbox — delivered out of band (spec §12)"
+                    ));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+// Note: death-watch exactly-once (#11) is intentionally *not* a continuous
+// checker. The tempting form — "at most one `TerminatedDelivered` per
+// (target, watcher)" — is unsound: a watcher may legitimately `watch` the same
+// target more than once, and watching an already-terminated actor yields a fresh
+// `Terminated` each time (spec §12, invariant #12). The receptionist does
+// exactly this when anti-entropy re-delivers a stale registration for an actor
+// that has since died. With no per-`watch` identity on the event stream, the
+// "exactly one *per watch*" property is not expressible as a safety invariant
+// over the existing events, so #11 stays verified by targeted tests.
+//
+// Likewise, bounded-non-dropping mailbox (#5) is *not* a continuous checker. Its
+// "bounded" half is structural — the mailbox is a fixed-capacity channel that
+// cannot exceed its bound — and its "blocks or returns `MailboxFull`, never drops
+// silently" half is a per-call API contract (`tell` awaits, `try_tell` returns
+// `MailboxFull`). Neither is an emergent property of the event stream: a depth
+// check would need per-actor capacity in the stream, and "depth 0 at quiescence"
+// is unsound for the time-bounded cluster runs (`run_for`) that stop mid-flight.
+// So #5 stays verified by targeted tests (`actor.rs`, `conformance_messaging.rs`).
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +551,39 @@ mod tests {
     fn lifecycle_flags_ready_before_assign() {
         let mut inv = LifecycleExactlyOnce::default();
         assert!(inv.observe(&Event::ActorReady { id: id(0) }).is_err());
+    }
+
+    #[test]
+    fn signal_in_band_flags_out_of_band_dispatch() {
+        let mut inv = SignalInBand::default();
+        let term = <Terminated as Message>::MANIFEST.as_str();
+        let enqueue = |n| Event::Enqueue {
+            actor: id(n),
+            manifest: term,
+        };
+        let dispatch = |n| Event::DispatchStart {
+            actor: id(n),
+            manifest: term,
+        };
+        // Enqueue then dispatch is in band — fine.
+        inv.observe(&enqueue(0)).unwrap();
+        assert!(inv.observe(&dispatch(0)).is_ok());
+        // A second dispatch with no matching enqueue is out of band — flagged.
+        assert!(inv.observe(&dispatch(0)).is_err());
+    }
+
+    #[test]
+    fn signal_in_band_ignores_ordinary_messages() {
+        let mut inv = SignalInBand::default();
+        // A non-Terminated manifest is not a signal: dispatching it without a
+        // tracked enqueue must not be mistaken for an out-of-band delivery.
+        assert!(
+            inv.observe(&Event::DispatchStart {
+                actor: id(0),
+                manifest: "app.Greet",
+            })
+            .is_ok()
+        );
     }
 
     #[test]

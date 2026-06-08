@@ -48,6 +48,15 @@ impl Message for Seq {
     const MANIFEST: Manifest = Manifest::new("faults.Seq");
 }
 
+// An `ask` counterpart to `Seq`: it logs the same way but expects a reply, so a
+// sender can interleave `tell` and `ask` to one recipient (spec §6 #3).
+#[derive(Serialize, Deserialize)]
+struct SeqAsk(u64);
+impl Message for SeqAsk {
+    type Reply = u64;
+    const MANIFEST: Manifest = Manifest::new("faults.SeqAsk");
+}
+
 struct Order<S> {
     log: Arc<Mutex<Vec<u64>>>,
     _system: PhantomData<fn() -> S>,
@@ -56,11 +65,18 @@ impl<S: ActorSystem> Actor for Order<S> {
     type System = S;
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Seq>();
+        r.accept::<SeqAsk>();
     }
 }
 impl<S: ActorSystem> Handler<Seq> for Order<S> {
     async fn handle(&mut self, msg: Seq, _ctx: &Ctx<Self>) {
         self.log.lock().unwrap().push(msg.0);
+    }
+}
+impl<S: ActorSystem> Handler<SeqAsk> for Order<S> {
+    async fn handle(&mut self, msg: SeqAsk, _ctx: &Ctx<Self>) -> u64 {
+        self.log.lock().unwrap().push(msg.0);
+        msg.0
     }
 }
 
@@ -86,6 +102,50 @@ fn per_pair_fifo_survives_latency_jitter() {
 
     // Despite per-frame jitter, frames on one directed pair arrive in send order.
     assert_eq!(*log.lock().unwrap(), (0..10).collect::<Vec<_>>());
+}
+
+#[test]
+fn per_pair_fifo_holds_across_interleaved_tell_and_ask() {
+    let sim = Simulation::new(7);
+    let net = SimNetwork::new(&sim).with_faults(latency_only(50));
+    let node_a = net.join(NodeId::new(1));
+    let node_b = net.join(NodeId::new(2));
+
+    let log: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&log);
+    sim.block_on(async move {
+        let order = node_a.spawn(Order {
+            log: observed,
+            _system: PhantomData,
+        });
+        let remote = node_b.resolve::<Order<SimCluster>>(order.id().clone());
+        // Issue `tell` and `ask` from one sender to one recipient *concurrently*
+        // (`join!` initiates all six in argument order), so jittered frames race
+        // in flight. Spec §6 #3: `tell` and `ask` from the same sender share one
+        // FIFO order — the recipient must still observe 0,1,2,3,4,5.
+        let (t0, a1, t2, a3, t4, a5) = futures::join!(
+            remote.tell(Seq(0)),
+            remote.ask(SeqAsk(1)),
+            remote.tell(Seq(2)),
+            remote.ask(SeqAsk(3)),
+            remote.tell(Seq(4)),
+            remote.ask(SeqAsk(5)),
+        );
+        t0.unwrap();
+        t2.unwrap();
+        t4.unwrap();
+        assert_eq!(
+            (a1.unwrap(), a3.unwrap(), a5.unwrap()),
+            (1, 3, 5),
+            "each ask resolved to its own reply",
+        );
+    });
+
+    assert_eq!(
+        *log.lock().unwrap(),
+        (0..6).collect::<Vec<_>>(),
+        "interleaved tell and ask from one sender are observed in send order (spec §6 #3)",
+    );
 }
 
 // --- #1 / §7.2: total loss completes with Timeout, never hangs ---------------

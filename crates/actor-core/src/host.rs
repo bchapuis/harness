@@ -16,6 +16,7 @@ use std::any::Any;
 use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -100,6 +101,43 @@ impl<A: Actor> ErasedActor for ActorEntry<A> {
     }
 }
 
+/// A bounded record of how recently-resigned local actors terminated, so a
+/// watch placed *after* an actor is gone reports the true reason — `Failed`, not
+/// a blanket `Stopped` — to the watcher (spec §12, invariant #12).
+///
+/// Watch-after-death has no live actor to ask, so without this the system can
+/// only guess. It is bounded (a FIFO of the last [`CAP`](Terminations::CAP)
+/// terminations): the watch-after-death race resolves within a few scheduler
+/// turns of the stop, so only *recent* deaths need fidelity, and ancient ones
+/// fall back to the `Stopped` default. Keyed lookups and insertion-ordered
+/// eviction only — no iteration — so it adds no observable nondeterminism (§4.6).
+#[derive(Default)]
+struct Terminations {
+    reason: BTreeMap<ActorId, TerminationReason>,
+    order: VecDeque<ActorId>,
+}
+
+impl Terminations {
+    /// How many recent terminations to remember. Far above the handful of
+    /// in-flight watch-after-death races a run realistically has.
+    const CAP: usize = 1024;
+
+    fn record(&mut self, id: &ActorId, reason: TerminationReason) {
+        if self.reason.insert(id.clone(), reason).is_none() {
+            self.order.push_back(id.clone());
+            if self.order.len() > Self::CAP {
+                if let Some(evicted) = self.order.pop_front() {
+                    self.reason.remove(&evicted);
+                }
+            }
+        }
+    }
+
+    fn reason(&self, id: &ActorId) -> Option<TerminationReason> {
+        self.reason.get(id).copied()
+    }
+}
+
 /// Shared mutable state of one node's host. Held behind an `Arc` so the executor
 /// task can reach it on termination.
 struct HostState {
@@ -109,6 +147,9 @@ struct HostState {
     actors: Mutex<BTreeMap<ActorId, Arc<dyn ErasedActor>>>,
     /// Death-watch subscriptions: watched target → its local watchers.
     watchers: Mutex<BTreeMap<ActorId, Vec<(ActorId, WatchDelivery)>>>,
+    /// Reasons recently-resigned local actors terminated with, for accurate
+    /// watch-after-death reporting (spec §12, invariant #12).
+    terminations: Mutex<Terminations>,
     /// Escalation inboxes: actor id → a sender its children escalate failures to
     /// (spec §11.1). The value is the failed child's id, for context.
     escalators: Mutex<BTreeMap<ActorId, async_channel::Sender<ActorId>>>,
@@ -145,6 +186,12 @@ impl HostState {
 
     /// Deliver `Terminated` to every watcher of `target`, then forget them — so
     /// each watcher is notified exactly once (invariant #11).
+    ///
+    /// Delivery itself emits the `TerminatedDelivered` event (at the watcher's
+    /// mailbox, see [`Mailbox::enqueue_signal`](crate::Mailbox)), so this only
+    /// fans out: a local watcher's closure enqueues onto its mailbox; a remote
+    /// watcher's closure forwards a frame, which is *not* a delivery and so is
+    /// re-emitted only when it lands on the remote node.
     async fn notify_terminated(&self, target: &ActorId, reason: TerminationReason) {
         // Drop the lock before awaiting delivery: the guard is released at the
         // end of this statement, so no lock is held across the `.await` below.
@@ -154,18 +201,49 @@ impl HostState {
             .expect("watchers mutex poisoned")
             .remove(target);
         if let Some(entries) = entries {
-            for (watcher, deliver) in entries {
+            for (_watcher, deliver) in entries {
                 deliver(Terminated {
                     id: target.clone(),
                     reason,
                 })
                 .await;
-                self.events.emit(Event::TerminatedDelivered {
-                    target: target.clone(),
-                    watcher,
-                    reason,
-                });
             }
+        }
+    }
+
+    /// Deliver `Terminated` to **one** named watcher of `target`, removing only
+    /// that subscription (spec §12). Used for an inbound `Terminated` frame,
+    /// which is addressed to a specific watcher: fanning it to *every* local
+    /// watcher would give the others a spurious extra signal (a second watcher's
+    /// watch-after-death re-watch must not re-notify the first — invariant #11).
+    async fn notify_terminated_one(
+        &self,
+        target: &ActorId,
+        watcher: &ActorId,
+        reason: TerminationReason,
+    ) {
+        // Take just this watcher's delivery closure out under the lock, dropping
+        // the empty entry behind it, then await delivery with no lock held.
+        let deliver = {
+            let mut watchers = self.watchers.lock().expect("watchers mutex poisoned");
+            let removed = watchers.get_mut(target).and_then(|entry| {
+                entry
+                    .iter()
+                    .position(|(w, _)| w == watcher)
+                    .map(|pos| entry.remove(pos).1)
+            });
+            if watchers.get(target).is_some_and(|entry| entry.is_empty()) {
+                watchers.remove(target);
+            }
+            removed
+        };
+        if let Some(deliver) = deliver {
+            // Delivery emits `TerminatedDelivered` at the watcher's mailbox.
+            deliver(Terminated {
+                id: target.clone(),
+                reason,
+            })
+            .await;
         }
     }
 
@@ -219,6 +297,7 @@ impl LocalHost {
                 mailbox_capacity,
                 actors: Mutex::new(BTreeMap::new()),
                 watchers: Mutex::new(BTreeMap::new()),
+                terminations: Mutex::new(Terminations::default()),
                 escalators: Mutex::new(BTreeMap::new()),
                 dispatch_cache: Mutex::new(HashMap::new()),
                 next_path: AtomicU64::new(0),
@@ -243,6 +322,19 @@ impl LocalHost {
             .lock()
             .expect("actors mutex poisoned")
             .contains_key(id)
+    }
+
+    /// The reason a recently-resigned local actor terminated with, if still
+    /// remembered. Used for accurate watch-after-death reporting: a watch placed
+    /// once the actor is gone reports `Failed` rather than a blanket `Stopped`
+    /// (spec §12, invariant #12). `None` once evicted (or never owned here), in
+    /// which case callers fall back to `Stopped`.
+    pub fn termination_reason(&self, id: &ActorId) -> Option<TerminationReason> {
+        self.state
+            .terminations
+            .lock()
+            .expect("terminations mutex poisoned")
+            .reason(id)
     }
 
     fn assign_id(&self) -> ActorId {
@@ -381,12 +473,20 @@ impl LocalHost {
         self.state.synthesize_node_down(node).await;
     }
 
-    /// Deliver `Terminated { reason }` to every local watcher of `target`, then
-    /// forget them (spec §12). Used by the cluster to fan a `Terminated` frame
-    /// received from `target`'s node out to local watchers; the forget keeps it
-    /// at most once per watcher (invariant #11).
-    pub async fn deliver_terminated(&self, target: &ActorId, reason: TerminationReason) {
-        self.state.notify_terminated(target, reason).await;
+    /// Deliver an inbound `Terminated { reason }` frame to the single `watcher`
+    /// it is addressed to, removing only that subscription (spec §12). A frame
+    /// arrives once per remote watcher, so delivering to just that watcher keeps
+    /// each notified exactly once per `watch` and never lets one watcher's signal
+    /// spill onto another's subscription (invariant #11).
+    pub async fn deliver_terminated_to(
+        &self,
+        target: &ActorId,
+        watcher: &ActorId,
+        reason: TerminationReason,
+    ) {
+        self.state
+            .notify_terminated_one(target, watcher, reason)
+            .await;
     }
 }
 
@@ -464,17 +564,26 @@ async fn run_actor<A, C>(
                     &|| ctx.system().next_random(),
                 )
                 .await;
-                emit_supervision(&state, &id, Fault::Started, &decision);
                 match decision {
-                    Decision::Resume => need_start = false,
-                    Decision::StopFailed => break End::Stop(actor, StopReason::Failed),
+                    Decision::Resume => {
+                        emit_supervision(&state, &id, Fault::Started, &Decision::Resume);
+                        need_start = false;
+                    }
+                    Decision::StopFailed => {
+                        emit_supervision(&state, &id, Fault::Started, &Decision::StopFailed);
+                        break End::Stop(actor, StopReason::Failed);
+                    }
                     Decision::Escalate => {
+                        emit_supervision(&state, &id, Fault::Started, &Decision::Escalate);
                         escalate(&state, &parent, &id);
                         break End::Stop(actor, StopReason::Failed);
                     }
                     Decision::Restart => {
+                        // The faulted instance stops with `Failed` (spec §11.2);
+                        // `resolve_restart` emits the effective decision (a real
+                        // restart, or a degrade to stop if the factory is spent).
                         actor.stopped(StopReason::Failed).await;
-                        match factory() {
+                        match resolve_restart(&state, &id, Fault::Started, &mut factory) {
                             Some(fresh) => {
                                 actor = fresh;
                                 continue;
@@ -509,18 +618,26 @@ async fn run_actor<A, C>(
             &|| ctx.system().next_random(),
         )
         .await;
-        emit_supervision(&state, &id, fault, &decision);
         match decision {
-            Decision::Resume => continue,
-            Decision::StopFailed => break End::Stop(actor, StopReason::Failed),
+            Decision::Resume => {
+                emit_supervision(&state, &id, fault, &Decision::Resume);
+                continue;
+            }
+            Decision::StopFailed => {
+                emit_supervision(&state, &id, fault, &Decision::StopFailed);
+                break End::Stop(actor, StopReason::Failed);
+            }
             Decision::Escalate => {
+                emit_supervision(&state, &id, fault, &Decision::Escalate);
                 escalate(&state, &parent, &id);
                 break End::Stop(actor, StopReason::Failed);
             }
             Decision::Restart => {
-                // The faulted instance stops with `Failed` (spec §11.2).
+                // The faulted instance stops with `Failed` (spec §11.2);
+                // `resolve_restart` emits the effective decision (a real restart,
+                // or a degrade to stop if the factory is spent).
                 actor.stopped(StopReason::Failed).await;
-                match factory() {
+                match resolve_restart(&state, &id, fault, &mut factory) {
                     Some(fresh) => {
                         actor = fresh;
                         need_start = true;
@@ -544,9 +661,40 @@ async fn run_actor<A, C>(
     }
 }
 
+/// Carry out a `Restart` decision against the factory, emitting the *effective*
+/// supervision decision (spec §11.2, §16).
+///
+/// An actor spawned **by value** has an exhausted factory and cannot be
+/// reconstructed, so its `Restart` degrades to `Stop` (spec §11.2). The event
+/// stream MUST report that effective `Stop`, not the candidate `Restart`:
+/// `Supervised` always carries the effective decision (see [`emit_supervision`]),
+/// and an observer (or a continuous checker) that saw `Restart` here would expect
+/// a following `Restarted`, never the `ResignId` a degraded stop produces.
+///
+/// Returns the fresh instance to swap in on a real restart, or `None` when it
+/// degraded to a stop (the caller then terminates the actor with `Failed`).
+fn resolve_restart<A: Actor>(
+    state: &HostState,
+    id: &ActorId,
+    fault: Fault,
+    factory: &mut ActorFactory<A>,
+) -> Option<A> {
+    match factory() {
+        Some(fresh) => {
+            emit_supervision(state, id, fault, &Decision::Restart);
+            Some(fresh)
+        }
+        None => {
+            emit_supervision(state, id, fault, &Decision::StopFailed);
+            None
+        }
+    }
+}
+
 /// Emit the supervision decision for a faulted actor (spec §11.2, §16). The
 /// decision is the effective one — the restart window and backoff have already
-/// been applied, so an exhausted window surfaces here as `Stop`.
+/// been applied, so an exhausted window surfaces here as `Stop`, and a `Restart`
+/// with no factory to rebuild from degrades to `Stop` (see [`resolve_restart`]).
 fn emit_supervision(state: &HostState, id: &ActorId, fault: Fault, decision: &Decision) {
     let decision = match decision {
         Decision::Resume => SupervisionDecision::Resume,
@@ -669,6 +817,13 @@ async fn finish<A: Actor>(actor: A, reason: StopReason, state: &HostState, id: &
 /// Release an identity and notify watchers, without an actor instance to stop
 /// (the instance was already stopped during a failed restart).
 async fn release(state: &HostState, id: &ActorId, reason: TerminationReason) {
+    // Record the reason before the actor leaves the live set, so a watch that
+    // arrives after this point reads it rather than racing an empty slot (§12).
+    state
+        .terminations
+        .lock()
+        .expect("terminations mutex poisoned")
+        .record(id, reason);
     state
         .actors
         .lock()

@@ -235,6 +235,10 @@ impl<A: Actor> Mailbox<A> {
         A: Handler<Terminated>,
     {
         let manifest = Terminated::MANIFEST.as_str();
+        // Capture the signal's facts before it moves into the handler closure, so
+        // we can mark the delivery on the event stream once it lands.
+        let target = signal.id.clone();
+        let reason = signal.reason;
         let run: Runner<A> = Box::new(move |actor, ctx| {
             Box::pin(async move {
                 actor.handle(signal, ctx).await;
@@ -244,6 +248,17 @@ impl<A: Actor> Mailbox<A> {
             self.events.emit(Event::Enqueue {
                 actor: self.id.clone(),
                 manifest,
+            });
+            // The watch signal has now reached this watcher's mailbox — the one
+            // and only point a `Terminated` is actually *delivered* (spec §12,
+            // §16). Emitting here, rather than where a node fans a signal out to
+            // remote watchers, keeps it one event per real delivery: a forward to
+            // another node is not a delivery (it is re-emitted there when the
+            // frame lands), and a watch-after-death delivery is still counted.
+            self.events.emit(Event::TerminatedDelivered {
+                target,
+                watcher: self.id.clone(),
+                reason,
             });
         }
     }

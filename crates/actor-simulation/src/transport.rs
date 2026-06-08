@@ -211,6 +211,14 @@ impl SimNetwork {
         self
     }
 
+    /// Set the per-actor bounded mailbox capacity on every node (spec §6). A
+    /// small capacity makes backpressure — `MailboxFull` on the inbound remote
+    /// path (invariant #5) — observable in a test without flooding the default.
+    pub fn with_mailbox_capacity(mut self, capacity: usize) -> SimNetwork {
+        self.mailbox_capacity = capacity;
+        self
+    }
+
     /// Bring up a node's system on the network, registering it for routing.
     /// `joining` selects founding (`Up`) vs joiner (`Joining`) startup (spec §9.3).
     fn bring_up(&self, node: NodeId, joining: bool) -> SimCluster {

@@ -461,10 +461,16 @@ where
         // inside its own handler must not block on its own mailbox.
         if self.is_local(&target) {
             if !self.inner.host.contains(&target) {
-                self.inner.spawner.launch(deliver(Terminated {
-                    id: target,
-                    reason: TerminationReason::Stopped,
-                }));
+                // Report the actual reason it died (Failed vs Stopped) when still
+                // remembered; otherwise default to a graceful stop (spec §12).
+                let reason = self
+                    .inner
+                    .host
+                    .termination_reason(&target)
+                    .unwrap_or(TerminationReason::Stopped);
+                self.inner
+                    .spawner
+                    .launch(deliver(Terminated { id: target, reason }));
                 return;
             }
         } else if self.inner.membership.is_down(target.node) {
@@ -740,11 +746,18 @@ async fn receive_loop<C, E, S, T>(
                     });
                     system.inner.host.add_watch(target, watcher, deliver);
                 } else {
-                    // Already gone: report a graceful stop immediately (§12).
+                    // Already gone: report immediately (§12), with the true reason
+                    // (Failed vs Stopped) when still remembered, else a graceful
+                    // stop by default.
+                    let reason = system
+                        .inner
+                        .host
+                        .termination_reason(&target)
+                        .unwrap_or(TerminationReason::Stopped);
                     let frame = Frame::Terminated {
                         target: target.clone(),
                         watcher: watcher.clone(),
-                        reason: TerminationReason::Stopped,
+                        reason,
                     };
                     let _ = system.inner.transport.send(watcher.node, frame).await;
                 }
@@ -752,15 +765,21 @@ async fn receive_loop<C, E, S, T>(
             Frame::Unwatch { target, watcher } => {
                 system.inner.host.remove_watch(&target, &watcher);
             }
-            // The target's node tells us a watched actor terminated: fan it out to
-            // our local watchers (at most once each — `deliver_terminated` forgets
-            // them, invariant #11).
+            // The target's node tells us a watched actor terminated. The frame is
+            // addressed to one specific `watcher` (the target's node sends one per
+            // remote watcher), so deliver it only there — fanning to every local
+            // watcher of `target` would hand the others a spurious extra signal
+            // when one of them re-watches the dead actor (invariant #11).
             Frame::Terminated {
                 target,
-                watcher: _,
+                watcher,
                 reason,
             } => {
-                system.inner.host.deliver_terminated(&target, reason).await;
+                system
+                    .inner
+                    .host
+                    .deliver_terminated_to(&target, &watcher, reason)
+                    .await;
             }
             Frame::Receptionist { key, origin, actor } => {
                 system

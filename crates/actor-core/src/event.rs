@@ -100,8 +100,11 @@ pub enum Event {
         fault: Fault,
         decision: SupervisionDecision,
     },
-    /// A `Terminated` signal was delivered to a watcher (spec §12, §16): fanned
-    /// out at the watched actor's host, one per watcher, exactly once.
+    /// A `Terminated` signal was delivered to a watcher (spec §12, §16): emitted
+    /// when the signal is enqueued onto the watcher's mailbox, on the watcher's
+    /// own node. Forwarding a signal to a remote watcher's node is not a delivery
+    /// (it is emitted there when the frame lands), so this fires once per actual
+    /// delivery — including a watch-after-death (invariant #12).
     TerminatedDelivered {
         target: ActorId,
         watcher: ActorId,

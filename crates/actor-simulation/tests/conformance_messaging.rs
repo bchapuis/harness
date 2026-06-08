@@ -21,6 +21,7 @@ use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Path;
 use actor_simulation::SimCluster;
+use actor_simulation::SimNetwork;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
 use serde::Deserialize;
@@ -58,6 +59,45 @@ fn tell_awaits_on_a_full_mailbox_then_delivers_everything() {
         served,
         Ok(5),
         "all five tells must be delivered, none dropped"
+    );
+}
+
+// --- §6 #5: the inbound remote path rejects with MailboxFull, never drops -----
+
+#[test]
+fn a_full_remote_mailbox_reports_mailboxfull_never_drops() {
+    // Backpressure on the *inbound remote* path (spec §6 #5): when a remote
+    // actor's bounded mailbox is full, the enqueue is rejected with `MailboxFull`
+    // (the receive loop must not block on one full mailbox), and the message is
+    // never silently dropped — every caller still gets an outcome.
+    let sim = Simulation::new(2);
+    let net = SimNetwork::new(&sim).with_mailbox_capacity(1);
+    let node_a = net.join(NodeId::new(1));
+    let node_b = net.join(NodeId::new(2));
+
+    let outcomes = sim.block_on(async move {
+        let slow = node_a.spawn(Slow::<SimCluster>::new(node_a.clock().clone()));
+        let remote = node_b.resolve::<Slow<SimCluster>>(slow.id().clone());
+        // A burst of concurrent asks; the handler sleeps, so a capacity-1 mailbox
+        // cannot drain fast enough and overflows.
+        futures::future::join_all(
+            (0..8).map(|_| remote.ask_timeout(Work { ms: 100 }, Duration::from_secs(30))),
+        )
+        .await
+    });
+
+    assert_eq!(outcomes.len(), 8, "every ask must complete, none may hang");
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, Err(CallError::MailboxFull))),
+        "a full mailbox must surface MailboxFull, got {outcomes:?}",
+    );
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| matches!(o, Ok(_) | Err(CallError::MailboxFull))),
+        "each ask resolves to Ok or MailboxFull — never a silent drop: {outcomes:?}",
     );
 }
 
@@ -279,6 +319,60 @@ fn actorref_in_a_message_rebinds_on_decode() {
         *seen.lock().unwrap(),
         vec![42],
         "the embedded ActorRef rebound on B and called back to A",
+    );
+}
+
+// A request whose *reply* carries an `ActorRef` (spec §4.4, #10).
+#[derive(Serialize, Deserialize)]
+struct Locate;
+impl Message for Locate {
+    type Reply = ActorRef<Collector>;
+    const MANIFEST: Manifest = Manifest::new("conf.Locate");
+}
+
+// Lives on node B; hands out a ref to a collector that also lives on B.
+struct Provider {
+    collector: ActorRef<Collector>,
+}
+impl Actor for Provider {
+    type System = SimCluster;
+    fn register(r: &mut HandlerRegistry<Self>) {
+        r.accept::<Locate>();
+    }
+}
+impl Handler<Locate> for Provider {
+    async fn handle(&mut self, _msg: Locate, _ctx: &Ctx<Self>) -> ActorRef<Collector> {
+        self.collector.clone()
+    }
+}
+
+#[test]
+fn actorref_in_a_reply_rebinds_on_decode() {
+    // The message path (above) covers a ref carried *into* an actor; #10 also
+    // requires rebinding a ref carried *out* in a reply. A asks B's provider for
+    // a collector ref; the reply crosses the wire, so on decode at A the ref must
+    // rebind to a working handle that routes back to B (spec §4.4, #10).
+    let (sim, node_a, node_b) = two_nodes(11);
+    let seen: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&seen);
+
+    sim.block_on(async move {
+        let collector = node_b.spawn(Collector { seen: observed });
+        let provider = node_b.spawn(Provider { collector });
+        let located = node_a
+            .resolve::<Provider>(provider.id().clone())
+            .ask(Locate)
+            .await
+            .unwrap();
+        // The reply-carried ref, used from A, must route across the wire to B.
+        located.tell(Record(99)).await.unwrap();
+        node_a.clock().sleep(Duration::from_millis(10)).await;
+    });
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![99],
+        "the ActorRef carried in the reply rebound on A and routed back to B",
     );
 }
 
