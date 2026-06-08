@@ -26,6 +26,7 @@ use actor_core::Actor;
 use actor_core::ActorId;
 use actor_core::ActorRef;
 use actor_core::ActorSystem;
+use actor_core::BoxFuture;
 use actor_core::CallError;
 use actor_core::Clock;
 use actor_core::Entropy;
@@ -380,6 +381,20 @@ where
         )
     }
 
+    fn spawn_child_with<A, F>(&self, mut factory: F, parent: ActorId) -> ActorRef<A>
+    where
+        A: Actor<System = Self>,
+        F: FnMut() -> A + Send + 'static,
+    {
+        self.inner.host.spawn_actor(
+            self.clone(),
+            self.inner.clock.clone(),
+            &self.inner.spawner,
+            Box::new(move || Some(factory())),
+            Some(parent),
+        )
+    }
+
     fn resolve_local<A: Actor<System = Self>>(&self, id: &ActorId) -> Option<Mailbox<A>> {
         self.inner.host.resolve_local(id)
     }
@@ -441,19 +456,22 @@ where
     fn watch(&self, target: ActorId, watcher: ActorId, deliver: WatchDelivery) {
         // Watch-after-death (invariant #12): a local target that is gone, or a
         // peer node already declared `down`, is reported immediately.
+        // Launch the immediate delivery rather than running it inline: delivery
+        // now applies mailbox backpressure, and a watcher calling `watch` from
+        // inside its own handler must not block on its own mailbox.
         if self.is_local(&target) {
             if !self.inner.host.contains(&target) {
-                deliver(Terminated {
+                self.inner.spawner.launch(deliver(Terminated {
                     id: target,
                     reason: TerminationReason::Stopped,
-                });
+                }));
                 return;
             }
         } else if self.inner.membership.is_down(target.node) {
-            deliver(Terminated {
+            self.inner.spawner.launch(deliver(Terminated {
                 id: target,
                 reason: TerminationReason::NodeDown,
-            });
+            }));
             return;
         }
         // Track locally so a delivered `Terminated` (synthesized on node-down, or
@@ -494,6 +512,10 @@ where
 
     fn node(&self) -> NodeId {
         self.inner.host.node()
+    }
+
+    fn next_random(&self) -> u64 {
+        self.inner.entropy.next_u64()
     }
 
     fn receptionist_state(&self) -> Arc<ReceptionistState> {
@@ -614,7 +636,7 @@ async fn receive_loop<C, E, S, T>(
                     .inner
                     .membership
                     .mark_alive_direct(from, incarnation, now);
-                gossip_merge(&system, digest, now);
+                gossip_merge(&system, digest, now).await;
                 let ack = Frame::Ack {
                     seq,
                     incarnation: system.inner.membership.self_incarnation(),
@@ -632,7 +654,7 @@ async fn receive_loop<C, E, S, T>(
                     .inner
                     .membership
                     .mark_alive_direct(from, incarnation, now);
-                gossip_merge(&system, digest, now);
+                gossip_merge(&system, digest, now).await;
                 let waiter = system
                     .inner
                     .pending_pings
@@ -658,7 +680,7 @@ async fn receive_loop<C, E, S, T>(
                     .inner
                     .membership
                     .mark_alive_direct(from, incarnation, now);
-                gossip_merge(&system, digest, now);
+                gossip_merge(&system, digest, now).await;
                 system.inner.spawner.launch(Box::pin(relay_probe(
                     system.clone(),
                     from,
@@ -679,7 +701,7 @@ async fn receive_loop<C, E, S, T>(
                     .inner
                     .membership
                     .mark_alive_direct(target, incarnation, now);
-                gossip_merge(&system, digest, now);
+                gossip_merge(&system, digest, now).await;
                 let waiter = system
                     .inner
                     .pending_pings
@@ -712,6 +734,9 @@ async fn receive_loop<C, E, S, T>(
                                 let _ = transport.send(watcher_node, frame).await;
                             }));
                         }
+                        // Forwarding the signal over the transport is fire-and-forget
+                        // (the launched task carries it), so this resolves immediately.
+                        Box::pin(async {}) as BoxFuture<'static, ()>
                     });
                     system.inner.host.add_watch(target, watcher, deliver);
                 } else {
@@ -735,7 +760,7 @@ async fn receive_loop<C, E, S, T>(
                 watcher: _,
                 reason,
             } => {
-                system.inner.host.deliver_terminated(&target, reason);
+                system.inner.host.deliver_terminated(&target, reason).await;
             }
             Frame::Receptionist { key, origin, actor } => {
                 system
@@ -763,7 +788,7 @@ async fn receive_loop<C, E, S, T>(
 
 /// Merge a gossiped digest into membership and run the node-down cascade for any
 /// node the merge newly declares `down` (spec §8.1, §9.2).
-fn gossip_merge<C, E, S, T>(
+async fn gossip_merge<C, E, S, T>(
     system: &ClusterSystem<C, E, S, T>,
     digest: Vec<crate::membership::MemberDigest>,
     now: actor_core::Instant,
@@ -775,7 +800,7 @@ fn gossip_merge<C, E, S, T>(
 {
     for node in system.inner.membership.merge(digest, now) {
         system.fail_pending_to(node, CallError::Unreachable);
-        system.inner.host.synthesize_node_down(node);
+        system.inner.host.synthesize_node_down(node).await;
     }
 }
 
@@ -800,7 +825,7 @@ where
         // complete their in-flight callers (step 3) and notify watchers (step 4).
         for node in system.inner.membership.tick(now) {
             system.fail_pending_to(node, CallError::Unreachable);
-            system.inner.host.synthesize_node_down(node);
+            system.inner.host.synthesize_node_down(node).await;
         }
 
         let Some(target) = system

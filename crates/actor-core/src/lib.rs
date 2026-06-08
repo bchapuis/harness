@@ -27,7 +27,7 @@ pub mod system;
 pub use actor::{Actor, BoxError, Handler, StopReason, Terminated, TerminationReason};
 pub use context::Ctx;
 pub use error::CallError;
-pub use event::{Event, EventSink};
+pub use event::{Event, EventSink, SupervisionDecision};
 pub use host::ActorFactory;
 pub use host::{LocalHost, WatchDelivery};
 pub use id::{ActorId, NodeId, Path};

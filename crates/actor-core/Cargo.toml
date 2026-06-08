@@ -16,3 +16,6 @@ actor-serialization.workspace = true
 serde = { workspace = true }
 futures.workspace = true
 async-channel.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true

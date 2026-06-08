@@ -94,9 +94,12 @@ fn restart_waits_for_the_backoff_before_re_creating() {
     });
     let times = starts.lock().unwrap();
     assert_eq!(times.len(), 2, "started once, then once more after restart");
+    let waited = times[1].duration_since(times[0]);
+    // Backoff is jittered (equal-jitter, spec §11.2): the restart waits between
+    // half and all of the 100ms base, so it is delayed but desynchronized.
     assert!(
-        times[1].duration_since(times[0]) >= Duration::from_millis(100),
-        "the restart waited at least the base backoff",
+        waited >= Duration::from_millis(50) && waited <= Duration::from_millis(100),
+        "the restart waited a jittered fraction of the base backoff, got {waited:?}",
     );
 }
 

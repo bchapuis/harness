@@ -9,8 +9,26 @@
 //! The enum is `#[non_exhaustive]`; later slices add membership, supervision,
 //! and `Terminated` variants without breaking matches.
 
+use crate::actor::TerminationReason;
 use crate::id::ActorId;
 use crate::id::NodeId;
+use crate::supervision::Fault;
+
+/// The decision supervision applied to a faulted actor (spec §11.2), as seen on
+/// the event stream (spec §16). This is the *effective* decision after the
+/// restart window and backoff are applied — e.g. exceeding `max` restarts
+/// surfaces as [`Stop`](SupervisionDecision::Stop), not `Restart`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SupervisionDecision {
+    /// Keep the actor, drop the failed message.
+    Resume,
+    /// Re-create the actor, keeping its id and mailbox.
+    Restart,
+    /// Terminate the actor with `Failed`.
+    Stop,
+    /// Terminate the actor and fail its parent (spec §11.1).
+    Escalate,
+}
 
 /// A structured observability event (spec §16).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +94,19 @@ pub enum Event {
     /// `observer` saw `node` become a full `up` member — the leader admitted it
     /// on convergence (spec §9.1, §9.3).
     MemberUp { observer: NodeId, node: NodeId },
+    /// Supervision chose a directive for a faulted actor (spec §11.2, §16).
+    Supervised {
+        actor: ActorId,
+        fault: Fault,
+        decision: SupervisionDecision,
+    },
+    /// A `Terminated` signal was delivered to a watcher (spec §12, §16): fanned
+    /// out at the watched actor's host, one per watcher, exactly once.
+    TerminatedDelivered {
+        target: ActorId,
+        watcher: ActorId,
+        reason: TerminationReason,
+    },
     /// A diagnostic marker, used by tests to punctuate an event stream.
     Mark(String),
 }

@@ -44,6 +44,19 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// [`Ctx::spawn`]: crate::Ctx::spawn
     fn spawn_child<A: Actor<System = Self>>(&self, child: A, parent: ActorId) -> ActorRef<A>;
 
+    /// Spawn a child from a `factory` so a `Restart` directive can re-create it
+    /// (spec §11.2), parented to `parent`. The value-based [`spawn_child`]
+    /// cannot reconstruct its actor — a restart there degrades to `Stop` — so a
+    /// child that wants to be restartable is spawned this way. Used by
+    /// [`Ctx::spawn_with`].
+    ///
+    /// [`spawn_child`]: ActorSystem::spawn_child
+    /// [`Ctx::spawn_with`]: crate::Ctx::spawn_with
+    fn spawn_child_with<A, F>(&self, factory: F, parent: ActorId) -> ActorRef<A>
+    where
+        A: Actor<System = Self>,
+        F: FnMut() -> A + Send + 'static;
+
     /// Resolve `id` to its local mailbox if a live local actor of type `A` owns
     /// it (spec §4.3). `None` for a remote or resigned id; performs no network
     /// round-trip and never blocks.
@@ -90,6 +103,12 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
 
     /// This node's identity.
     fn node(&self) -> NodeId;
+
+    /// A draw from the system's seeded [`Entropy`](crate::Entropy) (§4.6) — the
+    /// single source of randomness in the run. Used for supervision backoff
+    /// jitter (§11.2) and available to actors that need deterministic randomness;
+    /// it never reaches for a host RNG, so a simulated run stays reproducible.
+    fn next_random(&self) -> u64;
 
     /// The shared receptionist registry backing [`receptionist`](Self::receptionist).
     fn receptionist_state(&self) -> Arc<ReceptionistState>;
@@ -260,6 +279,20 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
         )
     }
 
+    fn spawn_child_with<A, F>(&self, mut factory: F, parent: ActorId) -> ActorRef<A>
+    where
+        A: Actor<System = Self>,
+        F: FnMut() -> A + Send + 'static,
+    {
+        self.inner.host.spawn_actor(
+            self.clone(),
+            self.inner.clock.clone(),
+            &self.inner.spawner,
+            Box::new(move || Some(factory())),
+            Some(parent),
+        )
+    }
+
     fn resolve_local<A: Actor<System = Self>>(&self, id: &ActorId) -> Option<Mailbox<A>> {
         self.inner.host.resolve_local(id)
     }
@@ -295,10 +328,14 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
     fn watch(&self, target: ActorId, watcher: ActorId, deliver: WatchDelivery) {
         // Single node: a target not currently live has already terminated.
         if !self.inner.host.contains(&target) {
-            deliver(Terminated {
+            // Deliver the immediate `Terminated` (invariant #12) on a task rather
+            // than inline: delivery now applies mailbox backpressure, and a watcher
+            // calling `watch` from inside its own handler must not block on (or
+            // deadlock against) its own mailbox.
+            self.inner.spawner.launch(deliver(Terminated {
                 id: target,
                 reason: TerminationReason::Stopped,
-            });
+            }));
             return;
         }
         self.inner.host.add_watch(target, watcher, deliver);
@@ -310,6 +347,10 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
 
     fn node(&self) -> NodeId {
         self.inner.host.node()
+    }
+
+    fn next_random(&self) -> u64 {
+        self.inner.entropy.next_u64()
     }
 
     fn receptionist_state(&self) -> Arc<ReceptionistState> {

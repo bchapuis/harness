@@ -1,0 +1,16 @@
+# Determinism guard-rail (spec §18.1 #3): the runtime-agnostic crates
+# (actor-core, actor-cluster, actor-simulation) must take time, randomness, and
+# task spawning only from the Clock / Entropy / Spawner seam (§4.6) — never from
+# the host directly — so a simulation build is byte-reproducible from one seed.
+#
+# These lints forbid the host APIs that would silently break that. The single
+# crate allowed to touch the host is `actor-runtime` (the production seam), which
+# opts out wholesale with a crate-level `#![allow(clippy::disallowed_methods)]`
+# — that allow is the explicit, greppable determinism boundary.
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "§18.1: read time via Clock::now, not the wall clock" },
+    { path = "std::time::SystemTime::now", reason = "§18.1: read time via Clock::now, not the wall clock" },
+    { path = "std::thread::spawn", reason = "§18.1: spawn via Spawner::launch, not OS threads" },
+    { path = "rand::thread_rng", reason = "§18.1: randomness must come from the seeded Entropy, not a thread RNG" },
+    { path = "rand::random", reason = "§18.1: randomness must come from the seeded Entropy" },
+]

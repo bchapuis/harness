@@ -22,6 +22,13 @@
 //! [`Transport`]: actor_cluster::Transport
 //! [`ClusterSystem`]: actor_cluster::ClusterSystem
 
+// This crate IS the host seam (spec §4.6, §18.1): it is the one place allowed to
+// read the wall clock, spawn OS/tokio tasks, and seed from the OS. The workspace
+// `clippy.toml` forbids those host APIs everywhere else to keep the simulation
+// build deterministic; this crate-level allow is the explicit determinism
+// boundary they are permitted to cross.
+#![allow(clippy::disallowed_methods)]
+
 mod clock;
 mod entropy;
 mod spawner;

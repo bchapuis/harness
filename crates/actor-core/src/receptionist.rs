@@ -263,7 +263,8 @@ impl<S: ActorSystem> Receptionist<S> {
         if self.state.add(key, origin, id.clone()) {
             let state = Arc::clone(&self.state);
             let deliver: WatchDelivery = Arc::new(move |signal: Terminated| {
-                state.remove_actor(&signal.id);
+                let state = Arc::clone(&state);
+                Box::pin(async move { state.remove_actor(&signal.id) })
             });
             self.system.watch(id, receptionist_id(self.node), deliver);
             self.state.notify(key);

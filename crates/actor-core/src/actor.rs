@@ -97,8 +97,9 @@ pub trait Actor: Sized + Send + 'static {
 
     /// This actor's supervision strategy (spec §11.2). The default is `Stop`.
     /// `Restart` is only honored for actors spawned with a factory
-    /// (`spawn_with`); a value-spawned actor cannot be re-created, so a restart
-    /// directive degrades to `Stop`.
+    /// (`ActorSystem::spawn_with` for a root, `Ctx::spawn_with` for a child); a
+    /// value-spawned actor (`spawn`/`Ctx::spawn`) cannot be re-created, so a
+    /// restart directive degrades to `Stop`.
     fn supervision() -> Supervision {
         Supervision::stop()
     }

@@ -30,6 +30,11 @@
 //! TLS-encrypted TCP association. Drop `--join` to start as a founding member
 //! instead.
 
+// A production-runtime demo: it legitimately reads the wall clock for its own
+// run deadline (it is not part of the deterministic simulation build). The
+// workspace determinism lint (§18.1) is allowed here for that reason.
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::net::SocketAddr;

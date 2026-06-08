@@ -222,9 +222,15 @@ impl<A: Actor> Mailbox<A> {
 
     /// Enqueue a [`Terminated`] death-watch signal (spec §12). It rides the same
     /// mailbox as any message, so it is observed in the actor's serial order
-    /// (invariant #13). Best-effort under backpressure (a closed mailbox simply
-    /// drops it — the actor is already gone).
-    pub(crate) fn enqueue_signal(&self, signal: Terminated)
+    /// (invariant #13).
+    ///
+    /// A `Terminated` MUST reach its watcher exactly once for *any* cause
+    /// (invariant #11), so unlike a best-effort send this applies the §6 default
+    /// backpressure policy: it **awaits** until the mailbox has room rather than
+    /// dropping the signal when the queue is full. Only a *closed* mailbox lets
+    /// it give up — that means the watcher itself is already gone, so there is no
+    /// one left to notify.
+    pub(crate) async fn enqueue_signal(&self, signal: Terminated)
     where
         A: Handler<Terminated>,
     {
@@ -234,7 +240,7 @@ impl<A: Actor> Mailbox<A> {
                 actor.handle(signal, ctx).await;
             })
         });
-        if self.sender.try_send(Envelope { manifest, run }).is_ok() {
+        if self.sender.send(Envelope { manifest, run }).await.is_ok() {
             self.events.emit(Event::Enqueue {
                 actor: self.id.clone(),
                 manifest,

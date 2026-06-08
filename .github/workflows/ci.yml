@@ -1,0 +1,44 @@
+name: CI
+
+# Build + lint + the full conformance suite on every change. The workspace test
+# run includes the deterministic conformance tests, the catalogue drift gate
+# (tests/conformance_catalogue.rs), and the fixed-seed swarm sweeps in swarm.rs
+# (0..256) and cluster_swarm.rs (0..48) — the regression corpus (spec §18.6).
+#
+# TODO(§18.6 "many fresh seeds per change"): drive an additional swarm sweep from
+# a per-run seed base (e.g. github.run_number) once swarm.rs/cluster_swarm.rs read
+# a SWARM_SEED_BASE env var, so each CI run exercises fresh cluster-hours on top of
+# the fixed regression corpus.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: build, lint, conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test (conformance suite + swarm regression corpus)
+        run: cargo test --workspace

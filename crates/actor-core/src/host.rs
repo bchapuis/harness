@@ -13,7 +13,9 @@
 //! 4), since no stop message can arrive from a dead node.
 
 use std::any::Any;
+use std::any::TypeId;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -31,6 +33,7 @@ use crate::context::Ctx;
 use crate::error::CallError;
 use crate::event::Event;
 use crate::event::EventSink;
+use crate::event::SupervisionDecision;
 use crate::id::ActorId;
 use crate::id::NodeId;
 use crate::id::Path;
@@ -40,12 +43,14 @@ use crate::refs::ActorRef;
 use crate::registry::DispatchFn;
 use crate::registry::HandlerRegistry;
 use crate::reply::ReplyHandle;
+use crate::runtime::BoxFuture;
 use crate::runtime::Clock;
 use crate::runtime::Instant;
 use crate::runtime::Spawner;
 use crate::supervision::Fault;
 use crate::supervision::Supervision;
 use crate::supervision::SupervisionDirective;
+use crate::system::ActorSystem;
 
 /// A source of fresh actor instances for (re)starts. Yields `Some` while the
 /// actor can be (re-)created and `None` once exhausted — a value-spawned actor
@@ -56,7 +61,11 @@ pub type ActorFactory<A> = Box<dyn FnMut() -> Option<A> + Send>;
 /// Delivers a [`Terminated`] to one watcher by enqueuing it on the watcher's
 /// mailbox. Built in [`Ctx::watch`](crate::Ctx::watch), where the watcher type
 /// is known; stored type-erased in the watch registry.
-pub type WatchDelivery = Arc<dyn Fn(Terminated) + Send + Sync>;
+///
+/// Returns a future because local delivery applies mailbox backpressure rather
+/// than dropping the signal (spec §6, §12 invariant #11): callers `.await` it so
+/// a busy watcher is never skipped.
+pub type WatchDelivery = Arc<dyn Fn(Terminated) -> BoxFuture<'static, ()> + Send + Sync>;
 
 /// One live local actor: its mailbox plus the dispatch table that turns inbound
 /// `(manifest, payload)` pairs into typed handler calls.
@@ -103,6 +112,11 @@ struct HostState {
     /// Escalation inboxes: actor id → a sender its children escalate failures to
     /// (spec §11.1). The value is the failed child's id, for context.
     escalators: Mutex<BTreeMap<ActorId, async_channel::Sender<ActorId>>>,
+    /// Per-actor-type dispatch tables, built once on first spawn of each type so
+    /// `Actor::register` runs at most once per type (spec §4.4), not per spawn.
+    /// The value is a type-erased `BTreeMap<&'static str, DispatchFn<A>>`. Keyed
+    /// lookups only (never iterated), so it adds no observable nondeterminism.
+    dispatch_cache: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
     next_path: AtomicU64,
 }
 
@@ -131,16 +145,24 @@ impl HostState {
 
     /// Deliver `Terminated` to every watcher of `target`, then forget them — so
     /// each watcher is notified exactly once (invariant #11).
-    fn notify_terminated(&self, target: &ActorId, reason: TerminationReason) {
+    async fn notify_terminated(&self, target: &ActorId, reason: TerminationReason) {
+        // Drop the lock before awaiting delivery: the guard is released at the
+        // end of this statement, so no lock is held across the `.await` below.
         let entries = self
             .watchers
             .lock()
             .expect("watchers mutex poisoned")
             .remove(target);
         if let Some(entries) = entries {
-            for (_watcher, deliver) in entries {
+            for (watcher, deliver) in entries {
                 deliver(Terminated {
                     id: target.clone(),
+                    reason,
+                })
+                .await;
+                self.events.emit(Event::TerminatedDelivered {
+                    target: target.clone(),
+                    watcher,
                     reason,
                 });
             }
@@ -163,7 +185,7 @@ impl HostState {
     /// Synthesize `Terminated { NodeDown }` for every watched actor on `node`
     /// (spec §8.1 step 4): a dead node sends no stop message, so the watcher's
     /// own node must manufacture the signal.
-    fn synthesize_node_down(&self, node: NodeId) {
+    async fn synthesize_node_down(&self, node: NodeId) {
         let targets: Vec<ActorId> = self
             .watchers
             .lock()
@@ -173,7 +195,8 @@ impl HostState {
             .cloned()
             .collect();
         for target in targets {
-            self.notify_terminated(&target, TerminationReason::NodeDown);
+            self.notify_terminated(&target, TerminationReason::NodeDown)
+                .await;
         }
     }
 }
@@ -197,6 +220,7 @@ impl LocalHost {
                 actors: Mutex::new(BTreeMap::new()),
                 watchers: Mutex::new(BTreeMap::new()),
                 escalators: Mutex::new(BTreeMap::new()),
+                dispatch_cache: Mutex::new(HashMap::new()),
                 next_path: AtomicU64::new(0),
             }),
         }
@@ -228,6 +252,30 @@ impl LocalHost {
         id
     }
 
+    /// The dispatch table for actor type `A`, building it once and caching it by
+    /// type (spec §4.4): `Actor::register` is invoked at most once per type — on
+    /// the first spawn — rather than on every spawn. The cached map is a `fn`
+    /// pointer table, so cloning it into each actor's entry is cheap.
+    fn dispatch_table<A: Actor>(&self) -> BTreeMap<&'static str, DispatchFn<A>> {
+        let key = TypeId::of::<A>();
+        let mut cache = self
+            .state
+            .dispatch_cache
+            .lock()
+            .expect("dispatch cache mutex poisoned");
+        if let Some(cached) = cache.get(&key) {
+            return cached
+                .downcast_ref::<BTreeMap<&'static str, DispatchFn<A>>>()
+                .expect("dispatch cache type mismatch")
+                .clone();
+        }
+        let mut registry = HandlerRegistry::<A>::default();
+        A::register(&mut registry);
+        let table = registry.into_entries();
+        cache.insert(key, Arc::new(table.clone()));
+        table
+    }
+
     /// Spawn an actor from a `factory`, returning a handle (spec §4.1, §4.2). The
     /// factory supplies the initial instance and any restart re-creations
     /// (spec §11.2); `clock` drives supervision backoff. `parent` is the spawning
@@ -252,11 +300,9 @@ impl LocalHost {
             self.state.events.clone(),
         );
 
-        let mut registry = HandlerRegistry::<A>::default();
-        A::register(&mut registry);
         let entry = ActorEntry {
             mailbox: mailbox.clone(),
-            dispatch: registry.into_entries(),
+            dispatch: self.dispatch_table::<A>(),
         };
         self.state
             .actors
@@ -331,16 +377,16 @@ impl LocalHost {
 
     /// Synthesize `Terminated { NodeDown }` for watchers of actors on `node`
     /// (spec §8.1 step 4). Called by the failure detector on a down decision.
-    pub fn synthesize_node_down(&self, node: NodeId) {
-        self.state.synthesize_node_down(node);
+    pub async fn synthesize_node_down(&self, node: NodeId) {
+        self.state.synthesize_node_down(node).await;
     }
 
     /// Deliver `Terminated { reason }` to every local watcher of `target`, then
     /// forget them (spec §12). Used by the cluster to fan a `Terminated` frame
     /// received from `target`'s node out to local watchers; the forget keeps it
     /// at most once per watcher (invariant #11).
-    pub fn deliver_terminated(&self, target: &ActorId, reason: TerminationReason) {
-        self.state.notify_terminated(target, reason);
+    pub async fn deliver_terminated(&self, target: &ActorId, reason: TerminationReason) {
+        self.state.notify_terminated(target, reason).await;
     }
 }
 
@@ -401,7 +447,7 @@ async fn run_actor<A, C>(
     let mut restarts: Vec<Instant> = Vec::new();
 
     let Some(mut actor) = factory() else {
-        release(&state, &id, TerminationReason::Stopped);
+        release(&state, &id, TerminationReason::Stopped).await;
         return;
     };
     let mut need_start = true;
@@ -410,7 +456,16 @@ async fn run_actor<A, C>(
     let end = loop {
         if need_start {
             if let Err(_err) = actor.started(&ctx).await {
-                match supervise(&supervision, Fault::Started, &clock, &mut restarts).await {
+                let decision = supervise(
+                    &supervision,
+                    Fault::Started,
+                    &clock,
+                    &mut restarts,
+                    &|| ctx.system().next_random(),
+                )
+                .await;
+                emit_supervision(&state, &id, Fault::Started, &decision);
+                match decision {
                     Decision::Resume => need_start = false,
                     Decision::StopFailed => break End::Stop(actor, StopReason::Failed),
                     Decision::Escalate => {
@@ -446,7 +501,16 @@ async fn run_actor<A, C>(
             Outcome::Faulted => Fault::Message,
             Outcome::Escalated => Fault::Escalation,
         };
-        match supervise(&supervision, fault, &clock, &mut restarts).await {
+        let decision = supervise(
+            &supervision,
+            fault,
+            &clock,
+            &mut restarts,
+            &|| ctx.system().next_random(),
+        )
+        .await;
+        emit_supervision(&state, &id, fault, &decision);
+        match decision {
             Decision::Resume => continue,
             Decision::StopFailed => break End::Stop(actor, StopReason::Failed),
             Decision::Escalate => {
@@ -476,8 +540,25 @@ async fn run_actor<A, C>(
 
     match end {
         End::Stop(actor, reason) => finish(actor, reason, &state, &id).await,
-        End::Released(reason) => release(&state, &id, reason),
+        End::Released(reason) => release(&state, &id, reason).await,
     }
+}
+
+/// Emit the supervision decision for a faulted actor (spec §11.2, §16). The
+/// decision is the effective one — the restart window and backoff have already
+/// been applied, so an exhausted window surfaces here as `Stop`.
+fn emit_supervision(state: &HostState, id: &ActorId, fault: Fault, decision: &Decision) {
+    let decision = match decision {
+        Decision::Resume => SupervisionDecision::Resume,
+        Decision::Restart => SupervisionDecision::Restart,
+        Decision::StopFailed => SupervisionDecision::Stop,
+        Decision::Escalate => SupervisionDecision::Escalate,
+    };
+    state.events.emit(Event::Supervised {
+        actor: id.clone(),
+        fault,
+        decision,
+    });
 }
 
 /// Route this actor's failure to its parent's escalation inbox (spec §11.1).
@@ -489,11 +570,15 @@ fn escalate(state: &HostState, parent: &Option<ActorId>, id: &ActorId) {
 
 /// Apply the supervision directive for `fault`, including the restart window
 /// (`max` within `within` → escalate to stop) and backoff sleep (spec §11.2).
+/// `draw_random` yields a value from the system's seeded `Entropy` (§4.6) for
+/// backoff jitter; it is called only when a jittered sleep actually happens, so
+/// a non-restart fault consumes no randomness and never perturbs the run.
 async fn supervise<C: Clock>(
     supervision: &Supervision,
     fault: Fault,
     clock: &C,
     restarts: &mut Vec<Instant>,
+    draw_random: &(dyn Fn() -> u64 + Send + Sync),
 ) -> Decision {
     match supervision.decide(fault) {
         SupervisionDirective::Stop => Decision::StopFailed,
@@ -510,11 +595,27 @@ async fn supervise<C: Clock>(
             if restarts.len() as u32 > max {
                 Decision::StopFailed
             } else {
-                clock.sleep(backoff.delay(restarts.len() as u32)).await;
+                let base = backoff.delay(restarts.len() as u32);
+                let delay = if base.is_zero() {
+                    base
+                } else {
+                    jittered(base, draw_random())
+                };
+                clock.sleep(delay).await;
                 Decision::Restart
             }
         }
     }
+}
+
+/// Apply equal-jitter to a backoff delay (spec §11.2): hold half the delay fixed
+/// and randomize the other half, so a wave of simultaneous restarts desynchronizes
+/// instead of retrying in lockstep. `rand` comes from the seeded `Entropy` (§4.6),
+/// keeping a simulated run reproducible.
+fn jittered(base: std::time::Duration, rand: u64) -> std::time::Duration {
+    let nanos = base.as_nanos() as u64;
+    let half = nanos / 2;
+    std::time::Duration::from_nanos(half + rand % (half + 1))
 }
 
 /// Process messages until the actor stops, panics, or a child escalates. The
@@ -562,12 +663,12 @@ async fn message_loop<A: Actor>(
 /// Stop `actor` and release its identity (spec §4.2 step 5, §12).
 async fn finish<A: Actor>(actor: A, reason: StopReason, state: &HostState, id: &ActorId) {
     actor.stopped(reason).await;
-    release(state, id, reason.into());
+    release(state, id, reason.into()).await;
 }
 
 /// Release an identity and notify watchers, without an actor instance to stop
 /// (the instance was already stopped during a failed restart).
-fn release(state: &HostState, id: &ActorId, reason: TerminationReason) {
+async fn release(state: &HostState, id: &ActorId, reason: TerminationReason) {
     state
         .actors
         .lock()
@@ -579,5 +680,5 @@ fn release(state: &HostState, id: &ActorId, reason: TerminationReason) {
         .expect("escalators mutex poisoned")
         .remove(id);
     state.events.emit(Event::ResignId { id: id.clone() });
-    state.notify_terminated(id, reason);
+    state.notify_terminated(id, reason).await;
 }

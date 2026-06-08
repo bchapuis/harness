@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use actor_core::Actor;
+use actor_core::ActorRef;
 use actor_core::ActorSystem;
 use actor_core::Backoff;
 use actor_core::BoxError;
@@ -141,6 +142,84 @@ impl Handler<Starts> for Bounded {
     async fn handle(&mut self, _msg: Starts, _ctx: &Ctx<Self>) -> u32 {
         self.starts.load(Ordering::SeqCst)
     }
+}
+
+// --- A child spawned via Ctx::spawn_with is restartable (spec §11.2) ----------
+//
+// The canonical parent→child path is `Ctx::spawn` (§11.1), but a value-spawned
+// child cannot be reconstructed, so its `Restart` directive degrades to `Stop`.
+// `Ctx::spawn_with` gives the child a factory, so `Restart` actually re-creates
+// it — keeping its id and mailbox — exactly like a factory-spawned root.
+
+struct Parent {
+    starts: Arc<AtomicU32>,
+    restartable: bool,
+}
+impl Actor for Parent {
+    type System = Sys;
+}
+
+#[derive(Serialize, Deserialize)]
+struct GetChild;
+impl Message for GetChild {
+    type Reply = ActorRef<Flaky>;
+    const MANIFEST: Manifest = Manifest::new("sup.GetChild");
+}
+
+impl Handler<GetChild> for Parent {
+    async fn handle(&mut self, _msg: GetChild, ctx: &Ctx<Self>) -> ActorRef<Flaky> {
+        let starts = Arc::clone(&self.starts);
+        if self.restartable {
+            ctx.spawn_with(move || Flaky {
+                starts: Arc::clone(&starts),
+            })
+        } else {
+            ctx.spawn(Flaky {
+                starts: Arc::clone(&starts),
+            })
+        }
+    }
+}
+
+#[test]
+fn ctx_spawn_with_child_restarts_on_fault() {
+    let (sim, system) = system(5);
+    let starts = Arc::new(AtomicU32::new(0));
+    let parent_starts = Arc::clone(&starts);
+
+    let after = sim.block_on(async move {
+        let parent = system.spawn(Parent {
+            starts: parent_starts,
+            restartable: true,
+        });
+        let child = parent.ask(GetChild).await.unwrap();
+        let _ = child.tell(Boom).await; // panic → Restart re-creates the child
+        // `Starts` was enqueued before the restart and survives it (same mailbox).
+        child.ask(Starts).await
+    });
+
+    // `started` ran once at spawn and once after the restart.
+    assert_eq!(after, Ok(2));
+}
+
+#[test]
+fn ctx_spawn_value_child_degrades_restart_to_stop() {
+    let (sim, system) = system(6);
+    let starts = Arc::new(AtomicU32::new(0));
+    let parent_starts = Arc::clone(&starts);
+
+    let after = sim.block_on(async move {
+        let parent = system.spawn(Parent {
+            starts: parent_starts,
+            restartable: false,
+        });
+        let child = parent.ask(GetChild).await.unwrap();
+        let _ = child.tell(Boom).await; // panic → Restart cannot re-create → Stop
+        child.ask(Starts).await
+    });
+
+    // The value-spawned child could not be reconstructed, so it stopped.
+    assert_eq!(after, Err(CallError::DeadLetter));
 }
 
 // --- Resume: keep state, drop the failed message -----------------------------

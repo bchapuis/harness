@@ -50,8 +50,24 @@ impl<A: Actor> Ctx<A> {
     /// Spawn a child actor on the same system (spec §3.4, §11.1). The child is
     /// parented to this actor, so a fault the child escalates fails this actor,
     /// applying its supervision strategy.
+    ///
+    /// The child is value-spawned, so a `Restart` directive degrades to `Stop`
+    /// (it cannot be reconstructed). For a restartable child, use
+    /// [`spawn_with`](Self::spawn_with).
     pub fn spawn<C: Actor<System = A::System>>(&self, child: C) -> ActorRef<C> {
         self.system.spawn_child(child, self.id.clone())
+    }
+
+    /// Spawn a child actor from a `factory` (spec §3.4, §11.1), parented to this
+    /// actor. Like [`spawn`](Self::spawn) but restartable: a `Restart`
+    /// supervision directive re-creates the child by calling `factory` again,
+    /// keeping its `ActorId` and mailbox (spec §11.2).
+    pub fn spawn_with<C, F>(&self, factory: F) -> ActorRef<C>
+    where
+        C: Actor<System = A::System>,
+        F: FnMut() -> C + Send + 'static,
+    {
+        self.system.spawn_child_with(factory, self.id.clone())
     }
 
     /// Request that this actor stop after the current message completes (spec
@@ -74,7 +90,10 @@ impl<A: Actor> Ctx<A> {
         let Some(mailbox) = self.system.resolve_local::<A>(&self.id) else {
             return;
         };
-        let deliver: WatchDelivery = Arc::new(move |signal| mailbox.enqueue_signal(signal));
+        let deliver: WatchDelivery = Arc::new(move |signal| {
+            let mailbox = mailbox.clone();
+            Box::pin(async move { mailbox.enqueue_signal(signal).await })
+        });
         self.system
             .watch(target.id().clone(), self.id.clone(), deliver);
     }

@@ -65,10 +65,9 @@ pub enum SupervisionDirective {
         within: Duration,
         backoff: Backoff,
     },
-    /// Fail the parent, applying the parent's strategy (spec §11.2). Parent
-    /// hierarchy propagation is a follow-up; treated as [`Stop`] for now.
-    ///
-    /// [`Stop`]: SupervisionDirective::Stop
+    /// Fail the parent, propagating the fault up the supervision hierarchy
+    /// (spec §11.1): the actor stops with `Failed` and its parent is faulted with
+    /// [`Fault::Escalation`], which then applies the parent's own strategy.
     Escalate,
 }
 

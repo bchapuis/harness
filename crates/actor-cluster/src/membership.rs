@@ -128,15 +128,17 @@ pub enum DowningPolicy {
     Timeout(Duration),
 }
 
-/// SWIM detector parameters (spec §10). All MUST be configurable; `T_suspect`
-/// SHOULD scale with cluster size in production.
+/// SWIM detector parameters (spec §10). All MUST be configurable.
 #[derive(Clone, Copy, Debug)]
 pub struct SwimConfig {
     /// `T_probe`: how often to probe a random member.
     pub probe_interval: Duration,
     /// `T_rtt`: how long to await an `Ack`.
     pub rtt: Duration,
-    /// `T_suspect`: how long a suspicion stands before becoming `unreachable`.
+    /// `T_suspect` **base**: how long a suspicion stands before becoming
+    /// `unreachable` in a small cluster. The effective timeout scales
+    /// logarithmically with cluster size (spec §10); see
+    /// `Membership::effective_suspect_timeout`.
     pub suspect_timeout: Duration,
     /// `k`: how many peers to enlist for indirect probing when a direct probe is
     /// missed (spec §10 #2). `0` disables indirect probing.
@@ -398,15 +400,41 @@ impl Membership {
     /// `Up`); full seen-by gossip convergence (spec §9.2) is a follow-up. Returns
     /// the nodes newly declared `down`, so the caller can run the cascade
     /// (spec §8.1 step 3).
+    /// `T_suspect` scaled for a cluster of `cluster_size` members (spec §10).
+    /// Logarithmic in the size and clamped to the base for small clusters: the
+    /// factor is `max(1, floor(log2(cluster_size)))`, so ≤3 members keep the base
+    /// timeout, 4–7 double it, 8–15 triple it, and so on.
+    fn effective_suspect_timeout(&self, cluster_size: usize) -> Duration {
+        let factor = (cluster_size as u32).max(1).ilog2().max(1);
+        self.suspect_timeout * factor
+    }
+
     pub fn tick(&self, now: Instant) -> Vec<NodeId> {
         let mut downed = Vec::new();
         let mut members = self.members.lock().expect("members mutex poisoned");
+
+        // Declaring a member `down` is a cluster decision the leader owns (spec
+        // §9.2 #3), so only the leader runs the downing transition below; other
+        // nodes adopt the `down` once it reaches them by gossip (`merge`). This
+        // gives a single decider and avoids two nodes downing each other. Note we
+        // deliberately do *not* gate downing on the reachable-convergence rule
+        // used for promotion: the node being downed is by definition unreachable,
+        // so that rule could never hold — leadership alone supplies the
+        // single-decider property. Reachability (`Suspect`→`Unreachable`) is a
+        // local detector state, not a cluster decision, so it stays per-node.
+        let is_leader = self.compute_leader(&members) == Some(self.node);
+        // `T_suspect` scales with cluster size (spec §10): a larger cluster needs
+        // a longer suspicion window to hold the false-positive rate down. The
+        // scaling is logarithmic and stays at the base for small clusters
+        // (≤3 members, factor 1), so detection latency is unchanged in the common
+        // small case and grows only gently as the cluster does.
+        let suspect_timeout = self.effective_suspect_timeout(members.len() + 1);
         for (node, m) in members.iter_mut() {
             if m.status.is_terminal() {
                 continue;
             }
             if m.reachability == Reachability::Suspect
-                && now.duration_since(m.changed_at) >= self.suspect_timeout
+                && now.duration_since(m.changed_at) >= suspect_timeout
             {
                 m.reachability = Reachability::Unreachable;
                 m.changed_at = now;
@@ -415,7 +443,7 @@ impl Membership {
                     node: *node,
                 });
             }
-            if m.reachability == Reachability::Unreachable {
+            if is_leader && m.reachability == Reachability::Unreachable {
                 if let DowningPolicy::Timeout(after) = self.downing {
                     if now.duration_since(m.changed_at) >= after {
                         m.status = MemberStatus::Down;

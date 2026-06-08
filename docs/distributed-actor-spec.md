@@ -5,7 +5,7 @@
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
 
-Throughout, `actor` stands in as the crate and namespace name.
+Throughout, `actor` stands in as the crate and namespace name. Async trait methods are shown as `async fn` for readability; the framework writes them `fn … -> impl Future<Output = …> + Send` so generic runtime code can require the returned future to be `Send`.
 
 > **Design stance.** The framework uses only ordinary Rust traits and generics, and it ships no macros of its own. Actors exchange **messages**, serializable value types, and implement one `Handler<M>` per message type they accept. Each message carries a hand-written `const` wire identity, its *manifest*; each actor lists the messages it accepts over the network in a hand-written `register` function (§4.4). In user code, serde's `Serialize` and `Deserialize` are the only macros.
 >
@@ -78,6 +78,13 @@ pub trait Actor: Sized + Send + 'static {
 
     /// Called once when the actor stops, for any reason.
     async fn stopped(self, _reason: StopReason) {}
+
+    /// List the messages this actor accepts over the network (§4.4). The default
+    /// registers nothing — a purely local actor; a remote one overrides it.
+    fn register(_r: &mut HandlerRegistry<Self>) {}
+
+    /// This actor's supervision strategy (§11.2). The default is `Stop`.
+    fn supervision() -> Supervision { Supervision::stop() }
 }
 ```
 
@@ -136,8 +143,8 @@ Rules (MUST hold):
 
 ```rust
 pub struct ActorRef<A: Actor> {
-    id: <A::System as ActorSystem>::ActorId,
-    system: SystemHandle<A::System>,
+    id: ActorId,
+    system: A::System,   // a cheap, cloneable handle to the local system
 }
 
 impl<A: Actor> ActorRef<A> {
@@ -171,10 +178,12 @@ impl<A: Actor> Ctx<A> {
     fn this(&self) -> ActorRef<A>;                  // self-reference, shareable
     fn system(&self) -> &A::System;
 
-    fn spawn<C: Actor<System = A::System>>(&self, child: C) -> ActorRef<C>; // parented to self (§11)
-    fn watch<B: Actor>(&self, target: &ActorRef<B>);                        // death watch (§12)
+    fn spawn<C: Actor<System = A::System>>(&self, child: C) -> ActorRef<C>;          // parented to self (§11)
+    fn spawn_with<C, F>(&self, factory: F) -> ActorRef<C>                             // restartable child (§11.2)
+        where C: Actor<System = A::System>, F: FnMut() -> C + Send + 'static;
+    fn watch<B: Actor>(&self, target: &ActorRef<B>) where A: Handler<Terminated>;     // death watch (§12)
     fn unwatch<B: Actor>(&self, target: &ActorRef<B>);
-    fn stop(&self);                                                          // stop self after current message
+    fn stop(&self);                                                                   // stop self after current message
 }
 ```
 
@@ -201,15 +210,7 @@ impl<A: Actor> ActorRef<A> {
 
 ### 3.6 Identity (`ActorId`)
 
-An `ActorId` MUST:
-- Be unique within a cluster for the cluster's lifetime.
-- Let any node identify the target's **owning node** and classify it as local or remote, from the id alone, without a network round-trip (the capability `resolve` depends on, §4.3).
-- Carry an **incarnation** that distinguishes a fresh actor from a resigned one that reused the same name.
-- Be `Clone + Eq + Hash + Send + Sync + Serialize + DeserializeOwned`.
-
-These requirements constrain what an `ActorId` lets a node *do*, not how it is laid out. The structure below satisfies them and is RECOMMENDED, but a conforming id MAY take a different form, for example an opaque key resolved against the node's local routing state, as long as locality stays classifiable without contacting another node.
-
-Recommended (non-normative) structure:
+An `ActorId` is a single cluster-wide identity type, shared by every system:
 
 ```
 ActorId = {
@@ -219,7 +220,12 @@ ActorId = {
 }
 ```
 
-A few paths are **well-known** (for example, `/system/receptionist`) and resolvable on every node without prior introduction (§13).
+It is `Clone + Eq + Hash + Send + Sync + Serialize + DeserializeOwned`, and it MUST:
+- Be unique within a cluster for the cluster's lifetime.
+- Let any node identify the target's **owning node** (the `node` field) and classify it as local or remote, from the id alone, without a network round-trip (the capability `resolve` depends on, §4.3).
+- Carry an **incarnation** that distinguishes a fresh actor from a resigned one that reused the same `path`.
+
+The struct is closed and self-describing, so any id that deserializes is well-formed and locality-classifiable with no routing-table lookup — which keeps `ActorRef<A>`, the wire envelope, and `ActorRef` rebinding (§4.4) simple. A few paths are **well-known** (for example, `/system/receptionist`) and resolvable on every node without prior introduction (§13).
 
 ---
 
@@ -229,39 +235,29 @@ The system is the runtime an actor runs on. The cluster runtime (§9 to §13) is
 
 ### 4.1 The trait
 
+A system resolves ids to refs and bridges the transport boundary, working on already-serialized payloads (the typed API and the local fast path live in the `ActorRef`/mailbox layer above):
+
 ```rust
 pub trait ActorSystem: Send + Sync + 'static {
-    type ActorId: Clone + Eq + Hash + Send + Sync + Serialize + DeserializeOwned;
-
-    // ---- Lifecycle (§4.2) ----
-    fn assign_id<A: Actor<System = Self>>(&self) -> Self::ActorId;
-    fn actor_ready<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A>;
-    fn resign_id(&self, id: &Self::ActorId);
-
     // ---- Resolution (§4.3) ----
-    fn resolve<A: Actor<System = Self>>(
-        &self, id: &Self::ActorId,
-    ) -> Result<ActorRef<A>, ResolveError>;
+    /// Build a typed handle to `id`. Infallible: every `ActorId` is well-formed
+    /// and locality-classifiable (§3.6), so resolution never fails.
+    fn resolve<A: Actor<System = Self>>(&self, id: ActorId) -> ActorRef<A>;
 
     // ---- Outbound, transport boundary (§4.4) ----
     async fn remote_ask(
-        &self, recipient: &Self::ActorId, manifest: Manifest, payload: Bytes, within: Duration,
-    ) -> Result<Bytes, CallError>;
+        &self, recipient: &ActorId, manifest: &'static str, payload: Vec<u8>, within: Duration,
+    ) -> Result<Vec<u8>, CallError>;
 
     async fn remote_tell(
-        &self, recipient: &Self::ActorId, manifest: Manifest, payload: Bytes,
+        &self, recipient: &ActorId, manifest: &'static str, payload: Vec<u8>,
     ) -> Result<(), CallError>;
-
-    // ---- Inbound, transport boundary (§4.4) ----
-    async fn deliver(
-        &self, recipient: &Self::ActorId, manifest: Manifest, payload: Bytes, reply: ReplyHandle,
-    );
 }
 ```
 
-> **Object safety.** `async fn` in traits is not dyn-compatible without boxing. Where a system must be used behind `dyn`, the implementation SHOULD expose boxed-future variants (`Pin<Box<dyn Future>>`). Code generic over the system SHOULD prefer static dispatch.
+The wire identity is the message's `MANIFEST` (§3.2) as a `&'static str`, and the payload is its codec-encoded bytes. The system also performs internal operations the contract orchestrates but does not expose as separately-called API: the lifecycle steps `assign_id` / `actor_ready` / `resign_id` (§4.2), and the inbound `deliver`, which the node's receive loop invokes to dispatch a decoded message to a local actor (§4.4).
 
-The user-facing entry point is `spawn`, which MUST run the lifecycle hooks in order:
+The user-facing entry point is `spawn`. It composes the lifecycle steps in the order §4.2 specifies:
 
 ```rust
 fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A>  // = assign_id → register mailbox → actor_ready
@@ -293,7 +289,7 @@ Invariants (MUST):
 - The id's owning node is the local node but no live mailbox exists → an `ActorRef` that dead-letters (the actor has resigned).
 - The id's owning node is remote → a **remote** `ActorRef` (messages serialize and route through a transport).
 
-`resolve` MUST NOT block or contact the remote node to check existence. The system finds liveness when a message is sent, or through failure detection (§10). On a malformed or foreign `id`, `resolve` MUST return `ResolveError`.
+`resolve` MUST NOT block or contact the remote node to check existence. The system finds liveness when a message is sent, or through failure detection (§10). It is **infallible**: every `ActorId` is a well-formed, locality-classifiable struct (§3.6), so there is no failure case. Malformed network input never reaches `resolve` — it is rejected earlier, at the codec and the dispatch allowlist (§5, §15), which never construct an unknown type from untrusted bytes.
 
 ### 4.4 Manifests, dispatch, and message flow
 
@@ -302,26 +298,22 @@ Every message type carries a stable **manifest** (`Message::MANIFEST`, §3.2): i
 - The manifest MUST stay stable across recompiles and renames. An explicit string such as `"myapp.Greet"` is RECOMMENDED. A breaking change to the message's shape SHOULD become a new message type with a new manifest, rather than a silent redefinition of an existing one.
 - The **dispatch registry** maps `(actor type, manifest) → typed dispatch entry`. A dispatch entry knows how to deserialize `M` from a payload, enqueue `Handler::<M>::handle` on the resolved local actor's executor, and serialize `M::Reply`.
 
-**Registration.** An actor that can be addressed remotely lists the messages it accepts over the network by implementing `RemoteActor`. Each `r.accept::<M>()` call is an ordinary generic function that captures the monomorphized dispatch entry for `(Self, M)`.
+**Registration.** An actor that can be addressed remotely lists the messages it accepts over the network in `Actor::register` (§3.1.1) — the defaulted method whose default registers nothing. Each `r.accept::<M>()` call is an ordinary generic function that captures the monomorphized dispatch entry for `(Self, M)`:
 
 ```rust
-pub trait RemoteActor: Actor {
-    /// List the messages this actor accepts over the network.
-    /// Invoked once per actor type by `spawn` (guarded so it runs at most once).
-    fn register(r: &mut HandlerRegistry<Self>);
-}
-
 pub struct HandlerRegistry<A: Actor> { /* … */ }
 impl<A: Actor> HandlerRegistry<A> {
     pub fn accept<M>(&mut self) where A: Handler<M>, M: Message;  // generic library fn, no codegen
 }
 ```
 
-- `spawn` (§4.1) MUST call `A::register` the first time it spawns an actor of a `RemoteActor` type, filling the registry before any message can arrive. It needs no separate setup step and no link-time collection.
-- Registration is **inbound-remote only**: a purely local actor (never registered, never sent across nodes) needs no `RemoteActor` impl, and its messages flow by value (§4.3).
+`register` is a defaulted method on `Actor` so that `spawn`, which is generic over `A: Actor`, always has an `A::register` to call: a local actor inherits the empty default, a remote one overrides it. One generic spawn path serves both kinds of actor.
+
+- `spawn` (§4.1) calls `A::register` the first time it spawns an actor of type `A`, filling the registry before any message can arrive — no separate setup step, no link-time collection.
+- Registration is **inbound-remote only**: a purely local actor (never registered, never sent across nodes) keeps the empty default, and its messages flow by value (§4.3).
 - A network-delivered message whose `(actor type, manifest)` is not registered MUST yield `CallError::Unhandled`. The registry is also the deserialization allowlist (§5, §15): only listed message types are ever built from network bytes.
 
-> **Optional derive (non-normative).** Both hand-written pieces above, a message's `MANIFEST` and an actor's `register` body, are mechanical, and an optional derive MAY generate them: `#[derive(Message)]` defaulting the manifest from the type path, and `#[derive(RemoteActor)]` emitting one `accept::<M>()` per `Handler<M>` impl. Such a derive is a convenience layered *above* the model, not part of it: an implementation MUST work with the manifests and `register` lists written by hand, and a hand-written manifest MUST always override a derived default. This keeps the explicit-wire-contract guarantee while removing the per-message boilerplate (see the no-codegen goal, §1.1).
+A message's `MANIFEST` and an actor's `register` body are mechanical, so an optional derive MAY generate them — `#[derive(Message)]` defaulting the manifest from the type path, `#[derive(RemoteActor)]` emitting one `accept::<M>()` per `Handler<M>` impl. Such a derive is a convenience layered *above* the model: an implementation MUST work with hand-written manifests and `register` lists, and a hand-written manifest MUST override a derived default (the no-codegen goal, §1.1).
 
 **Outbound, `ActorRef::ask<M>` (typed layer above the trait):**
 1. Resolve the locality of `self.id`.
@@ -347,13 +339,13 @@ impl<A: Actor> HandlerRegistry<A> {
 pub struct ReplyHandle { /* opaque; holds correlation + reply channel */ }
 
 impl ReplyHandle {
-    pub async fn send<R: SerializationRequirement>(self, reply: R);  // serialize + return to caller
-    pub async fn fail(self, failure: CallError);                     // transport/system-level failure
-    pub fn none(self);                                               // for `tell`: no reply expected
+    pub fn send<R: SerializationRequirement>(self, reply: R);  // serialize + return to caller
+    pub fn fail(self, failure: CallError);                     // transport/system-level failure
+    pub fn none(self);                                         // for `tell`: no reply expected
 }
 ```
 
-`deliver` MUST resolve exactly one of these per `ask`. Because application errors live inside `M::Reply` (§3.2), `send` carries both successful and application-failed outcomes; `fail` is reserved for transport or system failures the handler never produced.
+These are synchronous: each serializes its outcome and hands it to the correlation channel, which applies no backpressure to the handler (the backpressure that does exist — mailbox enqueue (§6) and `Terminated` delivery (§12) — lives on those paths). `deliver` MUST resolve exactly one of them per `ask`. Because application errors live inside `M::Reply` (§3.2), `send` carries both successful and application-failed outcomes; `fail` is reserved for transport or system failures the handler never produced.
 
 ### 4.6 Runtime environment (clock, randomness, concurrency)
 
@@ -413,7 +405,7 @@ Rules:
 1. **One mailbox per actor.** Each local actor has a bounded mailbox (a multi-producer, single-consumer queue) feeding exactly one executor task.
 2. **Serial execution.** The executor processes one message to completion before the next. This is what makes `&mut self` sound (§3.5) and gives each actor a total order over the messages it observes.
 3. **Cooperative async.** A handler MAY `.await`. While it is suspended, the executor MUST NOT begin another message for that actor (no reentrancy). Handlers SHOULD avoid blocking the thread, and SHOULD offload blocking work.
-4. **Backpressure.** Mailboxes are bounded. When one is full, the system MUST apply a defined policy: `await` until space frees (default), or fail the send with `CallError::MailboxFull`. It MUST NOT drop messages silently.
+4. **Backpressure.** Mailboxes are bounded. When one is full, the system MUST apply a defined policy: `await` until space frees, or fail the send with `CallError::MailboxFull`. It MUST NOT drop messages silently. The two policies are separate calls: `tell` awaits, `try_tell` returns `CallError::MailboxFull` at once (local target).
 5. **Ordering guarantee.** Messages from a single sender to a single recipient arrive in send order (FIFO per directed pair). The system guarantees no ordering across different senders. `tell` and `ask` from the same sender share this order.
 6. **Fairness.** The runtime SHOULD schedule executors fairly so that no ready actor starves.
 
@@ -426,25 +418,24 @@ A transport is pluggable behind a trait; the default is TCP with length-delimite
 1. **Associations.** Before exchanging actor traffic, two nodes MUST complete a handshake that establishes an association: a protocol-version check, a node-identity exchange, codec agreement, and optional authentication (§15). The nodes send actor envelopes only over an established association.
 2. **Multiplexing.** Many actor conversations share one association. Each request carries a correlation id, and each response references it.
 3. **Framing.** Messages are length-delimited; a malformed frame MUST tear down the association, not the node.
-4. **Lifecycle signals.** The transport MUST report association establishment and loss to the membership and failure-detection subsystems (§9, §10).
+4. **Failure detection.** Liveness is decided by the SWIM detector (§10), which probes members independently of connection state, so a node whose association merely blipped is never mistaken for a failed one. A transport is not required to report association loss. It MAY surface establishment/loss as an *optimization hint* to speed detection (e.g. mark a peer `suspect` early), but such a hint MUST feed only SWIM's refutable `suspect` state, never the terminal `down` decision (§9.2).
 
-Like `ActorSystem` (§4.1), the transport is a trait, so the default TCP transport and the simulator's in-memory network (§18) are two implementations of one trait, indistinguishable from above:
+Like `ActorSystem` (§4.1), the transport is a trait, so the default TCP transport and the simulator's in-memory network (§18) are two implementations of one trait, indistinguishable from above. It carries outbound frames and releases its resources on stop; inbound frames are delivered out of band, through a channel the transport hands to the system's receive loop at construction (this avoids returning a single-consumer stream from `&self`):
 
 ```rust
-pub trait Transport: Send + Sync + 'static {
-    /// Establish (or reuse) an authenticated association to a node (§7.1, §15).
-    async fn connect(&self, peer: &NodeId) -> Result<(), TransportError>;
+pub trait Transport: Clone + Send + Sync + 'static {
+    /// Send one frame to `peer` over its association, dialing and completing the
+    /// §7.1 handshake on first use. At-most-once (§7.2): never retransmits.
+    async fn send(&self, peer: NodeId, frame: Frame) -> Result<(), TransportError>;
 
-    /// Send one frame to `peer` over its association. At-most-once (§7.2).
-    async fn send(&self, peer: &NodeId, frame: Frame) -> Result<(), TransportError>;
-
-    /// Inbound frames from all associations, demultiplexed by the receive loop (§4.4).
-    fn inbound(&self) -> impl Stream<Item = (NodeId, Frame)> + Send;
-
-    /// Association lifecycle, feeding membership and failure detection (§9, §10).
-    fn events(&self) -> impl Stream<Item = TransportEvent> + Send; // Associated | Lost
+    /// Release listeners, background tasks, and open associations on a graceful
+    /// stop (§9.3); closing the inbound path ends the system's receive loop.
+    /// Default no-op (the in-memory simulator holds nothing to release).
+    fn shutdown(&self) {}
 }
 ```
+
+`connect` is implicit — the first `send` to a peer dials lazily and runs the §7.1 handshake — so there is no separate `connect` method.
 
 ### 7.1 Wire protocol
 
@@ -453,14 +444,15 @@ Two message families travel over an association: **actor envelopes** and **syste
 ```
 Envelope {
     recipient:   ActorId,
-    manifest:    Manifest,         // message type id; the dispatch key (§4.4)
+    manifest:    String,           // message type id; the dispatch key (§4.4). The sender's
+                                   //   `&'static str` const becomes an owned String on the wire.
     correlation: Option<CallId>,   // Some ⇒ a reply is expected (ask); None ⇒ one-way (tell)
-    payload:     Bytes,            // encoded message
+    payload:     Vec<u8>,          // encoded message
 }
 
 Reply {
     correlation: CallId,
-    outcome:     Ok(Bytes) | Failure(CallError),   // application errors are inside Ok(Bytes) as M::Reply
+    outcome:     Ok(Vec<u8>) | Failure(CallError),   // application errors are inside Ok(..) as M::Reply
 }
 
 SystemMessage =
@@ -536,7 +528,7 @@ joining → up → leaving → down → removed
 
 1. Membership disseminates by **gossip**: each node periodically exchanges a digest with a random peer and merges newer information.
 2. Each member entry carries an **incarnation** number; the higher incarnation wins, letting a node refute a stale suspicion about itself.
-3. Transitioning a member to `up` or `down` is a cluster decision. A single elected **leader** (the lowest-address `up`, reachable member) SHOULD perform these transitions, and MUST act only once membership has **converged** (all `up` members agree on the current set), to avoid split decisions.
+3. Transitioning a member to `up` or `down` is a cluster decision the elected **leader** (the lowest-address `up`, reachable member) performs. Membership is **eventually consistent with no consensus** (§1.2), so "converged" means the leader acts on a **locally stable, fully-reachable view**: it waits until every live member it can see is `reachable` before admitting a `joining → up` or finalizing a `leaving → down`, so it never transitions members while its own view is in flux. Independently-reached decisions reconcile through the **lattice**: `up` is monotonic and `down` is terminal and leader-gated, so two leaders' views merge without conflict once gossip carries them across. (Reachability-driven `unreachable → down` under a non-default `Timeout` policy is leader-gated but not gated on full reachability — the node being downed is unreachable by definition.)
 4. A network partition leaves each side seeing the other as `unreachable`. The framework MUST NOT auto-`down` across a partition by default; the downing policy (manual, timeout-based, or quorum-based) is configurable, and the default SHOULD be conservative.
 
 ### 9.3 Joining and leaving
@@ -582,10 +574,10 @@ pub enum SupervisionDirective {
 ```
 
 - The **default** directive MUST be `Stop`. For transient faults, `Restart` is usually the better choice.
-- **Restart** MUST construct a fresh actor value (state is not preserved by default) while the actor keeps its `ActorId` and mailbox. Exceeding `max` restarts `within` the window MUST escalate to `Stop`.
+- **Restart** MUST construct a fresh actor value (state is not preserved by default) while the actor keeps its `ActorId` and mailbox. Constructing a fresh value requires a *factory*: an actor spawned this way (`spawn_with` for a root, `Ctx::spawn_with` for a child) is restartable. An actor spawned **by value** (`spawn`/`Ctx::spawn`) consumes the only instance, so it cannot be reconstructed; for it a `Restart` directive MAY degrade to `Stop`. The safety property is unaffected either way — a fault is always contained (invariant #18); degradation only means the actor stops instead of restarting. Exceeding `max` restarts `within` the window MUST escalate to `Stop`.
 - **Backoff** between restarts MUST be supported (exponential with jitter RECOMMENDED) to avoid hot-restart loops.
 - A `restart` re-runs `A::started`; the prior value's `A::stopped` runs with `StopReason::Failed`.
-- A per-actor **decider** produces the decision: `fn decide(&Fault) -> SupervisionDirective`, allowing a different directive per fault kind.
+- A per-actor **decider** produces the decision — `fn decide(Fault) -> SupervisionDirective` (`Fault` is a small `Copy` enum) — allowing a different directive per fault kind.
 
 ### 11.3 Scope
 Supervision is a **local** mechanism: a node supervises only its own actors. Remote failures are not supervised; they surface to callers as `CallError` (§8) and to watchers as `Terminated` (§12).
@@ -633,11 +625,13 @@ Actors are addressed by `ActorRef`, but a node needs a way to obtain the initial
 pub struct Key<A: Actor> { id: &'static str, _marker: PhantomData<A> }
 
 impl Receptionist {
-    fn register<A: Actor>(&self, key: Key<A>, who: ActorRef<A>);
-    async fn lookup<A: Actor>(&self, key: Key<A>) -> Listing<A>;          // current snapshot
+    fn register<A: Actor>(&self, key: Key<A>, who: &ActorRef<A>);
+    fn lookup<A: Actor>(&self, key: Key<A>) -> Listing<A>;                // current snapshot
     fn subscribe<A: Actor>(&self, key: Key<A>) -> impl Stream<Item = Listing<A>>; // live updates
 }
 ```
+
+`lookup` is synchronous: the listing is replicated local state (requirement 2), so it is a snapshot read with nothing to await; `subscribe` is a stream of live updates.
 
 Requirements:
 1. The receptionist is a well-known actor (§3.6), resolvable on every node without prior introduction.
@@ -698,7 +692,7 @@ impl<A: Actor> ActorRef<A> {
 1. **Transport security.** Associations SHOULD support mutual TLS, and node identity SHOULD bind to a verified certificate.
 2. **Authentication.** The handshake SHOULD authenticate the peer and MAY enforce an allowlist of permitted node identities or clusters; a cluster secret prevents accidental cross-cluster association.
 3. **Deserialization safety.** As in §5, the dispatch registry MUST instantiate only registered, allowlisted message types from network input. No path may lead from an incoming envelope to constructing an arbitrary type.
-4. **Authorization.** A system MAY gate `deliver` per `(peer, actor, manifest)`; it MUST reject an unauthorized message as a system failure, not handle it.
+4. **Authorization.** A system MAY gate `deliver` per `(peer, actor, manifest)` through an optional `Authorizer` (`fn authorize(&self, peer: NodeId, recipient: &ActorId, manifest: &str) -> bool`), consulted before an envelope is dispatched. A denied message MUST be rejected as a system failure — never deserialized into the actor's type, so an unauthorized peer cannot trigger handler side effects. With no `Authorizer`, every message that clears the handshake is admitted.
 
 ---
 
@@ -709,7 +703,7 @@ A conforming system SHOULD expose:
 - **Tracing:** propagate a trace/correlation context through envelopes, so a logical request can be followed across nodes.
 - **Lifecycle logging:** spawn and resign, membership transitions, downing decisions, and supervision actions, each at a defined, filterable level.
 
-The same events drive deterministic simulation: a simulator subscribes to this stream to check invariants continuously (§18.5). A conforming system SHOULD emit, as structured events, `assign_id`/`actor_ready`/`resign_id` (§4.2), mailbox enqueue and dispatch (§6), every `ask` outcome (§14), membership and reachability transitions (§9 and §10), supervision decisions (§11), and `Terminated` deliveries (§12).
+The same events drive deterministic simulation: a simulator subscribes to this stream to check invariants (§18.5). A conforming system SHOULD emit, as structured events on a single (extensible) `Event` enum: `assign_id`/`actor_ready`/`resign_id` (§4.2), mailbox enqueue and dispatch (§6), every `ask` outcome (§14), membership and reachability transitions (§9 and §10), supervision decisions (§11), and `Terminated` deliveries (§12). Metrics and cross-node trace propagation are not yet provided (both RECOMMENDED); the event stream is the substrate they would build on.
 
 ---
 
@@ -725,7 +719,7 @@ An implementation conforms to this specification **iff** every property below ho
 | Lifecycle `assign_id → actor_ready → resign_id`: ordering and exactly-once | §4.2 | §18.5 #6 |
 | `resolve` classifies locality with no network round-trip | §4.3 | §18.5 #7 |
 | Stable hand-written manifest; unregistered `(actor, manifest)` → `Unhandled` | §4.4 | §18.5 #8; construction |
-| Remote dispatch listed by a hand-written `RemoteActor::register`; no framework macro | §1.1, §4.4 | construction |
+| Remote dispatch listed by a hand-written `register` (a defaulted `Actor` method); no framework macro | §1.1, §4.4 | construction |
 | Local sends enqueue by value, without serialization | §4.3, §4.4 | §18.5 #9 |
 | `ActorRef`s in messages/replies are rebound on decode | §4.4 | §18.5 #10 |
 | Every message and reply satisfies `SerializationRequirement` | §5 | compile-time (trait bound) |
@@ -772,12 +766,17 @@ Because these are the *same* traits production uses, simulation runs the real `A
 
 Under seed control, a simulator MUST be able to inject at least:
 
-- **Transport:** frame drop, duplication, delay, reordering; corruption (which MUST tear down the association, not the node; §7); association loss.
+- **Transport:** frame drop, duplication, delay, reordering; association loss.
 - **Mailbox:** induced `MailboxFull`; maximal cross-sender reordering subject to per-sender FIFO (§6).
 - **Scheduling:** seed-randomized selection among ready tasks.
 - **Membership / SWIM:** dropped or delayed pings, partitions, stale or replayed gossip, stale incarnations (§9 and §10).
 - **Supervision:** induced handler and `started()` faults (§11).
 - **Nodes:** abrupt crash (no graceful leave) at an arbitrary step, which MUST surface as `NodeDown`/`Terminated` to watchers (§12) and `Unreachable` to in-flight callers (§7.2).
+
+A fault is realized by the mechanism that fits its layer, as long as the effect is exercised:
+- **Frame corruption** is meaningful only where real bytes exist. The in-memory simulator carries *structured* frames (only the message payload is codec-encoded, §18.2), so it has nothing to bit-flip; the "malformed frame MUST tear down the association, not the node" requirement (§7) is exercised by the production transport's framing tests against real wire bytes. The simulator covers the observable consequence — a lost association — directly.
+- **Stale / replayed gossip and stale incarnations** arise from applying drop / duplication / delay / reordering to the gossip-bearing frames; they need no separate injector because gossip rides the same faulted transport.
+- **Induced handler / `started()` faults** are produced by workload actors that fault on demand (a handler that panics, a `started` that returns `Err`), which is how supervision (§11) is exercised, rather than by reaching into an arbitrary actor.
 
 Each run SHOULD enable a random subset of faults at random intensities (sometimes called "swarm" testing); a run with no faults is the simplest case and MUST still pass.
 
@@ -787,7 +786,9 @@ Tests are expressed as **workloads** over the cluster: a `setup` that builds act
 
 ### 18.5 Invariant catalogue
 
-These invariants appear as MUSTs throughout this specification, and those inline MUSTs are their normative statements. Collected here, they are the contract a simulator checks **continuously** during every run and at final quiescence, and the targets §17 verifies against. Each MUST hold even under the faults of §18.3.
+These invariants appear as MUSTs throughout this specification, and those inline MUSTs are their normative statements. Collected here, they are the contract a conforming implementation verifies, and the targets §17 checks against. Each MUST hold even under the faults of §18.3.
+
+Verification is **layered**, not uniform (see §18.6). The core *safety* properties — those expressible as "a bad thing never happens" over the §16 event stream — are checked **continuously**, on every run and at final quiescence, by a small set of always-on checkers (today: #1 no-silent-loss, #4 serial execution, #6 lifecycle, #15 down-is-terminal). The rest are verified by the method that fits them: a *liveness* or scenario property by a targeted conformance test, type-safety (#20) by a compile-fail test, location transparency (#21) by a differential local-vs-remote run. A machine-checked **catalogue** records, per invariant, which method applies; a drift test (`conformance_catalogue`) fails the build if a continuous checker and its catalogue entry disagree, so the §17 "Verified by" column stays mechanically true. Promoting a property from a targeted test to a continuous checker is always sound where it is a true safety invariant over the existing event stream.
 
 1. **No silent loss (§7.2, §14).** Every `ask` issued terminates in exactly one of `Ok(reply)`, `Timeout`, `Unreachable`, `DeadLetter`, or `Unhandled`; at final quiescence no `ask` remains pending.
 2. **Crash completes in-flight calls (§7.2, §10).** An `ask` whose target node is declared `down` completes with `Unreachable`; it never hangs.
@@ -814,18 +815,21 @@ These invariants appear as MUSTs throughout this specification, and those inline
 ### 18.6 Reproduction, layering, and CI
 
 - **Reproduction.** A failing run MUST be replayable from its `(seed, configuration)` alone.
-- **Layered checks.** Simulation covers the distributed invariants (1 to 19, and 21). Compile-fail tests cover invariant 20: a compiler run that asserts the rejection of invalid sends. The low-level mailbox and executor (§6) SHOULD also be model-checked across all interleavings, separately from the simulator.
-- **Regression corpus.** Every past failure SHOULD be kept as a `(seed, configuration)` and replayed permanently.
-- **Continuous testing.** CI SHOULD run many fresh seeds per change across different fault configurations; the coverage metric is cluster-hours exercised per change, not test count.
+- **Layered checks.** Simulation covers the distributed invariants (1 to 19, and 21). Compile-fail tests cover invariant 20: a compiler run that asserts the rejection of invalid sends. Because the simulator drives the mailbox and executor (§6) on a single-thread cooperative scheduler whose ready-task selection is seed-randomized (§18.3), it already explores interleavings deterministically and reproducibly; a separate `loom`/`kani` model-check of the executor across all interleavings is therefore an optional, complementary cross-check rather than a prerequisite.
+- **Regression corpus.** A failure SHOULD be kept as a `(seed, configuration)` and replayed permanently. The fixed-seed swarm sweeps (the single-node and cluster swarm tests) serve as the standing corpus.
+- **Continuous testing.** CI SHOULD run many seeds per change across different fault configurations; the coverage metric is cluster-hours exercised per change, not test count. (The reference CI runs the fixed-seed corpus on every change; per-run fresh-seed sweeps are a noted enhancement.)
 
 ---
 
 ## Appendix A: End-to-end example
 
 ```rust
-// --- Define the actor (plain struct + trait impl, no macros) ---
+// --- Define the actor; `register` lists the messages it accepts over the network ---
 pub struct Greeter { greeting: String }
-impl Actor for Greeter { type System = ClusterSystem; }
+impl Actor for Greeter {
+    type System = ClusterSystem;
+    fn register(r: &mut HandlerRegistry<Self>) { r.accept::<Greet>(); }  // macro-free; spawn calls it once
+}
 
 // --- Define a message (serde derive only; wire identity is a hand-written const) ---
 #[derive(Serialize, Deserialize)]
@@ -841,23 +845,16 @@ impl Handler<Greet> for Greeter {
     }
 }
 
-// --- List the messages Greeter accepts over the network (macro-free; spawn calls this once) ---
-impl RemoteActor for Greeter {
-    fn register(r: &mut HandlerRegistry<Self>) {
-        r.accept::<Greet>();
-    }
-}
-
 const GREETERS: Key<Greeter> = Key::new("greeters");
 
 // --- Host node ---
 let system = ClusterSystem::start("node-a", config).await?;
 let greeter = system.spawn(Greeter { greeting: "Hello".into() });
-system.receptionist().register(GREETERS, greeter.clone());
+system.receptionist().register(GREETERS, &greeter);
 
 // --- Client node (joined to the same cluster) ---
 let system = ClusterSystem::start("node-b", config.with_seed("node-a")).await?;
-let listing = system.receptionist().lookup(GREETERS).await;
+let listing = system.receptionist().lookup(GREETERS);   // synchronous snapshot (§13)
 if let Some(greeter) = listing.first() {
     // Identical call site whether `greeter` is local or remote.
     // `greeter.ask(Greet { .. })` compiles only because Greeter: Handler<Greet>.
@@ -875,12 +872,14 @@ if let Some(greeter) = listing.first() {
 ```
 actor/                  # umbrella re-export
 actor-core/             # Actor, Message, Handler, ActorRef, Ctx, ActorSystem,
-                         #   RemoteActor, HandlerRegistry, Manifest, CallError (§3, §4, §14)
+                         #   HandlerRegistry, Manifest, CallError (§3, §4, §14)
 actor-serialization/    # SerializationRequirement, dispatch registry, codecs (§5, §4.4)
 actor-cluster/          # ClusterSystem: transport, membership, SWIM, supervision,
                          #   death watch, receptionist (§7 to §13). The reference ActorSystem.
+actor-runtime/          # Production seam: wall-clock Clock, OS-seeded Entropy,
+                         #   multi-thread Spawner, mutual-TLS TCP Transport (§4.6, §7, §15)
 actor-simulation/       # TEST-ONLY. Virtual Clock/Entropy/Spawner + in-memory Transport,
                          #   the deterministic simulator, fault injection, invariant checkers (§18)
 ```
 
-Message identity is a `const`, remote dispatch is a hand-written `RemoteActor::register` list, and the call path is ordinary generic code in `actor-core`. No *required* macro crate exists; any `#[derive(Message)]` or `#[derive(RemoteActor)]` (§4.4) is an optional convenience layered above the model, not a dependency of it.
+Message identity is a `const`, remote dispatch is a hand-written `register` list (a defaulted `Actor` method, §4.4), and the call path is ordinary generic code in `actor-core`. The runtime-agnostic crates (`actor-core`, `actor-cluster`) take their `Clock`/`Entropy`/`Spawner`/`Transport` from a seam (§4.6, §7); `actor-runtime` supplies the production implementations and `actor-simulation` the virtual ones, so neither core nor cluster binds to a specific async runtime. No *required* macro crate exists; any `#[derive(Message)]` or `#[derive(RemoteActor)]` (§4.4) is an optional convenience layered above the model, not a dependency of it.
