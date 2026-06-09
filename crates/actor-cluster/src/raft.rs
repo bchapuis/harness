@@ -61,7 +61,7 @@ pub struct LogEntry {
 
 /// The durable Raft state a voter must persist (spec §9.4.3 item 2): the
 /// current term, the vote cast in it, and the log.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct PersistedRaft {
     pub term: u64,
     pub voted_for: Option<NodeId>,
@@ -69,9 +69,11 @@ pub struct PersistedRaft {
 }
 
 /// The durability seam for a voter's Raft state (spec §9.4.3 item 2):
-/// persisted before the state takes effect, reloaded on restart. In-memory for
-/// simulation ([`InMemoryRaftStorage`]); a production implementation persists
-/// to disk.
+/// persisted before the state takes effect, reloaded on restart. The methods
+/// are synchronous on purpose: when one returns, the data MUST be durable —
+/// the caller sends the messages announcing the state right after. In-memory
+/// for simulation ([`InMemoryRaftStorage`]); `actor-runtime` supplies the
+/// production `FileRaftStorage`.
 pub trait RaftStorage: Send + Sync + 'static {
     /// Load the persisted state (empty/default on first start).
     fn load(&self) -> PersistedRaft;

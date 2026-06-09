@@ -13,7 +13,9 @@ use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
 use actor_cluster::DowningPolicy;
 use actor_cluster::GossipMode;
+use actor_cluster::LeaderMode;
 use actor_cluster::MembershipMode;
+use actor_cluster::RaftConfig;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorSystem;
@@ -193,6 +195,42 @@ pub fn start_node(cfg: TcpConfig, listener: TcpListener) -> TcpCluster {
 /// Like [`start_node`], but with SWIM failure detection enabled.
 pub fn start_node_swim(cfg: TcpConfig, listener: TcpListener, swim: SwimConfig) -> TcpCluster {
     start_node_cfg(cfg, listener, Some(swim))
+}
+
+/// Start a cluster node in **leader-based** mode (spec §9.4.3): membership
+/// transitions are quorum-committed Raft log entries, with `raft` supplying the
+/// voter set, timing, and (durable) storage.
+pub fn start_node_leader(
+    cfg: TcpConfig,
+    listener: TcpListener,
+    swim: SwimConfig,
+    raft: RaftConfig,
+    downing: DowningPolicy,
+) -> TcpCluster {
+    let node = cfg.node;
+    let codec: Arc<dyn Codec> = Arc::clone(&cfg.codec);
+    let (transport, inbound) = TcpTransport::start(cfg, listener);
+    let config = ClusterConfig {
+        codec,
+        mailbox_capacity: 64,
+        events: Arc::new(()),
+        membership: MembershipMode::Leader(LeaderMode {
+            swim,
+            raft,
+            downing,
+        }),
+        joining: false,
+        authorizer: None,
+    };
+    ClusterSystem::start(
+        node,
+        TokioClock::new(),
+        OsEntropy::new(),
+        TokioSpawner::current(),
+        transport,
+        inbound,
+        config,
+    )
 }
 
 fn start_node_cfg(cfg: TcpConfig, listener: TcpListener, swim: Option<SwimConfig>) -> TcpCluster {

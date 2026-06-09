@@ -12,6 +12,8 @@
 //! - [`TokioSpawner`] — tasks on a tokio runtime.
 //! - [`TcpTransport`] — length-delimited frames over TCP, behind a mutual-TLS
 //!   association handshake with a cluster secret and a node allowlist (§7, §15).
+//! - [`FileRaftStorage`] — a voter's durable Raft state on the local
+//!   filesystem, for the leader-based control plane (§9.4.3).
 //!
 //! tokio and rustls live here and only here, so the core and cluster crates stay
 //! free of any specific async runtime.
@@ -32,12 +34,14 @@
 mod clock;
 mod entropy;
 mod spawner;
+mod storage;
 mod transport;
 mod wire;
 
 pub use clock::TokioClock;
 pub use entropy::OsEntropy;
 pub use spawner::TokioSpawner;
+pub use storage::FileRaftStorage;
 pub use transport::DEFAULT_CONNECT_TIMEOUT;
 pub use transport::DEFAULT_HANDSHAKE_TIMEOUT;
 pub use transport::DEFAULT_OUTBOUND_CAPACITY;
