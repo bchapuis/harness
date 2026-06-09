@@ -781,6 +781,13 @@ async fn receive_loop<C, E, S, T>(
     T: Transport,
 {
     while let Ok((from, frame)) = inbound.recv().await {
+        // A stopped node processes nothing further (spec §9.3): frames already
+        // queued when `shutdown` was called are dropped, not handled. This is
+        // what lets a restart hand the node's durable state to a successor —
+        // the old incarnation can no longer write to it.
+        if system.is_shutting_down() {
+            return;
+        }
         match frame {
             Frame::Envelope {
                 recipient,

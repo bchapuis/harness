@@ -363,6 +363,81 @@ impl ClusterWorkload for LeaderChurn {
     }
 }
 
+/// Leader-mode churn with a voter **restarting** every other round: the
+/// restart seam (abrupt stop, storage reload, fresh loops drawing from the
+/// shared entropy stream) is itself part of the deterministic surface and must
+/// replay byte-for-byte (spec §18.1).
+struct RestartReplay {
+    nodes: usize,
+    rounds: u64,
+}
+
+impl ClusterWorkload for RestartReplay {
+    fn name(&self) -> &'static str {
+        "repro-restart-churn"
+    }
+
+    fn node_count(&self) -> usize {
+        self.nodes
+    }
+
+    fn swim(&self) -> SwimConfig {
+        SwimConfig {
+            probe_interval: Duration::from_millis(100),
+            rtt: Duration::from_millis(50),
+            suspect_timeout: Duration::from_millis(200),
+            indirect_count: 2,
+        }
+    }
+
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Leader {
+            swim: self.swim(),
+            voters: 3,
+            election_timeout: Duration::from_millis(500),
+            heartbeat_interval: Duration::from_millis(100),
+            downing: DowningPolicy::Conservative,
+        }
+    }
+
+    fn setup(&self, ctx: &ClusterCtx) {
+        for node in ctx.nodes() {
+            let greeter = node.spawn(Greeter);
+            node.receptionist().register(GREETERS, &greeter);
+        }
+    }
+
+    fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
+        let caller = ctx.nodes()[0].clone();
+        let net = ctx.net().clone();
+        let victim = ctx.nodes()[1].node();
+        let rounds = self.rounds;
+        Box::pin(async move {
+            let clock = caller.clock().clone();
+            for round in 0..rounds {
+                clock.sleep(Duration::from_millis(300)).await;
+                if round % 2 == 0 {
+                    net.restart(victim);
+                }
+                for service in caller.receptionist().lookup(GREETERS).iter() {
+                    let _ = service.ask_timeout(Greet, Duration::from_millis(500)).await;
+                }
+            }
+        })
+    }
+}
+
+#[test]
+fn restart_churn_event_stream_is_byte_identical_across_seeds() {
+    let workload = RestartReplay {
+        nodes: 3,
+        rounds: 8,
+    };
+    if let Err(divergence) = replay_cluster_swarm(&workload, 0..24) {
+        panic!("{divergence}");
+    }
+}
+
 #[test]
 fn leader_mode_event_stream_is_byte_identical_across_seeds() {
     // Raft's timers, jitter, replication, and commit application must be as

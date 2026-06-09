@@ -421,6 +421,83 @@ fn watch_under_chaos_never_double_delivers_a_terminated() {
     }
 }
 
+// --- Restart churn (spec §9.4.3 item 2, §18.3) ---------------------------------
+
+/// Leader-mode traffic while voters restart every round: each restarted voter
+/// reloads its persisted term, vote, and log through the per-node storage seam.
+/// This is the regression guard for the classic persistence bug — a voter that
+/// forgets `voted_for` across a restart can grant a second vote in the same
+/// term and elect two leaders, which the continuous `OneLeaderPerTerm` checker
+/// (invariant #22) would catch on some seed of the sweep.
+struct RestartChurn {
+    nodes: usize,
+    rounds: u64,
+}
+
+impl ClusterWorkload for RestartChurn {
+    fn name(&self) -> &'static str {
+        "restart-churn"
+    }
+
+    fn node_count(&self) -> usize {
+        self.nodes
+    }
+
+    fn swim(&self) -> SwimConfig {
+        swarm_swim()
+    }
+
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Leader {
+            swim: self.swim(),
+            voters: 3,
+            election_timeout: Duration::from_millis(500),
+            heartbeat_interval: Duration::from_millis(100),
+            downing: DowningPolicy::Conservative,
+        }
+    }
+
+    fn setup(&self, ctx: &ClusterCtx) {
+        for node in ctx.nodes() {
+            let greeter = node.spawn(Greeter);
+            node.receptionist().register(GREETERS, &greeter);
+        }
+    }
+
+    fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
+        // Node 1 stays up as the caller; voters 2 and 3 restart on alternating
+        // rounds — often mid-election, thanks to the nemesis's partitions.
+        let caller = ctx.nodes()[0].clone();
+        let net = ctx.net().clone();
+        let victims = [ctx.nodes()[1].node(), ctx.nodes()[2].node()];
+        let rounds = self.rounds;
+        Box::pin(async move {
+            let clock = caller.clock().clone();
+            for round in 0..rounds {
+                clock.sleep(Duration::from_millis(300)).await;
+                net.restart(victims[(round % 2) as usize]);
+                for service in caller.receptionist().lookup(GREETERS).iter() {
+                    // Any outcome is acceptable (a restarted host loses its
+                    // actors); the invariant is completion, and — via the
+                    // checker — election safety across all the churn.
+                    let _ = service.ask_timeout(Greet, Duration::from_millis(500)).await;
+                }
+            }
+        })
+    }
+}
+
+#[test]
+fn restart_churn_upholds_election_safety_across_seeds() {
+    let workload = RestartChurn {
+        nodes: 3,
+        rounds: 10,
+    };
+    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+        panic!("{failure}");
+    }
+}
+
 #[test]
 fn a_cluster_seed_replays() {
     let workload = DiscoverAndCall {

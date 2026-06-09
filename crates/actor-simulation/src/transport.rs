@@ -245,6 +245,49 @@ impl SimNetwork {
         system
     }
 
+    /// Restart `node` (spec §18.3, §9.4.3 item 2): stop its current system —
+    /// an **abrupt** stop, not a graceful leave — and bring up a fresh one
+    /// under the same identity and mode. Volatile state is lost exactly as a
+    /// process death loses it (actors, the membership view, Raft's role and
+    /// commit index); durable state survives through the mode's storage seam —
+    /// the per-node-cached [`RaftStorage`](actor_cluster::RaftStorage), the
+    /// external registry. Network blocks involving the node are cleared: the
+    /// new process comes up with working connectivity.
+    ///
+    /// The old instance is shut down *before* its successor exists, and a
+    /// shut-down node processes nothing further, so the old incarnation can
+    /// never write to the shared durable state after the new one has loaded
+    /// it — the property the production restart relies on, modeled exactly.
+    pub fn restart(&self, node: NodeId) -> SimCluster {
+        let old = {
+            let mut inner = self.inner.lock().expect("network mutex poisoned");
+            let index = inner
+                .joined
+                .iter()
+                .position(|system| system.node() == node)
+                .expect("restart of a node that never joined");
+            inner.joined.remove(index)
+        };
+        old.shutdown();
+        {
+            let mut inner = self.inner.lock().expect("network mutex poisoned");
+            // Drop the old inbound sender: queued frames die with the old
+            // receive loop, and new frames route to the successor only.
+            inner.nodes.remove(&node);
+            inner.blocked.retain(|(a, b)| *a != node && *b != node);
+        }
+        let system = self.bring_up(node, false);
+        let mut inner = self.inner.lock().expect("network mutex poisoned");
+        for existing in &inner.joined {
+            // Re-introduce the roster both ways; `add_member` is idempotent and
+            // never resurrects a terminal member.
+            existing.add_member(node);
+            system.add_member(existing.node());
+        }
+        inner.joined.push(system.clone());
+        system
+    }
+
     /// Sever communication between two groups of nodes (spec §18.3): frames on
     /// any cross pair are dropped, in both directions.
     pub fn partition(&self, side_a: &[NodeId], side_b: &[NodeId]) {

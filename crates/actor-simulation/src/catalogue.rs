@@ -202,7 +202,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         property: "Quorum-gated control plane: every transition is a quorum-committed log entry applied in log order; at most one leader per term; a minority never evicts the majority",
         verify: &[
             Verify::Checker("one-leader-per-term"),
-            Verify::SimTest("conformance_leader.rs"),
+            Verify::SimTest("conformance_leader.rs, conformance_restart.rs, cluster_swarm.rs"),
         ],
     },
 ];

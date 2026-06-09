@@ -133,19 +133,36 @@ pub struct RaftConfig {
     /// Leader heartbeat/replication cadence. Must be well under
     /// `election_timeout`.
     pub heartbeat_interval: Duration,
-    /// Per-node storage factory (spec §9.4.3 item 2). Defaults to in-memory.
+    /// Per-node storage factory (spec §9.4.3 item 2). It MUST be
+    /// **per-node-stable**: calling it again with the same `NodeId` must hand
+    /// back the same durable state, so a restarted voter reloads the term it
+    /// voted in rather than a blank slate (the double-vote hazard). A
+    /// filesystem-backed factory is stable through the disk; the default
+    /// caches one in-memory storage per node.
     pub storage: Arc<dyn Fn(NodeId) -> Arc<dyn RaftStorage> + Send + Sync>,
 }
 
 impl RaftConfig {
     /// A config for `voters` with in-memory storage and default timing
-    /// (1s election timeout, 250ms heartbeats).
+    /// (1s election timeout, 250ms heartbeats). The default storage factory
+    /// caches one [`InMemoryRaftStorage`] per node, so state survives as long
+    /// as the config does — under simulation, a restarted node reloads its
+    /// persisted Raft state exactly as a production node reloads it from disk.
     pub fn new(voters: Vec<NodeId>) -> RaftConfig {
+        let cache: Mutex<BTreeMap<NodeId, Arc<dyn RaftStorage>>> = Mutex::new(BTreeMap::new());
         RaftConfig {
             voters,
             election_timeout: Duration::from_secs(1),
             heartbeat_interval: Duration::from_millis(250),
-            storage: Arc::new(|_| Arc::new(InMemoryRaftStorage::new())),
+            storage: Arc::new(move |node| {
+                Arc::clone(
+                    cache
+                        .lock()
+                        .expect("raft storage cache poisoned")
+                        .entry(node)
+                        .or_insert_with(|| Arc::new(InMemoryRaftStorage::new())),
+                )
+            }),
         }
     }
 }
