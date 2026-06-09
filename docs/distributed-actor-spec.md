@@ -105,6 +105,8 @@ pub trait Message: SerializationRequirement {
 }
 ```
 
+`Manifest` is a `const`-constructible newtype over `&'static str`. The transport boundary passes the inner `&'static str` (§4.1); in the envelope it travels as an owned `String` (§7.1), matched against the registered manifests on receipt (§4.4).
+
 An actor accepts a message by implementing `Handler<M>`:
 
 ```rust
@@ -155,8 +157,14 @@ impl<A: Actor> ActorRef<A> {
     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, CallError>
     where A: Handler<M>, M: Message;
 
-    /// Fire-and-forget. Errors only for enqueue/transport failure, not handler outcome.
+    /// Fire-and-forget. Errors only for transport failure, never for handler
+    /// outcome; a full local mailbox awaits space (§6).
     pub async fn tell<M>(&self, msg: M) -> Result<(), CallError>
+    where A: Handler<M>, M: Message;
+
+    /// Like `tell`, but a full local mailbox fails with `CallError::MailboxFull`
+    /// at once instead of awaiting space (§6).
+    pub async fn try_tell<M>(&self, msg: M) -> Result<(), CallError>
     where A: Handler<M>, M: Message;
 
     /// Same as `ask` but with an explicit deadline overriding the system default.
@@ -167,7 +175,7 @@ impl<A: Actor> ActorRef<A> {
 
 - The `A: Handler<M>` bound is the dispatch mechanism: it proves at compile time that `A` accepts `M`, so invalid sends do not compile and no runtime check is needed.
 - `ask` and `tell` are **identical** for local and remote targets. The system decides at call time whether to enqueue locally or send over a transport (§4.4).
-- An `ActorRef` MAY be a field of a message or of an `M::Reply`. On the wire only the `ActorId` travels; the receiving node rebinds it to its own system on decode, yielding a working local-or-remote `ActorRef` there (§4.3).
+- An `ActorRef` MAY be a field of a message or of an `M::Reply`. On the wire only the `ActorId` travels; the receiving node rebinds it to its own system on decode, yielding a working local-or-remote `ActorRef` there (§4.4).
 - An `ActorRef` MUST NOT expose actor state or handlers.
 
 ### 3.4 Context (`Ctx`)
@@ -240,7 +248,7 @@ The system is the runtime an actor runs on. The cluster runtime (§9 to §13) is
 A system resolves ids to refs and bridges the transport boundary, working on already-serialized payloads (the typed API and the local fast path live in the `ActorRef`/mailbox layer above):
 
 ```rust
-pub trait ActorSystem: Send + Sync + 'static {
+pub trait ActorSystem: Clone + Send + Sync + 'static {   // Clone: a system value is a cheap handle (§3.3)
     // ---- Resolution (§4.3) ----
     /// Build a typed handle to `id`. Infallible: every `ActorId` is well-formed
     /// and locality-classifiable (§3.6), so resolution never fails.
@@ -257,7 +265,7 @@ pub trait ActorSystem: Send + Sync + 'static {
 }
 ```
 
-The wire identity is the message's `MANIFEST` (§3.2) as a `&'static str`, and the payload is its codec-encoded bytes. The system also performs internal operations the contract orchestrates but does not expose as separately-called API: the lifecycle steps `assign_id` / `actor_ready` / `resign_id` (§4.2), and the inbound `deliver`, which the node's receive loop invokes to dispatch a decoded message to a local actor (§4.4).
+The wire identity is the message's `MANIFEST` (§3.2), passed as its inner `&'static str`, and the payload is its codec-encoded bytes. The system also performs internal operations the contract orchestrates but does not expose as separately-called API: the lifecycle steps `assign_id` / `actor_ready` / `resign_id` (§4.2), and the inbound `deliver`, which the node's receive loop invokes to dispatch a decoded message to a local actor (§4.4).
 
 The user-facing entry point is `spawn`. It composes the lifecycle steps in the order §4.2 specifies:
 
@@ -274,7 +282,7 @@ For each actor, the system MUST observe exactly this order:
 2. mailbox created, executor started, actor bound; A::started() runs before first user message
 3. actor_ready(actor) → ActorRef  // id becomes resolvable; messages may now be delivered
 4. … actor processes messages …
-5. resign_id(id)                  // on stop/failure; A::stopped() runs; releases all resources; idempotent
+5. resign_id(id)                  // on stop/failure; A::stopped() runs; releases all resources
 ```
 
 Invariants (MUST):
@@ -282,6 +290,8 @@ Invariants (MUST):
 - `actor_ready` runs exactly once; after it returns, `resolve(id)` succeeds and the mailbox accepts messages.
 - `resign_id` runs exactly once, even when spawn fails between steps 1 and 3, in which case it follows `assign_id` directly.
 - Between `assign_id` and `actor_ready` the id is reserved but **not** deliverable; the system MUST dead-letter or buffer messages to it, never silently accept them.
+
+Steps 2 and 3 overlap in time: `spawn` is synchronous (§4.1), so `actor_ready` does not await the async `A::started`. Messages delivered after `actor_ready` queue in the mailbox while `started` runs; the normative ordering is *`started` completes before the first user message is processed*, not *`started` completes before `actor_ready`*.
 
 ### 4.3 Resolution: local vs remote
 
@@ -325,7 +335,7 @@ A message's `MANIFEST` and an actor's `register` body are mechanical, so an opti
 `tell<M>` is identical but expects no reply (`remote_tell`); for a local target it enqueues without a reply channel.
 
 **Inbound, system receive loop (remote path):**
-1. Decode the envelope header → `recipient: ActorId`, `manifest: Manifest`, optional `correlation`.
+1. Decode the envelope header → `recipient: ActorId`, `manifest: String` (matched against the registered manifests, §3.2), optional `correlation`.
 2. `resolve(recipient)`; if no live local actor → reply `CallError::DeadLetter`.
 3. `system.deliver(recipient, manifest, payload, reply)`, which:
    a. Looks up `(type of the resolved actor, manifest)` in the dispatch registry; if absent → `CallError::Unhandled`.
@@ -408,8 +418,8 @@ Rules:
 1. **One mailbox per actor.** Each local actor has a bounded mailbox (a multi-producer, single-consumer queue) feeding exactly one executor task.
 2. **Serial execution.** The executor processes one message to completion before the next. This is what makes `&mut self` sound (§3.5) and gives each actor a total order over the messages it observes.
 3. **Cooperative async.** A handler MAY `.await`. While it is suspended, the executor MUST NOT begin another message for that actor (no reentrancy). Handlers SHOULD avoid blocking the thread, and SHOULD offload blocking work.
-4. **Backpressure.** Mailboxes are bounded. When one is full, the system MUST apply a defined policy: `await` until space frees, or fail the send with `CallError::MailboxFull`. It MUST NOT drop messages silently. The two policies are separate calls: `tell` awaits, `try_tell` returns `CallError::MailboxFull` at once (local target).
-5. **Ordering guarantee.** Messages from a single sender to a single recipient arrive in send order (FIFO per directed pair). The system guarantees no ordering across different senders. `tell` and `ask` from the same sender share this order.
+4. **Backpressure.** Mailboxes are bounded. When one is full, the system MUST apply a defined policy: `await` until space frees, or fail the send with `CallError::MailboxFull`. It MUST NOT drop messages silently. The two policies are separate calls: `tell` awaits, `try_tell` (§3.3) returns `CallError::MailboxFull` at once (local target).
+5. **Ordering guarantee.** Messages from a single sender to a single recipient arrive in send order (FIFO per directed pair). For a remote recipient this order is scoped to a single association (§7.2). The system guarantees no ordering across different senders. `tell` and `ask` from the same sender share this order.
 6. **Fairness.** The runtime SHOULD schedule executors fairly so that no ready actor starves.
 
 ---
@@ -470,8 +480,8 @@ SystemMessage =
 ### 7.2 Delivery guarantees
 
 - **At-most-once** per call attempt. The framework MUST NOT transparently retransmit a delivered message.
-- **No silent loss.** Every `ask` MUST terminate in a reply, a `CallError::Timeout`, or a `CallError::Unreachable`. A pending ask whose target node is declared `down` (§9.4) MUST complete with `Unreachable`; one whose target is confirmed `unreachable` (§10) MAY complete with `Unreachable` early — at-most-once delivery (above) makes that safe even if the node recovers; failing both, the ask's deadline (§14.2) bounds it.
-- **Ordering** per directed sender→recipient pair, as in §6, holds end-to-end over a single association.
+- **No silent loss.** Every `ask` MUST terminate in a reply or a definite `CallError` (§14.1); the invariant catalogue enumerates the outcomes (§18.5 #1). A pending ask whose target node is declared `down` (§9.4) MUST complete with `Unreachable`; one whose target is confirmed `unreachable` (§10) MAY complete with `Unreachable` early — at-most-once delivery (above) makes that safe even if the node recovers; failing both, the ask's deadline (§14.2) bounds it.
+- **Ordering** per directed sender→recipient pair, as in §6, holds end-to-end over a single association. Across an association loss and re-establishment, no order is defined between frames the old association had accepted and frames sent over the new one; a sender that needs ordering across that boundary re-synchronizes at the application level (an `ask` round-trip suffices).
 - Higher guarantees (exactly-once, durable delivery) are out of scope; build them atop this layer with explicit idempotency keys.
 
 ---
@@ -497,20 +507,20 @@ Failures the system MUST represent explicitly, never mask:
 
 Declaring a node `down` is one event whose consequences belong to six different subsystems. The detail lives with each owner; this is the single trace that ties them together. When node `N` is declared `down`:
 
-1. **Detection then decision (§10, §9.4).** A SWIM suspicion (`suspect`) that goes unrefuted for `T_suspect` confirms `N` `unreachable`; the mode's **down authority** then makes the terminal decision — the coordinator applying the downing policy (gossip-based), the leader committing the transition by quorum (leader-based), or the operator/platform removing `N` from the registry (dynamic). `suspect` and `unreachable` are the detector's refutable states; `down` is the cluster's terminal decision. (Static mode has no down authority; this cascade never runs there, §9.4.1.)
+1. **Detection then decision (§10, §9.4).** A SWIM suspicion (`suspect`) that goes unrefuted for `T_suspect` confirms `N` `unreachable`; the mode's **down authority** then makes the terminal decision — the coordinator applying the downing policy (gossip-based), the leader committing the transition by quorum (leader-based), or the operator/platform removing `N` from the registry (registry-based). `suspect` and `unreachable` are the detector's refutable states; `down` is the cluster's terminal decision. (Static mode has no down authority; this cascade never runs there, §9.4.1.)
 2. **Membership (§9.1).** The transition propagates through the mode's dissemination channel (§9.4); `down` is **terminal**. `N` MUST NOT reappear `up` under the same incarnation, and it MUST restart with a new `NodeId` to rejoin. The entry is later tombstoned (`removed`).
 3. **In-flight callers (§7.2, §14).** Every pending `ask` whose target is on `N` completes with `CallError::Unreachable`; it never hangs (invariant §18.5 #2). This is the guarantee plain request/response cannot give.
 4. **Watchers (§12).** No stop message can arrive from a dead node, so each node, on observing the `down` transition in its membership view (§9.2), **synthesizes** a `Terminated { reason: NodeDown }` for every locally-watched actor on `N` and delivers it into each watcher's mailbox in serial order.
 5. **Receptionist (§13).** Because the receptionist watches the actors it lists, step 4 drives it: it prunes every registration originating from `N`, and subscribers receive a fresh `Listing`.
 6. **Routing afterward (§4.3).** `resolve` of any `ActorId` on `N` still returns a (remote) `ActorRef`; sends to it fail with `Unreachable` rather than blocking, because liveness is discovered on send, not in `resolve`.
 
-A graceful **leave** (§9.3) reaches the same terminal `down`/`removed` state and the same steps 3 to 6, differing only in step 1: the node announces `leaving` and drains instead of being suspected. An operator **decommission** — removing the node from the registry (dynamic) or committing a removal entry (leader-based) — reaches it the same way, also differing only in step 1: the control plane declares `down` directly, with no detector involved. (A **drain** is *not* this cascade — it is reversible and leaves the node a member; only decommission/removal declares `down`, §9.4.)
+A graceful **leave** (§9.3) reaches the same terminal `down`/`removed` state and the same steps 3 to 6, differing only in step 1: the node announces `leaving` and drains instead of being suspected. An operator **decommission** — removing the node from the registry (registry-based) or committing a removal entry (leader-based) — reaches it the same way, also differing only in step 1: the control plane declares `down` directly, with no detector involved. (A **drain** is *not* this cascade — it is reversible and leaves the node a member; only decommission/removal declares `down`, §9.4.)
 
 ---
 
 ## 9. Cluster membership and node lifecycle
 
-Nodes share a view of cluster membership. The member-state lattice (§9.1), the view-merge rule (§9.2), and the lifecycle steps (§9.3) are common to every cluster. Who *decides* the member set — the **control plane** — is a configurable **mode** (§9.4): a fixed local configuration (**static**), an external registry (**dynamic**), a self-hosted consensus log (**leader-based**), or peer-to-peer dissemination (**gossip-based**).
+Nodes share a view of cluster membership. The member-state lattice (§9.1), the view-merge rule (§9.2), and the lifecycle steps (§9.3) are common to every cluster. Who *decides* the member set — the **control plane** — is a configurable **mode** (§9.4): a fixed local configuration (**static**), an external registry (**registry-based**), a self-hosted consensus log (**leader-based**), or peer-to-peer dissemination (**gossip-based**).
 
 ### 9.1 Member states
 
@@ -522,11 +532,11 @@ joining → up ──→ leaving ──→ down ──→ removed     (the monot
 reachability: reachable ⇄ unreachable             (orthogonal to every state above)
 ```
 
-- **joining**: handshake complete, not yet admitted to full participation. Used by the modes where admission is an in-cluster decision (leader-based and gossip-based, §9.4); static starts every member `up`, and in dynamic mode admission *is* the registry entry (§9.4.2).
+- **joining**: handshake complete, not yet admitted to full participation. Used by the modes where admission is an in-cluster decision (leader-based and gossip-based, §9.4); static starts every member `up`, and in registry-based mode admission *is* the registry entry (§9.4.2).
 - **up**: full member; may host and address actors.
-- **draining** *(modes with an authoritative control plane — dynamic and leader-based, §9.4)*: a **reversible** maintenance cordon. The node stays a full member, but service discovery routes new work away from it; `resume` returns it to `up`. It sits **off** the monotonic ladder — it is not terminal and never advances toward `removed` on its own — so transitions in and out of it are ordered by the control plane's authority stamp rather than by rank (§9.2).
+- **draining** *(modes with an authoritative control plane — registry-based and leader-based, §9.4)*: a **reversible** maintenance cordon. The node stays a full member, but service discovery routes new work away from it; `resume` returns it to `up`. It sits **off** the monotonic ladder — it is not terminal and never advances toward `removed` on its own — so transitions in and out of it are ordered by the control plane's authority stamp rather than by rank (§9.2).
 - **leaving**: graceful shutdown initiated; draining its mailboxes before departure.
-- **down**: declared dead by the mode's down authority (§9.4), or reached by completing a graceful leave. **Terminal and irrevocable**: a node that was `down` MUST NOT rejoin under the same incarnation; it MUST restart with a new `NodeId`. This coexists with the stable identities the static, dynamic, and leader-based modes require (§9.4): stable identity is *persisted* identity, surviving ordinary restarts; rejoining after `down` is a deliberate identity reset — wipe the persisted identity, join as a new member.
+- **down**: declared dead by the mode's down authority (§9.4), or reached by completing a graceful leave. **Terminal and irrevocable**: a node that was `down` MUST NOT rejoin under the same incarnation; it MUST restart with a new `NodeId`. This coexists with the stable identities the static, registry-based, and leader-based modes require (§9.4): stable identity is *persisted* identity, surviving ordinary restarts; rejoining after `down` is a deliberate identity reset — wipe the persisted identity, join as a new member.
 - **removed**: tombstone, eventually pruned.
 
 **Reachability** (`reachable`/`unreachable`) is an orthogonal flag the failure detector (§10) maintains in every mode that runs one. A node is first marked `suspect` (a refutable suspicion); a suspicion unrefuted for `T_suspect` is confirmed `unreachable`. Both are detector observations, reversible by a higher incarnation; `down` is the separate, terminal cluster decision — and *which authority may make it* is precisely what the mode chooses (§9.4).
@@ -535,7 +545,7 @@ reachability: reachable ⇄ unreachable             (orthogonal to every state a
 
 Every node holds a local **membership view**: one entry per member, `(NodeId, state, incarnation, stamp)`. Views update through the mode's dissemination channel (§9.4) and merge entry-wise by one rule, identical in every mode:
 
-1. **Authority stamp wins.** An entry carrying a higher **authority stamp** — the registry revision (dynamic, §9.4.2) or the log commit index (leader-based, §9.4.3) — replaces an entry with a lower or absent stamp. A mode's stamps come from a single logical writer, so they totally order its decisions; that order, not state rank, is what lets a *reversible* transition (`up ⇄ draining`) converge.
+1. **Authority stamp wins.** An entry carrying a higher **authority stamp** — the registry revision (registry-based, §9.4.2) or the log commit index (leader-based, §9.4.3) — replaces an entry with a lower or absent stamp. A mode's stamps come from a single logical writer, so they totally order its decisions; that order, not state rank, is what lets a *reversible* transition (`up ⇄ draining`) converge.
 2. **Otherwise, the lattice.** The higher incarnation wins; within one incarnation, the higher-ranked state on the monotonic ladder `joining < up < leaving < down < removed` wins. `up` is monotonic and `down` is terminal, so independently-reached views merge without conflict.
 3. **`down` is absorbing.** No merge result — stamped or not — returns a `down` member to a live state under the same incarnation. An authority that wants the machine back admits it as a *new* member with a fresh `NodeId`.
 
@@ -545,7 +555,7 @@ The reachability axis (§9.1) is not part of this merge: suspicion and refutatio
 
 The mechanics are common to every mode: a joiner handshakes an existing member (a configured seed, or one learned from the registry); a leaver announces `leaving` and drains its mailboxes; a crash is confirmed `unreachable` by the detector, where one runs (§10). But each transition that *changes the member set* needs an authority, and each mode names a different one (§9.4):
 
-| Who decides | **Static** | **Dynamic** | **Leader-based** | **Gossip-based** |
+| Who decides | **Static** | **Registry-based** | **Leader-based** | **Gossip-based** |
 |---|---|---|---|---|
 | Admission to `up` | nobody — roster fixed, all start `up` | appearing in the registry, at that revision | the leader commits `joining → up` | the coordinator, on convergence |
 | Finalizing a leave (`→ down`) | n/a — members never leave | deregistration: whoever registered the node removes its entry | the leader commits, at the departing node's request | the coordinator finalizes `leaving → down` |
@@ -557,7 +567,7 @@ The `leaving` announcement itself decides nothing: it starts the drain and advis
 
 A membership control plane must answer three questions: **where does the authoritative member set live**, **how do members learn it**, and **who may declare a member dead**. Each mode is one consistent set of answers; everything else — the lattice, the merge rule, the lifecycle, terminal `down` — is shared (§9.1–§9.3). The mode is one choice at node startup; every node in a cluster MUST run the same mode.
 
-| | **Static** | **Dynamic** (registry) | **Leader-based** (consensus) | **Gossip-based** |
+| | **Static** | **Registry-based** | **Leader-based** (consensus) | **Gossip-based** |
 |---|---|---|---|---|
 | Authoritative member set | local configuration, fixed at deployment | an external registry (platform API, database, coordination service) | a self-hosted replicated log (Raft) | none — the converged peer-to-peer view |
 | Runtime membership change | none (redeploy/restart) | operator or platform mutates the registry | command committed through the elected leader | self-organizing (seeds + gossip) |
@@ -579,7 +589,7 @@ Membership and configuration are fixed at deployment time. Every node reads the 
 
 Best suited to embedded systems, edge deployments, appliances, tests, and small clusters where topology rarely changes.
 
-#### 9.4.2 Dynamic (registry-based)
+#### 9.4.2 Registry-based
 
 Membership changes at runtime, with the authoritative cluster state held in an **external registry** — a platform API, a database, or a coordination service — that the cluster reads but does not operate. An operator or platform adds and removes nodes by mutating the registry; every member runs a **sync loop** that watches (or polls) it and applies its state to the local view. The cluster delegates consistency to infrastructure that already provides it.
 
@@ -613,8 +623,8 @@ Membership and state propagate peer-to-peer through the **SWIM** protocol and an
 
 1. **Dissemination.** Each node periodically exchanges a membership digest with a peer chosen at random (via `Entropy`, §4.6) and merges by §9.2; updates also piggyback on detector traffic (§10) for infection-style spread.
 2. **Refutation.** Entries carry the member's incarnation; a node that sees a stale suspicion or state about itself increments its incarnation and gossips the override (§10).
-3. **Coordinator.** Transitions that need a single actor — admitting `joining → up`, finalizing `leaving → down` — are performed by the **coordinator**: a deterministic *role*, not an election — it falls to the lowest-address `up`, reachable member of each node's converged view. The coordinator acts only on a **locally stable, fully-reachable view** (every live member it can see is `reachable`), so it never transitions members while its own view is in flux. Two nodes that transiently both consider themselves coordinator cannot conflict: their decisions merge through the lattice, since `up` is monotonic and `down` terminal (§9.2).
-4. **Downing.** The detector drives `suspect → unreachable`; the configured **downing policy** (manual, timeout-based, or quorum-heuristic) decides `unreachable → down`, applied by the coordinator. A partition leaves each side seeing the other `unreachable`; the default policy MUST be conservative and MUST NOT auto-`down` across a partition (§18.5 #16). (Timeout-driven downing is coordinator-applied but not gated on full reachability — the node being downed is unreachable by definition.)
+3. **Coordinator.** Transitions that need a single actor — admitting `joining → up`, finalizing `leaving → down` — are performed by the **coordinator**: a deterministic *role*, not an election — it falls to the lowest-address `up`, reachable member of each node's converged view. The coordinator acts only on a **locally stable, fully-reachable view** (every live member it can see is `reachable`), so it never transitions members while its own view is in flux — with one exception: applying the downing policy to an `unreachable` member (#4), which cannot be gated on full reachability because the node being downed is unreachable by definition. Two nodes that transiently both consider themselves coordinator cannot conflict: their decisions merge through the lattice, since `up` is monotonic and `down` terminal (§9.2).
+4. **Downing.** The detector drives `suspect → unreachable`; the configured **downing policy** (manual, timeout-based, or quorum-heuristic) decides `unreachable → down`, applied by the coordinator. A partition leaves each side seeing the other `unreachable`; the default policy MUST be conservative and MUST NOT auto-`down` across a partition (§18.5 #16).
 5. **Join:** a new node handshakes a configured seed → `joining`; the coordinator admits it to `up` on convergence.
 
 This mode chooses availability and partition tolerance over an instantaneously consistent view (§1.2): nodes may briefly disagree, and everything above membership — death watch (§12), the receptionist (§13) — is designed to tolerate that. Best suited to large or elastic clusters with high churn.
@@ -623,7 +633,7 @@ This mode chooses availability and partition tolerance over an instantaneously c
 
 ## 10. Failure detection (SWIM)
 
-Every mode except **static** runs a SWIM-style detector on each node, over its associations; static MAY enable it too (§9.4.1). The detector is the cluster's **reachability sensor**: it maintains the `reachable`/`suspect`/`unreachable` axis (§9.1) identically wherever it runs. Its *authority* is what differs by mode: in **gossip-based** mode its confirmations feed the downing policy; in **leader-based** mode they feed the leader, which alone may commit `down`; in **dynamic** mode — and in **static** mode when enabled — it is **observe-only**: nothing it reports ever moves a member to `down` (§9.4).
+Every mode except **static** runs a SWIM-style detector on each node, over its associations; static MAY enable it too (§9.4.1). The detector is the cluster's **reachability sensor**: it maintains the `reachable`/`suspect`/`unreachable` axis (§9.1) identically wherever it runs. Its *authority* is what differs by mode: in **gossip-based** mode its confirmations feed the downing policy; in **leader-based** mode they feed the leader, which alone may commit `down`; in **registry-based** mode — and in **static** mode when enabled — it is **observe-only**: nothing it reports ever moves a member to `down` (§9.4).
 
 1. **Direct probing.** Periodically (every `T_probe`), pick a member and send `Ping`; expect `Ack` within `T_rtt`.
 2. **Indirect probing.** On a missed `Ack`, ask `k` random members to `PingReq` the target on the prober's behalf. If any relays an `Ack`, the target is alive.
@@ -653,13 +663,23 @@ pub enum SupervisionDirective {
     Escalate,                              // fail the parent, applying the parent's strategy
     Resume,                                // keep state, drop the failed message (use sparingly)
 }
+
+/// What `Actor::supervision()` returns (§3.1.1): the actor's decider, mapping
+/// each fault kind to a directive.
+pub struct Supervision { /* decider: fn(Fault) -> SupervisionDirective */ }
+
+impl Supervision {
+    pub fn stop() -> Self;                                       // every fault → Stop (the default)
+    pub fn directive(d: SupervisionDirective) -> Self;           // every fault → d
+    pub fn decide(f: fn(Fault) -> SupervisionDirective) -> Self; // per-fault decision
+}
 ```
 
 - The **default** directive MUST be `Stop`. For transient faults, `Restart` is usually the better choice.
 - **Restart** MUST construct a fresh actor value (state is not preserved by default) while the actor keeps its `ActorId` and mailbox. Constructing a fresh value requires a *factory*: an actor spawned this way (`spawn_with` for a root, `Ctx::spawn_with` for a child) is restartable. An actor spawned **by value** (`spawn`/`Ctx::spawn`) consumes the only instance, so it cannot be reconstructed; for it a `Restart` directive MAY degrade to `Stop`. The safety property is unaffected either way — a fault is always contained (invariant #18); degradation only means the actor stops instead of restarting. Exceeding `max` restarts `within` the window MUST escalate to `Stop`.
 - **Backoff** between restarts MUST be supported (exponential with jitter RECOMMENDED) to avoid hot-restart loops.
 - A `restart` re-runs `A::started`; the prior value's `A::stopped` runs with `StopReason::Failed`.
-- A per-actor **decider** produces the decision — `fn decide(Fault) -> SupervisionDirective` (`Fault` is a small `Copy` enum) — allowing a different directive per fault kind.
+- The per-actor **decider** inside `Supervision` produces the decision (`Fault` is a small `Copy` enum identifying the fault kind), allowing a different directive per fault kind. `Supervision::stop()` is the default (§3.1.1).
 
 ### 11.3 Scope
 Supervision is a **local** mechanism: a node supervises only its own actors. Remote failures are not supervised; they surface to callers as `CallError` (§8) and to watchers as `Terminated` (§12).
@@ -672,7 +692,7 @@ Any actor MAY watch any other actor, local or remote, and learn when it terminat
 
 ```rust
 // via Ctx (§3.4):
-fn watch<B: Actor>(&self, target: &ActorRef<B>);
+fn watch<B: Actor>(&self, target: &ActorRef<B>) where A: Handler<Terminated>;
 fn unwatch<B: Actor>(&self, target: &ActorRef<B>);
 
 pub struct Terminated {
@@ -687,7 +707,7 @@ pub enum TerminationReason {
 }
 ```
 
-`A::stopped` (§3.1.1) receives a `StopReason`, the local-only subset `{Stopped, Failed}`: an actor runs its own `stopped` hook only when it stops on its own node. `TerminationReason` is what a *watcher* observes and extends `StopReason` with `NodeDown`, the case where the actor's node died and no local `stopped` could run (§8.1). A watcher observes terminations by handling `Terminated` as a system signal delivered into its mailbox, through a `Handler<Terminated>` impl or a dedicated signal hook.
+`A::stopped` (§3.1.1) receives a `StopReason`, the local-only subset `{Stopped, Failed}`: an actor runs its own `stopped` hook only when it stops on its own node. `TerminationReason` is what a *watcher* observes and extends `StopReason` with `NodeDown`, the case where the actor's node died and no local `stopped` could run (§8.1). A watcher observes terminations by handling `Terminated` as a system signal delivered into its mailbox, through the `Handler<Terminated>` impl that `Ctx::watch` requires (§3.4). The framework supplies the `Message` impl for `Terminated` (`type Reply = ()`, reserved manifest `actor.Terminated`) so that the bound is well-formed (§3.2); the type never travels in an actor envelope — on the wire only `SystemMessage::Terminated` (§7.1) exists, and the receiving node synthesizes and enqueues the local value itself — so the reserved manifest is never registered and never dispatched from network bytes (§4.4).
 
 Guarantees (MUST):
 1. After `watch(target)`, if the target terminates for **any** reason, the watcher receives exactly one `Terminated` for it, delivered into the watcher's mailbox.
@@ -695,7 +715,7 @@ Guarantees (MUST):
 3. Watching an already-terminated actor MUST immediately yield `Terminated`.
 4. Signals respect the per-actor serial order: a `Terminated` arrives through the mailbox like any other message, never out of band.
 
-Guarantee 2 is relative to the cluster's `down` decisions, not to physical reality: an actor on a crashed node terminates *observably* only when some authority declares that node `down` (§9.4). In a mode whose authority never does — static always; dynamic until the registry removes the node — watchers learn nothing from the crash, and callers see `Unreachable` or `Timeout` instead. Choosing a control-plane mode therefore also chooses when death watch can fire for node failure.
+Guarantee 2 is relative to the cluster's `down` decisions, not to physical reality: an actor on a crashed node terminates *observably* only when some authority declares that node `down` (§9.4). In a mode whose authority never does — static always; registry-based until the registry removes the node — watchers learn nothing from the crash, and callers see `Unreachable` or `Timeout` instead. Choosing a control-plane mode therefore also chooses when death watch can fire for node failure.
 
 Remote watch works by sending a `Watch(id)` system message to the target's node; that node tracks watchers and emits `Terminated` on stop, and the watcher's own node synthesizes `Terminated` when its membership view marks the target's node `down` (§8.1).
 
@@ -788,13 +808,13 @@ A conforming system SHOULD expose:
 - **Tracing:** propagate a trace/correlation context through envelopes, so a logical request can be followed across nodes.
 - **Lifecycle logging:** spawn and resign, membership transitions, downing decisions, and supervision actions, each at a defined, filterable level.
 
-The same events drive deterministic simulation: a simulator subscribes to this stream to check invariants (§18.5). A conforming system SHOULD emit, as structured events on a single (extensible) `Event` enum: `assign_id`/`actor_ready`/`resign_id` (§4.2), mailbox enqueue and dispatch (§6), every `ask` outcome (§14), membership and reachability transitions (§9 and §10), supervision decisions (§11), and `Terminated` deliveries (§12). Metrics and cross-node trace propagation are not yet provided (both RECOMMENDED); the event stream is the substrate they would build on.
+The same events drive deterministic simulation: a simulator subscribes to this stream to check invariants (§18.5). A conforming system SHOULD emit, as structured events on a single (extensible) `Event` enum: `assign_id`/`actor_ready`/`resign_id` (§4.2), mailbox enqueue and dispatch (§6), every `ask` outcome (§14), membership and reachability transitions (§9 and §10), supervision decisions (§11), and `Terminated` deliveries (§12). Metrics and cross-node trace propagation are RECOMMENDED, not REQUIRED; the event stream is the substrate both build on.
 
 ---
 
 ## 17. Conformance
 
-An implementation conforms to this specification **iff** every property below holds. This section is an index, not a restatement: the cited section's MUSTs *define* each property normatively, and the listed method *verifies* it: for runtime properties, the numbered invariant a simulator checks continuously (§18.5). The cited sections and the §18.5 catalogue are the single statements of each requirement; this table only points at them.
+An implementation conforms to this specification **iff** every property below holds. This section is an index, not a restatement: the cited section's MUSTs *define* each property normatively, and the listed method *verifies* it: for runtime properties, the numbered invariant of §18.5, checked by whichever method the §18.5 catalogue assigns it (continuous checker, targeted test, compile-fail, or differential run). The cited sections and the §18.5 catalogue are the single statements of each requirement; this table only points at them.
 
 | Property | Defined in | Verified by |
 |---|---|---|
@@ -830,7 +850,7 @@ A conforming implementation SHOULD be testable by **deterministic simulation**: 
 
 A system that supports simulation MUST satisfy:
 
-1. **Seed-reproducibility.** Given the same seed, configuration, and workload, two runs MUST produce byte-identical event streams (§16). All nondeterminism MUST pass through the `Clock`, `Entropy`, and `Spawner` traits (§4.6), the `Transport` trait (§7), and — in dynamic mode — the registry client (§9.4.2).
+1. **Seed-reproducibility.** Given the same seed, configuration, and workload, two runs MUST produce byte-identical event streams (§16). All nondeterminism MUST pass through the `Clock`, `Entropy`, and `Spawner` traits (§4.6), the `Transport` trait (§7), and — in registry-based mode — the registry client (§9.4.2).
 2. **Quiescence-driven time.** In simulation, logical time MUST advance only when no task is ready to run. A timeout, SWIM interval, or backoff therefore costs no wall-clock time, so a run can cover hours of cluster time per CPU-second.
 3. **No ambient nondeterminism.** A simulation build MUST NOT read the wall clock, spawn OS threads, or use a non-seeded RNG. A single leak breaks reproducibility, so implementations SHOULD enforce this statically, for example with a lint that forbids the offending APIs.
 
@@ -856,7 +876,7 @@ Under seed control, a simulator MUST be able to inject at least:
 - **Transport:** frame drop, duplication, delay, reordering; association loss.
 - **Mailbox:** induced `MailboxFull`; maximal cross-sender reordering subject to per-sender FIFO (§6).
 - **Scheduling:** seed-randomized selection among ready tasks.
-- **Membership / control plane:** dropped or delayed pings, partitions, stale or replayed gossip, stale incarnations (§9 and §10); leader crashes and elections mid-transition (leader-based mode); a stalled, lagging, or unavailable registry sync (dynamic mode).
+- **Membership / control plane:** dropped or delayed pings, partitions, stale or replayed gossip, stale incarnations (§9 and §10); leader crashes and elections mid-transition (leader-based mode); a stalled, lagging, or unavailable registry sync (registry-based mode).
 - **Supervision:** induced handler and `started()` faults (§11).
 - **Nodes:** abrupt crash (no graceful leave) at an arbitrary step, which MUST surface as `Unreachable` or `Timeout` to in-flight callers (§7.2) and — in a mode whose authority declares `down` (§9.4) — as `NodeDown`/`Terminated` to watchers (§12).
 
@@ -875,11 +895,11 @@ Tests are expressed as **workloads** over the cluster: a `setup` that builds act
 
 These invariants appear as MUSTs throughout this specification, and those inline MUSTs are their normative statements. Collected here, they are the contract a conforming implementation verifies, and the targets §17 checks against. Each MUST hold even under the faults of §18.3.
 
-Verification is **layered**, not uniform (see §18.6). The core *safety* properties — those expressible as "a bad thing never happens" over the §16 event stream — are checked **continuously**, on every run and at final quiescence, by a small set of always-on checkers (today: #1 no-silent-loss, #4 serial execution, #6 lifecycle, #13 signal-in-band, #15 down-is-terminal). The rest are verified by the method that fits them: a *liveness* or scenario property by a targeted conformance test, type-safety (#20) by a compile-fail test, location transparency (#21) by a differential local-vs-remote run. Some safety MUSTs are not emergent over the event stream and so stay targeted by design — e.g. #5 (the mailbox bound is structural and backpressure is a per-call contract) and #11 (death-watch is exactly-once *per `watch`*, but the stream carries no per-`watch` identity, and re-watching a dead actor legitimately re-fires, §12). A machine-checked **catalogue** records, per invariant, which method applies; a drift test (`conformance_catalogue`) fails the build if a continuous checker and its catalogue entry disagree, so the §17 "Verified by" column stays mechanically true. Promoting a property from a targeted test to a continuous checker is always sound where it is a true safety invariant over the existing event stream.
+Verification is **layered**, not uniform (see §18.6). The core *safety* properties — those expressible as "a bad thing never happens" over the §16 event stream — are checked **continuously**, on every run and at final quiescence, by a small set of always-on checkers (at minimum: #1 no-silent-loss, #4 serial execution, #6 lifecycle, #13 signal-in-band, #15 down-is-terminal). The rest are verified by the method that fits them: a *liveness* or scenario property by a targeted conformance test, type-safety (#20) by a compile-fail test, location transparency (#21) by a differential local-vs-remote run. Some safety MUSTs are not emergent over the event stream and so stay targeted by design — e.g. #5 (the mailbox bound is structural and backpressure is a per-call contract) and #11 (death-watch is exactly-once *per `watch`*, but the stream carries no per-`watch` identity, and re-watching a dead actor legitimately re-fires, §12). A machine-checked **catalogue** records, per invariant, which method applies; a drift test fails the build if a continuous checker and its catalogue entry disagree, so the §17 "Verified by" column stays mechanically true. Promoting a property from a targeted test to a continuous checker is always sound where it is a true safety invariant over the existing event stream.
 
-1. **No silent loss (§7.2, §14).** Every `ask` issued terminates in exactly one of `Ok(reply)`, `Timeout`, `Unreachable`, `DeadLetter`, or `Unhandled`; at final quiescence no `ask` remains pending.
+1. **No silent loss (§7.2, §14).** Every `ask` issued terminates in exactly one of `Ok(reply)`, `Timeout`, `Unreachable`, `DeadLetter`, `Unhandled`, `Serialization`, or `System` — never `MailboxFull`, since `ask` awaits mailbox space (§6). At final quiescence no `ask` remains pending.
 2. **Crash completes in-flight calls (§7.2, §9.4).** An `ask` whose target node is declared `down` completes with `Unreachable`; it never hangs. (Where no authority declares `down`, a confirmed `unreachable` MAY complete it early with `Unreachable`, and the deadline bounds it with `Timeout` regardless — #1 still holds.)
-3. **Per-pair FIFO (§6).** Messages from one sender to one recipient are observed in send order, even under maximal reordering injection; no ordering is assumed across senders.
+3. **Per-pair FIFO (§6).** Messages from one sender to one recipient are observed in send order (within one association, §6, §7.2), even under maximal reordering injection; no ordering is assumed across senders.
 4. **Serial, non-reentrant execution (§6).** An actor never processes two messages concurrently; `&mut self` is never aliased.
 5. **Bounded, non-dropping mailbox (§6).** A full mailbox blocks or returns `MailboxFull`; it never drops silently.
 6. **Lifecycle order and exactly-once (§4.2).** `assign_id` → `actor_ready` → `resign_id` occur in order; `assign_id` and `actor_ready` exactly once; `resign_id` exactly once even when spawn fails between steps 1 and 3; the id is undeliverable between assign and ready.
@@ -890,9 +910,9 @@ Verification is **layered**, not uniform (see §18.6). The core *safety* propert
 11. **Death-watch exactly-once (§12).** After `watch`, the watcher receives exactly one `Terminated` for any cause, including `NodeDown` when the target's node is declared `down`.
 12. **Watch-after-death (§12).** Watching an already-terminated actor yields `Terminated` immediately.
 13. **Signal ordering (§12).** `Terminated` is delivered through the mailbox in serial order, never out of band.
-14. **Membership convergence (§9.2, §9.4).** Once faults cease and partitions heal, all `up` members converge on one membership set within bounded logical time — by anti-entropy (gossip-based), registry sync (dynamic), or log replication (leader-based).
+14. **Membership convergence (§9.2, §9.4).** Once faults cease and partitions heal, all `up` members converge on one membership set within bounded logical time — by anti-entropy (gossip-based), registry sync (registry-based), or log replication (leader-based).
 15. **`down` is terminal (§9.1).** A node observed `down` never reappears `up` under the same incarnation.
-16. **Partition tolerance (§9.4).** Under the default downing policy, a partition alone never moves a member to `down`, only to `unreachable`. **Dynamic** mode holds this unconditionally: its detector is observe-only, so only the registry ever declares `down`. **Leader-based** mode holds it for any side without quorum, which can commit no transition at all (#22).
+16. **Partition tolerance (§9.4).** Under the default downing policy, a partition alone never moves a member to `down`, only to `unreachable`. **Registry-based** mode holds this unconditionally: its detector is observe-only, so only the registry ever declares `down`. **Leader-based** mode holds it for any side without quorum, which can commit no transition at all (#22).
 17. **SWIM refutation (§10).** A node that sees itself suspected refutes via a higher incarnation, clearing the suspicion cluster-wide.
 18. **Supervision containment (§11).** A handler panic never crashes the node; the default directive is `Stop`; restarts back off; exceeding `max` within the window escalates.
 19. **Receptionist consistency (§13).** Registrations from a `down` node are pruned and subscribers notified; `subscribe` delivers the current snapshot first, then every change; concurrent registrations merge (eventual consistency).
@@ -904,8 +924,8 @@ Verification is **layered**, not uniform (see §18.6). The core *safety* propert
 
 - **Reproduction.** A failing run MUST be replayable from its `(seed, configuration)` alone.
 - **Layered checks.** Simulation covers the distributed invariants (1 to 19, 21, and 22). Compile-fail tests cover invariant 20: a compiler run that asserts the rejection of invalid sends. Because the simulator drives the mailbox and executor (§6) on a single-thread cooperative scheduler whose ready-task selection is seed-randomized (§18.3), it already explores interleavings deterministically and reproducibly; a separate `loom`/`kani` model-check of the executor across all interleavings is therefore an optional, complementary cross-check rather than a prerequisite.
-- **Regression corpus.** A failure SHOULD be kept as a `(seed, configuration)` and replayed permanently. The fixed-seed swarm sweeps (the single-node and cluster swarm tests) serve as the standing corpus.
-- **Continuous testing.** CI SHOULD run many seeds per change across different fault configurations; the coverage metric is cluster-hours exercised per change, not test count. (The reference CI runs the fixed-seed corpus on every change; per-run fresh-seed sweeps are a noted enhancement.)
+- **Regression corpus.** A failure SHOULD be kept as a `(seed, configuration)` and replayed permanently. Fixed-seed swarm sweeps serve as the standing corpus.
+- **Continuous testing.** CI SHOULD run many seeds per change across different fault configurations; the coverage metric is cluster-hours exercised per change, not test count.
 
 ---
 
