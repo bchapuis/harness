@@ -24,7 +24,9 @@ use actor_core::Key;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_simulation::ClusterCtx;
+use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
+use actor_simulation::RegistryFaultPolicy;
 use actor_simulation::SimCluster;
 use actor_simulation::run_cluster_swarm_coverage;
 use serde::Deserialize;
@@ -76,6 +78,12 @@ impl ClusterWorkload for Chatter {
             rtt: Duration::from_millis(50),
             suspect_timeout: Duration::from_millis(200),
             indirect_count: 2,
+        }
+    }
+
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Gossip {
+            swim: self.swim(),
             downing: DowningPolicy::Timeout(Duration::from_millis(300)),
         }
     }
@@ -131,5 +139,96 @@ fn the_cluster_swarm_actually_exercises_every_fault_type() {
     assert!(
         stats.blocked > 0,
         "no frame was ever blocked by a partition/crash across the sweep: {stats:?}",
+    );
+}
+
+/// The same chatter under the **registry-based** control plane (spec §9.4.2):
+/// proves the registry-specific faults — outage windows opened by the nemesis,
+/// stale snapshots served by the seeded policy — actually fired across the
+/// sweep, on top of the transport faults (spec §18.3).
+struct RegistryChatter {
+    nodes: usize,
+    rounds: u64,
+}
+
+impl ClusterWorkload for RegistryChatter {
+    fn name(&self) -> &'static str {
+        "cov-registry-chatter"
+    }
+
+    fn node_count(&self) -> usize {
+        self.nodes
+    }
+
+    fn swim(&self) -> SwimConfig {
+        SwimConfig {
+            probe_interval: Duration::from_millis(100),
+            rtt: Duration::from_millis(50),
+            suspect_timeout: Duration::from_millis(200),
+            indirect_count: 2,
+        }
+    }
+
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Registry {
+            swim: self.swim(),
+            sync_interval: Duration::from_millis(100),
+            faults: RegistryFaultPolicy {
+                max_latency: Duration::from_millis(40),
+                stale_num: 1,
+                stale_den: 3,
+                max_staleness: 4,
+            },
+        }
+    }
+
+    fn setup(&self, ctx: &ClusterCtx) {
+        for node in ctx.nodes() {
+            let greeter = node.spawn(Greeter);
+            node.receptionist().register(GREETERS, &greeter);
+        }
+    }
+
+    fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
+        let caller = ctx.nodes()[0].clone();
+        let registry = ctx.registry().expect("registry mode").clone();
+        let victim = ctx.nodes()[1].node();
+        let rounds = self.rounds;
+        Box::pin(async move {
+            let clock = caller.clock().clone();
+            for round in 0..rounds {
+                clock.sleep(Duration::from_millis(150)).await;
+                // Churn the registry so stale reads have revisions to lag behind.
+                if round % 2 == 0 {
+                    registry.drain(victim);
+                } else {
+                    registry.resume(victim);
+                }
+                for service in caller.receptionist().lookup(GREETERS).iter() {
+                    let _ = service.ask_timeout(Greet, Duration::from_millis(500)).await;
+                }
+            }
+        })
+    }
+}
+
+#[test]
+fn the_registry_swarm_actually_exercises_registry_faults() {
+    let workload = RegistryChatter {
+        nodes: 3,
+        rounds: 10,
+    };
+    let stats = match run_cluster_swarm_coverage(&workload, 0..64) {
+        Ok(stats) => stats,
+        Err(failure) => panic!("{failure}"),
+    };
+
+    assert!(
+        stats.registry_outages > 0,
+        "the nemesis never opened a registry outage across the sweep: {stats:?}",
+    );
+    assert!(
+        stats.registry_stale > 0,
+        "no stale registry snapshot was ever served across the sweep: {stats:?}",
     );
 }

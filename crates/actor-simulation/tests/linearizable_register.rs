@@ -31,6 +31,7 @@ use actor_core::Key;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_simulation::ClusterCtx;
+use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::History;
 use actor_simulation::Register;
@@ -350,6 +351,12 @@ impl ClusterWorkload for RemoteRegisterWorkload {
             rtt: Duration::from_millis(50),
             suspect_timeout: Duration::from_millis(200),
             indirect_count: 2,
+        }
+    }
+
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Gossip {
+            swim: self.swim(),
             downing: DowningPolicy::Timeout(Duration::from_millis(300)),
         }
     }

@@ -17,6 +17,8 @@ use std::time::Duration;
 
 use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
+use actor_cluster::DowningPolicy;
+use actor_cluster::GossipMode;
 use actor_cluster::MembershipMode;
 use actor_cluster::Reachability;
 use actor_cluster::SwimConfig;
@@ -161,11 +163,14 @@ fn start_node(
             codec,
             mailbox_capacity: 64,
             events: Arc::new(()),
-            membership: MembershipMode::Autonomous(SwimConfig {
-                probe_interval: Duration::from_millis(200),
-                rtt: Duration::from_millis(150),
-                suspect_timeout: Duration::from_millis(600),
-                ..SwimConfig::default()
+            membership: MembershipMode::Gossip(GossipMode {
+                swim: SwimConfig {
+                    probe_interval: Duration::from_millis(200),
+                    rtt: Duration::from_millis(150),
+                    suspect_timeout: Duration::from_millis(600),
+                    ..SwimConfig::default()
+                },
+                downing: DowningPolicy::Conservative,
             }),
             joining: false,
             authorizer: None,

@@ -14,13 +14,13 @@ use actor_simulation::catalogue;
 use actor_simulation::default_invariants;
 
 #[test]
-fn every_invariant_1_through_21_is_present_exactly_once() {
+fn every_invariant_1_through_22_is_present_exactly_once() {
     let mut numbers: Vec<u8> = catalogue().iter().map(|e| e.invariant).collect();
     numbers.sort_unstable();
     assert_eq!(
         numbers,
-        (1..=21).collect::<Vec<u8>>(),
-        "catalogue must list invariants #1..=#21, each exactly once"
+        (1..=22).collect::<Vec<u8>>(),
+        "catalogue must list invariants #1..=#22, each exactly once"
     );
 }
 

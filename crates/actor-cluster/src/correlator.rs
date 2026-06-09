@@ -58,7 +58,9 @@ where
             .filter(|(_, v)| pred(v))
             .map(|(id, _)| *id)
             .collect();
-        ids.into_iter().filter_map(|id| waiting.remove(&id)).collect()
+        ids.into_iter()
+            .filter_map(|id| waiting.remove(&id))
+            .collect()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<K, V>> {

@@ -14,7 +14,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use actor_cluster::DowningPolicy;
+use actor_cluster::GossipMode;
+use actor_cluster::LeaderMode;
 use actor_cluster::MembershipMode;
+use actor_cluster::RaftConfig;
+use actor_cluster::RegistryMode;
 use actor_cluster::SwimConfig;
 use actor_core::BoxFuture;
 use actor_core::Clock;
@@ -34,6 +39,8 @@ use crate::Simulation;
 use crate::Violation;
 use crate::invariant::Invariant;
 use crate::invariant::default_invariants;
+use crate::registry::RegistryFaultPolicy;
+use crate::registry::SimRegistry;
 
 // Swarm intensity for the cluster harness (spec §18.3): how hard each run is
 // faulted and how long it may take. Collected here as named constants so the
@@ -63,6 +70,9 @@ const CLUSTER_FLUSH: Duration = Duration::from_secs(2);
 pub struct ClusterCtx {
     nodes: Vec<SimCluster>,
     net: SimNetwork,
+    /// The simulated external registry, in registry-based mode (spec §9.4.2):
+    /// the operator handle a workload mutates and outages under seed control.
+    registry: Option<SimRegistry>,
 }
 
 impl ClusterCtx {
@@ -74,6 +84,57 @@ impl ClusterCtx {
     /// The underlying network (for inspection; faults are the nemesis's job).
     pub fn net(&self) -> &SimNetwork {
         &self.net
+    }
+
+    /// The simulated registry, when the run is in registry-based mode
+    /// ([`ClusterModeSpec::Registry`]).
+    pub fn registry(&self) -> Option<&SimRegistry> {
+        self.registry.as_ref()
+    }
+}
+
+/// A declarative membership-mode choice for a [`ClusterWorkload`] (spec §9.4).
+/// Declarative because the registry- and leader-based modes need per-run
+/// resources (the simulated registry, the voter set) that only the driver — with
+/// the run's [`Simulation`] in hand — can materialize.
+#[derive(Clone, Copy, Debug)]
+pub enum ClusterModeSpec {
+    /// Fixed roster (spec §9.4.1); `detector` enables the observe-only SWIM loop.
+    Static { detector: Option<SwimConfig> },
+    /// Peer-to-peer gossip with a coordinator (spec §9.4.4).
+    Gossip {
+        swim: SwimConfig,
+        downing: DowningPolicy,
+    },
+    /// An external registry, simulated with seeded faults (spec §9.4.2). The
+    /// driver registers every node up front and hands the operator handle to the
+    /// workload via [`ClusterCtx::registry`].
+    Registry {
+        swim: SwimConfig,
+        sync_interval: Duration,
+        faults: RegistryFaultPolicy,
+    },
+    /// A self-hosted Raft log (spec §9.4.3): the first `voters` nodes (by join
+    /// order) form the voter set, with in-memory storage.
+    Leader {
+        swim: SwimConfig,
+        voters: usize,
+        election_timeout: Duration,
+        heartbeat_interval: Duration,
+        downing: DowningPolicy,
+    },
+}
+
+impl ClusterModeSpec {
+    /// A short name for reporting, so one workload swept across modes yields
+    /// distinguishable run names.
+    pub fn name(&self) -> &'static str {
+        match self {
+            ClusterModeSpec::Static { .. } => "static",
+            ClusterModeSpec::Gossip { .. } => "gossip",
+            ClusterModeSpec::Registry { .. } => "registry",
+            ClusterModeSpec::Leader { .. } => "leader",
+        }
     }
 }
 
@@ -88,14 +149,18 @@ pub trait ClusterWorkload {
     fn node_count(&self) -> usize;
 
     /// SWIM configuration for the run (used by the default
-    /// [`mode`](Self::mode), the autonomous control plane).
+    /// [`mode`](Self::mode), the gossip-based control plane).
     fn swim(&self) -> SwimConfig;
 
-    /// The membership [`mode`](MembershipMode) to sweep under (spec §9.4). Defaults
-    /// to **autonomous** SWIM; a workload overrides this to exercise the static or
-    /// managed control plane under the same nemesis and fault injection.
-    fn mode(&self) -> MembershipMode {
-        MembershipMode::Autonomous(self.swim())
+    /// The membership mode to sweep under (spec §9.4). Defaults to
+    /// **gossip-based** with conservative downing; a workload overrides this to
+    /// exercise the static, registry-based, or leader-based control plane under
+    /// the same nemesis and fault injection.
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Gossip {
+            swim: self.swim(),
+            downing: DowningPolicy::Conservative,
+        }
     }
 
     /// Build actors and registrations before traffic starts.
@@ -111,18 +176,22 @@ pub trait ClusterWorkload {
 }
 
 /// A seeded fault injector (spec §18.3): over several rounds it partitions,
-/// crashes, and heals at random, so a run exercises the failure paths.
+/// crashes, and heals at random, so a run exercises the failure paths. In
+/// registry-based mode a fifth action opens a bounded registry **outage**
+/// window — the "stalled, lagging, or unavailable registry sync" fault.
 async fn nemesis(
     net: SimNetwork,
     entropy: SimEntropy,
     clock: SimClock,
     nodes: Vec<NodeId>,
     rounds: usize,
+    registry: Option<SimRegistry>,
 ) {
+    let actions = if registry.is_some() { 5 } else { 4 };
     for _ in 0..rounds {
         let wait = 200 + entropy.next_u64() % 600;
         clock.sleep(Duration::from_millis(wait)).await;
-        match entropy.next_u64() % 4 {
+        match entropy.next_u64() % actions {
             // Partition the nodes into two random groups.
             0 => {
                 let mut left = Vec::new();
@@ -147,7 +216,16 @@ async fn nemesis(
             // Heal all partitions/crashes.
             2 => net.heal(),
             // A quiet round.
-            _ => {}
+            3 => {}
+            // A bounded registry outage window (spec §9.4.2 item 6, §18.3).
+            _ => {
+                if let Some(registry) = &registry {
+                    registry.set_available(false);
+                    let outage = 100 + entropy.next_u64() % 300;
+                    clock.sleep(Duration::from_millis(outage)).await;
+                    registry.set_available(true);
+                }
+            }
         }
     }
 }
@@ -182,8 +260,59 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
         duplicate_den: CLUSTER_FAULT_DEN,
         max_latency: Duration::from_millis(entropy.next_u64() % CLUSTER_MAX_LATENCY_MS),
     };
+    // Materialize the workload's mode spec into a concrete control plane: the
+    // registry- and leader-based modes need per-run resources (the simulated
+    // registry, the voter set) only the driver can build.
+    let (mode, registry) = match workload.mode() {
+        ClusterModeSpec::Static { detector } => (MembershipMode::Static { detector }, None),
+        ClusterModeSpec::Gossip { swim, downing } => {
+            (MembershipMode::Gossip(GossipMode { swim, downing }), None)
+        }
+        ClusterModeSpec::Registry {
+            swim,
+            sync_interval,
+            faults,
+        } => {
+            let registry = SimRegistry::new(&sim).with_faults(faults);
+            // The platform registers every node up front (spec §9.4.2 item 2);
+            // runtime mutations are the workload's and nemesis's job.
+            for i in 1..=workload.node_count() as u64 {
+                registry.register(NodeId::new(i));
+            }
+            (
+                MembershipMode::Registry(RegistryMode {
+                    swim,
+                    client: registry.client(),
+                    sync_interval,
+                }),
+                Some(registry),
+            )
+        }
+        ClusterModeSpec::Leader {
+            swim,
+            voters,
+            election_timeout,
+            heartbeat_interval,
+            downing,
+        } => {
+            let voter_ids: Vec<NodeId> = (1..=voters.min(workload.node_count()) as u64)
+                .map(NodeId::new)
+                .collect();
+            let mut raft = RaftConfig::new(voter_ids);
+            raft.election_timeout = election_timeout;
+            raft.heartbeat_interval = heartbeat_interval;
+            (
+                MembershipMode::Leader(LeaderMode {
+                    swim,
+                    raft,
+                    downing,
+                }),
+                None,
+            )
+        }
+    };
     let net = SimNetwork::new(&sim)
-        .with_mode(workload.mode())
+        .with_mode(mode)
         .with_events(events)
         .with_faults(faults);
 
@@ -193,6 +322,7 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
     let ctx = ClusterCtx {
         nodes: nodes.clone(),
         net: net.clone(),
+        registry,
     };
 
     workload.setup(&ctx);
@@ -212,6 +342,7 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
         sim.clock(),
         node_ids,
         CLUSTER_NEMESIS_ROUNDS,
+        ctx.registry.clone(),
     )));
 
     // Drive until the traffic completes, bounded so a hung call cannot loop
@@ -223,9 +354,13 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
     // Let post-traffic signals (terminations, prunes) flush.
     sim.run_for(CLUSTER_FLUSH);
 
+    let mut faults = net.fault_stats();
+    if let Some(registry) = &ctx.registry {
+        faults = faults + registry.fault_stats();
+    }
     ClusterRun {
         completed: done.load(Ordering::SeqCst),
-        faults: net.fault_stats(),
+        faults,
     }
 }
 

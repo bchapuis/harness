@@ -6,11 +6,9 @@
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::MembershipMode;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorRef;
-use actor_core::NodeId;
 use actor_core::ActorSystem;
 use actor_core::BoxError;
 use actor_core::BoxFuture;
@@ -23,7 +21,9 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::Terminated;
 use actor_simulation::ClusterCtx;
+use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
+use actor_simulation::RegistryFaultPolicy;
 use actor_simulation::SimCluster;
 use actor_simulation::record_cluster_seed;
 use actor_simulation::run_cluster_seed;
@@ -64,27 +64,27 @@ fn swarm_swim() -> SwimConfig {
         rtt: Duration::from_millis(50),
         suspect_timeout: Duration::from_millis(200),
         indirect_count: 2,
-        downing: DowningPolicy::Timeout(Duration::from_millis(300)),
     }
 }
 
 /// Each node hosts and publishes a greeter; node 0 repeatedly discovers and
 /// calls them, tolerating whatever failures the nemesis induces. Parameterized by
-/// membership `mode` so the *same* workload and nemesis sweep static, autonomous,
-/// and managed control planes (spec §9.4) — the safety invariants must hold under
-/// every mode.
+/// membership `mode` so the *same* workload and nemesis sweep the static,
+/// gossip-based, registry-based, and leader-based control planes (spec §9.4) —
+/// the safety invariants must hold under every mode.
 struct DiscoverAndCall {
     nodes: usize,
     rounds: u64,
-    mode: MembershipMode,
+    mode: ClusterModeSpec,
 }
 
 impl ClusterWorkload for DiscoverAndCall {
     fn name(&self) -> &'static str {
         match self.mode {
-            MembershipMode::Static => "discover-and-call/static",
-            MembershipMode::Autonomous(_) => "discover-and-call/autonomous",
-            MembershipMode::Managed { .. } => "discover-and-call/managed",
+            ClusterModeSpec::Static { .. } => "discover-and-call/static",
+            ClusterModeSpec::Gossip { .. } => "discover-and-call/gossip",
+            ClusterModeSpec::Registry { .. } => "discover-and-call/registry",
+            ClusterModeSpec::Leader { .. } => "discover-and-call/leader",
         }
     }
 
@@ -96,7 +96,7 @@ impl ClusterWorkload for DiscoverAndCall {
         swarm_swim()
     }
 
-    fn mode(&self) -> MembershipMode {
+    fn mode(&self) -> ClusterModeSpec {
         self.mode
     }
 
@@ -131,7 +131,10 @@ fn discover_and_call_holds_across_seeds_under_faults() {
     let workload = DiscoverAndCall {
         nodes: 3,
         rounds: 12,
-        mode: MembershipMode::Autonomous(swarm_swim()),
+        mode: ClusterModeSpec::Gossip {
+            swim: swarm_swim(),
+            downing: DowningPolicy::Timeout(Duration::from_millis(300)),
+        },
     };
     if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
         panic!("{failure}");
@@ -139,18 +142,47 @@ fn discover_and_call_holds_across_seeds_under_faults() {
 }
 
 #[test]
-fn discover_and_call_holds_across_seeds_in_managed_mode() {
-    // The same chaos under the **managed** control plane (spec §9.4): the detector
-    // is observe-only, so a crashed node is never auto-downed — its in-flight calls
-    // complete by timeout rather than the node-down cascade. The safety invariants
-    // (no silent loss, serial, lifecycle, down-terminal) must still hold on every
-    // seed. Node 1 is the designated leader.
+fn discover_and_call_holds_across_seeds_in_registry_mode() {
+    // The same chaos under the **registry-based** control plane (spec §9.4.2):
+    // the detector is observe-only, so a crashed node is never auto-downed — its
+    // in-flight calls complete by timeout rather than the node-down cascade. The
+    // safety invariants (no silent loss, serial, lifecycle, down-terminal) must
+    // still hold on every seed, with the registry sync itself faulted (latency
+    // and stale reads, spec §18.3).
     let workload = DiscoverAndCall {
         nodes: 3,
         rounds: 12,
-        mode: MembershipMode::Managed {
+        mode: ClusterModeSpec::Registry {
             swim: swarm_swim(),
-            leader: NodeId::new(1),
+            sync_interval: Duration::from_millis(100),
+            faults: RegistryFaultPolicy {
+                max_latency: Duration::from_millis(50),
+                stale_num: 1,
+                stale_den: 4,
+                max_staleness: 4,
+            },
+        },
+    };
+    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+        panic!("{failure}");
+    }
+}
+
+#[test]
+fn discover_and_call_holds_across_seeds_in_leader_mode() {
+    // The same chaos under the **leader-based** control plane (spec §9.4.3):
+    // the nemesis crashes and partitions voters, forcing elections and quorum
+    // loss mid-traffic. The safety invariants — now including one-leader-per-term
+    // (invariant #22's election-safety half) — must hold on every seed.
+    let workload = DiscoverAndCall {
+        nodes: 3,
+        rounds: 12,
+        mode: ClusterModeSpec::Leader {
+            swim: swarm_swim(),
+            voters: 3,
+            election_timeout: Duration::from_millis(500),
+            heartbeat_interval: Duration::from_millis(100),
+            downing: DowningPolicy::Timeout(Duration::from_millis(300)),
         },
     };
     if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
@@ -167,7 +199,7 @@ fn discover_and_call_holds_across_seeds_in_static_mode() {
     let workload = DiscoverAndCall {
         nodes: 3,
         rounds: 12,
-        mode: MembershipMode::Static,
+        mode: ClusterModeSpec::Static { detector: None },
     };
     if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
         panic!("{failure}");
@@ -228,9 +260,12 @@ const TARGETS: Key<Target> = Key::new("watch-targets");
 /// paths — local delivery, cross-node frame forwarding, and node-down synthesis —
 /// across the whole fault space, where the standing safety invariants
 /// (no-silent-loss, serial, lifecycle, down-terminal) must still hold.
+/// Parameterized by `mode` so both the gossip coordinator's downing and the
+/// Raft leader's quorum-committed downing feed the node-down synthesis path.
 struct WatchUnderChaos {
     nodes: usize,
     rounds: u64,
+    mode: ClusterModeSpec,
 }
 
 impl ClusterWorkload for WatchUnderChaos {
@@ -248,8 +283,11 @@ impl ClusterWorkload for WatchUnderChaos {
             rtt: Duration::from_millis(50),
             suspect_timeout: Duration::from_millis(200),
             indirect_count: 2,
-            downing: DowningPolicy::Timeout(Duration::from_millis(300)),
         }
+    }
+
+    fn mode(&self) -> ClusterModeSpec {
+        self.mode
     }
 
     fn setup(&self, ctx: &ClusterCtx) {
@@ -275,7 +313,12 @@ impl ClusterWorkload for WatchUnderChaos {
             // outcome occurs, a watcher never sees two `Terminated` for one target.
             for round in 0..rounds {
                 clock.sleep(Duration::from_millis(200)).await;
-                for (i, target) in watcher_node.receptionist().lookup(TARGETS).iter().enumerate() {
+                for (i, target) in watcher_node
+                    .receptionist()
+                    .lookup(TARGETS)
+                    .iter()
+                    .enumerate()
+                {
                     let poke = if (round as usize + i) % 2 == 0 {
                         Poke::Stop
                     } else {
@@ -288,11 +331,53 @@ impl ClusterWorkload for WatchUnderChaos {
     }
 }
 
+fn watch_gossip_mode(workload_swim: SwimConfig) -> ClusterModeSpec {
+    ClusterModeSpec::Gossip {
+        swim: workload_swim,
+        downing: DowningPolicy::Timeout(Duration::from_millis(300)),
+    }
+}
+
+fn watch_leader_mode(workload_swim: SwimConfig) -> ClusterModeSpec {
+    ClusterModeSpec::Leader {
+        swim: workload_swim,
+        voters: 3,
+        election_timeout: Duration::from_millis(500),
+        heartbeat_interval: Duration::from_millis(100),
+        downing: DowningPolicy::Timeout(Duration::from_millis(300)),
+    }
+}
+
+fn watch_swim() -> SwimConfig {
+    SwimConfig {
+        probe_interval: Duration::from_millis(100),
+        rtt: Duration::from_millis(50),
+        suspect_timeout: Duration::from_millis(200),
+        indirect_count: 2,
+    }
+}
+
 #[test]
 fn watch_under_chaos_upholds_safety_invariants_across_seeds() {
     let workload = WatchUnderChaos {
         nodes: 3,
         rounds: 12,
+        mode: watch_gossip_mode(watch_swim()),
+    };
+    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+        panic!("{failure}");
+    }
+}
+
+#[test]
+fn watch_under_chaos_upholds_safety_invariants_in_leader_mode() {
+    // The leader-mode twin: `NodeDown` synthesis is driven by quorum-committed
+    // `Down` entries instead of the coordinator's policy (spec §9.4.3 item 4),
+    // racing graceful stops and faults across the same fault space.
+    let workload = WatchUnderChaos {
+        nodes: 3,
+        rounds: 12,
+        mode: watch_leader_mode(watch_swim()),
     };
     if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
         panic!("{failure}");
@@ -312,6 +397,7 @@ fn watch_under_chaos_never_double_delivers_a_terminated() {
     let workload = WatchUnderChaos {
         nodes: 3,
         rounds: 12,
+        mode: watch_gossip_mode(watch_swim()),
     };
     for seed in 0..48u64 {
         let events = record_cluster_seed(&workload, seed);
@@ -340,7 +426,10 @@ fn a_cluster_seed_replays() {
     let workload = DiscoverAndCall {
         nodes: 3,
         rounds: 8,
-        mode: MembershipMode::Autonomous(swarm_swim()),
+        mode: ClusterModeSpec::Gossip {
+            swim: swarm_swim(),
+            downing: DowningPolicy::Timeout(Duration::from_millis(300)),
+        },
     };
     assert!(run_cluster_seed(&workload, 123).is_ok());
     assert!(run_cluster_seed(&workload, 123).is_ok());

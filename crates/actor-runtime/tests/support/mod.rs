@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
+use actor_cluster::DowningPolicy;
+use actor_cluster::GossipMode;
 use actor_cluster::MembershipMode;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
@@ -198,8 +200,11 @@ fn start_node_cfg(cfg: TcpConfig, listener: TcpListener, swim: Option<SwimConfig
     let codec: Arc<dyn Codec> = Arc::clone(&cfg.codec);
     let (transport, inbound) = TcpTransport::start(cfg, listener);
     let membership = match swim {
-        Some(swim) => MembershipMode::Autonomous(swim),
-        None => MembershipMode::Static,
+        Some(swim) => MembershipMode::Gossip(GossipMode {
+            swim,
+            downing: DowningPolicy::Conservative,
+        }),
+        None => MembershipMode::Static { detector: None },
     };
     let config = ClusterConfig {
         codec,

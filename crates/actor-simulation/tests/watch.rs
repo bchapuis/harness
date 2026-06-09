@@ -97,13 +97,12 @@ fn one_node(seed: u64) -> (Simulation, SimCluster) {
     (sim, node)
 }
 
-fn fast_swim(downing: DowningPolicy) -> SwimConfig {
+fn fast_swim() -> SwimConfig {
     SwimConfig {
         probe_interval: Duration::from_millis(100),
         rtt: Duration::from_millis(50),
         suspect_timeout: Duration::from_millis(200),
         indirect_count: 2,
-        downing,
     }
 }
 
@@ -235,9 +234,10 @@ fn node_down_synthesizes_terminated_for_remote_watch() {
     // The cascade (spec §8.1 step 4): a watcher of an actor on a downed node
     // receives `Terminated { NodeDown }`, even though no stop message can arrive.
     let sim = Simulation::new(4);
-    let net = SimNetwork::new(&sim).with_swim(fast_swim(DowningPolicy::Timeout(
-        Duration::from_millis(200),
-    )));
+    let net = SimNetwork::new(&sim).with_gossip(
+        fast_swim(),
+        DowningPolicy::Timeout(Duration::from_millis(200)),
+    );
     let node_a = net.join(NodeId::new(1));
     let node_b = net.join(NodeId::new(2));
 

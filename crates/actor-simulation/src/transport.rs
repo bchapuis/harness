@@ -17,8 +17,14 @@ use std::time::Duration;
 use actor_cluster::Authorizer;
 use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
+use actor_cluster::DowningPolicy;
 use actor_cluster::Frame;
+use actor_cluster::GossipMode;
+use actor_cluster::LeaderMode;
 use actor_cluster::MembershipMode;
+use actor_cluster::RaftConfig;
+use actor_cluster::RegistryClient;
+use actor_cluster::RegistryMode;
 use actor_cluster::SwimConfig;
 use actor_cluster::Transport;
 use actor_cluster::TransportError;
@@ -84,7 +90,7 @@ impl SimNetwork {
             entropy: sim.entropy(),
             spawner: sim.spawner(),
             mailbox_capacity: 64,
-            mode: MembershipMode::Static,
+            mode: MembershipMode::Static { detector: None },
             events: Arc::new(()),
             authorizer: None,
             faults: FaultPolicy::default(),
@@ -103,25 +109,52 @@ impl SimNetwork {
         self
     }
 
-    /// Run every node in **autonomous** mode (spec §9.2, §10): SWIM failure
-    /// detection with an elected leader driving the lifecycle.
-    pub fn with_swim(mut self, config: SwimConfig) -> SimNetwork {
-        self.mode = MembershipMode::Autonomous(config);
+    /// Run every node in **gossip-based** mode (spec §9.4.4): full SWIM failure
+    /// detection, with the coordinator driving the lifecycle and applying
+    /// `downing`.
+    pub fn with_gossip(mut self, swim: SwimConfig, downing: DowningPolicy) -> SimNetwork {
+        self.mode = MembershipMode::Gossip(GossipMode { swim, downing });
         self
     }
 
-    /// Run every node in **managed** mode (spec §9.4): the SWIM detector observes
-    /// reachability, but `leader` is the designated control plane — the single
-    /// node whose `admit`/`drain`/`resume`/`decommission` commands take effect.
-    pub fn with_managed(mut self, swim: SwimConfig, leader: NodeId) -> SimNetwork {
-        self.mode = MembershipMode::Managed { swim, leader };
+    /// Run every node in **registry-based** mode (spec §9.4.2): the SWIM
+    /// detector observes reachability, but the external registry behind
+    /// `client` is the authority — every node syncs against it each
+    /// `sync_interval`, and only a registry mutation declares `down`.
+    pub fn with_registry(
+        mut self,
+        swim: SwimConfig,
+        client: Arc<dyn RegistryClient>,
+        sync_interval: Duration,
+    ) -> SimNetwork {
+        self.mode = MembershipMode::Registry(RegistryMode {
+            swim,
+            client,
+            sync_interval,
+        });
+        self
+    }
+
+    /// Run every node in **leader-based** mode (spec §9.4.3): the SWIM detector
+    /// is the leader's sensor, membership transitions are quorum-committed Raft
+    /// log entries, and `downing` is applied by the elected leader alone.
+    pub fn with_leader(
+        mut self,
+        swim: SwimConfig,
+        raft: RaftConfig,
+        downing: DowningPolicy,
+    ) -> SimNetwork {
+        self.mode = MembershipMode::Leader(LeaderMode {
+            swim,
+            raft,
+            downing,
+        });
         self
     }
 
     /// Run every node in the given membership [`mode`](MembershipMode) (spec §9.4)
-    /// — the general form of [`with_swim`](Self::with_swim)/
-    /// [`with_managed`](Self::with_managed), so a swarm can sweep the same workload
-    /// across static, autonomous, and managed control planes.
+    /// — the general form of the per-mode builders, so a swarm can sweep the same
+    /// workload across all four control planes.
     pub fn with_mode(mut self, mode: MembershipMode) -> SimNetwork {
         self.mode = mode;
         self
@@ -160,7 +193,7 @@ impl SimNetwork {
             codec,
             mailbox_capacity: self.mailbox_capacity,
             events: Arc::clone(&self.events),
-            membership: self.mode,
+            membership: self.mode.clone(),
             joining,
             authorizer: self.authorizer.clone(),
         };

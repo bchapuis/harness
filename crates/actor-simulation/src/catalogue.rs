@@ -2,7 +2,7 @@
 //!
 //! The conformance-traceability concern, kept apart from the invariant
 //! *mechanism* in [`crate::invariant`]: a machine-readable table linking each of
-//! the 21 §18.5 invariants to *how* it is verified. The `conformance_catalogue`
+//! the 22 §18.5 invariants to *how* it is verified. The `conformance_catalogue`
 //! integration test asserts it stays consistent with
 //! [`default_invariants`](crate::default_invariants), so a checker added in code
 //! but not recorded here (or vice versa) fails the build.
@@ -38,7 +38,7 @@ pub struct CatalogueEntry {
     pub verify: &'static [Verify],
 }
 
-/// The §18.5 invariant catalogue (#1–#21): the single source of truth linking
+/// The §18.5 invariant catalogue (#1–#22): the single source of truth linking
 /// each invariant to the code that verifies it (spec §17, §18.5). Kept
 /// consistent with [`default_invariants`](crate::default_invariants) by the
 /// `conformance_catalogue` test.
@@ -66,7 +66,9 @@ const CATALOGUE: &[CatalogueEntry] = &[
         invariant: 3,
         spec: "§6",
         property: "Per-pair FIFO: messages from one sender to one recipient observed in send order",
-        verify: &[Verify::SimTest("actor.rs, cluster.rs, conformance_faults.rs")],
+        verify: &[Verify::SimTest(
+            "actor.rs, cluster.rs, conformance_faults.rs",
+        )],
     },
     CatalogueEntry {
         invariant: 4,
@@ -139,9 +141,11 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 14,
-        spec: "§9.2",
-        property: "Membership convergence once faults cease and partitions heal",
-        verify: &[Verify::SimTest("gossip.rs")],
+        spec: "§9.2, §9.4",
+        property: "Membership convergence once faults cease and partitions heal — by anti-entropy (gossip-based), registry sync (registry-based), or log replication (leader-based)",
+        verify: &[Verify::SimTest(
+            "gossip.rs, conformance_registry.rs, conformance_leader.rs",
+        )],
     },
     CatalogueEntry {
         invariant: 15,
@@ -154,9 +158,11 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 16,
-        spec: "§9.2",
-        property: "Partition tolerance: under the default policy a partition alone never downs a member",
-        verify: &[Verify::SimTest("failure.rs, conformance_membership.rs")],
+        spec: "§9.4",
+        property: "Partition tolerance: under the default policy a partition alone never downs a member — unconditionally in registry-based mode (observe-only detector), and on any quorum-less side in leader-based mode (#22)",
+        verify: &[Verify::SimTest(
+            "failure.rs, conformance_membership.rs, conformance_registry.rs, conformance_leader.rs",
+        )],
     },
     CatalogueEntry {
         invariant: 17,
@@ -174,7 +180,9 @@ const CATALOGUE: &[CatalogueEntry] = &[
         invariant: 19,
         spec: "§13",
         property: "Receptionist consistency: pruned on node down; subscribe delivers snapshot then changes",
-        verify: &[Verify::SimTest("receptionist.rs, conformance_receptionist.rs")],
+        verify: &[Verify::SimTest(
+            "receptionist.rs, conformance_receptionist.rs",
+        )],
     },
     CatalogueEntry {
         invariant: 20,
@@ -187,5 +195,14 @@ const CATALOGUE: &[CatalogueEntry] = &[
         spec: "§3.3",
         property: "Location transparency: local vs remote target produce identical replies and ordering",
         verify: &[Verify::Differential("cluster.rs")],
+    },
+    CatalogueEntry {
+        invariant: 22,
+        spec: "§9.4.3",
+        property: "Quorum-gated control plane: every transition is a quorum-committed log entry applied in log order; at most one leader per term; a minority never evicts the majority",
+        verify: &[
+            Verify::Checker("one-leader-per-term"),
+            Verify::SimTest("conformance_leader.rs"),
+        ],
     },
 ];

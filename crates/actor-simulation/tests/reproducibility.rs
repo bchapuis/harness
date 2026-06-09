@@ -14,12 +14,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::MembershipMode;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorSystem;
 use actor_core::BoxFuture;
-use actor_core::NodeId;
 use actor_core::Clock;
 use actor_core::Ctx;
 use actor_core::Handler;
@@ -28,7 +26,9 @@ use actor_core::Key;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_simulation::ClusterCtx;
+use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
+use actor_simulation::RegistryFaultPolicy;
 use actor_simulation::SimCluster;
 use actor_simulation::SimSystem;
 use actor_simulation::Workload;
@@ -149,6 +149,12 @@ impl ClusterWorkload for DiscoverAndCall {
             rtt: Duration::from_millis(50),
             suspect_timeout: Duration::from_millis(200),
             indirect_count: 2,
+        }
+    }
+
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Gossip {
+            swim: self.swim(),
             downing: DowningPolicy::Timeout(Duration::from_millis(300)),
         }
     }
@@ -198,19 +204,21 @@ fn cluster_one_seed_replays_identically() {
     assert!(check_cluster_reproducible(&workload, 99).is_ok());
 }
 
-/// A **managed**-mode workload whose leader churns a node `draining ⇄ up` every
-/// round while also discovering and calling. This exercises managed mode's
-/// *new* deterministic state — operator-decision revisions and the
-/// `MemberDraining`/`MemberResumed` event ordering — so the reproducibility check
-/// has something mode-specific to pin (spec §9.4, §18.1).
-struct ManagedChurn {
+/// A **registry**-mode workload whose operator churns a node `draining ⇄ up`
+/// every round — through the simulated external registry, with seeded sync
+/// latency and stale reads — while also discovering and calling. This exercises
+/// registry mode's *new* deterministic state — registry revisions, the sync
+/// loop, and the `MemberDraining`/`MemberResumed` event ordering — so the
+/// reproducibility check has something mode-specific to pin (spec §9.4.2,
+/// §18.1).
+struct RegistryChurn {
     nodes: usize,
     rounds: u64,
 }
 
-impl ClusterWorkload for ManagedChurn {
+impl ClusterWorkload for RegistryChurn {
     fn name(&self) -> &'static str {
-        "repro-managed-churn"
+        "repro-registry-churn"
     }
 
     fn node_count(&self) -> usize {
@@ -223,15 +231,19 @@ impl ClusterWorkload for ManagedChurn {
             rtt: Duration::from_millis(50),
             suspect_timeout: Duration::from_millis(200),
             indirect_count: 2,
-            downing: DowningPolicy::Conservative,
         }
     }
 
-    fn mode(&self) -> MembershipMode {
-        // Node 1 is the designated control-plane leader.
-        MembershipMode::Managed {
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Registry {
             swim: self.swim(),
-            leader: NodeId::new(1),
+            sync_interval: Duration::from_millis(100),
+            faults: RegistryFaultPolicy {
+                max_latency: Duration::from_millis(40),
+                stale_num: 1,
+                stale_den: 4,
+                max_staleness: 3,
+            },
         }
     }
 
@@ -243,21 +255,22 @@ impl ClusterWorkload for ManagedChurn {
     }
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
-        let leader = ctx.nodes()[0].clone(); // node 1 = leader
+        let caller = ctx.nodes()[0].clone();
+        let registry = ctx.registry().expect("registry mode").clone();
         let victim = ctx.nodes()[1].node(); // node 2
         let rounds = self.rounds;
         Box::pin(async move {
-            let clock = leader.clock().clone();
+            let clock = caller.clock().clone();
             for round in 0..rounds {
                 clock.sleep(Duration::from_millis(200)).await;
-                // Cordon and uncordon the victim on alternating rounds — operator
-                // decisions that must reproduce byte-for-byte from the seed.
+                // Cordon and uncordon the victim on alternating rounds — registry
+                // mutations whose sync must reproduce byte-for-byte from the seed.
                 if round % 2 == 0 {
-                    leader.drain(victim);
+                    registry.drain(victim);
                 } else {
-                    leader.resume(victim);
+                    registry.resume(victim);
                 }
-                for service in leader.receptionist().lookup(GREETERS).iter() {
+                for service in caller.receptionist().lookup(GREETERS).iter() {
                     let _ = service.ask_timeout(Greet, Duration::from_millis(500)).await;
                 }
             }
@@ -266,11 +279,96 @@ impl ClusterWorkload for ManagedChurn {
 }
 
 #[test]
-fn managed_mode_event_stream_is_byte_identical_across_seeds() {
-    // Managed mode's operator commands and revision counters must be as
+fn registry_mode_event_stream_is_byte_identical_across_seeds() {
+    // Registry mode's sync loop, seeded registry faults, and revision stamps
+    // must be as deterministic as everything else: the whole event stream
+    // reproduces byte-for-byte, even with the nemesis and transport faults in
+    // play.
+    let workload = RegistryChurn {
+        nodes: 3,
+        rounds: 8,
+    };
+    if let Err(divergence) = replay_cluster_swarm(&workload, 0..24) {
+        panic!("{divergence}");
+    }
+}
+
+/// A **leader**-mode workload whose operator churns a node `draining ⇄ up`
+/// every round — each a Raft proposal forwarded, committed, and applied — while
+/// the nemesis crashes and partitions nodes, forcing elections mid-transition.
+/// This pins leader mode's *new* deterministic state: election timers and
+/// jitter, log replication, commit-index stamps, and `LeaderElected` ordering
+/// (spec §9.4.3, §18.1) — the highest-risk determinism surface of the mode.
+struct LeaderChurn {
+    nodes: usize,
+    rounds: u64,
+}
+
+impl ClusterWorkload for LeaderChurn {
+    fn name(&self) -> &'static str {
+        "repro-leader-churn"
+    }
+
+    fn node_count(&self) -> usize {
+        self.nodes
+    }
+
+    fn swim(&self) -> SwimConfig {
+        SwimConfig {
+            probe_interval: Duration::from_millis(100),
+            rtt: Duration::from_millis(50),
+            suspect_timeout: Duration::from_millis(200),
+            indirect_count: 2,
+        }
+    }
+
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Leader {
+            swim: self.swim(),
+            voters: 3,
+            election_timeout: Duration::from_millis(500),
+            heartbeat_interval: Duration::from_millis(100),
+            downing: DowningPolicy::Timeout(Duration::from_millis(300)),
+        }
+    }
+
+    fn setup(&self, ctx: &ClusterCtx) {
+        for node in ctx.nodes() {
+            let greeter = node.spawn(Greeter);
+            node.receptionist().register(GREETERS, &greeter);
+        }
+    }
+
+    fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
+        let proposer = ctx.nodes()[0].clone();
+        let victim = ctx.nodes()[1].node(); // node 2
+        let rounds = self.rounds;
+        Box::pin(async move {
+            let clock = proposer.clock().clone();
+            for round in 0..rounds {
+                clock.sleep(Duration::from_millis(200)).await;
+                // Cordon and uncordon the victim on alternating rounds — Raft
+                // proposals whose elections, commits, and (under the nemesis)
+                // failures must reproduce byte-for-byte from the seed.
+                if round % 2 == 0 {
+                    let _ = proposer.drain(victim).await;
+                } else {
+                    let _ = proposer.resume(victim).await;
+                }
+                for service in proposer.receptionist().lookup(GREETERS).iter() {
+                    let _ = service.ask_timeout(Greet, Duration::from_millis(500)).await;
+                }
+            }
+        })
+    }
+}
+
+#[test]
+fn leader_mode_event_stream_is_byte_identical_across_seeds() {
+    // Raft's timers, jitter, replication, and commit application must be as
     // deterministic as everything else: the whole event stream reproduces
-    // byte-for-byte, even with the nemesis and transport faults in play.
-    let workload = ManagedChurn {
+    // byte-for-byte, even with the nemesis crashing leaders mid-transition.
+    let workload = LeaderChurn {
         nodes: 3,
         rounds: 8,
     };

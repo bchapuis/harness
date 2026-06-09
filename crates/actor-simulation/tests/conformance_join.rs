@@ -1,6 +1,6 @@
 //! Conformance: cluster join and leave (spec §9.1, §9.2, §9.3). A joiner enters
-//! `Joining` and is admitted to `Up` by the leader once the cluster learns of it
-//! via gossip; a graceful `leave` announces `Leaving` and the leader finalizes it
+//! `Joining` and is admitted to `Up` by the coordinator once the cluster learns of it
+//! via gossip; a graceful `leave` announces `Leaving` and the coordinator finalizes it
 //! to the terminal `Down`.
 
 mod support;
@@ -11,7 +11,7 @@ use actor_cluster::MemberStatus;
 use actor_cluster::SwimConfig;
 use actor_core::NodeId;
 
-/// A brisk SWIM config so gossip and leader transitions converge quickly in
+/// A brisk SWIM config so gossip and coordinator transitions converge quickly in
 /// virtual time. A long suspect timeout and the default (conservative) downing
 /// keep the failure detector from interfering with these lifecycle tests.
 fn brisk_swim() -> SwimConfig {
@@ -24,9 +24,9 @@ fn brisk_swim() -> SwimConfig {
 }
 
 #[test]
-fn a_joiner_is_admitted_to_up_by_the_leader() {
+fn a_joiner_is_admitted_to_up_by_the_coordinator() {
     let (sim, net) = support::cluster(20, Some(brisk_swim()));
-    // Two founding members; node 1 is the lowest id, hence the leader.
+    // Two founding members; node 1 is the lowest id, hence the coordinator.
     let a = net.join(NodeId::new(1));
     let b = net.join(NodeId::new(2));
     // A joiner that knows only the seed (node 1), not node 2.
@@ -38,43 +38,47 @@ fn a_joiner_is_admitted_to_up_by_the_leader() {
         "a joiner starts Joining, not yet a full member"
     );
 
-    // Gossip carries node 3 = Joining to the leader, which admits it; the
+    // Gossip carries node 3 = Joining to the coordinator, which admits it; the
     // admission then propagates to every member.
     sim.run_for(Duration::from_secs(3));
 
-    assert_eq!(a.leader(), Some(NodeId::new(1)), "lowest-id member leads");
+    assert_eq!(
+        a.leader(),
+        Some(NodeId::new(1)),
+        "lowest-id member coordinates"
+    );
     assert_eq!(
         c.membership().self_status(),
         MemberStatus::Up,
-        "the joiner adopts Up once the leader admits it"
+        "the joiner adopts Up once the coordinator admits it"
     );
     assert_eq!(
         a.membership().status(NodeId::new(3)),
         Some(MemberStatus::Up),
-        "the leader admitted the joiner"
+        "the coordinator admitted the joiner"
     );
     assert_eq!(
         b.membership().status(NodeId::new(3)),
         Some(MemberStatus::Up),
-        "admission propagated to the non-leader peer"
+        "admission propagated to the other peer"
     );
 }
 
 #[test]
 fn a_graceful_leave_reaches_the_terminal_down() {
     let (sim, net) = support::cluster(21, Some(brisk_swim()));
-    let a = net.join(NodeId::new(1)); // leader
+    let a = net.join(NodeId::new(1)); // coordinator
     let b = net.join(NodeId::new(2));
     sim.run_for(Duration::from_millis(500)); // let the cluster settle
 
-    // Node 2 announces a graceful leave; it is not the leader, so the leader
+    // Node 2 announces a graceful leave; it is not the coordinator, so the coordinator
     // (node 1) finalizes it to Down (spec §9.3).
     b.leave();
     sim.run_for(Duration::from_secs(2));
 
     assert!(
         a.membership().is_down(NodeId::new(2)),
-        "the leader finalized the leaving node to the terminal Down"
+        "the coordinator finalized the leaving node to the terminal Down"
     );
     assert_eq!(
         b.membership().self_status(),
@@ -94,7 +98,7 @@ fn down_from_a_leave_is_terminal_and_does_not_resurrect() {
     sim.run_for(Duration::from_secs(2));
     assert!(a.membership().is_down(NodeId::new(2)));
 
-    // Even though node 2's transport keeps answering pings, the leader must not
+    // Even though node 2's transport keeps answering pings, the coordinator must not
     // resurrect a downed member (spec §9.1, invariant #15).
     sim.run_for(Duration::from_secs(3));
     assert!(
@@ -104,12 +108,13 @@ fn down_from_a_leave_is_terminal_and_does_not_resurrect() {
 }
 
 #[test]
-fn the_leader_defers_admission_until_the_cluster_converges() {
-    // The leader admits a joiner only once membership has converged (spec §9.2):
+fn the_coordinator_defers_admission_until_the_cluster_converges() {
+    // The coordinator admits a joiner only once its view is stable and fully
+    // reachable (spec §9.4.4 item 3):
     // while a partition leaves a member unreachable, admission is deferred; after
     // the heal, the joiner is admitted.
     let (sim, net) = support::cluster(40, Some(brisk_swim()));
-    let a = net.join(NodeId::new(1)); // leader
+    let a = net.join(NodeId::new(1)); // coordinator
     let _b = net.join(NodeId::new(2));
     sim.run_for(Duration::from_millis(500)); // a, b converge
 
@@ -118,13 +123,13 @@ fn the_leader_defers_admission_until_the_cluster_converges() {
     net.partition(&[NodeId::new(2)], &[NodeId::new(1), NodeId::new(3)]);
     sim.run_for(Duration::from_secs(1));
 
-    // A joiner reaches the leader (its seed, A) but must not be admitted yet.
+    // A joiner reaches the coordinator (its seed, A) but must not be admitted yet.
     let c = net.join_seeded(NodeId::new(3), &[NodeId::new(1)]);
     sim.run_for(Duration::from_secs(1));
     assert_ne!(
         a.membership().status(NodeId::new(3)),
         Some(MemberStatus::Up),
-        "the leader must not admit a joiner while the cluster is unconverged",
+        "the coordinator must not admit a joiner while its view is in flux",
     );
     assert_eq!(
         c.membership().self_status(),
@@ -148,7 +153,7 @@ fn a_long_dead_member_is_tombstoned_then_pruned() {
     // from the roster entirely, so the membership map does not grow without bound
     // under churn (spec §9.1).
     let (sim, net) = support::cluster(23, Some(brisk_swim()));
-    let a = net.join(NodeId::new(1)); // leader
+    let a = net.join(NodeId::new(1)); // coordinator
     let b = net.join(NodeId::new(2));
     sim.run_for(Duration::from_millis(500));
 

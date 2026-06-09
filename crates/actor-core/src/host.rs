@@ -604,16 +604,41 @@ async fn run_actor<A, C>(
                     Step::Run(actor)
                 }
                 Err(_err) => {
-                    handle_fault(Fault::Started, actor, &supervision, &clock, &mut restarts, &ctx, &state, &id, &parent, &mut factory).await
+                    handle_fault(
+                        Fault::Started,
+                        actor,
+                        &supervision,
+                        &clock,
+                        &mut restarts,
+                        &ctx,
+                        &state,
+                        &id,
+                        &parent,
+                        &mut factory,
+                    )
+                    .await
                 }
             },
             Step::Run(mut actor) => {
-                let fault = match message_loop(&mut actor, &ctx, &inbox, &escalation, &state, &id).await {
-                    Outcome::Stopped => break End::Stop(actor, StopReason::Stopped),
-                    Outcome::Faulted => Fault::Message,
-                    Outcome::Escalated => Fault::Escalation,
-                };
-                handle_fault(fault, actor, &supervision, &clock, &mut restarts, &ctx, &state, &id, &parent, &mut factory).await
+                let fault =
+                    match message_loop(&mut actor, &ctx, &inbox, &escalation, &state, &id).await {
+                        Outcome::Stopped => break End::Stop(actor, StopReason::Stopped),
+                        Outcome::Faulted => Fault::Message,
+                        Outcome::Escalated => Fault::Escalation,
+                    };
+                handle_fault(
+                    fault,
+                    actor,
+                    &supervision,
+                    &clock,
+                    &mut restarts,
+                    &ctx,
+                    &state,
+                    &id,
+                    &parent,
+                    &mut factory,
+                )
+                .await
             }
             Step::End(end) => break end,
         };

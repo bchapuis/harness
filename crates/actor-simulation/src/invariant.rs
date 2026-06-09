@@ -3,11 +3,11 @@
 //! Correctness is expressed as a small set of invariants checked on **every**
 //! run, not as bespoke example tests. Each
 //! [`Invariant`] observes the [`Event`] stream live and reports a violation
-//! string; the [`Checker`](crate::Checker) collects them. Five ship as
+//! string; the [`Checker`](crate::Checker) collects them. Six ship as
 //! continuous checkers; the rest are verified by example tests.
 //!
 //! [`catalogue`](crate::catalogue) is the single source of truth linking each of
-//! the 21 §18.5 invariants to *how* it is verified (a continuous [`Checker`], a
+//! the 22 §18.5 invariants to *how* it is verified (a continuous [`Checker`], a
 //! conformance test, a compile-fail case, a differential test, or a compile-time
 //! bound). The `conformance_catalogue` integration test asserts this catalogue
 //! stays consistent with [`default_invariants`] — so a checker added in code but
@@ -47,6 +47,7 @@ pub fn default_invariants() -> Vec<Box<dyn Invariant>> {
         Box::new(LifecycleExactlyOnce::default()),
         Box::new(DownIsTerminal::default()),
         Box::new(SignalInBand::default()),
+        Box::new(OneLeaderPerTerm::default()),
     ]
 }
 
@@ -273,6 +274,41 @@ impl Invariant for SignalInBand {
     }
 }
 
+/// **Quorum-gated control plane — election safety** (spec §18.5 #22, §9.4.3):
+/// at most one node ever announces leadership for a given term. This is the
+/// half of #22 expressible as a safety property over the event stream
+/// (`LeaderElected` carries the term); the quorum-gating and
+/// minority-cannot-evict halves are scenario properties, verified by the
+/// targeted tests in `conformance_leader.rs`. Vacuously green outside
+/// leader-based mode (no `LeaderElected` is ever emitted), so it is safe in
+/// [`default_invariants`].
+#[derive(Default)]
+pub struct OneLeaderPerTerm {
+    leaders: BTreeMap<u64, NodeId>,
+}
+
+impl Invariant for OneLeaderPerTerm {
+    fn name(&self) -> &'static str {
+        "one-leader-per-term"
+    }
+
+    fn observe(&mut self, event: &Event) -> Result<(), String> {
+        if let Event::LeaderElected { node, term } = event {
+            if let Some(winner) = self.leaders.get(term) {
+                if winner != node {
+                    return Err(format!(
+                        "two leaders elected for term {term}: {winner} and {node} \
+                         (election safety, invariant #22)"
+                    ));
+                }
+            } else {
+                self.leaders.insert(*term, *node);
+            }
+        }
+        Ok(())
+    }
+}
+
 // Note: death-watch exactly-once (#11) is intentionally *not* a continuous
 // checker. The tempting form — "at most one `TerminatedDelivered` per
 // (target, watcher)" — is unsound: a watcher may legitimately `watch` the same
@@ -403,6 +439,30 @@ mod tests {
                 manifest: "app.Greet",
             })
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn one_leader_per_term_flags_a_double_election() {
+        let mut inv = OneLeaderPerTerm::default();
+        let a = NodeId::new(1);
+        let b = NodeId::new(2);
+        inv.observe(&Event::LeaderElected { node: a, term: 3 })
+            .unwrap();
+        // The same winner re-announcing a term is tolerated; a different one is
+        // an election-safety violation.
+        assert!(
+            inv.observe(&Event::LeaderElected { node: a, term: 3 })
+                .is_ok()
+        );
+        assert!(
+            inv.observe(&Event::LeaderElected { node: b, term: 3 })
+                .is_err()
+        );
+        // A later term may elect someone else.
+        assert!(
+            inv.observe(&Event::LeaderElected { node: b, term: 4 })
+                .is_ok()
         );
     }
 

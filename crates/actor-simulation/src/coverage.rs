@@ -22,13 +22,23 @@ pub struct FaultStats {
     pub delayed: u64,
     /// Frames dropped because their directed pair was partitioned or crashed.
     pub blocked: u64,
+    /// Registry outage windows the nemesis opened (registry-based mode,
+    /// spec §9.4.2 item 6, §18.3).
+    pub registry_outages: u64,
+    /// Registry fetches served a stale snapshot by a seeded roll (spec §18.3).
+    pub registry_stale: u64,
 }
 
 impl FaultStats {
     /// Total number of fault events of any kind. Zero means the run exercised
     /// only the happy path.
     pub fn total(&self) -> u64 {
-        self.dropped + self.duplicated + self.delayed + self.blocked
+        self.dropped
+            + self.duplicated
+            + self.delayed
+            + self.blocked
+            + self.registry_outages
+            + self.registry_stale
     }
 }
 
@@ -41,6 +51,8 @@ impl std::ops::Add for FaultStats {
             duplicated: self.duplicated + rhs.duplicated,
             delayed: self.delayed + rhs.delayed,
             blocked: self.blocked + rhs.blocked,
+            registry_outages: self.registry_outages + rhs.registry_outages,
+            registry_stale: self.registry_stale + rhs.registry_stale,
         }
     }
 }
@@ -79,6 +91,10 @@ impl FaultCounters {
             duplicated: self.duplicated.load(Ordering::Relaxed),
             delayed: self.delayed.load(Ordering::Relaxed),
             blocked: self.blocked.load(Ordering::Relaxed),
+            // The registry rows are tallied by the simulated registry itself
+            // (`SimRegistry::fault_stats`), not by the network.
+            registry_outages: 0,
+            registry_stale: 0,
         }
     }
 }

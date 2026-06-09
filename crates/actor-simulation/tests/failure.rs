@@ -49,13 +49,12 @@ impl Handler<Greet> for Greeter {
 }
 
 /// Fast SWIM timings so a run covers detection in a fraction of a virtual second.
-fn fast_swim(downing: DowningPolicy) -> SwimConfig {
+fn fast_swim() -> SwimConfig {
     SwimConfig {
         probe_interval: Duration::from_millis(100),
         rtt: Duration::from_millis(50),
         suspect_timeout: Duration::from_millis(200),
         indirect_count: 2,
-        downing,
     }
 }
 
@@ -67,9 +66,10 @@ fn crash_completes_in_flight_ask_with_unreachable() {
     // Invariant #2 / cascade step 3: an ask to a node that gets declared `down`
     // completes with `Unreachable` rather than hanging.
     let sim = Simulation::new(7);
-    let net = SimNetwork::new(&sim).with_swim(fast_swim(DowningPolicy::Timeout(
-        Duration::from_millis(200),
-    )));
+    let net = SimNetwork::new(&sim).with_gossip(
+        fast_swim(),
+        DowningPolicy::Timeout(Duration::from_millis(200)),
+    );
     let node_a = net.join(A);
     let node_b = net.join(B);
 
@@ -100,7 +100,7 @@ fn partition_alone_does_not_down_a_node() {
     // Invariant #16: under the conservative policy a partition yields
     // `unreachable`, never `down`.
     let sim = Simulation::new(8);
-    let net = SimNetwork::new(&sim).with_swim(fast_swim(DowningPolicy::Conservative));
+    let net = SimNetwork::new(&sim).with_gossip(fast_swim(), DowningPolicy::Conservative);
     let node_a = net.join(A);
     let _node_b = net.join(B);
 
@@ -117,7 +117,7 @@ fn partition_alone_does_not_down_a_node() {
 #[test]
 fn healed_partition_restores_reachability() {
     let sim = Simulation::new(9);
-    let net = SimNetwork::new(&sim).with_swim(fast_swim(DowningPolicy::Conservative));
+    let net = SimNetwork::new(&sim).with_gossip(fast_swim(), DowningPolicy::Conservative);
     let node_a = net.join(A);
     let _node_b = net.join(B);
 
@@ -142,9 +142,10 @@ fn down_is_terminal_even_after_healing() {
     // Invariant #15: a node observed `down` never returns, even if it becomes
     // reachable again.
     let sim = Simulation::new(10);
-    let net = SimNetwork::new(&sim).with_swim(fast_swim(DowningPolicy::Timeout(
-        Duration::from_millis(200),
-    )));
+    let net = SimNetwork::new(&sim).with_gossip(
+        fast_swim(),
+        DowningPolicy::Timeout(Duration::from_millis(200)),
+    );
     let node_a = net.join(A);
     let _node_b = net.join(B);
 

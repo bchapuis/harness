@@ -17,7 +17,7 @@ const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
 
-fn swim(downing: DowningPolicy) -> SwimConfig {
+fn swim() -> SwimConfig {
     SwimConfig {
         probe_interval: Duration::from_millis(100),
         rtt: Duration::from_millis(50),
@@ -26,7 +26,6 @@ fn swim(downing: DowningPolicy) -> SwimConfig {
         // form — so indirect probing is disabled here; it has its own test.
         suspect_timeout: Duration::from_millis(500),
         indirect_count: 0,
-        downing,
     }
 }
 
@@ -36,7 +35,7 @@ fn three_nodes(
     downing: DowningPolicy,
 ) -> (Simulation, SimNetwork, SimCluster, SimCluster, SimCluster) {
     let sim = Simulation::new(seed);
-    let net = SimNetwork::new(&sim).with_swim(swim(downing));
+    let net = SimNetwork::new(&sim).with_gossip(swim(), downing);
     let a = net.join(A);
     let b = net.join(B);
     let c = net.join(C);

@@ -91,17 +91,25 @@ pub enum Event {
     /// `observer` first saw `node` as `joining` — handshake done, not yet a full
     /// member (spec §9.1, §9.3).
     MemberJoining { observer: NodeId, node: NodeId },
-    /// `observer` saw `node` become a full `up` member — the leader admitted it
-    /// on convergence (spec §9.1, §9.3).
+    /// `observer` saw `node` become a full `up` member — admitted by the mode's
+    /// authority (spec §9.1, §9.3, §9.4).
     MemberUp { observer: NodeId, node: NodeId },
-    /// `observer` saw `node` enter the reversible `draining` state — an operator,
-    /// in the managed control plane, cordoned it for maintenance (spec §9.4).
-    /// Unlike `down`, this is not terminal: the node stays a member and a
-    /// later `resume` returns it to `up`.
+    /// `observer` saw `node` enter the reversible `draining` state — the mode's
+    /// authority (a registry entry or a committed log entry, spec §9.4) cordoned
+    /// it for maintenance. Unlike `down`, this is not terminal: the node stays a
+    /// member and a later `resume` returns it to `up`.
     MemberDraining { observer: NodeId, node: NodeId },
     /// `observer` saw a `draining` `node` return to `up` — the operator resumed it
     /// after maintenance (spec §9.4). The reverse of [`Event::MemberDraining`].
     MemberResumed { observer: NodeId, node: NodeId },
+    /// `observer` applied the external registry's state at `revision`
+    /// (registry-based mode, spec §9.4.2). Emitted when a sync first lands a new
+    /// revision, so tests can await convergence on a registry mutation.
+    RegistrySynced { observer: NodeId, revision: u64 },
+    /// `node` won the leader election for `term` (leader-based mode, spec
+    /// §9.4.3). At most one node may ever announce a given term — the
+    /// election-safety half of invariant #22 a continuous checker enforces.
+    LeaderElected { node: NodeId, term: u64 },
     /// Supervision chose a directive for a faulted actor (spec §11.2, §16).
     Supervised {
         actor: ActorId,

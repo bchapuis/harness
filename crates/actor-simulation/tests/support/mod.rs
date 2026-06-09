@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use actor_cluster::DowningPolicy;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorSystem;
@@ -237,12 +238,13 @@ pub fn local_recorded(seed: u64) -> (Simulation, SimSystem, Recorder) {
 }
 
 /// A network for a multi-node cluster; call `.join(node)` to bring nodes up.
-/// `swim` enables failure detection when `Some`.
+/// `swim` enables gossip-based membership (spec §9.4.4) with conservative
+/// downing when `Some`; `None` runs static mode without a detector.
 pub fn cluster(seed: u64, swim: Option<SwimConfig>) -> (Simulation, SimNetwork) {
     let sim = Simulation::new(seed);
     let mut net = SimNetwork::new(&sim);
     if let Some(config) = swim {
-        net = net.with_swim(config);
+        net = net.with_gossip(config, DowningPolicy::Conservative);
     }
     (sim, net)
 }

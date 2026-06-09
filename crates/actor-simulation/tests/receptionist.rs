@@ -52,13 +52,12 @@ impl Handler<Greet> for Greeter {
 
 const GREETERS: Key<Greeter> = Key::new("greeters");
 
-fn fast_swim(downing: DowningPolicy) -> SwimConfig {
+fn fast_swim() -> SwimConfig {
     SwimConfig {
         probe_interval: Duration::from_millis(100),
         rtt: Duration::from_millis(50),
         suspect_timeout: Duration::from_millis(200),
         indirect_count: 2,
-        downing,
     }
 }
 
@@ -95,9 +94,10 @@ fn registration_is_pruned_when_its_node_goes_down() {
     // Cascade step 5 (spec §8.1, §13 rule 3): when B is declared down, A's
     // listing for the key it published loses that registration.
     let sim = Simulation::new(2);
-    let net = SimNetwork::new(&sim).with_swim(fast_swim(DowningPolicy::Timeout(
-        Duration::from_millis(200),
-    )));
+    let net = SimNetwork::new(&sim).with_gossip(
+        fast_swim(),
+        DowningPolicy::Timeout(Duration::from_millis(200)),
+    );
     let node_a = net.join(NodeId::new(1));
     let node_b = net.join(NodeId::new(2));
 

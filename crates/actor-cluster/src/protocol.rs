@@ -15,6 +15,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::membership::MemberDigest;
+use crate::raft::LogEntry;
+use crate::raft::RaftCommand;
 
 /// A correlation id pairing a request with its reply on an association (spec
 /// §7.1).
@@ -114,4 +116,41 @@ pub enum Frame {
     /// because it joined late or a broadcast was lost — without the registrant
     /// having to re-broadcast.
     ReceptionistSync { entries: Vec<ReceptionistEntry> },
+    /// A Raft vote request (leader-based mode, spec §9.4.3): `candidate` asks
+    /// for the vote in `term`, proving its log is up to date with its last
+    /// entry's index and term.
+    RaftVote {
+        term: u64,
+        candidate: NodeId,
+        last_index: u64,
+        last_term: u64,
+    },
+    /// The reply to a [`RaftVote`](Frame::RaftVote).
+    RaftVoteReply { term: u64, granted: bool },
+    /// Raft log replication and heartbeat (spec §9.4.3): the `leader` sends the
+    /// log suffix after `(prev_index, prev_term)` plus its commit index.
+    RaftAppend {
+        term: u64,
+        leader: NodeId,
+        prev_index: u64,
+        prev_term: u64,
+        entries: Vec<LogEntry>,
+        commit: u64,
+    },
+    /// The reply to a [`RaftAppend`](Frame::RaftAppend): on success,
+    /// `match_index` is the highest replicated index; on a log mismatch it is a
+    /// back-off hint.
+    RaftAppendReply {
+        term: u64,
+        ok: bool,
+        match_index: u64,
+    },
+    /// A membership command offered to the leader (spec §9.4.3 item 1): a
+    /// non-leader node sends it to a voter, which forwards it to its leader.
+    /// `forwarded` stops a stale-leader loop — a forwarded proposal landing on
+    /// a non-leader is dropped, and the proposer's bounded wait reports failure.
+    RaftPropose {
+        command: RaftCommand,
+        forwarded: bool,
+    },
 }

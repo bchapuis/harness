@@ -45,6 +45,8 @@ use std::time::Duration;
 
 use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
+use actor_cluster::DowningPolicy;
+use actor_cluster::GossipMode;
 use actor_cluster::MemberStatus;
 use actor_cluster::MembershipMode;
 use actor_cluster::SwimConfig;
@@ -182,13 +184,16 @@ async fn run(args: &[String]) {
             codec,
             mailbox_capacity: 64,
             events: Arc::new(()),
-            membership: MembershipMode::Autonomous(SwimConfig {
-                probe_interval: Duration::from_millis(500),
-                rtt: Duration::from_millis(250),
-                suspect_timeout: Duration::from_secs(2),
-                ..SwimConfig::default()
+            membership: MembershipMode::Gossip(GossipMode {
+                swim: SwimConfig {
+                    probe_interval: Duration::from_millis(500),
+                    rtt: Duration::from_millis(250),
+                    suspect_timeout: Duration::from_secs(2),
+                    ..SwimConfig::default()
+                },
+                downing: DowningPolicy::Conservative,
             }),
-            // A joiner enters Joining and is admitted to Up by the leader once it
+            // A joiner enters Joining and is admitted to Up by the coordinator once it
             // gossips itself in via its seeds (spec §9.3).
             joining: opts.join,
             authorizer: None,
