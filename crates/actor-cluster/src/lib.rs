@@ -21,6 +21,7 @@ pub mod placement;
 mod protocol;
 mod raft;
 mod registry;
+mod router;
 mod system;
 mod transport;
 
@@ -48,6 +49,8 @@ pub use registry::RegistryEntry;
 pub use registry::RegistryError;
 pub use registry::RegistrySnapshot;
 pub use registry::RegistryState;
+pub use router::RouteStrategy;
+pub use router::Router;
 pub use system::Authorizer;
 pub use system::ClusterConfig;
 pub use system::ClusterSystem;

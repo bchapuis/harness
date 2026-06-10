@@ -48,7 +48,16 @@ This is deliberately stricter than the receptionist's listing filter (core §13 
 
 ## 3. Group routers
 
-*Reserved — specified together with its implementation in a subsequent change.*
+A group router spreads calls over the actors registered under one receptionist `Key` (core §13) — the cluster-utility counterpart of addressing one `ActorRef` directly.
+
+1. A router is a **node-local, typed view** over a receptionist `Key`. It MUST NOT replicate state of its own or introduce wire frames; the receptionist's replication is the only cluster state involved.
+2. Every routing decision MUST draw from the **current serving listing** (core §13 req 4) at decision time, so a routee on a node that goes `down` or `draining` stops being selected as soon as the local listing reflects it, and a `resume` restores it without re-registration.
+3. Strategies:
+   - **Round-robin** MUST cycle the listing in its deterministic order (the registry is an ordered set), so the cycle is reproducible under a fixed seed (core §18.1).
+   - **Random** MUST draw from the system's seeded entropy (core §4.6, §18.1), never an ambient RNG.
+   - **Rendezvous-hashed** routing selects by a **caller-supplied key**: routees are ranked by the §2 weight function over the routee's actor tag (owner-node tag ‖ path ‖ incarnation), ties to the lower `ActorId`. The same key over the same listing MUST select the same routee on every node.
+4. A route over an **empty listing** MUST fail fast with `DeadLetter`; the router MUST NOT buffer, queue, or retry (core §1.2, §14.2).
+5. Routing adds **no delivery guarantee** beyond the underlying `ask`/`tell` (core §7.2), and no failure handling beyond theirs: a stale listing entry MAY still route to an actor that just terminated, and the call then fails like any direct call would.
 
 ---
 
@@ -60,7 +69,7 @@ This is deliberately stricter than the receptionist's listing filter (core §13 
 
 ## 5. Events
 
-Utility events extend the core `Event` enum (core §16). This revision defines none: placement (§2) is a pure function with no event of its own — emitting one per routing decision would flood the stream without enabling any check that the property tests of U1 do not already perform.
+Utility events extend the core `Event` enum (core §16). Placement (§2) and routers (§3) define none: both are pure or node-local functions whose per-decision events would flood the stream without enabling any check their conformance tests do not already perform.
 
 ---
 
@@ -71,6 +80,8 @@ The utilities catalogue mirrors the core catalogue's structure (core §17, §18.
 | # | Invariant | Defined in | Verified by |
 |---|---|---|---|
 | U1 | **Deterministic placement.** Rendezvous placement is a pure, version-stable function of the serving set and key: nodes with identical serving sets compute identical owners for every key, and a single-member change reassigns only the keys that member owned or now owns. | §2 | property + cluster tests (`conformance_placement.rs`); pinned known-answer hash vectors |
+
+Group routers (§3) define no numbered invariant: "selects only from the current serving listing, fails fast when empty" is a local function property, not an emergent one — it is pinned directly by `conformance_router.rs`.
 
 ---
 
