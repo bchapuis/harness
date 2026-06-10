@@ -1,6 +1,6 @@
 # Agentic Harness: Specification
 
-**Status:** Draft v2
+**Status:** Draft v3
 **Scope:** A distributed agentic runtime: compound AI systems (agent loops combining model calls, tools, and control logic) run as actors on a mutualized cluster. Built as an application on the core framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)) and the cluster utilities ([`cluster-utilities-spec.md`](cluster-utilities-spec.md)).
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
@@ -9,7 +9,7 @@ Sections of the core specification are cited as **core §N**, sections of the ut
 
 > **Design stance.** Today an agentic session is one OS process per user: the loop, the conversation, and unrestricted access to a machine, all in one box (the shape of a Claude Code session). The box is mostly idle: a session spends its life waiting on a model, a tool, or its user, yet holds the machine the whole time. The harness splits the box at **one isolation boundary**, placed between *control* and *effect*. Above it, the **loop is an actor**: serial, journaled, touching the world only through three seams, the **model** (§4), the **journal** (§6), and the **sandbox** (§5.3). A waiting session holds no thread, a deactivated one holds no memory, and the journal *is* the session, so thousands of sessions pack onto shared nodes. Below it, the **effects live in a sandbox**: one isolated environment per session where tools run, free to be arbitrarily effectful without endangering the node or any other session. §5.1 places the boundary and defends the placement. Everything else (time, randomness, task spawning, transport) comes from the core seams (core §4.6, §7), so deterministic simulation extends to the harness unchanged: one seed reproduces an entire multi-node agentic run, including its model outputs, tool faults, crashes, and resumes.
 >
-> The harness is also the worked example of the honesty clauses the lower specs end on. Placement is not a lease (util §2.3) and the singleton guarantee is per *converged* view (util §4.3); both tell applications needing exclusivity to fence by their own means. The harness does: the journal's **fenced append** (§6.2) is that fence, and it keeps a session safe even while two nodes transiently believe they own it.
+> The harness is also the worked example of the honesty clauses the lower specs end on. Placement is not a lease (util §2.3) and the singleton guarantee is per *converged* view (util §4.3); both tell applications needing exclusivity to fence by their own means. The harness does: the journal's **fenced append** (§6.2) is that fence, and it keeps a session's *transcript* safe even while two nodes transiently believe they own it. The fence guards the record, not the world: it cannot recall an effect already launched, and what divergence can and cannot cost is itemized where it arises (§5.5, §6.2).
 
 ---
 
@@ -80,7 +80,7 @@ The loop reaches the world through exactly three seams, **model** (§4), **journ
 | **Session** | One agent conversation: a durable identity (`SessionId`), a journal, and, while active, one hosting actor. Survives actor restarts and node moves; an `ActorId` does not. |
 | **Journal** | The durable, per-session, totally-ordered log of records, behind a trait (§6). |
 | **Record** | One journal entry. The transcript is the sequence of records; agent state is a fold over them (§6.3). |
-| **Kind** | A named agent definition (`KindId` → system prompt, toolset, sandbox profile, model parameters, default budget), registered identically on every node (§7.1). |
+| **Kind** | A named agent definition (`KindId` → system prompt, toolset, sandbox profile, model parameters, default budget, delegation allowlist), registered identically on every node (§7.1). |
 | **Turn** | One submitted input: a user prompt, or a parent agent's delegation (§8). Carries a client-chosen `TurnId`, the idempotency key (§7.4). |
 | **Run** | The execution a turn triggers: the model→tools→model loop until a terminal outcome. Identified by its turn's `TurnId`. |
 | **Step** | One loop iteration within a run: one model call plus the resolution of every tool call and delegation it requested. |
@@ -107,7 +107,7 @@ A run advances in **steps**. Each step:
 1. checks the budget (§9.1); if exhausted, the run ends with `RunError::BudgetExhausted`;
 2. issues one model call carrying the transcript (§4.2);
 3. if the response is a final assistant message, journals it and ends the run with `Ok(Completion)`;
-4. otherwise journals the model turn (intent before effect, §6.4), then executes every requested tool call (§5) and delegation (§8);
+4. otherwise journals the model response (intent before effect, §6.4), then executes every requested tool call (§5) and delegation (§8);
 5. journals each outcome as it arrives; when all are resolved, begins the next step.
 
 A run MUST end in exactly one terminal outcome, journaled as the run's `RunEnded` record (invariant H3): `Ok(Completion)`, `RunError::BudgetExhausted`, `RunError::Cancelled`, `RunError::Model(…)` (a model failure no retry policy absorbed, §4.3), or `RunError::Journal(…)` (the session cannot record, §6.5). `RunError` is an application error and therefore lives **inside the reply** (core §3.2 rule 4): the caller of `Submit` (§7.3) sees `Result<Completion, RunError>`, with transport failure separate in `CallError`.
@@ -181,11 +181,19 @@ pub struct ToolDecl {
     pub name: &'static str,     // stable, author-chosen; the model selects by it (cf. manifests, core §4.4)
     pub description: String,
     pub input_schema: Schema,
-    pub idempotent: bool,       // may a dangling call be blindly re-executed? (§5.5)
+    pub on_dangling: OnDangling, // the declared recovery policy for a dangling call (§5.5)
+}
+
+/// Resume's policy for a dangling call: intent journaled, outcome not (§5.5).
+pub enum OnDangling {
+    Reexecute,  // blind re-execution is safe: the call is idempotent, or dedups (`delegate`, §8.1)
+    Interrupt,  // resolve as ToolError::Interrupted; the model decides whether to retry
 }
 ```
 
 A kind's `ToolRegistry` is a hand-built list of declarations, in the spirit of `HandlerRegistry` (core §4.4): explicit, inspectable, and the **allowlist**. A model's tool call dispatches by name against the registry and nothing else; no path leads from model output to code outside the declared set.
+
+Every requested tool call carries a **`CallId`**, unique within its run (the model API's tool-use id, or one the harness assigns on receipt), journaled with the call's intent (§6.4). Outcomes reference it, dangling-call resolution (§5.5) matches by it, and child-session derivation (§8.1) is keyed by it; without a per-call identity, none of the three is well-defined.
 
 Every declared tool is **sandboxed**: its call dispatches through the `Sandbox` seam (§5.3) and executes nowhere else. The single exception is the built-in **`delegate`** (§8), which executes in the loop: a delegation is control flow (a child `Submit`, confined to the seams), not an effect. v1 deliberately exposes no extension point for loop-executing tools; one is future work (§13), to be designed when a second inhabitant exists.
 
@@ -222,10 +230,14 @@ A failing tool does not fail the run. The harness journals its `ToolError` (a ti
 
 A tool call's **intent** is journaled before execution and its **outcome** after (§6.4); a crash between the two leaves a *dangling call*. On resume (§7.5):
 
-- a dangling call whose declaration says `idempotent` MUST be re-executed, in a fresh sandbox if the old one is gone; the re-execution may fail for exactly that reason, surfacing per §5.4;
-- any other dangling call MUST be resolved as `ToolError::Interrupted`, fed to the model like any tool failure (§5.4), so the *model* decides whether to retry the side effect.
+- a dangling call declared `OnDangling::Reexecute` MUST be re-executed, in a fresh sandbox if the old one is gone; the re-execution may fail for exactly that reason, surfacing per §5.4;
+- a dangling call declared `Interrupt` MUST be resolved as `ToolError::Interrupted`, fed to the model like any tool failure (§5.4), so the *model* decides whether to retry the side effect.
+
+A dangling call is not always dead. During divergence (§6.2) the stale activation may still be *executing* it: that activation discovers its staleness only at its next append, which for a slow call is after the effect lands. Resolution by the new owner therefore races the original — a `Reexecute` re-execution may run concurrently with it, and a model that answers `ToolError::Interrupted` with a retry may duplicate a side effect the old node is still producing. The window is the duration of the in-flight call, not a message round-trip. The fence guarantees one *transcript*; it cannot recall a launched effect, and this specification does not pretend otherwise. (`delegate` is the one call the architecture itself rescues: its re-execution is a child `Submit` carrying the same `TurnId`, which dedups into an attach rather than a second run, §7.4, §8.1.)
 
 The sandbox itself is **not session state**: the fold (§6.3) never reads it, no record depends on its contents, and a lost workspace is never reconstructed by the harness. Anything that must outlive the sandbox leaves it through a tool: push a branch, upload an artifact, return a result the loop journals. This is core §1.2's "retries are the caller's decision" applied to effects: the harness never re-fires a non-idempotent side effect on its own authority, and it never pretends a lost workspace still exists.
+
+Nor may the *model* be left pretending. The transcript asserts a workspace the world may no longer hold — files written, servers left running — and a model resumed into a fresh sandbox would otherwise discover the loss only through a confusing downstream failure. When an activation opens a fresh sandbox for a session whose journal already records sandboxed activity (after an idle stop §7.2, an environment loss, or a crash), it MUST journal a **`WorkspaceReset`** record before the next model call and surface it to the model with that request. The record answers no `CallId`, so it cannot ride a tool result: it enters the request as input content the harness authors, the encoding's analogue of a user message. The loss thus enters the record, and the model re-derives what it needs instead of acting on state that is gone.
 
 ---
 
@@ -241,15 +253,15 @@ pub trait Journal: Send + Sync + 'static {
     async fn append(&self, session: &SessionId, after: SeqNo, records: Vec<Record>)
         -> Result<SeqNo, AppendError>;
 
-    /// The committed records from `from` (exclusive) to the head.
-    async fn load(&self, session: &SessionId, from: SeqNo)
+    /// Up to `limit` committed records from `from` (exclusive) toward the head.
+    async fn load(&self, session: &SessionId, from: SeqNo, limit: usize)
         -> Result<Vec<(SeqNo, Record)>, JournalError>;
 }
 
 pub enum AppendError { Stale { head: SeqNo }, Unavailable(String) }
 ```
 
-The harness ships an in-memory implementation (suitable for ephemeral deployments and as the substrate the simulator wraps with faults, §12.2); durable store implementations are pluggable and out of scope for v1 (§13).
+The journal is **one logical store shared by every node**: a session's records MUST be readable and appendable from any node of the cluster, and `append` MUST be linearizable per session across all of them — cross-node resume (§7.5) and the fence (§6.2) are meaningless against anything weaker. The harness ships an in-memory implementation, which is per-process and therefore confines a deployment to a **single node** (suitable for ephemeral single-node use and as the substrate the simulator wraps with faults, §12.2); durable store implementations are pluggable and out of scope for v1 (§13).
 
 ### 6.2 Fenced append (the single-writer guarantee)
 
@@ -257,7 +269,8 @@ The harness ships an in-memory implementation (suitable for ephemeral deployment
 
 1. Placement may transiently name two owners for one session (divergent views, util §2.3). Both may activate (H6 allows it per converged view), but their appends race on the same `after`: the journal accepts **one**; the other receives `Stale`.
 2. An activation receiving `Stale` MUST deactivate: emit `AppendRejected` and `SessionDeactivated` (§10.4), stop its actor, journal nothing further, and issue no further model or tool calls for that session (invariant H2).
-3. The journal's total order per session is therefore single-writer *per record*, with no consensus, no lease, and no quorum on the message path (core §1.2). Divergence costs duplicated *speculative* work (model calls whose results lose the race and are discarded), never a forked transcript.
+3. The journal's total order per session is therefore single-writer *per record*, with no consensus, no lease, and no quorum on the framework's message path (core §1.2). The coordination has not vanished; it has been **placed**: the fence is a conditional write, and a durable, distributed `Journal` implementation linearizes it with whatever consensus its store runs internally (§6.1). The harness buys its simplicity by outsourcing that one decision to the journal.
+4. Divergence costs duplicated *speculative* work — model calls whose results lose the race and are discarded — and possibly **duplicated or concurrent side effects** of sandboxed calls launched before the loser learned it lost (§5.5). It never costs a forked transcript. The fence guards the record, not the world.
 
 ### 6.3 State is a fold
 
@@ -267,7 +280,7 @@ A session actor's state MUST be a pure, deterministic function of its journal pr
 
 Within a step, the actor journals:
 
-- a **model response** before any of its tool calls execute (intent before effect, §5.5); a model call itself is side-effect-free and needs no intent record;
+- a **model response** before any of its tool calls execute (intent before effect, §5.5), each requested call identified by its `CallId` (§5.2); a model call itself is side-effect-free and needs no intent record;
 - a **tool or delegation outcome** before the next step shows it to the model;
 - the **terminal outcome** (`RunEnded`) before releasing the reply to `Submit` (§7.3), so a caller never holds a completion the journal could lose.
 
@@ -283,13 +296,17 @@ A session's cluster life is a cycle only the journal survives: **created** (firs
 
 ### 7.1 Kinds
 
-Each node's harness is configured with the same `KindId → AgentDef` map: system prompt, `ToolRegistry`, `SandboxProfile`, model parameters, default budget. Kinds are code-and-config, agreed cluster-wide like the codec (core §5): a session created with a kind MUST be resumable on any node, so every node MUST register every kind. A `SessionCreated` record pins the session's kind and a **digest** of its definition (§10.5); activation on a node missing that kind is a deployment error surfaced as `RunError::System`, never a silent fallback.
+Each node's harness is configured with the same `KindId → Kind` map: system prompt, `ToolRegistry`, `SandboxProfile`, model parameters, default budget, delegation allowlist (§8.1). Kinds are code-and-config, agreed cluster-wide like the codec (core §5): a session created with a kind MUST be resumable on any node, so every node MUST register every kind. A `SessionCreated` record pins the session's kind and a **digest** of its definition (§10.5); activation on a node missing that kind is a deployment error that fails the triggering call with `CallError::System` before any run starts — nothing journaled, no `RunStarted` — never a silent fallback.
 
 ### 7.2 The host and placement
 
 Every node runs one **Host** actor, registered under a single receptionist key (`harness.hosts`, core §13). A session's **owner** is `owner(serving set, session id)` per util §2: a pure function of the local membership view, computed without I/O.
 
 The host activates a session lazily, on the first message that reaches it for a session it owns: load journal → fold → spawn the session actor (restartable, §3.3) → route. When the host's view stops naming its node owner, it MUST deactivate the session: stop the actor after the in-flight step's records commit, releasing the session for the new owner. Activations of one session on one node are strictly sequential (the per-node half of H6, mirroring util §4 rule 2).
+
+**Idle stop.** A host SHOULD deactivate a session that has had no live run for a configurable idle timeout (timed by `Clock`); it MUST NOT idle-stop a session whose run is live. Deactivation needs no flush — anything worth keeping is already a record (§6.3) — but it releases the sandbox (H8), and the workspace with it (§5.5). The idle timeout is therefore not a tuning detail: it is the knob trading sandbox cost, the expensive resource mutualization actually shares, against workspace continuity.
+
+**Not the owner.** A session message arriving at a host whose view does not name its node owner (the sender computed placement on a divergent view) MUST fail fast with `DeadLetter`; the `TurnId` makes the caller's retry safe once views converge (§7.4). Serving it would be transcript-safe — the fence (§6.2) protects the journal regardless of who appends — so the rejection is routing discipline (one owner path), not a safety requirement.
 
 ### 7.3 The wire contract
 
@@ -298,16 +315,19 @@ The host accepts, with hand-written manifests (core §4.4):
 | Message | Reply | Manifest |
 |---|---|---|
 | `Submit { session, kind, turn }` | `Result<Completion, RunError>` | `harness.Submit` |
-| `Cancel { session }` | `()` | `harness.Cancel` |
-| `Tail { session, from }` | `Vec<(SeqNo, Record)>` | `harness.Tail` |
+| `Cancel { session, turn }` | `()` | `harness.Cancel` |
+| `Tail { session, from, limit }` | `Vec<(SeqNo, Record)>` | `harness.Tail` |
 
-`Submit` is an `ask` whose deadline must cover the run; budgets (§9) make runs bounded, so a deadline derived from the budget is always available. There is deliberately no status message: a status view (head `SeqNo`, live run if any, spend so far) is a client-side fold over `Tail`'s records, not a second reply type restating them (§10.1). `Tail` is specified in §10.2.
+`Submit` is an `ask`; its deadline bounds the caller's **wait**, never the run. Budgets (§9) bound a run's tokens and steps, not its wall time — tool timeouts, model retries, and child runs compound — so a run MAY outlive any deadline: it continues unaffected when its caller times out, and the caller re-attaches by re-submitting the same `TurnId` (§7.4) or follows it through `Tail` (§10.2). There is deliberately no status message: a status view (head `SeqNo`, live run if any, spend so far) is a client-side fold over `Tail`'s records, not a second reply type restating them (§10.1). `Tail` is specified in §10.2.
+
+`Submit` carries `kind` on every call though it binds only on the first: creation is implicit in a session's first turn (§7), and the alternative — a separate create message — would buy a two-phase client protocol to remove one field. After creation the field is a checked redundancy, rejected on mismatch rather than ignored (§7.4).
 
 ### 7.4 The client view (`SessionRef`) and idempotent submission
 
 ```rust
-let h = Harness::new(system, kinds, journal);      // per node: spawns the Host, registers it
-let s = h.session(SESSION_ID);                     // pure: placement is a local function; no I/O,
+let h = Harness::new(system, kinds, journal, model, sandboxes);
+//   per node: spawns the Host and injects all three seams (§4, §6, §5.3) in one place
+let s = h.session("researcher", SESSION_ID);       // pure: placement is a local function; no I/O,
                                                    //   no failure case (cf. resolve, core §4.3)
 let out = s.prompt(Turn { id: TURN_ID, content }).await;   // Result<Result<Completion, RunError>, CallError>
 ```
@@ -315,13 +335,16 @@ let out = s.prompt(Turn { id: TURN_ID, content }).await;   // Result<Result<Comp
 `SessionRef` is the deep module of the client side: one call hides owner computation, receptionist lookup, host resolution, and activation. It MUST NOT transparently retry a failed `Submit` (core §1.2). Instead, the **`TurnId`** makes retries safe to the caller:
 
 - a `Submit` whose `TurnId` is already journaled for that session MUST NOT start a second run: if the run ended, the host returns the recorded outcome; if it is in progress, the host attaches the caller to its completion;
-- a caller that received `Unreachable` or `Timeout` therefore re-submits the same `TurnId` at will: the explicit idempotency key core §7.2 prescribes, owned by the application layer where it belongs.
+- a caller that received `Unreachable` or `Timeout` therefore re-submits the same `TurnId` at will: the explicit idempotency key core §7.2 prescribes, owned by the application layer where it belongs;
+- a re-submission whose turn *content* differs from the journaled turn, or a `Submit` whose `kind` differs from the session's journaled `SessionCreated`, is a caller bug, rejected with `CallError::System` and journaling nothing: the dedup returns *the* recorded turn's outcome; it never silently substitutes another.
 
 An owner whose host is not yet in the local listing (listing lag, core §13) fails fast with `DeadLetter`; the `TurnId` makes the caller's retry safe.
 
 ### 7.5 Resume after node failure
 
-When a session's owner node is declared `down` (core §8.1) or merely leaves the serving set, placement names a new owner on every converged view; the next message routed to it activates the session there: journal load, fold (§6.3), dangling-call resolution (§5.5), and continuation of any unfinished run. No coordinator hands the session over: ownership is computed, the journal is the state, and the fence (§6.2) makes the race with a not-yet-deactivated stale owner safe.
+When a session's owner node is declared `down` (core §8.1) or merely leaves the serving set, placement names a new owner on every converged view; the next message routed to it activates the session there: journal load, fold (§6.3), dangling-call resolution (§5.5), and continuation of any unfinished run. No coordinator hands the session over: ownership is computed, the journal is the state, and the fence (§6.2) makes the race with a not-yet-deactivated stale owner safe for the transcript (§5.5 itemizes what it cannot make safe).
+
+Resumption is **caller-driven**: nothing scans for orphaned work — the `Journal` deliberately has no cross-session enumeration — so a run interrupted by a crash resumes only when a message next reaches the session: the re-submitted `TurnId` of a caller that wants its answer, a parent's re-executed delegation (§8.1), a `Cancel`. A run nobody asks after stays interrupted, and its budget bounds what it can ever cost (§9.1). H3's liveness is conditional on exactly this contact.
 
 ---
 
@@ -329,13 +352,13 @@ When a session's owner node is declared `down` (core §8.1) or merely leaves the
 
 ### 8.1 Delegation is a tool
 
-The harness provides one built-in tool, `delegate`, the only tool that executes in the loop rather than the sandbox (§5.2), present in a kind's registry iff the kind permits sub-agents. Its input names a child kind, a prompt, and optionally a budget request; its execution is a child `Submit`:
+The harness provides one built-in tool, `delegate`, the only tool that executes in the loop rather than the sandbox (§5.2), present in a kind's registry iff the kind permits sub-agents. Its input names a child kind — which MUST belong to the parent kind's **delegation allowlist** (§7.1): naming any other kind is a synthesized `ToolError` (§5.4), so a locked-down kind cannot escalate its privileges by delegating to a permissive one — plus a prompt and optionally a budget request; its execution is a child `Submit`:
 
-1. the parent journals the delegation (a `ChildRun` record: the child `SessionId`, derived deterministically from the parent session and `TurnId`, plus the carved budget, §9.1);
+1. the parent journals the delegation (a `ChildRun` record: the child `SessionId` and the child turn's `TurnId`, both derived deterministically from the parent session, the parent's `TurnId`, and the delegation's `CallId` (§5.2) — one run may delegate many times, so the call, not the turn, is the unit of derivation — plus the carved budget, §9.1); a re-executed delegation re-derives the same pair (§5.5), and cancel propagation reads it from the record (§9.2);
 2. the launched task submits to the child session through an ordinary `SessionRef`; the child is a **full session**: journaled, budgeted, placed by util §2 wherever the cluster puts it, supervised on its node;
 3. the child's terminal outcome returns as the tool's outcome (§5.4): journaled, then shown to the parent's model.
 
-Delegation thereby inherits every property of §7 with no new machinery: a child on a crashed node resumes on the new owner (§7.5); a parent that crashes and resumes finds the delegation dangling and, since `delegate` is declared `idempotent`, re-executes it; the child's journaled `TurnId` dedups the re-submission into an attach (§7.4). The retry is safe *because* of the idempotency key, not despite the at-most-once transport.
+Delegation thereby inherits every property of §7 with no new machinery: a child on a crashed node resumes on the new owner (§7.5); a parent that crashes and resumes finds the delegation dangling and, since `delegate` is declared `Reexecute`, re-executes it; the child's journaled `TurnId` dedups the re-submission into an attach (§7.4). The retry is safe *because* of the idempotency key, not despite the at-most-once transport.
 
 ### 8.2 Tree shape and failure
 
@@ -354,13 +377,14 @@ pub struct Budget { pub tokens: u64, pub steps: u32 }
 ```
 
 1. Every run has a budget: the turn's explicit budget, else the kind's default. Spend is the model-**reported** usage (§4.1) summed over the run's calls, plus the spend of its children.
-2. **Pre-call enforcement.** A model call is issued only while `spent < tokens` and the step count is below `steps`; the request's `max_tokens` MUST be clamped to the remaining token budget, so output overshoot is zero and total overshoot is bounded by one call's input (stated honestly: the input size of a call is known only on response). Exhaustion ends the run with `RunError::BudgetExhausted` (§3.1): journaled, reported, recoverable by a new turn with a new budget.
+2. **Pre-call enforcement.** A model call is issued only while `spent < tokens` and the step count is below `steps`; the request's `max_tokens` MUST be clamped to the remaining token budget, and no call may be issued while the remainder is below a configurable floor (a near-zero-`max_tokens` call still pays its full input). Output overshoot is therefore zero, and total overshoot is bounded by one call's input — a bound that grows with the transcript, stated honestly: a call's input size is known only on response. Exhaustion ends the run with `RunError::BudgetExhausted` (§3.1): journaled, reported, recoverable by a new turn with a new budget.
 3. **Carve-outs.** A delegation reserves an explicit slice of the parent's remaining budget; the child enforces its slice locally, with no cross-node accounting protocol. Hence the bound is compositional: own spend + Σ carve-outs ≤ budget, at every node of the tree (H4).
+4. **What the bound is.** Spend is *journaled* usage. A divergence-losing activation's model calls are discarded unjournaled (§6.2) and never counted, though the provider bills them: the budget bounds the session's recorded spend, and the provider's invoice exceeds it by exactly the speculative work divergence cost.
 
 ### 9.2 Cancellation
 
-1. `Cancel` is a message (§7.3); because handlers never block on I/O (§3.2), it takes effect at the next message boundary, not after the current model call returns.
-2. On cancel, the session journals `RunEnded { Cancelled }`, releases any attached `Submit` callers with `RunError::Cancelled`, discards subsequent outcome messages of that run (§3.2), and **propagates**: it sends `Cancel` to every live child recorded in the journal, each of which cancels its own subtree.
+1. `Cancel` is a message (§7.3); because handlers never block on I/O (§3.2), it takes effect at the next message boundary, not after the current model call returns. It names the run it cancels (`turn`, §7.3): a `Cancel` naming an ended or unknown run is an idempotent no-op, so one delayed in flight never kills the named run's successor.
+2. On cancel, the session journals `RunEnded { Cancelled }`, releases any attached `Submit` callers with `RunError::Cancelled`, discards subsequent outcome messages of that run (§3.2), and **propagates**: it sends `Cancel { session, turn }` to every live child recorded in the journal — the `ChildRun` record names the child's session and turn (§8.1) — each of which cancels its own subtree.
 3. Propagation is at-most-once per attempt (core §7.2); a lost `Cancel` is not retried transparently. The guarantee is two-layered: once faults cease, propagation completes within bounded logical time (H5); under unhealed faults, the child's **budget is the backstop**, since every run is bounded with or without the cancel arriving (§9.1).
 4. In-flight side effects of a cancelled run (a tool mid-execution, a model call mid-flight) are not undone and MAY complete externally; their outcomes are discarded. The harness reports what it stopped; it does not pretend to have un-run it.
 
@@ -381,7 +405,7 @@ Each record additionally carries the writing node's `Clock` reading at write tim
 
 ### 10.2 Reading a run (`Tail`)
 
-`Tail { session, from: SeqNo } → Vec<(SeqNo, Record)>` (§7.3) returns the committed records after `from`: an idempotent journal read, routed through the session's owner like every other session message. Polling `Tail` follows a live run at whatever cadence the client chooses; `Submit`-and-await remains the one-shot form.
+`Tail { session, from: SeqNo, limit } → Vec<(SeqNo, Record)>` (§7.3) returns at most `limit` committed records after `from`: an idempotent, fence-free journal read, routed through the session's owner like every other session message — for one routing path, not for consistency; any node could serve it correctly (§6.1). The coupling is the honest cost: an unreachable owner takes observation of its sessions with it until views converge on a new one; push-based observation (§13) is where that coupling gets revisited. Polling `Tail` follows a live run at whatever cadence the client chooses; `Submit`-and-await remains the one-shot form.
 
 A `Tail` MUST NOT activate an inactive session: the host serves it from the journal directly. Push-based observation is future work (§13); `Tail` is deliberately the smallest interface that makes a run watchable.
 
@@ -399,12 +423,17 @@ Harness events extend the core `Event` enum (core §16), as the utilities' do (u
 | `SessionDeactivated` | `session`, `node` | That activation stopped (ownership moved, fence rejection, idle stop, or fault). |
 | `AppendRejected` | `session`, `node` | A fenced append lost the race (§6.2); the activation must now deactivate. |
 | `RunStarted` | `session`, `turn`, `parent?` | A run began for a newly journaled turn. |
-| `ModelCompleted` | `session`, `turn`, `usage` | One model call finished; `usage` feeds the H4 checker. |
+| `RunResumed` | `session`, `turn`, `node` | An activation picked up a journaled, unfinished run (§7.5). |
+| `ModelCompleted` | `session`, `turn`, `node`, `usage` | One model call finished; `usage` feeds the H4 checker, scoped to journaled spend (below). |
 | `RunEnded` | `session`, `turn`, `outcome` | The run's exactly-one terminal outcome was journaled. |
 | `SandboxBound` | `session`, `node` | The activation opened its sandbox (first sandboxed call, §5.3). |
 | `SandboxReleased` | `session`, `node` | That sandbox was torn down (deactivation, loss, or release). |
 
 Per session and node, `SessionActivated`/`SessionDeactivated` strictly alternate, `SandboxBound`/`SandboxReleased` alternate within the activation they belong to, and an `AppendRejected` is followed by that node's `SessionDeactivated` with no intervening harness activity for the session. Continuous checkers enforce all three on every simulated run.
+
+`RunStarted` fires once per `(session, turn)`, on the activation whose append commits the turn; a resume emits `RunResumed`, never a second `RunStarted`. That distinction is what keeps the H3 pairing and H7 counting checkers sound across crashes — and under divergence their soundness is the fence's (§6.2): the turn commits once, so one start is counted even when two activations raced to begin it.
+
+`ModelCompleted` carries its `node` for the same reason. Spend is *journaled* usage (§9.1.4): a divergence-losing activation completes model calls whose responses never commit, so its events describe spend no record carries. The H4 checker therefore attributes each `ModelCompleted` to its enclosing activation — the `SessionActivated`/`SessionDeactivated` pair on that node — and excludes those of an activation fenced off before the corresponding response committed (`AppendRejected`, §6.2). The event stream restates §9.1.4; it does not define spend a second time (§10.1).
 
 ### 10.5 Reconstruction and derived metrics
 
@@ -422,12 +451,12 @@ The harness catalogue mirrors the core and utilities catalogues (core §17, §18
 |---|---|---|---|
 | H1 | **Deterministic fold and resume.** Session state is a pure fold of the journal; a session resumed from any committed prefix behaves byte-identically to one that never stopped, given the same subsequent model and tool outcomes. | §6.3, §7.5 | differential resume-vs-uninterrupted test; seed-reproducibility sweep |
 | H2 | **Fenced single writer.** Per session, committed records form one total order; an activation whose append is rejected as stale deactivates and issues no further appends, model calls, or tool calls for that session. | §6.2 | continuous checker (`AppendRejected` ⇒ deactivation, no further activity); journal audit at quiescence |
-| H3 | **Run termination.** Every `RunStarted` is followed by exactly one `RunEnded`; once faults cease and partitions heal, no run remains pending past its budget's bound. | §3.1, §9 | continuous checker (pairing); swarm sweep (bounded completion) |
-| H4 | **Budget bound.** A run issues no model call after exhaustion; output spend never exceeds the remaining budget at call time; own spend plus children's carve-outs never exceeds the budget, at every level of a delegation tree. | §9.1 | continuous checker over `ModelCompleted`; tree scenario tests |
+| H3 | **Run termination.** Every `RunStarted` is followed by exactly one `RunEnded`; once faults cease, partitions heal, and a message reaches the session — resumption is caller-driven (§7.5) — no run remains pending past its budget's bound. | §3.1, §7.5, §9 | continuous checker (pairing); swarm sweep (bounded completion under caller re-submission) |
+| H4 | **Budget bound.** A run issues no model call after exhaustion; output spend never exceeds the remaining budget at call time; own spend plus children's carve-outs never exceeds the budget, at every level of a delegation tree. | §9.1 | continuous checker over `ModelCompleted`, scoped to journaled spend (§10.4); tree scenario tests |
 | H5 | **Cancellation.** After a cancel is journaled, the run and, once faults cease, every descendant run end `Cancelled` within bounded logical time, issuing no further model calls. | §9.2 | scenario + swarm tests; checker for post-cancel `ModelCompleted` |
-| H6 | **Single activation per converged view.** A node never runs two concurrent activations of one session; on a healed, converged cluster, at most one activation per session is live cluster-wide; an owned session with pending input is activated within bounded logical time. | §7.2 | continuous checker (per-node alternation, the per-node half); scenario + swarm for the converged and liveness halves (mirrors util U2) |
+| H6 | **Single activation per converged view.** A node never runs two concurrent activations of one session; on a healed, converged cluster, at most one activation per session is live cluster-wide; an owned session is activated within bounded logical time of a message reaching its owner's host. | §7.2, §7.5 | continuous checker (per-node alternation, the per-node half); scenario + swarm for the converged and liveness halves (mirrors util U2) |
 | H7 | **Idempotent submission.** A re-submitted `TurnId` never starts a second run: it returns the recorded outcome or attaches to the live run, under any injected duplication or caller retry. | §7.4 | continuous checker (one `RunStarted` per `(session, turn)`); retry scenario tests |
-| H8 | **Effect containment.** An activation binds at most one live sandbox and releases it on deactivation; every sandboxed tool call executes in the sandbox bound to its issuing activation, never another session's; sandbox loss surfaces as journaled `ToolError` outcomes, never as silent corruption. | §5.3, §5.5 | continuous checker (`SandboxBound`/`SandboxReleased` alternation, calls within the bind window); crash/loss scenario tests; cross-session isolation by construction of the provider |
+| H8 | **Effect containment.** An activation binds at most one live sandbox and releases it on deactivation; every sandboxed tool call executes in the sandbox bound to its issuing activation, never another session's; sandbox loss surfaces in the journal — `ToolError` outcomes, a `WorkspaceReset` record (§5.5) — never as silent corruption. | §5.3, §5.5 | continuous checker (`SandboxBound`/`SandboxReleased` alternation, calls within the bind window); crash/loss scenario tests; cross-session isolation by construction of the provider |
 
 The harness is also held to the core testing contract (core §18.1, §18.3): seed-reproducibility of the full event stream including harness events, and fault-coverage accounting proving that model faults, journal faults, and transport faults actually fired while agent traffic flowed.
 
@@ -482,19 +511,20 @@ A run with no faults is the simplest case and MUST still pass.
 // --- A kind: prompt, declared tools, sandbox profile; identical on every node (§7.1).
 // --- The registry is hand-built and is the allowlist (§5.2); `shell` and `read_file`
 // --- execute inside the session's sandbox (§5.3), `delegate` inside the loop (§8).
-let researcher = AgentDef::new("You are a research agent.")
+let researcher = Kind::new("You are a research agent.")
     .model(ModelParams::default())
     .sandboxed("shell", "Run a command in the workspace", &SHELL_SCHEMA)
     .sandboxed("read_file", "Read a file from the workspace", &READ_SCHEMA)
-    .delegation(true)                       // the built-in `delegate` tool (§5.2, §8)
+    .delegates_to(&["researcher"])          // the built-in `delegate` tool; allowlisted child kinds (§5.2, §8)
     .sandbox(SandboxProfile::image("workspace:base"))
     .budget(Budget { tokens: 200_000, steps: 50 });
 
-// --- Per node: one Harness over the actor system ---
-let h = Harness::new(system, Kinds::new().register("researcher", researcher), journal);
+// --- Per node: one Harness over the actor system; all three seams injected here (§12.1) ---
+let h = Harness::new(system, Kinds::new().register("researcher", researcher),
+                     journal, model, sandboxes);
 
 // --- Any node: drive a session; placement decides who hosts it (§7.2) ---
-let s = h.session(SessionId::new("report-42"));
+let s = h.session("researcher", SessionId::new("report-42"));
 match s.prompt(Turn::new(TurnId::new("t-1"), "Summarize the corpus on X.")).await {
     Ok(Ok(completion))                  => println!("{}", completion.text()),
     Ok(Err(RunError::BudgetExhausted))  => { /* grant a larger budget, resubmit a new turn */ }
