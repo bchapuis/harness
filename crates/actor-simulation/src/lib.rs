@@ -54,6 +54,7 @@ mod workload;
 pub use catalogue::CatalogueEntry;
 pub use catalogue::Verify;
 pub use catalogue::catalogue;
+pub use catalogue::utilities_catalogue;
 pub use check::Checker;
 pub use check::Violation;
 pub use clock::SimClock;

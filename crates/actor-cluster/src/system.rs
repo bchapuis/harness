@@ -475,6 +475,13 @@ where
         }
     }
 
+    /// The owner of `key` by rendezvous placement over this node's serving set
+    /// (utilities spec §2): a pure function of the local view, so converged
+    /// nodes agree on every owner. `None` while the serving set is empty.
+    pub fn place(&self, key: &[u8]) -> Option<NodeId> {
+        crate::placement::owner(&self.inner.membership.serving_members(), key)
+    }
+
     /// Stop this node (spec §9.3): halt the detector and gossip loops and release
     /// the transport's resources (its listener, connections, and background
     /// tasks; closing the inbound path also ends the receive loop). Typically

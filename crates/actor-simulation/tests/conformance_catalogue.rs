@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use actor_simulation::Verify;
 use actor_simulation::catalogue;
 use actor_simulation::default_invariants;
+use actor_simulation::utilities_catalogue;
 
 #[test]
 fn every_invariant_1_through_22_is_present_exactly_once() {
@@ -40,10 +41,35 @@ fn every_entry_has_spec_property_and_a_verification_method() {
     }
 }
 
-/// Checker names the catalogue claims are continuously checked.
+/// The utilities catalogue (utilities spec §6) is held to the same drift
+/// discipline as the core table: U-numbers contiguous from U1, every entry
+/// fully described and verified somehow.
+#[test]
+fn every_utilities_invariant_is_present_exactly_once_and_described() {
+    let mut numbers: Vec<u8> = utilities_catalogue().iter().map(|e| e.invariant).collect();
+    numbers.sort_unstable();
+    let expected: Vec<u8> = (1..=numbers.len() as u8).collect();
+    assert_eq!(
+        numbers,
+        expected,
+        "utilities catalogue must list U1..=U{}, each exactly once",
+        expected.len()
+    );
+    for e in utilities_catalogue() {
+        assert!(
+            !e.verify.is_empty() && !e.spec.is_empty() && !e.property.is_empty(),
+            "utilities invariant U{} is missing spec, property, or verification",
+            e.invariant
+        );
+    }
+}
+
+/// Checker names the catalogues (core and utilities) claim are continuously
+/// checked.
 fn catalogue_checker_names() -> BTreeSet<&'static str> {
     catalogue()
         .iter()
+        .chain(utilities_catalogue())
         .flat_map(|e| e.verify.iter())
         .filter_map(|v| match v {
             Verify::Checker(name) => Some(*name),

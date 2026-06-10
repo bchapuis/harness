@@ -929,6 +929,12 @@ Verification is **layered**, not uniform (see §18.6). The core *safety* propert
 
 ---
 
+## 19. Cluster utilities (separate document)
+
+Utilities layered on these abstractions — deterministic placement, group routers, and the cluster singleton — are specified separately in [`cluster-utilities-spec.md`](cluster-utilities-spec.md), with their own invariant catalogue (U1, U2, …). They build on membership (§9), the receptionist (§13), and the event stream (§16) without modifying any core semantics.
+
+---
+
 ## Appendix A: End-to-end example
 
 ```rust

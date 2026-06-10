@@ -1100,6 +1100,29 @@ impl Membership {
             .collect()
     }
 
+    /// The placement serving set (utilities spec §2.1): every member — including
+    /// this node — that is `Up` *and* `Reachable`, in `NodeId` order. Stricter
+    /// than the receptionist's listing filter (spec §13 req 4): placement
+    /// assigns ownership, so it also routes around confirmed-unreachable
+    /// members rather than handing them keys.
+    pub fn serving_members(&self) -> Vec<NodeId> {
+        let mut serving: Vec<NodeId> = self
+            .members
+            .lock()
+            .expect("members mutex poisoned")
+            .iter()
+            .filter(|(_, m)| {
+                m.status == MemberStatus::Up && m.reachability == Reachability::Reachable
+            })
+            .map(|(n, _)| *n)
+            .collect();
+        if self.self_status() == MemberStatus::Up {
+            serving.push(self.node);
+            serving.sort_unstable();
+        }
+        serving
+    }
+
     /// The current reachability of `node`, if known (for tests/inspection).
     pub fn reachability(&self, node: NodeId) -> Option<Reachability> {
         self.members

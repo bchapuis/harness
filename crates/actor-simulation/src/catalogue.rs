@@ -46,6 +46,15 @@ pub fn catalogue() -> &'static [CatalogueEntry] {
     CATALOGUE
 }
 
+/// The cluster-utilities invariant catalogue (utilities spec §6): U1, U2, … —
+/// numbered apart from the core #1–#22 because the utilities are specified in
+/// their own document (`cluster-utilities-spec.md`) layered on the core spec.
+/// `invariant: n` here reads as "Un". Guarded by the same `conformance_catalogue`
+/// drift test as the core table.
+pub fn utilities_catalogue() -> &'static [CatalogueEntry] {
+    UTILITIES_CATALOGUE
+}
+
 const CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 1,
@@ -206,3 +215,13 @@ const CATALOGUE: &[CatalogueEntry] = &[
         ],
     },
 ];
+
+const UTILITIES_CATALOGUE: &[CatalogueEntry] = &[CatalogueEntry {
+    invariant: 1, // U1
+    spec: "utilities §2",
+    property: "Deterministic placement: a pure, version-stable function of the serving set and key — identical serving sets compute identical owners, and a single-member change reassigns only the keys that member owned or now owns",
+    // No continuous checker: placement is a pure function off the event stream;
+    // per-decision events would flood the stream without enabling any check the
+    // property tests do not already perform (utilities spec §5).
+    verify: &[Verify::SimTest("conformance_placement.rs")],
+}];

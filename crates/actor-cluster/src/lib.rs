@@ -17,6 +17,7 @@
 
 mod correlator;
 mod membership;
+pub mod placement;
 mod protocol;
 mod raft;
 mod registry;
