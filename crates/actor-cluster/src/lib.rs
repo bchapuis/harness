@@ -22,6 +22,7 @@ mod protocol;
 mod raft;
 mod registry;
 mod router;
+mod singleton;
 mod system;
 mod transport;
 
@@ -51,6 +52,7 @@ pub use registry::RegistrySnapshot;
 pub use registry::RegistryState;
 pub use router::RouteStrategy;
 pub use router::Router;
+pub use singleton::SingletonProxy;
 pub use system::Authorizer;
 pub use system::ClusterConfig;
 pub use system::ClusterSystem;

@@ -29,7 +29,7 @@ Placement answers one question deterministically on every node: *given a key, wh
 
 ### 2.1 The serving set
 
-1. Placement candidates MUST be derived from the local membership view as the **serving set**: every member whose status is `up` *and* whose reachability is `reachable`, **including the local node** iff its own status is `up`. Members that are `joining`, `draining`, `leaving`, `down`, `removed`, or confirmed `unreachable` are excluded.
+1. Placement candidates MUST be derived from the local membership view as the **serving set**: every member whose status is `up` and whose reachability is not confirmed `unreachable`, **including the local node** iff its own status is `up`. Members that are `joining`, `draining`, `leaving`, `down`, `removed`, or confirmed `unreachable` are excluded. A member that is merely **`suspect`** MUST remain in the set: suspicion is refutable detector noise (core §10), and excluding it would move ownership on every dropped probe.
 
 This is deliberately stricter than the receptionist's listing filter (core §13 req 4, which only MUST exclude `draining`/`down`): placement assigns *ownership*, so it routes around a confirmed-unreachable member rather than assigning keys to a node nobody can reach.
 
@@ -63,13 +63,29 @@ A group router spreads calls over the actors registered under one receptionist `
 
 ## 4. Cluster singleton
 
-*Reserved — specified together with its implementation in a subsequent change.*
+One logical instance of an actor cluster-wide — for coordinators, schedulers, and (later) the sharding allocation owner. The instance's identity is decided by placement (§2); its discovery rides the receptionist (core §13).
+
+1. Every node that may host the singleton runs a **manager** per singleton name. The manager observes **only its local membership view**, on a periodic virtual-clock tick (core §18.1), and MUST activate (spawn) the instance iff its view's **anchor** — `owner(serving set, name)` per §2 — is the local node. On activation it MUST register the instance under the singleton's receptionist key. (The anchor is hash-based uniformly in all four control-plane modes, core §9.4: it is a pure function of the view and needs no join-order or coordinator the view does not carry.)
+2. When a node's view stops naming it anchor, its manager MUST initiate **handoff** by delivering the configured **stop message** to the instance; the instance's handler SHOULD stop the actor promptly. The manager MUST NOT activate a new local instance while a previous local activation is still live — activations on one node are strictly sequential (the per-node half of U2). There is no external kill: the instance always winds down through its own handler.
+3. **Guarantee honesty (normative).** The singleton guarantees at most one activation per **converged** view. During divergence — a partition, detector lag — two nodes MAY run an instance concurrently; once views converge (core §18.5 #14) the surplus manager MUST stop its instance. The singleton is **not** a mutual-exclusion primitive: an application requiring exclusivity MUST fence or deduplicate by its own means. (A quorum-gated, leader-committed activation is future work, §7.)
+4. **Liveness.** If the instance terminates — supervision stop, its own decision — while its node remains anchor, the manager MUST re-activate it within bounded logical time.
+5. Calls through a proxy during a handoff gap MUST fail fast (`DeadLetter` on an empty listing; `Unreachable`/`Timeout` on a stale entry), never buffer (core §14.2).
+6. The hosting node MUST emit `SingletonStarted` on each activation and `SingletonStopped` when it observes that activation terminated (§5).
 
 ---
 
 ## 5. Events
 
 Utility events extend the core `Event` enum (core §16). Placement (§2) and routers (§3) define none: both are pure or node-local functions whose per-decision events would flood the stream without enabling any check their conformance tests do not already perform.
+
+The singleton (§4) defines two, emitted by the hosting node's manager:
+
+| Event | Fields | Meaning |
+|---|---|---|
+| `SingletonStarted` | `name`, `actor` | The manager activated `actor` as its node's instance of `name`. |
+| `SingletonStopped` | `name`, `actor` | The manager observed that activation terminated (handoff, supervision, or its own stop). |
+
+Per-node, `Started`/`Stopped` for one name strictly alternate (U2); a continuous checker enforces this on every simulated run.
 
 ---
 
@@ -80,6 +96,7 @@ The utilities catalogue mirrors the core catalogue's structure (core §17, §18.
 | # | Invariant | Defined in | Verified by |
 |---|---|---|---|
 | U1 | **Deterministic placement.** Rendezvous placement is a pure, version-stable function of the serving set and key: nodes with identical serving sets compute identical owners for every key, and a single-member change reassigns only the keys that member owned or now owns. | §2 | property + cluster tests (`conformance_placement.rs`); pinned known-answer hash vectors |
+| U2 | **Singleton activation discipline.** A node never runs two live activations of one singleton name concurrently; once views converge on a healed cluster, exactly one activation per name is live cluster-wide; an anchor failure re-activates the singleton within bounded logical time. | §4 | continuous checker (`singleton-at-most-one-per-node`, the per-node half); scenario + swarm tests (`conformance_singleton.rs`, `cluster_swarm.rs`) for the converged-exactly-one and re-activation halves |
 
 Group routers (§3) define no numbered invariant: "selects only from the current serving listing, fails fast when empty" is a local function property, not an emergent one — it is pinned directly by `conformance_router.rs`.
 

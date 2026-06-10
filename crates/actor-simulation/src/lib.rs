@@ -74,6 +74,7 @@ pub use invariant::LifecycleExactlyOnce;
 pub use invariant::NoSilentLoss;
 pub use invariant::OneLeaderPerTerm;
 pub use invariant::SerialExecution;
+pub use invariant::SingletonAtMostOnePerNode;
 pub use invariant::default_invariants;
 pub use linearizability::Counter;
 pub use linearizability::CounterOp;

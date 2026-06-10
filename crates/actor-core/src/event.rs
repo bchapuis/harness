@@ -116,6 +116,16 @@ pub enum Event {
         fault: Fault,
         decision: SupervisionDecision,
     },
+    /// A singleton manager activated `actor` as its node's instance of the
+    /// singleton `name` (utilities spec §4). At most one activation per name may
+    /// be live on a node at a time — the per-node half of invariant U2 a
+    /// continuous checker enforces; cross-node overlap during view divergence is
+    /// legal until convergence.
+    SingletonStarted { name: &'static str, actor: ActorId },
+    /// A singleton manager observed its activation `actor` of `name` terminated
+    /// (utilities spec §4) — by handoff, supervision, or its own stop. Pairs
+    /// with the [`Event::SingletonStarted`] that activated it.
+    SingletonStopped { name: &'static str, actor: ActorId },
     /// A `Terminated` signal was delivered to a watcher (spec §12, §16): emitted
     /// when the signal is enqueued onto the watcher's mailbox, on the watcher's
     /// own node. Forwarding a signal to a remote watcher's node is not a delivery

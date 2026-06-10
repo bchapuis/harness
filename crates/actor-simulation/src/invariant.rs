@@ -3,7 +3,7 @@
 //! Correctness is expressed as a small set of invariants checked on **every**
 //! run, not as bespoke example tests. Each
 //! [`Invariant`] observes the [`Event`] stream live and reports a violation
-//! string; the [`Checker`](crate::Checker) collects them. Six ship as
+//! string; the [`Checker`](crate::Checker) collects them. Seven ship as
 //! continuous checkers; the rest are verified by example tests.
 //!
 //! [`catalogue`](crate::catalogue) is the single source of truth linking each of
@@ -25,7 +25,10 @@ use actor_core::Terminated;
 /// A property checked continuously during a run and at final quiescence
 /// (spec §18.5). Observation must be side-effect-free apart from the invariant's
 /// own bookkeeping, and must never panic (a violation is a returned `Err`, so
-/// the run is reported, not unwound through the executor).
+/// the run is reported, not unwound through the executor). Alongside the core
+/// catalogue, the cluster-utilities invariants (U1, U2, … — see
+/// [`utilities_catalogue`](crate::utilities_catalogue)) check through the same
+/// mechanism.
 pub trait Invariant: Send {
     /// A stable name for reporting.
     fn name(&self) -> &'static str;
@@ -48,6 +51,7 @@ pub fn default_invariants() -> Vec<Box<dyn Invariant>> {
         Box::new(DownIsTerminal::default()),
         Box::new(SignalInBand::default()),
         Box::new(OneLeaderPerTerm::default()),
+        Box::new(SingletonAtMostOnePerNode::default()),
     ]
 }
 
@@ -309,6 +313,53 @@ impl Invariant for OneLeaderPerTerm {
     }
 }
 
+/// **Singleton activation discipline — the per-node half** (utilities spec §4,
+/// invariant U2): a node never has two live activations of one singleton name
+/// at once — every `SingletonStarted` for a `(name, node)` must follow the
+/// `SingletonStopped` of its predecessor. The cross-node "exactly one" is only
+/// guaranteed at view convergence, so overlap *across* nodes during divergence
+/// is legal and deliberately not flagged here; the converged-exactly-one and
+/// re-activation halves are scenario properties, verified by
+/// `conformance_singleton.rs` and the singleton swarm workload. Vacuously green
+/// for workloads that host no singleton, so it is safe in
+/// [`default_invariants`]. (Not restart-safe: a `SimNetwork::restart` of a
+/// hosting node abandons its manager without a `SingletonStopped`, so singleton
+/// workloads use crash/partition nemeses, not restart.)
+#[derive(Default)]
+pub struct SingletonAtMostOnePerNode {
+    live: BTreeMap<(&'static str, NodeId), ActorId>,
+}
+
+impl Invariant for SingletonAtMostOnePerNode {
+    fn name(&self) -> &'static str {
+        "singleton-at-most-one-per-node"
+    }
+
+    fn observe(&mut self, event: &Event) -> Result<(), String> {
+        match event {
+            Event::SingletonStarted { name, actor } => {
+                let slot = (*name, actor.node());
+                if let Some(live) = self.live.get(&slot) {
+                    return Err(format!(
+                        "node {} activated singleton {name:?} as {actor} while {live} \
+                         is still live (per-node at-most-one, invariant U2)",
+                        actor.node()
+                    ));
+                }
+                self.live.insert(slot, actor.clone());
+            }
+            Event::SingletonStopped { name, actor } => {
+                let slot = (*name, actor.node());
+                if self.live.get(&slot) == Some(actor) {
+                    self.live.remove(&slot);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 // Note: death-watch exactly-once (#11) is intentionally *not* a continuous
 // checker. The tempting form — "at most one `TerminatedDelivered` per
 // (target, watcher)" — is unsound: a watcher may legitimately `watch` the same
@@ -479,6 +530,58 @@ mod tests {
             inv.observe(&Event::Reachable {
                 observer: other,
                 node,
+            })
+            .is_ok()
+        );
+    }
+
+    fn activation(node: u64, incarnation: u64) -> ActorId {
+        ActorId::new(NodeId::new(node), Path::new("/user/0"), incarnation)
+    }
+
+    #[test]
+    fn singleton_flags_overlapping_activations_on_one_node() {
+        let mut inv = SingletonAtMostOnePerNode::default();
+        let first = activation(1, 0);
+        inv.observe(&Event::SingletonStarted {
+            name: "s",
+            actor: first.clone(),
+        })
+        .unwrap();
+        // A second activation on the same node before the first stops.
+        assert!(
+            inv.observe(&Event::SingletonStarted {
+                name: "s",
+                actor: activation(1, 1),
+            })
+            .is_err()
+        );
+        // A concurrent activation on another node is legal (divergence, U2).
+        assert!(
+            inv.observe(&Event::SingletonStarted {
+                name: "s",
+                actor: activation(2, 0),
+            })
+            .is_ok()
+        );
+        // Another singleton name on the same node is independent.
+        assert!(
+            inv.observe(&Event::SingletonStarted {
+                name: "t",
+                actor: activation(1, 1),
+            })
+            .is_ok()
+        );
+        // Stopped-then-started on the same node is the legal hand-back cycle.
+        inv.observe(&Event::SingletonStopped {
+            name: "s",
+            actor: first,
+        })
+        .unwrap();
+        assert!(
+            inv.observe(&Event::SingletonStarted {
+                name: "s",
+                actor: activation(1, 2),
             })
             .is_ok()
         );

@@ -216,12 +216,23 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
 ];
 
-const UTILITIES_CATALOGUE: &[CatalogueEntry] = &[CatalogueEntry {
-    invariant: 1, // U1
-    spec: "utilities §2",
-    property: "Deterministic placement: a pure, version-stable function of the serving set and key — identical serving sets compute identical owners, and a single-member change reassigns only the keys that member owned or now owns",
-    // No continuous checker: placement is a pure function off the event stream;
-    // per-decision events would flood the stream without enabling any check the
-    // property tests do not already perform (utilities spec §5).
-    verify: &[Verify::SimTest("conformance_placement.rs")],
-}];
+const UTILITIES_CATALOGUE: &[CatalogueEntry] = &[
+    CatalogueEntry {
+        invariant: 1, // U1
+        spec: "utilities §2",
+        property: "Deterministic placement: a pure, version-stable function of the serving set and key — identical serving sets compute identical owners, and a single-member change reassigns only the keys that member owned or now owns",
+        // No continuous checker: placement is a pure function off the event stream;
+        // per-decision events would flood the stream without enabling any check the
+        // property tests do not already perform (utilities spec §5).
+        verify: &[Verify::SimTest("conformance_placement.rs")],
+    },
+    CatalogueEntry {
+        invariant: 2, // U2
+        spec: "utilities §4",
+        property: "Singleton activation discipline: a node never runs two live activations of one name concurrently; a healed, converged cluster runs exactly one per name; an anchor failure re-activates within bounded logical time",
+        verify: &[
+            Verify::Checker("singleton-at-most-one-per-node"),
+            Verify::SimTest("conformance_singleton.rs, cluster_swarm.rs"),
+        ],
+    },
+];

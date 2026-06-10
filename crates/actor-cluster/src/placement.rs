@@ -15,7 +15,8 @@
 //! tests below so an accidental change fails the build.
 //!
 //! Candidates come from [`Membership::serving_members`](crate::Membership::serving_members)
-//! (utilities spec §2.1): `up` ∧ `reachable`, including the local node iff `up`.
+//! (utilities spec §2.1): `up` and not confirmed `unreachable` (a merely
+//! suspected member still serves), including the local node iff `up`.
 //! Callers with divergent views may disagree on an owner until views converge —
 //! placement is a routing function, not a lease (utilities spec §2.3).
 

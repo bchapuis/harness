@@ -48,8 +48,9 @@ impl Message for Greet {
     const MANIFEST: Manifest = Manifest::new("conf.Greet");
 }
 
-/// Ask the actor to stop itself after handling this message.
-#[derive(Serialize, Deserialize)]
+/// Ask the actor to stop itself after handling this message. `Clone` so it can
+/// serve as a singleton's reusable handoff message.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Stop;
 impl Message for Stop {
     type Reply = ();

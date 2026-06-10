@@ -494,10 +494,30 @@ where
         self.inner.transport.shutdown();
     }
 
-    fn is_shutting_down(&self) -> bool {
+    pub(crate) fn is_shutting_down(&self) -> bool {
         self.inner
             .shutdown
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Launch a background task on the system's spawner — the seam the
+    /// singleton manager (utilities spec §4) starts its tick loop through.
+    pub(crate) fn launch_task(
+        &self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        self.inner.spawner.launch(Box::pin(task));
+    }
+
+    /// Emit onto the observability stream (spec §16).
+    pub(crate) fn emit(&self, event: Event) {
+        self.inner.events.emit(event);
+    }
+
+    /// The resolved SWIM probe interval — the cadence background utility loops
+    /// reuse so they add no second tunable (utilities spec §4).
+    pub(crate) fn probe_interval(&self) -> Duration {
+        self.inner.swim.probe_interval
     }
 
     /// Complete every in-flight `ask` to `node` with `err` — the node-down
