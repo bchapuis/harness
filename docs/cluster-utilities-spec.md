@@ -100,6 +100,11 @@ The utilities catalogue mirrors the core catalogue's structure (core §17, §18.
 
 Group routers (§3) define no numbered invariant: "selects only from the current serving listing, fails fast when empty" is a local function property, not an emergent one — it is pinned directly by `conformance_router.rs`.
 
+The utilities are additionally held to the core testing contract (core §18.1, §18.3):
+
+- **Seed-reproducibility.** The manager's tick loop, the `SingletonStarted`/`Stopped` event ordering, and the router's seeded random draws reproduce byte-identically from the seed — swept by a dedicated utilities workload in `reproducibility.rs`.
+- **Fault coverage.** A sweep whose traffic flows entirely through routers and singleton proxies proves that loss, duplication, reordering, and partition/crash actually fired while the utilities ran (`fault_coverage.rs`) — their conformance tests alone use only controlled faults.
+
 ---
 
 ## 7. Future work

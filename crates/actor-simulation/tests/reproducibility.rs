@@ -14,6 +14,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
+use actor_cluster::RouteStrategy;
+use actor_cluster::Router;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorSystem;
@@ -489,4 +491,110 @@ fn the_checker_catches_a_determinism_leak() {
     // The two runs emitted different-length streams (one extra ask's worth of
     // events), and the divergence names the first differing index.
     assert_ne!(divergence.left_len, divergence.right_len);
+}
+
+// --- Cluster utilities (utilities spec §2–§4, core §18.1) ----------------------
+
+/// The singleton's handoff message; delivered locally by the manager, so it
+/// needs no `register` entry.
+#[derive(Clone, Serialize, Deserialize)]
+struct Halt;
+
+impl Message for Halt {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("repro.Halt");
+}
+
+impl Handler<Halt> for Greeter {
+    async fn handle(&mut self, _msg: Halt, ctx: &Ctx<Self>) {
+        ctx.stop();
+    }
+}
+
+const UTILITIES_SINGLETON: &str = "repro-singleton";
+
+/// A workload over the cluster utilities, pinning *their* new deterministic
+/// state: the singleton manager's tick loop and `SingletonStarted`/`Stopped`
+/// event ordering as anchors move under the nemesis, the router's seeded
+/// `Random` draws, and rendezvous selection (utilities spec §2–§4). Like every
+/// utility, these must reproduce byte-for-byte from the seed (core §18.1 #1).
+struct UtilitiesChurn {
+    nodes: usize,
+    rounds: u64,
+}
+
+impl ClusterWorkload for UtilitiesChurn {
+    fn name(&self) -> &'static str {
+        "repro-utilities-churn"
+    }
+
+    fn node_count(&self) -> usize {
+        self.nodes
+    }
+
+    fn swim(&self) -> SwimConfig {
+        SwimConfig {
+            probe_interval: Duration::from_millis(100),
+            rtt: Duration::from_millis(50),
+            suspect_timeout: Duration::from_millis(200),
+            indirect_count: 2,
+        }
+    }
+
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Gossip {
+            swim: self.swim(),
+            downing: DowningPolicy::Conservative,
+        }
+    }
+
+    fn setup(&self, ctx: &ClusterCtx) {
+        for node in ctx.nodes() {
+            let greeter = node.spawn(Greeter);
+            node.receptionist().register(GREETERS, &greeter);
+            node.singleton(UTILITIES_SINGLETON, || Greeter, Halt);
+        }
+    }
+
+    fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
+        let nodes: Vec<SimCluster> = ctx.nodes().to_vec();
+        let rounds = self.rounds;
+        Box::pin(async move {
+            let clock = nodes[0].clock().clone();
+            for round in 0..rounds {
+                clock.sleep(Duration::from_millis(200)).await;
+                for node in &nodes {
+                    // A seeded-random pick, a rendezvous-hashed pick, and the
+                    // singleton instance — every utility selection path runs
+                    // every round, so a nondeterministic draw anywhere diverges
+                    // the stream.
+                    let random = Router::new(node, GREETERS, RouteStrategy::Random);
+                    if let Some(routee) = random.route() {
+                        let _ = routee.ask_timeout(Greet, Duration::from_millis(500)).await;
+                    }
+                    let key = format!("k-{round}");
+                    if let Some(routee) = random.route_by(key.as_bytes()) {
+                        let _ = routee.ask_timeout(Greet, Duration::from_millis(500)).await;
+                    }
+                    let proxy = node.singleton_proxy::<Greeter>(UTILITIES_SINGLETON);
+                    if let Some(instance) = proxy.resolve() {
+                        let _ = instance
+                            .ask_timeout(Greet, Duration::from_millis(500))
+                            .await;
+                    }
+                }
+            }
+        })
+    }
+}
+
+#[test]
+fn utilities_event_stream_is_byte_identical_across_seeds() {
+    let workload = UtilitiesChurn {
+        nodes: 3,
+        rounds: 8,
+    };
+    if let Err(divergence) = replay_cluster_swarm(&workload, 0..24) {
+        panic!("{divergence}");
+    }
 }
