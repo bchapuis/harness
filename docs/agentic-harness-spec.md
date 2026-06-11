@@ -1,11 +1,11 @@
 # Agentic Harness: Specification
 
-**Status:** Draft v3
+**Status:** Draft v4
 **Scope:** A distributed agentic runtime: compound AI systems (agent loops combining model calls, tools, and control logic) run as actors on a mutualized cluster. Built as an application on the core framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)) and the cluster utilities ([`cluster-utilities-spec.md`](cluster-utilities-spec.md)).
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
 
-Sections of the core specification are cited as **core §N**, sections of the utilities specification as **util §N**, and sections of this document as plain **§N**. Invariants defined here are numbered **H1, H2, …**, kept apart from the core catalogue (core §18.5 #1–#22) and the utilities catalogue (util §6 U1–U2).
+Sections of the core specification are cited as **core §N**, sections of the utilities specification as **util §N**, sections of the sandbox specification ([`sandbox-spec.md`](sandbox-spec.md)) as **sandbox §N**, and sections of this document as plain **§N**. Invariants defined here are numbered **H1, H2, …**, kept apart from the core catalogue (core §18.5 #1–#22), the utilities catalogue (util §6 U1–U2), and the sandbox catalogue (sandbox §6 S1–S5).
 
 > **Design stance.** Today an agentic session is one OS process per user: the loop, the conversation, and unrestricted access to a machine, all in one box (the shape of a Claude Code session). The box is mostly idle: a session spends its life waiting on a model, a tool, or its user, yet holds the machine the whole time. The harness splits the box at **one isolation boundary**, placed between *control* and *effect*. Above it, the **loop is an actor**: serial, journaled, touching the world only through three seams, the **model** (§4), the **journal** (§6), and the **sandbox** (§5.3). A waiting session holds no thread, a deactivated one holds no memory, and the journal *is* the session, so thousands of sessions pack onto shared nodes. Below it, the **effects live in a sandbox**: one isolated environment per session where tools run, free to be arbitrarily effectful without endangering the node or any other session. §5.1 places the boundary and defends the placement. Everything else (time, randomness, task spawning, transport) comes from the core seams (core §4.6, §7), so deterministic simulation extends to the harness unchanged: one seed reproduces an entire multi-node agentic run, including its model outputs, tool faults, crashes, and resumes.
 >
@@ -26,7 +26,7 @@ Everything in this document is built **on top of** the core abstractions and the
 - **actors, messages, supervision, death watch** (core §3–§12) host the session and carry every harness interaction as an ordinary typed message with a hand-written manifest (core §4.4);
 - **rendezvous placement** (util §2) decides which node owns a session;
 - the **receptionist** (core §13) is how a session's owner node is reached;
-- the **event stream** (core §16) carries the harness's observability events, extending the single `Event` enum.
+- the **event stream** (core §16) carries the harness's observability events through the core's application-event extension point — one totally ordered stream, with the harness's event vocabulary defined in the harness (§10.4).
 
 The core non-goals (core §1.2) hold unchanged: the harness never transparently retries a message with side effects, never places a quorum on the message path, and never masks a failure. Where the harness *does* make a retry safe, it does so the way core §7.2 prescribes: an explicit idempotency key (the `TurnId`, §7.4), not transparent retransmission.
 
@@ -35,7 +35,7 @@ The core non-goals (core §1.2) hold unchanged: the harness never transparently 
 - **A model gateway.** The harness calls one configured model implementation per request; routing across providers, A/B serving, and quota brokering are not its concern.
 - **Prompt management.** System prompts and tool descriptions are application data the harness stores and transmits, not a templating system it provides.
 - **Exactly-once tool execution.** A tool call is at-most-once per attempt; across a crash-resume boundary the recovery semantics are explicit and per-tool (§5.5), never silent.
-- **An isolation technology.** The spec mandates *that* effectful tools execute behind the `Sandbox` seam (§5.3), not *how*: process, container, or microVM is the provider's choice.
+- **An isolation technology.** The spec mandates *that* effectful tools execute behind the `Sandbox` seam (§5.3), not *how*: process, container, or microVM is the provider's choice. v4 narrows the *what* without touching the *how*: a tool now declares which capability tier its calls require (§5.6), and the realization of each tier remains the provider's choice, bound by the obligations of sandbox §3.
 - **Multi-tenant economics.** Quotas, fair scheduling, and billing live above the harness (§13); budgets (§9) bound a run's spend, not a tenant's share.
 - **Context-window management.** A transcript that exceeds the model's context fails the run explicitly (§4.3); compaction and summarization are future work (§13).
 - **Retrieval, vector stores, UI.** Applications build these as tools (§5) or clients (§7).
@@ -89,6 +89,7 @@ The loop reaches the world through exactly three seams, **model** (§4), **journ
 | **Model** | The inference seam (§4): one trait, implemented by `harness-anthropic` in production and by a scripted model in simulation. |
 | **Tool** | A capability the model may invoke, declared to the harness (§5.2). Every declared tool executes inside the session's sandbox; the single built-in exception, `delegate`, executes in the loop (§8). |
 | **Sandbox** | The isolated execution environment bound to one session activation, behind the third seam (§5.3): where sandboxed tools run, and the only place their effects land. |
+| **Tier** | A named capability set a tool call requires and an activation escalates to, journaled before first use (§5.6); semantics in sandbox §2. |
 | **Budget** | A run's spending limit (model tokens and steps) from which child budgets are carved (§9). |
 | **Root** | The parentless ancestor a delegation tree descends from. Every `SessionCreated` records its `root` (§10.3); the root's `SessionId` names the tree. Correlation metadata only; nothing routes or folds on it. |
 
@@ -181,7 +182,9 @@ pub struct ToolDecl {
     pub name: &'static str,     // stable, author-chosen; the model selects by it (cf. manifests, core §4.4)
     pub description: String,
     pub input_schema: Schema,
+    pub tier: Tier,              // the capability set the call requires (§5.6); part of the kind's digest (§7.1)
     pub on_dangling: OnDangling, // the declared recovery policy for a dangling call (§5.5)
+    pub timeout: Option<Duration>, // per-call bound; the harness default applies when absent (§5.3)
 }
 
 /// Resume's policy for a dangling call: intent journaled, outcome not (§5.5).
@@ -189,7 +192,18 @@ pub enum OnDangling {
     Reexecute,  // blind re-execution is safe: the call is idempotent, or dedups (`delegate`, §8.1)
     Interrupt,  // resolve as ToolError::Interrupted; the model decides whether to retry
 }
+
+/// The capability set a tool call requires (§5.6); full semantics in sandbox §2.
+pub enum Tier {
+    Workspace, // the session's scoped filesystem, through host-implemented typed tools; no guest code
+    Compute,   // arbitrary guest code over the workspace; no network, no ambient clock or entropy
+    Network,   // compute, plus egress to the profile's allowlist (§5.3)
+    Browser,   // a remote browser peripheral, driven through host functions
+    Native,    // OS processes and native binaries inside the confined environment
+}
 ```
+
+The tier names are capability sets, not rungs of a number line: each names what a call may touch, and `Browser` is deliberately comparable to none of the other escalations (sandbox §2.2). What each tier grants and withholds, and what a provider MUST guarantee to offer it, live in the sandbox specification (sandbox §2–§3); this document carries only the contract.
 
 A kind's `ToolRegistry` is a hand-built list of declarations, in the spirit of `HandlerRegistry` (core §4.4): explicit, inspectable, and the **allowlist**. A model's tool call dispatches by name against the registry and nothing else; no path leads from model output to code outside the declared set.
 
@@ -209,18 +223,19 @@ pub trait SandboxProvider: Send + Sync + 'static {
 
 /// One environment, bound to one session activation.
 pub trait Sandbox: Send + Sync + 'static {
-    /// Execute one declared, sandboxed tool call to completion inside the environment.
-    async fn call(&self, name: &str, input: Value) -> Result<Value, ToolError>;
-    /// Tear down processes and working state. Idempotent.
+    /// Execute one declared, sandboxed tool call to completion inside the
+    /// environment, at the call's declared tier (§5.2, §5.6).
+    async fn call(&self, tier: Tier, name: &str, input: Value) -> Result<Value, ToolError>;
+    /// Tear down processes and working state, across every provisioned tier. Idempotent.
     async fn release(&self);
 }
 ```
 
-1. **Lazy.** An activation opens its sandbox on its first sandboxed call; a session that never needs one never pays for one.
+1. **Lazy, per tier.** An activation opens its sandbox on its first sandboxed call; a session that never needs one never pays for one. Tiers are provisioned the same way: the harness passes each call's declared tier — the provider holds no registry and cannot derive it — and the provider builds a tier's environment on the first call carrying it (§5.6), so a session that never escalates holds only its workspace.
 2. **Bound per activation.** At most one live sandbox per activation, and deactivation, whether by ownership move, fence rejection (§6.2), or idle stop, MUST release it (invariant H8). The sandbox lives on the session's current owner node and never migrates.
 3. **Launched, never awaited inline** (§3.2): outcomes return as messages, bounded by a per-tool timeout from `Clock`.
-4. **Profiled.** The kind's `SandboxProfile` (image or toolchain, resource limits, network policy) is deployment configuration, agreed cluster-wide like the kind itself (§7.1).
-5. **Technology-opaque.** Whether an environment is a process, a container, or a microVM is the provider's secret; the simulator's scripted sandbox is one more implementation of the same trait (§12). A provider MAY tier environments internally, escalating as the session needs it: a lightweight isolate for generated code, a full container for OS-level work (cf. the execution ladder of Cloudflare's *Project Think*). The seam sees one `Sandbox`.
+4. **Profiled.** The kind's `SandboxProfile` (image or toolchain, resource limits, network policy) is deployment configuration, agreed cluster-wide like the kind itself (§7.1). The profile also carries the kind's **tier cap** — the set of tiers its sessions may hold (§5.6) — and, when the cap includes `Network`, the egress allowlist that tier grants (sandbox §3.3): a `TierEscalated` record grants the profile's allowlist by reference, never an inline list. Declaring a tool whose tier the cap excludes is a deployment configuration error, surfaced at registration as loudly as a duplicate name (§5.2), never discovered at dispatch; the cap defaults to exactly the tiers the kind's declared tools require.
+5. **Technology-opaque, within a tier.** Whether a tier's environment is a process, a container, or a microVM is the provider's secret; the simulator's scripted sandbox is one more implementation of the same trait (§12). Draft v3 left tiering itself to that secrecy — a provider MAY tier environments internally; the seam sees one `Sandbox` — and v4 supersedes it: *which capabilities a call holds* is now declared per tool (§5.2), journaled per escalation (§5.6), and agreed cluster-wide (§7.1), because an escalation ladder the provider improvises is an audit trail and a policy hook nobody has (cf. the execution ladder of Cloudflare's *Project Think*, cited by v3 as provider freedom and promoted by v4 to contract). The seam still sees one `Sandbox`: tiers are provisioned within it, never as separate seam objects.
 
 ### 5.4 Tool failure is a transcript value
 
@@ -238,6 +253,19 @@ A dangling call is not always dead. During divergence (§6.2) the stale activati
 The sandbox itself is **not session state**: the fold (§6.3) never reads it, no record depends on its contents, and a lost workspace is never reconstructed by the harness. Anything that must outlive the sandbox leaves it through a tool: push a branch, upload an artifact, return a result the loop journals. This is core §1.2's "retries are the caller's decision" applied to effects: the harness never re-fires a non-idempotent side effect on its own authority, and it never pretends a lost workspace still exists.
 
 Nor may the *model* be left pretending. The transcript asserts a workspace the world may no longer hold — files written, servers left running — and a model resumed into a fresh sandbox would otherwise discover the loss only through a confusing downstream failure. When an activation opens a fresh sandbox for a session whose journal already records sandboxed activity (after an idle stop §7.2, an environment loss, or a crash), it MUST journal a **`WorkspaceReset`** record before the next model call and surface it to the model with that request. The record answers no `CallId`, so it cannot ride a tool result: it enters the request as input content the harness authors, the encoding's analogue of a user message. The loss thus enters the record, and the model re-derives what it needs instead of acting on state that is gone.
+
+Tier loss follows the same honesty, at two grains. A fresh sandbox resets **every** tier the lost activation held: `WorkspaceReset` covers the whole environment, the new activation's held set restarts at `Workspace` (§5.6), and re-escalation is re-journaled, never silently inherited. Loss of a single tier's environment while the sandbox survives surfaces as `ToolError` outcomes on the calls that needed it (§5.4); the provider MAY re-provision that tier lazily under the escalation this activation already journaled, and MUST NOT grant a tier the activation never journaled (sandbox §4).
+
+### 5.6 Execution tiers
+
+A **tier** is a named capability set a tool call requires: `Workspace`, `Compute`, `Network`, `Browser`, or `Native` (§5.2). This document owns the contract — the declaration, the record, the cap, the agreement — and the sandbox specification owns the semantics: what each tier grants and withholds (sandbox §2), and what a provider MUST guarantee to offer it (sandbox §3).
+
+1. **Opening grants `Workspace` and nothing else.** The lazy open of §5.3 builds the workspace tier; a session that never escalates holds a directory's worth of capability and no more.
+2. **Escalation is journaled, intent before effect.** Before the first call at a tier the activation does not yet hold, the actor journals a **`TierEscalated { turn, tier }`** record: the write-ahead discipline (§6.4) applied to capability acquisition. The record is the audit trail — when did this session first run guest code, first touch the network? — and the policy hook (§13), both obtained from the journal the design already has rather than from a second mechanism.
+3. **Held tiers are additive and activation-scoped.** Within an activation the held set only grows; nothing revokes a tier. A fresh activation starts again from `Workspace` (§5.5): held tiers are working state, like the sandbox they live in, and only the journal's escalation records survive.
+4. **The cap is unreachable by construction.** Escalation beyond the kind's tier cap cannot be requested: declared tools are checked against the cap at registration (§5.3 item 4), and dispatch reaches declared tools only (§5.2). The cap is stated as the invariant that construction discharges (sandbox §6 S4), not as a runtime check the loop performs.
+5. **Agreement.** Each tool's tier and the profile's cap are covered by the kind digest (§7.1): what a session may escalate to is cluster-wide agreement, never a node-local choice.
+6. **A record, not an event.** Escalation is durable, user-facing audit, so §10.1 makes it a record. No §10.4 event accompanies it: tool execution carries no events at all, so no stream checker could consume one; the escalation ordering of sandbox §6 S4 is verified by journal audit, the way H2's quiescence audit already works.
 
 ---
 
@@ -281,6 +309,7 @@ A session actor's state MUST be a pure, deterministic function of its journal pr
 Within a step, the actor journals:
 
 - a **model response** before any of its tool calls execute (intent before effect, §5.5), each requested call identified by its `CallId` (§5.2); a model call itself is side-effect-free and needs no intent record;
+- a **tier escalation** (`TierEscalated`) before the first tool call at a tier the activation does not yet hold (§5.6); like a model response, it is intent journaled before effect;
 - a **tool or delegation outcome** before the next step shows it to the model;
 - the **terminal outcome** (`RunEnded`) before releasing the reply to `Submit` (§7.3), so a caller never holds a completion the journal could lose.
 
@@ -296,7 +325,7 @@ A session's cluster life is a cycle only the journal survives: **created** (firs
 
 ### 7.1 Kinds
 
-Each node's harness is configured with the same `KindId → Kind` map: system prompt, `ToolRegistry`, `SandboxProfile`, model parameters, default budget, delegation allowlist (§8.1). Kinds are code-and-config, agreed cluster-wide like the codec (core §5): a session created with a kind MUST be resumable on any node, so every node MUST register every kind. A `SessionCreated` record pins the session's kind and a **digest** of its definition (§10.5); activation on a node missing that kind is a deployment error that fails the triggering call with `CallError::System` before any run starts — nothing journaled, no `RunStarted` — never a silent fallback.
+Each node's harness is configured with the same `KindId → Kind` map: system prompt, `ToolRegistry`, `SandboxProfile`, model parameters, default budget, delegation allowlist (§8.1). Kinds are code-and-config, agreed cluster-wide like the codec (core §5): a session created with a kind MUST be resumable on any node, so every node MUST register every kind. A `SessionCreated` record pins the session's kind and a **digest** of its definition (§10.5); the digest covers, among the definition's fields, each tool's declared tier and the profile's tier cap (§5.6), so what a session may escalate to is pinned with the rest of its definition. Activation on a node missing that kind is a deployment error that fails the triggering call with `CallError::System` before any run starts — nothing journaled, no `RunStarted` — never a silent fallback.
 
 ### 7.2 The host and placement
 
@@ -415,7 +444,7 @@ Every `SessionCreated` records its session's **root**: its own `SessionId` for a
 
 ### 10.4 Events (checker-facing)
 
-Harness events extend the core `Event` enum (core §16), as the utilities' do (util §5). They exist to make the H-invariants (§11) checkable over the stream; per-message and per-fold events would add noise without enabling a check.
+Harness events are defined **in the harness** as their own typed enum and ride the core stream through its application-event extension point (core §16's `Event::App`): the core owns the mechanism, never the vocabulary, so layering an application adds no variant to the core enum — unlike the utilities' events (util §5), which are part of the framework proper. Checkers recover them from the shared stream by downcast, observing one totally ordered sequence interleaved with the core events; the seed-reproducibility contract (core §18.1) covers them for free. They exist to make the H-invariants (§11) checkable over the stream; per-message and per-fold events would add noise without enabling a check.
 
 | Event | Fields | Meaning |
 |---|---|---|
@@ -458,6 +487,8 @@ The harness catalogue mirrors the core and utilities catalogues (core §17, §18
 | H7 | **Idempotent submission.** A re-submitted `TurnId` never starts a second run: it returns the recorded outcome or attaches to the live run, under any injected duplication or caller retry. | §7.4 | continuous checker (one `RunStarted` per `(session, turn)`); retry scenario tests |
 | H8 | **Effect containment.** An activation binds at most one live sandbox and releases it on deactivation; every sandboxed tool call executes in the sandbox bound to its issuing activation, never another session's; sandbox loss surfaces in the journal — `ToolError` outcomes, a `WorkspaceReset` record (§5.5) — never as silent corruption. | §5.3, §5.5 | continuous checker (`SandboxBound`/`SandboxReleased` alternation, calls within the bind window); crash/loss scenario tests; cross-session isolation by construction of the provider |
 
+The tier obligations of the sandbox seam carry their own catalogue, **S1–S5** (sandbox §6): they bind providers rather than the loop, and their verification machinery is tracked there.
+
 The harness is also held to the core testing contract (core §18.1, §18.3): seed-reproducibility of the full event stream including harness events, and fault-coverage accounting proving that model faults, journal faults, and transport faults actually fired while agent traffic flowed.
 
 ---
@@ -472,9 +503,9 @@ The harness adds three rows to the core's virtualization table (core §18.2); ev
 |---|---|---|
 | `Model` (§4) | `harness-anthropic`: Anthropic Messages API over HTTPS; retry backoff from `Clock`/`Entropy` | **scripted model**: a deterministic function of the request and the seed; emits final messages, tool calls, malformed calls, and faults under seed control |
 | `Journal` (§6) | pluggable durable store (future work, §13); in-memory for ephemeral deployments | the in-memory journal wrapped with seeded latency, `Unavailable` windows, and crash-truncation of unacknowledged appends |
-| `Sandbox` (§5.3) | a deployment-supplied `SandboxProvider` (process, container, or microVM; §13) | **scripted sandbox**: deterministic outcomes per call and seed; seeded open failures, latency, crashes, and environment loss |
+| `Sandbox` (§5.3) | a deployment-supplied `SandboxProvider` (process, container, or microVM; §13) | **scripted sandbox**: deterministic outcomes per call and seed; seeded open failures, latency, crashes, environment loss, and tier-provisioning failure |
 
-The `harness` crate itself MUST satisfy core §18.1: no wall clock, no OS threads, no unseeded randomness; all I/O launched through `Spawner` (§3.2). `harness-anthropic` is production-only and is the single place HTTP exists; production sandbox providers are likewise separate crates: the harness core knows only the trait.
+The `harness` crate itself MUST satisfy core §18.1: no wall clock, no OS threads, no unseeded randomness; all I/O launched through `Spawner` (§3.2). `harness-anthropic` is production-only and is the single place HTTP exists; production sandbox providers are likewise separate crates: the harness core knows only the trait. The scripted sandbox remains the seam's single simulation implementation; the `Compute` tier's provider obligation (sandbox §3.2: no ambient clock, entropy, or network) is core §18.1's discipline applied below the seam, which is what would make a real compute engine *also* runnable under the simulator — claimed as a design property, not as shipped machinery.
 
 ### 12.2 Fault injection
 
@@ -482,7 +513,7 @@ Under seed control, a simulated harness run MUST be able to inject at least, on 
 
 - **Model:** latency, `RateLimited`/`Overloaded` bursts, `ContextOverflow`, unknown tool names, schema-invalid arguments, pathological tool-call loops (exercising budgets).
 - **Journal:** append/load latency, `Unavailable` windows, loss of unacknowledged appends at a crash (the torn tail a resume must tolerate).
-- **Sandbox:** open failure, execution latency, a crash mid-call (dangling calls, §5.5), loss of the environment between steps, forcing resume into a fresh sandbox.
+- **Sandbox:** open failure, execution latency, a crash mid-call (dangling calls, §5.5), loss of the environment between steps, forcing resume into a fresh sandbox, and provisioning failure at an escalated tier (the calls that needed it fail per §5.4).
 - **Topology:** node crash mid-step (dangling tool calls, §5.5), ownership moves under partition and heal (fence races, §6.2), cancellation racing completion across the tree.
 
 A run with no faults is the simplest case and MUST still pass.
@@ -493,13 +524,13 @@ A run with no faults is the simplest case and MUST still pass.
 
 - **Scheduler singleton.** Queued and recurring agent runs owned by a cluster singleton (util §4), feeding ordinary `Submit`s; deliberately out of v1.
 - **Durable journal implementations.** File- and store-backed `Journal`s; the trait (§6.1) is shaped for them (fenced append maps onto conditional writes).
-- **Sandbox providers, snapshots, and pooling.** Production `SandboxProvider` crates (process, container, microVM); workspace snapshot/restore across ownership moves; warm pools to cut open latency.
+- **Sandbox providers, snapshots, and pooling.** Production `SandboxProvider` crates implementing the per-tier obligations of sandbox §3–§4 (capability-handle workspaces, hermetic compute isolates, confined native environments); workspace snapshot/restore across ownership moves; warm pools to cut open latency.
 - **Multi-tenant scheduling.** Quotas, fair-share scheduling, and accounting across tenants sharing the cluster: the economics of mutualization (§1.1).
 - **Context compaction.** Summarizing the transcript into a journaled checkpoint record so the fold, and the model request, start from it; must preserve H1.
 - **Streaming.** Token streaming from `Model`, and push-based run observation: a subscription complement to `Tail` (§10.2), likely over a pub/sub utility (util §7).
-- **Permission gating.** A per-tool authorization hook between intent and execution, the application-level analogue of the core `Authorizer` (core §15).
+- **Permission gating.** A per-tool authorization hook between intent and execution, the application-level analogue of the core `Authorizer` (core §15). The tier cap (§5.6) is the static half of authorization, fixed at deployment; this hook is the dynamic, per-call half.
 - **Loop-executing tools.** A general extension point for tools that run in the loop with effects confined to the seams (ask-the-user, journal queries); v1's only loop-executing tool is the built-in `delegate` (§5.2).
-- **Code mode.** Exposing the toolset as an API the model *programs against* rather than calls tool-by-tool, the generated program executing in the sandbox like any other effect (cf. Project Think's codemode): fewer declaration tokens, fewer loop round-trips, same boundary.
+- **Code mode.** Exposing the toolset as an API the model *programs against* rather than calls tool-by-tool, the generated program executing at the `Compute` tier (§5.6) like any other effect (cf. Project Think's codemode): fewer declaration tokens, fewer loop round-trips, same boundary — and the tier the ladder was shaped for.
 - **External trace interop.** Mapping `root`/parent links (§10.3) onto W3C trace-context or OpenTelemetry ids at the boundary of an external collector; the opaque ids those systems expect are minted there, not stored in the journal.
 - **Sharding alignment.** If the planned sharding utility (util §7) lands, hosts become its entity hosts; placement semantics are already identical by construction.
 
@@ -510,11 +541,13 @@ A run with no faults is the simplest case and MUST still pass.
 ```rust
 // --- A kind: prompt, declared tools, sandbox profile; identical on every node (§7.1).
 // --- The registry is hand-built and is the allowlist (§5.2); `shell` and `read_file`
-// --- execute inside the session's sandbox (§5.3), `delegate` inside the loop (§8).
+// --- execute inside the session's sandbox (§5.3) at their declared tiers (§5.6),
+// --- `delegate` inside the loop (§8). The tier cap defaults to exactly what the
+// --- declared tools require — here {Workspace, Native} (§5.3 item 4).
 let researcher = Kind::new("You are a research agent.")
     .model(ModelParams::default())
-    .sandboxed("shell", "Run a command in the workspace", &SHELL_SCHEMA)
-    .sandboxed("read_file", "Read a file from the workspace", &READ_SCHEMA)
+    .sandboxed(Tier::Native, "shell", "Run a command in the workspace", &SHELL_SCHEMA)
+    .sandboxed(Tier::Workspace, "read_file", "Read a file from the workspace", &READ_SCHEMA)
     .delegates_to(&["researcher"])          // the built-in `delegate` tool; allowlisted child kinds (§5.2, §8)
     .sandbox(SandboxProfile::image("workspace:base"))
     .budget(Budget { tokens: 200_000, steps: 50 });
@@ -543,7 +576,7 @@ harness/                # the agentic harness (this spec)
   agent.rs              #   the session actor: message-driven run loop, steps (§3)
   model.rs              #   Model trait, ModelRequest/Response/Error (§4)
   tool.rs               #   ToolDecl, ToolRegistry, the built-in `delegate` (§5.2, §8)
-  sandbox.rs            #   Sandbox + SandboxProvider seams, SandboxProfile (§5.3)
+  sandbox.rs            #   Sandbox + SandboxProvider seams, SandboxProfile, Tier (§5.3, §5.6)
   journal.rs            #   Journal trait, SeqNo, fenced append, in-memory impl (§6)
   host.rs               #   Host actor, kinds, activation/deactivation, wire messages (§7)
   client.rs             #   Harness + SessionRef: placement + receptionist routing (§7.4)
