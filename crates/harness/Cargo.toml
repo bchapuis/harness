@@ -1,0 +1,23 @@
+[package]
+name = "harness"
+description = "The agentic harness: compound AI sessions as journaled actors on the cluster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-serialization.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+actor-simulation.workspace = true
+
+[lints]
+workspace = true

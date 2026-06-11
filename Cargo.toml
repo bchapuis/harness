@@ -22,6 +22,10 @@ actor-cluster = { path = "crates/actor-cluster", version = "0.1.0" }
 actor-simulation = { path = "crates/actor-simulation", version = "0.1.0" }
 actor-runtime = { path = "crates/actor-runtime", version = "0.1.0" }
 
+# The agentic harness (Appendix B layout of the agentic harness spec).
+harness = { path = "crates/harness", version = "0.1.0" }
+harness-anthropic = { path = "crates/harness-anthropic", version = "0.1.0" }
+
 # Third-party. The runtime seam (Clock/Entropy/Spawner) and mailbox are built
 # on these; our own crates remain `unsafe`-free.
 serde = { version = "1", features = ["derive"] }
