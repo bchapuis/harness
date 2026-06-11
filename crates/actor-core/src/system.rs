@@ -144,6 +144,7 @@ struct Inner<C, E, S> {
     codec: Arc<dyn Codec>,
     host: LocalHost,
     receptionist: Arc<ReceptionistState>,
+    events: Arc<dyn EventSink>,
 }
 
 /// A single-node actor system (spec §4). Generic over the runtime seam so the
@@ -213,7 +214,7 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystemBuilder<C, E, S> {
 
     /// Build the system.
     pub fn build(self) -> LocalSystem<C, E, S> {
-        let host = LocalHost::new(self.node, self.events, self.mailbox_capacity);
+        let host = LocalHost::new(self.node, Arc::clone(&self.events), self.mailbox_capacity);
         LocalSystem {
             inner: Arc::new(Inner {
                 clock: self.clock,
@@ -222,6 +223,7 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystemBuilder<C, E, S> {
                 codec: self.codec,
                 host,
                 receptionist: Arc::new(ReceptionistState::new()),
+                events: self.events,
             }),
         }
     }
@@ -246,6 +248,13 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystem<C, E, S> {
     /// The system task spawner.
     pub fn spawner(&self) -> &S {
         &self.inner.spawner
+    }
+
+    /// Emit onto the observability stream (spec §16). Public so layered
+    /// runtimes extending the [`Event`](crate::Event) enum (harness spec §10.4)
+    /// emit into the same stream the checkers read.
+    pub fn emit(&self, event: crate::Event) {
+        self.inner.events.emit(event);
     }
 
     /// Spawn an actor from a `factory` so it can be restarted on fault (spec

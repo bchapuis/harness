@@ -27,7 +27,7 @@ pub mod system;
 pub use actor::{Actor, BoxError, Handler, StopReason, Terminated, TerminationReason};
 pub use context::Ctx;
 pub use error::CallError;
-pub use event::{Event, EventSink, SupervisionDecision};
+pub use event::{AppEvent, Event, EventSink, SupervisionDecision};
 pub use id::{ActorId, NodeId, Path};
 pub use mailbox::Mailbox;
 pub use message::{Manifest, Message};

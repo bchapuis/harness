@@ -136,7 +136,93 @@ pub enum Event {
         watcher: ActorId,
         reason: TerminationReason,
     },
+    /// An application-layer event riding the framework's stream (spec §16).
+    ///
+    /// The extension point for runtimes layered *on* the framework (the
+    /// agentic harness, harness spec §10.4): they define their own typed
+    /// event enum and emit it here, so their checkers observe one totally
+    /// ordered stream interleaved with the core events — and the
+    /// seed-reproducibility contract (spec §18.1 #1) covers application
+    /// events for free. Core knows the mechanism, never the vocabulary: an
+    /// application's event type stays in the application's crate.
+    ///
+    /// Match with [`Event::as_app`]:
+    /// `event.as_app::<HarnessEvent>()`.
+    App(Box<dyn AppEvent>),
 }
+
+impl Event {
+    /// Wrap an application event for emission onto the stream.
+    pub fn app<E: AppEvent>(event: E) -> Event {
+        Event::App(Box::new(event))
+    }
+
+    /// The application event inside an [`Event::App`], if it is one and is of
+    /// type `E`. The downcast is how an application's checkers recover their
+    /// typed events from the shared stream.
+    pub fn as_app<E: AppEvent>(&self) -> Option<&E> {
+        match self {
+            // Dispatch through the inner `dyn AppEvent` explicitly: the
+            // blanket impl also covers `Box<dyn AppEvent>` itself (the box
+            // is Debug + Clone + PartialEq), so a method call on the box
+            // receiver would resolve to the *box's* impl and `as_any` would
+            // return the box, never the event.
+            Event::App(event) => (**event).as_any().downcast_ref::<E>(),
+            _ => None,
+        }
+    }
+}
+
+/// An application-defined event (spec §16): anything `Debug + Clone +
+/// PartialEq + Send + Sync` qualifies via the blanket impl — applications
+/// never implement this by hand. The bounds exist so [`Event`] keeps its
+/// derives: `Clone` for fan-out sinks, `PartialEq`/`Eq` for the
+/// reproducibility recorder's byte-identical comparison (spec §18.1 #1),
+/// `Debug` for reporting.
+pub trait AppEvent: std::fmt::Debug + Send + Sync + 'static {
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn clone_app(&self) -> Box<dyn AppEvent>;
+    fn eq_app(&self, other: &dyn AppEvent) -> bool;
+}
+
+impl<E> AppEvent for E
+where
+    E: std::fmt::Debug + Clone + PartialEq + Send + Sync + 'static,
+{
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn clone_app(&self) -> Box<dyn AppEvent> {
+        Box::new(self.clone())
+    }
+
+    fn eq_app(&self, other: &dyn AppEvent) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<E>()
+            .is_some_and(|other| self == other)
+    }
+}
+
+// Both impls dispatch through the inner `dyn AppEvent` explicitly. Calling
+// `self.clone_app()` / `self.eq_app(..)` on the box receiver would resolve
+// to the blanket impl on `Box<dyn AppEvent>` itself — these very impls make
+// the box satisfy its bounds — turning clone into infinite recursion and eq
+// into a constant `false`.
+impl Clone for Box<dyn AppEvent> {
+    fn clone(&self) -> Self {
+        (**self).clone_app()
+    }
+}
+
+impl PartialEq for Box<dyn AppEvent> {
+    fn eq(&self, other: &Self) -> bool {
+        (**self).eq_app(&**other)
+    }
+}
+
+impl Eq for Box<dyn AppEvent> {}
 
 /// A sink the runtime emits [`Event`]s to (spec §16).
 ///

@@ -501,16 +501,17 @@ where
     }
 
     /// Launch a background task on the system's spawner — the seam the
-    /// singleton manager (utilities spec §4) starts its tick loop through.
-    pub(crate) fn launch_task(
-        &self,
-        task: impl std::future::Future<Output = ()> + Send + 'static,
-    ) {
+    /// singleton manager (utilities spec §4) starts its tick loop through, and
+    /// the one layered runtimes (the agentic harness) launch their I/O on so a
+    /// simulated run stays on the seeded scheduler (spec §18.1).
+    pub fn launch_task(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
         self.inner.spawner.launch(Box::pin(task));
     }
 
-    /// Emit onto the observability stream (spec §16).
-    pub(crate) fn emit(&self, event: Event) {
+    /// Emit onto the observability stream (spec §16). Public so layered
+    /// runtimes extending the [`Event`] enum (utilities spec §5, harness spec
+    /// §10.4) emit into the same stream the checkers read.
+    pub fn emit(&self, event: Event) {
         self.inner.events.emit(event);
     }
 
