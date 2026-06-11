@@ -43,6 +43,9 @@ getrandom = "0.2"
 rustls = "0.23"
 tokio-rustls = "0.26"
 rcgen = "0.13"
+# Standalone deployment only (`harness-standalone`): trust anchors for the
+# rustls connection its HttpPost seam opens to the Anthropic API.
+webpki-roots = "1"
 
 # Dev-only: compile-fail tests asserting invalid `ask`/`tell` is rejected at
 # compile time (spec §18.5 #20, §18.6).

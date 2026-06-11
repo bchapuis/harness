@@ -5,3 +5,6 @@ Cargo.lock
 
 # Local Claude Code tooling state
 /.claude
+
+# Runtime data of demo.sh / harness-standalone (journals, workspaces, node logs)
+/harness-data
