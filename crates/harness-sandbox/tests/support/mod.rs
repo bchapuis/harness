@@ -29,7 +29,11 @@ const S_CATALOGUE: &[CatalogueEntry] = &[
                 "the cap-std Dir handle is the only filesystem capability the provider holds; \
                  the crate's one ambient-authority call opens the root",
             ),
-            Verify::SimTest("harness-sandbox/tests/workspace.rs (adversarial traversal)"),
+            Verify::SimTest(
+                "harness-sandbox/tests/workspace.rs (adversarial traversal); tests/native.rs \
+                 (container confinement smoke: only the workspace mount reaches the host \
+                 filesystem, no network)",
+            ),
         ],
     },
     CatalogueEntry {
@@ -70,8 +74,9 @@ const S_CATALOGUE: &[CatalogueEntry] = &[
         spec: "sandbox §2.3; harness §5.3",
         property: "Per-tier release: release tears down every provisioned tier's environment and is idempotent; deactivation releases all held tiers (the per-tier face of harness H8)",
         verify: &[Verify::SimTest(
-            "harness-sandbox/tests/workspace.rs (open/release accounting); the harness's \
-             existing H8 checker covers the binding window",
+            "harness-sandbox/tests/workspace.rs (open/release accounting); tests/native.rs \
+             (container removed on release, idempotent); the harness's existing H8 checker \
+             covers the binding window",
         )],
     },
 ];

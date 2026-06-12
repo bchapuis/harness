@@ -523,7 +523,7 @@ A run with no faults is the simplest case and MUST still pass.
 
 - **Scheduler singleton.** Queued and recurring agent runs owned by a cluster singleton (util §4), feeding ordinary `Submit`s; deliberately out of v1.
 - **Durable journal implementations.** File- and store-backed `Journal`s; the trait (§6.1) is shaped for them (fenced append maps onto conditional writes).
-- **Sandbox providers, snapshots, and pooling.** The first per-tier provider ships as `harness-sandbox` (capability-handle workspaces and hermetic compute isolates; sandbox §3.1–§3.2, §3.5). Still open: a confined native tier (sandbox §3.4), a network dataplane behind the profile's allowlist (sandbox §3.3), workspace snapshot/restore across ownership moves, and warm pools to cut open latency.
+- **Sandbox providers, snapshots, and pooling.** The first per-tier provider ships as `harness-sandbox` (capability-handle workspaces, hermetic compute isolates, and a container-backed shared-kernel `Native` tier, feature `native`; sandbox §3.1–§3.2, §3.4–§3.5). Still open: a microVM-grade native tier (sandbox §3.4), a network dataplane behind the profile's allowlist (sandbox §3.3), workspace snapshot/restore across ownership moves, and warm pools to cut open latency.
 - **Multi-tenant scheduling.** Quotas, fair-share scheduling, and accounting across tenants sharing the cluster: the economics of mutualization (§1.1).
 - **Context compaction.** Summarizing the transcript into a journaled checkpoint record so the fold, and the model request, start from it; must preserve H1.
 - **Streaming.** Token streaming from `Model`, and push-based run observation: a subscription complement to `Tail` (§10.2), likely over a pub/sub utility (util §7).
@@ -587,7 +587,9 @@ harness-anthropic/      # production Model only: Anthropic Messages API client;
 harness-sandbox/        # tiered SandboxProvider (sandbox §3): Workspace by cap-std
                         #   capability handle, Compute by hermetic wasmtime guests
                         #   (raw modules, or JavaScript via an embedded QuickJS runner,
-                        #   feature-gated); ships s_catalogue() with its tests (sandbox §6)
+                        #   feature-gated), Native by an OCI container through the
+                        #   docker CLI (feature-gated); ships s_catalogue() with its
+                        #   tests (sandbox §6)
 ```
 
 Test-only pieces (the scripted model, the scripted sandbox, the faulted journal wrapper, `harness_catalogue()`, and the conformance suites) live with the harness's tests, dev-depending on `actor-simulation` for the simulator, exactly as the utilities' suites do. The `harness` crate observes the workspace conventions: edition 2024, `unsafe_code = "forbid"`, `clippy::all = "warn"`, serde derives only.

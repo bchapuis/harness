@@ -183,7 +183,8 @@ fn tiers_not_offered_fail_as_outcomes() {
     let provider = TieredSandboxes::new(dir.path()).expect("provider");
     let sandbox = open(&provider, "s");
 
-    let outcome = block_on(sandbox.call(Tier::Native, "anything", json!({})));
+    // Network: unoffered in every feature combination of this provider.
+    let outcome = block_on(sandbox.call(Tier::Network, "anything", json!({})));
     assert!(
         matches!(outcome, Err(ToolError::Sandbox(_))),
         "an unoffered tier is a per-call failure (§5.4), got {outcome:?}"

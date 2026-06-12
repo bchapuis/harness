@@ -31,6 +31,7 @@ pub struct TierStats {
     released: Arc<AtomicUsize>,
     compute_built: Arc<AtomicUsize>,
     modules_compiled: Arc<AtomicUsize>,
+    native_built: Arc<AtomicUsize>,
 }
 
 impl TierStats {
@@ -56,11 +57,23 @@ impl TierStats {
     pub(crate) fn count_module_compiled(&self) {
         self.modules_compiled.fetch_add(1, Ordering::SeqCst);
     }
+
+    /// Containers actually provisioned: lazy on first use, once per held
+    /// tier per activation barring single-tier loss (sandbox spec §4).
+    pub fn native_built(&self) -> usize {
+        self.native_built.load(Ordering::SeqCst)
+    }
+
+    #[cfg(feature = "native")]
+    pub(crate) fn count_native_built(&self) {
+        self.native_built.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// The tiered sandbox provider (sandbox spec §3): `Workspace` by capability
-/// handle, `Compute` (feature `compute`) by hermetic wasmtime guests, and
-/// nothing else — see the crate docs for the offered set.
+/// handle, `Compute` (feature `compute`) by hermetic wasmtime guests,
+/// `Native` (feature `native`) by an OCI container behind the docker CLI,
+/// and nothing else — see the crate docs for the offered set.
 pub struct TieredSandboxes {
     /// The root, held as a capability handle from construction: even
     /// provisioning and teardown go through cap-std, never through an
@@ -75,6 +88,16 @@ pub struct TieredSandboxes {
     /// sandbox spec §2.3 item 2 permits: a module is code, not working
     /// state — every call still gets a fresh store.
     modules: BTreeMap<String, Arc<[u8]>>,
+    /// The root as a host path, retained solely to compose the bind-mount
+    /// argument handed to docker (see native.rs: configuration for an
+    /// external confinement mechanism, not ambient authority used here).
+    /// Canonicalized, so docker's `-v` gets an absolute, symlink-free path
+    /// (macOS `/tmp` is a symlink into `/private`).
+    #[cfg(feature = "native")]
+    root_path: std::path::PathBuf,
+    /// The container CLI binary for the native tier; `docker` by default.
+    #[cfg(feature = "native")]
+    container_cli: String,
     pub stats: TierStats,
 }
 
@@ -84,11 +107,17 @@ impl TieredSandboxes {
     /// reaches the filesystem through the returned handle.
     pub fn new(root: impl AsRef<std::path::Path>) -> std::io::Result<TieredSandboxes> {
         std::fs::create_dir_all(root.as_ref())?;
+        #[cfg(feature = "native")]
+        let root_path = std::fs::canonicalize(root.as_ref())?;
         let root = Dir::open_ambient_dir(root.as_ref(), cap_std::ambient_authority())?;
         Ok(TieredSandboxes {
             root: Arc::new(root),
             seed: 0,
             modules: BTreeMap::new(),
+            #[cfg(feature = "native")]
+            root_path,
+            #[cfg(feature = "native")]
+            container_cli: "docker".to_string(),
             stats: TierStats::default(),
         })
     }
@@ -118,6 +147,15 @@ impl TieredSandboxes {
     pub fn with_quickjs(self) -> TieredSandboxes {
         self.with_module(crate::compute::QJS_MODULE, quickjs_module())
     }
+
+    /// Set the container CLI binary the native tier drives (feature
+    /// `native`); `docker` by default. Podman's docker-compatible CLI and
+    /// colima answer to the same vocabulary.
+    #[cfg(feature = "native")]
+    pub fn with_container_cli(mut self, cli: impl Into<String>) -> TieredSandboxes {
+        self.container_cli = cli.into();
+        self
+    }
 }
 
 /// The committed QuickJS runner artifact (feature `quickjs`): a hermetic
@@ -141,6 +179,39 @@ impl SandboxProvider for TieredSandboxes {
         let limits = profile.compute;
         #[cfg(feature = "compute")]
         let modules = Arc::new(self.modules.clone());
+        // §2.2 of the sandbox spec: holding `Native` implies `Network`'s
+        // grants. This provider's container runs `--network none`, which
+        // delivers exactly an *empty* egress allowlist and nothing more. A
+        // profile that names egress (or explicitly caps in `Network`) asks
+        // for a dataplane this provider does not have: fail the open loudly,
+        // never silently withhold a granted capability. Feature-gated
+        // because without `native` a Network-capped profile already fails
+        // per call as an unoffered tier — the established conduct.
+        #[cfg(feature = "native")]
+        if !profile.egress.is_empty()
+            || profile
+                .tier_cap
+                .as_ref()
+                .is_some_and(|cap| cap.contains(&Tier::Network))
+        {
+            return Box::pin(async move {
+                Err(SandboxError(
+                    "this provider offers Native with --network none only: the profile's \
+                     egress allowlist must be empty and the cap must not include Network"
+                        .to_string(),
+                ))
+            });
+        }
+        // The tier struct is cheap and eager; the *container* is what stays
+        // lazy (sandbox spec §2.3 item 2).
+        #[cfg(feature = "native")]
+        let native = Arc::new(crate::native::NativeTier::new(
+            self.container_cli.clone(),
+            profile.image.clone(),
+            self.root_path.join(&name),
+            &name,
+            self.stats.clone(),
+        ));
         let stats = self.stats.clone();
         Box::pin(async move {
             root.create_dir_all(&name)
@@ -160,6 +231,8 @@ impl SandboxProvider for TieredSandboxes {
                         modules,
                         #[cfg(feature = "compute")]
                         compute: std::sync::Mutex::new(None),
+                        #[cfg(feature = "native")]
+                        native,
                         stats,
                     }) as Arc<dyn Sandbox>
                 })
@@ -188,6 +261,10 @@ struct TieredSandbox {
     /// The compute tier, built on the first `Compute` call (§2.3 item 2).
     #[cfg(feature = "compute")]
     compute: std::sync::Mutex<Option<Arc<crate::compute::ComputeTier>>>,
+    /// The native tier: the struct is eager, its *container* is built on the
+    /// first `Native` call (§2.3 item 2).
+    #[cfg(feature = "native")]
+    native: Arc<crate::native::NativeTier>,
     stats: TierStats,
 }
 
@@ -269,6 +346,17 @@ impl Sandbox for TieredSandbox {
                     escalate_loss(engine?.run(&dir, seed, &name, &input), &root, &workspace)
                 })
             }
+            #[cfg(feature = "native")]
+            Tier::Native => {
+                let native = Arc::clone(&self.native);
+                let name = name.to_string();
+                Box::pin(async move {
+                    // escalate_loss gives §4's asymmetry: container gone but
+                    // workspace intact stays a Sandbox outcome (single-tier
+                    // loss); workspace gone is EnvironmentLost.
+                    escalate_loss(native.call(&name, &input).await, &root, &workspace)
+                })
+            }
             other => {
                 // Not offered by this provider (crate docs): a per-call
                 // failure the model reacts to (harness spec §5.4), and
@@ -281,8 +369,11 @@ impl Sandbox for TieredSandbox {
 
     fn release(&self) -> BoxFuture<'static, ()> {
         // Tear down every provisioned tier's environment (S5): the compute
-        // engine drops here; the workspace directory is removed through the
-        // root handle. Idempotent — NotFound is success.
+        // engine drops here; the native container is removed (a no-op
+        // touching no tokio API when none was ever provisioned, so this
+        // future stays pollable outside a tokio runtime for workspace-only
+        // sessions); the workspace directory is removed through the root
+        // handle. Idempotent — NotFound is success.
         #[cfg(feature = "compute")]
         {
             self.compute
@@ -290,10 +381,14 @@ impl Sandbox for TieredSandbox {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
         }
+        #[cfg(feature = "native")]
+        let native = Arc::clone(&self.native);
         let root = Arc::clone(&self.root);
         let name = self.name.clone();
         let stats = self.stats.clone();
         Box::pin(async move {
+            #[cfg(feature = "native")]
+            native.release().await;
             let _ = root.remove_dir_all(&name);
             stats.released.fetch_add(1, Ordering::SeqCst);
         })

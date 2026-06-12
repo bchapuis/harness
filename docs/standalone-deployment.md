@@ -192,6 +192,9 @@ harness-standalone repl [host:port]        # default 127.0.0.1:7501
 | `--model <id>`   | `claude-sonnet-4-6`         | agree everywhere (kind digests are pinned per session) |
 | `--secret <s>`   | `harness-standalone`        | cluster association secret |
 | `--api-url <url>`| `https://api.anthropic.com` | `http://…` points at a fake for offline testing |
+| `--sandbox <mode>` | `local`                   | `local` or `docker`; agree everywhere (the choice shapes the kind digest) |
+| `--sandbox-image <r>` | —                       | container image for `--sandbox docker` (required there); agree everywhere |
+| `--container-cli <c>` | `docker`                | the container CLI binary (podman's compatible CLI works) |
 
 Environment: `ANTHROPIC_API_KEY` (required by `node`).
 
@@ -218,14 +221,18 @@ API key.
 - **The transport is plaintext.** Fine on loopback; the transport supports
   mutual TLS (`TcpConfig.tls`) but this deployment does not provision
   certificates. Do not point the roster across untrusted networks.
-- **The sandbox is a directory, not a boundary.** `shell` runs as your user
-  with your permissions; only the working directory is per-session. In tier
-  vocabulary (sandbox spec §2), `shell` declares `Tier::Native` and each
-  kind's cap is that singleton: the degenerate one-tier provider of sandbox
-  spec §5, running native environments unconfined, **trusted-input only**
-  (sandbox spec §3.4). Treat it as a demo seam — a container or
-  microVM provider slots in behind the same trait, and `harness-sandbox`
-  offers confined `Workspace` and `Compute` tiers today.
+- **The default sandbox is a directory, not a boundary.** With `--sandbox
+  local` (the default), `shell` runs as your user with your permissions;
+  only the working directory is per-session. In tier vocabulary (sandbox
+  spec §2), `shell` declares `Tier::Native` and each kind's cap is that
+  singleton: the degenerate one-tier provider of sandbox spec §5, running
+  native environments unconfined, **trusted-input only** (sandbox spec
+  §3.4). Pass `--sandbox docker --sandbox-image <ref>` (e.g.
+  `alpine:3.20`) to run `shell` inside a per-session OCI container instead,
+  via `harness-sandbox`'s `Native` tier: the workspace bind-mounted, no
+  network — shared-kernel confinement (sandbox spec §3.4's SHOULD grade),
+  still not the microVM grade. Pre-pull the image: the first call otherwise
+  pulls it inside the 120s tool timeout.
 - **The journal needs one shared local filesystem**, so "cluster" here means
   one machine. A multi-host deployment needs a networked journal
   implementation (spec §13 leaves durable stores open).

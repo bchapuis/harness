@@ -24,12 +24,24 @@
 //!   `Math.random`, frozen `Date`, workspace I/O only — so a script's output
 //!   is a function of the call, the workspace, and the seed, exactly as a
 //!   raw module's is.
-//! - **`Network` and `Native`**: not offered. A call carrying either tier
-//!   fails as a `ToolError` outcome the model reacts to (harness spec §5.4)
-//!   — and the registration-time cap check makes such a call unreachable in
-//!   a correctly configured deployment (harness spec §5.3 item 4). The
-//!   standalone deployment's `LocalSandboxes` remains the degenerate
-//!   `Native`-only provider (sandbox spec §5).
+//! - **`Native`** (feature `native`): OS processes inside an OCI container
+//!   driven through the `docker` CLI — the session workspace bind-mounted at
+//!   `/workspace`, `--network none`, one container per activation,
+//!   provisioned lazily on the first `Native` call and removed on release.
+//!   This is shared-kernel confinement, sandbox spec §3.4's SHOULD grade and
+//!   §3.5's development fallback, not the microVM grade. The tool is
+//!   exported as a ready-made declaration by [`shell_tool`]. Native calls
+//!   require a tokio runtime (`tokio::process`); the other tiers stay
+//!   runtime-agnostic.
+//! - **`Network`**: not offered. A call carrying it fails as a `ToolError`
+//!   outcome the model reacts to (harness spec §5.4) — and the
+//!   registration-time cap check makes such a call unreachable in a
+//!   correctly configured deployment (harness spec §5.3 item 4). With
+//!   `native` enabled, a profile that *names* egress (or caps in `Network`)
+//!   fails at `open` instead: holding `Native` implies `Network`'s grants
+//!   (sandbox spec §2.2), and `--network none` delivers exactly an empty
+//!   allowlist. The standalone deployment's `LocalSandboxes` remains the
+//!   degenerate unconfined `Native`-only provider (sandbox spec §5).
 //!
 //! The S-catalogue (sandbox spec §6) is machine-readable beside this crate's
 //! conformance suite, in `tests/support/mod.rs`, guarded by the same drift
@@ -47,6 +59,8 @@
 mod compute;
 #[cfg(feature = "workspace")]
 mod ids;
+#[cfg(feature = "native")]
+mod native;
 #[cfg(feature = "workspace")]
 mod provider;
 #[cfg(feature = "workspace")]
@@ -56,6 +70,8 @@ mod workspace;
 pub use compute::run_js_tool;
 #[cfg(feature = "compute")]
 pub use compute::run_module_tool;
+#[cfg(feature = "native")]
+pub use native::shell_tool;
 #[cfg(feature = "workspace")]
 pub use provider::TierStats;
 #[cfg(feature = "workspace")]

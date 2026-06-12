@@ -33,6 +33,9 @@ node options (defaults in parentheses; every node must agree on all of them):
   --model <id>         Anthropic model id                 (claude-sonnet-4-6)
   --secret <s>         cluster secret                     (harness-standalone)
   --api-url <url>      Messages API base                  (https://api.anthropic.com)
+  --sandbox <mode>     sandbox provider: local | docker   (local)
+  --sandbox-image <r>  container image for --sandbox docker (required there)
+  --container-cli <c>  container CLI binary               (docker)
 
 environment:
   ANTHROPIC_API_KEY    required by `node`";
@@ -72,6 +75,19 @@ async fn run_node(args: &[String]) -> Result<(), String> {
             "--model" => opts.model = value.clone(),
             "--secret" => opts.secret = value.clone(),
             "--api-url" => opts.api_url = value.clone(),
+            "--sandbox" => {
+                opts.sandbox = match value.as_str() {
+                    "local" => node::SandboxMode::Local,
+                    "docker" => node::SandboxMode::Docker,
+                    other => {
+                        return Err(format!(
+                            "--sandbox must be `local` or `docker`, got {other}"
+                        ));
+                    }
+                }
+            }
+            "--sandbox-image" => opts.sandbox_image = value.clone(),
+            "--container-cli" => opts.container_cli = value.clone(),
             other => return Err(format!("unknown flag: {other}")),
         }
         i += 2;

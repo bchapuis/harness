@@ -62,6 +62,19 @@ use crate::proto::Request;
 use crate::proto::Response;
 use crate::sandbox::LocalSandboxes;
 
+/// Which sandbox provider the node runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SandboxMode {
+    /// `LocalSandboxes`: an unconfined `/bin/sh` per session directory,
+    /// trusted-input only (sandbox spec §3.4).
+    Local,
+    /// `harness-sandbox`'s container-backed `Native` tier: `shell` runs
+    /// inside a per-session OCI container, workspace bind-mounted, no
+    /// network — shared-kernel confinement (sandbox spec §3.5's development
+    /// fallback).
+    Docker,
+}
+
 /// Everything `node` takes from the command line. The defaults make
 /// `node --id N` enough for the three-node local deployment.
 #[derive(Clone, Debug)]
@@ -82,6 +95,14 @@ pub struct NodeOptions {
     pub secret: String,
     /// The Messages API base; `http://…` points at a local fake.
     pub api_url: String,
+    /// The sandbox provider; every node must agree (the kind digest covers
+    /// the tool declarations and profile this choice selects).
+    pub sandbox: SandboxMode,
+    /// Container image for `--sandbox docker`; required there, and digest-
+    /// covered like `--model`.
+    pub sandbox_image: String,
+    /// The container CLI binary for `--sandbox docker`.
+    pub container_cli: String,
 }
 
 impl Default for NodeOptions {
@@ -95,6 +116,9 @@ impl Default for NodeOptions {
             model: ModelParams::default().model,
             secret: "harness-standalone".to_string(),
             api_url: "https://api.anthropic.com".to_string(),
+            sandbox: SandboxMode::Local,
+            sandbox_image: String::new(),
+            container_cli: "docker".to_string(),
         }
     }
 }
@@ -167,11 +191,22 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         TokioClock::new(),
         Arc::new(OsEntropy::new()),
     ));
-    let sandboxes: Arc<dyn SandboxProvider> =
-        Arc::new(LocalSandboxes::new(opts.data.join("workspaces")));
+    let sandboxes: Arc<dyn SandboxProvider> = match opts.sandbox {
+        SandboxMode::Local => Arc::new(LocalSandboxes::new(opts.data.join("workspaces"))),
+        SandboxMode::Docker => {
+            if opts.sandbox_image.is_empty() {
+                return Err("--sandbox docker requires --sandbox-image".to_string());
+            }
+            Arc::new(
+                harness_sandbox::TieredSandboxes::new(opts.data.join("workspaces"))
+                    .map_err(|e| format!("workspaces root: {e}"))?
+                    .with_container_cli(opts.container_cli.clone()),
+            )
+        }
+    };
     let harness = Harness::with_config(
         system.clone(),
-        kinds(&opts.model),
+        kinds(&opts),
         journal,
         model,
         sandboxes,
@@ -206,42 +241,60 @@ fn loopback(base: u16, id: u64) -> SocketAddr {
 }
 
 /// The cluster-wide kind map (harness spec §7.1). One pure function of the
-/// model id: every node must register byte-identical kinds — the digest is
-/// pinned by `SessionCreated` — so all nodes must run with the same
-/// `--model`.
-fn kinds(model: &str) -> Kinds {
+/// node options that shape kinds (`--model`, `--sandbox`, `--sandbox-image`):
+/// every node must register byte-identical kinds — the digest is pinned by
+/// `SessionCreated` — so all nodes must run with the same values for those
+/// flags.
+fn kinds(opts: &NodeOptions) -> Kinds {
     let params = ModelParams {
-        model: model.to_string(),
+        model: opts.model.to_string(),
         max_tokens: 4096,
     };
-    let shell_description = "Run a POSIX shell command (`/bin/sh -c`) in the session's private \
-                             workspace directory. Returns exit_code, stdout, and stderr.";
-    let shell_schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "command": {
-                "type": "string",
-                "description": "The shell command to run."
+    // The `shell` declaration per sandbox mode: the same tool name and
+    // shape, but distinct declarations (and a profile image in docker mode),
+    // so the digests differ — a mixed-mode cluster fails to agree instead of
+    // silently splitting confinement.
+    let shell = |kind: Kind| -> Kind {
+        match opts.sandbox {
+            SandboxMode::Local => {
+                let description = "Run a POSIX shell command (`/bin/sh -c`) in the session's \
+                                   private workspace directory. Returns exit_code, stdout, and \
+                                   stderr.";
+                let schema = serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to run."
+                        }
+                    },
+                    "required": ["command"]
+                });
+                kind.sandboxed("shell", description, &schema, Tier::Native)
             }
-        },
-        "required": ["command"]
-    });
-    let assistant = Kind::new(
-        "You are the assistant agent of a small local cluster. Use the `shell` tool for \
-         anything you need to inspect, compute, or build; it runs in your session's private \
-         workspace directory, which persists across your turns. You may delegate a \
-         self-contained subtask to the `worker` kind with the `delegate` tool.",
+            SandboxMode::Docker => kind
+                .tool(harness_sandbox::shell_tool())
+                .sandbox(harness::SandboxProfile::image(&opts.sandbox_image)),
+        }
+    };
+    let assistant = shell(
+        Kind::new(
+            "You are the assistant agent of a small local cluster. Use the `shell` tool for \
+             anything you need to inspect, compute, or build; it runs in your session's private \
+             workspace directory, which persists across your turns. You may delegate a \
+             self-contained subtask to the `worker` kind with the `delegate` tool.",
+        )
+        .model(params.clone()),
     )
-    .model(params.clone())
-    .sandboxed("shell", shell_description, &shell_schema, Tier::Native)
     .delegates_to(&["worker"])
     .budget(Budget::new(200_000, 50));
-    let worker = Kind::new(
-        "You are a worker agent. Complete the task you were delegated using the `shell` tool \
-         in your private workspace, then reply with a concise result.",
+    let worker = shell(
+        Kind::new(
+            "You are a worker agent. Complete the task you were delegated using the `shell` \
+             tool in your private workspace, then reply with a concise result.",
+        )
+        .model(params),
     )
-    .model(params)
-    .sandboxed("shell", shell_description, &shell_schema, Tier::Native)
     .budget(Budget::new(100_000, 25));
     Kinds::new()
         .register("assistant", assistant)

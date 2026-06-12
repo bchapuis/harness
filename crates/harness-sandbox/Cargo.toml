@@ -21,6 +21,11 @@ compute = ["workspace", "dep:wasmtime"]
 # crates/harness-sandbox/modules/qjs.wasm to be present, so it does not build
 # from a fresh checkout until that artifact is built and committed.
 quickjs = ["compute"]
+# The Native tier (sandbox spec §3.4, the development fallback of §3.5): OS
+# processes inside an OCI container driven through the `docker` CLI. The
+# container sees the §3.1 workspace as a bind mount, so the feature implies
+# `workspace`.
+native = ["workspace", "dep:tokio", "dep:rustix"]
 
 [dependencies]
 actor-core.workspace = true
@@ -29,12 +34,19 @@ serde.workspace = true
 serde_json.workspace = true
 cap-std = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["process"] }
+
+# uid/gid for the container's `--user` (unix-only API; the call site is
+# `#[cfg(unix)]`).
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, optional = true }
 
 [dev-dependencies]
 actor-simulation.workspace = true
 futures.workspace = true
 tempfile.workspace = true
 wat.workspace = true
+tokio = { workspace = true, features = ["process"] }
 
 [lints]
 workspace = true

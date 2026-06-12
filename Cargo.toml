@@ -53,6 +53,9 @@ webpki-roots = "1"
 # reference realization's product choices (sandbox spec §3.5).
 cap-std = "3"
 wasmtime = { version = "33", default-features = false, features = ["runtime", "cranelift"] }
+# Native tier (`harness-sandbox`, feature `native`) only: uid/gid without
+# `unsafe` in our own crates (rustix is already in the graph via cap-std).
+rustix = { version = "1", features = ["process"] }
 
 # Dev-only: compile-fail tests asserting invalid `ask`/`tell` is rejected at
 # compile time (spec §18.5 #20, §18.6).

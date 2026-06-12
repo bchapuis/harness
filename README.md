@@ -56,8 +56,8 @@ continues the same transcript.
   one).
 - A **standalone deployment** (`crates/harness-standalone`): the binary the
   demo runs — file-backed journal whose fence is an atomic `hard_link`,
-  tokio/rustls HTTP to the Messages API, per-session shell workspaces, and
-  the REPL.
+  tokio/rustls HTTP to the Messages API, per-session shell workspaces
+  (optionally container-confined via `--sandbox docker`), and the REPL.
 
 ## Going deeper
 
