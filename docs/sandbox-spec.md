@@ -62,6 +62,8 @@ The workspace MUST be reachable only through pre-opened directory handles (opena
 
 A compute environment executes guest code with no ambient wall clock, no ambient entropy, no network, and no OS identity: every capability the guest holds enters through a host function the provider chose to expose, and the filesystem it sees is the workspace of §3.1 and nothing else. Its outputs are therefore a function of the call, the workspace, and an injected seed. A conforming compute engine MUST be runnable inside the deterministic simulator: this is core §18.1's discipline applied below the seam, and the property that makes "deterministic" checkable rather than aspirational. Resource limits (memory, fuel or epoch-bounded CPU) are REQUIRED; their values are profile configuration (harness §5.3 item 4).
 
+The limits MUST cover what a guest can make the *host* pay, not only the guest's own memory and CPU: the bytes handed to a compiler (compilation runs before any execution meter exists), the table and instance allocations instantiation performs host-side, and the size of any buffer a host function or the call's output materializes outside the guest. A guest-controlled integer (a length in a host-function call, a packed output size) MUST be bounded, or resolved as a view into the guest's own bounded memory, before it sizes anything on the host. A guest that can name an unmetered host allocation has a capability the tier never granted.
+
 ### 3.3 `Network`: granted egress only
 
 Egress is **default-deny**. The only reachable hosts are those on the profile's allowlist, the one the session's `TierAcquired` record granted by reference (harness §5.3 item 4); the provider MUST NOT widen it per call or per session. Egress MUST be attributable to its session (per-session source identity, proxy, or namespace, at the provider's choice), so an operator can answer "which session reached this host" from provider logs plus the journal. Ingress remains withheld (§1.1).
@@ -80,18 +82,21 @@ The obligations of §3.1–§3.4 are properties, and §1.1 keeps them that way. 
 
 - `Workspace`: cap-std's `Dir` as the capability handle of §3.1.
 - `Compute`: wasmtime. Its defaults match §3.2's hermeticity (no ambient WASI unless the host wires it), and its fuel metering and epoch interruption implement the resource limits §3.2 requires; "fuel or epoch-bounded CPU" is its vocabulary on purpose.
+- `Compute`, scripting surface: a QuickJS interpreter compiled to a wasm module, registered with the provider so the model writes JavaScript rather than hand-authored wasm. Determinism is preserved by replacement, not exception: the engine's clock and entropy are seeded host functions, never the OS, so a script's output stays a function of the call, the workspace, and the seed (S2). A wasi-libc-linked interpreter imports a small WASI surface; the host satisfies it with deterministic stubs, which is conforming because §3.2 bans *ambient* capabilities, not host-injected ones. Any per-language interpreter joins the same way; the tier stays interpreter-agnostic.
 - `Native`: Firecracker. A microVM confines single-tenant and multi-tenant deployments alike (§3.4's stronger grade), and its snapshot-restore is the warm-pool answer §7 anticipates. Development deployments stay unconfined and trusted-input only, per §3.4.
 
 A provider choosing other products conforms all the same: the catalogue (§6) verifies the properties, never these names.
 
 ---
 
-## 4. Loss and honesty per tier
+## 4. Provider conduct under loss
 
-Harness §5.5 specifies the records; this section specifies the provider conduct beneath them, at two grains:
+An environment can vanish at any moment: a crash, an eviction, an idle release. One rule governs that moment: **the loss is reported, never absorbed**. The journal and the model must learn that state is gone; a provider that quietly rebuilds, silently re-grants, or lets a loss masquerade as an ordinary failure undoes every record above it. Harness §5.5 specifies the records; this section specifies the provider conduct beneath them, at two grains:
 
 - **Whole-environment loss** (crash, eviction, idle release): the next activation opens a fresh sandbox, the harness journals `WorkspaceReset`, and the held set restarts at `Workspace`. The provider MUST NOT carry tier grants across that boundary: a pooled or pre-warmed environment handed to a fresh activation starts at `Workspace`, whatever its previous tenant held.
 - **Single-tier loss** (a compute engine dies; the egress proxy is gone) while the sandbox survives: the calls that needed the tier fail as `ToolError` outcomes (harness §5.4), never as a run failure, never as a silent re-grant. The provider MAY re-provision the tier lazily under the acquisition this activation already journaled; it MUST NOT hold a session at a tier its activation never journaled.
+
+Reporting a loss requires detecting it: a provider that can observe that the environment itself is gone (the workspace's backing directory no longer exists; the engine's state vanished beneath it) MUST report the failing call as environment loss, the harness's `EnvironmentLost` outcome, never as an ordinary tool failure. Only environment loss engages §5.5's reset protocol; an ordinary failure leaves the model retrying against state that no longer exists, while the journal asserts a workspace the world lost.
 
 The asymmetry is deliberate: losing everything is a journaled reset the model is told about; losing one tier is a tool failure the model reacts to. Both keep the journal ahead of the world.
 
@@ -105,7 +110,7 @@ The asymmetry is deliberate: losing everything is a journaled reset the model is
 | `Sandbox::call(tier, …)`, lazy open, per-activation binding (H8) | harness §5.3 |
 | Tier cap and the profile's egress allowlist | harness §5.3 item 4 |
 | Acquisition discipline, `TierAcquired`, write-ahead position | harness §5.6, §6.4 |
-| `WorkspaceReset`, dangling calls, divergence honesty | harness §5.5 |
+| `WorkspaceReset`, dangling calls, the divergence window | harness §5.5 |
 | Digest coverage (cluster-wide agreement on tiers and cap) | harness §7.1 |
 | Tier grants and withholdings, the cap's set shape | §2 |
 | Per-tier provider obligations and the threat model | §3 |
@@ -123,13 +128,13 @@ The catalogue mirrors the sibling catalogues (core §18.5, util §6, harness §1
 
 | # | Invariant | Defined in | Verified by |
 |---|---|---|---|
-| S1 | **Workspace confinement.** At every tier, no path outside the session's workspace is representable to a tool or a guest: confinement is by capability handle, never by sanitization of a representable escape. | §3.1, §3.2 | by construction of the provider (handle-scoped filesystem); adversarial traversal scenario tests *(future)* |
-| S2 | **Compute hermeticity.** A `Compute` environment takes no ambient clock, entropy, network, or OS identity; its outputs are a function of the call, the workspace, and the injected seed. | §3.2 | by construction (the capability is not exposed); differential run under the deterministic simulator *(future)* |
+| S1 | **Workspace confinement.** At every tier, no path outside the session's workspace is representable to a tool or a guest: confinement is by capability handle, never by sanitization of a representable escape. | §3.1, §3.2 | by construction of the provider (handle-scoped filesystem); adversarial traversal scenario tests (`harness-sandbox/tests/workspace.rs`) |
+| S2 | **Compute hermeticity.** A `Compute` environment takes no ambient clock, entropy, network, or OS identity; its outputs are a function of the call, the workspace, and the injected seed. | §3.2 | by construction (the linker exposes only the chosen host functions); differential run, same call + workspace + seed (`harness-sandbox/tests/compute.rs`); a run under the deterministic simulator *(future)* |
 | S3 | **Granted egress only.** A `Network` environment's egress reaches only hosts on the allowlist its journaled acquisition granted; default-deny; per-session attributable. | §3.3, §2.3 | egress audit scenario tests *(future)*; by construction where the provider owns the dataplane |
-| S4 | **Journaled, monotone, capped acquisition.** A `TierAcquired` record precedes the first effect at its tier within the activation; the held set only grows within an activation, never crosses an activation boundary, and never leaves the kind's cap. | §2.3, §4; harness §5.6, §6.4 | journal audit at quiescence (H2-style); scripted-sandbox scenario tests *(future)* |
-| S5 | **Per-tier release.** `release` tears down every provisioned tier's environment and is idempotent; deactivation releases all held tiers (the per-tier face of harness H8). | §2.3; harness §5.3 | provider open/release accounting in scenario tests *(future)*; the existing H8 checker covers the binding window |
+| S4 | **Journaled, monotone, capped acquisition.** A `TierAcquired` record precedes the first effect at its tier within the activation; the held set only grows within an activation, never crosses an activation boundary, and never leaves the kind's cap. | §2.3, §4; harness §5.6, §6.4 | journal audit at quiescence (H2-style) and scripted-sandbox scenario tests (`harness/tests/conformance_sandbox.rs`); registration-time cap check, panicking like a duplicate name |
+| S5 | **Per-tier release.** `release` tears down every provisioned tier's environment and is idempotent; deactivation releases all held tiers (the per-tier face of harness H8). | §2.3; harness §5.3 | provider open/release accounting (`harness-sandbox/tests/workspace.rs`, `tests/compute.rs`); the existing H8 checker covers the binding window |
 
-Stated honestly: no production tier provider exists yet. The harness ships the scripted sandbox (simulation), and the standalone deployment ships an unconfined dev provider, so the entries marked *(future)* name the intended method in the established vocabulary (core §17's verification kinds), not an existing test. The catalogue becomes machine-readable with the first provider implementation: an `s_catalogue()` guarded by the same drift-test pattern as its siblings. Spec-first is the house method: the harness specification itself landed before the harness.
+The first provider is `harness-sandbox`, realizing §3.5's choices for the tiers it offers: `Workspace` behind a cap-std handle (the default feature) and `Compute` behind hermetic wasmtime guests (feature `compute`); `Network` and `Native` remain unoffered there, failing as `ToolError` outcomes (harness §5.4), and the standalone deployment's `LocalSandboxes` remains the degenerate `Native`-only provider of §5. The catalogue is machine-readable as `s_catalogue()` beside that crate's conformance suite, guarded by the same drift-test pattern as its siblings; the entries still marked *(future)* name the intended method in the established vocabulary (core §17's verification kinds), not an existing test.
 
 ---
 
@@ -138,5 +143,5 @@ Stated honestly: no production tier provider exists yet. The harness ships the s
 - **Warm pools and snapshots, per tier.** Pooling compute isolates and snapshot-restoring native microVMs (the provisioning-latency answer §3.4's grading alludes to); the harness-side hooks are already future work there (harness §13).
 - **Ingress.** Exposing a sandboxed server (preview deployments, callback receivers) behind explicit, journaled grants; today all ingress is withheld (§1.1).
 - **Permission-hook interplay.** When the dynamic per-call authorization hook lands (harness §13), acquisition is its natural coarse grain: approve-once-per-tier against the journaled `TierAcquired`, rather than per call.
-- **Peripheral tiers.** A tier granting a remote peripheral driven through host functions; a browser (navigate, read, screenshot, fill) is the canonical candidate. A peripheral sits beside the inclusion chain, not on it: it grants a device, not a superset of compute, and its own network activity (the pages a browser fetches, the scripts those pages run) happens at the peripheral, outside the session's egress. A peripheral tier would have to state that honestly: offering one would not imply `Network`-tier containment of what the peripheral touches, and a deployment needing that containment would police it at the peripheral. The cap's set shape (§2.2) already leaves room; each peripheral would join as a new named tier, a versioned change to the harness's `Tier` enum (harness §5.2).
+- **Peripheral tiers.** A tier granting a remote peripheral driven through host functions; a browser (navigate, read, screenshot, fill) is the canonical candidate. A peripheral sits beside the inclusion chain, not on it: it grants a device, not a superset of compute, and its own network activity (the pages a browser fetches, the scripts those pages run) happens at the peripheral, outside the session's egress. A peripheral tier would have to state that limit outright: offering one would not imply `Network`-tier containment of what the peripheral touches, and a deployment needing that containment would police it at the peripheral. The cap's set shape (§2.2) already leaves room; each peripheral would join as a new named tier, a versioned change to the harness's `Tier` enum (harness §5.2).
 - **Tier-attributed accounting.** Provider cost by tier and session, joined to the journal's acquisitions; part of the multi-tenant economics the harness defers (harness §1.1).

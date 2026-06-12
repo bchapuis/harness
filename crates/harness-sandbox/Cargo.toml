@@ -1,0 +1,40 @@
+[package]
+name = "harness-sandbox"
+description = "Tiered sandbox provider: workspace tier by capability handle (cap-std), compute tier by wasmtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["workspace"]
+# The Workspace tier (sandbox spec §3.1): typed tools over a cap-std `Dir`.
+workspace = ["dep:cap-std"]
+# The Compute tier (sandbox spec §3.2): hermetic wasmtime guests over the
+# workspace — a guest sees the §3.1 filesystem and nothing else, so the
+# feature implies `workspace`.
+compute = ["workspace", "dep:wasmtime"]
+# The QuickJS scripting surface (`run_js`): embeds the committed runner
+# artifact (guest/qjs-runner, built by its build.sh). Requires
+# crates/harness-sandbox/modules/qjs.wasm to be present, so it does not build
+# from a fresh checkout until that artifact is built and committed.
+quickjs = ["compute"]
+
+[dependencies]
+actor-core.workspace = true
+harness.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+cap-std = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
+
+[dev-dependencies]
+actor-simulation.workspace = true
+futures.workspace = true
+tempfile.workspace = true
+wat.workspace = true
+
+[lints]
+workspace = true

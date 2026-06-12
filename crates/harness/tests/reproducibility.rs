@@ -23,6 +23,7 @@ use harness::InMemoryJournal;
 use harness::Kind;
 use harness::Kinds;
 use harness::SessionId;
+use harness::Tier;
 use harness::Turn;
 use harness::TurnId;
 use serde_json::json;
@@ -79,7 +80,7 @@ impl Workload for FaultedWorkload {
         let kinds = Kinds::new().register(
             "worker",
             Kind::new("worker")
-                .sandboxed("shell", "run", &json!({"type": "object"}))
+                .sandboxed("shell", "run", &json!({"type": "object"}), Tier::Workspace)
                 .budget(Budget::new(10_000, 10)),
         );
         let script = ScriptedModel::steps(vec![

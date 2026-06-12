@@ -1,0 +1,30 @@
+# The QuickJS runner: a hermetic JavaScript interpreter for the Compute tier.
+#
+# Built OUT of the main workspace (its own [workspace] table below) so a plain
+# `cargo build` of the harness never needs the wasm toolchain. It targets
+# wasm32-wasip1 and links wasi-libc; the host's deterministic WASI stubs
+# (crates/harness-sandbox/src/compute.rs) satisfy the few imports that leaves.
+#
+# Build with ./build.sh; see README.md for the toolchain and provenance.
+[package]
+name = "qjs-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# quickjs-ng via rquickjs. `bindgen` generates bindings for wasm32-wasip1
+# (no pregenerated set ships for it); needs libclang at build time.
+rquickjs = { version = "0.9", features = ["bindgen"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

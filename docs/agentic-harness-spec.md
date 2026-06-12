@@ -171,7 +171,7 @@ Above the boundary, the loop touches the world only through the three seams; it 
 - **Loop inside the sandbox.** Ship the whole session into the box, one box per session. That is today's architecture relocated, not replaced: every session pays for an isolated environment to host control flow that is mostly waiting, and the loop's discipline (journaling, write-ahead order, the deterministic fold) becomes as opaque to the runtime as the tools are.
 - **A sandbox per tool call.** Maximal isolation, but consecutive calls share nothing, and the checkout, build cache, or running server one step produced is exactly what the next step needs. The workspace is the unit of tool-to-tool continuity.
 
-Hence one sandbox **per session**, opened lazily per activation (§5.3): coarse enough to keep working state across calls, fine enough that no effect escapes the session that made it. What this placement deliberately gives up is workspace durability: the workspace is working state, not session state, and §5.5 is honest about losing it.
+Hence one sandbox **per session**, opened lazily per activation (§5.3): coarse enough to keep working state across calls, fine enough that no effect escapes the session that made it. What this placement deliberately gives up is workspace durability: the workspace is working state, not session state, and when it is lost, §5.5 puts the loss on the record rather than papering over it.
 
 ### 5.2 Declarations and the registry
 
@@ -240,7 +240,7 @@ pub trait Sandbox: Send + Sync + 'static {
 
 A failing tool does not fail the run. The harness journals its `ToolError` (a timeout, a sandbox-side crash, a failed delegation (§8.2), an unknown tool name, or schema-rejected arguments) as that call's outcome and **returns it to the model** as the tool result, for the model to react to. This defines the error out of existence at the run level: the only abnormal run endings are the four of §3.1, and "a tool misbehaved" is not one of them. Unknown and malformed calls in particular are synthesized outcomes, not protocol failures; the registry-as-allowlist already guarantees nothing was executed.
 
-### 5.5 Crash, loss, and resume (honesty)
+### 5.5 Crash, loss, and resume (no silent loss)
 
 A tool call's **intent** is journaled before execution and its **outcome** after (§6.4); a crash between the two leaves a *dangling call*. On resume (§7.5):
 
@@ -253,7 +253,7 @@ The sandbox itself is **not session state**: the fold (§6.3) never reads it, no
 
 Nor may the *model* be left pretending. The transcript asserts a workspace the world may no longer hold — files written, servers left running — and a model resumed into a fresh sandbox would otherwise discover the loss only through a confusing downstream failure. When an activation opens a fresh sandbox for a session whose journal already records sandboxed activity (after an idle stop §7.2, an environment loss, or a crash), it MUST journal a **`WorkspaceReset`** record before the next model call and surface it to the model with that request. The record answers no `CallId`, so it cannot ride a tool result: it enters the request as input content the harness authors, the encoding's analogue of a user message. The loss thus enters the record, and the model re-derives what it needs instead of acting on state that is gone.
 
-Tier loss follows the same honesty, at two grains. A fresh sandbox resets **every** tier the lost activation held: `WorkspaceReset` covers the whole environment, the new activation's held set restarts at `Workspace` (§5.6), and re-acquisition is re-journaled, never silently inherited. Loss of a single tier's environment while the sandbox survives surfaces as `ToolError` outcomes on the calls that needed it (§5.4); the provider MAY re-provision that tier lazily under the acquisition this activation already journaled, and MUST NOT grant a tier the activation never journaled (sandbox §4).
+Tier loss follows the same rule at two grains: surfaced, never silently repaired. A fresh sandbox resets **every** tier the lost activation held: `WorkspaceReset` covers the whole environment, the new activation's held set restarts at `Workspace` (§5.6), and re-acquisition is re-journaled, never silently inherited. Loss of a single tier's environment while the sandbox survives surfaces as `ToolError` outcomes on the calls that needed it (§5.4); the provider MAY re-provision that tier lazily under the acquisition this activation already journaled, and MUST NOT grant a tier the activation never journaled (sandbox §4).
 
 ### 5.6 Execution tiers
 
@@ -523,7 +523,7 @@ A run with no faults is the simplest case and MUST still pass.
 
 - **Scheduler singleton.** Queued and recurring agent runs owned by a cluster singleton (util §4), feeding ordinary `Submit`s; deliberately out of v1.
 - **Durable journal implementations.** File- and store-backed `Journal`s; the trait (§6.1) is shaped for them (fenced append maps onto conditional writes).
-- **Sandbox providers, snapshots, and pooling.** Production `SandboxProvider` crates implementing the per-tier obligations of sandbox §3–§4 (capability-handle workspaces, hermetic compute isolates, confined native environments); workspace snapshot/restore across ownership moves; warm pools to cut open latency.
+- **Sandbox providers, snapshots, and pooling.** The first per-tier provider ships as `harness-sandbox` (capability-handle workspaces and hermetic compute isolates; sandbox §3.1–§3.2, §3.5). Still open: a confined native tier (sandbox §3.4), a network dataplane behind the profile's allowlist (sandbox §3.3), workspace snapshot/restore across ownership moves, and warm pools to cut open latency.
 - **Multi-tenant scheduling.** Quotas, fair-share scheduling, and accounting across tenants sharing the cluster: the economics of mutualization (§1.1).
 - **Context compaction.** Summarizing the transcript into a journaled checkpoint record so the fold, and the model request, start from it; must preserve H1.
 - **Streaming.** Token streaming from `Model`, and push-based run observation: a subscription complement to `Tail` (§10.2), likely over a pub/sub utility (util §7).
@@ -583,6 +583,11 @@ harness/                # the agentic harness (this spec)
 
 harness-anthropic/      # production Model only: Anthropic Messages API client;
                         #   backoff via Clock/Entropy; the single place HTTP exists (§12.1)
+
+harness-sandbox/        # tiered SandboxProvider (sandbox §3): Workspace by cap-std
+                        #   capability handle, Compute by hermetic wasmtime guests
+                        #   (raw modules, or JavaScript via an embedded QuickJS runner,
+                        #   feature-gated); ships s_catalogue() with its tests (sandbox §6)
 ```
 
 Test-only pieces (the scripted model, the scripted sandbox, the faulted journal wrapper, `harness_catalogue()`, and the conformance suites) live with the harness's tests, dev-depending on `actor-simulation` for the simulator, exactly as the utilities' suites do. The `harness` crate observes the workspace conventions: edition 2024, `unsafe_code = "forbid"`, `clippy::all = "warn"`, serde derives only.

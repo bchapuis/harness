@@ -1,7 +1,8 @@
-//! Sandbox conformance (harness spec §5.3, §5.5; invariant H8): lazy open,
-//! provisioning failure as a transcript value, per-tool timeouts, and
-//! environment loss surfacing as a journaled `WorkspaceReset` — never as
-//! silent corruption.
+//! Sandbox conformance (harness spec §5.3, §5.5, §5.6; invariant H8; sandbox
+//! spec S4): lazy open, provisioning failure as a transcript value, per-tool
+//! timeouts, environment loss surfacing as a journaled `WorkspaceReset` —
+//! never as silent corruption — and the tier acquisition discipline:
+//! journaled, monotone, capped, restarted by a reset.
 
 mod support;
 
@@ -18,14 +19,19 @@ use actor_simulation::SimSystem;
 use actor_simulation::Workload;
 use actor_simulation::run_seed;
 use harness::Budget;
+use harness::CallId;
 use harness::Harness;
 use harness::HarnessConfig;
 use harness::InMemoryJournal;
 use harness::Kind;
+use harness::KindId;
 use harness::Kinds;
 use harness::OnDangling;
 use harness::RecordBody;
+use harness::SandboxProfile;
 use harness::SessionId;
+use harness::Tier;
+use harness::ToolCall;
 use harness::ToolDecl;
 use harness::ToolError;
 use harness::Turn;
@@ -34,6 +40,7 @@ use serde_json::json;
 
 use support::ScriptedModel;
 use support::ScriptedSandboxes;
+use support::audit_tier_acquisition;
 use support::boxed;
 use support::final_message;
 use support::harness_invariants;
@@ -116,7 +123,7 @@ fn shell_kind() -> Kinds {
     Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .sandboxed("shell", "run", &json!({"type": "object"}))
+            .sandboxed("shell", "run", &json!({"type": "object"}), Tier::Workspace)
             .budget(Budget::new(10_000, 10)),
     )
 }
@@ -241,6 +248,7 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
             RecordBody::ToolOutcome { .. } => "tool",
             RecordBody::ChildRun { .. } => "child",
             RecordBody::WorkspaceReset => "reset",
+            RecordBody::TierAcquired { .. } => "tier",
             RecordBody::RunEnded { .. } => "ended",
         })
         .collect();
@@ -270,6 +278,7 @@ fn a_slow_tool_is_bounded_by_its_declared_timeout() {
                         name: "slow".to_string(),
                         description: "slow tool".to_string(),
                         input_schema: json!({"type": "object"}),
+                        tier: Tier::Workspace,
                         on_dangling: OnDangling::Interrupt,
                         timeout: Some(Duration::from_secs(1)),
                     })
@@ -317,4 +326,231 @@ fn a_slow_tool_is_bounded_by_its_declared_timeout() {
         })
         .collect();
     assert_eq!(tool_outcomes, vec![Err(ToolError::Timeout)]);
+}
+
+// ---------------------------------------------------------------------------
+// Tier acquisition (harness spec §5.6; sandbox spec S4)
+// ---------------------------------------------------------------------------
+
+fn record_kind(body: &RecordBody) -> &'static str {
+    match body {
+        RecordBody::SessionCreated { .. } => "created",
+        RecordBody::TurnSubmitted { .. } => "turn",
+        RecordBody::ModelResponse { .. } => "model",
+        RecordBody::ToolOutcome { .. } => "tool",
+        RecordBody::ChildRun { .. } => "child",
+        RecordBody::WorkspaceReset => "reset",
+        RecordBody::TierAcquired { .. } => "tier",
+        RecordBody::RunEnded { .. } => "ended",
+    }
+}
+
+/// A kind spanning two tiers: `read` needs only the workspace the open
+/// grants (§5.6 item 1); `run` needs `Compute`, acquired on first use.
+fn tiered_kind() -> Kinds {
+    Kinds::new().register(
+        "worker",
+        Kind::new("worker")
+            .sandboxed(
+                "read",
+                "read a file",
+                &json!({"type": "object"}),
+                Tier::Workspace,
+            )
+            .sandboxed(
+                "run",
+                "run guest code",
+                &json!({"type": "object"}),
+                Tier::Compute,
+            )
+            .budget(Budget::new(10_000, 10)),
+    )
+}
+
+fn worker_kind() -> std::sync::Arc<Kind> {
+    tiered_kind()
+        .get(&KindId::new("worker"))
+        .expect("registered")
+}
+
+#[test]
+fn a_tier_is_acquired_under_a_journaled_record_before_its_first_effect() {
+    let workload = SandboxWorkload {
+        name: "tier-acquisition",
+        kinds: tiered_kind,
+        model: ScriptedModel::steps(vec![
+            Ok(tool_call("c1", "read", json!({}))),
+            Ok(tool_call("c2", "run", json!({}))),
+            Ok(final_message("done")),
+        ]),
+        make_sandboxes: |_| ScriptedSandboxes::echo(),
+        body: |harness: Harness<SimSystem>, system: SimSystem, _| {
+            boxed(async move {
+                let session = harness.session("worker", SessionId::new("s-4"));
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
+                assert_eq!(outcome.text(), "done");
+                flush(&system).await;
+            })
+        },
+        journal: Mutex::new(None),
+        sandboxes: Mutex::new(None),
+    };
+    run_seed(&workload, 71).expect("invariants hold");
+
+    let records = workload.journal().records(&SessionId::new("s-4"));
+    let kinds: Vec<&str> = records.iter().map(|r| record_kind(&r.body)).collect();
+    // The Workspace call needs no record — opening grants Workspace and
+    // nothing else (§5.6 item 1); the Compute call's acquisition is
+    // journaled before its outcome: intent before effect (§6.4).
+    assert_eq!(
+        kinds,
+        vec![
+            "created", "turn", "model", "tool", "model", "tier", "tool", "model", "ended"
+        ],
+    );
+    let acquired: Vec<Tier> = records
+        .iter()
+        .filter_map(|r| match &r.body {
+            RecordBody::TierAcquired { tier, .. } => Some(*tier),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(acquired, vec![Tier::Compute]);
+    // The provider saw each call at its declared tier (§5.3 item 1).
+    let calls: Vec<(Tier, String)> = workload
+        .sandboxes()
+        .stats
+        .calls()
+        .into_iter()
+        .map(|(tier, name, _)| (tier, name))
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            (Tier::Workspace, "read".to_string()),
+            (Tier::Compute, "run".to_string()),
+        ],
+    );
+    audit_tier_acquisition(&records, &worker_kind());
+}
+
+#[test]
+fn two_same_step_calls_at_one_new_tier_journal_one_acquisition() {
+    let mut both = tool_call("c1", "run", json!({}));
+    both.calls.push(ToolCall {
+        id: CallId::new("c2"),
+        name: "run".to_string(),
+        input: json!({}),
+    });
+    let workload = SandboxWorkload {
+        name: "tier-acquisition-dedup",
+        kinds: tiered_kind,
+        model: ScriptedModel::steps(vec![Ok(both), Ok(final_message("done"))]),
+        make_sandboxes: |_| ScriptedSandboxes::echo(),
+        body: |harness: Harness<SimSystem>, system: SimSystem, _| {
+            boxed(async move {
+                let session = harness.session("worker", SessionId::new("s-5"));
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
+                assert_eq!(outcome.text(), "done");
+                flush(&system).await;
+            })
+        },
+        journal: Mutex::new(None),
+        sandboxes: Mutex::new(None),
+    };
+    run_seed(&workload, 73).expect("invariants hold");
+
+    let records = workload.journal().records(&SessionId::new("s-5"));
+    let acquisitions = records
+        .iter()
+        .filter(|r| matches!(&r.body, RecordBody::TierAcquired { .. }))
+        .count();
+    assert_eq!(
+        acquisitions, 1,
+        "the second sibling parks on the first's record, no duplicate (§5.6)"
+    );
+    let outcomes = records
+        .iter()
+        .filter(|r| matches!(&r.body, RecordBody::ToolOutcome { outcome: Ok(_), .. }))
+        .count();
+    assert_eq!(outcomes, 2, "both calls executed once the record committed");
+    audit_tier_acquisition(&records, &worker_kind());
+}
+
+#[test]
+fn a_reset_restarts_the_held_set_and_reacquisition_is_rejournaled() {
+    let workload = SandboxWorkload {
+        name: "tier-reacquisition",
+        kinds: tiered_kind,
+        model: ScriptedModel::steps(vec![
+            Ok(tool_call("c1", "run", json!({"lose": true}))),
+            Ok(tool_call("c2", "run", json!({}))),
+            Ok(final_message("done")),
+        ]),
+        make_sandboxes: |_| {
+            ScriptedSandboxes::new(|_, input| {
+                if input.get("lose").is_some() {
+                    Err(ToolError::EnvironmentLost("scripted loss".to_string()))
+                } else {
+                    Ok(json!("ok"))
+                }
+            })
+        },
+        body: |harness: Harness<SimSystem>, system: SimSystem, _| {
+            boxed(async move {
+                let session = harness.session("worker", SessionId::new("s-6"));
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
+                assert_eq!(outcome.text(), "done");
+                flush(&system).await;
+            })
+        },
+        journal: Mutex::new(None),
+        sandboxes: Mutex::new(None),
+    };
+    run_seed(&workload, 79).expect("invariants hold");
+
+    let records = workload.journal().records(&SessionId::new("s-6"));
+    let kinds: Vec<&str> = records.iter().map(|r| record_kind(&r.body)).collect();
+    // The fresh environment resets every held tier (§5.5): after the
+    // journaled reset, the held set is back to Workspace and the second
+    // Compute call re-journals its acquisition — never silently inherited.
+    assert_eq!(
+        kinds,
+        vec![
+            "created", "turn", "model", "tier", "tool", "reset", "model", "tier", "tool", "model",
+            "ended"
+        ],
+    );
+    audit_tier_acquisition(&records, &worker_kind());
+}
+
+#[test]
+#[should_panic(expected = "outside the tier cap")]
+fn a_tool_beyond_the_cap_is_a_registration_error() {
+    // Declaring a tool whose tier the cap excludes is a deployment
+    // configuration error, surfaced at registration as loudly as a duplicate
+    // name (§5.3 item 4) — never discovered at dispatch.
+    let _ = Kinds::new().register(
+        "worker",
+        Kind::new("worker")
+            .sandbox(SandboxProfile::default().cap([Tier::Workspace]))
+            .sandboxed(
+                "run",
+                "run guest code",
+                &json!({"type": "object"}),
+                Tier::Compute,
+            ),
+    );
 }

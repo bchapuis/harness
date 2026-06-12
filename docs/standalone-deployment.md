@@ -219,9 +219,13 @@ API key.
   mutual TLS (`TcpConfig.tls`) but this deployment does not provision
   certificates. Do not point the roster across untrusted networks.
 - **The sandbox is a directory, not a boundary.** `shell` runs as your user
-  with your permissions; only the working directory is per-session. Treat it
-  as a demo seam — a container or microVM provider slots in behind the same
-  trait.
+  with your permissions; only the working directory is per-session. In tier
+  vocabulary (sandbox spec §2), `shell` declares `Tier::Native` and each
+  kind's cap is that singleton: the degenerate one-tier provider of sandbox
+  spec §5, running native environments unconfined, **trusted-input only**
+  (sandbox spec §3.4). Treat it as a demo seam — a container or
+  microVM provider slots in behind the same trait, and `harness-sandbox`
+  offers confined `Workspace` and `Compute` tiers today.
 - **The journal needs one shared local filesystem**, so "cluster" here means
   one machine. A multi-host deployment needs a networked journal
   implementation (spec §13 leaves durable stores open).

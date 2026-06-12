@@ -24,6 +24,7 @@ use harness::Kind;
 use harness::Kinds;
 use harness::RecordBody;
 use harness::SessionId;
+use harness::Tier;
 use harness::Turn;
 use harness::TurnId;
 use serde_json::json;
@@ -48,7 +49,12 @@ fn echo_kind() -> Kinds {
     Kinds::new().register(
         "echo",
         Kind::new("You are a test agent.")
-            .sandboxed("shell", "Run a command", &json!({"type": "object"}))
+            .sandboxed(
+                "shell",
+                "Run a command",
+                &json!({"type": "object"}),
+                Tier::Workspace,
+            )
             .budget(Budget::new(10_000, 10)),
     )
 }
@@ -324,6 +330,7 @@ fn record_kind(body: &RecordBody) -> &'static str {
         RecordBody::ToolOutcome { .. } => "tool",
         RecordBody::ChildRun { .. } => "child",
         RecordBody::WorkspaceReset => "reset",
+        RecordBody::TierAcquired { .. } => "tier",
         RecordBody::RunEnded { .. } => "ended",
     }
 }

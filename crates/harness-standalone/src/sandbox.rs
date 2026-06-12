@@ -6,6 +6,12 @@
 //! files apart and gives the model a real shell, but it is NOT an isolation
 //! boundary: a command can read and write anything the node process can.
 //! Run it with inputs you trust.
+//!
+//! In tier vocabulary this is the degenerate conforming provider of sandbox
+//! spec §5: every call executes in the one unconfined environment, for kinds
+//! whose tools all declare `Tier::Native` and whose cap is that singleton.
+//! It runs native environments unconfined and is therefore **trusted-input
+//! only** (sandbox spec §3.4).
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -17,6 +23,7 @@ use harness::SandboxError;
 use harness::SandboxProfile;
 use harness::SandboxProvider;
 use harness::SessionId;
+use harness::Tier;
 use harness::ToolError;
 use serde_json::Value;
 use serde_json::json;
@@ -60,10 +67,25 @@ struct LocalSandbox {
 }
 
 impl Sandbox for LocalSandbox {
-    fn call(&self, name: &str, input: Value) -> BoxFuture<'static, Result<Value, ToolError>> {
+    fn call(
+        &self,
+        tier: Tier,
+        name: &str,
+        input: Value,
+    ) -> BoxFuture<'static, Result<Value, ToolError>> {
         let dir = self.dir.clone();
         let name = name.to_string();
         Box::pin(async move {
+            // One unconfined environment serves the one tier this provider
+            // offers (the degenerate singleton above). The registry's cap
+            // check already bounds what the harness can pass here (§5.3
+            // item 4); refusing anything else keeps a misconfigured
+            // deployment loud rather than silently unconfined.
+            if tier != Tier::Native {
+                return Err(ToolError::Sandbox(format!(
+                    "tier {tier:?} is not offered by this provider (Native only)"
+                )));
+            }
             // The registry allowlist already guards dispatch (§5.2); this is
             // the provider's own check that it implements what was named.
             if name != "shell" {
@@ -137,7 +159,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let sandbox = open(dir.path(), "s").await;
         let out = sandbox
-            .call("shell", json!({"command": "echo hi > f && cat f"}))
+            .call(
+                Tier::Native,
+                "shell",
+                json!({"command": "echo hi > f && cat f"}),
+            )
             .await
             .expect("call");
         assert_eq!(out["exit_code"], 0);
@@ -151,11 +177,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let sandbox = open(dir.path(), "s").await;
         let out = sandbox
-            .call("shell", json!({"command": "exit 3"}))
+            .call(Tier::Native, "shell", json!({"command": "exit 3"}))
             .await
             .expect("a failing command is still an outcome");
         assert_eq!(out["exit_code"], 3);
-        let bad = sandbox.call("shell", json!({"command": 42})).await;
+        let bad = sandbox
+            .call(Tier::Native, "shell", json!({"command": 42}))
+            .await;
         assert!(matches!(bad, Err(ToolError::InvalidArguments(_))));
     }
 
@@ -165,6 +193,7 @@ mod tests {
         let sandbox = open(dir.path(), "s").await;
         let out = sandbox
             .call(
+                Tier::Native,
                 "shell",
                 json!({"command": "head -c 100000 /dev/zero | tr '\\0' 'x'"}),
             )
@@ -180,7 +209,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let sandbox = open(dir.path(), "s").await;
         sandbox
-            .call("shell", json!({"command": "touch f"}))
+            .call(Tier::Native, "shell", json!({"command": "touch f"}))
             .await
             .expect("call");
         sandbox.release().await;

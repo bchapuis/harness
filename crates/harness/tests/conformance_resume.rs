@@ -26,6 +26,7 @@ use harness::OnDangling;
 use harness::RecordBody;
 use harness::RunError;
 use harness::SessionId;
+use harness::Tier;
 use harness::ToolDecl;
 use harness::ToolError;
 use harness::Turn;
@@ -59,6 +60,7 @@ fn fetch_kind(on_dangling: OnDangling) -> Kinds {
                 name: "fetch".to_string(),
                 description: "an idempotent read".to_string(),
                 input_schema: json!({"type": "object"}),
+                tier: Tier::Workspace,
                 on_dangling,
                 timeout: None,
             })

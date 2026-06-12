@@ -20,6 +20,7 @@
 //! run.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,6 +48,7 @@ use crate::client::HarnessSystem;
 use crate::journal::SeqNo;
 use crate::model::ModelParams;
 use crate::sandbox::SandboxProfile;
+use crate::sandbox::Tier;
 use crate::session::KindId;
 use crate::session::Lineage;
 use crate::session::Record;
@@ -104,20 +106,24 @@ impl Kind {
         self
     }
 
-    /// Declare a sandboxed tool (§5.2) with the safe dangling policy
-    /// (`Interrupt`, §5.5): on a crash-resume boundary the model, not the
-    /// harness, decides whether to retry the side effect. An idempotent tool
-    /// opts into blind re-execution via [`Kind::tool`].
+    /// Declare a sandboxed tool (§5.2) at its required tier (§5.6), with the
+    /// safe dangling policy (`Interrupt`, §5.5): on a crash-resume boundary
+    /// the model, not the harness, decides whether to retry the side effect.
+    /// An idempotent tool opts into blind re-execution via [`Kind::tool`].
+    /// The tier is explicit because it is digest-covered deployment
+    /// configuration (§7.1): visible at the declaration site, never defaulted.
     pub fn sandboxed(
         mut self,
         name: impl Into<String>,
         description: impl Into<String>,
         input_schema: &Value,
+        tier: Tier,
     ) -> Kind {
         self.tools.declare(ToolDecl {
             name: name.into(),
             description: description.into(),
             input_schema: input_schema.clone(),
+            tier,
             on_dangling: OnDangling::Interrupt,
             timeout: None,
         });
@@ -150,24 +156,61 @@ impl Kind {
         self
     }
 
+    /// The effective tier cap (§5.3 item 4): the profile's explicit set, or
+    /// the spec default — exactly the tiers the declared tools require.
+    pub fn tier_cap(&self) -> BTreeSet<Tier> {
+        self.profile
+            .tier_cap
+            .clone()
+            .unwrap_or_else(|| self.tools.iter().map(|d| d.tier).collect())
+    }
+
     /// A digest of the definition, pinned by `SessionCreated` (§7.1, §10.5)
     /// so a reader can tell whether a journal reconstruction is exact or
     /// merely indicative because a deployment changed the kind mid-session.
+    /// Covers each tool's declared tier and the profile's effective cap
+    /// (§5.6): what a session may acquire is cluster-wide agreement.
+    ///
+    /// The canonical form is length-prefixed (netstring-style) with a count
+    /// before each variable-length list: no concatenation of two distinct
+    /// definitions can collide, which bare juxtaposition cannot promise
+    /// ("fo"+"obar" reads as "foo"+"bar").
     pub fn digest(&self) -> u64 {
         let mut canon = String::new();
-        canon.push_str(&self.system_prompt);
-        canon.push_str(&self.params.model);
-        canon.push_str(&self.params.max_tokens.to_string());
+        let mut frame = |field: &str| {
+            canon.push_str(&field.len().to_string());
+            canon.push(':');
+            canon.push_str(field);
+        };
+        frame(&self.system_prompt);
+        frame(&self.params.model);
+        frame(&self.params.max_tokens.to_string());
+        frame(&format!("tools={}", self.tools.iter().count()));
         for decl in self.tools.iter() {
-            canon.push_str(&decl.name);
-            canon.push_str(&decl.description);
-            canon.push_str(&decl.input_schema.to_string());
+            frame(&decl.name);
+            frame(&decl.description);
+            frame(&decl.input_schema.to_string());
+            frame(&format!("{:?}", decl.tier));
+            frame(&format!("{:?}", decl.on_dangling));
+            frame(&format!("{:?}", decl.timeout));
         }
-        canon.push_str(&self.profile.image);
-        canon.push_str(&self.default_budget.tokens.to_string());
-        canon.push_str(&self.default_budget.steps.to_string());
+        frame(&self.profile.image);
+        let cap = self.tier_cap();
+        frame(&format!("cap={}", cap.len()));
+        for tier in cap {
+            frame(&format!("{tier:?}"));
+        }
+        frame(&format!("egress={}", self.profile.egress.len()));
+        for host in &self.profile.egress {
+            frame(host);
+        }
+        frame(&self.profile.compute.memory_bytes.to_string());
+        frame(&self.profile.compute.fuel.to_string());
+        frame(&self.default_budget.tokens.to_string());
+        frame(&self.default_budget.steps.to_string());
+        frame(&format!("delegates={}", self.delegates.len()));
         for kind in &self.delegates {
-            canon.push_str(kind.as_str());
+            frame(kind.as_str());
         }
         content_digest(&canon)
     }
@@ -187,7 +230,23 @@ impl Kinds {
 
     /// Register a kind under its name. Builder-style, used at deployment
     /// configuration time.
+    ///
+    /// Panics when a declared tool's tier falls outside the kind's tier cap
+    /// (§5.3 item 4): a deployment configuration error, surfaced here as
+    /// loudly as a duplicate tool name — never discovered at dispatch. The
+    /// loop performs no runtime cap check: the cap is unreachable by
+    /// construction (§5.6, sandbox spec S4).
     pub fn register(mut self, name: &str, kind: Kind) -> Kinds {
+        let cap = kind.tier_cap();
+        for decl in kind.tools.iter() {
+            assert!(
+                cap.contains(&decl.tier),
+                "kind '{name}': tool '{}' declares tier {:?} outside the tier cap {:?}",
+                decl.name,
+                decl.tier,
+                cap
+            );
+        }
         self.map.insert(KindId::new(name), Arc::new(kind));
         self
     }

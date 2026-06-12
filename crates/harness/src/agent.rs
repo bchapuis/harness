@@ -55,6 +55,7 @@ use crate::model::ModelRequest;
 use crate::model::ModelResponse;
 use crate::model::ToolSpec;
 use crate::sandbox::Sandbox;
+use crate::sandbox::Tier;
 use crate::session::CallId;
 use crate::session::ChildRef;
 use crate::session::Completion;
@@ -127,6 +128,8 @@ struct PendingExec {
     call: CallId,
     name: String,
     input: Value,
+    /// The call's declared tier (§5.2), passed to `Sandbox::call` (§5.6).
+    tier: Tier,
     timeout: Duration,
 }
 
@@ -169,6 +172,17 @@ struct Ready {
     sandbox: SandboxSlot,
     /// `SandboxBound` was emitted and not yet paired (H8).
     sandbox_bound: bool,
+    /// Tiers this activation holds (§5.6): working state, never fold state —
+    /// the fold's `TierAcquired` arm records nothing, so nothing resurrects
+    /// a tier across an activation boundary. Opening grants `Workspace` and
+    /// nothing else (§5.6 item 1); every other tier is acquired under a
+    /// journaled `TierAcquired`, and a committed `WorkspaceReset` restarts
+    /// the set at `Workspace` (§5.5).
+    tiers_held: BTreeSet<Tier>,
+    /// Tiers whose `TierAcquired` is in the append pipeline, not yet
+    /// committed: dedups two same-step calls at one new tier (cf.
+    /// `reset_enqueued`).
+    tiers_enqueued: BTreeSet<Tier>,
     /// Calls launched by this activation (a fold-external flag: relaunching
     /// is a *resume* decision, §5.5, not a fold one).
     launched: BTreeSet<CallId>,
@@ -420,6 +434,8 @@ impl<S: HarnessSystem> AgentActor<S> {
             reset_enqueued: false,
             sandbox: SandboxSlot::Closed,
             sandbox_bound: false,
+            tiers_held: BTreeSet::from([Tier::Workspace]),
+            tiers_enqueued: BTreeSet::new(),
             launched: BTreeSet::new(),
             resolved: BTreeSet::new(),
             model_inflight: false,
@@ -680,12 +696,17 @@ impl<S: HarnessSystem> AgentActor<S> {
         let harness = self.harness.clone();
         let session = self.session.clone();
         let me = self.me();
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
-        };
-        r.launched.insert(call.clone());
+        // `launched` is marked per branch, just before the work is committed
+        // to: a call parked on a tier acquisition (below) stays out of it, so
+        // the post-commit `advance` re-drives `launch_call` for it.
 
         if name == DELEGATE {
+            {
+                let Phase::Ready(r) = &mut self.phase else {
+                    return;
+                };
+                r.launched.insert(call.clone());
+            }
             // Delegation is control flow, executed in the loop (§5.2, §8).
             let parsed: Result<DelegateInput, _> = serde_json::from_value(input.clone());
             let request = match parsed {
@@ -761,16 +782,45 @@ impl<S: HarnessSystem> AgentActor<S> {
                 )),
             );
         }
+        let tier = decl.tier;
+        let timeout = decl.timeout.unwrap_or(harness.config().tool_timeout);
+
+        // The acquisition gate (§5.6): before the first call at a tier the
+        // activation does not yet hold, journal `TierAcquired` — the
+        // write-ahead discipline (§6.4) applied to capability acquisition,
+        // intent before effect. A parked call is NOT marked launched: it
+        // stays in the fold's pending set, and the record's commit re-drives
+        // it through `advance`. The cap needs no check here — declared tools
+        // were checked against it at registration (§5.3 item 4), and
+        // dispatch reaches declared tools only (§5.2).
+        let (held, first_to_need) = {
+            let Phase::Ready(r) = &mut self.phase else {
+                return;
+            };
+            let held = r.tiers_held.contains(&tier);
+            // `insert` is false when a same-step sibling already enqueued the
+            // tier, so only the first call to need it journals the record.
+            (held, !held && r.tiers_enqueued.insert(tier))
+        };
+        if !held {
+            if first_to_need {
+                self.enqueue(vec![RecordBody::TierAcquired { turn, tier }]);
+            }
+            return;
+        }
+
         let exec = PendingExec {
             turn,
-            call,
+            call: call.clone(),
             name,
             input,
-            timeout: decl.timeout.unwrap_or(harness.config().tool_timeout),
+            tier,
+            timeout,
         };
         let Phase::Ready(r) = &mut self.phase else {
             return;
         };
+        r.launched.insert(call);
         match &mut r.sandbox {
             SandboxSlot::Open(sandbox) => {
                 let sandbox = Arc::clone(sandbox);
@@ -1245,6 +1295,21 @@ impl<S: HarnessSystem> AgentActor<S> {
                     };
                     r.reset_needed = false;
                     r.reset_enqueued = false;
+                    // A fresh environment resets every held tier (§5.5): the
+                    // held set restarts at `Workspace`, and later
+                    // acquisitions re-journal — never silently inherited.
+                    r.tiers_held = BTreeSet::from([Tier::Workspace]);
+                    r.tiers_enqueued.clear();
+                }
+                RecordBody::TierAcquired { tier, .. } => {
+                    // The acquisition is durable (§5.6): the activation holds
+                    // the tier from here on, and the `advance` below
+                    // re-drives the calls parked on it.
+                    let Phase::Ready(r) = &mut self.phase else {
+                        return;
+                    };
+                    r.tiers_enqueued.remove(tier);
+                    r.tiers_held.insert(*tier);
                 }
                 RecordBody::RunEnded { turn, outcome } => {
                     harness.system().emit_event(
@@ -1262,6 +1327,12 @@ impl<S: HarnessSystem> AgentActor<S> {
                     r.model_inflight = false;
                     r.launched.clear();
                     r.resolved.clear();
+                    // Defensive: FIFO append ordering already guarantees any
+                    // TierAcquired committed before this RunEnded (launch_call
+                    // runs only while the run is live), so the set is empty
+                    // here — clearing keeps the run-boundary cleanup symmetric
+                    // rather than relying on that ordering forever.
+                    r.tiers_enqueued.clear();
                     // Release the reply only after the terminal outcome is
                     // journaled (§6.4): a caller never holds a completion the
                     // journal could lose.
@@ -1411,7 +1482,10 @@ fn launch_exec<S: HarnessSystem>(
     let clock = harness.clock();
     harness.system().launch(Box::pin(async move {
         let outcome = match clock
-            .timeout(exec.timeout, sandbox.call(&exec.name, exec.input))
+            .timeout(
+                exec.timeout,
+                sandbox.call(exec.tier, &exec.name, exec.input),
+            )
             .await
         {
             Ok(outcome) => outcome,

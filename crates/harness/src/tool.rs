@@ -23,6 +23,7 @@ use serde_json::Value;
 
 use crate::budget::Budget;
 use crate::model::ToolSpec;
+use crate::sandbox::Tier;
 use crate::session::RunError;
 
 /// The one built-in, loop-executing tool (harness spec §8.1): present in a
@@ -49,6 +50,11 @@ pub struct ToolDecl {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// The capability set the call requires (§5.6): checked against the
+    /// kind's tier cap at registration (§5.3 item 4), passed to
+    /// `Sandbox::call`, and covered by the kind digest (§7.1).
+    #[serde(default)]
+    pub tier: Tier,
     /// The declared recovery policy for a dangling call (§5.5).
     pub on_dangling: OnDangling,
     /// Per-call execution bound, timed by `Clock` (§5.3 item 3); `None` uses

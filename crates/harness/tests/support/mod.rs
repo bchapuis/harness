@@ -46,6 +46,7 @@ use harness::SandboxProfile;
 use harness::SandboxProvider;
 use harness::SeqNo;
 use harness::SessionId;
+use harness::Tier;
 use harness::ToolCall;
 use harness::ToolError;
 use harness::TurnId;
@@ -254,7 +255,7 @@ impl Model for FaultyModel {
 pub struct SandboxStats {
     opened: Arc<AtomicUsize>,
     released: Arc<AtomicUsize>,
-    calls: Arc<Mutex<Vec<(String, Value)>>>,
+    calls: Arc<Mutex<Vec<(Tier, String, Value)>>>,
 }
 
 impl SandboxStats {
@@ -266,7 +267,7 @@ impl SandboxStats {
         self.released.load(Ordering::SeqCst)
     }
 
-    pub fn calls(&self) -> Vec<(String, Value)> {
+    pub fn calls(&self) -> Vec<(Tier, String, Value)> {
         self.calls.lock().expect("calls mutex").clone()
     }
 }
@@ -317,12 +318,17 @@ struct ScriptedSandbox {
 }
 
 impl Sandbox for ScriptedSandbox {
-    fn call(&self, name: &str, input: Value) -> BoxFuture<'static, Result<Value, ToolError>> {
+    fn call(
+        &self,
+        tier: Tier,
+        name: &str,
+        input: Value,
+    ) -> BoxFuture<'static, Result<Value, ToolError>> {
         self.stats
             .calls
             .lock()
             .expect("calls mutex")
-            .push((name.to_string(), input.clone()));
+            .push((tier, name.to_string(), input.clone()));
         let result = (self.behavior)(name, &input);
         let delay = self.delay.clone();
         Box::pin(async move {
@@ -700,6 +706,73 @@ pub fn harness_invariants() -> Vec<Box<dyn Invariant>> {
     invariants.push(Box::new(HarnessEventGrammar::default()));
     invariants.push(Box::new(RunDiscipline::default()));
     invariants
+}
+
+// ---------------------------------------------------------------------------
+// S4 journal audit (sandbox spec §6)
+// ---------------------------------------------------------------------------
+
+/// The S4 journal audit, run at quiescence the way H2's audit runs (sandbox
+/// spec §6 S4): within one session's journal, every executed tool outcome at
+/// a tier other than `Workspace` is preceded by a `TierAcquired` at that
+/// tier with no `WorkspaceReset` in between, and every acquired or executed
+/// tier lies within the kind's cap.
+///
+/// Outcomes synthesized without execution — an unknown name, schema-rejected
+/// arguments (§5.4), or a dangling call resolved as `Interrupted` on resume
+/// (§5.5) — carry no effect and are exempt: the discipline orders the record
+/// against the *effect*, and there was none. No within-segment uniqueness is
+/// asserted either: a crash-resume re-execution legitimately re-journals an
+/// acquisition before the reset record lands.
+pub fn audit_tier_acquisition(records: &[harness::Record], kind: &harness::Kind) {
+    let cap = kind.tier_cap();
+    let mut call_tier: BTreeMap<harness::CallId, Tier> = BTreeMap::new();
+    let mut held: BTreeSet<Tier> = BTreeSet::from([Tier::Workspace]);
+    for (position, record) in records.iter().enumerate() {
+        match &record.body {
+            harness::RecordBody::ModelResponse { calls, .. } => {
+                for call in calls {
+                    if let Some(decl) = kind.tools.get(&call.name) {
+                        call_tier.insert(call.id.clone(), decl.tier);
+                    }
+                }
+            }
+            harness::RecordBody::TierAcquired { tier, .. } => {
+                assert!(
+                    cap.contains(tier),
+                    "S4: record {position} acquires tier {tier:?} outside the cap {cap:?}"
+                );
+                held.insert(*tier);
+            }
+            harness::RecordBody::WorkspaceReset => {
+                held = BTreeSet::from([Tier::Workspace]);
+            }
+            harness::RecordBody::ToolOutcome { call, outcome, .. } => {
+                let executed = !matches!(
+                    outcome,
+                    Err(ToolError::UnknownTool { .. })
+                        | Err(ToolError::InvalidArguments(_))
+                        | Err(ToolError::Interrupted)
+                );
+                let Some(tier) = call_tier.get(call) else {
+                    continue;
+                };
+                if executed {
+                    assert!(
+                        cap.contains(tier),
+                        "S4: record {position} executes call {call:?} at tier {tier:?} \
+                         outside the cap {cap:?}"
+                    );
+                    assert!(
+                        held.contains(tier),
+                        "S4: record {position} executes call {call:?} at tier {tier:?} with \
+                         no preceding TierAcquired in this reset segment"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

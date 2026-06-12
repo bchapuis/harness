@@ -43,6 +43,7 @@ use harness::ModelParams;
 use harness::SandboxProvider;
 use harness::SeqNo;
 use harness::SessionId;
+use harness::Tier;
 use harness::Turn;
 use harness::TurnId;
 use harness::host_key;
@@ -232,7 +233,7 @@ fn kinds(model: &str) -> Kinds {
          self-contained subtask to the `worker` kind with the `delegate` tool.",
     )
     .model(params.clone())
-    .sandboxed("shell", shell_description, &shell_schema)
+    .sandboxed("shell", shell_description, &shell_schema, Tier::Native)
     .delegates_to(&["worker"])
     .budget(Budget::new(200_000, 50));
     let worker = Kind::new(
@@ -240,7 +241,7 @@ fn kinds(model: &str) -> Kinds {
          in your private workspace, then reply with a concise result.",
     )
     .model(params)
-    .sandboxed("shell", shell_description, &shell_schema)
+    .sandboxed("shell", shell_description, &shell_schema, Tier::Native)
     .budget(Budget::new(100_000, 25));
     Kinds::new()
         .register("assistant", assistant)

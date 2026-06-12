@@ -370,6 +370,7 @@ fn render(seq: SeqNo, record: &Record) -> String {
             budget.tokens
         ),
         RecordBody::WorkspaceReset => format!("{seq} workspace reset"),
+        RecordBody::TierAcquired { tier, .. } => format!("{seq} tier acquired: {tier:?}"),
         RecordBody::RunEnded { turn, outcome } => match outcome {
             Ok(completion) => format!(
                 "{seq} run {} ended ok ({} tokens)",

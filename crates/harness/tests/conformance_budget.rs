@@ -25,6 +25,7 @@ use harness::ModelError;
 use harness::RecordBody;
 use harness::RunError;
 use harness::SessionId;
+use harness::Tier;
 use harness::Turn;
 use harness::TurnId;
 use serde_json::json;
@@ -124,7 +125,7 @@ fn an_exhausted_budget_ends_the_run_with_no_further_calls() {
             Kinds::new().register(
                 "looper",
                 Kind::new("loop forever")
-                    .sandboxed("shell", "run", &json!({"type": "object"}))
+                    .sandboxed("shell", "run", &json!({"type": "object"}), Tier::Workspace)
                     .budget(Budget::new(100_000, 3)),
             )
         },
@@ -175,7 +176,7 @@ fn token_exhaustion_is_enforced_before_the_call() {
             Kinds::new().register(
                 "looper",
                 Kind::new("loop forever")
-                    .sandboxed("shell", "run", &json!({"type": "object"}))
+                    .sandboxed("shell", "run", &json!({"type": "object"}), Tier::Workspace)
                     .budget(Budget::new(250, 100)),
             )
         },

@@ -24,6 +24,7 @@ use crate::budget::Spend;
 use crate::budget::Usage;
 use crate::model::ModelError;
 use crate::model::ToolCall;
+use crate::sandbox::Tier;
 use crate::tool::DELEGATE;
 use crate::tool::ToolError;
 
@@ -240,6 +241,13 @@ pub enum RecordBody {
     /// for a session whose journal records sandboxed activity, and surfaced
     /// to the model with that request.
     WorkspaceReset,
+    /// The activation's first call at `tier` is about to execute (§5.6):
+    /// the write-ahead discipline (§6.4) applied to capability acquisition,
+    /// intent journaled before effect. The audit trail — when did this
+    /// session first run guest code, first touch the network? — and the
+    /// future policy hook (§13). A record, not a §10.4 event: verified by
+    /// journal audit (sandbox spec S4), the way H2's quiescence audit works.
+    TierAcquired { turn: TurnId, tier: Tier },
     /// The run's exactly-one terminal outcome (§3.1, invariant H3).
     RunEnded { turn: TurnId, outcome: RunOutcome },
 }
@@ -452,6 +460,15 @@ impl SessionState {
             RecordBody::WorkspaceReset => {
                 self.sandbox_activity = false;
                 self.transcript.push(Entry::WorkspaceReset);
+            }
+            RecordBody::TierAcquired { .. } => {
+                // Held tiers are working state, scoped to the activation that
+                // journaled them (§5.6 item 3): the fold records nothing, so
+                // replay is harmless and nothing resurrects a tier across an
+                // activation boundary. The next activation restarts at
+                // `Workspace` and re-acquires under new records (§5.5). No
+                // transcript entry: acquisitions are audit, not something the
+                // model sees.
             }
             RecordBody::RunEnded { turn, outcome } => {
                 if self.live.as_ref().is_some_and(|l| &l.turn == turn) {
