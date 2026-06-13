@@ -191,6 +191,10 @@ struct HostState {
 /// dropped on release (S5).
 pub(crate) struct ComputeTier {
     engine: Engine,
+    /// The host surface, defined once per tier: instantiation only ever
+    /// consults it, so every call shares one immutable linker instead of
+    /// re-registering a dozen host functions per call.
+    linker: Linker<HostState>,
     limits: ComputeLimits,
     /// Deployment-registered modules (provider.rs): resolved before any
     /// workspace path.
@@ -218,8 +222,10 @@ impl ComputeTier {
         // construction, like the rest of the hermeticity story.
         let engine =
             Engine::new(&config).map_err(|e| ToolError::Sandbox(format!("compute engine: {e}")))?;
+        let linker = host_linker(&engine)?;
         Ok(ComputeTier {
             engine,
+            linker,
             limits,
             modules,
             cache: Mutex::new(BTreeMap::new()),
@@ -339,10 +345,10 @@ impl ComputeTier {
             .set_fuel(self.limits.fuel)
             .map_err(|e| ToolError::Sandbox(format!("compute: fuel: {e}")))?;
 
-        let linker = host_linker(&self.engine)?;
         // An import outside the defined surface fails here: hermeticity is
         // the absence of the capability, not a filter (§3.2).
-        let instance = linker
+        let instance = self
+            .linker
             .instantiate(&mut store, &module)
             .map_err(sandbox_err("instantiate"))?;
         let memory = instance
@@ -589,7 +595,14 @@ fn wasi_stubs(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
          nwritten: i32|
          -> wasmtime::Result<i32> {
             // Accept and discard: the runner captures console output itself;
-            // this only keeps libc's stdio from failing.
+            // this only keeps libc's stdio from failing. The iovs count is
+            // capped first — host loops run outside the fuel meter, and no
+            // libc writev carries more than a handful of entries.
+            if !(0..=1024).contains(&iovs_len) {
+                return Err(wasmtime::Error::msg(format!(
+                    "fd_write: iovs count {iovs_len} is outside 0..=1024"
+                )));
+            }
             let memory = guest_memory(&mut caller)?;
             let data = memory.data(&caller);
             let mut total: u32 = 0;

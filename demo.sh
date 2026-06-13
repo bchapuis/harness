@@ -14,7 +14,20 @@ cargo build -q -p harness-standalone
 BIN=target/debug/harness-standalone
 DATA=${HARNESS_DATA:-./harness-data}
 API_URL=${HARNESS_API_URL:-https://api.anthropic.com}
+IMAGE=${HARNESS_SANDBOX_IMAGE:-alpine:3.20}
 mkdir -p "$DATA"
+
+# A real model composes the shell commands this demo runs, so they execute
+# confined in a per-session container — never as your user. (The unconfined
+# alternative, --sandbox local, is for trusted-input setups only.)
+if ! docker version >/dev/null 2>&1; then
+  echo "The demo runs \`shell\` inside docker containers; start Docker (or colima) first." >&2
+  exit 1
+fi
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "▸ pulling $IMAGE (one-time; the first shell call would otherwise eat its timeout)"
+  docker pull -q "$IMAGE"
+fi
 
 # A node from an earlier run would silently join this cluster (same ports,
 # same secret) and confuse the demo — refuse to start over one.
@@ -32,6 +45,7 @@ trap cleanup EXIT INT TERM
 echo "▸ booting three nodes (logs in $DATA/node*.log)"
 for i in 1 2 3; do
   "$BIN" node --id "$i" --data "$DATA" --api-url "$API_URL" \
+    --sandbox docker --sandbox-image "$IMAGE" \
     > "$DATA/node$i.log" 2>&1 &
   NODE_PIDS+=($!)
 done

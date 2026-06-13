@@ -73,10 +73,17 @@ pub enum SandboxMode {
     /// network — shared-kernel confinement (sandbox spec §3.5's development
     /// fallback).
     Docker,
+    /// `harness-sandbox`'s microVM-backed `Native` tier: `shell` runs
+    /// inside a per-session Firecracker VM, workspace synced over vsock, no
+    /// network device — hardware-virtualization confinement (sandbox spec
+    /// §3.4's stronger grade). Linux with `/dev/kvm` only.
+    Firecracker,
 }
 
 /// Everything `node` takes from the command line. The defaults make
-/// `node --id N` enough for the three-node local deployment.
+/// `node --id N --sandbox <mode>` enough for the three-node local
+/// deployment — the sandbox is the one choice without a default, because
+/// the unconfined mode must never be reached by omission.
 #[derive(Clone, Debug)]
 pub struct NodeOptions {
     /// This node's id, `1..=nodes`. Required.
@@ -96,13 +103,23 @@ pub struct NodeOptions {
     /// The Messages API base; `http://…` points at a local fake.
     pub api_url: String,
     /// The sandbox provider; every node must agree (the kind digest covers
-    /// the tool declarations and profile this choice selects).
-    pub sandbox: SandboxMode,
+    /// the tool declarations and profile this choice selects). `None` fails
+    /// at startup: the operator names the confinement story explicitly, so
+    /// the unconfined `Local` mode cannot be selected by omission.
+    pub sandbox: Option<SandboxMode>,
     /// Container image for `--sandbox docker`; required there, and digest-
     /// covered like `--model`.
     pub sandbox_image: String,
     /// The container CLI binary for `--sandbox docker`.
     pub container_cli: String,
+    /// The firecracker executable for `--sandbox firecracker`.
+    pub fc_binary: String,
+    /// The vmlinux kernel for `--sandbox firecracker`; required there, and
+    /// digest-covered like `--model` via the kind digest's profile.
+    pub fc_kernel: String,
+    /// The base rootfs (ext4, containing `/sbin/fc-agent`) for `--sandbox
+    /// firecracker`; required there, digest-covered as the profile image.
+    pub fc_rootfs: String,
 }
 
 impl Default for NodeOptions {
@@ -116,9 +133,12 @@ impl Default for NodeOptions {
             model: ModelParams::default().model,
             secret: "harness-standalone".to_string(),
             api_url: "https://api.anthropic.com".to_string(),
-            sandbox: SandboxMode::Local,
+            sandbox: None,
             sandbox_image: String::new(),
             container_cli: "docker".to_string(),
+            fc_binary: "firecracker".to_string(),
+            fc_kernel: String::new(),
+            fc_rootfs: String::new(),
         }
     }
 }
@@ -131,6 +151,13 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
             opts.nodes, opts.id
         ));
     }
+    // Resolved before any port is bound: a missing confinement choice is a
+    // configuration error the operator fixes, not a half-booted node. The
+    // unconfined mode is reachable only by typing it, and says so loudly.
+    let sandbox_mode = opts.sandbox.ok_or(
+        "--sandbox is required: `docker` or `firecracker` (confined), or `local` \
+         (UNCONFINED /bin/sh — trusted-input only, sandbox spec §3.4)",
+    )?;
     let node = NodeId::new(opts.id);
     let roster: Vec<NodeId> = (1..=opts.nodes).map(NodeId::new).collect();
     let peers: BTreeMap<NodeId, SocketAddr> = roster
@@ -191,7 +218,15 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         TokioClock::new(),
         Arc::new(OsEntropy::new()),
     ));
-    let sandboxes: Arc<dyn SandboxProvider> = match opts.sandbox {
+    if sandbox_mode == SandboxMode::Local {
+        eprintln!(
+            "[{node}] WARNING: --sandbox local is UNCONFINED: `shell` runs as this process's \
+             user with all its permissions; only the working directory is per-session. \
+             Trusted-input only (sandbox spec §3.4) — anything that feeds a real model \
+             untrusted content belongs in --sandbox docker or firecracker."
+        );
+    }
+    let sandboxes: Arc<dyn SandboxProvider> = match sandbox_mode {
         SandboxMode::Local => Arc::new(LocalSandboxes::new(opts.data.join("workspaces"))),
         SandboxMode::Docker => {
             if opts.sandbox_image.is_empty() {
@@ -203,10 +238,28 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
                     .with_container_cli(opts.container_cli.clone()),
             )
         }
+        SandboxMode::Firecracker => {
+            if opts.fc_kernel.is_empty() || opts.fc_rootfs.is_empty() {
+                return Err(
+                    "--sandbox firecracker requires --fc-kernel and --fc-rootfs \
+                     (guest/fc-rootfs/build.sh produces both)"
+                        .to_string(),
+                );
+            }
+            Arc::new(
+                harness_sandbox::TieredSandboxes::new(opts.data.join("workspaces"))
+                    .map_err(|e| format!("workspaces root: {e}"))?
+                    .with_firecracker(harness_sandbox::FirecrackerConfig::new(
+                        &opts.fc_binary,
+                        &opts.fc_kernel,
+                        &opts.fc_rootfs,
+                    )),
+            )
+        }
     };
     let harness = Harness::with_config(
         system.clone(),
-        kinds(&opts),
+        kinds(&opts, sandbox_mode),
         journal,
         model,
         sandboxes,
@@ -245,7 +298,7 @@ fn loopback(base: u16, id: u64) -> SocketAddr {
 /// every node must register byte-identical kinds — the digest is pinned by
 /// `SessionCreated` — so all nodes must run with the same values for those
 /// flags.
-fn kinds(opts: &NodeOptions) -> Kinds {
+fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode) -> Kinds {
     let params = ModelParams {
         model: opts.model.to_string(),
         max_tokens: 4096,
@@ -255,7 +308,7 @@ fn kinds(opts: &NodeOptions) -> Kinds {
     // so the digests differ — a mixed-mode cluster fails to agree instead of
     // silently splitting confinement.
     let shell = |kind: Kind| -> Kind {
-        match opts.sandbox {
+        match sandbox_mode {
             SandboxMode::Local => {
                 let description = "Run a POSIX shell command (`/bin/sh -c`) in the session's \
                                    private workspace directory. Returns exit_code, stdout, and \
@@ -275,6 +328,13 @@ fn kinds(opts: &NodeOptions) -> Kinds {
             SandboxMode::Docker => kind
                 .tool(harness_sandbox::shell_tool())
                 .sandbox(harness::SandboxProfile::image(&opts.sandbox_image)),
+            // The microVM declaration differs from the docker one (sync
+            // semantics are model-visible), and the profile image carries
+            // the rootfs path — both digest-covered, so a cluster mixing
+            // realizations fails to agree instead of splitting confinement.
+            SandboxMode::Firecracker => kind
+                .tool(harness_sandbox::fc_shell_tool())
+                .sandbox(harness::SandboxProfile::image(&opts.fc_rootfs)),
         }
     };
     let assistant = shell(

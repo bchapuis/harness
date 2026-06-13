@@ -42,3 +42,39 @@ jobs:
 
       - name: Test (conformance suite + swarm regression corpus)
         run: cargo test --workspace
+
+  # The microVM-grade Native tier (sandbox spec §3.5): boots real Firecracker
+  # VMs, so it needs /dev/kvm — available on GitHub's Linux runners once the
+  # udev rule below widens the device's permissions. The assets (kernel,
+  # rootfs with the guest agent, VMM binary) are built by guest/fc-rootfs;
+  # that script also runs the agent's own test suite inside rust:alpine.
+  firecracker:
+    name: firecracker microVM conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Build the microVM assets (agent, rootfs, kernel, VMM)
+        run: guest/fc-rootfs/build.sh
+
+      - name: Clippy (feature firecracker)
+        run: cargo clippy -p harness-sandbox --features firecracker --all-targets -- -D warnings
+
+      - name: Test (protocol suite + KVM-gated microVM conformance)
+        run: cargo test -p harness-sandbox --features firecracker

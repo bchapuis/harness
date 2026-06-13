@@ -53,6 +53,10 @@ webpki-roots = "1"
 # reference realization's product choices (sandbox spec §3.5).
 cap-std = "3"
 wasmtime = { version = "33", default-features = false, features = ["runtime", "cranelift"] }
+# Firecracker Native tier (`harness-sandbox`, feature `firecracker`) only: the
+# tar stream that carries the workspace over vsock (mirrored by
+# `guest/fc-agent`, which pins the same version).
+tar = "0.4"
 # Native tier (`harness-sandbox`, feature `native`) only: uid/gid without
 # `unsafe` in our own crates (rustix is already in the graph via cap-std).
 rustix = { version = "1", features = ["process"] }

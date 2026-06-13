@@ -70,18 +70,25 @@ Or run uninstalled with `cargo run -p harness-standalone --` in place of
 
 ## Start the cluster
 
-One terminal per node, all pointing at the same data directory:
+One terminal per node, all pointing at the same data directory. `--sandbox`
+is required, and with a real API key the confined mode is the right one (a
+real model composes the shell commands these nodes will run):
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-…
+docker pull alpine:3.20   # once; the first shell call would otherwise eat its timeout
 
 # terminal 1
-harness-standalone node --id 1 --data ./harness-data
+harness-standalone node --id 1 --data ./harness-data --sandbox docker --sandbox-image alpine:3.20
 # terminal 2
-harness-standalone node --id 2 --data ./harness-data
+harness-standalone node --id 2 --data ./harness-data --sandbox docker --sandbox-image alpine:3.20
 # terminal 3
-harness-standalone node --id 3 --data ./harness-data
+harness-standalone node --id 3 --data ./harness-data --sandbox docker --sandbox-image alpine:3.20
 ```
+
+Without docker, `--sandbox local` runs `shell` directly as your user —
+unconfined, trusted-input only (see Limitations); the node says so loudly at
+startup.
 
 Each node logs its bootstrap and then the cluster's life on stderr:
 
@@ -166,8 +173,9 @@ that was running it.
    outcome comes back as if nothing happened. A tool call that was in flight
    when the node died is resolved per its declared policy (the `shell` tool
    interrupts: the model is told and decides whether to re-run it).
-7. Restart the node (`node --id N --data ./harness-data` again): survivors
-   log `Reachable`, and new sessions place onto it again.
+7. Restart the node (the same `node --id N …` command, same flags — the
+   sandbox mode shapes the kind digest existing sessions have pinned):
+   survivors log `Reachable`, and new sessions place onto it again.
 
 Two details make this honest rather than staged: the journal's fenced append
 means even a *not actually dead* node (a partition, a pause) cannot fork the
@@ -192,9 +200,12 @@ harness-standalone repl [host:port]        # default 127.0.0.1:7501
 | `--model <id>`   | `claude-sonnet-4-6`         | agree everywhere (kind digests are pinned per session) |
 | `--secret <s>`   | `harness-standalone`        | cluster association secret |
 | `--api-url <url>`| `https://api.anthropic.com` | `http://…` points at a fake for offline testing |
-| `--sandbox <mode>` | `local`                   | `local` or `docker`; agree everywhere (the choice shapes the kind digest) |
+| `--sandbox <mode>` | — (required)              | `docker`, `firecracker`, or `local` (unconfined, trusted-input only); agree everywhere (the choice shapes the kind digest) |
 | `--sandbox-image <r>` | —                       | container image for `--sandbox docker` (required there); agree everywhere |
 | `--container-cli <c>` | `docker`                | the container CLI binary (podman's compatible CLI works) |
+| `--fc-binary <path>` | `firecracker`            | the VMM executable for `--sandbox firecracker` |
+| `--fc-kernel <path>` | —                        | vmlinux for `--sandbox firecracker` (required there); agree everywhere |
+| `--fc-rootfs <path>` | —                        | base rootfs with `/sbin/fc-agent` (required there); agree everywhere |
 
 Environment: `ANTHROPIC_API_KEY` (required by `node`).
 
@@ -221,18 +232,24 @@ API key.
 - **The transport is plaintext.** Fine on loopback; the transport supports
   mutual TLS (`TcpConfig.tls`) but this deployment does not provision
   certificates. Do not point the roster across untrusted networks.
-- **The default sandbox is a directory, not a boundary.** With `--sandbox
-  local` (the default), `shell` runs as your user with your permissions;
-  only the working directory is per-session. In tier vocabulary (sandbox
-  spec §2), `shell` declares `Tier::Native` and each kind's cap is that
-  singleton: the degenerate one-tier provider of sandbox spec §5, running
-  native environments unconfined, **trusted-input only** (sandbox spec
-  §3.4). Pass `--sandbox docker --sandbox-image <ref>` (e.g.
-  `alpine:3.20`) to run `shell` inside a per-session OCI container instead,
+- **`--sandbox local` is a directory, not a boundary.** In that mode `shell`
+  runs as your user with your permissions; only the working directory is
+  per-session. In tier vocabulary (sandbox spec §2), `shell` declares
+  `Tier::Native` and each kind's cap is that singleton: the degenerate
+  one-tier provider of sandbox spec §5, running native environments
+  unconfined, **trusted-input only** (sandbox spec §3.4). It is never the
+  default — `--sandbox` must be chosen explicitly, and a node entering this
+  mode warns on stderr at startup. Pass `--sandbox docker --sandbox-image
+  <ref>` (e.g. `alpine:3.20`) to run `shell` inside a per-session OCI
+  container instead,
   via `harness-sandbox`'s `Native` tier: the workspace bind-mounted, no
   network — shared-kernel confinement (sandbox spec §3.4's SHOULD grade),
   still not the microVM grade. Pre-pull the image: the first call otherwise
-  pulls it inside the 120s tool timeout.
+  pulls it inside the 120s tool timeout. On Linux with `/dev/kvm`, pass
+  `--sandbox firecracker --fc-kernel <vmlinux> --fc-rootfs <ext4>` (both
+  built by `guest/fc-rootfs/build.sh`) for the microVM grade instead: one
+  Firecracker VM per activation, the workspace synced over vsock, no
+  network device (sandbox spec §3.5's reference choice).
 - **The journal needs one shared local filesystem**, so "cluster" here means
   one machine. A multi-host deployment needs a networked journal
   implementation (spec §13 leaves durable stores open).

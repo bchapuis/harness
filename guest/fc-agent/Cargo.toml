@@ -1,0 +1,26 @@
+# The Firecracker guest agent: pid 1 inside the microVM of harness-sandbox's
+# `firecracker` feature. Its own workspace (like guest/qjs-runner): it targets
+# static musl Linux and is built by guest/fc-rootfs/build.sh, never by the
+# repository workspace.
+[package]
+name = "fc-agent"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+libc = "0.2"
+serde_json = "1"
+# Pinned to the same major as the host side (workspace `tar`): the two ends
+# of the wire protocol must agree on the stream they exchange.
+tar = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+opt-level = "s"
+lto = true

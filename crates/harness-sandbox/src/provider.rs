@@ -72,8 +72,10 @@ impl TierStats {
 
 /// The tiered sandbox provider (sandbox spec §3): `Workspace` by capability
 /// handle, `Compute` (feature `compute`) by hermetic wasmtime guests,
-/// `Native` (feature `native`) by an OCI container behind the docker CLI,
-/// and nothing else — see the crate docs for the offered set.
+/// `Native` (feature `native`) by an OCI container behind the docker CLI —
+/// or, configured via [`TieredSandboxes::with_firecracker`] (feature
+/// `firecracker`), by a Firecracker microVM — and nothing else; see the
+/// crate docs for the offered set.
 pub struct TieredSandboxes {
     /// The root, held as a capability handle from construction: even
     /// provisioning and teardown go through cap-std, never through an
@@ -98,6 +100,11 @@ pub struct TieredSandboxes {
     /// The container CLI binary for the native tier; `docker` by default.
     #[cfg(feature = "native")]
     container_cli: String,
+    /// When set, the native tier runs at the microVM grade instead of the
+    /// docker fallback (sandbox spec §3.5): one Firecracker VM per
+    /// activation, workspace synced over vsock.
+    #[cfg(feature = "firecracker")]
+    firecracker: Option<Arc<crate::firecracker::FirecrackerConfig>>,
     pub stats: TierStats,
 }
 
@@ -118,6 +125,8 @@ impl TieredSandboxes {
             root_path,
             #[cfg(feature = "native")]
             container_cli: "docker".to_string(),
+            #[cfg(feature = "firecracker")]
+            firecracker: None,
             stats: TierStats::default(),
         })
     }
@@ -156,6 +165,21 @@ impl TieredSandboxes {
         self.container_cli = cli.into();
         self
     }
+
+    /// Run the native tier at the microVM grade (feature `firecracker`):
+    /// one Firecracker VM per activation instead of the docker fallback.
+    /// Runtime needs Linux and `/dev/kvm`; where they are absent the first
+    /// `Native` call fails as a `ToolError` outcome (harness spec §5.4). The
+    /// profile's `image`, when non-empty, selects a base rootfs path over
+    /// `config.rootfs`.
+    #[cfg(feature = "firecracker")]
+    pub fn with_firecracker(
+        mut self,
+        config: crate::firecracker::FirecrackerConfig,
+    ) -> TieredSandboxes {
+        self.firecracker = Some(Arc::new(config));
+        self
+    }
 }
 
 /// The committed QuickJS runner artifact (feature `quickjs`): a hermetic
@@ -180,8 +204,9 @@ impl SandboxProvider for TieredSandboxes {
         #[cfg(feature = "compute")]
         let modules = Arc::new(self.modules.clone());
         // §2.2 of the sandbox spec: holding `Native` implies `Network`'s
-        // grants. This provider's container runs `--network none`, which
-        // delivers exactly an *empty* egress allowlist and nothing more. A
+        // grants. Neither native realization has a dataplane — the container
+        // runs `--network none`, the microVM has no network device — so both
+        // deliver exactly an *empty* egress allowlist and nothing more. A
         // profile that names egress (or explicitly caps in `Network`) asks
         // for a dataplane this provider does not have: fail the open loudly,
         // never silently withhold a granted capability. Feature-gated
@@ -196,35 +221,78 @@ impl SandboxProvider for TieredSandboxes {
         {
             return Box::pin(async move {
                 Err(SandboxError(
-                    "this provider offers Native with --network none only: the profile's \
+                    "this provider offers Native without a network dataplane: the profile's \
                      egress allowlist must be empty and the cap must not include Network"
                         .to_string(),
                 ))
             });
         }
-        // The tier struct is cheap and eager; the *container* is what stays
-        // lazy (sandbox spec §2.3 item 2).
+        // The tier struct is cheap and eager; the *environment* (container
+        // or microVM) is what stays lazy (sandbox spec §2.3 item 2). Only
+        // the realization this provider was configured for is constructed.
         #[cfg(feature = "native")]
-        let native = Arc::new(crate::native::NativeTier::new(
-            self.container_cli.clone(),
-            profile.image.clone(),
-            self.root_path.join(&name),
-            &name,
-            self.stats.clone(),
-        ));
+        let docker = {
+            #[cfg(feature = "firecracker")]
+            let wanted = self.firecracker.is_none();
+            #[cfg(not(feature = "firecracker"))]
+            let wanted = true;
+            wanted.then(|| {
+                Arc::new(crate::native::NativeTier::new(
+                    self.container_cli.clone(),
+                    profile.image.clone(),
+                    self.root_path.join(&name),
+                    &name,
+                    self.stats.clone(),
+                ))
+            })
+        };
+        // The microVM tier needs the workspace *handle*, which exists only
+        // inside the future below; carry its other inputs in.
+        #[cfg(feature = "firecracker")]
+        let firecracker = self.firecracker.as_ref().map(|config| {
+            (
+                Arc::clone(config),
+                profile.image.clone(),
+                self.root_path.join(&name),
+            )
+        });
         let stats = self.stats.clone();
         Box::pin(async move {
             root.create_dir_all(&name)
                 .and_then(|()| root.open_dir(&name))
                 .map(|dir| {
                     stats.opened.fetch_add(1, Ordering::SeqCst);
+                    let dir = Arc::new(dir);
+                    #[cfg(feature = "native")]
+                    let native = {
+                        #[cfg(feature = "firecracker")]
+                        let native = match firecracker {
+                            Some((config, image, workspace)) => NativeEnv::MicroVm(Arc::new(
+                                crate::firecracker::FirecrackerTier::new(
+                                    config,
+                                    image,
+                                    Arc::clone(&dir),
+                                    &workspace,
+                                    stats.clone(),
+                                ),
+                            )),
+                            None => NativeEnv::Docker(
+                                docker.expect("constructed above when firecracker is unset"),
+                            ),
+                        };
+                        #[cfg(not(feature = "firecracker"))]
+                        let native = NativeEnv::Docker(
+                            docker.expect("always constructed without feature firecracker"),
+                        );
+                        native
+                    };
                     // Opening grants `Workspace` and nothing else (harness
                     // spec §5.6 item 1): no other tier environment exists
                     // until a call carries its tier.
                     Arc::new(TieredSandbox {
                         name,
                         root,
-                        dir: Arc::new(dir),
+                        dir,
                         seed,
                         limits,
                         #[cfg(feature = "compute")]
@@ -261,11 +329,41 @@ struct TieredSandbox {
     /// The compute tier, built on the first `Compute` call (§2.3 item 2).
     #[cfg(feature = "compute")]
     compute: std::sync::Mutex<Option<Arc<crate::compute::ComputeTier>>>,
-    /// The native tier: the struct is eager, its *container* is built on the
-    /// first `Native` call (§2.3 item 2).
+    /// The native tier: the struct is eager, its *environment* (container or
+    /// microVM) is built on the first `Native` call (§2.3 item 2).
     #[cfg(feature = "native")]
-    native: Arc<crate::native::NativeTier>,
+    native: NativeEnv,
     stats: TierStats,
+}
+
+/// Which realization answers `Native` for this sandbox (sandbox spec §3.5):
+/// the docker fallback, or — when the provider was configured with
+/// [`TieredSandboxes::with_firecracker`] — the microVM grade.
+#[cfg(feature = "native")]
+#[derive(Clone)]
+enum NativeEnv {
+    Docker(Arc<crate::native::NativeTier>),
+    #[cfg(feature = "firecracker")]
+    MicroVm(Arc<crate::firecracker::FirecrackerTier>),
+}
+
+#[cfg(feature = "native")]
+impl NativeEnv {
+    async fn call(&self, name: &str, input: &Value) -> Result<Value, ToolError> {
+        match self {
+            NativeEnv::Docker(tier) => tier.call(name, input).await,
+            #[cfg(feature = "firecracker")]
+            NativeEnv::MicroVm(tier) => tier.call(name, input).await,
+        }
+    }
+
+    async fn release(&self) {
+        match self {
+            NativeEnv::Docker(tier) => tier.release().await,
+            #[cfg(feature = "firecracker")]
+            NativeEnv::MicroVm(tier) => tier.release().await,
+        }
+    }
 }
 
 /// Distinguish a lost environment from an ordinary failure (harness spec
@@ -348,7 +446,7 @@ impl Sandbox for TieredSandbox {
             }
             #[cfg(feature = "native")]
             Tier::Native => {
-                let native = Arc::clone(&self.native);
+                let native = self.native.clone();
                 let name = name.to_string();
                 Box::pin(async move {
                     // escalate_loss gives §4's asymmetry: container gone but
@@ -382,7 +480,7 @@ impl Sandbox for TieredSandbox {
                 .take();
         }
         #[cfg(feature = "native")]
-        let native = Arc::clone(&self.native);
+        let native = self.native.clone();
         let root = Arc::clone(&self.root);
         let name = self.name.clone();
         let stats = self.stats.clone();

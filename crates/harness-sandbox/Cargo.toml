@@ -26,6 +26,12 @@ quickjs = ["compute"]
 # container sees the §3.1 workspace as a bind mount, so the feature implies
 # `workspace`.
 native = ["workspace", "dep:tokio", "dep:rustix"]
+# The Native tier at the microVM grade (sandbox spec §3.4's stronger grade,
+# §3.5's reference choice): OS processes inside a Firecracker microVM, the
+# workspace carried in and out as a tar stream over vsock. Linux + /dev/kvm
+# only at runtime; the code builds everywhere. Implies `native` (the docker
+# fallback shares the provider's Native routing and refusal conduct).
+firecracker = ["native", "dep:tar", "tokio/fs"]
 
 [dependencies]
 actor-core.workspace = true
@@ -35,6 +41,7 @@ serde_json.workspace = true
 cap-std = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["process"] }
+tar = { workspace = true, optional = true }
 
 # uid/gid for the container's `--user` (unix-only API; the call site is
 # `#[cfg(unix)]`).

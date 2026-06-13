@@ -32,7 +32,9 @@ const S_CATALOGUE: &[CatalogueEntry] = &[
             Verify::SimTest(
                 "harness-sandbox/tests/workspace.rs (adversarial traversal); tests/native.rs \
                  (container confinement smoke: only the workspace mount reaches the host \
-                 filesystem, no network)",
+                 filesystem, no network); tests/firecracker.rs (microVM confinement smoke: \
+                 only the synced workspace reaches the host, no network device, absolute \
+                 symlinks dropped at the pull)",
             ),
         ],
     },
@@ -75,8 +77,9 @@ const S_CATALOGUE: &[CatalogueEntry] = &[
         property: "Per-tier release: release tears down every provisioned tier's environment and is idempotent; deactivation releases all held tiers (the per-tier face of harness H8)",
         verify: &[Verify::SimTest(
             "harness-sandbox/tests/workspace.rs (open/release accounting); tests/native.rs \
-             (container removed on release, idempotent); the harness's existing H8 checker \
-             covers the binding window",
+             (container removed on release, idempotent); tests/firecracker.rs (VM killed and \
+             control directory removed on release, idempotent); the harness's existing H8 \
+             checker covers the binding window",
         )],
     },
 ];

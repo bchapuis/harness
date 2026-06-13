@@ -35,7 +35,11 @@ PIDS+=($!)
 export ANTHROPIC_API_KEY=sk-smoke
 NODE_PIDS=()
 for i in 1 2 3; do
+  # --sandbox local is the unconfined mode, chosen deliberately: this smoke
+  # run's only input is the canned fake API above — trusted by construction
+  # (sandbox spec §3.4) — and `local` keeps the script dependency-free.
   "$BIN" node --id "$i" --data "$DATA/data" --api-url http://127.0.0.1:7600 \
+    --sandbox local \
     > "$DATA/node$i.log" 2>&1 &
   NODE_PIDS+=($!)
   PIDS+=($!)

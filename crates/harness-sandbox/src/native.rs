@@ -51,8 +51,9 @@ use serde_json::json;
 use crate::provider::TierStats;
 
 /// Cap on each captured stream, so one chatty command cannot blow up the
-/// journal and the model context it feeds.
-const OUTPUT_CAP: usize = 16 * 1024;
+/// journal and the model context it feeds. Shared with the firecracker
+/// realization, which answers the same `shell` shape.
+pub(crate) const OUTPUT_CAP: usize = 16 * 1024;
 
 /// Fork-bomb guard on the container (`--pids-limit`).
 const PIDS_LIMIT: &str = "512";
@@ -161,7 +162,7 @@ impl NativeTier {
             .await
             .map_err(|e| ToolError::Sandbox(format!("native: spawn {}: {e}", self.cli)))?;
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if daemon_error(&stderr) {
+        if daemon_error(output.status.code(), &stderr) {
             // The container (or the daemon under it) is gone while the
             // workspace survives: single-tier loss (sandbox spec §4). Forget
             // the slot — the next call MAY re-provision lazily under the
@@ -304,15 +305,26 @@ where
 
 /// Container-level failure vs the command's own failure (module docs): the
 /// docker CLI reports daemon errors on stderr with a fixed prefix; a user
-/// command forging that exact shape is contrived enough to accept.
-fn daemon_error(stderr: &str) -> bool {
-    stderr.starts_with("Error response from daemon:")
-        || stderr.contains("Cannot connect to the Docker daemon")
-        || stderr.contains("No such container")
-        || stderr.contains("is not running")
+/// command forging that exact shape *as its first stderr bytes* is contrived
+/// enough to accept. The looser phrases are real (CLIs vary the framing),
+/// but they appear anywhere in stderr, where an innocent command can echo
+/// them — so they count only alongside the CLI's own exit codes (125–127),
+/// which a user command rarely shares and never accidentally pairs with the
+/// phrase.
+fn daemon_error(code: Option<i32>, stderr: &str) -> bool {
+    if stderr.starts_with("Error response from daemon:")
+        || stderr.starts_with("Cannot connect to the Docker daemon")
+    {
+        return true;
+    }
+    matches!(code, Some(125..=127))
+        && (stderr.contains("Error response from daemon:")
+            || stderr.contains("Cannot connect to the Docker daemon")
+            || stderr.contains("No such container")
+            || stderr.contains("is not running"))
 }
 
-fn capped(bytes: &[u8]) -> String {
+pub(crate) fn capped(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     if text.len() <= OUTPUT_CAP {
         return text.into_owned();

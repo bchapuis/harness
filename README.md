@@ -8,12 +8,12 @@ runs on — is disposable and replaceable while the session lives.
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-…
-./demo.sh
+./demo.sh        # needs docker running: the model's shell commands execute confined
 ```
 
 That builds the workspace, boots a three-node cluster — three OS processes on
-your machine, one shared journal directory — and drops you into a REPL
-attached to node 1:
+your machine, one shared journal directory, each `shell` call inside a
+per-session container — and drops you into a REPL attached to node 1:
 
 ```
 assistant/demo> Create numbers.txt holding 1..10, then tell me their sum.
@@ -57,7 +57,9 @@ continues the same transcript.
 - A **standalone deployment** (`crates/harness-standalone`): the binary the
   demo runs — file-backed journal whose fence is an atomic `hard_link`,
   tokio/rustls HTTP to the Messages API, per-session shell workspaces
-  (optionally container-confined via `--sandbox docker`), and the REPL.
+  behind an explicit `--sandbox` choice — a container (`docker`), a
+  Firecracker microVM (`firecracker`, Linux/KVM), or an unconfined
+  trusted-input-only `local` mode that is never the default — and the REPL.
 
 ## Going deeper
 
