@@ -66,6 +66,7 @@ cat <<EOF
 
   Try:
     Create numbers.txt holding 1..10, then tell me their sum.
+    Run a hello world in JavaScript.   (uses run_js — hermetic QuickJS, no runtime needed)
     :tail                              the journal IS the session
     kill ${NODE_PIDS[0]}                         (another terminal) then :retry here
     :quit                              tears the demo cluster down

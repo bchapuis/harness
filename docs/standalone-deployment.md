@@ -45,10 +45,16 @@ the session's owner, so the REPL can attach anywhere.
 
 Two agent kinds are registered on every node:
 
-| kind        | tools             | delegates to | budget             |
-|-------------|-------------------|--------------|--------------------|
-| `assistant` | `shell`, `delegate` | `worker`   | 200k tokens, 50 steps |
-| `worker`    | `shell`           | —            | 100k tokens, 25 steps |
+| kind        | tools                        | delegates to | budget             |
+|-------------|------------------------------|--------------|--------------------|
+| `assistant` | `shell`, `run_js`, `delegate` | `worker`    | 200k tokens, 50 steps |
+| `worker`    | `shell`, `run_js`            | —            | 100k tokens, 25 steps |
+
+`shell` is the Native tier (the container or microVM `--sandbox` selected);
+`run_js` is the hermetic QuickJS Compute tier (sandbox spec §3.2), so the
+model runs JavaScript without any language runtime in the shell image. The
+unconfined `--sandbox local` mode offers `shell` only — it is the degenerate
+Native-only provider, with no Compute engine.
 
 ## Prerequisites
 

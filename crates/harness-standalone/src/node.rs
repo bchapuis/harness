@@ -235,7 +235,10 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
             Arc::new(
                 harness_sandbox::TieredSandboxes::new(opts.data.join("workspaces"))
                     .map_err(|e| format!("workspaces root: {e}"))?
-                    .with_container_cli(opts.container_cli.clone()),
+                    .with_container_cli(opts.container_cli.clone())
+                    // The hermetic JS surface, so `run_js` runs without any
+                    // language runtime in the container (sandbox spec §3.2).
+                    .with_quickjs(),
             )
         }
         SandboxMode::Firecracker => {
@@ -253,7 +256,9 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
                         &opts.fc_binary,
                         &opts.fc_kernel,
                         &opts.fc_rootfs,
-                    )),
+                    ))
+                    // The hermetic JS surface, alongside the microVM shell.
+                    .with_quickjs(),
             )
         }
     };
@@ -303,11 +308,15 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode) -> Kinds {
         model: opts.model.to_string(),
         max_tokens: 4096,
     };
-    // The `shell` declaration per sandbox mode: the same tool name and
-    // shape, but distinct declarations (and a profile image in docker mode),
-    // so the digests differ — a mixed-mode cluster fails to agree instead of
-    // silently splitting confinement.
-    let shell = |kind: Kind| -> Kind {
+    // The sandbox tools per mode: the same `shell` name and shape, but
+    // distinct declarations (and a profile image in docker/firecracker
+    // mode), so the digests differ — a mixed-mode cluster fails to agree
+    // instead of silently splitting confinement. The `TieredSandboxes`
+    // modes additionally offer `run_js` (the hermetic QuickJS Compute tier,
+    // sandbox spec §3.2): JavaScript without any runtime in the shell
+    // environment. The unconfined `LocalSandboxes` is Native-only, so it has
+    // no Compute engine and offers `shell` alone.
+    let tools = |kind: Kind| -> Kind {
         match sandbox_mode {
             SandboxMode::Local => {
                 let description = "Run a POSIX shell command (`/bin/sh -c`) in the session's \
@@ -327,32 +336,43 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode) -> Kinds {
             }
             SandboxMode::Docker => kind
                 .tool(harness_sandbox::shell_tool())
+                .tool(harness_sandbox::run_js_tool())
                 .sandbox(harness::SandboxProfile::image(&opts.sandbox_image)),
-            // The microVM declaration differs from the docker one (sync
+            // The microVM shell declaration differs from the docker one (sync
             // semantics are model-visible), and the profile image carries
             // the rootfs path — both digest-covered, so a cluster mixing
             // realizations fails to agree instead of splitting confinement.
             SandboxMode::Firecracker => kind
                 .tool(harness_sandbox::fc_shell_tool())
+                .tool(harness_sandbox::run_js_tool())
                 .sandbox(harness::SandboxProfile::image(&opts.fc_rootfs)),
         }
     };
-    let assistant = shell(
-        Kind::new(
+    // The Compute tier exists only behind TieredSandboxes; steer toward it
+    // for JavaScript exactly where it is offered, and nowhere it is not.
+    let js_hint = if sandbox_mode == SandboxMode::Local {
+        ""
+    } else {
+        " To run JavaScript, use the `run_js` tool rather than reaching for a \
+          `node` binary through `shell`: it runs hermetically (QuickJS) and \
+          needs no runtime installed in the environment."
+    };
+    let assistant = tools(
+        Kind::new(format!(
             "You are the assistant agent of a small local cluster. Use the `shell` tool for \
              anything you need to inspect, compute, or build; it runs in your session's private \
-             workspace directory, which persists across your turns. You may delegate a \
-             self-contained subtask to the `worker` kind with the `delegate` tool.",
-        )
+             workspace directory, which persists across your turns.{js_hint} You may delegate a \
+             self-contained subtask to the `worker` kind with the `delegate` tool."
+        ))
         .model(params.clone()),
     )
     .delegates_to(&["worker"])
     .budget(Budget::new(200_000, 50));
-    let worker = shell(
-        Kind::new(
+    let worker = tools(
+        Kind::new(format!(
             "You are a worker agent. Complete the task you were delegated using the `shell` \
-             tool in your private workspace, then reply with a concise result.",
-        )
+             tool in your private workspace, then reply with a concise result.{js_hint}"
+        ))
         .model(params),
     )
     .budget(Budget::new(100_000, 25));
