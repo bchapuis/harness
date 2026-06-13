@@ -76,15 +76,20 @@ real model composes the shell commands these nodes will run):
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-…
-docker pull alpine:3.20   # once; the first shell call would otherwise eat its timeout
+docker pull python:3.12-slim   # once; the first shell call would otherwise eat its timeout
 
 # terminal 1
-harness-standalone node --id 1 --data ./harness-data --sandbox docker --sandbox-image alpine:3.20
+harness-standalone node --id 1 --data ./harness-data --sandbox docker --sandbox-image python:3.12-slim
 # terminal 2
-harness-standalone node --id 2 --data ./harness-data --sandbox docker --sandbox-image alpine:3.20
+harness-standalone node --id 2 --data ./harness-data --sandbox docker --sandbox-image python:3.12-slim
 # terminal 3
-harness-standalone node --id 3 --data ./harness-data --sandbox docker --sandbox-image alpine:3.20
+harness-standalone node --id 3 --data ./harness-data --sandbox docker --sandbox-image python:3.12-slim
 ```
+
+Any image works; the choice is just what `shell` finds on its `PATH`.
+`python:3.12-slim` carries python3, bash, and coreutils — enough for the
+model to actually run things. `alpine:3.20` is leaner (sh + awk only) if you
+only need file and text tasks.
 
 Without docker, `--sandbox local` runs `shell` directly as your user —
 unconfined, trusted-input only (see Limitations); the node says so loudly at

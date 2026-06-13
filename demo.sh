@@ -14,7 +14,11 @@ cargo build -q -p harness-standalone
 BIN=target/debug/harness-standalone
 DATA=${HARNESS_DATA:-./harness-data}
 API_URL=${HARNESS_API_URL:-https://api.anthropic.com}
-IMAGE=${HARNESS_SANDBOX_IMAGE:-alpine:3.20}
+# python:3.12-slim rather than bare alpine: it carries python3, bash, and
+# the GNU coreutils, so the model can actually run what a newcomer asks for.
+# Override with HARNESS_SANDBOX_IMAGE for a leaner (alpine:3.20) or richer
+# (a polyglot image) container.
+IMAGE=${HARNESS_SANDBOX_IMAGE:-python:3.12-slim}
 mkdir -p "$DATA"
 
 # A real model composes the shell commands this demo runs, so they execute
