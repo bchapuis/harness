@@ -106,10 +106,14 @@ pub enum Event {
     /// (registry-based mode, spec §9.4.2). Emitted when a sync first lands a new
     /// revision, so tests can await convergence on a registry mutation.
     RegistrySynced { observer: NodeId, revision: u64 },
-    /// `node` won the leader election for `term` (leader-based mode, spec
-    /// §9.4.3). At most one node may ever announce a given term — the
-    /// election-safety half of invariant #22 a continuous checker enforces.
-    LeaderElected { node: NodeId, term: u64 },
+    /// `node` won the leader election for `term` in Raft `group` (leader-based
+    /// mode, spec §9.4.3). At most one node may ever announce a given
+    /// `(group, term)` — the election-safety half of invariant #22 a continuous
+    /// checker enforces. Terms are **per group** (a multi-group engine runs
+    /// O(groups) independent Raft groups), so the group is part of the identity;
+    /// it is a plain `u64` (the `GroupId` value) to keep this crate agnostic of
+    /// the cluster's group type. The membership control plane is group `0`.
+    LeaderElected { node: NodeId, term: u64, group: u64 },
     /// Supervision chose a directive for a faulted actor (spec §11.2, §16).
     Supervised {
         actor: ActorId,

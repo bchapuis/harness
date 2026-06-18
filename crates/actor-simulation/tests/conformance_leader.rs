@@ -168,7 +168,8 @@ fn a_leader_is_elected_and_at_most_one_per_term() {
         .events()
         .iter()
         .filter_map(|e| match e {
-            Event::LeaderElected { node, term } => Some((*term, *node)),
+            // Only the control group runs here, so the group is constant.
+            Event::LeaderElected { node, term, .. } => Some((*term, *node)),
             _ => None,
         })
         .collect();

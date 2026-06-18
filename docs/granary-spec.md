@@ -57,7 +57,7 @@ A grain's in-memory activation is a **cache** of state folded from the journal. 
 | **Grain** | A virtual, durable, single-activation object: state + behavior addressed by a `GrainName`. |
 | **`GrainName`** | The stable, cluster-wide, serializable identity of a grain. A `(GrainType, key)` pair; `key` is an arbitrary application string. |
 | **Shard** | A partition of one grain type's namespace and the unit of consensus: one Raft group owning the journal, leadership, and activations of that type's grains whose names fall in its range (§7.1). |
-| **Shard map** | The cluster's record of which nodes replicate each shard and which key range it covers; held in the actor control plane (§7.6). |
+| **Shard map** | The cluster's consensus-agreed record of which nodes replicate each shard and which key range it covers; a per-grain-type map group seeded from the leader-based control plane (§7.6). |
 | **Activation** | The live, in-memory instance of a grain on the leader of its shard. Disposable; rebuilt from the journal. |
 | **Event** | A serializable value appended to a grain's journal; the unit of durable change. |
 | **`apply`** | The pure fold that applies an event to state. Runs identically on live commit and on replay. |
@@ -88,6 +88,12 @@ pub trait Grain: Sized + Send + 'static {
 
     /// The journal record type: the unit of durable change.
     type Event: SerializationRequirement;
+
+    /// The grain type's stable, serializable identity: the namespace tag in every
+    /// `GrainName` of this type (§5.1) and the receptionist key the type's gateway
+    /// is discovered under (§5.3). An explicit constant (e.g. `"bank.Account"`) is
+    /// REQUIRED — the runtime needs a rename-stable tag, which `type_name` is not.
+    const GRAIN_TYPE: &'static str;
 
     /// Apply one event to state. MUST be pure and deterministic: it runs on the
     /// live commit path AND on replay/rehydration, and the two MUST agree
@@ -187,15 +193,17 @@ impl GrainHandler<Deposit> for Account {
 ```rust
 impl<G: Grain> GrainRef<G> {
     pub fn name(&self) -> &GrainName;
-    pub async fn ask<M>(&self, msg: M)  -> Result<M::Reply, GrainError> where G: GrainHandler<M>;
-    pub async fn tell<M>(&self, msg: M) -> Result<(), GrainError>       where G: GrainHandler<M>;
-    pub async fn ask_timeout<M>(&self, msg: M, within: Duration) -> Result<M::Reply, GrainError> where G: GrainHandler<M>;
+    pub async fn ask<M>(&self, msg: M)  -> Result<M::Reply, GrainError> where G: GrainHandler<M>, M: Clone;
+    pub async fn tell<M>(&self, msg: M) -> Result<(), GrainError>       where G: GrainHandler<M>, M: Clone;
+    pub async fn ask_timeout<M>(&self, msg: M, within: Duration) -> Result<M::Reply, GrainError> where G: GrainHandler<M>, M: Clone;
 }
 ```
 
 The `G: GrainHandler<M>` bound proves at compile time that the grain accepts `M`, so an invalid call does not compile (invariant **G10**, the grain analogue of actor §3.3). The call site is identical whether the activation is local or on another node (§5).
 
-`GrainCtx<G>` is the handler/lifecycle context. It exposes the grain's name, a `GrainRef` self-reference, the system handle, and the actor `Ctx` underneath as inherited capabilities (death watch, child spawning):
+The `M: Clone` bound lets the runtime re-issue the command when the first attempt provably did not run — a stale cached host that hibernated (`DeadLetter`) or whose leadership moved (`NotLeader`), neither of which commits (§6, §8). An *ambiguous* transport failure (`Unreachable`/`Timeout`) is never auto-retried, because the command may have committed before the reply was lost (at-most-once, §2.2). The clone is of the caller's own small command value.
+
+`GrainCtx<G>` is the handler/lifecycle context. It exposes the grain's name, a `GrainRef` self-reference, and the system handle. (Surfacing the actor `Ctx` underneath for inherited capabilities such as death watch and child spawning is a deferred addition, §16; the current context exposes only the three accessors below.)
 
 ```rust
 impl<G: Grain> GrainCtx<G> {
@@ -270,19 +278,23 @@ The host's per-command protocol runs in order, and it is the one place the barri
 2. if events.is_empty() { return reply }                // read path: nothing to commit (§7.5)
 3. outcome = journal.append(grain = name, after = head, events)  // §7.3, Raft-replicate on the shard
 4. on Committed(new_head):                              // durable on a quorum
+       if new_head != head + events.len() {             // CONTIGUITY GUARD (G1/G3)
+           step_down(); return GrainError::Unavailable  //   head was stale — re-read, do not fold
+       }
        for e in &events { G::apply(&mut state, e) }     // fold AFTER durability
        head = new_head
        maybe_snapshot()                                 // §9
        return reply                                     // OUTPUT GATE releases here
 5. on NotLeader(hint):                                  // leadership moved off this node (§8)
-       passivate(); return GrainError::NotLeader(hint)  // caller retries against the new leader
-6. on Unavailable:                                      // shard quorum lost (§11)
-       return GrainError::Unavailable                   // state untouched; caller retries later
+       step_down(); return GrainError::NotLeader(hint)  // caller retries against the new leader
+6. on Unavailable:                                      // shard quorum lost OR commit timed out (§11)
+       step_down(); return GrainError::Unavailable      // ambiguous fate — re-read; caller retries
 ```
 
-Two ordering rules are normative and load-bearing (invariant **G1**):
+Three ordering rules are normative and load-bearing (invariant **G1**):
 - **Fold only after durability.** The host MUST NOT fold state before the entry commits. A handler observes its own prior writes because each completed command folded only on commit.
 - **Reply only after durability.** The host MUST NOT release the reply before the entry commits, and MUST NOT release it as success if the entry does not commit.
+- **Fold only a contiguous head.** A grain is its shard's single writer (§8), so a commit MUST advance its head by exactly the batch just appended. If the journal returns a head that jumps further — its starting head was stale, because the leader's view lagged at activation (§9) or a previously timed-out append committed late (§7.2) — the host MUST NOT fold (the intervening committed events were never applied to its state); it steps down and the next access rehydrates from the journal authority (**G3**). The host treats `NotLeader` and `Unavailable` the same way: any outcome other than a contiguous commit ends the activation, because after it the in-memory head can no longer be trusted. A forced step-down emits `Passivated` (§13) so the lifecycle stream stays balanced.
 
 **`tell` is fire-and-forget.** A `tell` returns once the host accepts the command, not after the commit (actor §3.3, §7.2), so it reports only the enqueue-time failures (`Call`, `NotLeader`, `Unhandled`), never `Unavailable`. The host runs the same protocol for the command, but the caller does not await the outcome: if the commit cannot complete, the command has no effect and the caller is not notified. This is the at-most-once contract (actor §7.2), which callers make idempotent where it matters.
 
@@ -304,6 +316,8 @@ A shard has one leader per term (§8). The leader assigns each entry its positio
 
 Each grain's own events stay totally ordered within the shared log: the host appends them in `Seq` order behind the input gate (§6), and replay reads them back in that order (§9).
 
+**Commit-once under late commits.** A leader awaits its append's commit, bounded by a timeout that reports `Unavailable` (§11). A timed-out entry MAY still commit later, so the apply path MUST be idempotent: each proposal carries a **proposal id** and is applied to the projection at most once. The id MUST be unique across the lifetime of a proposer, *including process restarts* — a node that crashes and re-starts reuses its stable node identity, so a bare `(node, sequence)` id would re-mint a prior incarnation's ids and the dedup would silently swallow the re-started node's writes. The id therefore carries a per-incarnation **epoch** (drawn from the deterministic entropy seam at journal construction), making `(node, epoch, sequence)` unique across restarts while staying reproducible under simulation. This is the durability analogue of the membership layer's incarnation-stamped merge.
+
 ### 7.3 The journal seam
 
 The journal is a trait, a simulation and deployment seam like `Transport` and `Clock` (actor §4.6, §7), operating on opaque, codec-encoded event bytes so it stays codec-agnostic:
@@ -320,6 +334,14 @@ pub trait Journal: Send + Sync + 'static {
     fn load(&self, grain: &GrainName, from: Seq, limit: usize)
         -> impl Future<Output = Result<Vec<(Seq, Vec<u8>)>, JournalError>> + Send;
 
+    /// The grain's committed head — the authoritative source of `head` on
+    /// rehydration (§9, invariant G3/G4). `Seq::ZERO` for a grain with no
+    /// committed events. Rehydration derives `head` from this rather than trusting
+    /// memory: the log always knows its head, and the sharded tier knows the
+    /// per-grain commit index.
+    fn head(&self, grain: &GrainName)
+        -> impl Future<Output = Result<Seq, JournalError>> + Send;
+
     /// Persist a snapshot for one grain at a committed seq (§9). Returns
     /// `Committed(at)` on success, or `NotLeader` if this node no longer leads.
     fn save_snapshot(&self, grain: &GrainName, at: Seq, state: Vec<u8>)
@@ -328,12 +350,20 @@ pub trait Journal: Send + Sync + 'static {
     /// The latest snapshot for one grain, if any (§9).
     fn load_snapshot(&self, grain: &GrainName)
         -> impl Future<Output = Result<Option<(Seq, Vec<u8>)>, JournalError>> + Send;
+
+    /// Block until this node's local view reflects every write committed as of
+    /// now — the rehydration barrier (§9). A no-op on a synchronous single-node
+    /// store; on the sharded tier it waits for the committed stream to drain. The
+    /// wait MAY be bounded (so a pathological backlog cannot wedge an activation
+    /// indefinitely); the host's contiguity guard (§6) is the backstop for any
+    /// residue, so a bounded barrier never folds onto a stale head.
+    fn catch_up(&self) -> impl Future<Output = ()> + Send { async {} }
 }
 
 pub enum AppendOutcome {
     Committed(Seq),          // durable on a quorum; the new head (for a snapshot, the snapshot seq)
     NotLeader(NodeId),       // this node no longer leads the shard; redirect (§8)
-    Unavailable(String),     // the shard cannot reach a quorum; the grain pauses (§11)
+    Unavailable(String),     // quorum unreachable, OR the commit timed out (ambiguous); pause (§11)
 }
 
 pub enum JournalError {
@@ -352,11 +382,21 @@ The seam admits multiple implementations; two are reference tiers, chosen at dep
 
 ### 7.5 Reads
 
-A command that emits no events (a query) commits nothing (§6 step 2). The leader serves it from the grain's in-memory state. Linearizable reads use Raft's read-index or a leader lease, so a deposed leader does not serve a stale read; an implementation MAY offer a relaxed read that skips this for grains that tolerate staleness. Reads scale with the leaders' capacity and never wait on replication. (Reads from shard followers are a deferred extension, §16.)
+A command that emits no events (a query) commits nothing (§6 step 2). The leader serves it from the grain's in-memory activation — a local, replication-free read. This is the property Durable Objects prize: a read is served by the single owner with **no per-read consensus**, so it is effectively zero-latency (DO §4.3, §4.4). Reads scale with the leaders' capacity and never wait on replication.
 
-### 7.6 The shard map lives in the control plane
+**The contract is read-your-leader (relaxed), not linearizable under partition.** Because the activation is colocated with the shard leader (§5.2) and the read path does not reconfirm leadership per call, a leader that has been deposed but not yet fenced — an isolated minority leader that has not yet learned it lost the election — MAY serve a stale read until its activation stops. Writes never fork (Raft fences the commit, §8); only reads can be stale, and only on the minority side of a partition. A caller that needs a linearizable read in the meantime issues a trivial *writing* command (one that emits an event): it rides the §6 output gate, so it commits through the shard leader and reflects committed state, or fails (`NotLeader`/`Unavailable`) on a deposed leader.
 
-The **shard map** records, for each shard, its key range and its replica set, and tracks current leadership. It lives in the actor framework's **leader-based control plane** (actor §9.4.3), whose log already reserves room for "shard allocation" (actor §9.4.3 item 6). Its write rate is low: it changes on shard splits and merges (§7.7), on replica-set reconfiguration, and on node membership changes, never on a grain activation or a grain write. Nodes cache the map and refresh on `NotLeader` (§5.4), so steady-state routing adds no control-plane traffic. Granary therefore requires the leader-based control-plane mode; the pure gossip-based AP mode (actor §9.4.4) cannot host the shard map (this is the consistency-versus-availability tradeoff of actor §12, resolved toward CP).
+**Linearizable reads are a deferred upgrade (§16), via a leader lease — not a per-read consensus round.** The DO-faithful mechanism is single-instance fencing, not a Raft read-index: the leader serves reads locally while it holds a **check-quorum lease** (it has heard from a quorum within an election timeout, so no other leader can have been elected), and the activation **self-fences** — returning `Unavailable`/`NotLeader` — when the lease lapses, trading availability for consistency on the minority side (CP, §11). This keeps steady-state reads local and zero-latency, unlike a read-index, which would pay a quorum round-trip per read and defeat read scaling (§7.8). (Reads from shard *followers* are a separate deferred extension, §16.)
+
+### 7.6 The shard map is a consensus-agreed allocation
+
+The **shard map** records, for each shard, its key range and its replica set, and tracks current leadership. It MUST be **consensus-agreed**, so every node resolves a name to the same replica set regardless of join order: a rendezvous choice each node snapshots from its own *live* membership view would diverge across nodes that join at different membership epochs. The reference implementation realizes this as a **per-grain-type Raft group whose committed log *is* the allocation** (one `Assign { shard, replicas }` record per shard); every node applies the identical committed entries and so agrees on where each shard lives. This map group is keyed by grain type and derives its group id from a reserved shard index, so it never collides with a data shard's group (§8.2).
+
+A leader-only **allocator** keeps each shard's committed replica set equal to its rendezvous choice over the current cluster voters, and a leader-only **reconcile** loop drives each group it leads (the map group and the shards it leads) toward its intended membership — so shards rebalance onto and off of changed members as the cluster grows or shrinks. A node that is newly a replica creates the shard's group as a non-member over the *old* replica set (no election disruption) and catches up the committed prefix by replication before the reconcile loop adds it as a voter.
+
+The map's write rate is low: it changes on shard splits and merges (§7.7), on replica-set reconfiguration, and on node membership changes, never on a grain activation or a grain write. Nodes cache the map and refresh on `NotLeader` (§5.4), so steady-state routing adds no map-group traffic (invariant **G9**). The map group seeds its membership from the actor framework's **leader-based control plane** (actor §9.4.3): granary therefore requires the leader-based control-plane mode; the pure gossip-based AP mode (actor §9.4.4) cannot agree a shard map (this is the consistency-versus-availability tradeoff of actor §12, resolved toward CP).
+
+> **Note.** An earlier draft stored the allocation *inside* the control-plane group's own log (actor §9.4.3 item 6). The implementation instead runs a dedicated per-type map group seeded from the control plane's voters; the guarantee (a single consensus-agreed allocation, off the grain data path) is identical, but the consensus-group count is `O(shards) + O(grain types)` rather than `O(shards)` alone (§8.2, **G7**).
 
 ### 7.7 Splitting and merging shards
 
@@ -392,13 +432,14 @@ Because consensus is sharded (§7.1), the cost of "one leader per object" is pai
 
 A tempting alternative pins each grain's writer with a clock-based lease and a monotonic fencing token. Raft subsumes both: leadership is a quorum fact, not a clock fact, so a paused leader that wakes is already deposed and cannot commit, regardless of clock skew, and no separate token is needed. The grain keeps a per-grain `Seq` only to order its own events and to align snapshots with the log (§9), never to arbitrate writers.
 
-### 8.2 The actor control plane and the shards, side by side
+### 8.2 The actor control plane, the shard maps, and the shards, side by side
 
-Two consensus layers operate, at very different rates, and they do not conflict:
-- the **actor control plane** (one leader-based group, actor §9.4.3) owns membership and the shard map (§7.6), changing on cluster events;
+Three consensus layers operate, at very different rates, and they do not conflict:
+- the **actor control plane** (one leader-based group, actor §9.4.3) owns cluster membership and seeds the map groups' voters, changing on cluster events;
+- the **shard map** per grain type (one group per type, §7.6) owns the allocation — which nodes form each shard and which key range it covers — changing on splits, merges, reconfiguration, and membership;
 - the **shards** (O(shards) groups) own the data, changing on every write.
 
-The control plane decides *which nodes form a shard and which key range it covers*; the shard's own Raft decides *which replica leads it and in what order entries commit*. Neither is on the other's hot path.
+A shard map decides *which nodes form a shard and which key range it covers*; the shard's own Raft decides *which replica leads it and in what order entries commit*. Every group derives a distinct, non-colliding group id (the membership control group is id 0; a shard map uses a reserved shard index; data shards hash `(grain_type, index)`), so none is on another's hot path. The total group count is `O(shards) + O(grain types) + 1`, still bounded by split/merge (§7.7) and the number of hosted types — never O(grains) (**G7**).
 
 ### 8.3 Failover
 
@@ -411,7 +452,8 @@ When a shard's leader fails or is partitioned away, the shard's replicas elect a
 Replaying a long event history on every activation is wasteful, so a grain periodically snapshots its folded state.
 
 - **Snapshot policy.** After a commit, the host MAY persist a snapshot `(head, State)` for the grain via `save_snapshot` (§7.3). The trigger (every *N* events, every *T* of growth) is configuration, not part of the model. Only the shard leader writes snapshots, so a deposed leader cannot (its `save_snapshot` returns `NotLeader`).
-- **Rehydration (§10).** On activation the leader loads the grain's latest snapshot `(s_seq, s_state)`, then replays its events after `s_seq`, folding via `apply`, to reach the head. Both reads are local to the leader (§5.2). The head is set **only** from journal/snapshot returns, never trusted from a prior activation's memory (invariant **G3**).
+- **The rehydration barrier (§10).** Before reading the head, the leader MUST wait until its local view reflects every write committed as of activation. A freshly-elected leader has every committed entry in its Raft log, but the colocated read model (§7.5) serves from an in-memory projection of the committed stream, which may still be draining the backlog at the instant of activation. Reading the head from a still-draining projection would rebuild a short state and then serve stale reads or fold onto a stale head. The barrier (`catch_up`, the journal seam) closes that window; it is a no-op on the single-node tier, whose store *is* the committed state.
+- **Rehydration (§10).** On activation, after the barrier, the leader loads the grain's latest snapshot `(s_seq, s_state)`, then replays its events after `s_seq`, folding via `apply`, to reach the head. Both reads are local to the leader (§5.2). The head is set **only** from journal/snapshot returns, never trusted from a prior activation's memory (invariant **G3**).
 - **A snapshot MUST NOT shorten the effective log.** If a snapshot's `s_seq` exceeds the grain's committed head, the host MUST ignore it and replay from `ZERO`. The journal is always the authority; the snapshot is only an optimization (invariant **G4**).
 
 Compaction (truncating event prefixes for a grain once a durable snapshot covers them) is a background operation of the shard, below the seam; it MUST NOT remove any event not yet covered by a durable snapshot. Per-grain snapshots let the shard compact a grain's history independently of its shard-mates.
@@ -423,12 +465,12 @@ Compaction (truncating event prefixes for a grain once a durable snapshot covers
 A grain's lifecycle, from the host's view, is a loop of:
 
 ```
-activate → rehydrate (snapshot + replay, §9) → on_activate → serve commands → idle → (snapshot) → on_passivate → stop
+activate → rehydrate (snapshot + replay, §9) → on_activate → serve commands → idle → on_passivate → (snapshot) → stop
 ```
 
 - **Activation** is triggered by the first message for the name reaching its shard leader's gateway (§5.3). The leader rehydrates the grain (§9), runs `on_activate`, then serves. Activation takes no consensus and no network: the leader holds the log locally (§5.2).
 - **Migration** follows shard leadership. When the shard's leader changes (§8.3), the grain's activation moves to the new leader and rehydrates there. In-memory state is never preserved across the move; the journal rebuilds it.
-- **Hibernation (deactivate-on-idle).** After an idle interval the leader MAY snapshot, run `on_passivate`, and `ctx.stop()`, dropping the grain's in-memory state. The gateway prunes the name from its activation table (it watches its hosts via death watch, actor §12). The next message re-activates and rehydrates. Hibernation reclaims memory; persisted storage survives; in-memory state was only ever a cache (§1).
+- **Hibernation (deactivate-on-idle).** After an idle interval the leader MAY run `on_passivate`, snapshot to bound the next replay, and `ctx.stop()`, dropping the grain's in-memory state. (`on_passivate` cannot mutate state — §4.3 — so it runs before or after the snapshot indistinguishably; the implementation runs it first.) The gateway prunes the name from its activation table (it watches its hosts via death watch, actor §12). The next message re-activates and rehydrates. Hibernation reclaims memory; persisted storage survives; in-memory state was only ever a cache (§1).
   - **Default and tuning.** `idle_after` SHOULD default to about **10 seconds**, matching the Durable Objects eviction window (DO §5), because reactivation is a cheap local replay (§5.2). To avoid thrashing when a grain is accessed just slower than the timer, an implementation SHOULD apply a small minimum residency or jitter so a barely-idle grain is not evicted and reloaded repeatedly.
 - **Eviction races.** If a command reaches the gateway for a name whose host has stopped but whose `Terminated` has not yet pruned the table, the host `ask` returns `CallError::DeadLetter`; the gateway MUST treat that as "reactivate" (drop the stale entry and activate afresh), bounded to avoid a loop.
 
@@ -446,7 +488,7 @@ When a node fails (actor §8.1):
 3. **Watchers.** A grain MAY be watched as any actor; watchers receive `Terminated { NodeDown }` (actor §12) for the activation.
 4. **Re-activation.** The next message re-activates each affected grain on its shard's new leader, which rehydrates from the log (§9). No acknowledged write is lost (invariant **G14**).
 
-**Quorum loss is unavailability, not a fork (CP).** If a shard cannot reach a quorum (enough of its replicas are down or partitioned away), it elects no leader and commits nothing. `append` returns `Unavailable`, and every grain in that shard pauses writes (§6 step 6): effects are not applied, the reply is `GrainError::Unavailable`, and callers retry or fail over. The shard does not fork, because a minority cannot commit (Raft). Only that shard's grains are affected; the rest of the cluster serves normally. A grain leader holding a valid read lease MAY continue to serve linearizable reads (§7.5).
+**Quorum loss is unavailability, not a fork (CP).** If a shard cannot reach a quorum (enough of its replicas are down or partitioned away), it elects no leader and commits nothing. `append` returns `Unavailable`, and every grain in that shard pauses writes (§6 step 6): effects are not applied, the reply is `GrainError::Unavailable`, and the affected activation steps down (the outcome is ambiguous — a timed-out commit MAY land later, §7.2/§7.3 — so the in-memory head is no longer trusted; the next access rehydrates from the journal). Callers retry or fail over. The shard does not fork, because a minority cannot commit (Raft). Only that shard's grains are affected; the rest of the cluster serves normally. Reads remain read-your-leader (§7.5): until the leader lease of §7.5/§16 exists, an isolated minority leader cannot fence itself and MAY serve a stale read, though it can commit nothing; with the lease, a leader holding a valid one MAY keep serving linearizable reads.
 
 ---
 
@@ -492,13 +534,13 @@ These invariants appear as MUSTs above; collected here, they are the contract a 
 
 | | Invariant | Defined in |
 |---|---|---|
-| **G1** | **Single writer per grain.** Only the shard leader appends; Raft elects one leader per term and a deposed leader cannot commit, so a grain's log never forks. | §6, §8 |
+| **G1** | **Single writer per grain.** Only the shard leader appends; Raft elects one leader per term and a deposed leader cannot commit, so a grain's log never forks. A commit advances the grain's head by exactly the batch appended; the host folds only such a contiguous commit and steps down on any other outcome. | §6, §8 |
 | **G2** | **Deterministic fold.** `apply` produces identical state on live commit and on replay from any snapshot/journal prefix. | §4.1 |
 | **G3** | **Journal is the source of truth.** `head` and state derive only from journal/snapshot returns; in-memory state is never trusted across activation. | §1, §9 |
 | **G4** | **Snapshot never shortens the log.** A snapshot seq beyond a grain's committed head is ignored; replay always reaches the true head. | §9 |
 | **G5** | **Reply iff durable.** A command's reply is released, and its events folded, only after the entry commits; a `NotLeader`/`Unavailable` outcome yields an error, no fold, no success reply. | §6 |
 | **G6** | **Exactly-once activation per node.** The serial gateway activates a name at most once; concurrent requests find the same host. | §5.3 |
-| **G7** | **Bounded consensus groups.** The cluster runs O(shards) Raft groups, kept bounded by split/merge, never O(grains) and never one. | §7.1, §7.7 |
+| **G7** | **Bounded consensus groups.** The cluster runs `O(shards) + O(grain types)` Raft groups (data shards plus one shard-map group per type, §7.6), kept bounded by split/merge, never O(grains) and never one. | §7.1, §7.6, §7.7 |
 | **G8** | **Activation without consensus.** Activating or hibernating a grain touches no consensus group and no network; only shard membership/leadership/split does. | §5.2, §7.8, §10 |
 | **G9** | **Control plane off the data path.** The shard map changes only on cluster events; no grain write or activation contacts it. | §7.6 |
 | **G10** | **Type-safe calls.** A command a grain has no `GrainHandler` for does not compile. | §4.3 |
@@ -518,6 +560,7 @@ Named here, specified elsewhere or later, so the core stays small:
 
 - **Durable alarms.** A stored timer (`set_alarm` → `alarm()` handler) that re-activates a grain with no caller present (DO §5). The basis for retries, timeouts, and batch flushes.
 - **Hibernatable connections.** Parking WebSocket/stream connections across hibernation, re-delivering via callbacks (DO §5), so a grain sleeps without dropping clients.
+- **Linearizable reads (leader lease).** A check-quorum leader lease that lets the activation self-fence when it can no longer confirm shard ownership, so a deposed/isolated leader stops serving reads rather than returning stale state (§7.5). The DO-faithful single-instance fence; cheaper than a per-read Raft read-index. Requires a check-quorum/lease primitive on the shards' Raft engine (a leader that has not heard from a quorum within an election timeout is no longer lease-valid).
 - **Follower reads.** Serving reads from a shard's followers with a freshness bound, trading linearizability for read scale (§7.5).
 - **Cross-grain sagas.** Idempotent multi-grain workflows built above the single-grain consistency boundary (non-goal §2.2).
 - **Optional `#[derive(Grain)]`.** Defaulting the manifest and `register` list, as actor §4.4 permits for actors: a convenience above the model, never required.
@@ -532,8 +575,9 @@ let system = ClusterSystem::start("node-a", config_leader_based).await?;
 
 // --- Host grains of type Account: registers the gateway and joins/leads shards ---
 let accounts: Granary<Account> = system.granary(GranaryConfig {
+    shards: 16,                             // partitions of this type's namespace (§7.1)
     replication_factor: 3,                  // replicas per shard (§7.1)
-    shard_target_bytes: 256 << 20,          // split a shard past this size (§7.7)
+    shard_target_bytes: 256 << 20,          // split a shard past this size (§7.7, deferred)
     idle_after: Duration::from_secs(10),    // hibernation window, matches DO (§10)
     snapshot_every: 256,                    // events (§9)
 });
@@ -554,17 +598,24 @@ match acct.ask(Withdraw { cents: 500 }).await {
 
 ```
 granary/                 # the grain runtime, built on actor-core + actor-cluster
-  grain.rs               # Grain, GrainHandler, GrainCtx, GrainName, Seq,
+  grain.rs               # Grain, GrainHandler, GrainCtx, GrainName,
                          #   GrainRegistry (the per-grain dispatch builder, §4, §5.5)
   host.rs                # the host actor: durability protocol, rehydrate, hibernate (§6, §9, §10)
   gateway.rs             # per-node gateway: routing, activation table, NotLeader redirect (§5.3, §5.4)
-  ref.rs                 # GrainRef + the system extension (`granary`/`grain`) (§4.3, §5.4)
+  grainref.rs            # GrainRef + Granary handle + the system extension (`granary`/`grain`) (§4.3, §5.4)
   shard.rs               # the shard: a Raft group over a key range; per-grain append/load/snapshot (§7)
-  shardmap.rs            # the shard map in the actor control plane; split/merge (§7.6, §7.7)
-  journal.rs             # the Journal seam + AppendOutcome + Seq (§7.3)
+  shardmap.rs            # the consensus-agreed shard map (per-type map group); allocator + reconcile (§7.6, §7.7)
+  journal.rs             # the Journal seam + AppendOutcome + Seq + DynJournal (§7.3)
   memory.rs              # single-node local journal (tier 1, §7.4)
+  system.rs              # the GranarySystem capability seam + name→shard/group hashing (§5.1, §7)
+  event.rs               # GrainEvent observability stream (§13)
+  config.rs              # GranaryConfig (Appendix A)
   error.rs               # GrainError (§12)
 ```
+
+(`grainref.rs` rather than `ref.rs`, since `ref` is a reserved word; `system.rs`,
+`event.rs`, and `config.rs` carry the `GranarySystem` seam, the event enum, and
+the deployment config respectively.)
 
 `granary` depends on `actor-core` (the model and seams), `actor-cluster` (the
 clustered `ActorSystem`, the leader-based control plane, and the Raft

@@ -286,9 +286,14 @@ impl Invariant for SignalInBand {
 /// targeted tests in `conformance_leader.rs`. Vacuously green outside
 /// leader-based mode (no `LeaderElected` is ever emitted), so it is safe in
 /// [`default_invariants`].
+///
+/// Terms are **per Raft group** (the engine runs O(groups) independent groups,
+/// each with its own term sequence), so election safety is keyed by
+/// `(group, term)`: two groups legitimately reaching term `N` is not a double
+/// election. The membership control plane is group `0`.
 #[derive(Default)]
 pub struct OneLeaderPerTerm {
-    leaders: BTreeMap<u64, NodeId>,
+    leaders: BTreeMap<(u64, u64), NodeId>,
 }
 
 impl Invariant for OneLeaderPerTerm {
@@ -297,16 +302,16 @@ impl Invariant for OneLeaderPerTerm {
     }
 
     fn observe(&mut self, event: &Event) -> Result<(), String> {
-        if let Event::LeaderElected { node, term } = event {
-            if let Some(winner) = self.leaders.get(term) {
+        if let Event::LeaderElected { node, term, group } = event {
+            if let Some(winner) = self.leaders.get(&(*group, *term)) {
                 if winner != node {
                     return Err(format!(
-                        "two leaders elected for term {term}: {winner} and {node} \
-                         (election safety, invariant #22)"
+                        "two leaders elected for term {term} in group {group}: \
+                         {winner} and {node} (election safety, invariant #22)"
                     ));
                 }
             } else {
-                self.leaders.insert(*term, *node);
+                self.leaders.insert((*group, *term), *node);
             }
         }
         Ok(())
@@ -498,22 +503,71 @@ mod tests {
         let mut inv = OneLeaderPerTerm::default();
         let a = NodeId::new(1);
         let b = NodeId::new(2);
-        inv.observe(&Event::LeaderElected { node: a, term: 3 })
-            .unwrap();
+        let g = 0; // the control group
+        inv.observe(&Event::LeaderElected {
+            node: a,
+            term: 3,
+            group: g,
+        })
+        .unwrap();
         // The same winner re-announcing a term is tolerated; a different one is
         // an election-safety violation.
         assert!(
-            inv.observe(&Event::LeaderElected { node: a, term: 3 })
-                .is_ok()
+            inv.observe(&Event::LeaderElected {
+                node: a,
+                term: 3,
+                group: g,
+            })
+            .is_ok()
         );
         assert!(
-            inv.observe(&Event::LeaderElected { node: b, term: 3 })
-                .is_err()
+            inv.observe(&Event::LeaderElected {
+                node: b,
+                term: 3,
+                group: g,
+            })
+            .is_err()
         );
         // A later term may elect someone else.
         assert!(
-            inv.observe(&Event::LeaderElected { node: b, term: 4 })
-                .is_ok()
+            inv.observe(&Event::LeaderElected {
+                node: b,
+                term: 4,
+                group: g,
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn one_leader_per_term_is_keyed_per_group() {
+        // Two groups legitimately reaching the same term number with different
+        // leaders is not a double election — terms are per group.
+        let mut inv = OneLeaderPerTerm::default();
+        let a = NodeId::new(1);
+        let b = NodeId::new(2);
+        inv.observe(&Event::LeaderElected {
+            node: a,
+            term: 1,
+            group: 1,
+        })
+        .unwrap();
+        assert!(
+            inv.observe(&Event::LeaderElected {
+                node: b,
+                term: 1,
+                group: 2,
+            })
+            .is_ok()
+        );
+        // But a second leader for the *same* (group, term) is still a violation.
+        assert!(
+            inv.observe(&Event::LeaderElected {
+                node: b,
+                term: 1,
+                group: 1,
+            })
+            .is_err()
         );
     }
 

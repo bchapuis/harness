@@ -72,6 +72,15 @@ pub struct SimNetwork {
     events: Arc<dyn EventSink>,
     authorizer: Option<Arc<dyn Authorizer>>,
     faults: FaultPolicy,
+    /// A fixed minimum delivery latency applied to every frame (spec §18.2). It is
+    /// **not** a fault and draws no entropy — it exists so virtual time always
+    /// advances on delivery. Without it, zero-latency delivery completes
+    /// synchronously at the current instant (`SimClock::sleep(0)` is immediately
+    /// ready), and a burst of same-instant traffic — e.g. simultaneous re-election
+    /// of every Raft group a crashed node led, plus concurrent routing — can pin
+    /// the clock and starve future election timers. A small floor (a realistic LAN
+    /// latency) keeps the run deterministic while guaranteeing progress.
+    base_latency: Duration,
     stats: Arc<FaultCounters>,
 }
 
@@ -94,6 +103,9 @@ impl SimNetwork {
             events: Arc::new(()),
             authorizer: None,
             faults: FaultPolicy::default(),
+            // A small, realistic default so virtual time always advances on
+            // delivery (see the field doc). Deterministic and entropy-free.
+            base_latency: Duration::from_millis(1),
             stats: Arc::new(FaultCounters::default()),
         }
     }
@@ -101,6 +113,15 @@ impl SimNetwork {
     /// A snapshot of the faults this network has exercised so far (spec §18.3).
     pub fn fault_stats(&self) -> FaultStats {
         self.stats.snapshot()
+    }
+
+    /// Override the fixed minimum delivery latency (default 1 ms; see
+    /// [`base_latency`](Self::base_latency)). Set `Duration::ZERO` only for a test
+    /// that needs the old synchronous, same-instant delivery and is known not to
+    /// generate a starving message burst.
+    pub fn with_base_latency(mut self, base_latency: Duration) -> SimNetwork {
+        self.base_latency = base_latency;
+        self
     }
 
     /// Enable seed-controlled transport faults (spec §18.3).
@@ -352,30 +373,33 @@ impl SimNetwork {
             }
         };
 
-        if !self.faults.active() {
+        // Fast synchronous path only when there is neither a fault nor a base
+        // latency to apply — the cheapest case (spec §18.2).
+        if !self.faults.active() && self.base_latency.is_zero() {
             return sender
                 .try_send((from, frame))
                 .map_err(|_| TransportError::Unreachable);
         }
 
-        // Seeded loss (also models corruption / association loss): the node never
-        // sees the frame, so it cannot be wedged by it (spec §7.3).
-        if self
-            .entropy
-            .buggify(self.faults.drop_num, self.faults.drop_den)
-        {
-            self.stats.record_dropped();
-            return Ok(());
-        }
-
-        // Seeded duplication (spec §18.3): the framework tolerates it; the caller
-        // still sees a single outcome (§7.2).
-        let copies = if self
-            .entropy
-            .buggify(self.faults.duplicate_num, self.faults.duplicate_den)
-        {
-            self.stats.record_duplicated();
-            2
+        // Drop/duplicate are applied **only when faults are configured**, so the
+        // base-latency-only default draws no entropy here — the seeded random
+        // stream stays byte-identical to a zero-latency run, only delivery timing
+        // shifts. (`buggify` always consumes entropy, so it must not run otherwise.)
+        let copies = if self.faults.active() {
+            // Seeded loss (also models corruption / association loss): the node
+            // never sees the frame, so it cannot be wedged by it (spec §7.3).
+            if self.entropy.buggify(self.faults.drop_num, self.faults.drop_den) {
+                self.stats.record_dropped();
+                return Ok(());
+            }
+            // Seeded duplication (spec §18.3): the framework tolerates it; the
+            // caller still sees a single outcome (§7.2).
+            if self.entropy.buggify(self.faults.duplicate_num, self.faults.duplicate_den) {
+                self.stats.record_duplicated();
+                2
+            } else {
+                1
+            }
         } else {
             1
         };
@@ -400,13 +424,16 @@ impl SimNetwork {
     /// applying seeded latency. Strict monotonicity is what preserves per-pair
     /// FIFO under jitter: later-sent frames never get an earlier delivery time.
     fn reserve_pair_slot(&self, from: NodeId, to: NodeId) -> Instant {
-        let delay = if self.faults.max_latency.is_zero() {
+        // Seeded jitter only when `max_latency` is set (drawing entropy); floored by
+        // the fixed `base_latency` so every delivery is at least `now + base` — the
+        // floor draws no entropy.
+        let jitter = if self.faults.max_latency.is_zero() {
             Duration::ZERO
         } else {
             let span = self.faults.max_latency.as_nanos() as u64 + 1;
             Duration::from_nanos(self.entropy.next_u64() % span)
         };
-        let earliest = self.clock.now() + delay;
+        let earliest = self.clock.now() + jitter.max(self.base_latency);
         let mut inner = self.inner.lock().expect("network mutex poisoned");
         let deliver_at = match inner.pair_clock.get(&(from, to)) {
             Some(last) => earliest.max(*last + Duration::from_nanos(1)),

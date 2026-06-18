@@ -1,0 +1,499 @@
+//! `GrainRef`, the `Granary` handle, and the system extension (spec §4.3, §5.4).
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use actor_core::ActorRef;
+use actor_core::ActorSystem;
+use actor_core::CallError;
+use actor_core::Message;
+use actor_core::NodeId;
+use serde::Deserialize;
+use serde::Serialize;
+
+use crate::config::GranaryConfig;
+use crate::error::GrainError;
+use crate::gateway::Activate;
+use crate::gateway::Gateway;
+use crate::gateway::gateway_key;
+use crate::grain::Grain;
+use crate::grain::GrainHandler;
+use crate::grain::GrainName;
+use crate::host::Host;
+use crate::host::RunTyped;
+use crate::shardmap::ShardMapSource;
+use crate::system::GranarySystem;
+use crate::system::shard_for;
+
+/// The default deadline applied to [`GrainRef::ask`] (mirrors the actor `ask`).
+const DEFAULT_ASK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long the client-side redirect waits between resolution attempts while a
+/// shard has no reachable leader — a fresh election or a not-yet-gossiped gateway
+/// registration (§5.4). Short relative to an election timeout so convergence is
+/// observed promptly.
+const RESOLVE_BACKOFF: Duration = Duration::from_millis(50);
+
+/// Safety bound on the redirect loop; the real bound is the caller's deadline
+/// (`within`), checked each attempt. A run started during failover is absorbed
+/// rather than surfaced, so a remote call stays observably identical to a local
+/// one (invariant **G13**).
+const RESOLVE_ATTEMPTS: usize = 200;
+
+/// How long one resolution attempt waits on a gateway before treating it as
+/// stale and re-resolving — short, so a hint pointing at a just-crashed leader
+/// fails fast instead of stalling the redirect for the full deadline.
+const FORWARD_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// A node-local cache of resolved host handles, shared by every [`GrainRef`] a
+/// [`Granary`] hands out (spec §5.4). A cache hit lets a call go **straight to the
+/// host actor**, skipping the serial gateway on the steady-state hot path; the
+/// gateway then only serializes genuine activations and the `NotLeader` refresh.
+///
+/// A cached handle is returned only after a cheap, local check that its node still
+/// leads the grain's shard ([`HostCache::get`]). This is the pre-send guard that
+/// keeps a cache hit from dispatching to a **deposed** leader: a write to a crashed
+/// leader can time out, and a timeout is not safe to auto-retry (the command may
+/// have committed — at-most-once, §6, §2.2). Validating leadership before sending
+/// routes around a settled failover entirely, so the cache self-heals safely.
+///
+/// `Arc`-shared and never serialized: a `GrainRef` that crosses the wire arrives
+/// cache-less and resolves through the gateway each call.
+pub(crate) struct HostCache<G: Grain> {
+    system: G::System,
+    shards: usize,
+    hosts: Mutex<HashMap<GrainName, ActorRef<Host<G>>>>,
+}
+
+impl<G: Grain> HostCache<G> {
+    fn new(system: G::System, shards: usize) -> Arc<HostCache<G>> {
+        Arc::new(HostCache {
+            system,
+            shards,
+            hosts: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// A cached host for `name`. On a node that **replicates** the name's shard the
+    /// current leader is known locally, so a handle that no longer sits on it (the
+    /// leader moved) is proactively dropped — the pre-send guard that keeps a write
+    /// off a deposed leader (§5.4). A node that does **not** replicate the shard
+    /// cannot know the leader (`shard_leader` is `None`), so it returns the cached
+    /// handle and relies on reactive invalidation (a `NotLeader`/`DeadLetter`/
+    /// `Unreachable` outcome drops it and re-resolves). The leadership read is a
+    /// local lock read, off the network and off the control plane (invariant **G9**).
+    fn get(&self, name: &GrainName) -> Option<ActorRef<Host<G>>> {
+        let mut hosts = self.hosts.lock().expect("host cache mutex poisoned");
+        let host = hosts.get(name)?.clone();
+        match self.system.shard_leader(shard_for(G::GRAIN_TYPE, name.key(), self.shards)) {
+            // Replica node, leader moved: drop the stale handle before it is used.
+            Some(leader) if host.id().node() != leader => {
+                hosts.remove(name);
+                None
+            }
+            // Leader matches, or this node cannot tell (a non-replica): use it.
+            _ => Some(host),
+        }
+    }
+
+    fn put(&self, name: GrainName, host: ActorRef<Host<G>>) {
+        self.hosts.lock().expect("host cache mutex poisoned").insert(name, host);
+    }
+
+    fn remove(&self, name: &GrainName) {
+        self.hosts.lock().expect("host cache mutex poisoned").remove(name);
+    }
+
+    fn contains(&self, name: &GrainName) -> bool {
+        self.hosts.lock().expect("host cache mutex poisoned").contains_key(name)
+    }
+}
+
+/// The only handle to a grain (spec §4.3): it carries the [`GrainName`] and a
+/// handle to the grain type's gateway, and **never** grants access to state.
+///
+/// `Clone + Serialize + DeserializeOwned + Send + Sync`: it travels as the name
+/// plus the gateway's id, and the gateway handle rebinds on decode (the framework
+/// `ActorRef` discipline). The `G: GrainHandler<M>` bound on `ask`/`tell` proves
+/// at compile time that the grain accepts `M` (invariant **G10**).
+///
+/// It also carries an optional, **non-serialized** [`HostCache`] (present when
+/// obtained from a [`Granary`] on this node): repeated calls hit the cache and go
+/// straight to the host, off the gateway (§5.4). A `GrainRef` rebuilt from the
+/// wire, or a self-reference from [`GrainCtx`](crate::GrainCtx), has no cache and
+/// resolves through the gateway each call — correct, just not cached.
+///
+/// The system handle drives the **client-side bounded redirect** (§5.4 step 4):
+/// the gateway answers single-shot, and this ref follows `NotLeader(hint)` to the
+/// hinted node's gateway (looked up in the receptionist), backing off until the
+/// shard's leader is found or the caller's deadline expires. It is never
+/// serialized; a wire-arrived ref recovers it from its decoded `gateway` handle
+/// ([`ActorRef::system`]), which rebinds to the local system on decode (§4.4).
+pub struct GrainRef<G: Grain> {
+    name: GrainName,
+    gateway: ActorRef<Gateway<G>>,
+    system: G::System,
+    cache: Option<Arc<HostCache<G>>>,
+}
+
+// `GrainRef` travels as just its name and gateway id (the gateway rebinds on
+// decode, §4.4); the system handle and host cache are reconstructed locally.
+impl<G: Grain> Serialize for GrainRef<G> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (&self.name, &self.gateway).serialize(serializer)
+    }
+}
+
+// Decoding recovers the local system from the rebound gateway ref, so a ref
+// embedded in a message is usable on the node that receives it (§4.4). It arrives
+// cache-less and resolves through the gateway each call (correct, just not
+// cached).
+impl<'de, G: Grain> Deserialize<'de> for GrainRef<G> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (name, gateway) = <(GrainName, ActorRef<Gateway<G>>)>::deserialize(deserializer)?;
+        let system = gateway.system().clone();
+        Ok(GrainRef {
+            name,
+            gateway,
+            system,
+            cache: None,
+        })
+    }
+}
+
+// Manual `Clone`: `G` itself need not be `Clone`.
+impl<G: Grain> Clone for GrainRef<G> {
+    fn clone(&self) -> Self {
+        GrainRef {
+            name: self.name.clone(),
+            gateway: self.gateway.clone(),
+            system: self.system.clone(),
+            cache: self.cache.clone(),
+        }
+    }
+}
+
+impl<G: Grain> GrainRef<G> {
+    pub(crate) fn new(
+        name: GrainName,
+        gateway: ActorRef<Gateway<G>>,
+        system: G::System,
+        cache: Option<Arc<HostCache<G>>>,
+    ) -> GrainRef<G> {
+        GrainRef {
+            name,
+            gateway,
+            system,
+            cache,
+        }
+    }
+
+    /// This grain's name.
+    pub fn name(&self) -> &GrainName {
+        &self.name
+    }
+
+    /// Send a command and await its reply, held until the command's events are
+    /// durable (the output gate, §6). The `G: GrainHandler<M>` bound makes an
+    /// invalid call a compile error (**G10**).
+    ///
+    /// `M: Clone` so the runtime can re-issue the command if the first attempt
+    /// hits a stale cached host — one that hibernated (§10) or whose leader moved
+    /// (§8) since it was cached. The command did not commit in that case (§6), so
+    /// re-issuing is safe; the clone is of the caller's own small command value.
+    pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, GrainError>
+    where
+        G: GrainHandler<M>,
+        M: Message + Clone,
+    {
+        self.dispatch(msg, DEFAULT_ASK_TIMEOUT).await
+    }
+
+    /// [`ask`](Self::ask) with an explicit deadline.
+    pub async fn ask_timeout<M>(&self, msg: M, within: Duration) -> Result<M::Reply, GrainError>
+    where
+        G: GrainHandler<M>,
+        M: Message + Clone,
+    {
+        self.dispatch(msg, within).await
+    }
+
+    /// Fire-and-forget (spec §6): returns once the host accepts the command, not
+    /// after the commit, so it reports only enqueue-time failures and never
+    /// `Unavailable`. At-most-once — callers make it idempotent where it matters.
+    pub async fn tell<M>(&self, msg: M) -> Result<(), GrainError>
+    where
+        G: GrainHandler<M>,
+        M: Message + Clone,
+    {
+        // Attempt the cached host; only a `DeadLetter` (a hibernated host that
+        // never received the command, §10) is re-enqueued. An ambiguous failure is
+        // surfaced, not retried — a re-enqueue could double-apply (§2.2).
+        let host = self.resolve(true, DEFAULT_ASK_TIMEOUT).await?;
+        if let Err(call) = host.tell(RunTyped(msg.clone())).await {
+            if is_retriable(&call) {
+                self.invalidate();
+                let host = self.resolve(false, DEFAULT_ASK_TIMEOUT).await?;
+                return host.tell(RunTyped(msg)).await.map_err(GrainError::Call);
+            }
+            return Err(GrainError::Call(call));
+        }
+        Ok(())
+    }
+
+    /// Resolve the name to its live host (§5.4). With `use_cache`, a cached handle
+    /// is returned without touching the gateway (the steady-state fast path);
+    /// otherwise this drives the **client-side bounded redirect**: the single-shot
+    /// gateway answers `Ok(host)` if its node leads the shard, else
+    /// `NotLeader(hint)`; this follows the hint to that node's gateway (looked up
+    /// in the receptionist), backing off while the shard elects, until the leader
+    /// is found or the caller's deadline (`within`) expires (§5.4 step 4). A
+    /// transient miss — bootstrap not committed, an election in flight, a hint at a
+    /// just-crashed leader — is waited out rather than surfaced, so a remote call
+    /// stays observably identical to a local one across a failover (invariant
+    /// **G13**). Driving the loop here, not in the gateway's serial handler, keeps
+    /// one slow resolution from blocking another grain's activation on that node.
+    async fn resolve(&self, use_cache: bool, within: Duration) -> Result<ActorRef<Host<G>>, GrainError> {
+        if use_cache {
+            if let Some(host) = self.cache.as_ref().and_then(|cache| cache.get(&self.name)) {
+                return Ok(host);
+            }
+        }
+        let deadline = self.system.now() + within;
+        // Start at this ref's own gateway: local for a `Granary`-minted ref (the
+        // local fast path when this node leads), the source node's for a
+        // wire-arrived one. Hints and re-discovery move it toward the leader.
+        let mut target = self.gateway.clone();
+        for _ in 0..RESOLVE_ATTEMPTS {
+            let remaining = deadline.duration_since(self.system.now());
+            if remaining.is_zero() {
+                break;
+            }
+            // Cap each attempt so a dead target fails fast and we re-resolve,
+            // rather than spending the whole deadline on one unreachable gateway.
+            let attempt = remaining.min(FORWARD_TIMEOUT);
+            match target.ask_timeout(Activate::new(self.name.clone()), attempt).await {
+                Ok(Ok(host)) => {
+                    if let Some(cache) = &self.cache {
+                        cache.put(self.name.clone(), host.clone());
+                    }
+                    return Ok(host);
+                }
+                // Follow the leader hint to that node's gateway. If it is not (yet)
+                // discoverable, keep the current target and back off — the shard is
+                // still electing or the gateway has not gossiped in.
+                Ok(Err(GrainError::NotLeader(hint))) => {
+                    if let Some(gateway) = self.gateway_on(hint) {
+                        target = gateway;
+                    }
+                }
+                // A genuine durability outcome (quorum loss / unhandled): surface it.
+                Ok(Err(other)) => return Err(other),
+                // The target gateway is unreachable (its node crashed): re-discover a
+                // live gateway to redirect from, then back off.
+                Err(_) => {
+                    if let Some(gateway) = self.any_gateway() {
+                        target = gateway;
+                    }
+                }
+            }
+            self.system.sleep(RESOLVE_BACKOFF).await;
+        }
+        // Deadline or attempt bound exhausted: surface the best hint (§12).
+        Err(GrainError::NotLeader(self.system.node()))
+    }
+
+    /// The gateway registered on `node`, if discovered in the receptionist (§5.3).
+    fn gateway_on(&self, node: NodeId) -> Option<ActorRef<Gateway<G>>> {
+        self.system
+            .receptionist()
+            .lookup(gateway_key::<G>())
+            .into_vec()
+            .into_iter()
+            .find(|gateway| gateway.id().node() == node)
+    }
+
+    /// Any discovered gateway — used to escape a dead starting target (§5.4).
+    fn any_gateway(&self) -> Option<ActorRef<Gateway<G>>> {
+        self.system
+            .receptionist()
+            .lookup(gateway_key::<G>())
+            .into_vec()
+            .into_iter()
+            .next()
+    }
+
+    /// Drop the cached host handle for this name, so the next [`resolve`] goes back
+    /// through the gateway. Called when a cached host turns out to be stale.
+    fn invalidate(&self) {
+        if let Some(cache) = &self.cache {
+            cache.remove(&self.name);
+        }
+    }
+
+    /// Resolve the host and send the typed command, held until durable (§6). The
+    /// first attempt prefers the cache (straight to the host, off the gateway); if
+    /// that host turns out unusable, the cache entry is dropped and the command
+    /// re-issued — but **only when the first attempt provably did not run** (a
+    /// `NotLeader`, which never commits, §8; or a `DeadLetter` from a hibernated
+    /// host, §10). An ambiguous transport failure (`Unreachable`/`Timeout`) is
+    /// surfaced, never auto-retried, because the command may have committed before
+    /// the reply was lost — re-issuing a non-idempotent command would double-apply
+    /// (at-most-once, §2.2; reply-iff-durable, §6/G5).
+    async fn dispatch<M>(&self, msg: M, within: Duration) -> Result<M::Reply, GrainError>
+    where
+        G: GrainHandler<M>,
+        M: Message + Clone,
+    {
+        // Attempt 1: cached host (or a fresh resolution if nothing is cached).
+        let host = self.resolve(true, within).await?;
+        match host.ask_timeout(RunTyped(msg.clone()), within).await {
+            // The host's reply is itself `Result<M::Reply, GrainError>`.
+            Ok(Ok(reply)) => return Ok(reply),
+            // Leadership moved off the cached host (§8): refresh and retry.
+            Ok(Err(GrainError::NotLeader(_))) => self.invalidate(),
+            // A genuine durability outcome (quorum loss / unhandled): terminal.
+            Ok(Err(other)) => return Err(other),
+            // The cached host had hibernated and stopped, so the command never
+            // reached a handler (§10): safe to refresh and re-issue.
+            Err(call) if is_retriable(&call) => self.invalidate(),
+            // Ambiguous (Unreachable/Timeout) or otherwise terminal: surface it,
+            // never auto-retry an effectful command that may have committed (§2.2).
+            Err(call) => return Err(GrainError::Call(call)),
+        }
+
+        // Attempt 2: a fresh gateway resolution (bypassing the cache) and re-issue.
+        let host = self.resolve(false, within).await?;
+        match host.ask_timeout(RunTyped(msg), within).await {
+            Ok(result) => result,
+            Err(call) => Err(GrainError::Call(call)),
+        }
+    }
+}
+
+/// Whether a transport failure proves the command **never ran**, so re-issuing it
+/// against a fresh resolution cannot double-apply (at-most-once, §2.2; reply-iff-
+/// durable, §6/G5). Only `DeadLetter` qualifies: the cached host had hibernated
+/// and stopped, so the command dead-lettered without reaching a handler (the §10
+/// eviction race). `Unreachable`/`Timeout` are **ambiguous** — the command may
+/// have committed on a leader that then crashed before replying — so they are NOT
+/// auto-retried for an effectful command; they surface to the caller, who makes
+/// the operation idempotent where a retry matters (§2.2). A stale cached host on a
+/// crashed leader is instead dropped *before* the send by the cache's leadership
+/// pre-send guard ([`HostCache::get`]), so a read still self-heals without relying
+/// on this ambiguous path.
+fn is_retriable(call: &CallError) -> bool {
+    matches!(call, CallError::DeadLetter)
+}
+
+/// A handle to a hosted grain type (spec Appendix A): address a grain by key and
+/// `ask`/`tell` it. Obtained from [`GranaryExt::granary`].
+pub struct Granary<G: Grain> {
+    system: G::System,
+    gateway: ActorRef<Gateway<G>>,
+    /// The number of shards the type's namespace is partitioned into (§7.1); used
+    /// to resolve a name to its shard for [`Granary::leader`]/[`Granary::replicas`].
+    shards: usize,
+    /// The consensus-agreed shard map (§7.6), read by [`Granary::replicas`].
+    shard_map: Arc<dyn ShardMapSource>,
+    /// Resolved host handles shared by every [`GrainRef`] this handle hands out, so
+    /// repeated calls skip the gateway (§5.4).
+    cache: Arc<HostCache<G>>,
+}
+
+impl<G: Grain> Clone for Granary<G> {
+    fn clone(&self) -> Self {
+        Granary {
+            system: self.system.clone(),
+            gateway: self.gateway.clone(),
+            shards: self.shards,
+            shard_map: Arc::clone(&self.shard_map),
+            cache: Arc::clone(&self.cache),
+        }
+    }
+}
+
+impl<G: Grain> Granary<G> {
+    /// Address a grain of this type by key (spec Appendix A): a [`GrainRef`] with
+    /// no activation yet — the first message activates it. The ref shares this
+    /// handle's host cache, so steady-state calls skip the gateway (§5.4).
+    pub fn grain(&self, key: impl Into<String>) -> GrainRef<G> {
+        GrainRef::new(
+            GrainName::new(G::GRAIN_TYPE, key),
+            self.gateway.clone(),
+            self.system.clone(),
+            Some(Arc::clone(&self.cache)),
+        )
+    }
+
+    /// The node that currently leads the shard a grain key maps to — where that
+    /// grain activates (§5.2) — or `None` during a shard election. A routing
+    /// observation, not a guarantee: leadership can move immediately after.
+    pub fn leader(&self, key: impl Into<String>) -> Option<NodeId> {
+        let name = GrainName::new(G::GRAIN_TYPE, key);
+        self.system
+            .shard_leader(shard_for(G::GRAIN_TYPE, name.key(), self.shards))
+    }
+
+    /// Whether a live host handle is currently cached for `key` (spec §5.4). An
+    /// optimization/observability detail — exposed for metrics and tests — not a
+    /// statement about the grain's activation on its leader.
+    pub fn is_cached(&self, key: impl Into<String>) -> bool {
+        self.cache.contains(&GrainName::new(G::GRAIN_TYPE, key))
+    }
+
+    /// The nodes that replicate the shard a grain key maps to (spec §7.6) — the
+    /// only nodes that hold its data and can lead it. Read live from the
+    /// consensus-agreed shard map (Tier 2 rebalances it as membership changes; Tier
+    /// 1 is the single node), so it reflects the latest committed allocation, not a
+    /// `granary()`-time snapshot. Exposed for metrics and tests.
+    pub fn replicas(&self, key: impl Into<String>) -> Vec<NodeId> {
+        let name = GrainName::new(G::GRAIN_TYPE, key);
+        let index = shard_for(G::GRAIN_TYPE, name.key(), self.shards).index;
+        self.shard_map.replicas(index).unwrap_or_default()
+    }
+}
+
+/// Host grains of a type on a system (spec Appendix A). Implemented for every
+/// [`GranarySystem`], so `system.granary::<G>(config)` starts the gateway and
+/// returns a [`Granary`] handle.
+pub trait GranaryExt: GranarySystem {
+    /// Start hosting grains of type `G` (spec Appendix A): spawn the type's
+    /// gateway and return the handle. The grain behavior is built by `G::default`
+    /// on each activation (the runtime instantiates the grain).
+    fn granary<G>(&self, config: GranaryConfig) -> Granary<G>
+    where
+        G: Grain<System = Self> + Default;
+}
+
+impl<T: GranarySystem> GranaryExt for T {
+    fn granary<G>(&self, config: GranaryConfig) -> Granary<G>
+    where
+        G: Grain<System = Self> + Default,
+    {
+        let shards = config.shards.max(1);
+        let replicas = config.replication_factor.max(1);
+        // Build the consensus-agreed shard map (§7.6): a per-type Raft group whose
+        // committed log is the allocation, so every node agrees on each shard's
+        // replica set and only the replicas store it. Tier 1 is a trivial
+        // single-node map. The map creates each assigned shard's group + journal as
+        // the allocation commits; routing reads the map live and the gateway's
+        // bounded redirect absorbs the brief bootstrap window.
+        let shard_map = self.shard_map(G::GRAIN_TYPE, shards, replicas);
+        let factory: Arc<dyn Fn() -> G + Send + Sync> = Arc::new(G::default);
+        let gateway = self.spawn(Gateway::new(Arc::clone(&shard_map), shards, config, factory));
+        // Register this node's gateway under the type's well-known key so other
+        // nodes route activations to it (§5.3). Each node hosting the type does
+        // this, giving one gateway entry per node.
+        self.receptionist().register(gateway_key::<G>(), &gateway);
+        Granary {
+            system: self.clone(),
+            gateway,
+            shards,
+            shard_map,
+            cache: HostCache::new(self.clone(), shards),
+        }
+    }
+}

@@ -225,6 +225,74 @@ pub struct RegistryMode {
     pub sync_interval: Duration,
 }
 
+/// A membership transition carried as the control group's application command
+/// (spec §9.4.3 item 1): the state machine the control group's replicated log
+/// drives is the member set itself. This is the application payload encoded into
+/// a Raft [`EntryPayload::App`](crate::raft::EntryPayload); the engine's own
+/// `Noop`/`AddVoter`/`RemoveVoter` entries are separate and never reach here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MembershipCommand {
+    /// Admit a node as a full `up` member (`joining → up`, or a new member).
+    Admit(NodeId),
+    /// Cordon a member for maintenance — the reversible `draining` state.
+    Drain(NodeId),
+    /// Return a drained member to `up`.
+    Resume(NodeId),
+    /// Finalize a graceful leave (`leaving → down`), committed at the departing
+    /// node's request (spec §9.3).
+    Leave(NodeId),
+    /// Declare a member terminally `down` — the detector-fed, policy-gated,
+    /// quorum-committed downing decision (spec §9.4.3 item 4, invariant #22).
+    Down(NodeId),
+}
+
+impl MembershipCommand {
+    /// The node this transition targets.
+    pub fn node(self) -> NodeId {
+        match self {
+            MembershipCommand::Admit(n)
+            | MembershipCommand::Drain(n)
+            | MembershipCommand::Resume(n)
+            | MembershipCommand::Leave(n)
+            | MembershipCommand::Down(n) => n,
+        }
+    }
+
+    /// Encode as the control group's opaque app payload. A fixed 9-byte form
+    /// (tag + little-endian node uid) — **canonical** (one value → one byte
+    /// string), so the engine's byte-equality dedup of a re-proposed command
+    /// works exactly as the old typed `RaftCommand` equality did.
+    pub fn encode(self) -> Vec<u8> {
+        let (tag, node) = match self {
+            MembershipCommand::Admit(n) => (0u8, n),
+            MembershipCommand::Drain(n) => (1, n),
+            MembershipCommand::Resume(n) => (2, n),
+            MembershipCommand::Leave(n) => (3, n),
+            MembershipCommand::Down(n) => (4, n),
+        };
+        let mut bytes = Vec::with_capacity(9);
+        bytes.push(tag);
+        bytes.extend_from_slice(&node.uid().to_le_bytes());
+        bytes
+    }
+
+    /// Decode a committed control-group app payload. `None` on a malformed or
+    /// unknown payload (defensively ignored rather than panicking).
+    pub fn decode(bytes: &[u8]) -> Option<MembershipCommand> {
+        let tag = *bytes.first()?;
+        let uid = u64::from_le_bytes(bytes.get(1..9)?.try_into().ok()?);
+        let node = NodeId::new(uid);
+        match tag {
+            0 => Some(MembershipCommand::Admit(node)),
+            1 => Some(MembershipCommand::Drain(node)),
+            2 => Some(MembershipCommand::Resume(node)),
+            3 => Some(MembershipCommand::Leave(node)),
+            4 => Some(MembershipCommand::Down(node)),
+            _ => None,
+        }
+    }
+}
+
 /// The leader-based control plane (spec §9.4.3): membership transitions are
 /// entries of a self-hosted replicated log, committed by quorum through an
 /// elected leader. The detector is a sensor feeding the leader, which alone may

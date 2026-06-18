@@ -22,6 +22,9 @@ actor-cluster = { path = "crates/actor-cluster", version = "0.1.0" }
 actor-simulation = { path = "crates/actor-simulation", version = "0.1.0" }
 actor-runtime = { path = "crates/actor-runtime", version = "0.1.0" }
 
+# Granary: durable objects ("grains") built on the actor framework (granary spec).
+granary = { path = "crates/granary", version = "0.1.0" }
+
 # The agentic harness (Appendix B layout of the agentic harness spec).
 harness = { path = "crates/harness", version = "0.1.0" }
 harness-anthropic = { path = "crates/harness-anthropic", version = "0.1.0" }

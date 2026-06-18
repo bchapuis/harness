@@ -15,7 +15,9 @@
 //! via death watch, and runs the receptionist with broadcast-on-change plus
 //! periodic anti-entropy (spec §12, §13).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Weak;
 use std::time::Duration;
 
@@ -41,19 +43,25 @@ use actor_core::host::WatchDelivery;
 use actor_core::receptionist::ReceptionistState;
 use actor_serialization::Codec;
 use async_channel::Receiver;
+use async_channel::Sender;
 use futures::channel::oneshot;
 
 use crate::correlator::Correlator;
 use crate::membership::LeaderMode;
 use crate::membership::MemberStatus;
 use crate::membership::Membership;
+use crate::membership::MembershipCommand;
 use crate::membership::MembershipMode;
 use crate::membership::SwimConfig;
 use crate::protocol::CallId;
 use crate::protocol::Frame;
 use crate::protocol::ReceptionistEntry;
-use crate::raft::Raft;
-use crate::raft::RaftCommand;
+use crate::consensus::RaftLog;
+use crate::raft::Committed;
+use crate::raft::EntryPayload;
+use crate::raft::GroupId;
+use crate::raft::MultiRaft;
+use crate::raft::RaftGroup;
 use crate::raft::RaftOutput;
 use crate::registry::RegistryClient;
 use crate::registry::RegistryState;
@@ -109,6 +117,10 @@ impl Default for ClusterConfig {
     }
 }
 
+/// A subscriber to one Raft group's committed `(index, app-bytes)` stream
+/// (the [`RaftLog`](crate::RaftLog) seam).
+type CommitSink = Sender<Committed>;
+
 struct Inner<C, E, S, T> {
     clock: C,
     entropy: E,
@@ -120,8 +132,10 @@ struct Inner<C, E, S, T> {
     /// The configured control plane (spec §9.4), kept so the operator API can
     /// dispatch to the mode's authority.
     mode: MembershipMode,
-    /// The Raft instance, in leader-based mode (spec §9.4.3); `None` elsewhere.
-    raft: Option<Arc<Raft>>,
+    /// The multi-group consensus engine, in leader-based mode (spec §9.4.3);
+    /// `None` elsewhere. It hosts the membership control group ([`GroupId::CONTROL`])
+    /// and (for granary, later) a group per replicated shard.
+    raft: Option<Arc<MultiRaft>>,
     /// Resolved SWIM parameters, so loops spawned without the config (e.g. a
     /// relayed indirect probe) can still read `rtt`/`k` (spec §10).
     swim: SwimConfig,
@@ -135,6 +149,13 @@ struct Inner<C, E, S, T> {
     /// incarnation, so a relay can report it back to the requester (spec §10).
     pings: Correlator<u64, oneshot::Sender<u64>>,
     receptionist: Arc<ReceptionistState>,
+    /// Per-group subscribers to committed application entries (the [`RaftLog`]
+    /// seam, granary's sharded journal). A non-`CONTROL` group's committed
+    /// `(index, bytes)` are broadcast here in `apply_raft_output`; the control
+    /// group's entries drive membership instead and are never published.
+    ///
+    /// [`RaftLog`]: crate::RaftLog
+    commit_sinks: Mutex<BTreeMap<GroupId, Vec<CommitSink>>>,
     /// Set on a graceful stop (spec §9.3): the detector and receptionist gossip
     /// loops return once they see it. Default `false`, so a system that never
     /// stops (every simulation run) behaves exactly as before.
@@ -181,7 +202,7 @@ where
         let membership = Membership::new(node, &mode, Arc::clone(&config.events), config.joining);
         let raft = match &mode {
             MembershipMode::Leader(leader) => {
-                Some(Arc::new(Raft::new(node, &leader.raft, clock.now())))
+                Some(Arc::new(MultiRaft::new(node, &leader.raft, clock.now())))
             }
             _ => None,
         };
@@ -201,6 +222,7 @@ where
                 calls: Correlator::new(),
                 pings: Correlator::new(),
                 receptionist: Arc::new(ReceptionistState::new()),
+                commit_sinks: Mutex::new(BTreeMap::new()),
                 shutdown: std::sync::atomic::AtomicBool::new(false),
                 authorizer: config.authorizer,
             }),
@@ -306,7 +328,7 @@ where
         match &self.inner.mode {
             MembershipMode::Registry(registry) => registry.client.register(node).await.is_ok(),
             MembershipMode::Leader(leader) => {
-                self.propose_and_wait(leader, RaftCommand::Admit(node), move |m| {
+                self.propose_and_wait(leader, MembershipCommand::Admit(node), move |m| {
                     m.status(node) == Some(MemberStatus::Up)
                 })
                 .await
@@ -329,7 +351,7 @@ where
                 .await
                 .is_ok(),
             MembershipMode::Leader(leader) => {
-                self.propose_and_wait(leader, RaftCommand::Drain(node), move |m| {
+                self.propose_and_wait(leader, MembershipCommand::Drain(node), move |m| {
                     m.status(node) == Some(MemberStatus::Draining)
                 })
                 .await
@@ -349,7 +371,7 @@ where
                 .await
                 .is_ok(),
             MembershipMode::Leader(leader) => {
-                self.propose_and_wait(leader, RaftCommand::Resume(node), move |m| {
+                self.propose_and_wait(leader, MembershipCommand::Resume(node), move |m| {
                     m.status(node) == Some(MemberStatus::Up)
                 })
                 .await
@@ -370,8 +392,10 @@ where
         match &self.inner.mode {
             MembershipMode::Registry(registry) => registry.client.deregister(node).await.is_ok(),
             MembershipMode::Leader(leader) => {
-                self.propose_and_wait(leader, RaftCommand::Down(node), move |m| m.is_down(node))
-                    .await
+                self.propose_and_wait(leader, MembershipCommand::Down(node), move |m| {
+                    m.is_down(node)
+                })
+                .await
             }
             _ => false,
         }
@@ -381,29 +405,35 @@ where
     /// item 2) — a committed single-server configuration change. Leader-only:
     /// `false` anywhere else (call it on [`leader`](Self::leader)).
     pub async fn add_voter(&self, node: NodeId) -> bool {
-        self.voter_change(RaftCommand::AddVoter(node), node, true)
+        self.voter_change(EntryPayload::AddVoter(node), node, true)
             .await
     }
 
     /// **Remove a voter** from the Raft quorum (spec §9.4.3 item 2) — e.g. a
     /// voter that was declared `down` and must leave the quorum. Leader-only.
     pub async fn remove_voter(&self, node: NodeId) -> bool {
-        self.voter_change(RaftCommand::RemoveVoter(node), node, false)
+        self.voter_change(EntryPayload::RemoveVoter(node), node, false)
             .await
     }
 
-    async fn voter_change(&self, command: RaftCommand, node: NodeId, desired: bool) -> bool {
+    /// Propose a single-server voter-set change to the **control group** and wait
+    /// for it to take effect. Voter changes are engine-level entries (not app
+    /// commands), so this proposes the `EntryPayload` directly.
+    async fn voter_change(&self, change: EntryPayload, node: NodeId, desired: bool) -> bool {
         let MembershipMode::Leader(leader) = &self.inner.mode else {
             return false;
         };
         let raft = self.inner.raft.as_ref().expect("leader mode has raft");
-        if !raft.is_leader() {
+        let Some(control) = raft.group(GroupId::CONTROL) else {
+            return false;
+        };
+        if !control.is_leader() {
             return false;
         }
-        raft.propose(command);
+        control.propose(change);
         let deadline = self.inner.clock.now() + 10 * leader.raft.election_timeout;
         while self.inner.clock.now() < deadline {
-            if raft.has_voter(node) == desired {
+            if control.has_voter(node) == desired {
                 return true;
             }
             self.inner.clock.sleep(leader.raft.heartbeat_interval).await;
@@ -419,7 +449,7 @@ where
     async fn propose_and_wait(
         &self,
         leader: &LeaderMode,
-        command: RaftCommand,
+        command: MembershipCommand,
         done: impl Fn(&Membership) -> bool,
     ) -> bool {
         let deadline = self.inner.clock.now() + 10 * leader.raft.election_timeout;
@@ -435,18 +465,24 @@ where
         }
     }
 
-    /// One proposal submission (spec §9.4.3 item 1): append locally when
-    /// leading; otherwise send `RaftPropose` to the known leader, or — knowing
-    /// none yet — to every configured voter, which forward it to theirs.
-    async fn submit_proposal(&self, leader: &LeaderMode, command: RaftCommand) {
+    /// One proposal submission to the **control group** (spec §9.4.3 item 1):
+    /// append locally when leading; otherwise send `RaftPropose` to the known
+    /// leader, or — knowing none yet — to every configured voter, which forward
+    /// it to theirs. The membership command is encoded to the control group's
+    /// opaque app payload.
+    async fn submit_proposal(&self, leader: &LeaderMode, command: MembershipCommand) {
         let raft = self.inner.raft.as_ref().expect("leader mode has raft");
-        if raft.is_leader() {
-            raft.propose(command);
+        let Some(control) = raft.group(GroupId::CONTROL) else {
+            return;
+        };
+        if control.is_leader() {
+            control.propose(EntryPayload::App(command.encode()));
             return;
         }
-        if let Some(target) = raft.leader_hint() {
+        if let Some(target) = control.leader_hint() {
             let frame = Frame::RaftPropose {
-                command,
+                group: GroupId::CONTROL,
+                command: command.encode(),
                 forwarded: true,
             };
             let _ = self.inner.transport.send(target, frame).await;
@@ -454,11 +490,20 @@ where
         }
         for &voter in leader.raft.voters.iter().filter(|&&v| v != self.node()) {
             let frame = Frame::RaftPropose {
-                command,
+                group: GroupId::CONTROL,
+                command: command.encode(),
                 forwarded: false,
             };
             let _ = self.inner.transport.send(voter, frame).await;
         }
+    }
+
+    /// The Raft group `group` if this node runs the consensus engine and hosts
+    /// that group (spec §9.4.3). The receive loop routes each group's frames
+    /// through it; an unknown group is dropped. Also the basis of the
+    /// [`RaftLog`](crate::RaftLog) seam (see `consensus.rs`).
+    pub(crate) fn group(&self, group: GroupId) -> Option<Arc<RaftGroup>> {
+        self.inner.raft.as_ref().and_then(|raft| raft.group(group))
     }
 
     /// The control-plane leader as this node sees it (spec §9.4): the Raft
@@ -468,9 +513,12 @@ where
     pub fn leader(&self) -> Option<NodeId> {
         match &self.inner.mode {
             MembershipMode::Gossip(_) => self.inner.membership.coordinator(),
-            MembershipMode::Leader(_) => {
-                self.inner.raft.as_ref().and_then(|raft| raft.leader_hint())
-            }
+            MembershipMode::Leader(_) => self
+                .inner
+                .raft
+                .as_ref()
+                .and_then(|raft| raft.group(GroupId::CONTROL))
+                .and_then(|control| control.leader_hint()),
             _ => None,
         }
     }
@@ -1045,12 +1093,13 @@ async fn receive_loop<C, E, S, T>(
             // ordinary transport as system messages; a node not in leader mode
             // ignores it.
             Frame::RaftVote {
+                group,
                 term,
                 candidate,
                 last_index,
                 last_term,
             } => {
-                if let Some(raft) = &system.inner.raft {
+                if let Some(raft) = system.group(group) {
                     let out = raft.handle_vote(
                         candidate,
                         term,
@@ -1059,11 +1108,15 @@ async fn receive_loop<C, E, S, T>(
                         system.inner.clock.now(),
                         &system.inner.entropy,
                     );
-                    apply_raft_output(&system, out).await;
+                    apply_raft_output(&system, group, out).await;
                 }
             }
-            Frame::RaftVoteReply { term, granted } => {
-                if let Some(raft) = &system.inner.raft {
+            Frame::RaftVoteReply {
+                group,
+                term,
+                granted,
+            } => {
+                if let Some(raft) = system.group(group) {
                     let out = raft.handle_vote_reply(
                         from,
                         term,
@@ -1071,10 +1124,11 @@ async fn receive_loop<C, E, S, T>(
                         system.inner.clock.now(),
                         &system.inner.entropy,
                     );
-                    apply_raft_output(&system, out).await;
+                    apply_raft_output(&system, group, out).await;
                 }
             }
             Frame::RaftAppend {
+                group,
                 term,
                 leader,
                 prev_index,
@@ -1082,7 +1136,7 @@ async fn receive_loop<C, E, S, T>(
                 entries,
                 commit,
             } => {
-                if let Some(raft) = &system.inner.raft {
+                if let Some(raft) = system.group(group) {
                     let out = raft.handle_append(
                         leader,
                         term,
@@ -1093,15 +1147,16 @@ async fn receive_loop<C, E, S, T>(
                         system.inner.clock.now(),
                         &system.inner.entropy,
                     );
-                    apply_raft_output(&system, out).await;
+                    apply_raft_output(&system, group, out).await;
                 }
             }
             Frame::RaftAppendReply {
+                group,
                 term,
                 ok,
                 match_index,
             } => {
-                if let Some(raft) = &system.inner.raft {
+                if let Some(raft) = system.group(group) {
                     let out = raft.handle_append_reply(
                         from,
                         term,
@@ -1110,20 +1165,50 @@ async fn receive_loop<C, E, S, T>(
                         system.inner.clock.now(),
                         &system.inner.entropy,
                     );
-                    apply_raft_output(&system, out).await;
+                    apply_raft_output(&system, group, out).await;
                 }
             }
-            // A membership command offered to the leader (spec §9.4.3 item 1):
-            // append it when leading, forward it once when not. A forwarded
-            // proposal landing on a non-leader is dropped — the proposer's
-            // bounded re-submission handles the stale-leader case.
-            Frame::RaftPropose { command, forwarded } => {
-                if let Some(raft) = &system.inner.raft {
+            Frame::RaftInstallSnapshot {
+                group,
+                term,
+                leader,
+                snapshot_index,
+                snapshot_term,
+                voters,
+                learners,
+                data,
+            } => {
+                if let Some(raft) = system.group(group) {
+                    let out = raft.handle_install_snapshot(
+                        leader,
+                        term,
+                        snapshot_index,
+                        snapshot_term,
+                        voters,
+                        learners,
+                        data,
+                        system.inner.clock.now(),
+                        &system.inner.entropy,
+                    );
+                    apply_raft_output(&system, group, out).await;
+                }
+            }
+            // An application command offered to a group's leader (spec §9.4.3
+            // item 1): append it when leading, forward it once when not. A
+            // forwarded proposal landing on a non-leader is dropped — the
+            // proposer's bounded re-submission handles the stale-leader case.
+            Frame::RaftPropose {
+                group,
+                command,
+                forwarded,
+            } => {
+                if let Some(raft) = system.group(group) {
                     if raft.is_leader() {
-                        raft.propose(command);
+                        raft.propose(EntryPayload::App(command));
                     } else if !forwarded {
                         if let Some(target) = raft.leader_hint() {
                             let frame = Frame::RaftPropose {
+                                group,
                                 command,
                                 forwarded: true,
                             };
@@ -1136,12 +1221,140 @@ async fn receive_loop<C, E, S, T>(
     }
 }
 
-/// Act on one Raft step (spec §9.4.3): emit the election event, apply newly
-/// committed membership commands to the local view — each stamped with its
-/// commit index (spec §9.2), running the node-down cascade (spec §8.1) for a
-/// committed `Down`/`Leave` — and send the produced consensus frames.
-async fn apply_raft_output<C, E, S, T>(system: &ClusterSystem<C, E, S, T>, out: RaftOutput)
+impl<C, E, S, T> RaftLog for ClusterSystem<C, E, S, T>
 where
+    C: Clock,
+    E: Entropy,
+    S: Spawner,
+    T: Transport,
+{
+    fn node(&self) -> NodeId {
+        self.inner.host.node()
+    }
+
+    fn cluster_voters(&self) -> Vec<NodeId> {
+        // The control group's current voter set — the consensus-agreed cluster
+        // configuration, identical on every admitted node (spec §9.4.3).
+        self.inner
+            .raft
+            .as_ref()
+            .and_then(|raft| raft.group(GroupId::CONTROL))
+            .map(|control| control.voters())
+            .unwrap_or_default()
+    }
+
+    fn configured_voters(&self) -> Vec<NodeId> {
+        // The statically configured founding voter set — identical and unchanging
+        // on every node (spec §9.4.3), unlike the live `cluster_voters`.
+        match &self.inner.mode {
+            MembershipMode::Leader(leader) => leader.raft.voters.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn reconfigure_group(&self, group: GroupId, voters: Vec<NodeId>) {
+        let Some(raft) = self.group(group) else {
+            return;
+        };
+        if !raft.is_leader() {
+            return; // only the leader proposes config changes (spec §9.4.3)
+        }
+        let desired: std::collections::BTreeSet<NodeId> = voters.into_iter().collect();
+        let current: std::collections::BTreeSet<NodeId> = raft.voters().into_iter().collect();
+        for &node in desired.difference(&current) {
+            raft.propose(EntryPayload::AddVoter(node));
+        }
+        for &node in current.difference(&desired) {
+            raft.propose(EntryPayload::RemoveVoter(node));
+        }
+    }
+
+    fn create_group(&self, group: GroupId, voters: Vec<NodeId>, learners: Vec<NodeId>) {
+        if let Some(raft) = self.inner.raft.as_ref() {
+            raft.create_group(group, voters, learners, self.inner.clock.now());
+        }
+    }
+
+    fn subscribe_commits(&self, group: GroupId) -> Receiver<Committed> {
+        let (tx, rx) = async_channel::unbounded();
+        self.inner
+            .commit_sinks
+            .lock()
+            .expect("commit sinks mutex poisoned")
+            .entry(group)
+            .or_default()
+            .push(tx);
+        rx
+    }
+
+    fn compact(&self, group: GroupId, index: u64, snapshot: Vec<u8>) {
+        if let Some(raft) = self.group(group) {
+            raft.compact(index, snapshot);
+        }
+    }
+
+    async fn propose_to(&self, group: GroupId, command: Vec<u8>) {
+        let Some(raft) = self.group(group) else {
+            return;
+        };
+        if raft.is_leader() {
+            raft.propose(EntryPayload::App(command));
+            return;
+        }
+        if let Some(target) = raft.leader_hint() {
+            let frame = Frame::RaftPropose {
+                group,
+                command,
+                forwarded: true,
+            };
+            let _ = self.inner.transport.send(target, frame).await;
+            return;
+        }
+        let self_node = self.inner.host.node();
+        for voter in raft.voters().into_iter().filter(|&v| v != self_node) {
+            let frame = Frame::RaftPropose {
+                group,
+                command: command.clone(),
+                forwarded: false,
+            };
+            let _ = self.inner.transport.send(voter, frame).await;
+        }
+    }
+
+    fn group_is_leader(&self, group: GroupId) -> bool {
+        self.group(group).map(|g| g.is_leader()).unwrap_or(false)
+    }
+
+    fn group_leader(&self, group: GroupId) -> Option<NodeId> {
+        self.group(group).and_then(|g| g.leader_hint())
+    }
+
+    fn next_u64(&self) -> u64 {
+        self.inner.entropy.next_u64()
+    }
+
+    fn sleep(&self, dur: Duration) -> BoxFuture<'static, ()> {
+        let clock = self.inner.clock.clone();
+        Box::pin(async move { clock.sleep(dur).await })
+    }
+
+    fn launch(&self, task: BoxFuture<'static, ()>) {
+        self.inner.spawner.launch(task);
+    }
+}
+
+/// Act on one group's Raft step (spec §9.4.3): emit the election event (tagged
+/// with `group`), apply the group's newly committed application commands, and
+/// send the produced consensus frames. For the control group, committed commands
+/// are membership transitions — decoded and merged into the local view, each
+/// stamped with its commit index (spec §9.2), running the node-down cascade
+/// (spec §8.1) for a committed `Down`/`Leave`. Other groups' committed entries
+/// belong to their owner (granary shards, later) and are not membership.
+async fn apply_raft_output<C, E, S, T>(
+    system: &ClusterSystem<C, E, S, T>,
+    group: GroupId,
+    out: RaftOutput,
+) where
     C: Clock,
     E: Entropy,
     S: Spawner,
@@ -1151,24 +1364,58 @@ where
         system.inner.events.emit(Event::LeaderElected {
             node: system.node(),
             term,
+            group: group.value(),
         });
     }
-    for (index, command) in out.committed {
-        let (node, status) = match command {
-            RaftCommand::Admit(node) | RaftCommand::Resume(node) => (node, MemberStatus::Up),
-            RaftCommand::Drain(node) => (node, MemberStatus::Draining),
-            RaftCommand::Leave(node) | RaftCommand::Down(node) => (node, MemberStatus::Down),
-            // Voter changes are consensus-internal (the Raft instance already
-            // applied them); a Noop opens a term and carries nothing.
-            RaftCommand::AddVoter(_) | RaftCommand::RemoveVoter(_) | RaftCommand::Noop => continue,
-        };
-        let now = system.inner.clock.now();
-        if system
-            .inner
-            .membership
-            .apply_stamped(node, status, index, now)
-        {
-            system.node_down_cascade(node).await;
+    if group == GroupId::CONTROL {
+        for observation in out.committed {
+            // The control group never compacts, so it only ever applies commands.
+            let Committed::Apply { index, command } = observation else {
+                continue;
+            };
+            // The control group's app payload is a `MembershipCommand`; a
+            // malformed payload is defensively ignored, never panicked on.
+            let Some(command) = MembershipCommand::decode(&command) else {
+                continue;
+            };
+            let (node, status) = match command {
+                MembershipCommand::Admit(node) | MembershipCommand::Resume(node) => {
+                    (node, MemberStatus::Up)
+                }
+                MembershipCommand::Drain(node) => (node, MemberStatus::Draining),
+                MembershipCommand::Leave(node) | MembershipCommand::Down(node) => {
+                    (node, MemberStatus::Down)
+                }
+            };
+            let now = system.inner.clock.now();
+            if system
+                .inner
+                .membership
+                .apply_stamped(node, status, index, now)
+            {
+                system.node_down_cascade(node).await;
+            }
+        }
+    } else {
+        // An application group (granary's sharded journal): publish each
+        // committed entry to its subscribers, in commit order. The send is a
+        // synchronous `try_send` on an unbounded channel — no `.await` between
+        // draining `out.committed` and delivering — so commit order is preserved
+        // and a slow consumer cannot interleave another group's batch.
+        if !out.committed.is_empty() {
+            let mut sinks = system
+                .inner
+                .commit_sinks
+                .lock()
+                .expect("commit sinks mutex poisoned");
+            if let Some(senders) = sinks.get_mut(&group) {
+                senders.retain(|sender| !sender.is_closed());
+                for observation in &out.committed {
+                    for sender in senders.iter() {
+                        let _ = sender.try_send(observation.clone());
+                    }
+                }
+            }
         }
     }
     for (to, frame) in out.frames {
@@ -1198,21 +1445,30 @@ where
             return;
         }
         let now = system.inner.clock.now();
-        let out = raft.tick(now, &system.inner.entropy);
-        apply_raft_output(&system, out).await;
-        if raft.is_leader() {
-            for node in system.inner.membership.admission_candidates() {
-                raft.propose(RaftCommand::Admit(node));
-            }
-            for node in system.inner.membership.leaving_members() {
-                raft.propose(RaftCommand::Leave(node));
-            }
-            for node in system
-                .inner
-                .membership
-                .downing_candidates(mode.downing, now)
-            {
-                raft.propose(RaftCommand::Down(node));
+        // Tick every group; apply each group's output under its own id.
+        for (group, out) in raft.tick_all(now, &system.inner.entropy) {
+            apply_raft_output(&system, group, out).await;
+        }
+        // The control group's leader performs the membership control-plane
+        // duties, encoding each transition as the group's opaque app payload.
+        if let Some(control) = raft.group(GroupId::CONTROL) {
+            if control.is_leader() {
+                let propose = |command: MembershipCommand| {
+                    control.propose(EntryPayload::App(command.encode()));
+                };
+                for node in system.inner.membership.admission_candidates() {
+                    propose(MembershipCommand::Admit(node));
+                }
+                for node in system.inner.membership.leaving_members() {
+                    propose(MembershipCommand::Leave(node));
+                }
+                for node in system
+                    .inner
+                    .membership
+                    .downing_candidates(mode.downing, now)
+                {
+                    propose(MembershipCommand::Down(node));
+                }
             }
         }
     }

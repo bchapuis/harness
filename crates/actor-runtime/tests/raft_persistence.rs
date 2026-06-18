@@ -17,8 +17,10 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
+use actor_cluster::EntryPayload;
+use actor_cluster::GroupId;
 use actor_cluster::MemberStatus;
-use actor_cluster::RaftCommand;
+use actor_cluster::MembershipCommand;
 use actor_cluster::RaftConfig;
 use actor_cluster::RaftStorage;
 use actor_cluster::SwimConfig;
@@ -133,7 +135,12 @@ async fn a_restarted_voter_recovers_its_persisted_raft_state() {
 
     // The committed transition is on B's disk: a real term and the Drain entry,
     // exactly what §9.4.3 item 2 requires to survive.
-    let b_dir = data_dir.path().join(B.to_string());
+    // Storage is namespaced per (group, node); the membership log is the control
+    // group's.
+    let b_dir = data_dir
+        .path()
+        .join(GroupId::CONTROL.to_string())
+        .join(B.to_string());
     {
         let persisted = FileRaftStorage::open(&b_dir).unwrap().load();
         assert!(
@@ -141,10 +148,11 @@ async fn a_restarted_voter_recovers_its_persisted_raft_state() {
             "B persisted the term it participated in"
         );
         assert!(
-            persisted
-                .log
-                .iter()
-                .any(|e| e.command == RaftCommand::Drain(C)),
+            persisted.log.iter().any(|e| matches!(
+                &e.payload,
+                EntryPayload::App(bytes)
+                    if MembershipCommand::decode(bytes) == Some(MembershipCommand::Drain(C))
+            )),
             "B persisted the committed Drain entry: {:?}",
             persisted.log,
         );

@@ -15,8 +15,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::membership::MemberDigest;
-use crate::raft::LogEntry;
-use crate::raft::RaftCommand;
+use crate::raft::GroupId;
+use crate::raft::RaftEntry;
 
 /// A correlation id pairing a request with its reply on an association (spec
 /// §7.1).
@@ -117,40 +117,68 @@ pub enum Frame {
     /// having to re-broadcast.
     ReceptionistSync { entries: Vec<ReceptionistEntry> },
     /// A Raft vote request (leader-based mode, spec §9.4.3): `candidate` asks
-    /// for the vote in `term`, proving its log is up to date with its last
-    /// entry's index and term.
+    /// for the vote in `term` for Raft `group`, proving its log is up to date
+    /// with its last entry's index and term.
     RaftVote {
+        group: GroupId,
         term: u64,
         candidate: NodeId,
         last_index: u64,
         last_term: u64,
     },
     /// The reply to a [`RaftVote`](Frame::RaftVote).
-    RaftVoteReply { term: u64, granted: bool },
-    /// Raft log replication and heartbeat (spec §9.4.3): the `leader` sends the
-    /// log suffix after `(prev_index, prev_term)` plus its commit index.
+    RaftVoteReply {
+        group: GroupId,
+        term: u64,
+        granted: bool,
+    },
+    /// Raft log replication and heartbeat (spec §9.4.3): the `leader` sends
+    /// `group`'s log suffix after `(prev_index, prev_term)` plus its commit
+    /// index.
     RaftAppend {
+        group: GroupId,
         term: u64,
         leader: NodeId,
         prev_index: u64,
         prev_term: u64,
-        entries: Vec<LogEntry>,
+        entries: Vec<RaftEntry>,
         commit: u64,
     },
     /// The reply to a [`RaftAppend`](Frame::RaftAppend): on success,
     /// `match_index` is the highest replicated index; on a log mismatch it is a
     /// back-off hint.
     RaftAppendReply {
+        group: GroupId,
         term: u64,
         ok: bool,
         match_index: u64,
     },
-    /// A membership command offered to the leader (spec §9.4.3 item 1): a
-    /// non-leader node sends it to a voter, which forwards it to its leader.
+    /// A state-machine snapshot the `leader` sends a follower whose `next` has
+    /// fallen below the leader's compacted prefix (spec §9): the log entries that
+    /// would catch it up no longer exist, so the leader ships the snapshot that
+    /// subsumes them. The follower installs it (replacing its state through
+    /// `snapshot_index`) and replies with an ordinary
+    /// [`RaftAppendReply`](Frame::RaftAppendReply). `data` is the opaque
+    /// application snapshot; `voters`/`learners` are the membership as of the base.
+    RaftInstallSnapshot {
+        group: GroupId,
+        term: u64,
+        leader: NodeId,
+        snapshot_index: u64,
+        snapshot_term: u64,
+        voters: Vec<NodeId>,
+        learners: Vec<NodeId>,
+        data: Vec<u8>,
+    },
+    /// An application command offered to `group`'s leader (spec §9.4.3 item 1):
+    /// a non-leader node sends it to a voter, which forwards it to its leader.
+    /// The command is the opaque app payload (the engine's `EntryPayload::App`
+    /// bytes — for the control group, an encoded `MembershipCommand`).
     /// `forwarded` stops a stale-leader loop — a forwarded proposal landing on
     /// a non-leader is dropped, and the proposer's bounded wait reports failure.
     RaftPropose {
-        command: RaftCommand,
+        group: GroupId,
+        command: Vec<u8>,
         forwarded: bool,
     },
 }

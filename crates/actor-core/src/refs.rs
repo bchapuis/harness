@@ -120,6 +120,14 @@ impl<A: Actor> ActorRef<A> {
         &self.id
     }
 
+    /// The system this ref is bound to (the local system after decode, spec
+    /// §4.4). Lets a handle carrying an `ActorRef` recover the local system
+    /// without threading one separately — e.g. a deserialized `GrainRef`
+    /// recovering its routing system from its gateway ref.
+    pub fn system(&self) -> &A::System {
+        &self.system
+    }
+
     /// Request/response (spec §3.3), with the system default deadline. The
     /// `A: Handler<M>` bound proves at compile time that this actor accepts `M`.
     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, CallError>

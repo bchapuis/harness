@@ -1,0 +1,85 @@
+error[E0277]: the trait bound `Switch: GrainHandler<Unhandled>` is not satisfied
+  --> tests/compile_fail/unhandled_grain_ask.rs:88:24
+   |
+88 |     let _ = switch.ask(Unhandled).await;
+   |                    --- ^^^^^^^^^ unsatisfied trait bound
+   |                    |
+   |                    required by a bound introduced by this call
+   |
+help: the trait `GrainHandler<Unhandled>` is not implemented for `Switch`
+  --> tests/compile_fail/unhandled_grain_ask.rs:16:1
+   |
+16 | struct Switch;
+   | ^^^^^^^^^^^^^
+help: the following other types implement trait `GrainHandler<M>`
+  --> tests/compile_fail/unhandled_grain_ask.rs:50:1
+   |
+50 | impl GrainHandler<Toggle> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Switch` implements `GrainHandler<Toggle>`
+...
+71 | impl GrainHandler<IsOn> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Switch` implements `GrainHandler<IsOn>`
+note: required by a bound in `GrainRef::<G>::ask`
+  --> src/grainref.rs
+   |
+   |     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, GrainError>
+   |                  --- required by a bound in this associated function
+   |     where
+   |         G: GrainHandler<M>,
+   |            ^^^^^^^^^^^^^^^ required by this bound in `GrainRef::<G>::ask`
+
+error[E0277]: the trait bound `Switch: GrainHandler<Unhandled>` is not satisfied
+  --> tests/compile_fail/unhandled_grain_ask.rs:88:13
+   |
+88 |     let _ = switch.ask(Unhandled).await;
+   |             ^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `GrainHandler<Unhandled>` is not implemented for `Switch`
+  --> tests/compile_fail/unhandled_grain_ask.rs:16:1
+   |
+16 | struct Switch;
+   | ^^^^^^^^^^^^^
+help: the following other types implement trait `GrainHandler<M>`
+  --> tests/compile_fail/unhandled_grain_ask.rs:50:1
+   |
+50 | impl GrainHandler<Toggle> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Switch` implements `GrainHandler<Toggle>`
+...
+71 | impl GrainHandler<IsOn> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Switch` implements `GrainHandler<IsOn>`
+note: required by a bound in `GrainRef::<G>::ask`
+  --> src/grainref.rs
+   |
+   |     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, GrainError>
+   |                  --- required by a bound in this associated function
+   |     where
+   |         G: GrainHandler<M>,
+   |            ^^^^^^^^^^^^^^^ required by this bound in `GrainRef::<G>::ask`
+
+error[E0277]: the trait bound `Switch: GrainHandler<Unhandled>` is not satisfied
+  --> tests/compile_fail/unhandled_grain_ask.rs:88:35
+   |
+88 |     let _ = switch.ask(Unhandled).await;
+   |                                   ^^^^^ unsatisfied trait bound
+   |
+help: the trait `GrainHandler<Unhandled>` is not implemented for `Switch`
+  --> tests/compile_fail/unhandled_grain_ask.rs:16:1
+   |
+16 | struct Switch;
+   | ^^^^^^^^^^^^^
+help: the following other types implement trait `GrainHandler<M>`
+  --> tests/compile_fail/unhandled_grain_ask.rs:50:1
+   |
+50 | impl GrainHandler<Toggle> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Switch` implements `GrainHandler<Toggle>`
+...
+71 | impl GrainHandler<IsOn> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Switch` implements `GrainHandler<IsOn>`
+note: required by a bound in `GrainRef::<G>::ask`
+  --> src/grainref.rs
+   |
+   |     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, GrainError>
+   |                  --- required by a bound in this associated function
+   |     where
+   |         G: GrainHandler<M>,
+   |            ^^^^^^^^^^^^^^^ required by this bound in `GrainRef::<G>::ask`

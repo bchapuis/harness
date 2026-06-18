@@ -1,0 +1,29 @@
+[package]
+name = "granary"
+description = "Durable objects (\"grains\"): virtual, durable, single-activation actors with colocated event-sourced storage (granary spec)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-serialization.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+futures.workspace = true
+async-channel.workspace = true
+
+[dev-dependencies]
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-simulation.workspace = true
+serde = { workspace = true }
+futures.workspace = true
+trybuild.workspace = true

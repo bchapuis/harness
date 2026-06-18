@@ -10,7 +10,7 @@
 //!   [`save_term_and_vote`](RaftStorage::save_term_and_vote) by atomic replace
 //!   (write `term.tmp` → fsync → rename → fsync dir). A torn write is
 //!   impossible: a reader sees either the old record or the new one.
-//! - **`log`** — append-only framed records, one per [`LogEntry`]:
+//! - **`log`** — append-only framed records, one per [`RaftEntry`]:
 //!   `[u32 length][JSON payload][u64 FNV-1a checksum]`. Raft's
 //!   truncate-then-append maps to `set_len` at the entry's recorded offset
 //!   followed by appends; every write is fsynced before the method returns.
@@ -45,8 +45,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use actor_cluster::LogEntry;
+use actor_cluster::GroupId;
 use actor_cluster::PersistedRaft;
+use actor_cluster::RaftEntry;
 use actor_cluster::RaftStorage;
 use actor_core::NodeId;
 use serde::Deserialize;
@@ -76,8 +77,8 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// Frame one log entry: `[u32 len][payload][u64 checksum]`, all little-endian.
-fn encode_record(entry: &LogEntry) -> Vec<u8> {
-    let payload = serde_json::to_vec(entry).expect("a LogEntry always serializes");
+fn encode_record(entry: &RaftEntry) -> Vec<u8> {
+    let payload = serde_json::to_vec(entry).expect("a RaftEntry always serializes");
     let mut record = Vec::with_capacity(4 + payload.len() + 8);
     record.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     record.extend_from_slice(&payload);
@@ -89,7 +90,7 @@ fn encode_record(entry: &LogEntry) -> Vec<u8> {
 /// length)`. The scan stops at the first incomplete, oversized,
 /// checksum-failing, or unparsable record — the recovery rule: the valid
 /// prefix is the log; the tail was never acknowledged.
-fn scan_log(bytes: &[u8]) -> (Vec<LogEntry>, Vec<u64>, u64) {
+fn scan_log(bytes: &[u8]) -> (Vec<RaftEntry>, Vec<u64>, u64) {
     let mut entries = Vec::new();
     let mut offsets = Vec::new();
     let mut pos = 0usize;
@@ -108,7 +109,7 @@ fn scan_log(bytes: &[u8]) -> (Vec<LogEntry>, Vec<u64>, u64) {
         if u64::from_le_bytes(check.try_into().expect("8-byte slice")) != fnv1a(payload) {
             break;
         }
-        let Ok(entry) = serde_json::from_slice::<LogEntry>(payload) else {
+        let Ok(entry) = serde_json::from_slice::<RaftEntry>(payload) else {
             break;
         };
         offsets.push(pos as u64);
@@ -215,20 +216,31 @@ impl FileRaftStorage {
                     term,
                     voted_for,
                     log: entries,
+                    // Stage 1 leaves on-disk snapshotting unimplemented: this
+                    // storage keeps the full log and the engine's default
+                    // `save_snapshot` is a no-op here. Durable snapshots + log-prefix
+                    // truncation are a follow-up.
+                    snapshot_index: 0,
+                    snapshot_term: 0,
+                    snapshot: None,
                 },
             }),
         })
     }
 
-    /// A [`RaftConfig::storage`] factory rooted at `data_dir`: each node's
-    /// state lives in its own `data_dir/<node>/` subdirectory. Panics if a
-    /// directory cannot be opened — a voter without durable storage must not
+    /// A [`RaftConfig::storage`] factory rooted at `data_dir`: each
+    /// `(group, node)`'s state lives in its own `data_dir/<group>/<node>/`
+    /// subdirectory, so a node's several Raft groups (the membership control
+    /// group plus, for granary, a group per shard) never share a log. Panics if
+    /// a directory cannot be opened — a voter without durable storage must not
     /// start (spec §9.4.3 item 2).
     ///
     /// [`RaftConfig::storage`]: actor_cluster::RaftConfig
-    pub fn factory(data_dir: PathBuf) -> Arc<dyn Fn(NodeId) -> Arc<dyn RaftStorage> + Send + Sync> {
-        Arc::new(move |node| {
-            let dir = data_dir.join(node.to_string());
+    pub fn factory(
+        data_dir: PathBuf,
+    ) -> Arc<dyn Fn(GroupId, NodeId) -> Arc<dyn RaftStorage> + Send + Sync> {
+        Arc::new(move |group, node| {
+            let dir = data_dir.join(group.to_string()).join(node.to_string());
             let storage = FileRaftStorage::open(&dir).unwrap_or_else(|err| {
                 panic!("cannot open raft storage at {}: {err}", dir.display())
             });
@@ -255,7 +267,7 @@ impl FileRaftStorage {
 
     /// The fallible body of [`RaftStorage::append`]: truncate the log file at
     /// `from_index`'s recorded offset, then append the framed records.
-    fn persist_append(&self, from_index: u64, entries: &[LogEntry]) -> io::Result<()> {
+    fn persist_append(&self, from_index: u64, entries: &[RaftEntry]) -> io::Result<()> {
         let mut inner = self.lock();
         let from = from_index as usize;
         assert!(
@@ -278,7 +290,7 @@ impl FileRaftStorage {
             let offset = inner.end + buf.len() as u64;
             inner.offsets.push(offset);
             buf.extend_from_slice(&encode_record(entry));
-            inner.state.log.push(*entry);
+            inner.state.log.push(entry.clone());
         }
         inner.log.write_all(&buf)?;
         inner.log.sync_all()?;
@@ -306,7 +318,7 @@ impl RaftStorage for FileRaftStorage {
         inner.state.voted_for = voted_for;
     }
 
-    fn append(&self, from_index: u64, entries: &[LogEntry]) {
+    fn append(&self, from_index: u64, entries: &[RaftEntry]) {
         self.persist_append(from_index, entries)
             .unwrap_or_else(|err| {
                 panic!(
@@ -321,11 +333,21 @@ impl RaftStorage for FileRaftStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actor_cluster::EntryPayload;
     use actor_cluster::InMemoryRaftStorage;
-    use actor_cluster::RaftCommand;
 
-    fn entry(term: u64, command: RaftCommand) -> LogEntry {
-        LogEntry { term, command }
+    fn entry(term: u64, payload: EntryPayload) -> RaftEntry {
+        RaftEntry { term, payload }
+    }
+
+    /// A distinct opaque app payload (`tag` + node uid), standing in for the
+    /// membership commands these storage round-trip/truncation tests used to
+    /// carry — the engine treats `App` bytes opaquely, so any distinct,
+    /// comparable value exercises the log machinery.
+    fn app(tag: u8, uid: u64) -> EntryPayload {
+        let mut bytes = vec![tag];
+        bytes.extend_from_slice(&uid.to_le_bytes());
+        EntryPayload::App(bytes)
     }
 
     fn node(uid: u64) -> NodeId {
@@ -340,8 +362,8 @@ mod tests {
         storage.append(
             0,
             &[
-                entry(1, RaftCommand::Noop),
-                entry(3, RaftCommand::Admit(node(4))),
+                entry(1, EntryPayload::Noop),
+                entry(3, app(0, 4)),
             ],
         );
         drop(storage);
@@ -353,8 +375,8 @@ mod tests {
         assert_eq!(
             state.log,
             vec![
-                entry(1, RaftCommand::Noop),
-                entry(3, RaftCommand::Admit(node(4))),
+                entry(1, EntryPayload::Noop),
+                entry(3, app(0, 4)),
             ],
         );
     }
@@ -373,17 +395,17 @@ mod tests {
         storage.append(
             0,
             &[
-                entry(1, RaftCommand::Noop),
-                entry(1, RaftCommand::Admit(node(4))),
-                entry(1, RaftCommand::Drain(node(4))),
+                entry(1, EntryPayload::Noop),
+                entry(1, app(0, 4)),
+                entry(1, app(1, 4)),
             ],
         );
         // Raft conflict resolution: overwrite from index 1 with a higher term.
         storage.append(
             1,
             &[
-                entry(2, RaftCommand::Noop),
-                entry(2, RaftCommand::Down(node(4))),
+                entry(2, EntryPayload::Noop),
+                entry(2, app(4, 4)),
             ],
         );
         drop(storage);
@@ -392,9 +414,9 @@ mod tests {
         assert_eq!(
             reopened.load().log,
             vec![
-                entry(1, RaftCommand::Noop),
-                entry(2, RaftCommand::Noop),
-                entry(2, RaftCommand::Down(node(4))),
+                entry(1, EntryPayload::Noop),
+                entry(2, EntryPayload::Noop),
+                entry(2, app(4, 4)),
             ],
         );
     }
@@ -406,8 +428,8 @@ mod tests {
         storage.append(
             0,
             &[
-                entry(1, RaftCommand::Noop),
-                entry(1, RaftCommand::Leave(node(9))),
+                entry(1, EntryPayload::Noop),
+                entry(1, app(3, 9)),
             ],
         );
         drop(storage);
@@ -423,13 +445,13 @@ mod tests {
         assert_eq!(
             reopened.load().log,
             vec![
-                entry(1, RaftCommand::Noop),
-                entry(1, RaftCommand::Leave(node(9)))
+                entry(1, EntryPayload::Noop),
+                entry(1, app(3, 9))
             ],
             "the torn tail is not part of the log",
         );
         // The recovery truncated the garbage; appends land cleanly after it.
-        reopened.append(2, &[entry(2, RaftCommand::Noop)]);
+        reopened.append(2, &[entry(2, EntryPayload::Noop)]);
         drop(reopened);
         let again = FileRaftStorage::open(dir.path()).unwrap();
         assert_eq!(again.load().log.len(), 3);
@@ -441,7 +463,7 @@ mod tests {
         let storage = FileRaftStorage::open(dir.path()).unwrap();
         storage.append(
             0,
-            &[entry(1, RaftCommand::Noop), entry(1, RaftCommand::Noop)],
+            &[entry(1, EntryPayload::Noop), entry(1, EntryPayload::Noop)],
         );
         drop(storage);
 
@@ -455,7 +477,7 @@ mod tests {
         let reopened = FileRaftStorage::open(dir.path()).unwrap();
         assert_eq!(
             reopened.load().log,
-            vec![entry(1, RaftCommand::Noop)],
+            vec![entry(1, EntryPayload::Noop)],
             "the half-written record is dropped; the valid prefix survives",
         );
     }
@@ -466,7 +488,7 @@ mod tests {
         let storage = FileRaftStorage::open(dir.path()).unwrap();
         storage.append(
             0,
-            &[entry(1, RaftCommand::Noop), entry(1, RaftCommand::Noop)],
+            &[entry(1, EntryPayload::Noop), entry(1, EntryPayload::Noop)],
         );
         drop(storage);
 
@@ -511,31 +533,31 @@ mod tests {
     fn file_storage_matches_in_memory_storage_across_reopens() {
         enum Op {
             Save(u64, Option<u64>),
-            Append(u64, Vec<LogEntry>),
+            Append(u64, Vec<RaftEntry>),
         }
         let ops = vec![
             Op::Save(1, Some(1)),
-            Op::Append(0, vec![entry(1, RaftCommand::Noop)]),
-            Op::Append(1, vec![entry(1, RaftCommand::Admit(node(4)))]),
+            Op::Append(0, vec![entry(1, EntryPayload::Noop)]),
+            Op::Append(1, vec![entry(1, app(0, 4))]),
             Op::Save(2, None),
             Op::Save(2, Some(3)),
             // Conflict: overwrite index 1 onward at the new term.
             Op::Append(
                 1,
                 vec![
-                    entry(2, RaftCommand::Noop),
-                    entry(2, RaftCommand::Drain(node(4))),
+                    entry(2, EntryPayload::Noop),
+                    entry(2, app(1, 4)),
                 ],
             ),
-            Op::Append(3, vec![entry(2, RaftCommand::Resume(node(4)))]),
+            Op::Append(3, vec![entry(2, app(2, 4))]),
             // Truncate everything back to empty, then rebuild.
-            Op::Append(0, vec![entry(3, RaftCommand::Noop)]),
+            Op::Append(0, vec![entry(3, EntryPayload::Noop)]),
             Op::Save(4, Some(2)),
             Op::Append(
                 1,
                 vec![
-                    entry(4, RaftCommand::AddVoter(node(5))),
-                    entry(4, RaftCommand::Down(node(4))),
+                    entry(4, EntryPayload::AddVoter(node(5))),
+                    entry(4, app(4, 4)),
                 ],
             ),
         ];
