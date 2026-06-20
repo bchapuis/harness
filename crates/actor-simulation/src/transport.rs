@@ -222,7 +222,9 @@ impl SimNetwork {
             node,
             self.clock.clone(),
             self.entropy.clone(),
-            self.spawner.clone(),
+            // Tag the node's spawner with its id so all its tasks can be frozen as a
+            // unit by `pause` (spec §18.3); child tasks inherit the tag.
+            self.spawner.clone().with_domain(node.uid()),
             transport,
             rx,
             config,
@@ -321,6 +323,22 @@ impl SimNetwork {
         }
     }
 
+    /// Sever communication in **one direction only** (spec §18.3): frames from any
+    /// node in `from` to any node in `to` are dropped, but the reverse direction
+    /// keeps flowing. This is the asymmetric ("one-way" / half-open) partition that
+    /// symmetric `partition` cannot express — the source of zombie leaders, where a
+    /// deposed leader still *receives* traffic (so it can be told it is stale) but
+    /// cannot *reach* a quorum, or the reverse, where it keeps heartbeating outward
+    /// but never hears the votes that would let it commit. `heal` clears it.
+    pub fn partition_one_way(&self, from: &[NodeId], to: &[NodeId]) {
+        let mut inner = self.inner.lock().expect("network mutex poisoned");
+        for &f in from {
+            for &t in to {
+                inner.blocked.insert((f, t));
+            }
+        }
+    }
+
     /// Isolate a node from every peer (spec §18.3) — a crash, as seen by the
     /// rest of the cluster: its frames are dropped in both directions.
     pub fn crash(&self, node: NodeId) {
@@ -344,6 +362,25 @@ impl SimNetwork {
         if let Some(sender) = sender {
             let _ = sender.try_send((from, frame));
         }
+    }
+
+    /// **Freeze a node** (spec §18.3): its tasks stop being polled, so it makes no
+    /// progress at all — a process pause / VM freeze / long GC stall. Unlike `crash`,
+    /// the node keeps its state and its inbound frames queue up, to be processed when
+    /// it resumes. Virtual time is global and keeps advancing, but while frozen no
+    /// task code runs: a paused leader does not climb its term, so when it wakes it
+    /// is cleanly behind and discovers it is deposed (§8.1, "a paused leader that
+    /// wakes is already deposed"). This is the case symmetric partition cannot make.
+    /// `resume` thaws it; the backlog then drains and any timers that came due in the
+    /// meantime fire at once.
+    pub fn pause(&self, node: NodeId) {
+        self.spawner.set_paused(node.uid(), true);
+    }
+
+    /// Thaw a node frozen by [`pause`](SimNetwork::pause): its queued inbound frames
+    /// drain and its overdue timers fire, so it rejoins and reconciles (spec §18.3).
+    pub fn resume(&self, node: NodeId) {
+        self.spawner.set_paused(node.uid(), false);
     }
 
     /// Clear all partitions/crashes — the network heals (spec §9.2).

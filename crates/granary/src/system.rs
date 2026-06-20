@@ -102,12 +102,20 @@ pub(crate) fn group_id_for(shard: ShardId) -> GroupId {
 /// cluster while moving only `~1/N` of shards when membership changes. `members`
 /// is assumed sorted (the tie-break) and non-empty; `replicas` is clamped to it.
 pub(crate) fn select_replicas(members: &[NodeId], group: GroupId, replicas: usize) -> (Vec<NodeId>, Vec<NodeId>) {
+    // Rendezvous (HRW) score per node. The group id MUST be hashed, not XORed in
+    // raw: `group_id_for` derives a type's shard groups as `BASE ^ (index+1)`, so
+    // consecutive shards' ids differ only in the low ~4 bits. XORing that raw into a
+    // per-node constant leaves the high-order bits — which dominate the sort — fixed,
+    // so every shard would rank the nodes identically and pile onto the same R
+    // replicas with the same leader. Diffusing the id through `fnv1a` first spreads
+    // those low-bit differences across all 64 bits, so each shard gets an independent
+    // ranking and shards spread their replicas and leadership across the cluster.
     let mut scored: Vec<(u64, NodeId)> = members
         .iter()
         .map(|&node| {
             let score = fnv1a(&node.uid().to_le_bytes())
                 .wrapping_mul(0x0000_0100_0000_01b3)
-                ^ group.0;
+                ^ fnv1a(&group.0.to_le_bytes());
             (score, node)
         })
         .collect();
@@ -281,6 +289,42 @@ mod tests {
         // shards spread their leadership/replication across the cluster.
         let other = select_replicas(&members, GroupId(43), 3);
         assert_eq!(other.0.len(), 3);
+    }
+
+    #[test]
+    fn select_replicas_spreads_shards_across_the_cluster() {
+        // Regression for the rendezvous bug: the prior code XORed the raw group id
+        // into a per-node constant, but `group_id_for` derives a type's shard groups
+        // as `BASE ^ (index+1)` — differing only in the low ~4 bits — so every shard
+        // ranked the nodes identically and piled onto the SAME R replicas, leaving
+        // other nodes idle. Verified here with the *realistic* group ids (not the
+        // far-apart literals the deterministic test uses): distinct shards must land
+        // on more than one replica set, and every node must replicate some shard, or
+        // the §7.1/§7.8 load-spreading premise is broken.
+        let members = nodes(&[1, 2, 3, 4, 5]);
+        let mut sets = std::collections::BTreeSet::new();
+        let mut covered = std::collections::BTreeSet::new();
+        for index in 0..16u32 {
+            let group = group_id_for(ShardId {
+                grain_type: "bank.Account",
+                index,
+            });
+            let (voters, _) = select_replicas(&members, group, 3);
+            for v in &voters {
+                covered.insert(*v);
+            }
+            sets.insert(voters);
+        }
+        assert!(
+            sets.len() > 1,
+            "shards must not all collapse onto one replica set (got {} distinct sets)",
+            sets.len(),
+        );
+        assert_eq!(
+            covered.len(),
+            5,
+            "every node must replicate at least one shard — no idle nodes (covered {covered:?})",
+        );
     }
 
     #[test]

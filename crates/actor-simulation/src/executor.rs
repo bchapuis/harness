@@ -12,6 +12,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::BinaryHeap;
 use std::future::Future;
 use std::sync::Arc;
@@ -38,6 +39,18 @@ pub(crate) type Shared = Arc<Mutex<Inner>>;
 struct Task {
     /// `None` only while the task is mid-poll (taken out to avoid re-entrancy).
     future: Mutex<Option<BoxFuture<'static, ()>>>,
+    /// The node ("domain") this task belongs to, for pause/resume (spec §18.3).
+    /// `None` for test-driver tasks (`block_on`, a bare `sim.spawner()`), which
+    /// are never frozen. Set from the spawning node's tagged spawner, and
+    /// inherited by child tasks via [`CURRENT_DOMAIN`].
+    domain: Option<u64>,
+}
+
+thread_local! {
+    /// The node whose task is currently being polled, so any child task spawned
+    /// during that poll inherits its domain even through an untagged spawner. The
+    /// executor is single-threaded, so a thread-local `Cell` is deterministic.
+    static CURRENT_DOMAIN: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 /// A registered timer: fire `waker` once virtual time reaches `deadline`.
@@ -82,6 +95,11 @@ pub(crate) struct Inner {
     timers: BinaryHeap<Timer>,
     next_task_id: u64,
     next_seq: u64,
+    /// Frozen domains (spec §18.3). A paused node's tasks stay ready but are not
+    /// polled, so it makes no progress and its inbound frames queue; its timers
+    /// still fire (re-readying the task) but never run until it resumes. Empty in
+    /// every run that uses no pause, so scheduling is then byte-identical.
+    paused: BTreeSet<u64>,
 }
 
 impl Inner {
@@ -93,6 +111,16 @@ impl Inner {
             timers: BinaryHeap::new(),
             next_task_id: 0,
             next_seq: 0,
+            paused: BTreeSet::new(),
+        }
+    }
+
+    /// Freeze (`paused = true`) or thaw a node's tasks (spec §18.3).
+    pub(crate) fn set_paused(&mut self, domain: u64, paused: bool) {
+        if paused {
+            self.paused.insert(domain);
+        } else {
+            self.paused.remove(&domain);
         }
     }
 
@@ -111,13 +139,14 @@ impl Inner {
         });
     }
 
-    fn spawn(&mut self, future: BoxFuture<'static, ()>) {
+    fn spawn(&mut self, future: BoxFuture<'static, ()>, domain: Option<u64>) {
         let id = self.next_task_id;
         self.next_task_id += 1;
         self.tasks.insert(
             id,
             Arc::new(Task {
                 future: Mutex::new(Some(future)),
+                domain,
             }),
         );
         self.ready.push(id);
@@ -151,14 +180,39 @@ impl Wake for TaskWaker {
 #[derive(Clone)]
 pub struct SimSpawner {
     shared: Shared,
+    /// The node every task launched through this handle belongs to (pause/resume).
+    /// `None` for the bare `Simulation::spawner()` used by test drivers. Each node's
+    /// system is handed a `with_domain`-tagged clone, so all its tasks carry its id.
+    domain: Option<u64>,
+}
+
+impl SimSpawner {
+    /// A clone of this spawner that tags every task it launches with `domain` (a
+    /// node id), so the node can be frozen/thawed as a unit (spec §18.3). Clones of
+    /// the result keep the tag, so the whole subtree a node spawns is tagged.
+    pub(crate) fn with_domain(mut self, domain: u64) -> SimSpawner {
+        self.domain = Some(domain);
+        self
+    }
+
+    /// Freeze or thaw a node's tasks in the shared scheduler.
+    pub(crate) fn set_paused(&self, domain: u64, paused: bool) {
+        self.shared
+            .lock()
+            .expect("scheduler mutex poisoned")
+            .set_paused(domain, paused);
+    }
 }
 
 impl actor_core::Spawner for SimSpawner {
     fn launch(&self, task: BoxFuture<'static, ()>) {
+        // A tagged spawner forces its node; an untagged one inherits the domain of
+        // the task being polled (so child tasks of a node stay with that node).
+        let domain = self.domain.or_else(|| CURRENT_DOMAIN.with(|d| d.get()));
         self.shared
             .lock()
             .expect("scheduler mutex poisoned")
-            .spawn(task);
+            .spawn(task, domain);
     }
 }
 
@@ -187,10 +241,12 @@ impl Simulation {
         SimClock::new(Arc::clone(&self.shared))
     }
 
-    /// A spawner handle backed by this runtime.
+    /// A spawner handle backed by this runtime. Untagged (domain `None`), so the
+    /// tasks a test driver launches through it are never frozen by pause/resume.
     pub fn spawner(&self) -> SimSpawner {
         SimSpawner {
             shared: Arc::clone(&self.shared),
+            domain: None,
         }
     }
 
@@ -270,10 +326,13 @@ impl Simulation {
         let out = Arc::clone(&cell);
         {
             let mut inner = self.shared.lock().expect("scheduler mutex poisoned");
-            inner.spawn(Box::pin(async move {
-                let value = future.await;
-                *out.lock().expect("result mutex poisoned") = Some(value);
-            }));
+            inner.spawn(
+                Box::pin(async move {
+                    let value = future.await;
+                    *out.lock().expect("result mutex poisoned") = Some(value);
+                }),
+                None,
+            );
         }
         self.run();
         cell.lock()
@@ -286,12 +345,37 @@ impl Simulation {
     /// seed-randomized (spec §18.3) to surface ordering-dependent bugs.
     fn take_ready(&self) -> Option<u64> {
         let mut inner = self.shared.lock().expect("scheduler mutex poisoned");
-        match inner.ready.len() {
+        // Fast path — no node is frozen. Identical to the pre-pause scheduler, so a
+        // run that never pauses draws entropy and orders tasks byte-for-byte as
+        // before (the reproducibility contract, spec §18.1).
+        if inner.paused.is_empty() {
+            return match inner.ready.len() {
+                0 => None,
+                1 => Some(inner.ready.swap_remove(0)),
+                n => {
+                    let idx = self.entropy.pick_index(n).expect("non-empty");
+                    Some(inner.ready.swap_remove(idx))
+                }
+            };
+        }
+        // A node is frozen: choose only among ready tasks whose domain is not
+        // paused. The rest stay in `ready`, unpolled, until the node resumes.
+        let eligible: Vec<usize> = inner
+            .ready
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| match inner.tasks.get(id).and_then(|t| t.domain) {
+                Some(domain) => !inner.paused.contains(&domain),
+                None => true, // untagged (driver) tasks are never frozen
+            })
+            .map(|(i, _)| i)
+            .collect();
+        match eligible.len() {
             0 => None,
-            1 => Some(inner.ready.swap_remove(0)),
+            1 => Some(inner.ready.swap_remove(eligible[0])),
             n => {
-                let idx = self.entropy.pick_index(n).expect("non-empty");
-                Some(inner.ready.swap_remove(idx))
+                let k = self.entropy.pick_index(n).expect("non-empty");
+                Some(inner.ready.swap_remove(eligible[k]))
             }
         }
     }
@@ -320,7 +404,12 @@ impl Simulation {
         let Some(mut future) = slot.take() else {
             return;
         };
-        match future.as_mut().poll(&mut cx) {
+        // Make this task's node the current domain for the poll, so anything it
+        // spawns inherits it; restore the previous domain afterward.
+        let prev = CURRENT_DOMAIN.with(|d| d.replace(task.domain));
+        let poll = future.as_mut().poll(&mut cx);
+        CURRENT_DOMAIN.with(|d| d.set(prev));
+        match poll {
             Poll::Ready(()) => {
                 drop(slot);
                 self.shared

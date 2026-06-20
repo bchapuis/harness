@@ -1,4 +1,4 @@
-//! Linearizability checking over a live actor (spec §18.4).
+//! Conformance: linearizability checking over a live actor (spec §18.4).
 //!
 //! A register actor is hammered by several concurrent client processes issuing
 //! reads, writes, and compare-and-sets. Each client records its operations into a

@@ -638,6 +638,125 @@ fn storage_distributes_and_non_replicas_still_route() {
     }
 }
 
+#[test]
+fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
+    // G11 / §11 BLAST RADIUS: "only that shard's grains are affected; the rest of
+    // the cluster serves normally." This is the whole point of sharded consensus —
+    // a quorum loss is contained to one shard. Every other test either runs one
+    // shard or puts both shards' replicas on all three nodes, so a quorum loss
+    // takes out everything; none proves containment. Here: 5 nodes, R=3, several
+    // shards on *different* replica sets. We kill the two followers of shard X
+    // (X's leader survives but loses quorum) while leaving shard Y a full quorum,
+    // and prove a grain in X pauses with `Unavailable` while a grain in Y commits
+    // — in the same run, same instant.
+    let sim = Simulation::new(7);
+    // Seed only {A,B,C} as control voters (as `leader_net`/the rebalance tests do),
+    // then promote D and E — listing all five in RaftConfig would make them voters
+    // already, so `add_voter` would be a no-op.
+    let net = leader_net(&sim);
+    let systems: Vec<SimCluster> = [A, B, C, D, E].iter().map(|&n| net.join(n)).collect();
+    sim.run_for(Duration::from_secs(2));
+    const SHARDS: usize = 8;
+    let cfg = GranaryConfig {
+        shards: SHARDS,
+        replication_factor: 3,
+        idle_after: Duration::from_secs(60),
+        snapshot_every: 8,
+        ..GranaryConfig::default()
+    };
+    let granaries: Vec<Granary<Account>> =
+        systems.iter().map(|s| s.granary::<Account>(cfg.clone())).collect();
+    // The allocator spreads shards over `cluster_voters()`; the RaftConfig listing
+    // D and E is not enough — they must be admitted to the control quorum, exactly
+    // as the rebalance tests do, or every shard collapses onto the same 3 voters.
+    add_control_voter(&sim, &systems, D);
+    add_control_voter(&sim, &systems, E);
+    sim.run_for(Duration::from_secs(6)); // allocator spreads shards; elect leaders
+
+    // Probe keys to learn each shard's (representative key, replicas, leader).
+    let mut shard_of: std::collections::BTreeMap<u32, (String, Vec<NodeId>, NodeId)> =
+        std::collections::BTreeMap::new();
+    for i in 0..80u64 {
+        let key = format!("account/{i}");
+        let idx = granary::shard_for("bank.Account", &key, SHARDS).index;
+        if let std::collections::btree_map::Entry::Vacant(slot) = shard_of.entry(idx) {
+            let replicas = granaries[0].replicas(&key);
+            if let Some(leader) = granaries[0].leader(&key) {
+                if replicas.len() == 3 && replicas.contains(&leader) {
+                    slot.insert((key, replicas, leader));
+                }
+            }
+        }
+    }
+
+    // Find a target shard X (kill its two followers) and a bystander shard Y that
+    // keeps a quorum once those two are gone, with Y's leader still alive.
+    let mut chosen: Option<((String, NodeId), (String, NodeId), [NodeId; 2])> = None;
+    'outer: for (_xi, (xkey, xreplicas, xleader)) in &shard_of {
+        let followers: Vec<NodeId> = xreplicas.iter().copied().filter(|&n| n != *xleader).collect();
+        let victims = [followers[0], followers[1]];
+        for (_yi, (ykey, yreplicas, yleader)) in &shard_of {
+            if ykey == xkey {
+                continue;
+            }
+            let y_survivors = yreplicas.iter().filter(|n| !victims.contains(n)).count();
+            if !victims.contains(yleader) && y_survivors >= 2 {
+                chosen = Some(((xkey.clone(), *xleader), (ykey.clone(), *yleader), victims));
+                break 'outer;
+            }
+        }
+    }
+    let ((xkey, xleader), (ykey, yleader), victims) = chosen.expect(
+        "found a shard X to isolate and a shard Y that keeps quorum — requires shards to \
+         spread across replica sets (see the select_replicas rendezvous fix)",
+    );
+    let xleader_idx = systems.iter().position(|s| s.node() == xleader).unwrap();
+    let yleader_idx = systems.iter().position(|s| s.node() == yleader).unwrap();
+
+    // Baseline: both grains commit while healthy.
+    for (idx, key, amount) in [(xleader_idx, xkey.clone(), 100u64), (yleader_idx, ykey.clone(), 200)] {
+        let g = granaries[idx].clone();
+        let label = key.clone();
+        let committed =
+            drive(&sim, Duration::from_secs(8), async move { g.grain(key).ask(Deposit { cents: amount }).await });
+        assert!(matches!(committed, Ok(_)), "baseline commit for {label} failed: {committed:?}");
+    }
+
+    // Kill shard X's two followers: X's leader survives but can no longer reach a
+    // quorum; shard Y is untouched (its quorum and leader are intact).
+    for v in victims {
+        net.crash(v);
+    }
+    sim.run_for(Duration::from_secs(2));
+
+    // Shard X: the write proposes on the surviving leader but never commits.
+    let x_outcome = {
+        let g = granaries[xleader_idx].clone();
+        let xkey = xkey.clone();
+        drive(&sim, Duration::from_secs(13), async move {
+            g.grain(xkey).ask_timeout(Deposit { cents: 9 }, Duration::from_secs(12)).await
+        })
+    };
+    assert!(
+        matches!(x_outcome, Err(GrainError::Unavailable(_))),
+        "the isolated shard must pause with Unavailable, got {x_outcome:?}",
+    );
+
+    // Shard Y, in the SAME run: still has a quorum, so its grain commits normally.
+    let y_outcome = {
+        let g = granaries[yleader_idx].clone();
+        let ykey = ykey.clone();
+        drive(&sim, Duration::from_secs(9), async move {
+            g.grain(ykey).ask_timeout(Deposit { cents: 5 }, Duration::from_secs(8)).await
+        })
+    };
+    assert_eq!(
+        y_outcome,
+        Ok(205),
+        "a bystander shard keeps serving while another shard has lost quorum (G11 blast radius)",
+    );
+}
+
 // --- Concurrent linearizability across a shard-leader failover ----------------
 //
 // The strongest cross-node correctness check: concurrent clients on *different*
@@ -874,4 +993,133 @@ fn activations_and_writes_leave_the_shard_map_unchanged() {
         leaders_before, leaders_after,
         "no activation or write moved a shard's leadership (G8/G9)",
     );
+}
+
+// --- Atomic multi-event batch: no observer ever sees a partial command --------
+//
+// §7.3 / §6: "all of a command's events commit in one Raft entry, so no observer
+// ever sees a partial command." Every other grain here emits exactly ONE event
+// per command, so the all-or-nothing property of a multi-event batch has never
+// been exercised. `Pair` emits TWO events per write — `IncA` then `IncB` — that
+// jointly preserve the invariant `a == b`. A reader that ever observed `a != b`
+// would prove a torn batch: the entry committed (or folded) one event without the
+// other. We hammer one `Pair` grain with concurrent writers and readers while its
+// shard leader is crashed mid-run, so a torn commit at the failover boundary (an
+// entry partially applied on the old leader, or a half-batch surviving) would be
+// caught. The invariant must hold on every read, on every seed.
+
+#[derive(Default)]
+struct Pair;
+
+#[derive(Default, Serialize, Deserialize)]
+struct PairState {
+    a: i64,
+    b: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+enum PairEvent {
+    IncA,
+    IncB,
+}
+
+impl Grain for Pair {
+    type System = SimCluster;
+    type State = PairState;
+    type Event = PairEvent;
+    const GRAIN_TYPE: &'static str = "test.Pair";
+
+    fn apply(state: &mut PairState, event: &PairEvent) {
+        match event {
+            PairEvent::IncA => state.a += 1,
+            PairEvent::IncB => state.b += 1,
+        }
+    }
+
+    fn register(r: &mut granary::GrainRegistry<Self>) {
+        r.accept::<Bump>();
+        r.accept::<ReadPair>();
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Bump;
+impl Message for Bump {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("test.Bump");
+}
+
+impl GrainHandler<Bump> for Pair {
+    async fn handle(&self, _state: &PairState, _msg: Bump, _ctx: &GrainCtx<Self>) -> (Vec<PairEvent>, ()) {
+        // Two events in one command — they must commit and fold atomically.
+        (vec![PairEvent::IncA, PairEvent::IncB], ())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ReadPair;
+impl Message for ReadPair {
+    type Reply = (i64, i64);
+    const MANIFEST: Manifest = Manifest::new("test.ReadPair");
+}
+
+impl GrainHandler<ReadPair> for Pair {
+    async fn handle(&self, state: &PairState, _msg: ReadPair, _ctx: &GrainCtx<Self>) -> (Vec<PairEvent>, (i64, i64)) {
+        (vec![], (state.a, state.b))
+    }
+}
+
+#[test]
+fn a_multi_event_command_commits_atomically_across_failover() {
+    for seed in 0..12 {
+        let sim = Simulation::new(seed);
+        let net = leader_net(&sim);
+        let systems = vec![net.join(A), net.join(B), net.join(C)];
+        sim.run_for(Duration::from_secs(2));
+        let granaries: Vec<Granary<Pair>> =
+            systems.iter().map(|s| s.granary::<Pair>(config())).collect();
+        sim.run_for(Duration::from_secs(3));
+
+        let key = "pair/0";
+        let leader = granaries[0].leader(key).expect("the shard elected a leader");
+        let survivors: Vec<usize> =
+            systems.iter().enumerate().filter(|(_, s)| s.node() != leader).map(|(i, _)| i).collect();
+
+        // Concurrent writers and readers on the survivor nodes; every read asserts
+        // the invariant a == b (a partial batch would break it).
+        let torn = Arc::new(Mutex::new(Vec::<(i64, i64)>::new()));
+        for &idx in &survivors {
+            let granary = granaries[idx].clone();
+            let torn = Arc::clone(&torn);
+            let entropy = systems[0].entropy().clone();
+            sim.spawner().launch(Box::pin(async move {
+                let pair = granary.grain(key);
+                for _ in 0..8 {
+                    if entropy.next_u64() % 2 == 0 {
+                        let _ = pair.ask_timeout(Bump, Duration::from_secs(8)).await;
+                    } else if let Ok((a, b)) = pair.ask_timeout(ReadPair, Duration::from_secs(8)).await {
+                        if a != b {
+                            torn.lock().unwrap().push((a, b));
+                        }
+                    }
+                }
+            }));
+        }
+
+        // Crash the shard leader partway through, forcing a failover mid-traffic.
+        let crasher = net.clone();
+        sim.spawner().launch(Box::pin(async move {
+            systems[0].clock().sleep(Duration::from_millis(400)).await;
+            crasher.crash(leader);
+        }));
+
+        sim.run_for(Duration::from_secs(30));
+
+        let torn = torn.lock().unwrap();
+        assert!(
+            torn.is_empty(),
+            "seed {seed}: a read observed a partial multi-event command (a != b): {torn:?} — \
+             the batch did not commit/fold atomically (§7.3)",
+        );
+    }
 }

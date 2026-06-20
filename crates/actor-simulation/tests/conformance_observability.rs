@@ -1,4 +1,4 @@
-//! Observability event stream (spec §16): supervision decisions and
+//! Conformance: observability event stream (spec §16): supervision decisions and
 //! `Terminated` deliveries are emitted as structured events, and
 //! `Actor::register` runs at most once per actor type (spec §4.4).
 

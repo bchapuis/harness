@@ -1,6 +1,8 @@
 //! Conformance: messaging interface — `ask` / `tell` / `ask_timeout` and the
 //! error model (spec §3.3, §6, §14). Covers the gaps the audit found; cases that
-//! already have coverage elsewhere are not duplicated here.
+//! already have coverage elsewhere are not duplicated here. Also folds in the
+//! local actor-model messaging cases from actor.rs (spec §3, §6) and the
+//! multi-node routing cases from cluster.rs (spec §4, §7, invariant #21).
 
 mod support;
 
@@ -410,4 +412,437 @@ fn when_local_is_none_for_a_remote_actor() {
             .await
     });
     assert_eq!(result, None);
+}
+
+// =============================================================================
+// Merged from actor.rs (spec §3, §6): the local actor model running on
+// `LocalSystem` — ask round-trip, registration, per-sender FIFO, serial
+// non-reentrant execution, and the bounded non-dropping mailbox.
+// =============================================================================
+mod local_model {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use actor_core::Actor;
+    use actor_core::ActorSystem;
+    use actor_core::CallError;
+    use actor_core::Clock;
+    use actor_core::Ctx;
+    use actor_core::Handler;
+    use actor_core::HandlerRegistry;
+    use actor_core::LocalSystem;
+    use actor_core::LocalSystemBuilder;
+    use actor_core::Manifest;
+    use actor_core::Message;
+    use actor_simulation::SimClock;
+    use actor_simulation::SimEntropy;
+    use actor_simulation::SimSpawner;
+    use actor_simulation::Simulation;
+    use serde::Deserialize;
+    use serde::Serialize;
+
+    /// The concrete system every test actor runs on.
+    type Sys = LocalSystem<SimClock, SimEntropy, SimSpawner>;
+
+    // --- Greeter: the Appendix A actor, local-only --------------------------------
+
+    struct Greeter {
+        greeting: String,
+        served: u64,
+    }
+
+    impl Actor for Greeter {
+        type System = Sys;
+
+        // Macro-free remote registration, folded into the actor (spec §4.4).
+        fn register(r: &mut HandlerRegistry<Self>) {
+            r.accept::<Greet>();
+        }
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Greet {
+        name: String,
+    }
+
+    impl Message for Greet {
+        type Reply = String;
+        const MANIFEST: Manifest = Manifest::new("test.Greet");
+    }
+
+    impl Handler<Greet> for Greeter {
+        async fn handle(&mut self, msg: Greet, _ctx: &Ctx<Self>) -> String {
+            self.served += 1;
+            format!("{}, {}!", self.greeting, msg.name)
+        }
+    }
+
+    #[test]
+    fn local_ask_round_trip() {
+        let sim = Simulation::new(1);
+        let system = LocalSystem::new(sim.clock(), sim.entropy(), sim.spawner());
+        let reply = sim.block_on(async move {
+            let greeter = system.spawn(Greeter {
+                greeting: "Hello".into(),
+                served: 0,
+            });
+            greeter
+                .ask(Greet {
+                    name: "world".into(),
+                })
+                .await
+        });
+        assert_eq!(reply, Ok("Hello, world!".to_string()));
+    }
+
+    #[test]
+    fn registration_lists_accepted_manifests() {
+        let mut registry = HandlerRegistry::<Greeter>::default();
+        Greeter::register(&mut registry);
+        assert_eq!(registry.accepted(), &["test.Greet"]);
+    }
+
+    // --- Per-sender FIFO (spec §6, invariant #3) ----------------------------------
+
+    struct Log {
+        seen: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl Actor for Log {
+        type System = Sys;
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Note(u64);
+
+    impl Message for Note {
+        type Reply = ();
+        const MANIFEST: Manifest = Manifest::new("test.Note");
+    }
+
+    impl Handler<Note> for Log {
+        async fn handle(&mut self, msg: Note, _ctx: &Ctx<Self>) {
+            self.seen.lock().unwrap().push(msg.0);
+        }
+    }
+
+    #[test]
+    fn messages_from_one_sender_keep_fifo_order() {
+        let sim = Simulation::new(5);
+        let system = LocalSystem::new(sim.clock(), sim.entropy(), sim.spawner());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+
+        sim.block_on(async move {
+            let log = system.spawn(Log { seen: recorded });
+            for i in 0..10u64 {
+                log.tell(Note(i)).await.unwrap();
+            }
+        });
+
+        assert_eq!(*seen.lock().unwrap(), (0..10).collect::<Vec<_>>());
+    }
+
+    // --- Serial, non-reentrant execution (spec §6, invariant #4) ------------------
+
+    struct Guard {
+        active: Arc<AtomicBool>,
+        clock: SimClock,
+    }
+
+    impl Actor for Guard {
+        type System = Sys;
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Work;
+
+    impl Message for Work {
+        // `true` if the handler observed exclusive access; `false` on overlap.
+        type Reply = bool;
+        const MANIFEST: Manifest = Manifest::new("test.Work");
+    }
+
+    impl Handler<Work> for Guard {
+        async fn handle(&mut self, _msg: Work, _ctx: &Ctx<Self>) -> bool {
+            if self.active.swap(true, Ordering::SeqCst) {
+                return false; // someone else is already inside — reentrancy!
+            }
+            // Suspend mid-handler; a non-serial executor could start another message.
+            self.clock.sleep(Duration::from_millis(10)).await;
+            self.active.store(false, Ordering::SeqCst);
+            true
+        }
+    }
+
+    #[test]
+    fn executor_is_serial_and_non_reentrant() {
+        let sim = Simulation::new(0);
+        let system = LocalSystem::new(sim.clock(), sim.entropy(), sim.spawner());
+        let clock = system.clock().clone();
+
+        let (a, b) = sim.block_on(async move {
+            let guard = system.spawn(Guard {
+                active: Arc::new(AtomicBool::new(false)),
+                clock,
+            });
+            let other = guard.clone();
+            futures::future::join(guard.ask(Work), other.ask(Work)).await
+        });
+
+        assert_eq!((a, b), (Ok(true), Ok(true)));
+    }
+
+    // --- Bounded, non-dropping mailbox (spec §6, invariant #5) --------------------
+
+    struct Sink;
+
+    impl Actor for Sink {
+        type System = Sys;
+    }
+
+    impl Handler<Note> for Sink {
+        async fn handle(&mut self, _msg: Note, _ctx: &Ctx<Self>) {}
+    }
+
+    #[test]
+    fn full_mailbox_reports_mailboxfull_not_drop() {
+        let sim = Simulation::new(0);
+        let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
+            .mailbox_capacity(2)
+            .build();
+
+        // No `await` between sends, so the executor never runs and the bounded
+        // mailbox fills: the third send is rejected rather than dropped.
+        let outcome = sim.block_on(async move {
+            let sink = system.spawn(Sink);
+            let r1 = sink.try_tell(Note(1));
+            let r2 = sink.try_tell(Note(2));
+            let r3 = sink.try_tell(Note(3));
+            (r1, r2, r3)
+        });
+
+        assert_eq!(outcome, (Ok(()), Ok(()), Err(CallError::MailboxFull)));
+    }
+}
+
+// =============================================================================
+// Merged from cluster.rs (spec §4, §7): multi-node routing over the simulated
+// network — the same `ask`/`tell` call site works whether the target is local
+// or remote (invariant #21), real JSON crosses every hop, and node/actor
+// failures surface as the right `CallError`.
+// =============================================================================
+mod remote_routing {
+    use actor_core::Actor;
+    use actor_core::ActorSystem;
+    use actor_core::CallError;
+    use actor_core::Ctx;
+    use actor_core::Handler;
+    use actor_core::HandlerRegistry;
+    use actor_core::Manifest;
+    use actor_core::Message;
+    use actor_core::NodeId;
+    use actor_core::Path;
+    use actor_simulation::SimCluster;
+    use actor_simulation::SimNetwork;
+    use actor_simulation::Simulation;
+    use serde::Deserialize;
+    use serde::Serialize;
+
+    type Sys = SimCluster;
+
+    struct Greeter {
+        greeting: String,
+    }
+
+    impl Actor for Greeter {
+        type System = Sys;
+
+        fn register(r: &mut HandlerRegistry<Self>) {
+            r.accept::<Greet>();
+        }
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Greet {
+        name: String,
+    }
+
+    impl Message for Greet {
+        type Reply = String;
+        const MANIFEST: Manifest = Manifest::new("test.Greet");
+    }
+
+    impl Handler<Greet> for Greeter {
+        async fn handle(&mut self, msg: Greet, _ctx: &Ctx<Self>) -> String {
+            format!("{}, {}!", self.greeting, msg.name)
+        }
+    }
+
+    /// A two-node network on one simulation.
+    fn two_nodes(seed: u64) -> (Simulation, SimCluster, SimCluster) {
+        let sim = Simulation::new(seed);
+        let net = SimNetwork::new(&sim);
+        let a = net.join(NodeId::new(1));
+        let b = net.join(NodeId::new(2));
+        (sim, a, b)
+    }
+
+    #[test]
+    fn remote_ask_crosses_nodes() {
+        let (sim, node_a, node_b) = two_nodes(1);
+        let reply = sim.block_on(async move {
+            let greeter = node_a.spawn(Greeter {
+                greeting: "Hello".into(),
+            });
+            // node_b holds no local actor for this id, so the call routes to node_a.
+            let remote = node_b.resolve::<Greeter>(greeter.id().clone());
+            remote
+                .ask(Greet {
+                    name: "world".into(),
+                })
+                .await
+        });
+        assert_eq!(reply, Ok("Hello, world!".to_string()));
+    }
+
+    #[test]
+    fn location_transparency_local_vs_remote() {
+        // Differential check (invariant #21): identical replies from the same call
+        // site, target local versus remote.
+        let (sim, node_a, node_b) = two_nodes(2);
+        let (local, remote) = sim.block_on(async move {
+            let greeter = node_a.spawn(Greeter {
+                greeting: "Hi".into(),
+            });
+            let id = greeter.id().clone();
+            let local = greeter.ask(Greet { name: "x".into() }).await;
+            let remote = node_b
+                .resolve::<Greeter>(id)
+                .ask(Greet { name: "x".into() })
+                .await;
+            (local, remote)
+        });
+        assert_eq!(local, remote);
+        assert_eq!(local, Ok("Hi, x!".to_string()));
+    }
+
+    // --- A counter to exercise remote tell + per-pair FIFO ------------------------
+
+    struct Counter {
+        n: u64,
+    }
+
+    impl Actor for Counter {
+        type System = Sys;
+
+        fn register(r: &mut HandlerRegistry<Self>) {
+            r.accept::<Inc>();
+            r.accept::<Get>();
+        }
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Inc;
+
+    impl Message for Inc {
+        type Reply = ();
+        const MANIFEST: Manifest = Manifest::new("test.Inc");
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Get;
+
+    impl Message for Get {
+        type Reply = u64;
+        const MANIFEST: Manifest = Manifest::new("test.Get");
+    }
+
+    impl Handler<Inc> for Counter {
+        async fn handle(&mut self, _msg: Inc, _ctx: &Ctx<Self>) {
+            self.n += 1;
+        }
+    }
+
+    impl Handler<Get> for Counter {
+        async fn handle(&mut self, _msg: Get, _ctx: &Ctx<Self>) -> u64 {
+            self.n
+        }
+    }
+
+    #[test]
+    fn remote_tells_then_ask_observe_fifo() {
+        let (sim, node_a, node_b) = two_nodes(3);
+        let count = sim.block_on(async move {
+            let counter = node_a.spawn(Counter { n: 0 });
+            let remote = node_b.resolve::<Counter>(counter.id().clone());
+            // tell/ask from one sender to one recipient are FIFO (spec §6, §7.2).
+            for _ in 0..5 {
+                remote.tell(Inc).await.unwrap();
+            }
+            remote.ask(Get).await
+        });
+        assert_eq!(count, Ok(5));
+    }
+
+    // --- Failure modes over the wire ----------------------------------------------
+
+    #[test]
+    fn ask_to_missing_remote_actor_is_dead_letter() {
+        let (sim, _node_a, node_b) = two_nodes(4);
+        let result = sim.block_on(async move {
+            // A well-formed id on node 1, but no such actor was ever spawned.
+            let ghost = actor_core::ActorId::new(NodeId::new(1), Path::new("/user/404"), 0);
+            node_b
+                .resolve::<Greeter>(ghost)
+                .ask(Greet { name: "x".into() })
+                .await
+        });
+        assert_eq!(result, Err(CallError::DeadLetter));
+    }
+
+    #[test]
+    fn ask_to_unknown_node_is_unreachable() {
+        let (sim, _node_a, node_b) = two_nodes(5);
+        let result = sim.block_on(async move {
+            // Node 99 never joined the network.
+            let nowhere = actor_core::ActorId::new(NodeId::new(99), Path::new("/user/0"), 0);
+            node_b
+                .resolve::<Greeter>(nowhere)
+                .ask(Greet { name: "x".into() })
+                .await
+        });
+        assert_eq!(result, Err(CallError::Unreachable));
+    }
+
+    // An actor that handles a message but never registered it for remote dispatch.
+    struct Closed;
+
+    impl Actor for Closed {
+        type System = Sys;
+        // register() left as the default: accepts nothing over the wire.
+    }
+
+    impl Handler<Greet> for Closed {
+        async fn handle(&mut self, _msg: Greet, _ctx: &Ctx<Self>) -> String {
+            "unreachable by wire".into()
+        }
+    }
+
+    #[test]
+    fn unregistered_message_over_wire_is_unhandled() {
+        let (sim, node_a, node_b) = two_nodes(6);
+        let result = sim.block_on(async move {
+            let closed = node_a.spawn(Closed);
+            // Allowlist (spec §5, §15): the manifest is not registered on the target.
+            node_b
+                .resolve::<Closed>(closed.id().clone())
+                .ask(Greet { name: "x".into() })
+                .await
+        });
+        assert_eq!(result, Err(CallError::Unhandled));
+    }
 }

@@ -18,7 +18,10 @@ use std::time::Duration;
 
 use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
+use actor_cluster::DowningPolicy;
+use actor_cluster::LeaderMode;
 use actor_cluster::MembershipMode;
+use actor_cluster::RaftConfig;
 use actor_cluster::SwimConfig;
 use actor_core::Event;
 use actor_core::EventSink;
@@ -26,6 +29,7 @@ use actor_core::NodeId;
 use actor_runtime::DEFAULT_CONNECT_TIMEOUT;
 use actor_runtime::DEFAULT_HANDSHAKE_TIMEOUT;
 use actor_runtime::DEFAULT_OUTBOUND_CAPACITY;
+use actor_runtime::FileRaftStorage;
 use actor_runtime::OsEntropy;
 use actor_runtime::TcpCluster;
 use actor_runtime::TcpConfig;
@@ -195,11 +199,21 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         inbound,
         ClusterConfig {
             events: Arc::new(StderrEvents { node }),
-            // The detector must run (observe-only): it carries reachability
-            // for placement and the gossip that spreads host registrations.
-            membership: MembershipMode::Static {
-                detector: Some(SwimConfig::default()),
-            },
+            // Granary's sharded journal rides Raft, so the node must run the
+            // consensus engine: leader-based membership is the only mode that
+            // builds one (system.rs). Voters are the full roster; the shard-map
+            // and per-shard groups seed from these. Disk-backed storage under
+            // --data keeps a restarted node's term/vote, so killing a node and
+            // re-attaching stays Raft-safe (the demo's `:retry` story).
+            membership: MembershipMode::Leader(LeaderMode {
+                swim: SwimConfig::default(),
+                raft: {
+                    let mut raft = RaftConfig::new(roster.clone());
+                    raft.storage = FileRaftStorage::factory(opts.data.join("raft"));
+                    raft
+                },
+                downing: DowningPolicy::Conservative,
+            }),
             ..ClusterConfig::default()
         },
     );
@@ -388,20 +402,26 @@ fn harness_config() -> HarnessConfig {
     }
 }
 
-/// Hold the control port closed until every peer joins the membership view (or
-/// a bounded wait elapses). granary's bounded redirect absorbs a prompt issued
-/// before the shard map converges (invariant G13), so this is a UX nicety, not a
-/// correctness requirement: it makes the first prompt of a fresh cluster prompt.
+/// Hold the control port closed until the cluster has converged enough to serve:
+/// every peer is in the membership view and the control group has elected a
+/// leader (so granary's shard groups can elect too). granary's bounded redirect
+/// absorbs a prompt issued before the shard map converges (invariant G13), so
+/// this is a UX nicety, not a correctness requirement: it makes the first prompt
+/// of a fresh cluster prompt rather than bouncing off a still-electing shard.
+///
+/// `expected` is the cluster size; `members()` reports peers only (never this
+/// node, membership.rs), so the peer quorum is `expected - 1`.
 async fn wait_for_hosts(system: &TcpCluster, expected: usize) {
+    let peers = expected.saturating_sub(1);
     for _ in 0..150 {
-        if system.membership().members().len() >= expected {
-            eprintln!("[{}] all {expected} nodes joined", system.node());
+        if system.membership().members().len() >= peers && system.leader().is_some() {
+            eprintln!("[{}] cluster ready (leader elected)", system.node());
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     eprintln!(
-        "[{}] warning: not all nodes joined after 15s; serving anyway",
+        "[{}] warning: cluster not ready after 15s (no leader or peers missing); serving anyway",
         system.node()
     );
 }

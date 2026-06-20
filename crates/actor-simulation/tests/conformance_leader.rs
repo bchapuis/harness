@@ -542,3 +542,289 @@ fn a_graceful_leave_is_committed_at_the_departing_nodes_request() {
         "the finalization is a committed, stamped entry",
     );
 }
+
+#[test]
+fn a_voter_removed_during_a_partition_commits_consistently() {
+    // §9.4.3 item 2 + §18.5 #22: voter-set changes are committed configuration
+    // entries. The dangerous, previously-untested case is a *reconfiguration that
+    // races a partition* — a voter removed while it is isolated. The majority
+    // commits the change over the old config's quorum; the isolated minority can
+    // commit nothing, so it cannot fork the configuration. On heal everyone must
+    // converge on one voter set, and the cluster must keep committing throughout.
+    let sim = Simulation::new(21);
+    let net = leader_net(&sim, DowningPolicy::Conservative);
+    let a = net.join(A);
+    let b = net.join(B);
+    let c = net.join(C);
+    sim.run_for(Duration::from_secs(2));
+
+    let nodes = [&a, &b, &c];
+    let leader = elected_leader(&nodes).node();
+    // Remove a *non-leader* voter, so the leader stays on the majority side and can
+    // commit the change immediately. `keep` is the other survivor.
+    let others: Vec<NodeId> = [A, B, C].into_iter().filter(|&n| n != leader).collect();
+    let (victim, keep) = (others[0], others[1]);
+    let victim_sys = nodes.iter().find(|n| n.node() == victim).unwrap().to_owned().clone();
+    let keep_sys = nodes.iter().find(|n| n.node() == keep).unwrap().to_owned().clone();
+    let leader_sys = nodes.iter().find(|n| n.node() == leader).unwrap().to_owned().clone();
+
+    // Isolate the victim; the leader and `keep` retain a quorum of the old config.
+    net.partition(&[victim], &[leader, keep]);
+    sim.run_for(Duration::from_secs(3));
+
+    // Remove the isolated voter — committed over the old config's majority.
+    let removed = {
+        let l = leader_sys.clone();
+        drive(&sim, Duration::from_secs(12), async move { l.remove_voter(victim).await })
+    };
+    assert!(removed, "the voter removal committed on the majority during the partition");
+
+    // The cluster keeps committing over the reduced voter set: drain `keep`, a
+    // membership entry that must commit *without* the removed voter's vote.
+    let drained = {
+        let l = leader_sys.clone();
+        drive(&sim, Duration::from_secs(12), async move { l.drain(keep).await })
+    };
+    assert!(drained, "the cluster commits over the reduced voter set (the removal took effect)");
+
+    // Heal: the isolated node adopts the majority's log — there is no forked config.
+    net.heal();
+    sim.run_for(Duration::from_secs(6));
+
+    // The post-removal commit (drain of `keep`) converged. The leader and the
+    // formerly-isolated victim are both *peers* of `keep`, so they see its status
+    // in the peer map; `keep` sees its own via `self_status()`. (A node's view of
+    // itself is not in the peer map — `status(self)` is `None`.)
+    let stamp = leader_sys.membership().stamp(keep);
+    assert_eq!(
+        leader_sys.membership().status(keep),
+        Some(MemberStatus::Draining),
+        "the post-removal drain is visible on the leader",
+    );
+    assert_eq!(
+        keep_sys.membership().self_status(),
+        MemberStatus::Draining,
+        "and on `keep` itself — the reduced-config commit took effect",
+    );
+    // The formerly-isolated victim adopted the majority log on heal and holds the
+    // drain at the *same* commit index — one log order, no forked configuration.
+    assert_eq!(
+        victim_sys.membership().status(keep),
+        Some(MemberStatus::Draining),
+        "the isolated node reconverged on the majority's committed config after heal (#14)",
+    );
+    assert_eq!(
+        victim_sys.membership().stamp(keep),
+        stamp,
+        "the reconverged node holds the drain at the same commit index (no forked config, #22)",
+    );
+}
+
+// --- Asymmetric (one-way) partitions: the cases symmetric partition can't make -
+
+#[test]
+fn a_leader_that_cannot_send_is_deposed_when_it_hears_the_new_term() {
+    // §8.1 / #22: leadership is a quorum fact, not a clock fact — "a paused leader
+    // that wakes is already deposed and cannot commit." The sharp, one-way case
+    // symmetric partition cannot express: block only the leader's OUTBOUND traffic.
+    // Its followers, hearing no heartbeats, elect a new leader at a higher term;
+    // that leader's heartbeats still reach the old one (inbound is open), so the old
+    // leader learns it is deposed and steps down WITHOUT any heal — already deposed
+    // the moment it hears the newer term, exactly the §8.1 property. A new control
+    // change commits through the new leader; the old leader contributed nothing.
+    let sim = Simulation::new(31);
+    let net = leader_net(&sim, DowningPolicy::Conservative);
+    let a = net.join(A);
+    let b = net.join(B);
+    let c = net.join(C);
+    sim.run_for(Duration::from_secs(2));
+
+    let nodes = [&a, &b, &c];
+    let old_leader = elected_leader(&nodes).node();
+    let majority: Vec<NodeId> = [A, B, C].into_iter().filter(|&n| n != old_leader).collect();
+    let old_sys = nodes.iter().find(|n| n.node() == old_leader).unwrap().to_owned().clone();
+
+    // One-way: the old leader can no longer SEND to the others, but still RECEIVES.
+    net.partition_one_way(&[old_leader], &majority);
+    sim.run_for(Duration::from_secs(4)); // the majority elects a new leader
+
+    // The majority elected a new leader at a higher term.
+    let survivor = nodes.iter().find(|n| n.node() == majority[0]).unwrap();
+    let new_leader = survivor.leader().expect("the majority elected a new leader");
+    assert_ne!(new_leader, old_leader, "a new leader was elected on the reachable side");
+
+    // The crux (§8.1): the old leader, still partitioned for sending, has ALREADY
+    // stepped down — it heard the newer term on its open inbound link, with no heal.
+    assert_ne!(
+        old_sys.leader(),
+        Some(old_leader),
+        "the deposed leader stepped down on hearing the new term, without a heal (§8.1)",
+    );
+
+    // The cluster commits through the new leader while the old one is still one-way
+    // partitioned — its participation was never needed.
+    let new_sys = nodes.iter().find(|n| n.node() == new_leader).unwrap().to_owned().clone();
+    let committed = drive(&sim, Duration::from_secs(10), async move { new_sys.drain(old_leader).await });
+    assert!(committed, "the new leader commits a transition while the old leader is deposed");
+
+    net.heal();
+    sim.run_for(Duration::from_secs(4));
+    assert_eq!(b.leader(), c.leader(), "the cluster holds a single leader after heal");
+}
+
+#[test]
+fn a_send_only_leader_is_a_zombie_that_stalls_the_control_plane() {
+    // Characterization of the KNOWN gap: actor-cluster's Raft has no check-quorum,
+    // so a leader that has lost contact with a quorum does not step down on its own
+    // (granary-vv-findings). A one-way partition blocking the leader's INBOUND (it
+    // can still heartbeat OUTWARD) makes the zombie concrete: the followers keep
+    // hearing it, so they never elect; the leader never receives acks, so it can
+    // never commit; and without check-quorum it never resigns. The control plane
+    // STALLS until heal. This pins the current behavior so the day a check-quorum
+    // lease lands (the deferred upgrade), the "stalls" assertion must flip to
+    // "recovers without a heal."
+    let sim = Simulation::new(32);
+    let net = leader_net(&sim, DowningPolicy::Conservative);
+    let a = net.join(A);
+    let b = net.join(B);
+    let c = net.join(C);
+    sim.run_for(Duration::from_secs(2));
+
+    let nodes = [&a, &b, &c];
+    let leader = elected_leader(&nodes).node();
+    let others: Vec<NodeId> = [A, B, C].into_iter().filter(|&n| n != leader).collect();
+    let victim = others[0];
+    let leader_sys = nodes.iter().find(|n| n.node() == leader).unwrap().to_owned().clone();
+
+    // One-way: the others can no longer reach the leader, but the leader still
+    // heartbeats outward — so the followers keep their election timers reset.
+    net.partition_one_way(&others, &[leader]);
+    sim.run_for(Duration::from_secs(5)); // well past several election timeouts
+
+    // The zombie still believes it leads (no check-quorum deposes it), and because
+    // its heartbeats still reach the followers, no rival leader was elected either.
+    assert_eq!(
+        leader_sys.leader(),
+        Some(leader),
+        "without check-quorum the send-only leader does not step down (known gap)",
+    );
+
+    // It cannot commit, though: a transition proposed on it never gets the acks back
+    // (inbound is blocked), so the control plane is stalled — nothing commits.
+    let stalled = {
+        let l = leader_sys.clone();
+        drive(&sim, Duration::from_secs(8), async move { l.drain(victim).await })
+    };
+    assert!(!stalled, "the zombie leader cannot commit — the control plane is stalled, not progressing");
+    assert_ne!(
+        a.membership().status(victim),
+        Some(MemberStatus::Draining),
+        "no transition took effect while the leader was a send-only zombie",
+    );
+
+    // Heal restores the inbound path; the leader gets its acks and the control plane
+    // resumes. (A check-quorum lease would have recovered this WITHOUT a heal.)
+    net.heal();
+    sim.run_for(Duration::from_secs(3));
+    let recovered = {
+        let l = nodes.iter().find(|n| n.node() == a.leader().unwrap()).unwrap().to_owned().clone();
+        drive(&sim, Duration::from_secs(10), async move { l.drain(victim).await })
+    };
+    assert!(recovered, "after heal the control plane commits again");
+}
+
+// --- A frozen (paused) leader: GC-stall / VM-freeze (spec §8.1, §18.3) ---------
+
+#[test]
+fn a_paused_leader_wakes_already_deposed_and_does_not_disrupt() {
+    // §8.1: "a paused leader that wakes is already deposed and cannot commit,
+    // regardless of clock skew, and no separate token is needed" — leadership is a
+    // quorum fact, not a clock fact. This exercises a *true execution freeze* via
+    // `SimNetwork::pause` (a GC stall / VM freeze): the leader's tasks and timers
+    // stop entirely, it sends nothing and its inbound queues. The survivors elect a
+    // new leader and keep committing; the frozen leader commits nothing. On resume
+    // it drains the backlog, hears the newer term, and steps down — already deposed.
+    //
+    // NOTE (an honest result of writing this): for a *leader*, this is observably
+    // the same as a partition, and deliberately so — a Raft leader does NOT climb
+    // its term while merely isolated (it stays leader-in-its-own-view until it hears
+    // a higher term), so freeze and partition both give a clean, non-disruptive
+    // deposition. The "regardless of clock skew" robustness is *structural*: this
+    // Raft never grants or holds leadership on a clock (no lease), so a leader whose
+    // clock froze cannot wrongly believe it still leads — there is no clock-based
+    // fence to fool. (Swapping `pause`/`resume` here for `partition`/`heal` keeps the
+    // test green, confirming the property is robust across both fault kinds, not a
+    // knife-edge of the freeze.) The freeze primitive earns its keep as a distinct
+    // *fault* — state preserved, inbound replayed, no self-progress — for future
+    // liveness work; it does not, for this clock-free design, open a new *safety*
+    // surface beyond what partition already covers.
+    let sim = Simulation::new(33);
+    let recorder = Recorder::new();
+    let net = leader_net(&sim, DowningPolicy::Conservative).with_events(Arc::new(recorder.clone()));
+    let a = net.join(A);
+    let b = net.join(B);
+    let c = net.join(C);
+    sim.run_for(Duration::from_secs(2));
+
+    let nodes = [&a, &b, &c];
+    let old_leader = elected_leader(&nodes).node();
+    let survivors: Vec<NodeId> = [A, B, C].into_iter().filter(|&n| n != old_leader).collect();
+
+    let max_term = |rec: &Recorder| {
+        rec.events()
+            .iter()
+            .filter_map(|e| match e {
+                Event::LeaderElected { term, .. } => Some(*term),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    };
+
+    // Freeze the leader: no heartbeats, no election timer — it cannot climb its term
+    // or do anything at all while paused.
+    net.pause(old_leader);
+    sim.run_for(Duration::from_secs(4)); // the survivors elect a new leader
+    let term_after_election = max_term(&recorder);
+
+    // A new leader emerged among the survivors, and the cluster commits a transition
+    // (draining the frozen node) WITHOUT the frozen one's participation.
+    let surv = nodes.iter().find(|n| n.node() == survivors[0]).unwrap();
+    let new_leader = surv.leader().expect("the survivors elected a new leader");
+    assert_ne!(new_leader, old_leader, "a survivor leads while the old leader is frozen");
+    let committed = {
+        let new_sys = nodes.iter().find(|n| n.node() == new_leader).unwrap().to_owned().clone();
+        drive(&sim, Duration::from_secs(10), async move { new_sys.drain(old_leader).await })
+    };
+    assert!(committed, "the cluster commits through the new leader while the old one is frozen");
+
+    // Resume the old leader: it drains its backlog, hears the newer term, and steps
+    // down cleanly — already deposed the moment it wakes (§8.1).
+    net.resume(old_leader);
+    sim.run_for(Duration::from_secs(4));
+
+    let old_sys = nodes.iter().find(|n| n.node() == old_leader).unwrap();
+    assert_eq!(
+        old_sys.leader(),
+        Some(new_leader),
+        "the woken leader accepted the newer term and is a follower — already deposed (§8.1)",
+    );
+    // The clean part the freeze guarantees: the wakeup forced NO re-election, because
+    // the frozen leader never climbed its term. The new leader kept leading.
+    assert_eq!(
+        surv.leader(),
+        Some(new_leader),
+        "the stale wakeup did not disrupt the new leader (no clock-based fencing needed, §8.1)",
+    );
+    assert_eq!(b.leader(), c.leader(), "the cluster holds a single agreed leader after the wakeup");
+
+    // The woken leader caused NO new election: the highest term is unchanged since
+    // the single post-pause election, so its rejoin was a clean step-down, not a
+    // disruptive re-election. (This also guards the pause mechanism: were a frozen
+    // node still campaigning into ever-higher terms, the term would have climbed.)
+    assert_eq!(
+        max_term(&recorder),
+        term_after_election,
+        "the woken leader forced no re-election — a clean step-down on rejoin (§8.1)",
+    );
+}

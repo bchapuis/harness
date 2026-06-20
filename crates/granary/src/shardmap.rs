@@ -140,6 +140,21 @@ impl RaftShardMap {
     ) -> RaftShardMap {
         let group = map_group_id(grain_type);
         let self_node = consensus.node();
+        // Tier 2 rides Raft: the map group and every shard group elect through the
+        // system's consensus engine. A clustered system with no configured voters
+        // has no engine at all (only `MembershipMode::Leader` builds one) — so no
+        // group would ever elect, the gateway's redirect would hint this node back
+        // at itself, and every grain call would loop on `NotLeader`. Fail loud at
+        // host-construction (`granary()`), not silently at the first call. Tier 1
+        // never reaches here: `LocalSystem` serves a `LocalShardMap` instead.
+        assert!(
+            !consensus.configured_voters().is_empty(),
+            "granary Tier-2 requires leader-based consensus, but the system reports \
+             no configured Raft voters: start the node in MembershipMode::Leader \
+             (the only mode that builds the Raft engine). Static, Registry, and \
+             Gossip modes have no engine, so no shard can elect a leader and every \
+             grain call would loop on NotLeader."
+        );
         let commits = consensus.subscribe_commits(group);
         // Seed the map group from the **configured** (founding) voters, identical
         // on every node regardless of when it calls `granary()`, so all nodes form

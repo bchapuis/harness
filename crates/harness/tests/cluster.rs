@@ -213,3 +213,19 @@ fn assert_invariants(events: &[Event]) {
     let violations = check_events(events);
     assert!(violations.is_empty(), "checkers: {violations:?}");
 }
+
+/// Regression (the standalone-harness `NotLeader` livelock): a kind carries a
+/// `GranaryConfig`, so each kind becomes a Tier-2 grain type that needs the
+/// system's Raft engine to elect a shard leader. Building the harness on a
+/// cluster left in the default `Static` membership mode — no `.with_leader(...)`,
+/// hence no engine — must panic at construction (granary's guard), not hand back
+/// a harness whose every turn would loop on `NotLeader`. This is the deployment
+/// layer inheriting the guard `tests/requires_consensus.rs` checks in granary.
+#[test]
+#[should_panic(expected = "leader-based consensus")]
+fn building_a_harness_without_consensus_panics() {
+    let sim = Simulation::new(1);
+    // No `.with_leader(...)`: the cluster has no Raft engine.
+    let system = SimNetwork::new(&sim).join(A);
+    let _ = Harness::new(system, kinds(), Arc::new(model()), Arc::new(ScriptedSandboxes::echo()));
+}

@@ -1,4 +1,5 @@
 //! Conformance: lifecycle hooks, `Ctx`, and resolution (spec §3.4, §4.2, §4.3).
+//! Also folds in the local lifecycle ordering cases from actor.rs (spec §4.2).
 
 mod support;
 
@@ -266,4 +267,119 @@ fn locality_is_classified_from_the_id_without_a_network_call() {
     let id = greeter.id().clone();
     assert!(node_a.is_local(&id), "owning node sees it local");
     assert!(!node_b.is_local(&id), "other node sees it remote");
+}
+
+// =============================================================================
+// Merged from actor.rs (spec §4.2, invariant #6): local lifecycle ordering —
+// assign → ready → resign exactly once, and a failed startup that resigns
+// without ever becoming ready.
+// =============================================================================
+mod local_lifecycle {
+    use std::sync::Arc;
+
+    use actor_core::Actor;
+    use actor_core::ActorSystem;
+    use actor_core::BoxError;
+    use actor_core::Ctx;
+    use actor_core::Event;
+    use actor_core::Handler;
+    use actor_core::LocalSystemBuilder;
+    use actor_core::Manifest;
+    use actor_core::Message;
+    use actor_core::LocalSystem;
+    use actor_simulation::Recorder;
+    use actor_simulation::SimClock;
+    use actor_simulation::SimEntropy;
+    use actor_simulation::SimSpawner;
+    use actor_simulation::Simulation;
+    use serde::Deserialize;
+    use serde::Serialize;
+
+    /// The concrete system every test actor runs on.
+    type Sys = LocalSystem<SimClock, SimEntropy, SimSpawner>;
+
+    // --- Lifecycle order and exactly-once (spec §4.2, invariant #6) ---------------
+
+    struct Stoppable;
+
+    impl Actor for Stoppable {
+        type System = Sys;
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Stop;
+
+    impl Message for Stop {
+        type Reply = ();
+        const MANIFEST: Manifest = Manifest::new("test.Stop");
+    }
+
+    impl Handler<Stop> for Stoppable {
+        async fn handle(&mut self, _msg: Stop, ctx: &Ctx<Self>) {
+            ctx.stop();
+        }
+    }
+
+    #[test]
+    fn lifecycle_runs_in_order_exactly_once() {
+        let recorder = Recorder::new();
+        let sim = Simulation::new(0);
+        let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
+            .events(Arc::new(recorder.clone()))
+            .build();
+
+        sim.block_on(async move {
+            let actor = system.spawn(Stoppable);
+            actor.tell(Stop).await.unwrap();
+        });
+
+        let lifecycle = lifecycle_only(&recorder.events());
+        assert_eq!(
+            lifecycle,
+            vec!["AssignId", "ActorReady", "ResignId"],
+            "lifecycle must be assign → ready → resign, each exactly once",
+        );
+    }
+
+    struct FailStart;
+
+    impl Actor for FailStart {
+        type System = Sys;
+
+        async fn started(&mut self, _ctx: &Ctx<Self>) -> Result<(), BoxError> {
+            Err("startup refused".into())
+        }
+    }
+
+    #[test]
+    fn failed_startup_resigns_without_becoming_ready() {
+        let recorder = Recorder::new();
+        let sim = Simulation::new(0);
+        let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
+            .events(Arc::new(recorder.clone()))
+            .build();
+
+        sim.block_on(async move {
+            let _ = system.spawn(FailStart);
+        });
+
+        // assign → resign, no ready: the id was reserved but never became live.
+        assert_eq!(
+            lifecycle_only(&recorder.events()),
+            vec!["AssignId", "ResignId"]
+        );
+    }
+
+    /// Project an event stream down to its lifecycle markers, in order.
+    fn lifecycle_only(events: &[Event]) -> Vec<&'static str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::AssignId { .. } => Some("AssignId"),
+                Event::ActorReady { .. } => Some("ActorReady"),
+                Event::ResignId { .. } => Some("ResignId"),
+                _ => None,
+            })
+            .collect()
+    }
 }
