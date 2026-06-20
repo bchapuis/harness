@@ -9,6 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+granary.workspace = true
 actor-core.workspace = true
 actor-cluster.workspace = true
 actor-serialization.workspace = true

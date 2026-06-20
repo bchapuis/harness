@@ -1,20 +1,24 @@
 //! Session identity, records, and the fold (harness spec §2, §6.3).
 //!
-//! One sentence carries the design: **the journal is the session; the actor
-//! and the sandbox are disposable; the seams are the only world** (§2.1).
-//! This module holds the durable half: the identifiers, the [`Record`]s, and
-//! [`SessionState`] — the pure, deterministic fold of a journal prefix that
-//! *is* an agent actor's state (invariant H1). Anything not journaled is, by
-//! definition, lost on deactivation: a design constraint, not an accident to
-//! discover.
+//! One sentence carries the design: **the grain is the session; the activation
+//! and the sandbox are disposable; the seams are the only world** (§2.1). A
+//! session *is* a grain: its [`SessionId`] is the key half of a `GrainName`
+//! (`(KindId, SessionId)`, §2.2), each [`Record`] is the grain's `Event`, and
+//! [`SessionState`] is the grain's `State` — the pure, deterministic fold of the
+//! journal that granary rehydrates on activation (invariant H1). Anything not
+//! journaled is, by definition, lost on deactivation: a design constraint, not
+//! an accident to discover.
 //!
-//! Identity is layered deliberately (§2.2): `SessionId` (durable,
-//! application-chosen) → `ActorId` (one activation, system-assigned, core
-//! §3.6) → `TurnId` (one run). The harness owns the first mapping; the
-//! framework owns the second.
+//! Identity is layered deliberately (§2.2), and the layering is now the grain's:
+//! `SessionId` (= the `GrainName` key: durable, application-chosen) → `ActorId`
+//! (one activation, system-assigned) → `TurnId` (one run). The `KindId` is the
+//! session's grain *type* (granary hosts one `Agent` grain under each kind's name
+//! via `granary_named`); granary owns name→shard→leader resolution.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use granary::Seq;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -55,8 +59,9 @@ macro_rules! id_string {
 }
 
 id_string! {
-    /// A session's durable identity (harness spec §2.2): application-chosen,
-    /// surviving actor restarts and node moves; an `ActorId` does not.
+    /// A session's durable identity (harness spec §2.2): the key half of the
+    /// grain's `GrainName`, application-chosen, surviving activation restarts and
+    /// shard-leadership moves; an `ActorId` does not.
     SessionId
 }
 id_string! {
@@ -132,16 +137,18 @@ impl Completion {
         }
     }
 
-    /// The final assistant message.
     pub fn text(&self) -> &str {
         &self.content
     }
 }
 
 /// A run's abnormal terminal outcome (harness spec §3.1) — an application
-/// error living **inside the reply** (core spec §3.2 rule 4), distinct from
-/// transport `CallError`. Exactly these four: "a tool misbehaved" is not a
-/// run failure (§5.4).
+/// error living **inside the reply**, distinct from transport/durability
+/// `GrainError`. Exactly these three: "a tool misbehaved" is not a run failure
+/// (§5.4), and durability failure is not a run outcome at all — it is the
+/// grain's outer `GrainError::Unavailable`, which *pauses* the run rather than
+/// ending it (§3.1, §6.4), since a shard that cannot commit cannot record "I
+/// could not record".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunError {
     /// The budget ran out (§9.1); recoverable by a new turn with a new budget.
@@ -150,8 +157,6 @@ pub enum RunError {
     Cancelled,
     /// A model failure no retry policy absorbed (§4.3).
     Model(ModelError),
-    /// The session cannot record (§6.5).
-    Journal(String),
 }
 
 impl std::fmt::Display for RunError {
@@ -160,7 +165,6 @@ impl std::fmt::Display for RunError {
             RunError::BudgetExhausted => f.write_str("budget exhausted"),
             RunError::Cancelled => f.write_str("cancelled"),
             RunError::Model(e) => write!(f, "model failure: {e}"),
-            RunError::Journal(e) => write!(f, "journal failure: {e}"),
         }
     }
 }
@@ -175,7 +179,6 @@ pub fn outcome_label(outcome: &RunOutcome) -> &'static str {
         Err(RunError::BudgetExhausted) => "budget",
         Err(RunError::Cancelled) => "cancelled",
         Err(RunError::Model(_)) => "model",
-        Err(RunError::Journal(_)) => "journal",
     }
 }
 
@@ -225,13 +228,15 @@ pub enum RecordBody {
         call: CallId,
         outcome: Result<Value, ToolError>,
     },
-    /// A delegation's intent (§8.1): the child session and turn, both derived
-    /// deterministically from this session, this turn, and the call — so a
-    /// re-executed delegation re-derives the same pair — plus the carved
-    /// budget (§9.1). Cancel propagation reads children from here (§9.2).
+    /// A delegation's intent (§8.1): the child kind (its grain type, needed to
+    /// address the child for cancel propagation, §9.2), the child session and
+    /// turn — both derived deterministically from this session, this turn, and
+    /// the call, so a re-executed delegation re-derives the same pair — plus the
+    /// carved budget (§9.1). Cancel propagation reads children from here (§9.2).
     ChildRun {
         turn: TurnId,
         call: CallId,
+        child_kind: KindId,
         child_session: SessionId,
         child_turn: TurnId,
         budget: Budget,
@@ -275,20 +280,49 @@ pub enum Entry {
     WorkspaceReset,
 }
 
+/// Serde adapter for an `Arc<Vec<Entry>>`: encode the inner slice, rebuild a
+/// fresh `Arc` on decode. Lets the transcript be `Arc`-shared — so a model
+/// request clones a pointer, not the whole conversation, each step (§4.1) —
+/// without enabling serde's workspace-wide `rc` feature. A `SessionState` holds
+/// no second reference to its transcript `Arc`, so there is no cross-`Arc`
+/// sharing for a snapshot round-trip to lose: a fresh `Arc` per decode is exact.
+pub(crate) mod arc_transcript {
+    use std::sync::Arc;
+
+    use serde::Deserialize;
+    use serde::Deserializer;
+    use serde::Serialize;
+    use serde::Serializer;
+
+    use super::Entry;
+
+    pub(crate) fn serialize<S: Serializer>(v: &Arc<Vec<Entry>>, s: S) -> Result<S::Ok, S::Error> {
+        (**v).serialize(s)
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Arc<Vec<Entry>>, D::Error> {
+        Vec::<Entry>::deserialize(d).map(Arc::new)
+    }
+}
+
 /// FNV-1a 64 over a turn's content: the digest dedup compares re-submissions
-/// against (§7.4) without holding a second copy of the content.
+/// against (§7.4) without holding a second copy of the content. Fold-local —
+/// rebuilt on every replay and never journaled — so its exact value need not
+/// stay stable across versions, unlike [`Kind::digest`](crate::Kind::digest).
 pub fn content_digest(content: &str) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET_BASIS;
     for byte in content.as_bytes() {
         hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
 }
 
 /// What the fold knows about a turn (harness spec §7.4): enough to dedup a
 /// re-submission and return the recorded outcome.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TurnFacts {
     pub content_digest: u64,
     /// `None` while the run is unfinished.
@@ -298,7 +332,7 @@ pub struct TurnFacts {
 /// A journaled call intent whose outcome is not yet journaled. While the run
 /// is live these are the in-flight calls of the current step; at activation
 /// they are the **dangling calls** resume must resolve (§5.5).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingCall {
     pub name: String,
     pub input: Value,
@@ -306,9 +340,11 @@ pub struct PendingCall {
     pub child: Option<ChildRef>,
 }
 
-/// A recorded delegation target (§8.1, §9.2).
-#[derive(Clone, Debug, PartialEq)]
+/// A recorded delegation target (§8.1, §9.2): the child's kind (grain type),
+/// session, turn, and carved budget — enough to address it and cancel it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChildRef {
+    pub kind: KindId,
     pub session: SessionId,
     pub turn: TurnId,
     pub budget: Budget,
@@ -316,7 +352,7 @@ pub struct ChildRef {
 
 /// The unfinished run, as the fold sees it (harness spec §3.1): the step is a
 /// state the fold tracks, not a stack frame the executor holds (§3.2).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LiveRun {
     pub turn: TurnId,
     pub budget: Budget,
@@ -327,7 +363,7 @@ pub struct LiveRun {
 }
 
 /// The session's creation facts (§7.1, §10.3).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Created {
     pub kind: KindId,
     pub digest: u64,
@@ -339,28 +375,45 @@ pub struct Created {
 /// function of the records, with no information outside it influencing
 /// behavior except new inputs arriving as messages. Replay is therefore
 /// resume (invariant H1).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
-    /// The head this state folds up to — the `after` of the next fenced
-    /// append (§6.2).
-    pub head: crate::journal::SeqNo,
     pub created: Option<Created>,
-    pub transcript: Vec<Entry>,
+    /// The model-facing conversation projection (§4.1), `Arc`-shared so each
+    /// model request takes a pointer to it rather than a deep copy. The fold
+    /// appends with copy-on-write ([`Arc::make_mut`]); since an in-flight request
+    /// has dropped its clone by the time its response folds, the append is in
+    /// place. Serialized as its inner slice (see [`arc_transcript`]).
+    #[serde(with = "arc_transcript")]
+    pub transcript: Arc<Vec<Entry>>,
     pub turns: BTreeMap<TurnId, TurnFacts>,
     /// At most one unfinished run; the journal's total order serializes runs.
     pub live: Option<LiveRun>,
     /// Whether the journal records sandboxed activity since the last
     /// `WorkspaceReset` — the §5.5 trigger for journaling the next one.
     pub sandbox_activity: bool,
+    /// Every committed record, in `Seq` order: the grain owns the journal, so
+    /// the activation mirrors it here to serve `Tail` (§10.2) — the one read
+    /// that needs the raw records, not the [`transcript`](Self::transcript)
+    /// projection. The grain commits one event per `Seq`, contiguously, so the
+    /// record at index `i` carries `Seq(i + 1)`.
+    pub records: Vec<Record>,
 }
 
 impl SessionState {
-    /// Fold one committed record at `seq`. Total: a record that fits no
-    /// transition (a malformed journal) is ignored rather than panicking —
-    /// the journal is the authority, and the fold's job is to read it, not
-    /// police it.
-    pub fn apply(&mut self, seq: crate::journal::SeqNo, record: &Record) {
-        self.head = seq;
+    /// The `Seq` of the record at `index` in [`records`](Self::records). The
+    /// grain commits one event per `Seq`, contiguously from `Seq(1)`, so it is
+    /// `index + 1`. The one place this index→`Seq` rule lives; `Tail` reads it.
+    pub fn seq_of(index: usize) -> Seq {
+        Seq::new(index as u64 + 1)
+    }
+
+    /// Fold one committed record — the grain's `apply` (granary §4.1), pure and
+    /// deterministic, run on the live commit path and on every replay. Total: a
+    /// record that fits no transition (a malformed journal) is ignored rather
+    /// than panicking — the journal is the authority, and the fold's job is to
+    /// read it, not police it.
+    pub fn apply(&mut self, record: &Record) {
+        self.records.push(record.clone());
         match &record.body {
             RecordBody::SessionCreated {
                 kind,
@@ -393,7 +446,7 @@ impl SessionState {
                     spend: Spend::default(),
                     pending: BTreeMap::new(),
                 });
-                self.transcript.push(Entry::User(content.clone()));
+                Arc::make_mut(&mut self.transcript).push(Entry::User(content.clone()));
             }
             RecordBody::ModelResponse {
                 turn,
@@ -419,7 +472,7 @@ impl SessionState {
                         // (§5.5 — intent precedes effect).
                         self.sandbox_activity = true;
                     }
-                    self.transcript.push(Entry::Assistant {
+                    Arc::make_mut(&mut self.transcript).push(Entry::Assistant {
                         content: content.clone(),
                         calls: calls.clone(),
                     });
@@ -432,7 +485,7 @@ impl SessionState {
             } => {
                 if let Some(live) = self.live.as_mut().filter(|l| &l.turn == turn) {
                     live.pending.remove(call);
-                    self.transcript.push(Entry::ToolResult {
+                    Arc::make_mut(&mut self.transcript).push(Entry::ToolResult {
                         call: call.clone(),
                         outcome: outcome.clone(),
                     });
@@ -441,6 +494,7 @@ impl SessionState {
             RecordBody::ChildRun {
                 turn,
                 call,
+                child_kind,
                 child_session,
                 child_turn,
                 budget,
@@ -450,6 +504,7 @@ impl SessionState {
                     live.spend.carved_steps += budget.steps;
                     if let Some(pending) = live.pending.get_mut(call) {
                         pending.child = Some(ChildRef {
+                            kind: child_kind.clone(),
                             session: child_session.clone(),
                             turn: child_turn.clone(),
                             budget: *budget,
@@ -459,7 +514,7 @@ impl SessionState {
             }
             RecordBody::WorkspaceReset => {
                 self.sandbox_activity = false;
-                self.transcript.push(Entry::WorkspaceReset);
+                Arc::make_mut(&mut self.transcript).push(Entry::WorkspaceReset);
             }
             RecordBody::TierAcquired { .. } => {
                 // Held tiers are working state, scoped to the activation that
@@ -481,11 +536,13 @@ impl SessionState {
         }
     }
 
-    /// Fold a loaded prefix — activation's `state = fold(records)` (§6.3).
-    pub fn fold(records: &[(crate::journal::SeqNo, Record)]) -> SessionState {
+    /// Fold a sequence of records — `state = fold(records)` (§6.3). The runtime
+    /// folds via granary's per-event `apply` on the commit/replay path; this
+    /// whole-prefix helper exists for tests and reconstruction (§10.5).
+    pub fn fold(records: &[Record]) -> SessionState {
         let mut state = SessionState::default();
-        for (seq, record) in records {
-            state.apply(*seq, record);
+        for record in records {
+            state.apply(record);
         }
         state
     }
@@ -507,7 +564,6 @@ pub fn derive_child(parent: &SessionId, turn: &TurnId, call: &CallId) -> (Sessio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::SeqNo;
 
     fn rec(body: RecordBody) -> Record {
         Record { at_nanos: 7, body }
@@ -516,56 +572,45 @@ mod tests {
     #[test]
     fn fold_tracks_a_run_through_its_step() {
         let mut state = SessionState::default();
-        state.apply(
-            SeqNo(1),
-            &rec(RecordBody::TurnSubmitted {
-                turn: TurnId::new("t1"),
-                content: "go".into(),
-                budget: Budget::new(100, 5),
-            }),
-        );
+        state.apply(&rec(RecordBody::TurnSubmitted {
+            turn: TurnId::new("t1"),
+            content: "go".into(),
+            budget: Budget::new(100, 5),
+        }));
         let call = CallId::new("c1");
-        state.apply(
-            SeqNo(2),
-            &rec(RecordBody::ModelResponse {
-                turn: TurnId::new("t1"),
-                content: "using a tool".into(),
-                calls: vec![ToolCall {
-                    id: call.clone(),
-                    name: "shell".into(),
-                    input: Value::Null,
-                }],
-                usage: Usage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                },
-            }),
-        );
+        state.apply(&rec(RecordBody::ModelResponse {
+            turn: TurnId::new("t1"),
+            content: "using a tool".into(),
+            calls: vec![ToolCall {
+                id: call.clone(),
+                name: "shell".into(),
+                input: Value::Null,
+            }],
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+        }));
         let live = state.live.as_ref().expect("run live");
         assert_eq!(live.spend.own_tokens, 15);
         assert_eq!(live.pending.len(), 1);
         assert!(state.sandbox_activity);
 
-        state.apply(
-            SeqNo(3),
-            &rec(RecordBody::ToolOutcome {
-                turn: TurnId::new("t1"),
-                call,
-                outcome: Ok(Value::String("done".into())),
-            }),
-        );
+        state.apply(&rec(RecordBody::ToolOutcome {
+            turn: TurnId::new("t1"),
+            call,
+            outcome: Ok(Value::String("done".into())),
+        }));
         assert!(state.live.as_ref().expect("still live").pending.is_empty());
 
-        state.apply(
-            SeqNo(4),
-            &rec(RecordBody::RunEnded {
-                turn: TurnId::new("t1"),
-                outcome: Ok(Completion::new("answer", 15)),
-            }),
-        );
+        state.apply(&rec(RecordBody::RunEnded {
+            turn: TurnId::new("t1"),
+            outcome: Ok(Completion::new("answer", 15)),
+        }));
         assert!(state.live.is_none());
         assert!(state.turns[&TurnId::new("t1")].outcome.is_some());
-        assert_eq!(state.head, SeqNo(4));
+        // Four records committed; the grain serves them by Seq for `Tail`.
+        assert_eq!(state.records.len(), 4);
     }
 
     #[test]

@@ -22,7 +22,6 @@ pub struct Budget {
 }
 
 impl Budget {
-    /// A budget of `tokens` and `steps`.
     pub const fn new(tokens: u64, steps: u32) -> Budget {
         Budget { tokens, steps }
     }
@@ -47,7 +46,7 @@ impl Usage {
 /// A run's journaled spend so far (harness spec §9.1): own model usage plus
 /// the slices carved out for children. Folded from the journal — the fold is
 /// the accountant, so a resumed run resumes its accounting too (H1).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spend {
     /// Tokens of this run's own journaled model calls.
     pub own_tokens: u64,

@@ -10,7 +10,6 @@
 
 mod http;
 mod ids;
-mod journal;
 mod node;
 mod proto;
 mod repl;

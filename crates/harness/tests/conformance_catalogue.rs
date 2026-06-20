@@ -43,14 +43,12 @@ fn the_catalogue_and_the_checker_set_agree() {
 }
 
 #[test]
-fn the_catalogue_covers_h1_through_h8() {
+fn the_catalogue_covers_the_live_h_invariants() {
+    // H2 is retired (§11): the single-writer fence is wholly the grain's (G1),
+    // so it has no harness invariant; H3–H8 keep their numbers.
     let numbers: Vec<u8> = harness_catalogue().iter().map(|e| e.invariant).collect();
-    assert_eq!(numbers, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(numbers, vec![1, 3, 4, 5, 6, 7, 8]);
     for entry in harness_catalogue() {
-        assert!(
-            !entry.verify.is_empty(),
-            "H{} has no verification method",
-            entry.invariant
-        );
+        assert!(!entry.verify.is_empty(), "H{} has no verification method", entry.invariant);
     }
 }

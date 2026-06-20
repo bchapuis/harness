@@ -86,6 +86,10 @@ pub struct Host<G: Grain> {
     head: Seq,
     /// The seq of the latest persisted snapshot, to decide when to snapshot again.
     last_snapshot: Seq,
+    /// The runtime type name (spec §5.1), `G::GRAIN_TYPE` by default; a
+    /// caller-supplied name under [`granary_named`](crate::GranaryExt::granary_named).
+    /// Threaded into [`GrainCtx`] so a self-reference resolves under the right type.
+    grain_type: &'static str,
     name: GrainName,
     journal: Arc<dyn DynJournal>,
     config: GranaryConfig,
@@ -99,6 +103,7 @@ impl<G: Grain> Host<G> {
     /// [`Actor::started`], where the system (and thus the journal's authoritative
     /// head) is reachable.
     pub(crate) fn new(
+        grain_type: &'static str,
         grain: G,
         name: GrainName,
         journal: Arc<dyn DynJournal>,
@@ -110,6 +115,7 @@ impl<G: Grain> Host<G> {
             state: G::State::default(),
             head: Seq::ZERO,
             last_snapshot: Seq::ZERO,
+            grain_type,
             name,
             journal,
             config,
@@ -120,7 +126,12 @@ impl<G: Grain> Host<G> {
 
     /// Build the handler/lifecycle context for the grain (§4.3).
     fn grain_ctx(&self, ctx: &Ctx<Host<G>>) -> GrainCtx<G> {
-        GrainCtx::new(self.name.clone(), ctx.system().clone(), self.gateway.clone())
+        GrainCtx::new(
+            self.grain_type,
+            self.name.clone(),
+            ctx.system().clone(),
+            self.gateway.clone(),
+        )
     }
 
     /// Rebuild state from the journal (spec §9): load the latest snapshot, then
@@ -242,7 +253,7 @@ impl<G: Grain> Host<G> {
                 // state that is missing them; the next access rehydrates cleanly.
                 let expected = Seq::new(self.head.value() + events.len() as u64);
                 if new_head != expected {
-                    self.step_down(ctx);
+                    self.forced_step_down(ctx).await;
                     return Err(GrainError::Unavailable("stale head; reactivating".into()));
                 }
                 for event in &events {
@@ -260,7 +271,7 @@ impl<G: Grain> Host<G> {
             // 5. Leadership moved off this node (§8): step down, redirect. The
             //    state is untouched; no fold, no success reply (**G5**).
             AppendOutcome::NotLeader(hint) => {
-                self.step_down(ctx);
+                self.forced_step_down(ctx).await;
                 Err(GrainError::NotLeader(hint))
             }
             // 6. Shard quorum lost or the commit timed out (§11): the append's fate
@@ -268,24 +279,34 @@ impl<G: Grain> Host<G> {
             //    no longer be trusted. Step down; the caller retries/fails over and
             //    the next access rehydrates from the journal authority (G3).
             AppendOutcome::Unavailable(why) => {
-                self.step_down(ctx);
+                self.forced_step_down(ctx).await;
                 Err(GrainError::Unavailable(why))
             }
         }
     }
 
-    /// Deactivate the activation on an involuntary stop — leadership moved (§8),
-    /// the shard went unavailable (§11), or the head desynced (above). Emit
-    /// `Passivated` so the lifecycle stream stays balanced (every `Activated` has a
-    /// matching `Passivated`/`NodeDown`, the basis of the **G6** singleton checker,
-    /// §13), then stop. No `on_passivate` and no snapshot: unlike idle hibernation
-    /// (§10) this is a forced step-down, and the journal may be unwritable.
+    /// Emit `Passivated` and stop — the one deactivation seam (§13). Emitting
+    /// `Passivated` keeps the lifecycle stream balanced (every `Activated` has a
+    /// matching `Passivated`/`NodeDown`, the basis of the **G6** singleton checker).
     fn step_down(&self, ctx: &Ctx<Host<G>>) {
         ctx.system().emit_grain_event(GrainEvent::Passivated {
             node: ctx.system().node(),
             name: self.name.clone(),
         });
         ctx.stop();
+    }
+
+    /// Deactivate on an involuntary stop — leadership moved (§8), the shard went
+    /// unavailable (§11), or the head desynced. Runs `on_passivate` so the grain
+    /// can release non-durable activation resources even on a forced step-down (a
+    /// layered runtime's per-activation handles — e.g. the agentic harness's
+    /// sandbox), then emits `Passivated` and stops. Safe when the journal is
+    /// unwritable: `on_passivate` has no journal access (the [`GrainCtx`] exposes
+    /// no `persist`). Unlike idle hibernation (§10) it takes **no snapshot**.
+    async fn forced_step_down(&mut self, ctx: &Ctx<Host<G>>) {
+        let gctx = self.grain_ctx(ctx);
+        self.grain.on_passivate(&gctx).await;
+        self.step_down(ctx);
     }
 
     /// Persist a snapshot once enough events have accumulated past the last one
@@ -385,10 +406,15 @@ where
 impl<G: Grain> Handler<CheckIdle> for Host<G> {
     async fn handle(&mut self, _msg: CheckIdle, ctx: &Ctx<Host<G>>) {
         let now = ctx.system().now();
-        if now.duration_since(self.last_active) >= self.config.idle_after {
+        // Idle long enough AND the grain permits eviction (§10): a grain with
+        // autonomous, not-yet-journaled work vetoes hibernation until it settles
+        // (`can_passivate`), so the host reschedules rather than evicting it
+        // mid-flight. Activity arriving after the timer was armed also reschedules.
+        if now.duration_since(self.last_active) >= self.config.idle_after
+            && self.grain.can_passivate(&self.state)
+        {
             self.passivate(ctx).await;
         } else {
-            // Activity arrived after the timer was armed: re-arm, don't evict.
             self.schedule_idle_check(ctx);
         }
     }

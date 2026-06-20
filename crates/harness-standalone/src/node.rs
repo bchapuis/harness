@@ -1,11 +1,13 @@
 //! One node of the standalone deployment: the production runtime wired to
 //! the harness, plus the control listener a REPL attaches to.
 //!
-//! Every node is identical (harness spec §7.1): same kinds, same seams, one
-//! shared journal directory. Membership is a static roster with the SWIM
-//! detector observe-only (core spec §9.4.1) — reachability events route
-//! placement around a killed node and carry the receptionist gossip that
-//! lets nodes discover each other's hosts.
+//! Every node is identical (harness spec §7.1): same kinds, same seams. A
+//! session is a grain, so durability, placement, and the single-writer fence are
+//! granary's: each node hosts every kind's grain type, joining its shards' Raft
+//! groups and registering its gateway (§5.3). Membership is a static roster with
+//! the SWIM detector observe-only (core spec §9.4.1) — reachability drives the
+//! shard map's reallocation and the gateway gossip nodes route activations
+//! through.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -18,7 +20,6 @@ use actor_cluster::ClusterConfig;
 use actor_cluster::ClusterSystem;
 use actor_cluster::MembershipMode;
 use actor_cluster::SwimConfig;
-use actor_core::ActorSystem;
 use actor_core::Event;
 use actor_core::EventSink;
 use actor_core::NodeId;
@@ -41,12 +42,11 @@ use harness::Kinds;
 use harness::Model;
 use harness::ModelParams;
 use harness::SandboxProvider;
-use harness::SeqNo;
+use harness::Seq;
 use harness::SessionId;
 use harness::Tier;
 use harness::Turn;
 use harness::TurnId;
-use harness::host_key;
 use harness_anthropic::AnthropicModel;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
@@ -55,7 +55,6 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use crate::http::HttpsPost;
-use crate::journal::FileJournal;
 use crate::proto::Op;
 use crate::proto::Reply;
 use crate::proto::Request;
@@ -210,7 +209,6 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         }
     }
 
-    let journal = Arc::new(FileJournal::new(opts.data.join("journal"), node));
     let http = Arc::new(HttpsPost::new(&opts.api_url)?);
     let model: Arc<dyn Model> = Arc::new(AnthropicModel::new(
         http,
@@ -265,7 +263,6 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     let harness = Harness::with_config(
         system.clone(),
         kinds(&opts, sandbox_mode),
-        journal,
         model,
         sandboxes,
         harness_config(),
@@ -385,28 +382,26 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode) -> Kinds {
 /// calls and multi-step tool runs rather than the library defaults.
 fn harness_config() -> HarnessConfig {
     HarnessConfig {
-        idle_timeout: Duration::from_secs(300),
         submit_deadline: Duration::from_secs(600),
         tool_timeout: Duration::from_secs(120),
         ..HarnessConfig::default()
     }
 }
 
-/// Hold the control port closed until every peer's host shows up in the
-/// receptionist listing (or a bounded wait elapses): a `Submit` routed
-/// before discovery would fail fast with `DeadLetter` anyway, but waiting
-/// makes the first prompt of a fresh cluster reliable.
+/// Hold the control port closed until every peer joins the membership view (or
+/// a bounded wait elapses). granary's bounded redirect absorbs a prompt issued
+/// before the shard map converges (invariant G13), so this is a UX nicety, not a
+/// correctness requirement: it makes the first prompt of a fresh cluster prompt.
 async fn wait_for_hosts(system: &TcpCluster, expected: usize) {
     for _ in 0..150 {
-        let listed = system.receptionist().lookup(host_key::<TcpCluster>()).len();
-        if listed >= expected {
-            eprintln!("[{}] all {expected} hosts discovered", system.node());
+        if system.membership().members().len() >= expected {
+            eprintln!("[{}] all {expected} nodes joined", system.node());
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     eprintln!(
-        "[{}] warning: not all hosts discovered after 15s; serving anyway",
+        "[{}] warning: not all nodes joined after 15s; serving anyway",
         system.node()
     );
 }
@@ -490,7 +485,7 @@ async fn handle(harness: Harness<TcpCluster>, op: Op) -> Reply {
             limit,
         } => {
             let session = harness.session(&kind, SessionId::new(session));
-            match session.tail(SeqNo(from), limit).await {
+            match session.tail(Seq::new(from), limit).await {
                 Ok(records) => Reply::Records { records },
                 Err(e) => Reply::Error {
                     message: format!("{e:?}"),

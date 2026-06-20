@@ -1,13 +1,17 @@
 //! Test support for the harness conformance suite (harness spec §11, §12).
 //!
-//! The harness's three rows of the virtualization table (§12.1): the
-//! **scripted model** (a deterministic function of the request), the
-//! **scripted sandbox** (deterministic outcomes per call), and the
-//! **faulted journal** (the in-memory journal wrapped with seeded latency,
-//! `Unavailable` windows, and per-op failures). Plus the continuous
-//! H-invariant checkers (§11) and the machine-readable
-//! [`harness_catalogue`], guarded by the same drift-test pattern as the core
-//! and utilities catalogues.
+//! The harness adds **two** rows to the table granary already virtualizes
+//! (§12.1): the **scripted model** (a deterministic function of the request) and
+//! the **scripted sandbox** (deterministic outcomes per call). The journal is
+//! the grain's, so the harness tests drive the real granary host, gateway, and
+//! rehydration code under the same seed — simulating the harness *runs the real
+//! consensus path*, with the agent's loop the only new code on it.
+//!
+//! Plus the continuous H-invariant checkers (§11) and the machine-readable
+//! [`harness_catalogue`], guarded by the same drift-test pattern as the core and
+//! granary catalogues. Activation, deactivation, and the single-writer fence are
+//! observed through the **grain's** events (`Activated`/`Passivated`, granary
+//! §13), not duplicated by the harness.
 
 #![allow(dead_code)]
 
@@ -24,27 +28,30 @@ use actor_core::BoxFuture;
 use actor_core::Clock;
 use actor_core::Entropy;
 use actor_core::Event;
+use actor_core::LocalSystemBuilder;
 use actor_core::NodeId;
 use actor_simulation::CatalogueEntry;
 use actor_simulation::Invariant;
 use actor_simulation::SimClock;
 use actor_simulation::SimEntropy;
+use actor_simulation::SimSystem;
+use actor_simulation::Simulation;
 use actor_simulation::Verify;
 use actor_simulation::default_invariants;
-use harness::AppendError;
+use granary::GrainEvent;
+use granary::GrainName;
+use harness::Harness;
+use harness::HarnessConfig;
 use harness::HarnessEvent;
-use harness::Journal;
-use harness::JournalError;
+use harness::Kinds;
 use harness::Model;
 use harness::ModelError;
 use harness::ModelRequest;
 use harness::ModelResponse;
-use harness::Record;
 use harness::Sandbox;
 use harness::SandboxError;
 use harness::SandboxProfile;
 use harness::SandboxProvider;
-use harness::SeqNo;
 use harness::SessionId;
 use harness::Tier;
 use harness::ToolCall;
@@ -53,24 +60,152 @@ use harness::TurnId;
 use harness::Usage;
 use serde_json::Value;
 
-/// Coerce an async block to the `BoxFuture` the workload traits want — a
-/// struct-literal initializer provides no expected type, so the coercion
-/// needs a hand.
+/// Coerce an async block to the `BoxFuture` the workload traits want.
 pub fn boxed(f: impl std::future::Future<Output = ()> + Send + 'static) -> BoxFuture<'static, ()> {
     Box::pin(f)
+}
+
+/// Build a single-node simulation, a `LocalSystem` on it, and a harness hosting
+/// `kinds` with the given seams — the common setup for the scenario tests.
+pub fn harness_on(
+    sim: &Simulation,
+    kinds: Kinds,
+    model: Arc<dyn Model>,
+    sandboxes: Arc<dyn SandboxProvider>,
+) -> Harness<SimSystem> {
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
+    Harness::new(system, kinds, model, sandboxes)
+}
+
+/// Read a session's whole journal via `Tail` (§10.2) — the journal is the
+/// grain's, so the transcript is read back through the activation, not a
+/// test-held store.
+pub async fn tail_records(session: &harness::SessionRef<SimSystem>) -> Vec<harness::Record> {
+    session
+        .tail(granary::Seq::new(0), 1_000_000)
+        .await
+        .expect("tail")
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect()
+}
+
+/// A short label for a record body, for asserting write-ahead order (§6.4).
+pub fn record_kind(body: &harness::RecordBody) -> &'static str {
+    match body {
+        harness::RecordBody::SessionCreated { .. } => "created",
+        harness::RecordBody::TurnSubmitted { .. } => "turn",
+        harness::RecordBody::ModelResponse { .. } => "model",
+        harness::RecordBody::ToolOutcome { .. } => "tool",
+        harness::RecordBody::ChildRun { .. } => "child",
+        harness::RecordBody::WorkspaceReset => "reset",
+        harness::RecordBody::TierAcquired { .. } => "tier",
+        harness::RecordBody::RunEnded { .. } => "ended",
+    }
+}
+
+/// The record-body labels of a session's journal, in order.
+pub fn record_kinds(records: &[harness::Record]) -> Vec<&'static str> {
+    records.iter().map(|r| record_kind(&r.body)).collect()
+}
+
+type ScenarioBody = Arc<dyn Fn(Harness<SimSystem>, SimSystem) -> BoxFuture<'static, ()> + Send + Sync>;
+type ModelFactory = Arc<dyn Fn(&SimSystem) -> Arc<dyn Model> + Send + Sync>;
+type SandboxFactory = Arc<dyn Fn(&SimSystem) -> Arc<dyn SandboxProvider> + Send + Sync>;
+
+/// A reusable single-run workload (§12): builds a harness on the simulation's
+/// `LocalSystem` with the given seams, runs `body`, and checks the harness
+/// invariants over the run's event stream. The journal is the grain's; the seams
+/// come from factories so a seam that needs the run's clock (a `SlowModel`) is
+/// built from the handed system, while a caller-held seam (whose stats are read
+/// after the run) is captured and cloned by a constant factory ([`Scenario::new`]).
+pub struct Scenario {
+    name: &'static str,
+    kinds: Kinds,
+    model: ModelFactory,
+    sandboxes: SandboxFactory,
+    config: HarnessConfig,
+    body: ScenarioBody,
+}
+
+impl Scenario {
+    pub fn new(
+        name: &'static str,
+        kinds: Kinds,
+        model: Arc<dyn Model>,
+        sandboxes: Arc<dyn SandboxProvider>,
+        body: impl Fn(Harness<SimSystem>, SimSystem) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+    ) -> Scenario {
+        Scenario::from_factories(
+            name,
+            kinds,
+            Arc::new(move |_| Arc::clone(&model)),
+            Arc::new(move |_| Arc::clone(&sandboxes)),
+            body,
+        )
+    }
+
+    pub fn from_factories(
+        name: &'static str,
+        kinds: Kinds,
+        model: ModelFactory,
+        sandboxes: SandboxFactory,
+        body: impl Fn(Harness<SimSystem>, SimSystem) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+    ) -> Scenario {
+        Scenario {
+            name,
+            kinds,
+            model,
+            sandboxes,
+            config: HarnessConfig::default(),
+            body: Arc::new(body),
+        }
+    }
+
+    pub fn with_config(mut self, config: HarnessConfig) -> Scenario {
+        self.config = config;
+        self
+    }
+}
+
+impl actor_simulation::Workload for Scenario {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn run(&self, system: SimSystem) -> BoxFuture<'static, ()> {
+        let harness = Harness::with_config(
+            system.clone(),
+            self.kinds.clone(),
+            (self.model)(&system),
+            (self.sandboxes)(&system),
+            self.config.clone(),
+        );
+        (self.body)(harness, system)
+    }
+
+    fn invariants(&self) -> Vec<Box<dyn Invariant>> {
+        harness_invariants()
+    }
+}
+
+/// A kind config with an aggressive idle window, so a single test run exercises
+/// idle hibernation and sandbox release (§7.2, H8).
+pub fn brisk_idle() -> granary::GranaryConfig {
+    granary::GranaryConfig {
+        idle_after: Duration::from_secs(1),
+        ..granary::GranaryConfig::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Scripted model (§12.1)
 // ---------------------------------------------------------------------------
 
-/// The scripted model's behavior: a pure function of the request.
 type ModelScript = Arc<dyn Fn(&ModelRequest) -> Result<ModelResponse, ModelError> + Send + Sync>;
-/// The scripted sandbox's behavior: a pure function of the call.
 type SandboxScript = Arc<dyn Fn(&str, &Value) -> Result<Value, ToolError> + Send + Sync>;
 
 /// A deterministic model: a pure function of the request (§4.2 rule 2).
-/// Everything downstream of a fixed response sequence is reproducible (H1).
 #[derive(Clone)]
 pub struct ScriptedModel {
     script: ModelScript,
@@ -80,15 +215,12 @@ impl ScriptedModel {
     pub fn new(
         script: impl Fn(&ModelRequest) -> Result<ModelResponse, ModelError> + Send + Sync + 'static,
     ) -> ScriptedModel {
-        ScriptedModel {
-            script: Arc::new(script),
-        }
+        ScriptedModel { script: Arc::new(script) }
     }
 
-    /// A script keyed by step: the n-th model call of a run gets
-    /// `responses[n]`; past the end, a final "done" message. The step index
-    /// is the number of assistant entries in the transcript — a pure
-    /// function of the request, as §12.1 demands.
+    /// A script keyed by step: the n-th model call of a run gets `responses[n]`;
+    /// past the end, a final "done" message. The step index is the number of
+    /// assistant entries in the transcript — a pure function of the request.
     pub fn steps(responses: Vec<Result<ModelResponse, ModelError>>) -> ScriptedModel {
         ScriptedModel::new(move |req| {
             let step = req
@@ -116,10 +248,7 @@ pub fn final_message(text: &str) -> ModelResponse {
     ModelResponse {
         content: text.to_string(),
         calls: Vec::new(),
-        usage: Usage {
-            input_tokens: 100,
-            output_tokens: 20,
-        },
+        usage: Usage { input_tokens: 100, output_tokens: 20 },
     }
 }
 
@@ -127,21 +256,14 @@ pub fn final_message(text: &str) -> ModelResponse {
 pub fn tool_call(id: &str, name: &str, input: Value) -> ModelResponse {
     ModelResponse {
         content: format!("calling {name}"),
-        calls: vec![ToolCall {
-            id: harness::CallId::new(id),
-            name: name.to_string(),
-            input,
-        }],
-        usage: Usage {
-            input_tokens: 100,
-            output_tokens: 30,
-        },
+        calls: vec![ToolCall { id: harness::CallId::new(id), name: name.to_string(), input }],
+        usage: Usage { input_tokens: 100, output_tokens: 30 },
     }
 }
 
-/// A model that takes a fixed span of logical time per call — for cancel
-/// races (§9.2): the mailbox stays live during the call (§3.2), so a cancel
-/// lands at message granularity.
+/// A model that takes a fixed span of logical time per call — for cancel races
+/// (§9.2): the mailbox stays live during the call (§3.2), so a cancel lands at
+/// message granularity.
 pub struct SlowModel {
     pub inner: Arc<dyn Model>,
     pub clock: SimClock,
@@ -161,7 +283,7 @@ impl Model for SlowModel {
 }
 
 /// An event sink that records everything, for tests that assert on specific
-/// harness events (the fence race, resume) rather than only invariants.
+/// events rather than only invariants.
 #[derive(Clone, Default)]
 pub struct CollectingSink {
     events: Arc<Mutex<Vec<Event>>>,
@@ -175,15 +297,11 @@ impl CollectingSink {
 
 impl actor_core::EventSink for CollectingSink {
     fn emit(&self, event: Event) {
-        self.events
-            .lock()
-            .expect("events mutex")
-            .push(event.clone());
+        self.events.lock().expect("events mutex").push(event.clone());
     }
 }
 
-/// Feed a recorded stream through the harness checkers after the fact — for
-/// manually assembled runs that bypass `run_seed`.
+/// Feed a recorded stream through the harness checkers after the fact.
 pub fn check_events(events: &[Event]) -> Vec<String> {
     let mut invariants = harness_invariants();
     let mut violations = Vec::new();
@@ -209,11 +327,8 @@ pub struct FaultyModel {
     pub clock: SimClock,
     pub entropy: SimEntropy,
     pub max_latency: Duration,
-    /// Per-call failure probability `num / den`; zero disables.
     pub fail_num: u64,
     pub fail_den: u64,
-    /// Failures actually injected — coverage accounting (§11): a sweep that
-    /// configures faults but never fires one gives false confidence.
     pub fired: Arc<AtomicUsize>,
 }
 
@@ -234,11 +349,7 @@ impl Model for FaultyModel {
         Box::pin(async move {
             clock.sleep(latency).await;
             if fail {
-                return Err(if overloaded {
-                    ModelError::Overloaded
-                } else {
-                    ModelError::RateLimited
-                });
+                return Err(if overloaded { ModelError::Overloaded } else { ModelError::RateLimited });
             }
             inner.complete(req).await
         })
@@ -249,8 +360,7 @@ impl Model for FaultyModel {
 // Scripted sandbox (§12.1)
 // ---------------------------------------------------------------------------
 
-/// Observable provider activity, for H8 assertions: every environment opened
-/// is eventually released, exactly once.
+/// Observable provider activity, for H8 assertions.
 #[derive(Clone, Default)]
 pub struct SandboxStats {
     opened: Arc<AtomicUsize>,
@@ -278,8 +388,6 @@ impl SandboxStats {
 pub struct ScriptedSandboxes {
     behavior: SandboxScript,
     fail_open: Arc<AtomicBool>,
-    /// Logical time each call takes (with the clock to take it from) — for
-    /// per-tool timeout scenarios (§5.3 item 3).
     delay: Option<(SimClock, Duration)>,
     pub stats: SandboxStats,
 }
@@ -301,7 +409,7 @@ impl ScriptedSandboxes {
         self
     }
 
-    /// Echo every call back as `{"tool": name}` — the do-nothing workspace.
+    /// Echo every call back as `"{name}: ok"` — the do-nothing workspace.
     pub fn echo() -> ScriptedSandboxes {
         ScriptedSandboxes::new(|name, _| Ok(Value::String(format!("{name}: ok"))))
     }
@@ -318,17 +426,8 @@ struct ScriptedSandbox {
 }
 
 impl Sandbox for ScriptedSandbox {
-    fn call(
-        &self,
-        tier: Tier,
-        name: &str,
-        input: Value,
-    ) -> BoxFuture<'static, Result<Value, ToolError>> {
-        self.stats
-            .calls
-            .lock()
-            .expect("calls mutex")
-            .push((tier, name.to_string(), input.clone()));
+    fn call(&self, tier: Tier, name: &str, input: Value) -> BoxFuture<'static, Result<Value, ToolError>> {
+        self.stats.calls.lock().expect("calls mutex").push((tier, name.to_string(), input.clone()));
         let result = (self.behavior)(name, &input);
         let delay = self.delay.clone();
         Box::pin(async move {
@@ -351,130 +450,17 @@ impl SandboxProvider for ScriptedSandboxes {
         _session: &SessionId,
         _profile: &SandboxProfile,
     ) -> BoxFuture<'static, Result<Arc<dyn Sandbox>, SandboxError>> {
-        let result: Result<Arc<dyn Sandbox>, SandboxError> =
-            if self.fail_open.load(Ordering::SeqCst) {
-                Err(SandboxError("scripted open failure".to_string()))
-            } else {
-                self.stats.opened.fetch_add(1, Ordering::SeqCst);
-                Ok(Arc::new(ScriptedSandbox {
-                    behavior: Arc::clone(&self.behavior),
-                    delay: self.delay.clone(),
-                    stats: self.stats.clone(),
-                }))
-            };
-        Box::pin(async move { result })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Faulted journal (§12.1, §12.2)
-// ---------------------------------------------------------------------------
-
-/// The in-memory journal wrapped with seeded latency, switchable
-/// `Unavailable` windows, and per-op seeded failures — the substrate the
-/// §12.2 journal faults inject through.
-#[derive(Clone)]
-pub struct FaultedJournal {
-    pub inner: harness::InMemoryJournal,
-    pub clock: SimClock,
-    pub entropy: SimEntropy,
-    pub max_latency: Duration,
-    unavailable: Arc<AtomicBool>,
-    /// Per-op `Unavailable` probability `num / den`; zero disables.
-    pub fail_num: u64,
-    pub fail_den: u64,
-    /// Failures actually injected — coverage accounting (§11).
-    pub fired: Arc<AtomicUsize>,
-}
-
-impl FaultedJournal {
-    pub fn new(inner: harness::InMemoryJournal, clock: SimClock, entropy: SimEntropy) -> Self {
-        FaultedJournal {
-            inner,
-            clock,
-            entropy,
-            max_latency: Duration::ZERO,
-            unavailable: Arc::new(AtomicBool::new(false)),
-            fail_num: 0,
-            fail_den: 1,
-            fired: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    pub fn with_latency(mut self, max: Duration) -> Self {
-        self.max_latency = max;
-        self
-    }
-
-    pub fn with_failures(mut self, num: u64, den: u64) -> Self {
-        self.fail_num = num;
-        self.fail_den = den;
-        self
-    }
-
-    /// Open or close an outage window (§12.2): every op fails `Unavailable`
-    /// while open.
-    pub fn set_unavailable(&self, unavailable: bool) {
-        self.unavailable.store(unavailable, Ordering::SeqCst);
-    }
-
-    fn latency(&self) -> Duration {
-        if self.max_latency.is_zero() {
-            Duration::ZERO
+        let result: Result<Arc<dyn Sandbox>, SandboxError> = if self.fail_open.load(Ordering::SeqCst) {
+            Err(SandboxError("scripted open failure".to_string()))
         } else {
-            Duration::from_nanos(self.entropy.next_u64() % self.max_latency.as_nanos() as u64)
-        }
-    }
-
-    fn should_fail(&self) -> bool {
-        let fail = self.unavailable.load(Ordering::SeqCst)
-            || (self.fail_num > 0 && self.entropy.buggify(self.fail_num, self.fail_den));
-        if fail {
-            self.fired.fetch_add(1, Ordering::SeqCst);
-        }
-        fail
-    }
-}
-
-impl Journal for FaultedJournal {
-    fn append(
-        &self,
-        session: &SessionId,
-        after: SeqNo,
-        records: Vec<Record>,
-    ) -> BoxFuture<'static, Result<SeqNo, AppendError>> {
-        let clock = self.clock.clone();
-        let latency = self.latency();
-        let fail = self.should_fail();
-        let inner = self.inner.clone();
-        let session = session.clone();
-        Box::pin(async move {
-            clock.sleep(latency).await;
-            if fail {
-                return Err(AppendError::Unavailable("injected outage".to_string()));
-            }
-            inner.append(&session, after, records).await
-        })
-    }
-
-    fn load(
-        &self,
-        session: &SessionId,
-        from: SeqNo,
-        limit: usize,
-    ) -> BoxFuture<'static, Result<Vec<(SeqNo, Record)>, JournalError>> {
-        let clock = self.clock.clone();
-        let latency = self.latency();
-        let fail = self.should_fail();
-        let inner = self.inner.clone();
-        let session = session.clone();
-        Box::pin(async move {
-            clock.sleep(latency).await;
-            if fail {
-                return Err(JournalError::Unavailable("injected outage".to_string()));
-            }
-            inner.load(&session, from, limit).await
-        })
+            self.stats.opened.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(ScriptedSandbox {
+                behavior: Arc::clone(&self.behavior),
+                delay: self.delay.clone(),
+                stats: self.stats.clone(),
+            }))
+        };
+        Box::pin(async move { result })
     }
 }
 
@@ -482,26 +468,26 @@ impl Journal for FaultedJournal {
 // Continuous H-invariant checkers (§11)
 // ---------------------------------------------------------------------------
 
-/// **Harness event grammar** (H2, H6 per-node half, H8): per session and
-/// node, `SessionActivated`/`SessionDeactivated` strictly alternate;
-/// `SandboxBound`/`SandboxReleased` alternate within the activation;
-/// harness activity only happens inside an activation; and an
-/// `AppendRejected` is followed by that node's `SessionDeactivated` with no
-/// intervening harness activity for the session (§10.4).
-///
-/// Harness events ride the shared stream as `Event::App` (core spec §16);
-/// the checker recovers them by downcast and ignores everything else.
+/// The session a grain event names, by its key (§2.2: the `GrainName` key is the
+/// `SessionId`). Tests use unique session keys, so the key identifies the run.
+fn session_of(name: &GrainName) -> SessionId {
+    SessionId::new(name.key())
+}
+
+/// **Effect containment and single per-node activation** (H6 per-node half, H8):
+/// activation is the grain's (`Activated`/`Passivated` strictly alternate per
+/// session and node, granary §13); the harness's `SandboxBound`/`SandboxReleased`
+/// alternate **within** that window and the sandbox is released before
+/// deactivation; and a `ModelCompleted` only fires inside a live activation.
 #[derive(Default)]
 pub struct HarnessEventGrammar {
-    /// (session, node) → (active, sandbox_bound, fenced)
-    windows: BTreeMap<(SessionId, NodeId), (bool, bool, bool)>,
+    /// (session, node) → (active, sandbox_bound)
+    windows: BTreeMap<(SessionId, NodeId), (bool, bool)>,
 }
 
 impl HarnessEventGrammar {
-    fn window(&mut self, session: &SessionId, node: NodeId) -> &mut (bool, bool, bool) {
-        self.windows
-            .entry((session.clone(), node))
-            .or_insert((false, false, false))
+    fn window(&mut self, session: SessionId, node: NodeId) -> &mut (bool, bool) {
+        self.windows.entry((session, node)).or_insert((false, false))
     }
 }
 
@@ -511,120 +497,69 @@ impl Invariant for HarnessEventGrammar {
     }
 
     fn observe(&mut self, event: &Event) -> Result<(), String> {
+        // Activation lifecycle from the grain's own events (granary §13).
+        if let Some(grain) = event.as_app::<GrainEvent>() {
+            match grain {
+                GrainEvent::Activated { node, name } => {
+                    let w = self.window(session_of(name), *node);
+                    if w.0 {
+                        return Err(format!("second activation of {name} on {node} without passivation (G6)"));
+                    }
+                    *w = (true, false);
+                }
+                GrainEvent::Passivated { node, name } => {
+                    let w = self.window(session_of(name), *node);
+                    if w.1 {
+                        return Err(format!("passivation of {name} on {node} with the sandbox still bound (H8)"));
+                    }
+                    *w = (false, false);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         let Some(event) = event.as_app::<HarnessEvent>() else {
             return Ok(());
         };
         match event {
-            HarnessEvent::SessionActivated { session, node } => {
-                let w = self.window(session, *node);
-                if w.0 {
-                    return Err(format!(
-                        "second activation of {session} on {node} without deactivation (H6)"
-                    ));
-                }
-                *w = (true, false, false);
-            }
-            HarnessEvent::SessionDeactivated { session, node } => {
-                let w = self.window(session, *node);
-                if !w.0 {
-                    return Err(format!(
-                        "deactivation of {session} on {node} without activation (H6)"
-                    ));
-                }
-                if w.1 {
-                    return Err(format!(
-                        "deactivation of {session} on {node} with the sandbox still bound (H8)"
-                    ));
-                }
-                *w = (false, false, false);
-            }
-            HarnessEvent::AppendRejected { session, node } => {
-                let w = self.window(session, *node);
-                if !w.0 {
-                    return Err(format!(
-                        "fence rejection for {session} on {node} outside an activation (H2)"
-                    ));
-                }
-                w.2 = true;
-            }
             HarnessEvent::SandboxBound { session, node } => {
-                let w = self.window(session, *node);
+                let w = self.window(session.clone(), *node);
                 if !w.0 {
-                    return Err(format!(
-                        "sandbox bound for {session} on {node} outside an activation (H8)"
-                    ));
+                    return Err(format!("sandbox bound for {session} on {node} outside an activation (H8)"));
                 }
                 if w.1 {
                     return Err(format!("second sandbox bound for {session} on {node} (H8)"));
                 }
-                if w.2 {
-                    return Err(format!(
-                        "sandbox bound for {session} on {node} after a fence rejection (H2)"
-                    ));
-                }
                 w.1 = true;
             }
             HarnessEvent::SandboxReleased { session, node } => {
-                let w = self.window(session, *node);
+                let w = self.window(session.clone(), *node);
                 if !w.1 {
-                    return Err(format!(
-                        "sandbox released for {session} on {node} without a bind (H8)"
-                    ));
+                    return Err(format!("sandbox released for {session} on {node} without a bind (H8)"));
                 }
                 w.1 = false;
             }
-            HarnessEvent::RunResumed { session, node, .. } => {
-                let w = self.window(session, *node);
-                if !w.0 || w.2 {
-                    return Err(format!(
-                        "run resumed for {session} on {node} outside a live activation (H2/H6)"
-                    ));
-                }
-            }
             HarnessEvent::ModelCompleted { session, node, .. } => {
-                let w = self.window(session, *node);
+                let w = self.window(session.clone(), *node);
                 if !w.0 {
-                    return Err(format!(
-                        "model completion for {session} on {node} outside an activation (H6)"
-                    ));
-                }
-                if w.2 {
-                    return Err(format!(
-                        "model completion for {session} on {node} after a fence rejection (H2)"
-                    ));
+                    return Err(format!("model completion for {session} on {node} outside an activation (H6)"));
                 }
             }
             _ => {}
         }
         Ok(())
     }
-
-    // No at-quiescence sweep: a time-bounded cluster run (`run_for`) stops
-    // mid-flight, where a live activation legitimately still holds its
-    // sandbox — the same reason the core keeps mailbox-depth checks out of
-    // the continuous set. H8's checkable content is the alternation and the
-    // release-before-deactivation ordering, both enforced per event above;
-    // actual release counts are asserted by the scenario tests.
 }
 
-/// **Run discipline** (H3 pairing, H4/H5 post-end silence, H7): per
-/// `(session, turn)` exactly one `RunStarted` and at most one `RunEnded`,
-/// never an end without a start — and no unfenced activation completes a
-/// model call for a turn after its terminal outcome (§10.4 scopes the spend
-/// events to journaled spend, so a fenced activation's stragglers are
-/// excluded at quiescence, when fencing is known).
+/// **Run discipline** (H3 pairing, H7): per `(session, turn)` exactly one
+/// `RunStarted` and at most one `RunEnded`, never an end without a start. A
+/// resume emits no second `RunStarted` (§10.4), and `ModelCompleted` is scoped to
+/// journaled spend (emitted only after the response commits, §9.1.4), so no
+/// completion follows a run's end.
 #[derive(Default)]
 pub struct RunDiscipline {
     started: BTreeSet<(SessionId, TurnId)>,
     ended: BTreeSet<(SessionId, TurnId)>,
-    /// (session, node) → activation ordinal, to attribute completions.
-    activation: BTreeMap<(SessionId, NodeId), u64>,
-    /// Activations that lost the fence: their speculative completions are
-    /// excluded (§10.4).
-    fenced: BTreeSet<(SessionId, NodeId, u64)>,
-    /// Completions observed after their run ended, with the activation they
-    /// belong to — judged at quiescence.
-    suspects: Vec<(SessionId, TurnId, NodeId, u64)>,
 }
 
 impl Invariant for RunDiscipline {
@@ -637,20 +572,6 @@ impl Invariant for RunDiscipline {
             return Ok(());
         };
         match event {
-            HarnessEvent::SessionActivated { session, node } => {
-                *self.activation.entry((session.clone(), *node)).or_insert(0) += 1;
-            }
-            HarnessEvent::AppendRejected { session, node } => {
-                let ordinal = self
-                    .activation
-                    .get(&(session.clone(), *node))
-                    .copied()
-                    .unwrap_or(0);
-                self.fenced.insert((session.clone(), *node, ordinal));
-            }
-            // The guard's insert is the membership test and the recording in
-            // one draw; no other arm matches `RunStarted`, so a false guard
-            // (a fresh turn) simply falls through to the catch-all.
             HarnessEvent::RunStarted { session, turn, .. }
                 if !self.started.insert((session.clone(), turn.clone())) =>
             {
@@ -659,48 +580,27 @@ impl Invariant for RunDiscipline {
             HarnessEvent::RunEnded { session, turn, .. } => {
                 let key = (session.clone(), turn.clone());
                 if !self.started.contains(&key) {
-                    return Err(format!(
-                        "RunEnded without RunStarted for {session}/{turn} (H3)"
-                    ));
+                    return Err(format!("RunEnded without RunStarted for {session}/{turn} (H3)"));
                 }
                 if !self.ended.insert(key) {
                     return Err(format!("second RunEnded for {session}/{turn} (H3)"));
                 }
             }
-            HarnessEvent::ModelCompleted {
-                session,
-                turn,
-                node,
-                ..
-            } if self.ended.contains(&(session.clone(), turn.clone())) => {
-                let ordinal = self
-                    .activation
-                    .get(&(session.clone(), *node))
-                    .copied()
-                    .unwrap_or(0);
-                self.suspects
-                    .push((session.clone(), turn.clone(), *node, ordinal));
+            HarnessEvent::ModelCompleted { session, turn, .. }
+                if self.ended.contains(&(session.clone(), turn.clone())) =>
+            {
+                return Err(format!(
+                    "model call for {session}/{turn} completed after the run ended (H4/H5)"
+                ));
             }
             _ => {}
         }
         Ok(())
     }
-
-    fn at_quiescence(&mut self) -> Result<(), String> {
-        for (session, turn, node, ordinal) in &self.suspects {
-            if !self.fenced.contains(&(session.clone(), *node, *ordinal)) {
-                return Err(format!(
-                    "model call for {session}/{turn} completed on {node} after the run ended, \
-                     by an activation that was never fenced (H4/H5)"
-                ));
-            }
-        }
-        Ok(())
-    }
 }
 
-/// The default checker set for harness workloads: the core invariants plus
-/// the harness's continuous H-checkers (§11).
+/// The default checker set for harness workloads: the core and grain invariants
+/// plus the harness's continuous H-checkers (§11).
 pub fn harness_invariants() -> Vec<Box<dyn Invariant>> {
     let mut invariants = default_invariants();
     invariants.push(Box::new(HarnessEventGrammar::default()));
@@ -712,18 +612,14 @@ pub fn harness_invariants() -> Vec<Box<dyn Invariant>> {
 // S4 journal audit (sandbox spec §6)
 // ---------------------------------------------------------------------------
 
-/// The S4 journal audit, run at quiescence the way H2's audit runs (sandbox
-/// spec §6 S4): within one session's journal, every executed tool outcome at
-/// a tier other than `Workspace` is preceded by a `TierAcquired` at that
-/// tier with no `WorkspaceReset` in between, and every acquired or executed
-/// tier lies within the kind's cap.
+/// The S4 journal audit (sandbox spec §6 S4): within one session's journal,
+/// every executed tool outcome at a tier other than `Workspace` is preceded by a
+/// `TierAcquired` at that tier with no `WorkspaceReset` in between, and every
+/// acquired or executed tier lies within the kind's cap.
 ///
-/// Outcomes synthesized without execution — an unknown name, schema-rejected
-/// arguments (§5.4), or a dangling call resolved as `Interrupted` on resume
-/// (§5.5) — carry no effect and are exempt: the discipline orders the record
-/// against the *effect*, and there was none. No within-segment uniqueness is
-/// asserted either: a crash-resume re-execution legitimately re-journals an
-/// acquisition before the reset record lands.
+/// Synthesized outcomes — an unknown name, schema-rejected arguments (§5.4), or a
+/// dangling call resolved as `Interrupted` on resume (§5.5) — carry no effect and
+/// are exempt.
 pub fn audit_tier_acquisition(records: &[harness::Record], kind: &harness::Kind) {
     let cap = kind.tier_cap();
     let mut call_tier: BTreeMap<harness::CallId, Tier> = BTreeMap::new();
@@ -760,13 +656,11 @@ pub fn audit_tier_acquisition(records: &[harness::Record], kind: &harness::Kind)
                 if executed {
                     assert!(
                         cap.contains(tier),
-                        "S4: record {position} executes call {call:?} at tier {tier:?} \
-                         outside the cap {cap:?}"
+                        "S4: record {position} executes call {call:?} at tier {tier:?} outside the cap {cap:?}"
                     );
                     assert!(
                         held.contains(tier),
-                        "S4: record {position} executes call {call:?} at tier {tier:?} with \
-                         no preceding TierAcquired in this reset segment"
+                        "S4: record {position} executes call {call:?} at tier {tier:?} with no preceding TierAcquired in this reset segment"
                     );
                 }
             }
@@ -779,9 +673,11 @@ pub fn audit_tier_acquisition(records: &[harness::Record], kind: &harness::Kind)
 // The H catalogue (§11)
 // ---------------------------------------------------------------------------
 
-/// The harness invariant catalogue, H1–H8 (harness spec §11): machine
-/// readable alongside the conformance suite, guarded by the drift test in
-/// `conformance_catalogue.rs`. `invariant: n` reads as "Hn".
+/// The harness invariant catalogue (harness spec §11): machine readable
+/// alongside the conformance suite, guarded by the drift test in
+/// `conformance_catalogue.rs`. `invariant: n` reads as "Hn". **H2 is retired**
+/// (§11): the single-writer fence is wholly the grain's (G1), so it has no
+/// harness invariant; the numbers H3–H8 are kept stable rather than renumbered.
 pub fn harness_catalogue() -> &'static [CatalogueEntry] {
     HARNESS_CATALOGUE
 }
@@ -789,20 +685,11 @@ pub fn harness_catalogue() -> &'static [CatalogueEntry] {
 const HARNESS_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 1,
-        spec: "harness §6.3, §7.5",
+        spec: "harness §6.2, §7.5",
         property: "Deterministic fold and resume: state is a pure fold of the journal; a session resumed from any committed prefix behaves identically to one that never stopped, given the same subsequent outcomes",
         verify: &[Verify::SimTest(
             "harness/tests/conformance_resume.rs (differential), harness/tests/reproducibility.rs (seed sweep)",
         )],
-    },
-    CatalogueEntry {
-        invariant: 2,
-        spec: "harness §6.2",
-        property: "Fenced single writer: committed records form one total order per session; a stale activation deactivates with no further appends, model calls, or tool calls",
-        verify: &[
-            Verify::Checker("harness-event-grammar"),
-            Verify::SimTest("harness/tests/conformance_fence.rs (journal audit at quiescence)"),
-        ],
     },
     CatalogueEntry {
         invariant: 3,
@@ -834,7 +721,7 @@ const HARNESS_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 6,
         spec: "harness §7.2, §7.5",
-        property: "Single activation per converged view: per-node activations never overlap; a converged healed cluster runs at most one activation per session; an owned session activates within bounded logical time of contact",
+        property: "Single autonomous activation: per-node activations never overlap; a converged healed cluster runs at most one activation per session; an addressed session activates within bounded logical time of contact",
         verify: &[
             Verify::Checker("harness-event-grammar"),
             Verify::SimTest("harness/tests/cluster.rs (converged and liveness halves)"),

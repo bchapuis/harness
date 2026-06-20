@@ -1,55 +1,62 @@
-//! The session actor: the message-driven run loop (harness spec §3).
+//! The agent: an autonomous grain (harness spec §3).
 //!
-//! A session, while active, is one ordinary actor whose private state is the
-//! folded transcript plus the in-flight run. Its handlers **never block on
-//! I/O** (§3.2): every external operation — the model call, a sandboxed tool,
-//! a journal append, the load itself — is launched through the system spawner
-//! and returns as a `when_local` closure on the actor's own executor, so the
-//! mailbox stays live during a thirty-second model call and a `Cancel` takes
-//! effect at message granularity. The step is a state the fold tracks
-//! (§6.3), not a stack frame the executor holds: after every committed batch
-//! the actor re-reads its fold and asks one question — *what does this state
-//! call for next?* ([`advance`](AgentActor::advance)) — which is exactly why
-//! a resumed activation continues identically to one that never stopped
-//! (invariant H1).
+//! A session *is* a grain ([`granary`]). What the harness adds is **autonomy**:
+//! a plain grain waits for the next command, whereas an agent's activation drives
+//! itself forward — model→tools→model — until a run reaches a terminal outcome.
+//! The grain model is decide/apply: [`Grain::apply`] folds records into
+//! [`SessionState`], and each [`GrainHandler`] is a *pure decision* returning the
+//! records to journal plus a reply (granary §4.2). The loop rides three granary
+//! seams the spec leans on, none of which the harness re-implements:
 //!
-//! Appends are serialized through a one-in-flight queue carrying the fenced
-//! `after` (§6.2); a `Stale` rejection deactivates with nothing further
-//! journaled or issued (invariant H2). The write-ahead discipline (§6.4) is
-//! structural: a model response is journaled before its calls launch (call
-//! launching *is* the post-commit hook of the response batch), an outcome
-//! before the next step's model call, and a final message with its `RunEnded`
-//! in one atomic batch.
+//! - **The output gate** (granary §6): a handler's records commit before its
+//!   reply releases, so "intent before effect" (§6.4) is free — a handler that
+//!   journals an intent never launches the effect itself.
+//! - **Self-messaging** ([`GrainCtx::this`]) + **`ctx.system().launch`**: the
+//!   loop launches each external operation (a model call, a sandboxed tool, a
+//!   child submit) as a background task that delivers its outcome back as an
+//!   ordinary command ([`ModelDone`]/[`ToolDone`]), and nudges itself forward
+//!   with [`Advance`] once an intent has committed. The activation therefore
+//!   never awaits I/O inside a handler (§3.2).
+//! - **`on_activate`/`on_passivate`/`can_passivate`** (granary §10): resume
+//!   set-up, sandbox release on every deactivation (H8), and the veto that keeps
+//!   a live run from hibernating (§7.2).
+//!
+//! Everything else — the journal, the single-writer fence, placement,
+//! activation, hibernation, lossless failover — is the grain's, consumed
+//! unchanged (§2.1). Ephemeral activation state (the sandbox handle, held tiers,
+//! the subscriber set, in-flight flags) lives behind a [`Mutex`] on the grain
+//! behavior, rebuilt per activation and never journaled (§5.5, §5.6, §7.4).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
+use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
-use actor_core::Actor;
 use actor_core::ActorRef;
+use actor_core::Backoff;
 use actor_core::BoxError;
-use actor_core::Clock;
-use actor_core::Ctx;
-use actor_core::Handler;
-use actor_core::Instant;
 use actor_core::Manifest;
 use actor_core::Message;
-use actor_core::StopReason;
-use actor_core::Supervision;
 use futures::channel::oneshot;
+use futures::future::Either;
+use granary::Grain;
+use granary::GrainError;
+use granary::GrainCtx;
+use granary::GrainHandler;
+use granary::GrainRegistry;
+use granary::Seq;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::client::Harness;
 use crate::client::HarnessSystem;
+use crate::client::ReplyMailbox;
+use crate::client::Shared;
 use crate::event::HarnessEvent;
-use crate::host::Awaited;
-use crate::host::Kind;
-use crate::journal::AppendError;
-use crate::journal::SeqNo;
+use crate::kind::Kind;
 use crate::model::ModelError;
 use crate::model::ModelRequest;
 use crate::model::ModelResponse;
@@ -61,9 +68,12 @@ use crate::session::ChildRef;
 use crate::session::Completion;
 use crate::session::KindId;
 use crate::session::Lineage;
+use crate::session::LiveRun;
+use crate::session::PendingCall;
 use crate::session::Record;
 use crate::session::RecordBody;
 use crate::session::RunError;
+use crate::session::RunOutcome;
 use crate::session::SessionId;
 use crate::session::SessionState;
 use crate::session::Turn;
@@ -76,1370 +86,1449 @@ use crate::tool::DelegateInput;
 use crate::tool::OnDangling;
 use crate::tool::ToolError;
 
-/// Page size for the activation load.
-const LOAD_PAGE: usize = 256;
-/// Backoff cap for the delegation and cancel-propagation retry loops.
+/// How many times an unreachable peer is retried before a delegation/cancel
+/// gives up (§8.1, §9.2): past it the child surfaces as a tool failure (§5.4)
+/// rather than looping forever — the child's budget is the ultimate backstop
+/// (§9.2 item 3). A transport bound, backed off between tries.
+const TRANSPORT_RETRIES: u32 = 32;
+/// How many times a delegating parent re-attaches to a reachable-but-slow child
+/// before giving up (§8.1). Distinct from [`TRANSPORT_RETRIES`]: this bounds the
+/// *wait* on a child that accepts but has not finished, so it does not back off.
+const CHILD_WAIT_ATTEMPTS: u32 = 32;
+/// Backoff cap for the transport-retry loop.
 const PROPAGATION_BACKOFF_CAP: Duration = Duration::from_secs(2);
-/// Attempt bound for the delegation retry loop (§8.1): past it, the
-/// unreachable child surfaces to the parent's model as a tool failure (§5.4)
-/// rather than looping forever.
-const DELEGATION_ATTEMPTS: u32 = 32;
 
-/// A submission as the host hands it over (§7.2): the resolved kind, the
-/// turn, the lineage when delegated, and the caller's reply sender — which is
-/// why this rides a `when_local` closure and never a wire message.
-pub(crate) struct SubmitOp {
+// ===========================================================================
+// Wire contract (§7.3): commands addressed to the grain, and the outbound
+// `RunCompleted` notification. A session is addressed as a grain — its `kind`
+// is the grain type and its `SessionId` the key — so the `GrainName` carries
+// both and the commands omit them (granary §4.3).
+// ===========================================================================
+
+/// Submit a turn (§7.3). `kind` rides every call though it binds only on the
+/// first (creation is implicit in the first turn); after that it is a checked
+/// redundancy against the grain's own type, rejected on mismatch (§7.4).
+/// `reply_to` is **transient routing, not part of the turn**: it is not
+/// journaled and is excluded from the content-equality check (§7.4).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct Submit<S: HarnessSystem> {
     pub kind: KindId,
-    pub kind_def: Arc<Kind>,
     pub turn: Turn,
     pub parent: Option<Lineage>,
-    pub tx: oneshot::Sender<Awaited>,
+    pub reply_to: Option<ActorRef<ReplyMailbox<S>>>,
 }
 
-/// The self-nudge that lets a sync method stop the actor: `Ctx::stop` exists
-/// only inside handlers, so a method that decides to stop sets a flag and
-/// pokes its own mailbox.
+impl<S: HarnessSystem> Message for Submit<S> {
+    type Reply = Result<Accepted, SubmitReject>;
+    const MANIFEST: Manifest = Manifest::new("harness.Submit");
+}
+
+/// The `Submit` ack, released by the output gate the moment the `TurnSubmitted`
+/// record commits (§7.3): an ack, not the run's outcome — the outcome travels
+/// later as a [`RunCompleted`] notification to the `reply_to`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Accepted {
+    pub turn: TurnId,
+    pub status: SubmitStatus,
+}
+
+/// What a `Submit` did (§7.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubmitStatus {
+    /// A fresh run was started (its turn newly journaled or queued).
+    Started,
+    /// The `TurnId` named a live run; the `reply_to` was registered on it (H7).
+    Attached,
+    /// The `TurnId` named an ended run; its recorded outcome is delivered to the
+    /// `reply_to` immediately (H7).
+    Ended,
+}
+
+/// Why a `Submit` was rejected (§7.4): a deterministic caller-contract
+/// violation, kept distinct from a transport `GrainError`. Both cases are
+/// **permanent** — the same submit always rejects the same way — so a caller
+/// must never retry one (unlike a transport failure, which a peer move could
+/// clear). Naming them lets the resume/delegation loops tell the two apart.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubmitReject {
+    /// The submitted `kind` is not this grain's type: the address and the
+    /// payload disagree (§7.4).
+    KindMismatch { addressed: KindId, submitted: KindId },
+    /// The `TurnId` was already used for different content (§7.4): turn ids are
+    /// the dedup key, so reusing one for new content is a bug, never a retry.
+    ContentConflict { turn: TurnId },
+}
+
+impl std::fmt::Display for SubmitReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubmitReject::KindMismatch { addressed, submitted } => write!(
+                f,
+                "kind mismatch: addressed grain type '{addressed}', submitted as '{submitted}'"
+            ),
+            SubmitReject::ContentConflict { turn } => {
+                write!(f, "turn {turn} re-submitted with different content")
+            }
+        }
+    }
+}
+
+/// Cancel the run `turn` names (§7.3, §9.2). Idempotent.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Poke {}
+pub struct Cancel {
+    pub turn: TurnId,
+}
 
-impl Message for Poke {
+impl Message for Cancel {
     type Reply = ();
-    const MANIFEST: Manifest = Manifest::new("harness.agent.Poke");
+    const MANIFEST: Manifest = Manifest::new("harness.Cancel");
 }
 
-/// An operation that arrived before the journal finished loading.
-enum QueuedOp {
-    Submit(SubmitOp),
-    Cancel(TurnId),
+/// Read committed records (§7.3, §10.2): at most `limit` records after `from`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Tail {
+    pub from: Seq,
+    pub limit: u32,
 }
 
-/// A turn accepted but not yet journaled: it starts when the journal says the
-/// previous run ended (§3.1 — the journal's total order serializes runs).
-struct QueuedTurn {
-    kind: KindId,
-    kind_def: Arc<Kind>,
-    turn: Turn,
-    parent: Option<Lineage>,
+impl Message for Tail {
+    type Reply = Vec<(Seq, Record)>;
+    const MANIFEST: Manifest = Manifest::new("harness.Tail");
 }
 
-/// A sandboxed execution waiting for the environment to open (§5.3 item 1).
-struct PendingExec {
-    turn: TurnId,
-    call: CallId,
-    name: String,
-    input: Value,
-    /// The call's declared tier (§5.2), passed to `Sandbox::call` (§5.6).
-    tier: Tier,
-    timeout: Duration,
+/// The outbound notification carrying a run's outcome to a registered `reply_to`
+/// (§7.3): a `tell` delivered when `RunEnded` commits. Delivery, not the source
+/// of truth (the `RunEnded` record is); a lost one is recovered by re-contact.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RunCompleted {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub outcome: RunOutcome,
 }
+
+impl Message for RunCompleted {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("harness.RunCompleted");
+}
+
+// ===========================================================================
+// Internal self-driving commands (§3.2): local-only self-tells, never in the
+// network allowlist (`register`), so no peer can inject them. They carry the
+// outcomes of launched work back onto the grain's serial command path.
+// ===========================================================================
+
+/// "What does the fold call for next?" — the post-commit continuation and
+/// effect launcher. Idempotent: every path is guarded by a fold fact or an
+/// in-flight flag, so a resume is the same code path as ordinary progress (H1).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Advance;
+
+impl Message for Advance {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("harness.agent.Advance");
+}
+
+/// One model call finished (§3.1 step 2): its outcome, back on the loop.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelDone {
+    pub turn: TurnId,
+    pub result: Result<ModelResponse, ModelError>,
+}
+
+impl Message for ModelDone {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("harness.agent.ModelDone");
+}
+
+/// One tool call or delegation finished (§5.4, §8.1): its outcome, back on the
+/// loop, to be journaled and shown to the model.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolDone {
+    pub turn: TurnId,
+    pub call: CallId,
+    pub outcome: Result<Value, ToolError>,
+}
+
+impl Message for ToolDone {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("harness.agent.ToolDone");
+}
+
+// ===========================================================================
+// The grain
+// ===========================================================================
 
 /// The activation's sandbox binding (§5.3): at most one live sandbox per
-/// activation (invariant H8).
+/// activation (invariant H8). The opened handle is not serializable, so it is
+/// filled by the open task directly under the [`Mutex`] (the one place a task
+/// touches activation state off the command path) rather than carried in a
+/// message; the task then nudges [`Advance`].
+#[derive(Default)]
 enum SandboxSlot {
+    #[default]
     Closed,
-    Opening(Vec<PendingExec>),
+    Opening,
     Open(Arc<dyn Sandbox>),
+    /// The last open failed (§5.4): the next `Advance` fails the calls that
+    /// needed it and resets to `Closed`, so a later call retries the open.
+    Failed(String),
 }
 
-/// The working state of a live activation.
-struct Ready {
-    state: SessionState,
-    /// Resolved from the journaled `SessionCreated`, or pinned by the first
-    /// submission (§7.1).
-    kind: Option<Arc<Kind>>,
-    /// The journaled kind is not registered on this node — a deployment
-    /// error (§7.1): every triggering call fails, nothing is journaled.
-    kind_missing: bool,
-    /// The fenced append pipeline: one batch in flight, the rest queued. The
-    /// in-flight records are kept to fold on commit.
-    inflight: Option<Vec<Record>>,
-    backlog: VecDeque<Vec<Record>>,
-    /// Callers attached per turn (§7.4): resolved when the turn's outcome is
-    /// known, `Lost` on deactivation.
-    waiters: BTreeMap<TurnId, Vec<oneshot::Sender<Awaited>>>,
-    queue: VecDeque<QueuedTurn>,
-    /// A `TurnSubmitted` is in the append pipeline; don't start another.
-    starting: Option<TurnId>,
-    /// A `RunEnded` is in the append pipeline; the run is over for every
-    /// decision this activation makes (outcomes arriving now are stragglers,
-    /// §3.2).
-    ending: Option<TurnId>,
-    /// The §5.5 workspace-loss protocol: a fresh sandbox will not match what
-    /// the transcript asserts, so a `WorkspaceReset` must be journaled before
-    /// the next model call.
-    reset_needed: bool,
-    reset_enqueued: bool,
-    sandbox: SandboxSlot,
+/// The sandbox binding and tier grants this activation holds (§5.4, §5.6):
+/// fold-external working state, rebuilt per activation and released on
+/// deactivation (H8).
+#[derive(Default)]
+struct SandboxState {
+    /// The sandbox handle's lifecycle slot.
+    slot: SandboxSlot,
     /// `SandboxBound` was emitted and not yet paired (H8).
-    sandbox_bound: bool,
-    /// Tiers this activation holds (§5.6): working state, never fold state —
-    /// the fold's `TierAcquired` arm records nothing, so nothing resurrects
-    /// a tier across an activation boundary. Opening grants `Workspace` and
-    /// nothing else (§5.6 item 1); every other tier is acquired under a
-    /// journaled `TierAcquired`, and a committed `WorkspaceReset` restarts
-    /// the set at `Workspace` (§5.5).
+    bound: bool,
+    /// Tiers this activation holds (§5.6): working state, never fold state.
+    /// Opening grants `Workspace` and nothing else (§5.6 item 1).
     tiers_held: BTreeSet<Tier>,
-    /// Tiers whose `TierAcquired` is in the append pipeline, not yet
-    /// committed: dedups two same-step calls at one new tier (cf.
-    /// `reset_enqueued`).
-    tiers_enqueued: BTreeSet<Tier>,
-    /// Calls launched by this activation (a fold-external flag: relaunching
-    /// is a *resume* decision, §5.5, not a fold one).
+    /// Whether this activation has reconciled with the journal's sandbox
+    /// activity (§5.5): false until a `WorkspaceReset` is journaled (or none is
+    /// needed); flipped false again on environment loss.
+    reconciled: bool,
+}
+
+/// The progress flags of the one live run (§3.1, §5.5): cleared between runs by
+/// [`reset`](RunScope::reset), since runs are serialized one at a time.
+#[derive(Default)]
+struct RunScope {
+    /// Calls this activation has launched: a fold-external flag, so `Advance`
+    /// does not relaunch a call whose outcome has not yet committed.
     launched: BTreeSet<CallId>,
-    /// Calls whose outcome is enqueued or committed: dedups a straggler
-    /// outcome racing its own timeout.
+    /// Calls whose outcome is journaled or synthesized: dedups a straggler
+    /// (a timeout racing the real outcome, §9.2 item 4).
     resolved: BTreeSet<CallId>,
     model_inflight: bool,
-    last_activity: Instant,
-    /// Deactivate once the in-flight append commits (§7.2).
-    draining: bool,
+    /// Whether dangling calls have been resolved for the resumed run (§5.5).
+    dangling_resolved: bool,
 }
 
-/// The activation's lifecycle.
-enum Phase {
-    /// `started` launched the journal load; operations queue until it lands.
-    Boot {
-        queued: Vec<QueuedOp>,
-    },
-    Ready(Box<Ready>),
-    /// Fenced off or deactivated: every further input is discarded (H2). The
-    /// sandbox, if any, is carried so `stopped` can release it.
-    Gone {
-        sandbox: Option<Arc<dyn Sandbox>>,
-    },
+impl RunScope {
+    /// Clear every flag for the next run (§3.1): a new turn starts blank.
+    fn reset(&mut self) {
+        self.launched.clear();
+        self.resolved.clear();
+        self.model_inflight = false;
+        self.dangling_resolved = false;
+    }
 }
 
-/// A session's hosting actor (harness spec §2.1, §3): the disposable fold of
-/// the journal plus the in-flight run. Stopping it loses nothing.
-pub struct AgentActor<S: HarnessSystem> {
-    harness: Harness<S>,
-    session: SessionId,
-    phase: Phase,
-    me: Option<ActorRef<AgentActor<S>>>,
-    /// `SessionActivated` was emitted; gates the pairing `SessionDeactivated`.
-    activated: bool,
-    sandbox_was_bound_on_stop: bool,
-    stop_requested: bool,
+/// Run-boundary events this activation owes once their records commit (§10.4):
+/// each list is drained in `emit_run_events`. Filled only on the committing
+/// activation, so a resume re-emits none of them.
+#[derive(Default)]
+struct EventOutbox {
+    /// Turns whose `TurnSubmitted` just committed, awaiting `RunStarted`.
+    started: Vec<TurnId>,
+    /// Turns whose `RunEnded` just committed, awaiting `RunEnded` (§10.4, H3).
+    ended: Vec<TurnId>,
+    /// Model calls whose `ModelResponse` just committed, awaiting `ModelCompleted`
+    /// — scoped to journaled spend, so an uncommitted response emits nothing and
+    /// a resume re-counts nothing (§10.4, §9.1.4): `(turn, tokens)`.
+    model: Vec<(TurnId, u64)>,
 }
 
-impl<S: HarnessSystem> AgentActor<S> {
-    pub(crate) fn new(harness: Harness<S>, session: SessionId) -> AgentActor<S> {
-        AgentActor {
-            harness,
-            session,
-            phase: Phase::Boot { queued: Vec::new() },
-            me: None,
-            activated: false,
-            sandbox_was_bound_on_stop: false,
-            stop_requested: false,
-        }
-    }
+/// Ephemeral, per-activation working state (§5.5, §5.6, §7.4): never journaled,
+/// rebuilt on every activation, lost on deactivation. Held behind a [`Mutex`] so
+/// the `&self` handlers (granary's decide functions) can mutate it.
+struct Activation<S: HarnessSystem> {
+    /// A self-reference for the launched tasks to deliver outcomes back (§3.2).
+    this: Option<granary::GrainRef<Agent<S>>>,
+    /// The sandbox binding and held tiers (§5.4, §5.6).
+    env: SandboxState,
+    /// The live run's progress flags (§3.1, §5.5).
+    run: RunScope,
+    /// Run-boundary events awaiting their records' commit (§10.4).
+    events: EventOutbox,
+    /// Turns accepted but not yet journaled — they start when the journal shows
+    /// no live run (§3.1): the runs are serialized, one at a time.
+    queue: VecDeque<(Turn, Option<Lineage>)>,
+    /// Callers registered for a run's outcome (§7.4): notified on `RunEnded`,
+    /// rebuilt by callers re-contacting after a resume.
+    subscribers: BTreeMap<TurnId, Vec<ActorRef<ReplyMailbox<S>>>>,
+    /// Children to cancel once a `RunEnded { Cancelled }` commits (§9.2):
+    /// captured before the fold clears the live run.
+    cancel_children: Vec<ChildRef>,
+}
 
-    fn me(&self) -> ActorRef<AgentActor<S>> {
-        self.me.clone().expect("self reference set in started")
-    }
-
-    fn now(&self) -> Instant {
-        self.harness.clock().now()
-    }
-
-    /// Set the stop flag and nudge the mailbox so a handler runs and applies
-    /// it.
-    fn request_stop(&mut self) {
-        if self.stop_requested {
-            return;
-        }
-        self.stop_requested = true;
-        let me = self.me();
-        self.harness.system().launch(Box::pin(async move {
-            let _ = me.tell(Poke {}).await;
-        }));
-    }
-
-    // -- operations handed over by the host (§7.2) --------------------------
-
-    /// Accept, attach, or dedup a submission (§7.4).
-    pub(crate) fn submit(&mut self, op: SubmitOp) {
-        match &mut self.phase {
-            Phase::Boot { queued } => queued.push(QueuedOp::Submit(op)),
-            Phase::Gone { .. } => {
-                let _ = op.tx.send(Awaited::Lost);
-            }
-            Phase::Ready(_) => {
-                self.accept_submit(op);
-                self.advance();
-            }
-        }
-    }
-
-    /// Cancel the run `turn` names (§9.2): idempotent — ended or unknown is a
-    /// no-op.
-    pub(crate) fn cancel(&mut self, turn: TurnId) {
-        match &mut self.phase {
-            Phase::Boot { queued } => queued.push(QueuedOp::Cancel(turn)),
-            Phase::Gone { .. } => {}
-            Phase::Ready(r) => {
-                r.last_activity = self.harness.clock().now();
-                let live_is_target = r.state.live.as_ref().is_some_and(|live| live.turn == turn);
-                if live_is_target && r.ending.is_none() {
-                    r.ending = Some(turn.clone());
-                    self.enqueue(vec![RecordBody::RunEnded {
-                        turn,
-                        outcome: Err(RunError::Cancelled),
-                    }]);
-                } else if let Some(i) = r.queue.iter().position(|q| q.turn.id == turn) {
-                    // Not yet journaled: nothing started, so nothing to
-                    // record — the queued turn simply never runs.
-                    r.queue.remove(i);
-                    notify(r, &turn, || Awaited::Outcome(Err(RunError::Cancelled)));
-                }
-            }
-        }
-    }
-
-    /// The host's deactivation sweep (§7.2): wind down when the view no
-    /// longer names this node owner, or on idleness — never while a run is
-    /// live.
-    pub(crate) fn sweep(&mut self, owned: bool, idle_timeout: Duration, now: Instant) {
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
-        };
-        if r.draining {
-            return;
-        }
-        let idle = r.state.live.is_none()
-            && r.queue.is_empty()
-            && r.starting.is_none()
-            && r.inflight.is_none()
-            && r.backlog.is_empty()
-            && now.duration_since(r.last_activity) >= idle_timeout;
-        if !owned || idle {
-            r.draining = true;
-            if r.inflight.is_none() {
-                self.go_gone();
-            }
-        }
-    }
-
-    // -- submission details --------------------------------------------------
-
-    fn accept_submit(&mut self, op: SubmitOp) {
-        let now = self.now();
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
-        };
-        r.last_activity = now;
-        if r.kind_missing {
-            let _ = op.tx.send(Awaited::Rejected(format!(
-                "kind of session {} is not registered on this node (deployment error, §7.1)",
-                op.turn.id
-            )));
-            return;
-        }
-        if let Some(created) = &r.state.created
-            && created.kind != op.kind
-        {
-            // A checked redundancy, rejected on mismatch rather than ignored
-            // (§7.3): journaling nothing.
-            let _ = op.tx.send(Awaited::Rejected(format!(
-                "kind mismatch: session created as '{}', submitted as '{}'",
-                created.kind, op.kind
-            )));
-            return;
-        }
-        let digest = content_digest(&op.turn.content);
-        // Dedup against the journal (§7.4): the recorded outcome, or an
-        // attach to the live or queued run — never a second run (H7).
-        if let Some(facts) = r.state.turns.get(&op.turn.id) {
-            if facts.content_digest != digest {
-                let _ = op.tx.send(Awaited::Rejected(format!(
-                    "turn {} re-submitted with different content",
-                    op.turn.id
-                )));
-                return;
-            }
-            match &facts.outcome {
-                Some(outcome) => {
-                    let _ = op.tx.send(Awaited::Outcome(outcome.clone()));
-                }
-                None => attach(r, op.turn.id, op.tx),
-            }
-            return;
-        }
-        if let Some(queued) = r.queue.iter().find(|q| q.turn.id == op.turn.id) {
-            if content_digest(&queued.turn.content) != digest {
-                let _ = op.tx.send(Awaited::Rejected(format!(
-                    "turn {} re-submitted with different content",
-                    op.turn.id
-                )));
-            } else {
-                attach(r, op.turn.id, op.tx);
-            }
-            return;
-        }
-        attach(r, op.turn.id.clone(), op.tx);
-        r.queue.push_back(QueuedTurn {
-            kind: op.kind,
-            kind_def: op.kind_def,
-            turn: op.turn,
-            parent: op.parent,
-        });
-    }
-
-    // -- activation (§7.5) ---------------------------------------------------
-
-    /// The journal landed: fold, resolve the kind, resolve dangling calls,
-    /// surface workspace loss, and continue (§6.3, §5.5).
-    fn loaded(&mut self, result: Result<Vec<(SeqNo, Record)>, String>) {
-        let Phase::Boot { queued } = &mut self.phase else {
-            return;
-        };
-        let queued = std::mem::take(queued);
-        let records = match result {
-            Ok(records) => records,
-            Err(_unavailable) => {
-                // Cannot fold, so cannot serve: the contact that triggered
-                // this activation retries against a fresh one (§6.5).
-                for op in queued {
-                    if let QueuedOp::Submit(op) = op {
-                        let _ = op.tx.send(Awaited::Lost);
-                    }
-                }
-                self.phase = Phase::Gone { sandbox: None };
-                self.request_stop();
-                return;
-            }
-        };
-        let state = SessionState::fold(&records);
-        let (kind, kind_missing) = match &state.created {
-            Some(created) => match self.harness.kinds().get(&created.kind) {
-                Some(kind) => (Some(kind), false),
-                None => (None, true),
-            },
-            None => (None, false),
-        };
-        let resumed = state.live.clone();
-        let reset_needed = state.sandbox_activity;
-        self.phase = Phase::Ready(Box::new(Ready {
-            state,
-            kind,
-            kind_missing,
-            inflight: None,
-            backlog: VecDeque::new(),
-            waiters: BTreeMap::new(),
+// Hand-written rather than `#[derive(Default)]`: deriving would impose a
+// spurious `S: Default` bound on the type parameter, which never needs it.
+impl<S: HarnessSystem> Default for Activation<S> {
+    fn default() -> Self {
+        Activation {
+            this: None,
+            env: SandboxState::default(),
+            run: RunScope::default(),
+            events: EventOutbox::default(),
             queue: VecDeque::new(),
-            starting: None,
-            ending: None,
-            reset_needed,
-            reset_enqueued: false,
-            sandbox: SandboxSlot::Closed,
-            sandbox_bound: false,
-            tiers_held: BTreeSet::from([Tier::Workspace]),
-            tiers_enqueued: BTreeSet::new(),
-            launched: BTreeSet::new(),
-            resolved: BTreeSet::new(),
-            model_inflight: false,
-            last_activity: self.harness.clock().now(),
-            draining: false,
-        }));
-        self.activated = true;
-        let node = self.harness.system().node();
-        self.harness.system().emit_event(
-            HarnessEvent::SessionActivated {
-                session: self.session.clone(),
-                node,
-            }
-            .into(),
-        );
-        if let Some(live) = &resumed {
-            self.harness.system().emit_event(
-                HarnessEvent::RunResumed {
-                    session: self.session.clone(),
-                    turn: live.turn.clone(),
-                    node,
-                }
-                .into(),
-            );
-            self.resolve_dangling();
+            subscribers: BTreeMap::new(),
+            cancel_children: Vec::new(),
         }
-        // The deactivation sweep (§7.2), scoped to this activation: each tick
-        // re-checks ownership against the local view and idleness, and the
-        // agent winds itself down when either says to. The loop ends with the
-        // activation — a node with no live session schedules nothing, so a
-        // quiescence-driven simulation can quiesce.
-        {
-            let harness = self.harness.clone();
-            let session = self.session.clone();
-            let me = self.me();
-            let clock = harness.clock();
-            let tick = harness.config().tick_interval;
-            let idle = harness.config().idle_timeout;
-            let launcher = harness.clone();
-            launcher.system().launch(Box::pin(async move {
-                loop {
-                    clock.sleep(tick).await;
-                    let owned = harness.system().owner_of(session.as_str().as_bytes())
-                        == Some(harness.system().node());
-                    let now = clock.now();
-                    if me
-                        .when_local(move |agent: &mut AgentActor<S>| agent.sweep(owned, idle, now))
-                        .await
-                        .is_none()
-                    {
-                        // The activation stopped; the sweep dies with it.
-                        return;
-                    }
-                }
-            }));
+    }
+}
+
+/// The agent grain (harness spec §3): one `Agent` Rust type hosted under each
+/// kind's name (`granary_named`, §2.2), so a `KindId` is a grain type. The
+/// behavior is built fresh per activation by the harness's factory, which
+/// injects the node's seams via [`Shared`]; the folded [`SessionState`] is the
+/// grain's `State`, rebuilt from the journal by granary.
+pub struct Agent<S: HarnessSystem> {
+    shared: Arc<Shared<S>>,
+    /// This grain's kind definition (§7.1). Captured by the factory, which hosts
+    /// one grain type per kind (§2.2), so an activation of grain-type `K` always
+    /// has `K`'s definition — kind resolution is infallible, no lookup needed.
+    kind: Arc<Kind>,
+    act: Arc<Mutex<Activation<S>>>,
+    _marker: PhantomData<S>,
+}
+
+impl<S: HarnessSystem> Agent<S> {
+    /// Build a fresh activation's behavior, injecting this node's seams and this
+    /// grain type's kind (§7.4). Called by the harness factory passed to
+    /// `granary_named`.
+    pub(crate) fn new(shared: Arc<Shared<S>>, kind: Arc<Kind>) -> Agent<S> {
+        Agent {
+            shared,
+            kind,
+            act: Arc::new(Mutex::new(Activation::default())),
+            _marker: PhantomData,
         }
-        for op in queued {
-            match op {
-                QueuedOp::Submit(op) => self.submit(op),
-                QueuedOp::Cancel(turn) => self.cancel(turn),
-            }
-        }
-        self.advance();
     }
 
-    /// Resolve calls whose intent is journaled but whose outcome is not
-    /// (§5.5): re-execute or interrupt, per declaration. `delegate`
-    /// re-executes by construction — its re-submission dedups into an attach
-    /// (§8.1).
-    fn resolve_dangling(&mut self) {
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
-        };
-        let Some(live) = &r.state.live else {
-            return;
-        };
-        let turn = live.turn.clone();
-        let mut interrupts = Vec::new();
-        for (call, pending) in &live.pending {
-            let policy = if pending.name == DELEGATE {
-                OnDangling::Reexecute
-            } else {
-                r.kind
-                    .as_ref()
-                    .and_then(|k| k.tools.get(&pending.name))
-                    .map(|decl| decl.on_dangling)
-                    // The declaration vanished (the kind changed mid-session):
-                    // the safe policy.
-                    .unwrap_or(OnDangling::Interrupt)
-            };
-            // Re-executions need no marking: `advance` launches any pending
-            // call not yet launched by this activation, which on resume is
-            // exactly blind re-execution (§5.5).
-            if policy == OnDangling::Interrupt {
-                r.resolved.insert(call.clone());
-                interrupts.push(call.clone());
-            }
+    fn lock(&self) -> std::sync::MutexGuard<'_, Activation<S>> {
+        self.act.lock().expect("agent activation mutex poisoned")
+    }
+
+    /// This grain's kind definition (§7.1): infallible by construction.
+    fn kind(&self) -> &Kind {
+        &self.kind
+    }
+
+    fn session(ctx: &GrainCtx<Agent<S>>) -> SessionId {
+        SessionId::new(ctx.name().key())
+    }
+
+    /// Stamp a record body with this node's clock reading (§10.1).
+    fn rec(&self, ctx: &GrainCtx<Agent<S>>, body: RecordBody) -> Record {
+        Record {
+            at_nanos: ctx.system().now().as_nanos(),
+            body,
         }
-        for call in interrupts {
-            self.enqueue(vec![RecordBody::ToolOutcome {
+    }
+
+    /// Resolve `call` with a failure outcome as one step: mark it resolved so it
+    /// never relaunches, and return the `ToolOutcome` record to journal. The two
+    /// must always happen together — a resolved call with no journaled outcome
+    /// would dangle forever; a journaled failure not marked resolved would
+    /// re-execute. Callers push the returned record onto the round's batch.
+    fn fail_call(
+        &self,
+        act: &mut Activation<S>,
+        ctx: &GrainCtx<Agent<S>>,
+        turn: &TurnId,
+        call: &CallId,
+        error: ToolError,
+    ) -> Record {
+        act.run.resolved.insert(call.clone());
+        self.rec(
+            ctx,
+            RecordBody::ToolOutcome {
                 turn: turn.clone(),
-                call,
-                outcome: Err(ToolError::Interrupted),
-            }]);
-        }
+                call: call.clone(),
+                outcome: Err(error),
+            },
+        )
     }
 
-    // -- the dispatcher (§3.1) ----------------------------------------------
-
-    /// What does the fold call for next? Idempotent: every path is guarded by
-    /// a fold fact or an in-flight flag, so calling it after any transition
-    /// is safe — which is what makes resume the same code path as progress.
-    fn advance(&mut self) {
-        self.pump();
-        let harness = self.harness.clone();
-        let session = self.session.clone();
-        let me = self.me();
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
-        };
-        if r.draining || r.kind_missing {
-            return;
-        }
-
-        // Start the next queued turn once the journal shows no live run.
-        if r.state.live.is_none() && r.starting.is_none() && r.ending.is_none() {
-            if let Some(next) = r.queue.front() {
-                let mut batch = Vec::new();
-                if r.state.created.is_none() {
-                    let root = next
-                        .parent
-                        .as_ref()
-                        .map(|p| p.root.clone())
-                        .unwrap_or_else(|| session.clone());
-                    batch.push(RecordBody::SessionCreated {
-                        kind: next.kind.clone(),
-                        digest: next.kind_def.digest(),
-                        parent: next.parent.clone(),
-                        root,
-                    });
-                }
-                batch.push(RecordBody::TurnSubmitted {
-                    turn: next.turn.id.clone(),
-                    content: next.turn.content.clone(),
-                    budget: next.turn.budget.unwrap_or(next.kind_def.default_budget),
-                });
-                r.starting = Some(next.turn.id.clone());
-                if r.kind.is_none() {
-                    r.kind = Some(Arc::clone(&next.kind_def));
-                }
-                let _ = r; // end the borrow before enqueue
-                self.enqueue(batch);
-                return self.advance_rest(harness, session, me);
-            }
-        }
-        self.advance_rest(harness, session, me);
-    }
-
-    /// The live-run half of [`advance`]; split only to satisfy the borrow
-    /// checker across the enqueue above.
-    fn advance_rest(&mut self, harness: Harness<S>, session: SessionId, me: ActorRef<Self>) {
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
-        };
-        if r.draining || r.kind_missing || r.ending.is_some() {
-            return;
-        }
-        let Some(live) = &r.state.live else {
-            return;
-        };
-        let turn = live.turn.clone();
-        let Some(kind) = r.kind.clone() else {
-            return;
-        };
-
-        if live.pending.is_empty() {
-            if r.model_inflight || r.reset_enqueued {
-                return;
-            }
-            // Pre-call budget enforcement (§9.1 item 2).
-            let floor = harness.config().budget_floor;
-            if !live.spend.allows_call(&live.budget, floor) {
-                r.ending = Some(turn.clone());
-                self.enqueue(vec![RecordBody::RunEnded {
-                    turn,
-                    outcome: Err(RunError::BudgetExhausted),
-                }]);
-                return;
-            }
-            // Surface a lost workspace before the model acts on state that is
-            // gone (§5.5).
-            if r.reset_needed {
-                r.reset_enqueued = true;
-                self.enqueue(vec![RecordBody::WorkspaceReset]);
-                return;
-            }
-            // One model call per step (§3.1), launched, never awaited inline
-            // (§3.2).
-            r.model_inflight = true;
-            let max_tokens = kind
-                .params
-                .max_tokens
-                .min(live.spend.remaining_tokens(&live.budget));
-            let mut tools: Vec<ToolSpec> = kind.tools.specs();
-            if !kind.delegates.is_empty() {
-                tools.push(delegate_spec(&kind));
-            }
-            let request = ModelRequest {
-                system_prompt: kind.system_prompt.clone(),
-                params: kind.params.clone(),
-                tools,
-                transcript: r.state.transcript.clone(),
-                max_tokens,
-            };
-            let model = Arc::clone(harness.model());
-            harness.system().launch(Box::pin(async move {
-                let result = model.complete(request).await;
-                let _ = me
-                    .when_local(move |agent: &mut AgentActor<S>| agent.model_done(turn, result))
-                    .await;
-            }));
-            return;
-        }
-
-        // Execute every journaled intent that is not yet launched or resolved
-        // (§3.1 step 4; on resume this is dangling-call re-execution, §5.5).
-        let to_launch: Vec<(CallId, String, Value, Option<ChildRef>)> = live
-            .pending
-            .iter()
-            .filter(|(call, _)| !r.launched.contains(*call) && !r.resolved.contains(*call))
-            .map(|(call, p)| {
-                (
-                    call.clone(),
-                    p.name.clone(),
-                    p.input.clone(),
-                    p.child.clone(),
-                )
-            })
-            .collect();
-        for (call, name, input, child) in to_launch {
-            self.launch_call(&kind, turn.clone(), call, name, input, child);
-            let Phase::Ready(_) = &self.phase else {
-                return;
-            };
-        }
-        let _ = (harness, session);
-    }
-
-    fn launch_call(
-        &mut self,
-        kind: &Arc<Kind>,
-        turn: TurnId,
-        call: CallId,
-        name: String,
-        input: Value,
-        child: Option<ChildRef>,
-    ) {
-        let harness = self.harness.clone();
-        let session = self.session.clone();
-        let me = self.me();
-        // `launched` is marked per branch, just before the work is committed
-        // to: a call parked on a tier acquisition (below) stays out of it, so
-        // the post-commit `advance` re-drives `launch_call` for it.
-
-        if name == DELEGATE {
-            {
-                let Phase::Ready(r) = &mut self.phase else {
-                    return;
-                };
-                r.launched.insert(call.clone());
-            }
-            // Delegation is control flow, executed in the loop (§5.2, §8).
-            let parsed: Result<DelegateInput, _> = serde_json::from_value(input.clone());
-            let request = match parsed {
-                Ok(request) => request,
-                Err(e) => {
-                    return self.synthesize_outcome(
-                        turn,
-                        call,
-                        Err(ToolError::InvalidArguments(e.to_string())),
-                    );
-                }
-            };
-            let child_kind = KindId::new(request.kind.clone());
-            if !kind.delegates.contains(&child_kind) {
-                // The allowlist (§8.1): a locked-down kind cannot escalate by
-                // delegating to a permissive one.
-                return self.synthesize_outcome(
-                    turn,
-                    call,
-                    Err(ToolError::InvalidArguments(format!(
-                        "kind '{child_kind}' is not in this kind's delegation allowlist"
-                    ))),
-                );
-            }
-            let Some(child_def) = harness.kinds().get(&child_kind) else {
-                return self.synthesize_outcome(
-                    turn,
-                    call,
-                    Err(ToolError::InvalidArguments(format!(
-                        "delegated kind '{child_kind}' is not registered"
-                    ))),
-                );
-            };
-            match child {
-                // The intent is already journaled (a dangling re-execution):
-                // re-submit with the recorded identifiers and budget (§5.5).
-                Some(child) => self.launch_delegation(turn, call, request, child),
-                // Fresh delegation: journal the `ChildRun` intent first
-                // (§8.1 step 1); the submit launches when it commits.
-                None => {
-                    let Phase::Ready(r) = &mut self.phase else {
-                        return;
-                    };
-                    let Some(live) = &r.state.live else {
-                        return;
-                    };
-                    let (child_session, child_turn) = derive_child(&session, &turn, &call);
-                    let requested = request.budget.unwrap_or(child_def.default_budget);
-                    let budget = live.spend.carve(&live.budget, requested);
-                    self.enqueue(vec![RecordBody::ChildRun {
-                        turn,
-                        call,
-                        child_session,
-                        child_turn,
-                        budget,
-                    }]);
-                }
-            }
-            return;
-        }
-
-        // Sandboxed tools: dispatch by name against the registry and nothing
-        // else (§5.2).
-        let Some(decl) = kind.tools.get(&name) else {
-            return self.synthesize_outcome(turn, call, Err(ToolError::UnknownTool { name }));
-        };
-        if !input.is_object() {
-            return self.synthesize_outcome(
-                turn,
-                call,
-                Err(ToolError::InvalidArguments(
-                    "tool input must be a JSON object".to_string(),
-                )),
-            );
-        }
-        let tier = decl.tier;
-        let timeout = decl.timeout.unwrap_or(harness.config().tool_timeout);
-
-        // The acquisition gate (§5.6): before the first call at a tier the
-        // activation does not yet hold, journal `TierAcquired` — the
-        // write-ahead discipline (§6.4) applied to capability acquisition,
-        // intent before effect. A parked call is NOT marked launched: it
-        // stays in the fold's pending set, and the record's commit re-drives
-        // it through `advance`. The cap needs no check here — declared tools
-        // were checked against it at registration (§5.3 item 4), and
-        // dispatch reaches declared tools only (§5.2).
-        let (held, first_to_need) = {
-            let Phase::Ready(r) = &mut self.phase else {
-                return;
-            };
-            let held = r.tiers_held.contains(&tier);
-            // `insert` is false when a same-step sibling already enqueued the
-            // tier, so only the first call to need it journals the record.
-            (held, !held && r.tiers_enqueued.insert(tier))
-        };
-        if !held {
-            if first_to_need {
-                self.enqueue(vec![RecordBody::TierAcquired { turn, tier }]);
-            }
-            return;
-        }
-
-        let exec = PendingExec {
-            turn,
-            call: call.clone(),
-            name,
-            input,
-            tier,
-            timeout,
-        };
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
-        };
-        r.launched.insert(call);
-        match &mut r.sandbox {
-            SandboxSlot::Open(sandbox) => {
-                let sandbox = Arc::clone(sandbox);
-                launch_exec(&harness, &me, sandbox, exec);
-            }
-            SandboxSlot::Opening(queue) => queue.push(exec),
-            SandboxSlot::Closed => {
-                // Lazy open on the first sandboxed call (§5.3 item 1).
-                r.sandbox = SandboxSlot::Opening(vec![exec]);
-                let profile = kind.profile.clone();
-                let provider = Arc::clone(harness.sandboxes());
-                harness.system().launch(Box::pin(async move {
-                    let result = provider.open(&session, &profile).await;
-                    let _ = me
-                        .when_local(move |agent: &mut AgentActor<S>| agent.sandbox_opened(result))
-                        .await;
-                }));
-            }
-        }
-    }
-
-    /// A synthesized outcome for a call that executed nowhere (§5.4): unknown
-    /// name, malformed arguments, failed provisioning.
-    fn synthesize_outcome(
-        &mut self,
-        turn: TurnId,
-        call: CallId,
-        outcome: Result<Value, ToolError>,
-    ) {
-        self.tool_done(turn, call, outcome);
-    }
-
-    /// Launch the child submission of a journaled delegation (§8.1 steps
-    /// 2–3): an ordinary `SessionRef` submit, retried on reported transport
-    /// failure — safe because the derived `TurnId` dedups (H7).
-    fn launch_delegation(
-        &mut self,
-        turn: TurnId,
-        call: CallId,
-        request: DelegateInput,
-        child: ChildRef,
-    ) {
-        let harness = self.harness.clone();
-        let me = self.me();
-        let Phase::Ready(r) = &self.phase else {
-            return;
-        };
-        let root = r
-            .state
-            .created
-            .as_ref()
-            .map(|c| c.root.clone())
-            .unwrap_or_else(|| self.session.clone());
-        let lineage = Lineage {
-            session: self.session.clone(),
-            turn: turn.clone(),
-            root,
-        };
-        let clock = harness.clock();
-        let deadline = harness.config().submit_deadline;
-        let launcher = harness.clone();
-        launcher.system().launch(Box::pin(async move {
-            let child_ref = harness.session(&request.kind, child.session.clone());
-            let child_turn = Turn {
-                id: child.turn.clone(),
-                content: request.prompt.clone(),
-                budget: Some(child.budget),
-            };
-            let mut attempt: u32 = 0;
-            let outcome = loop {
-                match child_ref
-                    .submit(child_turn.clone(), Some(lineage.clone()), deadline)
-                    .await
-                {
-                    Ok(Ok(completion)) => break Ok(Value::String(completion.text().to_string())),
-                    Ok(Err(run_error)) => break Err(ToolError::Delegation(run_error)),
-                    Err(_call_error) if attempt < DELEGATION_ATTEMPTS => {
-                        attempt += 1;
-                        clock.sleep(propagation_backoff(attempt)).await;
-                    }
-                    Err(call_error) => {
-                        // The child stayed unreachable past the retry bound:
-                        // surface it as a tool failure for the model (§5.4);
-                        // the journaled intent re-executes on a later resume.
-                        break Err(ToolError::Delegation(RunError::Journal(format!(
-                            "child unreachable: {call_error}"
-                        ))));
-                    }
-                }
-            };
-            let _ = me
-                .when_local(move |agent: &mut AgentActor<S>| agent.tool_done(turn, call, outcome))
-                .await;
+    /// Launch a self-`tell` of [`Advance`] (§3.2): runs after the current
+    /// handler's records commit, so launching effects from it honors the
+    /// write-ahead discipline (§6.4).
+    fn schedule_advance(&self, ctx: &GrainCtx<Agent<S>>) {
+        let this = ctx.this();
+        ctx.system().launch(Box::pin(async move {
+            let _ = this.tell(Advance).await;
         }));
     }
 
-    // -- outcomes arriving from launched tasks -------------------------------
+    // -- handler bodies ------------------------------------------------------
 
-    fn model_done(&mut self, turn: TurnId, result: Result<ModelResponse, ModelError>) {
-        let node = self.harness.system().node();
-        let session = self.session.clone();
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
-        };
-        r.model_inflight = false;
-        r.last_activity = self.harness.clock().now();
-        let live = match &r.state.live {
-            Some(live) if live.turn == turn && r.ending.is_none() => live,
+    fn on_submit(
+        &self,
+        state: &SessionState,
+        msg: Submit<S>,
+        ctx: &GrainCtx<Agent<S>>,
+    ) -> (Vec<Record>, Result<Accepted, SubmitReject>) {
+        let my_kind = KindId::new(ctx.name().grain_type());
+        if msg.kind != my_kind {
+            return (
+                Vec::new(),
+                Err(SubmitReject::KindMismatch { addressed: my_kind, submitted: msg.kind }),
+            );
+        }
+        let turn_id = msg.turn.id.clone();
+        let digest = content_digest(&msg.turn.content);
+        let mut act = self.lock();
+
+        // Dedup against the journal (§7.4): the recorded outcome, or an attach to
+        // the live run — never a second run (H7).
+        if let Some(facts) = state.turns.get(&turn_id) {
+            if facts.content_digest != digest {
+                return (
+                    Vec::new(),
+                    Err(SubmitReject::ContentConflict { turn: turn_id }),
+                );
+            }
+            return match &facts.outcome {
+                Some(outcome) => {
+                    // Ended: deliver the recorded outcome to the fresh reply-to.
+                    if let Some(reply_to) = msg.reply_to {
+                        self.notify_one(ctx, reply_to, &turn_id, outcome.clone());
+                    }
+                    (Vec::new(), Ok(Accepted { turn: turn_id, status: SubmitStatus::Ended }))
+                }
+                None => {
+                    if let Some(reply_to) = msg.reply_to {
+                        act.subscribers.entry(turn_id.clone()).or_default().push(reply_to);
+                    }
+                    // A live run with a fresh attachment may be resuming on this
+                    // activation: nudge it forward.
+                    drop(act);
+                    self.schedule_advance(ctx);
+                    (Vec::new(), Ok(Accepted { turn: turn_id, status: SubmitStatus::Attached }))
+                }
+            };
+        }
+
+        // Dedup against a queued-but-unstarted turn (ephemeral, §7.4).
+        if act.queue.iter().any(|(t, _)| t.id == turn_id) {
+            if let Some(reply_to) = msg.reply_to {
+                act.subscribers.entry(turn_id.clone()).or_default().push(reply_to);
+            }
+            return (Vec::new(), Ok(Accepted { turn: turn_id, status: SubmitStatus::Attached }));
+        }
+
+        // A new turn.
+        if let Some(reply_to) = msg.reply_to {
+            act.subscribers.entry(turn_id.clone()).or_default().push(reply_to);
+        }
+        if state.live.is_none() && act.queue.is_empty() {
+            // Start now: journal SessionCreated (if first) + TurnSubmitted.
+            act.events.started.push(turn_id.clone());
+            drop(act);
+            let batch = self.start_records(state, ctx, self.kind(), msg.turn, msg.parent);
+            self.schedule_advance(ctx);
+            (batch, Ok(Accepted { turn: turn_id, status: SubmitStatus::Started }))
+        } else {
+            // Serialize behind the live/queued run (§3.1).
+            act.queue.push_back((msg.turn, msg.parent));
+            (Vec::new(), Ok(Accepted { turn: turn_id, status: SubmitStatus::Started }))
+        }
+    }
+
+    /// The records that start a turn: `SessionCreated` on the very first turn,
+    /// then `TurnSubmitted` (§3.1, §7.1).
+    fn start_records(
+        &self,
+        state: &SessionState,
+        ctx: &GrainCtx<Agent<S>>,
+        kind: &Kind,
+        turn: Turn,
+        parent: Option<Lineage>,
+    ) -> Vec<Record> {
+        let mut batch = Vec::new();
+        if state.created.is_none() {
+            let session = Self::session(ctx);
+            let root = parent.as_ref().map(|p| p.root.clone()).unwrap_or(session);
+            batch.push(self.rec(
+                ctx,
+                RecordBody::SessionCreated {
+                    kind: KindId::new(ctx.name().grain_type()),
+                    digest: kind.digest(),
+                    parent,
+                    root,
+                },
+            ));
+        }
+        let budget = turn.budget.unwrap_or(kind.default_budget);
+        batch.push(self.rec(
+            ctx,
+            RecordBody::TurnSubmitted {
+                turn: turn.id,
+                content: turn.content,
+                budget,
+            },
+        ));
+        batch
+    }
+
+    fn on_cancel(&self, state: &SessionState, turn: TurnId, ctx: &GrainCtx<Agent<S>>) -> Vec<Record> {
+        let mut act = self.lock();
+        // A cancel naming the live run ends it; one naming an ended, queued, or
+        // unknown run is an idempotent no-op (§9.2 item 1).
+        if state.live.as_ref().is_some_and(|l| l.turn == turn) {
+            // Capture the live children before the fold clears the run, so the
+            // committed cancel propagates to them (§9.2 item 2).
+            if let Some(live) = &state.live {
+                act.cancel_children = live.pending.values().filter_map(|p| p.child.clone()).collect();
+            }
+            act.events.ended.push(turn.clone());
+            drop(act);
+            self.schedule_advance(ctx);
+            vec![self.rec(ctx, RecordBody::RunEnded { turn, outcome: Err(RunError::Cancelled) })]
+        } else if let Some(i) = act.queue.iter().position(|(t, _)| t.id == turn) {
+            // Not yet journaled: drop it and notify any attached caller.
+            act.queue.remove(i);
+            let subs = act.subscribers.remove(&turn).unwrap_or_default();
+            drop(act);
+            for sub in subs {
+                self.notify_one(ctx, sub, &turn, Err(RunError::Cancelled));
+            }
+            Vec::new()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn on_tail(&self, state: &SessionState, msg: Tail) -> Vec<(Seq, Record)> {
+        // The grain owns the journal, so the activation mirrors committed records
+        // (§10.2). A read served from the activation, read-your-leader, never a
+        // write (§7.3). Record `i` carries `Seq(i + 1)`, so every record with
+        // `Seq <= from` sits at index `< from` — skip that prefix instead of
+        // scanning it.
+        let from = msg.from.value() as usize;
+        state
+            .records
+            .iter()
+            .enumerate()
+            .skip(from)
+            .map(|(i, r)| (SessionState::seq_of(i), r.clone()))
+            .take(msg.limit as usize)
+            .collect()
+    }
+
+    fn on_model_done(
+        &self,
+        state: &SessionState,
+        turn: TurnId,
+        result: Result<ModelResponse, ModelError>,
+        ctx: &GrainCtx<Agent<S>>,
+    ) -> Vec<Record> {
+        let mut act = self.lock();
+        act.run.model_inflight = false;
+        let Some(live) = state.live.as_ref().filter(|l| l.turn == turn) else {
             // The run ended while the call was in flight (a cancel, §9.2):
-            // discard, do not journal (§3.2) — and emit nothing, so the event
-            // stream stays scoped to journaled spend (§10.4).
-            _ => return,
+            // discard, do not journal, emit nothing (§3.2, §10.4).
+            return Vec::new();
         };
         match result {
             Ok(mut response) => {
-                // Assign call ids the provider omitted (§5.2): deterministic
-                // in the step and position.
+                // Assign ids the provider omitted (§5.2): deterministic in the
+                // step and position.
                 let step = live.spend.own_steps + 1;
                 for (i, call) in response.calls.iter_mut().enumerate() {
                     if call.id.as_str().is_empty() {
                         call.id = CallId::new(format!("call-{step}-{i}"));
                     }
                 }
-                self.harness.system().emit_event(
-                    HarnessEvent::ModelCompleted {
-                        session,
-                        turn: turn.clone(),
-                        node,
-                        usage: response.usage.total(),
-                    }
-                    .into(),
-                );
-                if response.is_final() {
+                // `ModelCompleted` is emitted after the response commits (§10.4),
+                // so it counts only journaled spend (§9.1.4).
+                act.events.model.push((turn.clone(), response.usage.total()));
+                // No requested tool calls ⇒ this assistant message ends the run
+                // (§3.1 step 3). The termination rule is the loop's, not a
+                // property of the model's reply.
+                let is_final = response.calls.is_empty();
+                if is_final {
+                    act.events.ended.push(turn.clone());
+                }
+                drop(act);
+                self.schedule_advance(ctx);
+                if is_final {
                     // Final message and terminal outcome in one atomic batch
                     // (§6.4): no journal prefix ends between them.
                     let tokens = live.spend.tokens() + response.usage.total();
                     let completion = Completion::new(response.content.clone(), tokens);
-                    r.ending = Some(turn.clone());
-                    self.enqueue(vec![
+                    vec![
+                        self.rec(
+                            ctx,
+                            RecordBody::ModelResponse {
+                                turn: turn.clone(),
+                                content: response.content,
+                                calls: Vec::new(),
+                                usage: response.usage,
+                            },
+                        ),
+                        self.rec(ctx, RecordBody::RunEnded { turn, outcome: Ok(completion) }),
+                    ]
+                } else {
+                    vec![self.rec(
+                        ctx,
                         RecordBody::ModelResponse {
-                            turn: turn.clone(),
+                            turn,
                             content: response.content,
-                            calls: Vec::new(),
+                            calls: response.calls,
                             usage: response.usage,
                         },
-                        RecordBody::RunEnded {
-                            turn,
-                            outcome: Ok(completion),
-                        },
-                    ]);
-                } else {
-                    self.enqueue(vec![RecordBody::ModelResponse {
-                        turn,
-                        content: response.content,
-                        calls: response.calls,
-                        usage: response.usage,
-                    }]);
+                    )]
                 }
             }
             Err(error) => {
-                // A failure no retry policy absorbed ends the run: journaled,
-                // reported, never swallowed (§4.3).
-                r.ending = Some(turn.clone());
-                self.enqueue(vec![RecordBody::RunEnded {
-                    turn,
-                    outcome: Err(RunError::Model(error)),
-                }]);
+                // A failure no retry policy absorbed ends the run (§4.3).
+                act.events.ended.push(turn.clone());
+                drop(act);
+                self.schedule_advance(ctx);
+                vec![self.rec(ctx, RecordBody::RunEnded { turn, outcome: Err(RunError::Model(error)) })]
             }
         }
     }
 
-    fn tool_done(&mut self, turn: TurnId, call: CallId, outcome: Result<Value, ToolError>) {
-        let node = self.harness.system().node();
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
-        };
-        r.last_activity = self.harness.clock().now();
-        let live_matches = r
-            .state
+    fn on_tool_done(
+        &self,
+        state: &SessionState,
+        turn: TurnId,
+        call: CallId,
+        outcome: Result<Value, ToolError>,
+        ctx: &GrainCtx<Agent<S>>,
+    ) -> Vec<Record> {
+        let mut act = self.lock();
+        let live_matches = state
             .live
             .as_ref()
-            .is_some_and(|live| live.turn == turn && live.pending.contains_key(&call));
-        if !live_matches || r.ending.is_some() || r.resolved.contains(&call) {
+            .is_some_and(|l| l.turn == turn && l.pending.contains_key(&call));
+        if !live_matches || act.run.resolved.contains(&call) {
             // A straggler of an ended or cancelled run, or a duplicate
-            // (timeout racing the real outcome): discarded, not journaled
-            // (§3.2, §9.2 item 4).
+            // (a timeout racing the real outcome): discard (§3.2, §9.2 item 4).
+            return Vec::new();
+        }
+        act.run.resolved.insert(call.clone());
+        if let Err(ToolError::EnvironmentLost(_)) = &outcome {
+            // The provider lost the workspace (§5.5): drop the binding, release
+            // it, and require a `WorkspaceReset` before the next model call.
+            self.release_sandbox(&mut act, ctx);
+            act.env.reconciled = false;
+        }
+        drop(act);
+        self.schedule_advance(ctx);
+        vec![self.rec(ctx, RecordBody::ToolOutcome { turn, call, outcome })]
+    }
+
+    // -- the dispatcher (§3.1) ----------------------------------------------
+
+    /// What the fold calls for next, run after every committed batch. Reads the
+    /// folded state and launches the next effect, journaling intents first
+    /// (§6.4). Returns the records to journal this round (empty when it only
+    /// launches effects); the handler schedules a re-advance iff it returns records.
+    fn advance(&self, state: &SessionState, ctx: &GrainCtx<Agent<S>>) -> Vec<Record> {
+        let kind = self.kind();
+        let session = Self::session(ctx);
+        let mut act = self.lock();
+
+        // (a) Emit the run-boundary events this activation owes (§10.4), notify
+        //     callers of any finished run, and propagate a committed cancel to
+        //     the captured children (§9.2).
+        self.emit_run_events(&mut act, state, ctx, &session);
+        self.notify_finished(&mut act, state, ctx, &session);
+        self.propagate_cancels(&mut act, ctx, kind);
+
+        // (b) No live run: reset per-run flags and start the next queued turn.
+        let Some(live) = state.live.as_ref() else {
+            return self.start_next_turn(state, ctx, kind, &mut act);
+        };
+        let turn = live.turn.clone();
+
+        // (c) Resume: resolve dangling calls once (§5.5).
+        if let Some(events) = self.resolve_dangling(ctx, kind, &mut act, live, &turn) {
+            return events;
+        }
+
+        // (d) Step boundary: no pending calls ⇒ a model call (§3.1 step 2).
+        if live.pending.is_empty() {
+            return self.step_model(state, ctx, kind, &mut act, live, turn);
+        }
+
+        // (e) Execute every journaled intent not yet launched or resolved
+        //     (§3.1 step 4; on resume this is dangling re-execution, §5.5).
+        self.dispatch_pending(state, ctx, kind, &mut act, live, &turn)
+    }
+
+    /// (b) No live run: clear the per-run flags, then start the next queued turn
+    /// if one is waiting (§3.1). Returns the records to journal — empty when the
+    /// queue is empty and the grain goes idle.
+    fn start_next_turn(
+        &self,
+        state: &SessionState,
+        ctx: &GrainCtx<Agent<S>>,
+        kind: &Kind,
+        act: &mut Activation<S>,
+    ) -> Vec<Record> {
+        act.run.reset();
+        if let Some((turn, parent)) = act.queue.pop_front() {
+            act.events.started.push(turn.id.clone());
+            return self.start_records(state, ctx, kind, turn, parent);
+        }
+        Vec::new()
+    }
+
+    /// (c) Resume: on the first advance of a live run the pending set is exactly
+    /// the dangling calls; resolve each whose policy is `Interrupt` (§5.5).
+    /// `Some(events)` ⇒ commit them and stop; `None` ⇒ fall through.
+    fn resolve_dangling(
+        &self,
+        ctx: &GrainCtx<Agent<S>>,
+        kind: &Kind,
+        act: &mut Activation<S>,
+        live: &LiveRun,
+        turn: &TurnId,
+    ) -> Option<Vec<Record>> {
+        if act.run.dangling_resolved {
+            return None;
+        }
+        act.run.dangling_resolved = true;
+        let mut events = Vec::new();
+        for (call, pending) in &live.pending {
+            if self.dangling_policy(pending, kind) == OnDangling::Interrupt {
+                events.push(self.fail_call(act, ctx, turn, call, ToolError::Interrupted));
+            }
+        }
+        (!events.is_empty()).then_some(events)
+    }
+
+    /// (d) Step boundary: no calls pending, so issue the next model call (§3.1
+    /// step 2) — unless the budget is exhausted (a terminal `RunEnded`) or a
+    /// lost workspace must be surfaced first (§5.5). Returns the records to
+    /// journal; launches the call and returns empty when it proceeds.
+    fn step_model(
+        &self,
+        state: &SessionState,
+        ctx: &GrainCtx<Agent<S>>,
+        kind: &Kind,
+        act: &mut Activation<S>,
+        live: &LiveRun,
+        turn: TurnId,
+    ) -> Vec<Record> {
+        if act.run.model_inflight {
+            return Vec::new();
+        }
+        let floor = self.shared.config.budget_floor;
+        if !live.spend.allows_call(&live.budget, floor) {
+            act.events.ended.push(turn.clone());
+            return vec![self.rec(
+                ctx,
+                RecordBody::RunEnded { turn, outcome: Err(RunError::BudgetExhausted) },
+            )];
+        }
+        // Surface a lost workspace before the model acts on state that is gone
+        // (§5.5). A fresh environment resets every held tier to `Workspace`;
+        // later acquisitions re-journal, never silently inherited.
+        if !act.env.reconciled && state.sandbox_activity {
+            act.env.reconciled = true;
+            act.env.tiers_held = BTreeSet::from([Tier::Workspace]);
+            return vec![self.rec(ctx, RecordBody::WorkspaceReset)];
+        }
+        act.env.reconciled = true;
+        act.run.model_inflight = true;
+        let request = self.build_request(state, kind, live);
+        let this = act.this.clone().expect("self-ref set in on_activate");
+        let model = Arc::clone(&self.shared.model);
+        ctx.system().launch(Box::pin(async move {
+            let result = model.complete(request).await;
+            let _ = this.tell(ModelDone { turn, result }).await;
+        }));
+        Vec::new()
+    }
+
+    /// (e) Execute every journaled intent not yet launched or resolved (§3.1
+    /// step 4; on resume, dangling re-execution, §5.5). Synthesized failures and
+    /// acquisition/delegation intents are journaled first and re-advanced; once
+    /// none remain, every ready call launches. Returns the records to journal.
+    fn dispatch_pending(
+        &self,
+        state: &SessionState,
+        ctx: &GrainCtx<Agent<S>>,
+        kind: &Kind,
+        act: &mut Activation<S>,
+        live: &LiveRun,
+        turn: &TurnId,
+    ) -> Vec<Record> {
+        // A failed sandbox open fails the calls that needed it (§5.4), then
+        // resets to `Closed` so a later call retries the open.
+        if matches!(act.env.slot, SandboxSlot::Failed(_)) {
+            let SandboxSlot::Failed(error) =
+                std::mem::replace(&mut act.env.slot, SandboxSlot::Closed)
+            else {
+                unreachable!("guarded by matches! above")
+            };
+            let mut events = Vec::new();
+            for (call, pending) in &live.pending {
+                if act.run.launched.contains(call) || act.run.resolved.contains(call) || pending.name == DELEGATE {
+                    continue;
+                }
+                events.push(self.fail_call(act, ctx, turn, call, ToolError::Sandbox(error.clone())));
+            }
+            if !events.is_empty() {
+                return events;
+            }
+        }
+
+        // Collect intents (TierAcquired/ChildRun) and synthesized failures to
+        // journal this round; if any, commit them first and re-advance. Else
+        // launch every ready call.
+        let mut events = Vec::new();
+        let mut ready: Vec<(CallId, PendingCall)> = Vec::new();
+        for (call, pending) in &live.pending {
+            if act.run.launched.contains(call) || act.run.resolved.contains(call) {
+                continue;
+            }
+            if pending.name == DELEGATE {
+                if pending.child.is_some() {
+                    ready.push((call.clone(), pending.clone()));
+                } else {
+                    match self.plan_delegation(state, ctx, kind, turn, call, pending, live) {
+                        Ok(child_run) => events.push(child_run),
+                        Err(tool_err) => {
+                            events.push(self.fail_call(act, ctx, turn, call, tool_err));
+                        }
+                    }
+                }
+            } else {
+                match kind.tools.get(&pending.name) {
+                    None => {
+                        events.push(self.fail_call(
+                            act,
+                            ctx,
+                            turn,
+                            call,
+                            ToolError::UnknownTool { name: pending.name.clone() },
+                        ));
+                    }
+                    Some(_) if !pending.input.is_object() => {
+                        events.push(self.fail_call(
+                            act,
+                            ctx,
+                            turn,
+                            call,
+                            ToolError::InvalidArguments("tool input must be a JSON object".into()),
+                        ));
+                    }
+                    Some(decl) if act.env.tiers_held.contains(&decl.tier) => {
+                        ready.push((call.clone(), pending.clone()));
+                    }
+                    Some(decl) => {
+                        // The acquisition gate (§5.6): journal `TierAcquired` before
+                        // the first call at a tier not yet held, and mark it held
+                        // optimistically so neither a same-batch sibling nor the
+                        // post-commit re-advance re-journals it. A failed commit
+                        // forces step-down, which resets held tiers to `Workspace`
+                        // on the next activation (§5.5), so the optimism is safe.
+                        if act.env.tiers_held.insert(decl.tier) {
+                            events.push(self.rec(
+                                ctx,
+                                RecordBody::TierAcquired { turn: turn.clone(), tier: decl.tier },
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if !events.is_empty() {
+            return events;
+        }
+        let root = state
+            .created
+            .as_ref()
+            .map(|c| c.root.clone())
+            .unwrap_or_else(|| Self::session(ctx));
+        for (call, pending) in ready {
+            self.launch_call(act, ctx, kind, turn, &root, call, pending);
+        }
+        Vec::new()
+    }
+
+    /// The recovery policy for a dangling call (§5.5): `delegate` re-executes by
+    /// construction (its re-submission dedups, §8.1); a sandboxed tool follows
+    /// its declaration, defaulting to `Interrupt` if the declaration vanished.
+    fn dangling_policy(&self, pending: &PendingCall, kind: &Kind) -> OnDangling {
+        if pending.name == DELEGATE {
+            OnDangling::Reexecute
+        } else {
+            kind.tools
+                .get(&pending.name)
+                .map(|d| d.on_dangling)
+                .unwrap_or(OnDangling::Interrupt)
+        }
+    }
+
+    /// Plan a fresh delegation (§8.1 step 1): validate the child kind against the
+    /// allowlist and the registry, then build the `ChildRun` intent.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_delegation(
+        &self,
+        _state: &SessionState,
+        ctx: &GrainCtx<Agent<S>>,
+        kind: &Kind,
+        turn: &TurnId,
+        call: &CallId,
+        pending: &PendingCall,
+        live: &crate::session::LiveRun,
+    ) -> Result<Record, ToolError> {
+        let request: DelegateInput = serde_json::from_value(pending.input.clone())
+            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        let child_kind = KindId::new(request.kind.clone());
+        if !kind.delegates.contains(&child_kind) {
+            return Err(ToolError::InvalidArguments(format!(
+                "kind '{child_kind}' is not in this kind's delegation allowlist"
+            )));
+        }
+        let Some(child_def) = self.shared.kinds.get(&child_kind) else {
+            return Err(ToolError::InvalidArguments(format!(
+                "delegated kind '{child_kind}' is not registered"
+            )));
+        };
+        let session = Self::session(ctx);
+        let (child_session, child_turn) = derive_child(&session, turn, call);
+        let requested = request.budget.unwrap_or(child_def.default_budget);
+        let budget = live.spend.carve(&live.budget, requested);
+        Ok(self.rec(
+            ctx,
+            RecordBody::ChildRun {
+                turn: turn.clone(),
+                call: call.clone(),
+                child_kind,
+                child_session,
+                child_turn,
+                budget,
+            },
+        ))
+    }
+
+    /// Launch one ready call (§3.1): a sandboxed tool, or a delegation. The
+    /// `delegate` exception executes in the loop (§5.2, §8).
+    #[allow(clippy::too_many_arguments)]
+    fn launch_call(
+        &self,
+        act: &mut Activation<S>,
+        ctx: &GrainCtx<Agent<S>>,
+        kind: &Kind,
+        turn: &TurnId,
+        root: &SessionId,
+        call: CallId,
+        pending: PendingCall,
+    ) {
+        if pending.name == DELEGATE {
+            act.run.launched.insert(call.clone());
+            let Some(child) = pending.child.clone() else { return };
+            let Ok(request) = serde_json::from_value::<DelegateInput>(pending.input.clone()) else {
+                return;
+            };
+            let lineage = Lineage {
+                session: Self::session(ctx),
+                turn: turn.clone(),
+                root: root.clone(),
+            };
+            self.launch_delegation(act, ctx, turn.clone(), call, request, child, lineage);
             return;
         }
-        r.resolved.insert(call.clone());
-        if let Err(ToolError::EnvironmentLost(_)) = &outcome {
-            // The provider lost the workspace (§5.5): drop the binding and
-            // arrange the reset; the next sandboxed call opens fresh.
-            if let SandboxSlot::Open(sandbox) =
-                std::mem::replace(&mut r.sandbox, SandboxSlot::Closed)
-            {
-                self.harness
-                    .system()
-                    .launch(Box::pin(async move { sandbox.release().await }));
+
+        let Some(decl) = kind.tools.get(&pending.name) else { return };
+        let tier = decl.tier;
+        let timeout = decl.timeout.unwrap_or(self.shared.config.tool_timeout);
+        match &act.env.slot {
+            SandboxSlot::Open(sandbox) => {
+                let sandbox = Arc::clone(sandbox);
+                act.run.launched.insert(call.clone());
+                let this = act.this.clone().expect("self-ref set in on_activate");
+                let system = ctx.system().clone();
+                let name = pending.name.clone();
+                let input = pending.input.clone();
+                let turn = turn.clone();
+                system.clone().launch(Box::pin(async move {
+                    let call_fut = Box::pin(sandbox.call(tier, &name, input));
+                    let sleep = system.sleep(timeout);
+                    let outcome = match futures::future::select(call_fut, sleep).await {
+                        Either::Left((outcome, _)) => outcome,
+                        Either::Right(((), _)) => Err(ToolError::Timeout),
+                    };
+                    let _ = this.tell(ToolDone { turn, call, outcome }).await;
+                }));
             }
-            if r.sandbox_bound {
-                r.sandbox_bound = false;
-                self.harness.system().emit_event(
-                    HarnessEvent::SandboxReleased {
-                        session: self.session.clone(),
-                        node,
+            // `Opening` waits for the open task to re-advance; `Failed` is resolved
+            // by `advance` before any call reaches here, so it is never seen.
+            SandboxSlot::Opening | SandboxSlot::Failed(_) => {}
+            SandboxSlot::Closed => {
+                // Lazy open on the first sandboxed call (§5.3 item 1); the call
+                // stays pending and is re-driven when the environment is ready.
+                act.env.slot = SandboxSlot::Opening;
+                self.launch_open(ctx, kind.profile.clone());
+            }
+        }
+    }
+
+    /// Open the sandbox off the command path (§5.3). The opened handle is not
+    /// serializable, so the task fills the slot under the mutex and nudges
+    /// [`Advance`]; success emits `SandboxBound` (H8).
+    fn launch_open(&self, ctx: &GrainCtx<Agent<S>>, profile: crate::sandbox::SandboxProfile) {
+        let this = ctx.this();
+        let system = ctx.system().clone();
+        let provider = Arc::clone(&self.shared.sandboxes);
+        let act = Arc::clone(&self.act);
+        let session = Self::session(ctx);
+        let node = ctx.system().node();
+        system.clone().launch(Box::pin(async move {
+            let result = provider.open(&session, &profile).await;
+            let bound = {
+                let mut a = act.lock().expect("agent activation mutex poisoned");
+                match result {
+                    Ok(sandbox) => {
+                        a.env.slot = SandboxSlot::Open(sandbox);
+                        a.env.bound = true;
+                        true
+                    }
+                    Err(error) => {
+                        a.env.slot = SandboxSlot::Failed(error.to_string());
+                        false
+                    }
+                }
+            };
+            if bound {
+                system.emit_app(HarnessEvent::SandboxBound { session, node }.into());
+            }
+            let _ = this.tell(Advance).await;
+        }));
+    }
+
+    /// Launch the child submission of a journaled delegation (§8.1 steps 2-3): an
+    /// ordinary grain submit with a reply-to mailbox, awaiting the child's
+    /// `RunCompleted`, retried on transport failure (safe — the derived `TurnId`
+    /// dedups, H7). The outcome becomes this call's tool outcome (§5.4).
+    #[allow(clippy::too_many_arguments)]
+    fn launch_delegation(
+        &self,
+        act: &mut Activation<S>,
+        ctx: &GrainCtx<Agent<S>>,
+        turn: TurnId,
+        call: CallId,
+        request: DelegateInput,
+        child: ChildRef,
+        lineage: Lineage,
+    ) {
+        let this = act.this.clone().expect("self-ref set in on_activate");
+        let system = ctx.system().clone();
+        let within = self.shared.config.submit_deadline;
+        let granary = self
+            .shared
+            .granaries()
+            .get(&child.kind)
+            .cloned();
+        system.clone().launch(Box::pin(async move {
+            let outcome = match granary {
+                None => Err(ToolError::Delegation(format!(
+                    "child kind '{}' is not hosted on this node",
+                    child.kind
+                ))),
+                Some(granary) => {
+                    let child_ref = granary.grain(child.session.as_str());
+                    run_child(system, child_ref, &child, request.prompt, lineage, within).await
+                }
+            };
+            let _ = this.tell(ToolDone { turn, call, outcome }).await;
+        }));
+    }
+
+    // -- notifications & cancellation ----------------------------------------
+
+    /// Emit the run-boundary events this activation owes, after their records
+    /// committed (§10.4): `RunStarted` once per turn this activation started (a
+    /// resume emits none — it attaches, never journals a `TurnSubmitted`), and
+    /// `RunEnded` once per turn this activation ended (H3).
+    fn emit_run_events(
+        &self,
+        act: &mut Activation<S>,
+        state: &SessionState,
+        ctx: &GrainCtx<Agent<S>>,
+        session: &SessionId,
+    ) {
+        let node = ctx.system().node();
+        for turn in std::mem::take(&mut act.events.started) {
+            let parent = state
+                .created
+                .as_ref()
+                .and_then(|c| c.parent.as_ref())
+                .map(|l| l.session.clone());
+            ctx.system().emit_app(
+                HarnessEvent::RunStarted { session: session.clone(), turn, parent }.into(),
+            );
+        }
+        for (turn, usage) in std::mem::take(&mut act.events.model) {
+            ctx.system().emit_app(
+                HarnessEvent::ModelCompleted { session: session.clone(), turn, node, usage }.into(),
+            );
+        }
+        for turn in std::mem::take(&mut act.events.ended) {
+            if let Some(outcome) = state.turns.get(&turn).and_then(|f| f.outcome.as_ref()) {
+                ctx.system().emit_app(
+                    HarnessEvent::RunEnded {
+                        session: session.clone(),
+                        turn,
+                        outcome: outcome_label(outcome),
                     }
                     .into(),
                 );
             }
-            let Phase::Ready(r) = &mut self.phase else {
-                return;
-            };
-            r.reset_needed = true;
         }
-        self.enqueue(vec![RecordBody::ToolOutcome {
-            turn,
-            call,
+    }
+
+    /// Notify every caller registered for a run that has finished (§7.3), then
+    /// drop their registrations.
+    fn notify_finished(
+        &self,
+        act: &mut Activation<S>,
+        state: &SessionState,
+        ctx: &GrainCtx<Agent<S>>,
+        session: &SessionId,
+    ) {
+        let mut finished = Vec::new();
+        act.subscribers.retain(|turn, subs| match state.turns.get(turn) {
+            Some(facts) if facts.outcome.is_some() => {
+                let outcome = facts.outcome.clone().expect("checked some");
+                finished.push((turn.clone(), std::mem::take(subs), outcome));
+                false
+            }
+            _ => true,
+        });
+        for (turn, subs, outcome) in finished {
+            for sub in subs {
+                self.deliver(ctx, sub, RunCompleted {
+                    session: session.clone(),
+                    turn: turn.clone(),
+                    outcome: outcome.clone(),
+                });
+            }
+        }
+    }
+
+    /// Deliver one `RunCompleted` to one reply-to (§7.3): a fire-and-forget
+    /// `tell`, launched off the command path.
+    fn deliver(&self, ctx: &GrainCtx<Agent<S>>, reply_to: ActorRef<ReplyMailbox<S>>, msg: RunCompleted) {
+        ctx.system().launch(Box::pin(async move {
+            let _ = reply_to.tell(msg).await;
+        }));
+    }
+
+    fn notify_one(
+        &self,
+        ctx: &GrainCtx<Agent<S>>,
+        reply_to: ActorRef<ReplyMailbox<S>>,
+        turn: &TurnId,
+        outcome: RunOutcome,
+    ) {
+        self.deliver(ctx, reply_to, RunCompleted {
+            session: Self::session(ctx),
+            turn: turn.clone(),
             outcome,
-        }]);
+        });
     }
 
-    fn sandbox_opened(&mut self, result: Result<Arc<dyn Sandbox>, crate::sandbox::SandboxError>) {
-        let harness = self.harness.clone();
-        let me = self.me();
-        let node = harness.system().node();
-        let session = self.session.clone();
-        match &mut self.phase {
-            Phase::Ready(r) => {
-                let queued = match std::mem::replace(&mut r.sandbox, SandboxSlot::Closed) {
-                    SandboxSlot::Opening(queued) => queued,
-                    other => {
-                        r.sandbox = other;
-                        return;
-                    }
-                };
-                match result {
-                    Ok(sandbox) => {
-                        r.sandbox = SandboxSlot::Open(Arc::clone(&sandbox));
-                        r.sandbox_bound = true;
-                        harness
-                            .system()
-                            .emit_event(HarnessEvent::SandboxBound { session, node }.into());
-                        for exec in queued {
-                            launch_exec(&harness, &me, Arc::clone(&sandbox), exec);
-                        }
-                    }
-                    Err(error) => {
-                        // Provisioning failed: every queued call fails as a
-                        // transcript value (§5.4); a later call retries the
-                        // open.
-                        for exec in queued {
-                            self.synthesize_outcome(
-                                exec.turn,
-                                exec.call,
-                                Err(ToolError::Sandbox(error.to_string())),
-                            );
-                            if !matches!(self.phase, Phase::Ready(_)) {
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-            Phase::Gone { .. } | Phase::Boot { .. } => {
-                // The activation went away while the environment was opening:
-                // release it immediately (H8).
-                if let Ok(sandbox) = result {
-                    harness
-                        .system()
-                        .launch(Box::pin(async move { sandbox.release().await }));
-                }
-            }
-        }
-    }
-
-    // -- the fenced append pipeline (§6.2, §6.4) ------------------------------
-
-    /// Queue a batch for the fenced append pipeline, stamping each record
-    /// with this node's clock reading (§10.1).
-    fn enqueue(&mut self, bodies: Vec<RecordBody>) {
-        let at_nanos = self.harness.clock().now().as_nanos();
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
-        };
-        r.backlog.push_back(
-            bodies
-                .into_iter()
-                .map(|body| Record { at_nanos, body })
-                .collect(),
-        );
-        self.pump();
-    }
-
-    /// Send the next batch if none is in flight. `after` is the fold's head:
-    /// one batch in flight at a time is what keeps the fence's condition
-    /// equal to this activation's own knowledge (§6.2).
-    fn pump(&mut self) {
-        let harness = self.harness.clone();
-        let session = self.session.clone();
-        let me = self.me();
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
-        };
-        if r.inflight.is_some() {
-            return;
-        }
-        let Some(batch) = r.backlog.pop_front() else {
-            return;
-        };
-        r.inflight = Some(batch.clone());
-        let after = r.state.head;
-        let journal = Arc::clone(harness.journal());
-        let clock = harness.clock();
-        let attempts = harness.config().journal_attempts.max(1);
-        let backoff = harness.config().journal_backoff;
-        harness.system().launch(Box::pin(async move {
-            // Bounded retries absorb a transient outage (§6.5); `Stale` is
-            // never retried — it is the fence speaking (§6.2).
-            let mut attempt = 0;
-            let result = loop {
-                attempt += 1;
-                match journal.append(&session, after, batch.clone()).await {
-                    Err(AppendError::Unavailable(e)) if attempt < attempts => {
-                        let factor = 2u32.saturating_pow(attempt - 1);
-                        clock.sleep(backoff * factor).await;
-                        let _ = e;
-                    }
-                    other => break other,
-                }
+    /// Propagate a committed cancel to every recorded child (§9.2 item 2).
+    fn propagate_cancels(&self, act: &mut Activation<S>, ctx: &GrainCtx<Agent<S>>, _kind: &Kind) {
+        let children = std::mem::take(&mut act.cancel_children);
+        for child in children {
+            let Some(granary) = self.shared.granaries().get(&child.kind).cloned() else {
+                continue;
             };
-            let _ = me
-                .when_local(move |agent: &mut AgentActor<S>| agent.append_done(result))
-                .await;
-        }));
+            let system = ctx.system().clone();
+            let child_turn = child.turn.clone();
+            let session = child.session.clone();
+            system.clone().launch(Box::pin(async move {
+                let child_ref = granary.grain(session.as_str());
+                let mut attempt = 0;
+                loop {
+                    match child_ref.ask(Cancel { turn: child_turn.clone() }).await {
+                        Ok(()) => return,
+                        Err(_) if attempt < TRANSPORT_RETRIES => {
+                            attempt += 1;
+                            system.sleep(propagation_backoff(attempt)).await;
+                        }
+                        Err(_) => return,
+                    }
+                }
+            }));
+        }
     }
 
-    fn append_done(&mut self, result: Result<SeqNo, AppendError>) {
-        let node = self.harness.system().node();
-        let session = self.session.clone();
-        let Phase::Ready(r) = &mut self.phase else {
-            return;
+    // -- sandbox lifecycle ---------------------------------------------------
+
+    /// Drop and release the bound sandbox, emitting `SandboxReleased` (H8).
+    /// Synchronous teardown is launched off the command path.
+    fn release_sandbox(&self, act: &mut Activation<S>, ctx: &GrainCtx<Agent<S>>) {
+        if let SandboxSlot::Open(sandbox) = std::mem::replace(&mut act.env.slot, SandboxSlot::Closed) {
+            let sandbox = sandbox.clone();
+            ctx.system().launch(Box::pin(async move { sandbox.release().await }));
+        }
+        if act.env.bound {
+            act.env.bound = false;
+            ctx.system().emit_app(
+                HarnessEvent::SandboxReleased {
+                    session: Self::session(ctx),
+                    node: ctx.system().node(),
+                }
+                .into(),
+            );
+        }
+    }
+
+    /// Build the model request from the folded transcript (§4.1), clamping
+    /// `max_tokens` to the remaining budget (§9.1 item 2).
+    fn build_request(&self, state: &SessionState, kind: &Kind, live: &crate::session::LiveRun) -> ModelRequest {
+        let max_tokens = kind.params.max_tokens.min(live.spend.remaining_tokens(&live.budget));
+        let mut tools: Vec<ToolSpec> = kind.tools.specs();
+        if !kind.delegates.is_empty() {
+            tools.push(delegate_spec(kind));
+        }
+        ModelRequest {
+            system_prompt: kind.system_prompt.clone(),
+            params: kind.params.clone(),
+            tools,
+            transcript: Arc::clone(&state.transcript),
+            max_tokens,
+        }
+    }
+}
+
+impl<S: HarnessSystem> Grain for Agent<S> {
+    type System = S;
+    type State = SessionState;
+    type Event = Record;
+    // The fallback type name; the harness hosts each kind under its own name via
+    // `granary_named`, so a session's grain type is its `KindId` (§2.2).
+    const GRAIN_TYPE: &'static str = "harness.Agent";
+
+    fn apply(state: &mut SessionState, event: &Record) {
+        state.apply(event);
+    }
+
+    fn register(registry: &mut GrainRegistry<Self>) {
+        // The network allowlist: only the wire commands (§7.3). The internal
+        // self-tells (Advance/ModelDone/ToolDone) are local-only, so no peer can
+        // inject them.
+        registry.accept::<Submit<S>>();
+        registry.accept::<Cancel>();
+        registry.accept::<Tail>();
+    }
+
+    async fn on_activate(&mut self, ctx: &GrainCtx<Self>) -> Result<(), BoxError> {
+        let mut act = self.lock();
+        act.this = Some(ctx.this());
+        // Opening grants `Workspace` and nothing else (§5.6 item 1); every other
+        // tier is re-acquired under a journaled record this activation.
+        act.env.tiers_held = BTreeSet::from([Tier::Workspace]);
+        act.env.reconciled = false;
+        act.run.dangling_resolved = false;
+        Ok(())
+    }
+
+    async fn on_passivate(&mut self, ctx: &GrainCtx<Self>) {
+        // Release the sandbox on every deactivation — idle hibernation, migration,
+        // or forced step-down (H8). The workspace goes with it (§5.5). Scope the
+        // lock so the guard is dropped before the async release.
+        let to_release = {
+            let mut act = self.lock();
+            match std::mem::replace(&mut act.env.slot, SandboxSlot::Closed) {
+                SandboxSlot::Open(sandbox) => {
+                    let bound = act.env.bound;
+                    act.env.bound = false;
+                    Some((sandbox, bound))
+                }
+                _ => None,
+            }
         };
-        let Some(batch) = r.inflight.take() else {
-            return;
-        };
-        match result {
-            Ok(_head) => {
-                // Snapshot the live children before the fold consumes the
-                // batch: a committed cancellation propagates to them (§9.2).
-                let cancelled_children: Vec<ChildRef> = if batch.iter().any(|rec| {
-                    matches!(
-                        &rec.body,
-                        RecordBody::RunEnded {
-                            outcome: Err(RunError::Cancelled),
-                            ..
-                        }
-                    )
-                }) {
-                    r.state
-                        .live
-                        .as_ref()
-                        .map(|live| {
-                            live.pending
-                                .values()
-                                .filter_map(|p| p.child.clone())
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
+        if let Some((sandbox, bound)) = to_release {
+            sandbox.release().await;
+            if bound {
+                ctx.system().emit_app(
+                    HarnessEvent::SandboxReleased {
+                        session: Self::session(ctx),
+                        node: ctx.system().node(),
+                    }
+                    .into(),
+                );
+            }
+        }
+    }
+
+    fn can_passivate(&self, state: &SessionState) -> bool {
+        // Never hibernate a session whose run is live (§7.2): no live run, no
+        // queued turn, and nothing in flight.
+        if state.live.is_some() {
+            return false;
+        }
+        let act = self.lock();
+        act.queue.is_empty()
+            && !act.run.model_inflight
+            && act.run.launched.is_empty()
+            && !matches!(act.env.slot, SandboxSlot::Opening)
+    }
+}
+
+impl<S: HarnessSystem> GrainHandler<Submit<S>> for Agent<S> {
+    async fn handle(
+        &self,
+        state: &SessionState,
+        msg: Submit<S>,
+        ctx: &GrainCtx<Self>,
+    ) -> (Vec<Record>, Result<Accepted, SubmitReject>) {
+        self.on_submit(state, msg, ctx)
+    }
+}
+
+impl<S: HarnessSystem> GrainHandler<Cancel> for Agent<S> {
+    async fn handle(&self, state: &SessionState, msg: Cancel, ctx: &GrainCtx<Self>) -> (Vec<Record>, ()) {
+        (self.on_cancel(state, msg.turn, ctx), ())
+    }
+}
+
+impl<S: HarnessSystem> GrainHandler<Tail> for Agent<S> {
+    async fn handle(
+        &self,
+        state: &SessionState,
+        msg: Tail,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<Record>, Vec<(Seq, Record)>) {
+        // A read: no records, commits nothing (granary §7.5).
+        (Vec::new(), self.on_tail(state, msg))
+    }
+}
+
+impl<S: HarnessSystem> GrainHandler<Advance> for Agent<S> {
+    async fn handle(&self, state: &SessionState, _msg: Advance, ctx: &GrainCtx<Self>) -> (Vec<Record>, ()) {
+        let events = self.advance(state, ctx);
+        if !events.is_empty() {
+            self.schedule_advance(ctx);
+        }
+        (events, ())
+    }
+}
+
+impl<S: HarnessSystem> GrainHandler<ModelDone> for Agent<S> {
+    async fn handle(&self, state: &SessionState, msg: ModelDone, ctx: &GrainCtx<Self>) -> (Vec<Record>, ()) {
+        (self.on_model_done(state, msg.turn, msg.result, ctx), ())
+    }
+}
+
+impl<S: HarnessSystem> GrainHandler<ToolDone> for Agent<S> {
+    async fn handle(&self, state: &SessionState, msg: ToolDone, ctx: &GrainCtx<Self>) -> (Vec<Record>, ()) {
+        (self.on_tool_done(state, msg.turn, msg.call, msg.outcome, ctx), ())
+    }
+}
+
+// ===========================================================================
+// Free helpers
+// ===========================================================================
+
+/// The outcome of one [`submit_and_attach`] attempt — the re-attach protocol's
+/// single mechanism, leaving the *policy* (when to give up, when to retry) to
+/// the caller's loop, since the two callers bound it differently (§7.4, §8.1).
+pub(crate) enum AttachOutcome {
+    /// The run finished and delivered its outcome.
+    Completed(RunOutcome),
+    /// The submit was accepted but the wait lapsed (or the mailbox dropped):
+    /// re-submitting the same `TurnId` re-attaches (H7).
+    Lapsed,
+    /// The submit was permanently rejected (§7.4): never worth retrying.
+    Rejected(SubmitReject),
+    /// The grain was unreachable: a transport failure a retry might clear.
+    Unreachable(GrainError),
+}
+
+/// One submit-and-await-outcome attempt against a grain (§7.4): spawn an
+/// ephemeral reply mailbox, `Submit` the turn carrying it, and await the run's
+/// `RunCompleted` bounded by `within`. This is the whole re-attach mechanism;
+/// `prompt` and delegation each wrap it in their own retry policy (deadline- or
+/// attempt-bounded), safe because re-submitting the same `TurnId` is idempotent.
+pub(crate) async fn submit_and_attach<S: HarnessSystem>(
+    system: &S,
+    grain: &granary::GrainRef<Agent<S>>,
+    kind: &KindId,
+    turn: &Turn,
+    parent: Option<&Lineage>,
+    within: Duration,
+) -> AttachOutcome {
+    let (tx, rx) = oneshot::channel::<RunOutcome>();
+    let mailbox = system.spawn(ReplyMailbox::new(tx));
+    let submit = Submit {
+        kind: kind.clone(),
+        turn: turn.clone(),
+        parent: parent.cloned(),
+        reply_to: Some(mailbox),
+    };
+    match grain.ask_timeout(submit, within).await {
+        Ok(Ok(_accepted)) => {
+            let sleep = system.sleep(within);
+            match futures::future::select(rx, sleep).await {
+                Either::Left((Ok(outcome), _)) => AttachOutcome::Completed(outcome),
+                Either::Left((Err(_), _)) | Either::Right(((), _)) => AttachOutcome::Lapsed,
+            }
+        }
+        Ok(Err(reject)) => AttachOutcome::Rejected(reject),
+        Err(call_error) => AttachOutcome::Unreachable(call_error),
+    }
+}
+
+/// Submit to a child and await its outcome (§8.1 step 2), with the derived
+/// `TurnId` keeping every re-attempt safe (H7). Bounds the wait on a slow child
+/// by [`CHILD_WAIT_ATTEMPTS`] and retries an unreachable one up to
+/// [`TRANSPORT_RETRIES`] with backoff. Maps the child's `RunOutcome` onto this
+/// delegation's tool outcome (§5.4).
+async fn run_child<S: HarnessSystem>(
+    system: S,
+    child_ref: granary::GrainRef<Agent<S>>,
+    child: &ChildRef,
+    prompt: String,
+    parent: Lineage,
+    within: Duration,
+) -> Result<Value, ToolError> {
+    let turn = Turn {
+        id: child.turn.clone(),
+        content: prompt,
+        budget: Some(child.budget),
+    };
+    let mut waits = 0;
+    let mut retries = 0;
+    loop {
+        match submit_and_attach(&system, &child_ref, &child.kind, &turn, Some(&parent), within).await {
+            AttachOutcome::Completed(outcome) => {
+                return match outcome {
+                    Ok(completion) => Ok(Value::String(completion.text().to_string())),
+                    Err(run_error) => Err(ToolError::Delegation(run_error.to_string())),
                 };
-
-                let base = r.state.head.0;
-                for (i, record) in batch.iter().enumerate() {
-                    r.state.apply(SeqNo(base + 1 + i as u64), record);
-                }
-                let _ = r;
-                self.committed(&batch, cancelled_children);
             }
-            Err(AppendError::Stale { .. }) => {
-                // Another activation owns the order now: deactivate, journal
-                // nothing further, issue nothing further (H2).
-                self.harness
-                    .system()
-                    .emit_event(HarnessEvent::AppendRejected { session, node }.into());
-                self.go_gone();
-            }
-            Err(AppendError::Unavailable(e)) => {
-                // The retries did not absorb it: the session cannot record
-                // (§6.5). The run pauses where the journal last saw it; the
-                // terminal error reaches attached callers best-effort, and a
-                // later contact resumes from the committed prefix.
-                let run_turn = r
-                    .state
-                    .live
-                    .as_ref()
-                    .map(|live| live.turn.clone())
-                    .or_else(|| r.starting.clone());
-                if let Some(turn) = run_turn {
-                    notify(r, &turn, || {
-                        Awaited::Outcome(Err(RunError::Journal(e.clone())))
-                    });
-                }
-                self.go_gone();
-            }
-        }
-    }
-
-    /// Post-commit hooks: the effects whose intent the batch just made
-    /// durable (§6.4 — intent before effect, so launching here *is* the
-    /// write-ahead discipline).
-    fn committed(&mut self, batch: &[Record], cancelled_children: Vec<ChildRef>) {
-        let harness = self.harness.clone();
-        for record in batch {
-            match &record.body {
-                RecordBody::TurnSubmitted { turn, .. } => {
-                    let (parent, popped) = {
-                        let Phase::Ready(r) = &mut self.phase else {
-                            return;
-                        };
-                        r.starting = None;
-                        let popped = r.queue.pop_front();
-                        (
-                            r.state
-                                .created
-                                .as_ref()
-                                .and_then(|c| c.parent.as_ref())
-                                .map(|p| p.session.clone()),
-                            popped,
-                        )
-                    };
-                    debug_assert!(popped.is_some_and(|q| &q.turn.id == turn));
-                    harness.system().emit_event(
-                        HarnessEvent::RunStarted {
-                            session: self.session.clone(),
-                            turn: turn.clone(),
-                            parent,
-                        }
-                        .into(),
-                    );
-                }
-                RecordBody::ChildRun { turn, call, .. } => {
-                    // The delegation's intent is durable: submit the child
-                    // (§8.1 step 2).
-                    let Phase::Ready(r) = &self.phase else {
-                        return;
-                    };
-                    if r.ending.is_some() {
-                        continue;
-                    }
-                    let Some(live) = &r.state.live else {
-                        continue;
-                    };
-                    let Some(pending) = live.pending.get(call) else {
-                        continue;
-                    };
-                    let Some(child) = pending.child.clone() else {
-                        continue;
-                    };
-                    let Ok(request) =
-                        serde_json::from_value::<DelegateInput>(pending.input.clone())
-                    else {
-                        continue;
-                    };
-                    self.launch_delegation(turn.clone(), call.clone(), request, child);
-                }
-                RecordBody::WorkspaceReset => {
-                    // The loss is on the record (§5.5): the next model call
-                    // may proceed, and carries the reset in its transcript.
-                    let Phase::Ready(r) = &mut self.phase else {
-                        return;
-                    };
-                    r.reset_needed = false;
-                    r.reset_enqueued = false;
-                    // A fresh environment resets every held tier (§5.5): the
-                    // held set restarts at `Workspace`, and later
-                    // acquisitions re-journal — never silently inherited.
-                    r.tiers_held = BTreeSet::from([Tier::Workspace]);
-                    r.tiers_enqueued.clear();
-                }
-                RecordBody::TierAcquired { tier, .. } => {
-                    // The acquisition is durable (§5.6): the activation holds
-                    // the tier from here on, and the `advance` below
-                    // re-drives the calls parked on it.
-                    let Phase::Ready(r) = &mut self.phase else {
-                        return;
-                    };
-                    r.tiers_enqueued.remove(tier);
-                    r.tiers_held.insert(*tier);
-                }
-                RecordBody::RunEnded { turn, outcome } => {
-                    harness.system().emit_event(
-                        HarnessEvent::RunEnded {
-                            session: self.session.clone(),
-                            turn: turn.clone(),
-                            outcome: outcome_label(outcome),
-                        }
-                        .into(),
-                    );
-                    let Phase::Ready(r) = &mut self.phase else {
-                        return;
-                    };
-                    r.ending = None;
-                    r.model_inflight = false;
-                    r.launched.clear();
-                    r.resolved.clear();
-                    // Defensive: FIFO append ordering already guarantees any
-                    // TierAcquired committed before this RunEnded (launch_call
-                    // runs only while the run is live), so the set is empty
-                    // here — clearing keeps the run-boundary cleanup symmetric
-                    // rather than relying on that ordering forever.
-                    r.tiers_enqueued.clear();
-                    // Release the reply only after the terminal outcome is
-                    // journaled (§6.4): a caller never holds a completion the
-                    // journal could lose.
-                    let outcome = outcome.clone();
-                    notify(r, turn, move || Awaited::Outcome(outcome.clone()));
-                    // Propagate the cancel to every live child recorded in
-                    // the journal (§9.2 item 2).
-                    for child in &cancelled_children {
-                        self.propagate_cancel(child.clone());
-                        if !matches!(self.phase, Phase::Ready(_)) {
-                            return;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        // The fold moved; ask it what comes next.
-        if let Phase::Ready(r) = &mut self.phase
-            && r.draining
-            && r.inflight.is_none()
-        {
-            self.go_gone();
-            return;
-        }
-        self.advance();
-    }
-
-    /// Send `Cancel` down one recorded child (§9.2): retried on *reported*
-    /// failure with backoff — at-most-once per attempt, with the child's
-    /// budget as the backstop under unhealed faults (§9.2 item 3).
-    fn propagate_cancel(&mut self, child: ChildRef) {
-        let harness = self.harness.clone();
-        let clock = harness.clock();
-        // The child kind is not needed for a cancel; SessionRef's kind field
-        // only matters on submission. Use a placeholder.
-        let launcher = harness.clone();
-        launcher.system().launch(Box::pin(async move {
-            let child_ref = harness.session("", child.session.clone());
-            let mut attempt: u32 = 0;
-            loop {
-                match child_ref.cancel(&child.turn).await {
-                    Ok(()) => return,
-                    Err(_) if attempt < DELEGATION_ATTEMPTS => {
-                        attempt += 1;
-                        clock.sleep(propagation_backoff(attempt)).await;
-                    }
-                    Err(_) => return,
+            AttachOutcome::Lapsed => {
+                waits += 1;
+                if waits >= CHILD_WAIT_ATTEMPTS {
+                    return Err(ToolError::Delegation("child run did not complete in time".into()));
                 }
             }
-        }));
-    }
-
-    // -- deactivation (§7.2) -------------------------------------------------
-
-    /// Stop serving: every attached caller learns the attachment is gone, the
-    /// sandbox is carried out for release, and the actor stops. Everything
-    /// worth keeping is already a record (§6.3) — deactivation needs no
-    /// flush.
-    fn go_gone(&mut self) {
-        let phase = std::mem::replace(&mut self.phase, Phase::Gone { sandbox: None });
-        let sandbox = match phase {
-            Phase::Ready(mut r) => {
-                for (_, senders) in std::mem::take(&mut r.waiters) {
-                    for tx in senders {
-                        let _ = tx.send(Awaited::Lost);
-                    }
-                }
-                self.sandbox_was_bound_on_stop = r.sandbox_bound;
-                match r.sandbox {
-                    SandboxSlot::Open(sandbox) => Some(sandbox),
-                    _ => None,
-                }
+            AttachOutcome::Rejected(reject) => {
+                return Err(ToolError::Delegation(format!("child rejected the submit: {reject}")));
             }
-            Phase::Boot { queued } => {
-                for op in queued {
-                    if let QueuedOp::Submit(op) = op {
-                        let _ = op.tx.send(Awaited::Lost);
-                    }
+            AttachOutcome::Unreachable(call_error) => {
+                retries += 1;
+                if retries >= TRANSPORT_RETRIES {
+                    return Err(ToolError::Delegation(format!("child unreachable: {call_error:?}")));
                 }
-                None
+                system.sleep(propagation_backoff(retries)).await;
             }
-            Phase::Gone { sandbox } => sandbox,
-        };
-        self.phase = Phase::Gone { sandbox };
-        self.request_stop();
-    }
-}
-
-/// Attach a caller to a turn's eventual outcome (§7.4).
-fn attach(r: &mut Ready, turn: TurnId, tx: oneshot::Sender<Awaited>) {
-    r.waiters.entry(turn).or_default().push(tx);
-}
-
-/// Resolve every caller attached to `turn`.
-fn notify(r: &mut Ready, turn: &TurnId, make: impl Fn() -> Awaited) {
-    if let Some(senders) = r.waiters.remove(turn) {
-        for tx in senders {
-            let _ = tx.send(make());
         }
     }
 }
 
-/// Exponential backoff for the delegation/cancel retry loops, capped.
+/// Exponential backoff for the delegation/cancel retry loops, capped — the
+/// framework's own backoff (core §11.2), reused rather than re-derived.
 fn propagation_backoff(attempt: u32) -> Duration {
-    let base = Duration::from_millis(200);
-    (base * 2u32.saturating_pow(attempt.saturating_sub(1).min(8))).min(PROPAGATION_BACKOFF_CAP)
+    Backoff::Exponential { base: Duration::from_millis(200), max: PROPAGATION_BACKOFF_CAP }.delay(attempt)
 }
 
 /// The interface of the built-in `delegate` tool (§8.1), synthesized so the
@@ -1448,184 +1537,7 @@ fn delegate_spec(kind: &Kind) -> ToolSpec {
     let kinds: Vec<&str> = kind.delegates.iter().map(|k| k.as_str()).collect();
     ToolSpec {
         name: DELEGATE.to_string(),
-        description: format!(
-            "Delegate a task to a sub-agent. Allowed kinds: {}.",
-            kinds.join(", ")
-        ),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "kind": { "type": "string", "enum": kinds },
-                "prompt": { "type": "string" },
-                "budget": {
-                    "type": "object",
-                    "properties": {
-                        "tokens": { "type": "integer" },
-                        "steps": { "type": "integer" }
-                    }
-                }
-            },
-            "required": ["kind", "prompt"]
-        }),
-    }
-}
-
-/// Run one sandboxed call to completion, bounded by its per-tool timeout
-/// (§5.3 item 3), and deliver the outcome back onto the actor's executor.
-fn launch_exec<S: HarnessSystem>(
-    harness: &Harness<S>,
-    me: &ActorRef<AgentActor<S>>,
-    sandbox: Arc<dyn Sandbox>,
-    exec: PendingExec,
-) {
-    let me = me.clone();
-    let clock = harness.clock();
-    harness.system().launch(Box::pin(async move {
-        let outcome = match clock
-            .timeout(
-                exec.timeout,
-                sandbox.call(exec.tier, &exec.name, exec.input),
-            )
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(_elapsed) => Err(ToolError::Timeout),
-        };
-        let _ = me
-            .when_local(move |agent: &mut AgentActor<S>| {
-                agent.tool_done(exec.turn, exec.call, outcome)
-            })
-            .await;
-    }));
-}
-
-impl<S: HarnessSystem> Actor for AgentActor<S> {
-    type System = S;
-
-    async fn started(&mut self, ctx: &Ctx<Self>) -> Result<(), BoxError> {
-        self.me = Some(ctx.this());
-        // Activation loads the journal off the executor (§3.2): the mailbox
-        // is live immediately, and operations queue in `Boot` until the fold
-        // lands.
-        let harness = self.harness.clone();
-        let session = self.session.clone();
-        let me = ctx.this();
-        let journal = Arc::clone(harness.journal());
-        let clock = harness.clock();
-        let attempts = harness.config().journal_attempts.max(1);
-        let backoff = harness.config().journal_backoff;
-        harness.system().launch(Box::pin(async move {
-            let mut attempt = 0;
-            let result = loop {
-                attempt += 1;
-                match load_all(&*journal, &session).await {
-                    Ok(records) => break Ok(records),
-                    Err(e) if attempt < attempts => {
-                        let factor = 2u32.saturating_pow(attempt - 1);
-                        clock.sleep(backoff * factor).await;
-                        let _ = e;
-                    }
-                    Err(e) => break Err(e.to_string()),
-                }
-            };
-            let _ = me
-                .when_local(move |agent: &mut AgentActor<S>| agent.loaded(result))
-                .await;
-        }));
-        Ok(())
-    }
-
-    async fn stopped(self, _reason: StopReason) {
-        // The single exit point for the pairing events (§10.4): whatever path
-        // stopped this activation — drain, fence, fault — the sandbox is
-        // released (H8) and the deactivation recorded.
-        let node = self.harness.system().node();
-        let session = self.session.clone();
-        let (sandbox, bound, waiters) = match self.phase {
-            Phase::Ready(mut r) => {
-                let waiters: Vec<oneshot::Sender<Awaited>> = std::mem::take(&mut r.waiters)
-                    .into_values()
-                    .flatten()
-                    .collect();
-                let sandbox = match r.sandbox {
-                    SandboxSlot::Open(sandbox) => Some(sandbox),
-                    _ => None,
-                };
-                (sandbox, r.sandbox_bound, waiters)
-            }
-            Phase::Gone { sandbox } => (sandbox, self.sandbox_was_bound_on_stop, Vec::new()),
-            Phase::Boot { queued } => {
-                let waiters = queued
-                    .into_iter()
-                    .filter_map(|op| match op {
-                        QueuedOp::Submit(op) => Some(op.tx),
-                        QueuedOp::Cancel(_) => None,
-                    })
-                    .collect();
-                (None, false, waiters)
-            }
-        };
-        for tx in waiters {
-            let _ = tx.send(Awaited::Lost);
-        }
-        if let Some(sandbox) = sandbox {
-            sandbox.release().await;
-        }
-        if bound {
-            self.harness.system().emit_event(
-                HarnessEvent::SandboxReleased {
-                    session: session.clone(),
-                    node,
-                }
-                .into(),
-            );
-        }
-        if self.activated {
-            self.harness
-                .system()
-                .emit_event(HarnessEvent::SessionDeactivated { session, node }.into());
-        }
-    }
-
-    /// Restart with backoff (§3.3): a restart is cheap by construction —
-    /// state is a fold of the journal, so the restarted instance replays and
-    /// continues, the same mechanism as a cross-node resume.
-    fn supervision() -> Supervision {
-        Supervision::restart(
-            3,
-            Duration::from_secs(60),
-            actor_core::Backoff::Exponential {
-                base: Duration::from_millis(100),
-                max: Duration::from_secs(5),
-            },
-        )
-    }
-}
-
-impl<S: HarnessSystem> Handler<Poke> for AgentActor<S> {
-    async fn handle(&mut self, _msg: Poke, ctx: &Ctx<Self>) {
-        if self.stop_requested {
-            ctx.stop();
-        }
-    }
-}
-
-/// Load the whole journal, page by page (§6.1).
-async fn load_all(
-    journal: &dyn crate::journal::Journal,
-    session: &SessionId,
-) -> Result<Vec<(SeqNo, Record)>, crate::journal::JournalError> {
-    let mut records = Vec::new();
-    let mut from = SeqNo::ZERO;
-    loop {
-        let page = journal.load(session, from, LOAD_PAGE).await?;
-        let len = page.len();
-        if let Some((seq, _)) = page.last() {
-            from = *seq;
-        }
-        records.extend(page);
-        if len < LOAD_PAGE {
-            return Ok(records);
-        }
+        description: format!("Delegate a task to a sub-agent. Allowed kinds: {}.", kinds.join(", ")),
+        input_schema: DelegateInput::input_schema(&kinds),
     }
 }

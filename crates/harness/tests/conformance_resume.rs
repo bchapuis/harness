@@ -1,14 +1,13 @@
-//! Resume conformance (harness spec §5.5, §6.5, §7.5; invariant H1): a
-//! journal outage interrupts a run mid-step; the caller's re-submitted
-//! `TurnId` resumes it on a fresh activation, dangling calls resolve per
-//! their declared policy, and the resumed journal matches an uninterrupted
-//! control run — the differential test behind H1.
+//! Resume conformance (harness spec §6.2, §7.5; invariant H1): a session
+//! hibernates between turns and rehydrates from the journal on the next contact
+//! (granary §9, §10); the resumed journal matches an uninterrupted control run,
+//! record for record — the differential test behind H1. (Mid-run crash/migration
+//! resume of a *dangling* call, §5.5, is a Tier-2 leadership-move phenomenon,
+//! exercised under the clustered simulation; Tier-1 is faultless by design.)
 
 mod support;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use actor_core::Clock;
@@ -16,239 +15,133 @@ use actor_core::Event;
 use actor_core::LocalSystemBuilder;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
+use granary::GrainEvent;
 use harness::Budget;
 use harness::Harness;
 use harness::HarnessConfig;
-use harness::InMemoryJournal;
 use harness::Kind;
 use harness::Kinds;
-use harness::OnDangling;
+use harness::Record;
 use harness::RecordBody;
-use harness::RunError;
 use harness::SessionId;
 use harness::Tier;
-use harness::ToolDecl;
-use harness::ToolError;
 use harness::Turn;
 use harness::TurnId;
 use serde_json::json;
 
 use support::CollectingSink;
-use support::FaultedJournal;
 use support::ScriptedModel;
 use support::ScriptedSandboxes;
+use support::brisk_idle;
 use support::check_events;
 use support::final_message;
+use support::tail_records;
 use support::tool_call;
 
-fn test_config() -> HarnessConfig {
-    HarnessConfig {
-        idle_timeout: Duration::from_secs(2),
-        tick_interval: Duration::from_millis(500),
-        submit_deadline: Duration::from_secs(60),
-        journal_attempts: 2,
-        journal_backoff: Duration::from_millis(50),
-        ..HarnessConfig::default()
-    }
-}
-
-fn fetch_kind(on_dangling: OnDangling) -> Kinds {
+fn worker_kinds() -> Kinds {
     Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .tool(ToolDecl {
-                name: "fetch".to_string(),
-                description: "an idempotent read".to_string(),
-                input_schema: json!({"type": "object"}),
-                tier: Tier::Workspace,
-                on_dangling,
-                timeout: None,
-            })
-            .budget(Budget::new(10_000, 10)),
+            .sandboxed("fetch", "an idempotent read", &json!({ "type": "object" }), Tier::Workspace)
+            .budget(Budget::new(10_000, 10))
+            .grain(brisk_idle()),
     )
 }
 
-fn fetch_model() -> ScriptedModel {
-    ScriptedModel::steps(vec![
-        Ok(tool_call("c1", "fetch", json!({}))),
-        Ok(final_message("done")),
-    ])
+/// Two turns; each does one tool step then completes. A pure function of the
+/// request, so a replay reproduces it (§4.2): at a turn's start (last entry is
+/// the user prompt) it calls the tool; after the tool result, it completes.
+fn two_turn_model() -> ScriptedModel {
+    ScriptedModel::new(|req| match req.transcript.last() {
+        Some(harness::Entry::ToolResult { .. }) => Ok(final_message("done")),
+        // Empty call id: the harness assigns a deterministic per-step id, so it
+        // matches across runs even though the resumed transcript carries an extra
+        // `WorkspaceReset` entry that would shift a length-derived id.
+        _ => Ok(tool_call("", "fetch", json!({}))),
+    })
 }
 
-/// One manually assembled run: a session whose tool execution trips a
-/// one-shot journal outage, so the tool's outcome cannot be journaled — a
-/// dangling call (§5.5). Returns the journal, the collected events, and the
-/// sandbox stats.
-fn run_interrupted(
-    seed: u64,
-    on_dangling: OnDangling,
-) -> (InMemoryJournal, Vec<Event>, support::SandboxStats) {
+/// Run two turns on one session, optionally idling between them so the session
+/// hibernates and the second turn rehydrates from the journal (§7.5). Returns
+/// the journal and the observed event stream.
+fn run_two_turns(seed: u64, session: &'static str, hibernate: bool) -> (Vec<Record>, Vec<Event>) {
     let sim = Simulation::new(seed);
     let sink = CollectingSink::default();
     let system: SimSystem = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
         .events(Arc::new(sink.clone()))
         .build();
-    let store = InMemoryJournal::new();
-    let journal = FaultedJournal::new(store.clone(), sim.clock(), sim.entropy());
-    let outage = journal.clone();
-    let trips = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&trips);
-    // The first `fetch` executes its effect and *then* the journal goes
-    // down: intent journaled, outcome not — the §5.5 dangling shape.
-    let sandboxes = ScriptedSandboxes::new(move |_, _| {
-        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
-            outage.set_unavailable(true);
-        }
-        Ok(json!("fetched"))
-    });
-    let stats = sandboxes.stats.clone();
     let harness = Harness::with_config(
         system.clone(),
-        fetch_kind(on_dangling),
-        Arc::new(journal.clone()),
-        Arc::new(fetch_model()),
-        Arc::new(sandboxes),
-        test_config(),
-    );
-    let clock = system.clock().clone();
-    sim.block_on(async move {
-        let session = harness.session("worker", SessionId::new("s-resume"));
-        let first = session
-            .prompt(Turn::new(TurnId::new("t-1"), "go"))
-            .await
-            .expect("call");
-        // The session cannot record (§6.5): the run pauses, the caller is
-        // told so best-effort.
-        assert_eq!(first, Err(RunError::Journal("injected outage".to_string())));
-
-        // The store recovers; the re-submitted TurnId is the resumption
-        // contact (§7.5).
-        journal.set_unavailable(false);
-        clock.sleep(Duration::from_secs(5)).await;
-        let second = session
-            .prompt(Turn::new(TurnId::new("t-1"), "go"))
-            .await
-            .expect("call")
-            .expect("run resumes and completes");
-        assert_eq!(second.text(), "done");
-        clock.sleep(Duration::from_secs(10)).await;
-    });
-    (store, sink.events(), stats)
-}
-
-/// The uninterrupted control run, identical but for the outage.
-fn run_control(seed: u64) -> InMemoryJournal {
-    let sim = Simulation::new(seed);
-    let system: SimSystem =
-        LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
-    let store = InMemoryJournal::new();
-    let harness = Harness::with_config(
-        system.clone(),
-        fetch_kind(OnDangling::Reexecute),
-        Arc::new(store.clone()),
-        Arc::new(fetch_model()),
+        worker_kinds(),
+        Arc::new(two_turn_model()),
         Arc::new(ScriptedSandboxes::new(|_, _| Ok(json!("fetched")))),
-        test_config(),
+        HarnessConfig::default(),
     );
     let clock = system.clock().clone();
-    sim.block_on(async move {
-        let session = harness.session("worker", SessionId::new("s-control"));
-        let outcome = session
-            .prompt(Turn::new(TurnId::new("t-1"), "go"))
-            .await
-            .expect("call")
-            .expect("run");
-        assert_eq!(outcome.text(), "done");
-        clock.sleep(Duration::from_secs(10)).await;
+    let records = sim.block_on(async move {
+        let s = harness.session("worker", SessionId::new(session));
+        let first = s.prompt(Turn::new(TurnId::new("t-1"), "one")).await.expect("call").expect("run");
+        assert_eq!(first.text(), "done");
+        if hibernate {
+            // Idle past the brisk window so the activation hibernates; the next
+            // turn reactivates and rehydrates from the journal (§7.5).
+            clock.sleep(Duration::from_secs(5)).await;
+        }
+        let second = s.prompt(Turn::new(TurnId::new("t-2"), "two")).await.expect("call").expect("run");
+        assert_eq!(second.text(), "done");
+        let records = tail_records(&s).await;
+        clock.sleep(Duration::from_secs(5)).await;
+        records
     });
-    store
+    (records, sink.events())
 }
 
 #[test]
-fn a_reexecuted_dangling_call_resumes_to_the_control_run_transcript() {
-    let (store, events, stats) = run_interrupted(71, OnDangling::Reexecute);
-    let control = run_control(71);
+fn a_hibernated_session_resumes_to_the_control_transcript() {
+    let (resumed, events) = run_two_turns(71, "s-resume", true);
+    let (control, _) = run_two_turns(71, "s-resume", false);
 
-    // The harness checkers hold over the interrupted run's full stream, and
-    // the resume is visible on it (§10.4): a RunResumed, never a second
-    // RunStarted.
-    let violations = check_events(&events);
-    assert!(violations.is_empty(), "checkers: {violations:?}");
-    assert!(
-        events
-            .iter()
-            .filter_map(|e| e.as_app::<harness::HarnessEvent>())
-            .any(|e| matches!(e, harness::HarnessEvent::RunResumed { .. })),
-        "the second activation resumed the journaled run"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter_map(|e| e.as_app::<harness::HarnessEvent>())
-            .filter(|e| matches!(e, harness::HarnessEvent::RunStarted { .. }))
-            .count(),
-        1
-    );
-
-    // The effect ran twice — blind re-execution is the declared policy
-    // (§5.5) — but the journal records one outcome.
-    assert_eq!(stats.calls().len(), 2);
-
-    // H1, differentially: the resumed journal equals the uninterrupted
-    // control's, record for record, except for (a) the recorded session
-    // identity inside `SessionCreated` and (b) the `WorkspaceReset` the spec
-    // *requires* the fresh activation to journal for a transcript that
-    // asserts sandboxed state (§5.5) — the one mandated divergence.
-    let resumed: Vec<RecordBody> = store
-        .records(&SessionId::new("s-resume"))
-        .into_iter()
-        .map(|r| r.body)
-        .filter(|b| {
-            !matches!(
-                b,
-                RecordBody::SessionCreated { .. } | RecordBody::WorkspaceReset
-            )
-        })
-        .collect();
-    let control: Vec<RecordBody> = control
-        .records(&SessionId::new("s-control"))
-        .into_iter()
-        .map(|r| r.body)
-        .filter(|b| {
-            !matches!(
-                b,
-                RecordBody::SessionCreated { .. } | RecordBody::WorkspaceReset
-            )
-        })
-        .collect();
-    assert_eq!(resumed, control, "fold-equivalence after resume (H1)");
-}
-
-#[test]
-fn an_interrupted_dangling_call_resolves_for_the_model_to_decide() {
-    let (store, events, stats) = run_interrupted(73, OnDangling::Interrupt);
-
+    // The harness checkers hold over the resumed run's full stream (§11).
     let violations = check_events(&events);
     assert!(violations.is_empty(), "checkers: {violations:?}");
 
-    // The effect ran once; the harness never re-fired it (§5.5 — the model,
-    // not the harness, decides whether to retry a side effect).
-    assert_eq!(stats.calls().len(), 1);
-    let records = store.records(&SessionId::new("s-resume"));
-    let outcomes: Vec<_> = records
+    // The session activated more than once: it hibernated and rehydrated (§10).
+    let activations = events
         .iter()
-        .filter_map(|r| match &r.body {
-            RecordBody::ToolOutcome { outcome, .. } => Some(outcome.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        outcomes,
-        vec![Err(ToolError::Interrupted)],
-        "the dangling call resolved as Interrupted, journaled once"
+        .filter_map(|e| e.as_app::<GrainEvent>())
+        .filter(|e| matches!(e, GrainEvent::Activated { .. }))
+        .count();
+    assert!(activations >= 2, "the session hibernated and reactivated, got {activations} activations");
+
+    // A resume emits no second RunStarted (§10.4): one per turn, two total.
+    let starts = events
+        .iter()
+        .filter_map(|e| e.as_app::<harness::HarnessEvent>())
+        .filter(|e| matches!(e, harness::HarnessEvent::RunStarted { .. }))
+        .count();
+    assert_eq!(starts, 2, "one RunStarted per turn, none for the resume");
+
+    // The resumed run journals a `WorkspaceReset` before turn 2's model call:
+    // the fresh sandbox cannot match the workspace the journal asserts (§5.5),
+    // the one mandated divergence from the control.
+    assert!(
+        resumed.iter().any(|r| matches!(r.body, RecordBody::WorkspaceReset)),
+        "the resume surfaces the lost workspace (§5.5)"
     );
-    assert!(matches!(
-        records.last().expect("records").body,
-        RecordBody::RunEnded { outcome: Ok(_), .. }
-    ));
+    assert!(
+        !control.iter().any(|r| matches!(r.body, RecordBody::WorkspaceReset)),
+        "the uninterrupted control never resets"
+    );
+
+    // H1, differentially: the rehydrated journal equals the uninterrupted
+    // control's, record for record, except that one mandated `WorkspaceReset`
+    // (filtered here). Same session id, so even `SessionCreated` matches.
+    let strip = |records: Vec<Record>| -> Vec<RecordBody> {
+        records
+            .into_iter()
+            .map(|r| r.body)
+            .filter(|b| !matches!(b, RecordBody::WorkspaceReset))
+            .collect()
+    };
+    assert_eq!(strip(resumed), strip(control), "fold-equivalence after resume (H1)");
 }

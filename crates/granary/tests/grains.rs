@@ -419,6 +419,74 @@ fn hibernated_grain_reactivates_with_state() {
     assert_eq!(rehydrations, vec![false, true], "reactivation seeds from the snapshot");
 }
 
+// --- can_passivate: a grain that vetoes idle hibernation (§10) ----------------
+
+/// A grain that never permits idle hibernation. The agentic harness overrides
+/// `can_passivate` this way while a run is live (harness §7.2).
+#[derive(Default)]
+struct PinnedGrain;
+
+impl Grain for PinnedGrain {
+    type System = SimSystem;
+    type State = CounterState;
+    type Event = CounterEvent;
+    const GRAIN_TYPE: &'static str = "test.Pinned";
+
+    fn apply(state: &mut CounterState, event: &CounterEvent) {
+        match event {
+            CounterEvent::Added(d) => state.value += *d,
+        }
+    }
+
+    fn register(r: &mut granary::GrainRegistry<Self>) {
+        r.accept::<Add>();
+    }
+
+    fn can_passivate(&self, _state: &CounterState) -> bool {
+        false
+    }
+}
+
+impl GrainHandler<Add> for PinnedGrain {
+    async fn handle(&self, state: &CounterState, msg: Add, _ctx: &GrainCtx<Self>) -> (Vec<CounterEvent>, i64) {
+        (vec![CounterEvent::Added(msg.0)], state.value + msg.0)
+    }
+}
+
+#[test]
+fn can_passivate_vetoes_idle_hibernation() {
+    use actor_core::Spawner;
+
+    let sim = Simulation::new(9);
+    let recorder = Recorder::new();
+    let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
+        .events(sink)
+        .build();
+    let pinned = system.granary::<PinnedGrain>(GranaryConfig {
+        idle_after: Duration::from_millis(10),
+        ..GranaryConfig::default()
+    });
+
+    // Drive with `run_for`, not `block_on`: a vetoing grain reschedules its idle
+    // check forever, so the sim never quiesces — a bounded run drives the
+    // activation and then well past many idle windows.
+    sim.spawner().launch(Box::pin(async move {
+        let _ = pinned.grain("p/0").ask(Add(1)).await;
+    }));
+    sim.run_for(Duration::from_secs(1));
+
+    let events = recorder.events();
+    assert!(
+        events.iter().any(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Activated { .. }))),
+        "the grain activated",
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Passivated { .. }))),
+        "can_passivate = false must veto idle hibernation (§10)",
+    );
+}
+
 // --- An account grain: the Appendix A end-to-end example ----------------------
 
 #[derive(Default)]
@@ -613,4 +681,39 @@ fn account_balance_survives_reactivation() {
     let reread = accounts.grain("account/7");
     let balance = sim.block_on(async move { reread.ask(ReadBalance).await.unwrap() });
     assert_eq!(balance, 250, "a durable deposit must survive hibernation (G12)");
+}
+
+#[test]
+fn granary_named_hosts_one_grain_under_many_type_names() {
+    // The extension point the agentic harness rides (§5.1): one Rust grain (its
+    // run loop) hosted under many runtime type names — one per kind. Each name is
+    // its own grain type (its own gateway key, shard map, and namespace), so the
+    // same key under two names addresses two **independent** grains. The factory
+    // also replaces `G::default`, the seam the harness uses to inject per-node
+    // handles into each fresh activation.
+    let sim = Simulation::new(5);
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
+
+    let researchers = system.granary_named::<CounterGrain>(
+        "harness.researcher",
+        GranaryConfig::default(),
+        Arc::new(CounterGrain::default),
+    );
+    let summarizers = system.granary_named::<CounterGrain>(
+        "harness.summarizer",
+        GranaryConfig::default(),
+        Arc::new(CounterGrain::default),
+    );
+
+    // The runtime type name lands in the `GrainName`, overriding `G::GRAIN_TYPE`.
+    assert_eq!(researchers.grain("c/0").name().grain_type(), "harness.researcher");
+    assert_eq!(summarizers.grain("c/0").name().grain_type(), "harness.summarizer");
+
+    sim.block_on(async move {
+        // Same key under two type names → two independent grains, no crosstalk.
+        assert_eq!(researchers.grain("c/0").ask(Add(3)).await.unwrap(), 3);
+        assert_eq!(summarizers.grain("c/0").ask(Add(10)).await.unwrap(), 10);
+        assert_eq!(researchers.grain("c/0").ask(ReadCount).await.unwrap(), 3);
+        assert_eq!(summarizers.grain("c/0").ask(ReadCount).await.unwrap(), 10);
+    });
 }

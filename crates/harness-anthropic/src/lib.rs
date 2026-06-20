@@ -190,7 +190,7 @@ pub fn encode_request(req: &ModelRequest) -> Value {
         Some((last, blocks)) if *last == role => blocks.push(block),
         _ => messages.push((role, vec![block])),
     };
-    for entry in &req.transcript {
+    for entry in req.transcript.iter() {
         match entry {
             Entry::User(text) => push("user", json!({"type": "text", "text": text})),
             Entry::Assistant { content, calls } => {
@@ -431,7 +431,7 @@ mod tests {
                 description: "run".to_string(),
                 input_schema: json!({"type": "object"}),
             }],
-            transcript: vec![
+            transcript: std::sync::Arc::new(vec![
                 Entry::User("hello".to_string()),
                 Entry::Assistant {
                     content: "using a tool".to_string(),
@@ -446,7 +446,7 @@ mod tests {
                     outcome: Err(ToolError::Timeout),
                 },
                 Entry::WorkspaceReset,
-            ],
+            ]),
             max_tokens: 1234,
         }
     }

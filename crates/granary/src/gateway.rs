@@ -49,11 +49,16 @@ use crate::system::GranarySystem;
 use crate::system::ShardId;
 use crate::system::shard_for;
 
-/// The receptionist key the gateway for grain type `G` registers under (spec
+/// The receptionist key the gateway for a grain type registers under (spec
 /// §5.3): one well-known key per type, one entry per node. Routing looks the
 /// leader node's gateway up here.
-pub(crate) fn gateway_key<G: Grain>() -> Key<Gateway<G>> {
-    Key::new(G::GRAIN_TYPE)
+///
+/// `grain_type` is the runtime type name (spec §5.1), `G::GRAIN_TYPE` by default
+/// but a caller-supplied name when one Rust grain is hosted under several type
+/// names ([`granary_named`](crate::GranaryExt::granary_named)). Two type names
+/// thus register distinct keys even though both are `Key<Gateway<G>>`.
+pub(crate) fn gateway_key<G: Grain>(grain_type: &'static str) -> Key<Gateway<G>> {
+    Key::new(grain_type)
 }
 
 /// Get-or-activate the host for a name and return a handle to it (spec §5.4). The
@@ -96,6 +101,11 @@ pub(crate) struct Gateway<G: Grain> {
     /// Names this node currently hosts. The serial actor is the only writer, so
     /// no lock guards it (**G6**).
     table: HashMap<GrainName, ActorRef<Host<G>>>,
+    /// The runtime type name (spec §5.1), `G::GRAIN_TYPE` by default; a
+    /// caller-supplied name when one Rust grain is hosted under several type
+    /// names ([`granary_named`](crate::GranaryExt::granary_named)). Used to map a
+    /// name to its shard.
+    grain_type: &'static str,
     /// The shard map (§7.6): which nodes replicate each shard and this node's local
     /// store for the shards it replicates, read live as the consensus allocation
     /// commits.
@@ -110,6 +120,7 @@ pub(crate) struct Gateway<G: Grain> {
 
 impl<G: Grain> Gateway<G> {
     pub(crate) fn new(
+        grain_type: &'static str,
         shard_map: Arc<dyn ShardMapSource>,
         shards: usize,
         config: GranaryConfig,
@@ -117,6 +128,7 @@ impl<G: Grain> Gateway<G> {
     ) -> Gateway<G> {
         Gateway {
             table: HashMap::new(),
+            grain_type,
             shard_map,
             shards,
             config,
@@ -158,8 +170,10 @@ impl<G: Grain> Gateway<G> {
         let factory = Arc::clone(&self.factory);
         let gateway = ctx.this();
         let activated = name.clone();
+        let grain_type = self.grain_type;
         let host = ctx.spawn_with(move || {
             Host::new(
+                grain_type,
                 (factory)(),
                 activated.clone(),
                 journal.clone(),
@@ -199,7 +213,7 @@ impl<G: Grain> Handler<Activate<G>> for Gateway<G> {
         msg: Activate<G>,
         ctx: &Ctx<Gateway<G>>,
     ) -> Result<ActorRef<Host<G>>, GrainError> {
-        let shard = shard_for(G::GRAIN_TYPE, msg.name.key(), self.shards());
+        let shard = shard_for(self.grain_type, msg.name.key(), self.shards());
         if self.shard_map.journal(shard.index).is_some() && ctx.system().leads_shard(shard) {
             Ok(self.get_or_activate(msg.name, shard, ctx))
         } else {

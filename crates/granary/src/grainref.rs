@@ -63,14 +63,18 @@ const FORWARD_TIMEOUT: Duration = Duration::from_millis(500);
 /// cache-less and resolves through the gateway each call.
 pub(crate) struct HostCache<G: Grain> {
     system: G::System,
+    /// The runtime type name (spec §5.1) this cache routes for, `G::GRAIN_TYPE`
+    /// by default but a caller-supplied name under [`granary_named`](GranaryExt::granary_named).
+    grain_type: &'static str,
     shards: usize,
     hosts: Mutex<HashMap<GrainName, ActorRef<Host<G>>>>,
 }
 
 impl<G: Grain> HostCache<G> {
-    fn new(system: G::System, shards: usize) -> Arc<HostCache<G>> {
+    fn new(system: G::System, grain_type: &'static str, shards: usize) -> Arc<HostCache<G>> {
         Arc::new(HostCache {
             system,
+            grain_type,
             shards,
             hosts: Mutex::new(HashMap::new()),
         })
@@ -87,7 +91,7 @@ impl<G: Grain> HostCache<G> {
     fn get(&self, name: &GrainName) -> Option<ActorRef<Host<G>>> {
         let mut hosts = self.hosts.lock().expect("host cache mutex poisoned");
         let host = hosts.get(name)?.clone();
-        match self.system.shard_leader(shard_for(G::GRAIN_TYPE, name.key(), self.shards)) {
+        match self.system.shard_leader(shard_for(self.grain_type, name.key(), self.shards)) {
             // Replica node, leader moved: drop the stale handle before it is used.
             Some(leader) if host.id().node() != leader => {
                 hosts.remove(name);
@@ -132,6 +136,12 @@ impl<G: Grain> HostCache<G> {
 /// serialized; a wire-arrived ref recovers it from its decoded `gateway` handle
 /// ([`ActorRef::system`]), which rebinds to the local system on decode (§4.4).
 pub struct GrainRef<G: Grain> {
+    /// The runtime type name (spec §5.1) this ref routes under, used to look up
+    /// the leader's gateway in the receptionist (the `&'static` a [`Key`] needs).
+    /// `G::GRAIN_TYPE` for the common case; a caller-supplied name when the type
+    /// is hosted under [`granary_named`](GranaryExt::granary_named). A ref decoded
+    /// off the wire recovers it as `G::GRAIN_TYPE` (see the `Deserialize` note).
+    grain_type: &'static str,
     name: GrainName,
     gateway: ActorRef<Gateway<G>>,
     system: G::System,
@@ -149,12 +159,19 @@ impl<G: Grain> Serialize for GrainRef<G> {
 // Decoding recovers the local system from the rebound gateway ref, so a ref
 // embedded in a message is usable on the node that receives it (§4.4). It arrives
 // cache-less and resolves through the gateway each call (correct, just not
-// cached).
+// cached). `grain_type` recovers as `G::GRAIN_TYPE`: the receptionist `Key` needs
+// a `&'static str` and the wire carries only the name's owned string, so this is
+// the one path that cannot honor a runtime type name. It is correct for every
+// grain hosted under its own `G::GRAIN_TYPE` (granary's native use); a type hosted
+// under `granary_named` (the agentic harness's per-kind grains) must therefore
+// re-mint its refs locally from its `Granary` handle rather than ship them over
+// the wire — which it does (it addresses children by key through the handle).
 impl<'de, G: Grain> Deserialize<'de> for GrainRef<G> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let (name, gateway) = <(GrainName, ActorRef<Gateway<G>>)>::deserialize(deserializer)?;
         let system = gateway.system().clone();
         Ok(GrainRef {
+            grain_type: G::GRAIN_TYPE,
             name,
             gateway,
             system,
@@ -167,6 +184,7 @@ impl<'de, G: Grain> Deserialize<'de> for GrainRef<G> {
 impl<G: Grain> Clone for GrainRef<G> {
     fn clone(&self) -> Self {
         GrainRef {
+            grain_type: self.grain_type,
             name: self.name.clone(),
             gateway: self.gateway.clone(),
             system: self.system.clone(),
@@ -177,12 +195,14 @@ impl<G: Grain> Clone for GrainRef<G> {
 
 impl<G: Grain> GrainRef<G> {
     pub(crate) fn new(
+        grain_type: &'static str,
         name: GrainName,
         gateway: ActorRef<Gateway<G>>,
         system: G::System,
         cache: Option<Arc<HostCache<G>>>,
     ) -> GrainRef<G> {
         GrainRef {
+            grain_type,
             name,
             gateway,
             system,
@@ -309,7 +329,7 @@ impl<G: Grain> GrainRef<G> {
     fn gateway_on(&self, node: NodeId) -> Option<ActorRef<Gateway<G>>> {
         self.system
             .receptionist()
-            .lookup(gateway_key::<G>())
+            .lookup(gateway_key::<G>(self.grain_type))
             .into_vec()
             .into_iter()
             .find(|gateway| gateway.id().node() == node)
@@ -319,7 +339,7 @@ impl<G: Grain> GrainRef<G> {
     fn any_gateway(&self) -> Option<ActorRef<Gateway<G>>> {
         self.system
             .receptionist()
-            .lookup(gateway_key::<G>())
+            .lookup(gateway_key::<G>(self.grain_type))
             .into_vec()
             .into_iter()
             .next()
@@ -392,6 +412,9 @@ fn is_retriable(call: &CallError) -> bool {
 /// `ask`/`tell` it. Obtained from [`GranaryExt::granary`].
 pub struct Granary<G: Grain> {
     system: G::System,
+    /// The runtime type name (spec §5.1) this handle addresses, `G::GRAIN_TYPE` by
+    /// default; a caller-supplied name under [`granary_named`](GranaryExt::granary_named).
+    grain_type: &'static str,
     gateway: ActorRef<Gateway<G>>,
     /// The number of shards the type's namespace is partitioned into (§7.1); used
     /// to resolve a name to its shard for [`Granary::leader`]/[`Granary::replicas`].
@@ -407,6 +430,7 @@ impl<G: Grain> Clone for Granary<G> {
     fn clone(&self) -> Self {
         Granary {
             system: self.system.clone(),
+            grain_type: self.grain_type,
             gateway: self.gateway.clone(),
             shards: self.shards,
             shard_map: Arc::clone(&self.shard_map),
@@ -421,7 +445,8 @@ impl<G: Grain> Granary<G> {
     /// handle's host cache, so steady-state calls skip the gateway (§5.4).
     pub fn grain(&self, key: impl Into<String>) -> GrainRef<G> {
         GrainRef::new(
-            GrainName::new(G::GRAIN_TYPE, key),
+            self.grain_type,
+            GrainName::new(self.grain_type, key),
             self.gateway.clone(),
             self.system.clone(),
             Some(Arc::clone(&self.cache)),
@@ -432,16 +457,16 @@ impl<G: Grain> Granary<G> {
     /// grain activates (§5.2) — or `None` during a shard election. A routing
     /// observation, not a guarantee: leadership can move immediately after.
     pub fn leader(&self, key: impl Into<String>) -> Option<NodeId> {
-        let name = GrainName::new(G::GRAIN_TYPE, key);
+        let name = GrainName::new(self.grain_type, key);
         self.system
-            .shard_leader(shard_for(G::GRAIN_TYPE, name.key(), self.shards))
+            .shard_leader(shard_for(self.grain_type, name.key(), self.shards))
     }
 
     /// Whether a live host handle is currently cached for `key` (spec §5.4). An
     /// optimization/observability detail — exposed for metrics and tests — not a
     /// statement about the grain's activation on its leader.
     pub fn is_cached(&self, key: impl Into<String>) -> bool {
-        self.cache.contains(&GrainName::new(G::GRAIN_TYPE, key))
+        self.cache.contains(&GrainName::new(self.grain_type, key))
     }
 
     /// The nodes that replicate the shard a grain key maps to (spec §7.6) — the
@@ -450,8 +475,8 @@ impl<G: Grain> Granary<G> {
     /// 1 is the single node), so it reflects the latest committed allocation, not a
     /// `granary()`-time snapshot. Exposed for metrics and tests.
     pub fn replicas(&self, key: impl Into<String>) -> Vec<NodeId> {
-        let name = GrainName::new(G::GRAIN_TYPE, key);
-        let index = shard_for(G::GRAIN_TYPE, name.key(), self.shards).index;
+        let name = GrainName::new(self.grain_type, key);
+        let index = shard_for(self.grain_type, name.key(), self.shards).index;
         self.shard_map.replicas(index).unwrap_or_default()
     }
 }
@@ -460,18 +485,54 @@ impl<G: Grain> Granary<G> {
 /// [`GranarySystem`], so `system.granary::<G>(config)` starts the gateway and
 /// returns a [`Granary`] handle.
 pub trait GranaryExt: GranarySystem {
-    /// Start hosting grains of type `G` (spec Appendix A): spawn the type's
-    /// gateway and return the handle. The grain behavior is built by `G::default`
-    /// on each activation (the runtime instantiates the grain).
-    fn granary<G>(&self, config: GranaryConfig) -> Granary<G>
-    where
-        G: Grain<System = Self> + Default;
-}
-
-impl<T: GranarySystem> GranaryExt for T {
+    /// Start hosting grains of type `G` under its own `G::GRAIN_TYPE` (spec
+    /// Appendix A): spawn the type's gateway and return the handle. The grain
+    /// behavior is built by `G::default` on each activation (the runtime
+    /// instantiates the grain). The common case — one Rust type, one grain type.
     fn granary<G>(&self, config: GranaryConfig) -> Granary<G>
     where
         G: Grain<System = Self> + Default,
+    {
+        self.granary_named(G::GRAIN_TYPE, config, Arc::new(G::default))
+    }
+
+    /// Host grains of type `G` under an explicit runtime **type name** (spec
+    /// §5.1), with a caller-supplied **factory** for each activation's behavior.
+    ///
+    /// Two extension points over [`granary`](GranaryExt::granary), both for one
+    /// Rust grain that must be **many** grain types at runtime (e.g. the agentic
+    /// harness, where each *kind* is its own grain type but shares one loop):
+    ///
+    /// - `grain_type` overrides `G::GRAIN_TYPE`, so the same `G` hosts under
+    ///   several names — distinct gateways (one `gateway_key` each), distinct
+    ///   shard maps, distinct consensus groups (Tier 2). It MUST be stable
+    ///   cluster-wide and across runs, exactly as `G::GRAIN_TYPE` must be (§5.1);
+    ///   a `&'static str` makes that lifetime explicit (deployment leaks its
+    ///   bounded set of names if they are not literals).
+    /// - `factory` replaces `G::default`, so the runtime can inject per-node seam
+    ///   handles into each fresh activation (the grain needs no `Default`).
+    ///
+    /// `granary(config)` is exactly `granary_named(G::GRAIN_TYPE, config,
+    /// Arc::new(G::default))`.
+    fn granary_named<G>(
+        &self,
+        grain_type: &'static str,
+        config: GranaryConfig,
+        factory: Arc<dyn Fn() -> G + Send + Sync>,
+    ) -> Granary<G>
+    where
+        G: Grain<System = Self>;
+}
+
+impl<T: GranarySystem> GranaryExt for T {
+    fn granary_named<G>(
+        &self,
+        grain_type: &'static str,
+        config: GranaryConfig,
+        factory: Arc<dyn Fn() -> G + Send + Sync>,
+    ) -> Granary<G>
+    where
+        G: Grain<System = Self>,
     {
         let shards = config.shards.max(1);
         let replicas = config.replication_factor.max(1);
@@ -480,20 +541,27 @@ impl<T: GranarySystem> GranaryExt for T {
         // replica set and only the replicas store it. Tier 1 is a trivial
         // single-node map. The map creates each assigned shard's group + journal as
         // the allocation commits; routing reads the map live and the gateway's
-        // bounded redirect absorbs the brief bootstrap window.
-        let shard_map = self.shard_map(G::GRAIN_TYPE, shards, replicas);
-        let factory: Arc<dyn Fn() -> G + Send + Sync> = Arc::new(G::default);
-        let gateway = self.spawn(Gateway::new(Arc::clone(&shard_map), shards, config, factory));
+        // bounded redirect absorbs the brief bootstrap window. Keyed by the runtime
+        // `grain_type`, so two type names get separate maps and groups.
+        let shard_map = self.shard_map(grain_type, shards, replicas);
+        let gateway = self.spawn(Gateway::new(
+            grain_type,
+            Arc::clone(&shard_map),
+            shards,
+            config,
+            factory,
+        ));
         // Register this node's gateway under the type's well-known key so other
         // nodes route activations to it (§5.3). Each node hosting the type does
         // this, giving one gateway entry per node.
-        self.receptionist().register(gateway_key::<G>(), &gateway);
+        self.receptionist().register(gateway_key::<G>(grain_type), &gateway);
         Granary {
             system: self.clone(),
+            grain_type,
             gateway,
             shards,
             shard_map,
-            cache: HostCache::new(self.clone(), shards),
+            cache: HostCache::new(self.clone(), grain_type, shards),
         }
     }
 }

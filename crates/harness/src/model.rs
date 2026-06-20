@@ -13,6 +13,8 @@
 //! object-safe: the harness injects seams as `Arc<dyn Model>`, the same shape
 //! the core gives its codec (core spec §5).
 
+use std::sync::Arc;
+
 use actor_core::BoxFuture;
 use serde::Deserialize;
 use serde::Serialize;
@@ -62,7 +64,11 @@ pub struct ModelRequest {
     pub system_prompt: String,
     pub params: ModelParams,
     pub tools: Vec<ToolSpec>,
-    pub transcript: Vec<Entry>,
+    /// The folded conversation, `Arc`-shared with [`SessionState`] so building a
+    /// request is a pointer clone, not a deep copy of the whole conversation
+    /// (§4.1). Serialized as its inner slice (see [`arc_transcript`](crate::session)).
+    #[serde(with = "crate::session::arc_transcript")]
+    pub transcript: Arc<Vec<Entry>>,
     /// `params.max_tokens` clamped to the run's remaining token budget
     /// (§9.1 item 2).
     pub max_tokens: u64,
@@ -86,14 +92,6 @@ pub struct ModelResponse {
     pub content: String,
     pub calls: Vec<ToolCall>,
     pub usage: Usage,
-}
-
-impl ModelResponse {
-    /// Whether this is a final assistant message — no tool calls, so the run
-    /// ends with it (harness spec §3.1 step 3).
-    pub fn is_final(&self) -> bool {
-        self.calls.is_empty()
-    }
 }
 
 /// A model failure (harness spec §4.3). Serializable because an unabsorbed

@@ -6,11 +6,11 @@
 //! addresses a session as `(kind, session)` (`Harness::session`).
 //!
 //! The payload types ride the harness's own serde forms — `RunOutcome`,
-//! `Record`, `SeqNo` — so the wire shows exactly what the journal holds.
+//! `Record`, `Seq` — so the wire shows exactly what the journal holds.
 
 use harness::Record;
 use harness::RunOutcome;
-use harness::SeqNo;
+use harness::Seq;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -62,7 +62,7 @@ pub enum Reply {
     /// A run's terminal outcome: `{"Ok": …}` or `{"Err": …}` per serde.
     Outcome { outcome: RunOutcome },
     /// A page of journal records.
-    Records { records: Vec<(SeqNo, Record)> },
+    Records { records: Vec<(Seq, Record)> },
     /// The cancel was accepted (idempotent; says nothing about the run).
     Cancelled,
     /// A transport- or protocol-level failure; the caller may retry the same

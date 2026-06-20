@@ -93,6 +93,9 @@ pub trait Grain: Sized + Send + 'static {
     /// `GrainName` of this type (§5.1) and the receptionist key the type's gateway
     /// is discovered under (§5.3). An explicit constant (e.g. `"bank.Account"`) is
     /// REQUIRED — the runtime needs a rename-stable tag, which `type_name` is not.
+    /// It is the *default* type name; one Rust grain MAY be hosted under several
+    /// runtime type names via `granary_named` (Appendix A), in which case this
+    /// const is the fallback a wire-decoded `GrainRef` recovers.
     const GRAIN_TYPE: &'static str;
 
     /// Apply one event to state. MUST be pure and deterministic: it runs on the
@@ -109,9 +112,20 @@ pub trait Grain: Sized + Send + 'static {
     fn on_activate(&mut self, _ctx: &GrainCtx<Self>)
         -> impl Future<Output = Result<(), BoxError>> + Send { async { Ok(()) } }
 
-    /// Called once before the activation deactivates (idle eviction or handoff).
+    /// Called once before the activation deactivates — idle eviction, handoff, OR
+    /// a forced step-down (leadership move, quorum loss). Runs even when the
+    /// journal is unwritable, since it cannot persist (the ctx exposes no
+    /// `persist`); a layered runtime uses it to release non-durable per-activation
+    /// resources (e.g. the agentic harness's sandbox, harness §5.3).
     fn on_passivate(&mut self, _ctx: &GrainCtx<Self>)
         -> impl Future<Output = ()> + Send { async {} }
+
+    /// Whether the activation MAY idle-hibernate now (§10). Consulted only on idle
+    /// eviction; a forced step-down ignores it. The default always permits it. A
+    /// grain with autonomous, not-yet-journaled work (the agentic harness's live
+    /// run) overrides this to veto eviction until the work settles; the host
+    /// reschedules the idle check rather than evicting mid-flight.
+    fn can_passivate(&self, _state: &Self::State) -> bool { true }
 }
 ```
 
@@ -470,7 +484,8 @@ activate → rehydrate (snapshot + replay, §9) → on_activate → serve comman
 
 - **Activation** is triggered by the first message for the name reaching its shard leader's gateway (§5.3). The leader rehydrates the grain (§9), runs `on_activate`, then serves. Activation takes no consensus and no network: the leader holds the log locally (§5.2).
 - **Migration** follows shard leadership. When the shard's leader changes (§8.3), the grain's activation moves to the new leader and rehydrates there. In-memory state is never preserved across the move; the journal rebuilds it.
-- **Hibernation (deactivate-on-idle).** After an idle interval the leader MAY run `on_passivate`, snapshot to bound the next replay, and `ctx.stop()`, dropping the grain's in-memory state. (`on_passivate` cannot mutate state — §4.3 — so it runs before or after the snapshot indistinguishably; the implementation runs it first.) The gateway prunes the name from its activation table (it watches its hosts via death watch, actor §12). The next message re-activates and rehydrates. Hibernation reclaims memory; persisted storage survives; in-memory state was only ever a cache (§1).
+- **Hibernation (deactivate-on-idle).** After an idle interval the leader MAY — *if the grain's `can_passivate` permits it* — run `on_passivate`, snapshot to bound the next replay, and `ctx.stop()`, dropping the grain's in-memory state. (`on_passivate` cannot mutate state — §4.3 — so it runs before or after the snapshot indistinguishably; the implementation runs it first.) A grain that vetoes eviction (`can_passivate` returns false, e.g. an autonomous grain with a live run) is left running and the idle check rescheduled. The gateway prunes the name from its activation table (it watches its hosts via death watch, actor §12). The next message re-activates and rehydrates. Hibernation reclaims memory; persisted storage survives; in-memory state was only ever a cache (§1).
+- **Forced step-down.** When leadership moves (§8) or the shard goes unavailable (§11), the activation deactivates involuntarily: it runs `on_passivate` (to release non-durable per-activation resources) but takes **no snapshot** — the journal may be unwritable — then emits `Passivated` and stops. The journal is the authority; the next access rehydrates.
   - **Default and tuning.** `idle_after` SHOULD default to about **10 seconds**, matching the Durable Objects eviction window (DO §5), because reactivation is a cheap local replay (§5.2). To avoid thrashing when a grain is accessed just slower than the timer, an implementation SHOULD apply a small minimum residency or jitter so a barely-idle grain is not evicted and reloaded repeatedly.
 - **Eviction races.** If a command reaches the gateway for a name whose host has stopped but whose `Terminated` has not yet pruned the table, the host `ask` returns `CallError::DeadLetter`; the gateway MUST treat that as "reactivate" (drop the stale entry and activate afresh), bounded to avoid a loop.
 
@@ -593,6 +608,31 @@ match acct.ask(Withdraw { cents: 500 }).await {
     Err(GrainError::Unhandled)       => unreachable!("Withdraw is registered"),
 }
 ```
+
+**Hosting one grain under many type names (`granary_named`).** `granary(config)` hosts a
+type under its own `GRAIN_TYPE`, built by `G::default` per activation — the common case.
+A caller that must host **one Rust grain as several distinct grain types at runtime** uses
+`granary_named`, which adds two extension points:
+
+```rust
+fn granary_named<G: Grain<System = Self>>(
+    &self,
+    grain_type: &'static str,                       // overrides G::GRAIN_TYPE (§5.1)
+    config: GranaryConfig,
+    factory: Arc<dyn Fn() -> G + Send + Sync>,      // overrides G::default (per-activation seam injection)
+) -> Granary<G>;
+// granary(config) == granary_named(G::GRAIN_TYPE, config, Arc::new(G::default))
+```
+
+Each `grain_type` is a fully distinct grain type: its own gateway (one `gateway_key` per
+name), its own shard map, and — at Tier 2 — its own consensus groups (the group id hashes
+`(grain_type, index)`, §8.2). The same key under two names addresses two independent grains.
+`grain_type` MUST be stable cluster-wide and across runs, exactly as `GRAIN_TYPE` must be
+(§5.1); the `&'static str` makes that lifetime explicit (a deployment leaks its bounded set
+of names if they are not literals). The `factory` lets the runtime inject per-node seam
+handles into each fresh activation, so the grain needs no `Default`. This is the seam the
+agentic harness rides: each *kind* is its own grain type (`KindId` IS the `GrainType`),
+hosted under one shared agent run loop.
 
 ## Appendix B: Suggested crate layout
 

@@ -24,7 +24,6 @@ use serde_json::Value;
 use crate::budget::Budget;
 use crate::model::ToolSpec;
 use crate::sandbox::Tier;
-use crate::session::RunError;
 
 /// The one built-in, loop-executing tool (harness spec §8.1): present in a
 /// kind's registry iff the kind permits sub-agents.
@@ -124,6 +123,30 @@ pub struct DelegateInput {
     pub budget: Option<Budget>,
 }
 
+impl DelegateInput {
+    /// The JSON-Schema the model is shown for the `delegate` tool's input,
+    /// kept beside the struct it describes so the wire shape has one source of
+    /// truth (§8.1). `allowed` restricts `kind` to the parent's delegation
+    /// allowlist (§7.1); `budget` mirrors [`Budget`]'s `tokens`/`steps` (§9.1).
+    pub fn input_schema(allowed: &[&str]) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "enum": allowed },
+                "prompt": { "type": "string" },
+                "budget": {
+                    "type": "object",
+                    "properties": {
+                        "tokens": { "type": "integer" },
+                        "steps": { "type": "integer" }
+                    }
+                }
+            },
+            "required": ["kind", "prompt"]
+        })
+    }
+}
+
 /// A tool call's failure, journaled as the call's outcome and returned to the
 /// model as the tool result (harness spec §5.4): a failing tool never fails
 /// the run — the only abnormal run endings are the four of §3.1.
@@ -147,9 +170,11 @@ pub enum ToolError {
     /// mid-call. The agent releases the binding and journals a
     /// `WorkspaceReset` before the next model call (§5.5).
     EnvironmentLost(String),
-    /// A delegated child run ended in failure; the child's terminal error,
-    /// for the parent's model to react to (§8.2).
-    Delegation(RunError),
+    /// A delegation failed: the child run's terminal `RunError`, or the child
+    /// staying unreachable past the retry bound — formatted for the parent's
+    /// model to react to (§8.2). A failed delegation is a tool outcome, never a
+    /// failure of the parent run (§5.4).
+    Delegation(String),
 }
 
 impl std::fmt::Display for ToolError {
@@ -161,7 +186,7 @@ impl std::fmt::Display for ToolError {
             ToolError::InvalidArguments(e) => write!(f, "invalid arguments: {e}"),
             ToolError::Sandbox(e) => write!(f, "sandbox failure: {e}"),
             ToolError::EnvironmentLost(e) => write!(f, "environment lost: {e}"),
-            ToolError::Delegation(e) => write!(f, "delegated run failed: {e:?}"),
+            ToolError::Delegation(e) => write!(f, "delegated run failed: {e}"),
         }
     }
 }

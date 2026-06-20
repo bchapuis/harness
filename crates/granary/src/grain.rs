@@ -111,6 +111,17 @@ pub trait Grain: Sized + Send + 'static {
     fn on_passivate(&mut self, _ctx: &GrainCtx<Self>) -> impl Future<Output = ()> + Send {
         async {}
     }
+
+    /// Whether the activation MAY idle-hibernate now (§10). Consulted only on idle
+    /// eviction; a forced step-down (leadership move, quorum loss) is involuntary
+    /// and ignores it. The default always permits hibernation — a reactive grain
+    /// keeps nothing in flight that a replay would not reconstruct. A grain with
+    /// **autonomous** work that is not yet journaled (the agentic harness's live
+    /// run, harness §7.2) overrides this to veto eviction until the work settles;
+    /// the host reschedules the idle check rather than evicting.
+    fn can_passivate(&self, _state: &Self::State) -> bool {
+        true
+    }
 }
 
 /// A grain's handler for one command type (spec §4.2): the **decide** half of the
@@ -136,6 +147,7 @@ pub trait GrainHandler<M: Message>: Grain {
 /// `persist` method and no state mutation — state changes only through events
 /// folded by [`Grain::apply`] (§4.2).
 pub struct GrainCtx<G: Grain> {
+    grain_type: &'static str,
     name: GrainName,
     system: G::System,
     gateway: ActorRef<Gateway<G>>,
@@ -143,11 +155,13 @@ pub struct GrainCtx<G: Grain> {
 
 impl<G: Grain> GrainCtx<G> {
     pub(crate) fn new(
+        grain_type: &'static str,
         name: GrainName,
         system: G::System,
         gateway: ActorRef<Gateway<G>>,
     ) -> GrainCtx<G> {
         GrainCtx {
+            grain_type,
             name,
             system,
             gateway,
@@ -163,6 +177,7 @@ impl<G: Grain> GrainCtx<G> {
     /// call (no host cache): a self-reference is used rarely, not on a hot path.
     pub fn this(&self) -> GrainRef<G> {
         GrainRef::new(
+            self.grain_type,
             self.name.clone(),
             self.gateway.clone(),
             self.system.clone(),

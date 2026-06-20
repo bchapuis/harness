@@ -15,7 +15,7 @@ use std::io::Write as _;
 use harness::Record;
 use harness::RecordBody;
 use harness::RunOutcome;
-use harness::SeqNo;
+use harness::Seq;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
@@ -228,7 +228,7 @@ impl Repl {
                 .filter(|(_, r)| matches!(r.body, RecordBody::TurnSubmitted { .. }))
                 .count() as u64;
             let full_page = records.len() as u32 == PAGE;
-            from = records.last().map(|(seq, _)| seq.0).unwrap_or(from);
+            from = records.last().map(|(seq, _)| seq.value()).unwrap_or(from);
             if !full_page {
                 break;
             }
@@ -312,7 +312,7 @@ fn print_outcome(turn: &str, outcome: &RunOutcome) {
 }
 
 /// One journal record, one line — the audit view (harness spec §10.1).
-fn render(seq: SeqNo, record: &Record) -> String {
+fn render(seq: Seq, record: &Record) -> String {
     match &record.body {
         RecordBody::SessionCreated { kind, parent, .. } => {
             let parent = parent
