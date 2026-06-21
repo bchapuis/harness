@@ -24,10 +24,16 @@
 //! and never collides with a prior incarnation's already-applied ids — which would
 //! otherwise make the dedup silently swallow its new writes.
 //!
-//! **The rehydration barrier.** [`catch_up`](RaftJournal::catch_up) waits for the
-//! apply loop to drain the commit stream up to the leader's commit index before a
-//! grain reads its head, so a freshly-elected leader never rebuilds a grain from a
-//! still-draining projection (spec §9, invariant **G3**/**G14**).
+//! **The rehydration barrier.** [`catch_up`](RaftJournal::catch_up) holds a
+//! grain's head read until the apply loop has folded the commit stream up to the
+//! leader's *established* commit — the highest committed index once the current
+//! leader has committed in its term (`group_ready_commit`). It compares that
+//! target against a commit watermark the apply loop publishes (`Committed::commit`),
+//! both indices on the same ordered stream, so a freshly-activated grain never
+//! rebuilds from a still-draining projection (spec §9, invariant **G3**/**G14**).
+//! This holds across a **full cluster restart**, where every group must re-elect
+//! before its restored log is re-committed: the barrier waits out that window
+//! rather than reading an as-yet-empty projection.
 //!
 //! This journal backs a running `Granary` over a cluster: grain activation on the
 //! shard leader and cross-node routing go through the [`Gateway`](crate::gateway)
@@ -147,11 +153,13 @@ struct Inner<R: RaftLog> {
     projection: Projection,
     waiters: Waiters,
     next_nonce: AtomicU64,
-    /// A non-consuming clone of the commit stream, used only by the rehydration
-    /// barrier ([`catch_up`](RaftJournal::catch_up)) to observe whether the apply
-    /// loop has drained every delivered commit. It never `recv`s, so it does not
-    /// steal observations from the apply loop.
-    commits: Receiver<Committed>,
+    /// The commit high-water mark the apply loop has folded from the stream
+    /// (`Committed::commit`). The rehydration barrier
+    /// ([`catch_up`](RaftJournal::catch_up)) waits for it to reach the leader's
+    /// established commit, so a freshly-activated grain never rebuilds from a
+    /// still-draining projection — the cold-restart race (spec §9, invariant
+    /// **G3**/**G14**). Folded monotonically, so it never regresses.
+    seen: Arc<AtomicU64>,
 }
 
 /// A [`Journal`] backed by a Raft group (spec §7.4 tier 2). Cloning shares one
@@ -179,11 +187,10 @@ impl<R: RaftLog> RaftJournal<R> {
         let epoch = consensus.next_u64();
         let projection: Projection = Arc::new(Mutex::new(BTreeMap::new()));
         let waiters: Waiters = Arc::new(Mutex::new(HashMap::new()));
+        // The commit watermark the apply loop folds from the stream; the
+        // rehydration barrier reads it to know the projection is current.
+        let seen = Arc::new(AtomicU64::new(0));
         let commits = consensus.subscribe_commits(group);
-        // A second handle on the same stream for the barrier to probe; the apply
-        // loop owns the consuming handle. async-channel is MPMC, so the probe
-        // observes the queue length without ever taking an observation.
-        let probe = commits.clone();
         consensus.launch(Box::pin(apply_loop(
             consensus.clone(),
             group,
@@ -192,6 +199,7 @@ impl<R: RaftLog> RaftJournal<R> {
             commits,
             Arc::clone(&projection),
             Arc::clone(&waiters),
+            Arc::clone(&seen),
         )));
         RaftJournal {
             inner: Arc::new(Inner {
@@ -202,7 +210,7 @@ impl<R: RaftLog> RaftJournal<R> {
                 projection,
                 waiters,
                 next_nonce: AtomicU64::new(0),
-                commits: probe,
+                seen,
             }),
         }
     }
@@ -241,6 +249,7 @@ fn restore_projection(bytes: &[u8]) -> BTreeMap<GrainName, GrainLog> {
 /// `Committed::Snapshot` installed by the engine replaces the projection wholesale
 /// (a freshly added or lagging replica catching up without replaying the log).
 /// Runs until the journal is dropped and the channel closes.
+#[allow(clippy::too_many_arguments)]
 async fn apply_loop<R: RaftLog>(
     consensus: R,
     group: GroupId,
@@ -249,25 +258,35 @@ async fn apply_loop<R: RaftLog>(
     commits: Receiver<Committed>,
     projection: Projection,
     waiters: Waiters,
+    seen: Arc<AtomicU64>,
 ) {
     // The highest index covered by our latest local compaction; bounds how often
     // we re-snapshot.
     let mut last_compacted: u64 = 0;
     while let Ok(observation) = commits.recv().await {
+        // The commit high-water mark this observation carries; published to `seen`
+        // only *after* the projection has folded it, so the rehydration barrier
+        // ([`catch_up`]) never observes "caught up" ahead of the state it gates on.
+        // Monotonic by the stream's commit order; `fetch_max` guards regardless.
+        let watermark = observation.commit();
         let (index, bytes) = match observation {
-            Committed::Apply { index, command } => (index, command),
-            Committed::Snapshot { index, snapshot } => {
+            Committed::Apply { index, command, .. } => (index, command),
+            Committed::Snapshot { index, snapshot, .. } => {
                 // The engine installed a leader's snapshot: replace our state with
                 // it. Any pending local waiters cannot be completed from a remote
                 // snapshot — they fall back to their commit timeout.
                 *projection.lock().expect("projection mutex poisoned") =
                     restore_projection(&snapshot);
                 last_compacted = index;
+                seen.fetch_max(watermark, Ordering::Release);
                 continue;
             }
         };
         let Some(command) = decode(&bytes) else {
-            continue; // a command this journal cannot parse is defensively ignored
+            // Unparseable, but still committed state: advance the watermark so the
+            // barrier counts it rather than waiting on an entry it will never fold.
+            seen.fetch_max(watermark, Ordering::Release);
+            continue;
         };
         match command {
             JournalCommand::Append { grain, events, id } => {
@@ -303,6 +322,9 @@ async fn apply_loop<R: RaftLog>(
                 projection.entry(grain).or_default().snapshot = Some((Seq::new(at), state));
             }
         }
+        // The projection now reflects this observation; publish the watermark so
+        // the rehydration barrier can count it.
+        seen.fetch_max(watermark, Ordering::Release);
         // Compact once enough records have accumulated since the last snapshot.
         // The projection now reflects exactly the committed prefix through
         // `index` (the stream is sequential), so it is a valid snapshot at it.
@@ -418,16 +440,30 @@ impl<R: RaftLog> Journal for RaftJournal<R> {
     }
 
     async fn catch_up(&self) {
-        // The rehydration barrier (spec §9, G3/G14): wait until the apply loop has
-        // drained every committed observation the engine has delivered, so a grain
-        // that just activated rebuilds from a projection reflecting all committed
-        // writes rather than a still-draining prefix. The engine delivers an
-        // observation as it commits, so an empty stream means the projection is
-        // current. Bounded so a pathological backlog cannot wedge an activation;
-        // the host's contiguity guard (§6) catches any residue.
+        // The rehydration barrier (spec §9, G3/G14): wait until this projection
+        // reflects the leader's *established* commit, so a grain that just
+        // activated rebuilds from the whole committed log rather than a prefix.
+        //
+        // [`ready_commit`](actor_cluster::RaftLog::group_ready_commit) is the
+        // highest committed application index, available only once the current
+        // leader has committed in its term; `seen` is the commit watermark the
+        // apply loop has folded from the stream. Both are indices on the same
+        // ordered stream, so comparing them is race-free — unlike the old "is the
+        // stream momentarily empty?" check, which a cold restart defeated: a
+        // restarted group's restored log is re-committed only after its new leader
+        // commits its term-opening Noop, well after a grain might first activate,
+        // so the stream is briefly empty while still far behind.
+        //
+        // While no current-term commit exists (a fresh election still settling, or
+        // a leaderless minority under partition) the target is `None` and we keep
+        // polling. The bound stops a partition from wedging the activation: it then
+        // falls through and the host serves the read from the local projection
+        // (the §7.5 stale-read contract); the §6 contiguity guard catches residue.
         for _ in 0..CATCH_UP_MAX_POLLS {
-            if self.inner.commits.is_empty() {
-                return;
+            if let Some(target) = self.inner.consensus.group_ready_commit(self.inner.group) {
+                if self.inner.seen.load(Ordering::Acquire) >= target {
+                    return;
+                }
             }
             self.inner.consensus.sleep(CATCH_UP_POLL).await;
         }

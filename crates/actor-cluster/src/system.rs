@@ -1277,6 +1277,15 @@ where
 
     fn subscribe_commits(&self, group: GroupId) -> Receiver<Committed> {
         let (tx, rx) = async_channel::unbounded();
+        // Seed a subscriber that came up over a reloaded, compacted log with the
+        // snapshot it reloaded, as the first thing on its stream — so a node that
+        // restarts from a snapshot (not a full log) rebuilds its projection from
+        // it, the leaderless counterpart of a leader InstallSnapshot (spec §9).
+        // Sent before the sender is registered, so it strictly precedes any commit
+        // a later tick fans out to this sink. `None` for an uncompacted group.
+        if let Some(snapshot) = self.group(group).and_then(|g| g.snapshot_observation()) {
+            let _ = tx.try_send(snapshot);
+        }
         self.inner
             .commit_sinks
             .lock()
@@ -1319,6 +1328,10 @@ where
             };
             let _ = self.inner.transport.send(voter, frame).await;
         }
+    }
+
+    fn group_ready_commit(&self, group: GroupId) -> Option<u64> {
+        self.group(group).and_then(|g| g.ready_commit())
     }
 
     fn group_is_leader(&self, group: GroupId) -> bool {
@@ -1370,7 +1383,7 @@ async fn apply_raft_output<C, E, S, T>(
     if group == GroupId::CONTROL {
         for observation in out.committed {
             // The control group never compacts, so it only ever applies commands.
-            let Committed::Apply { index, command } = observation else {
+            let Committed::Apply { index, command, .. } = observation else {
                 continue;
             };
             // The control group's app payload is a `MembershipCommand`; a

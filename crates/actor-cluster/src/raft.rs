@@ -340,11 +340,19 @@ enum Role {
 /// commands after it never reorder.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Committed {
-    /// A committed application command at this 1-based log index.
-    Apply { index: u64, command: Vec<u8> },
+    /// A committed application command at this 1-based log index. `commit` is the
+    /// group's commit index at the moment this batch was drained — a high-water
+    /// mark a consumer folds monotonically (`seen = max(seen, commit)`) so it can
+    /// tell, after a restart, when its projection has caught up to the leader's
+    /// established commit (see [`RaftGroup::ready_commit`]). It rides the same
+    /// ordered stream as the command, so it never races the data it covers; and
+    /// it carries the *commit*, not this entry's `index`, so the last delivered
+    /// observation reflects any `Noop`/voter-change tail that the stream filters.
+    Apply { index: u64, command: Vec<u8>, commit: u64 },
     /// Install this state-machine snapshot, which subsumes every command through
-    /// `index`; the receiver replaces its state with it.
-    Snapshot { index: u64, snapshot: Vec<u8> },
+    /// `index`; the receiver replaces its state with it. `commit` is the
+    /// high-water mark as for [`Apply`](Committed::Apply).
+    Snapshot { index: u64, snapshot: Vec<u8>, commit: u64 },
 }
 
 impl Committed {
@@ -353,6 +361,15 @@ impl Committed {
     pub fn index(&self) -> u64 {
         match self {
             Committed::Apply { index, .. } | Committed::Snapshot { index, .. } => *index,
+        }
+    }
+
+    /// The commit high-water mark this observation was drained at — a consumer
+    /// folds it monotonically to track how far its projection has caught up (see
+    /// the variant docs and [`RaftGroup::ready_commit`]).
+    pub fn commit(&self) -> u64 {
+        match self {
+            Committed::Apply { commit, .. } | Committed::Snapshot { commit, .. } => *commit,
         }
     }
 }
@@ -552,6 +569,69 @@ impl RaftGroup {
     /// Whether this node currently leads this group.
     pub(crate) fn is_leader(&self) -> bool {
         self.lock().role == Role::Leader
+    }
+
+    /// The highest committed **application** index, but only once the current
+    /// leader has committed an entry in its own term — `None` until then (spec
+    /// §9, leader completeness).
+    ///
+    /// This is the rehydration target a consumer of [`subscribe_commits`] waits
+    /// for after a restart. The subtlety it resolves: a just-reloaded node starts
+    /// with `commit`/`applied` at its persisted snapshot base (see [`new`]), so
+    /// its restored log tail is *not yet known-committed* — only after the new
+    /// leader's term-opening `Noop` commits does `advance_commit` carry `commit`
+    /// over the whole restored prefix. Gating on `term_at(commit) == term` is
+    /// exactly that "the prefix is now final" signal.
+    ///
+    /// The returned index is the highest *App* entry at or below `commit`, not
+    /// `commit` itself: `Noop` and voter-change entries are filtered from the
+    /// commit stream ([`drain_committed`]), so a consumer can never observe a
+    /// watermark above the last App entry — targeting raw `commit` would make it
+    /// wait forever behind a `Noop` tail. With no committed App entry (a fresh or
+    /// fully-compacted group) it returns the snapshot base, which a consumer that
+    /// has applied nothing already satisfies.
+    ///
+    /// [`new`]: RaftGroup::new
+    /// [`subscribe_commits`]: crate::RaftLog::subscribe_commits
+    pub(crate) fn ready_commit(&self) -> Option<u64> {
+        let state = self.lock();
+        if state.commit <= state.snapshot_index || state.term_at(state.commit) != state.term {
+            return None;
+        }
+        let mut index = state.commit;
+        while index > state.snapshot_index {
+            if matches!(state.entry_at(index).payload, EntryPayload::App(_)) {
+                return Some(index);
+            }
+            index -= 1;
+        }
+        Some(state.snapshot_index)
+    }
+
+    /// The reloaded state-machine snapshot as a [`Committed::Snapshot`], if this
+    /// group came up over a **compacted** log (`snapshot_index > 0`), else `None`.
+    ///
+    /// A node that restarts from a snapshot reloads it into [`RaftState`] but the
+    /// engine never re-emits already-applied state on the commit stream (`applied`
+    /// starts at the snapshot base, see [`new`]). So a fresh subscriber — a granary
+    /// journal rebuilding its projection after a full cluster restart — would
+    /// otherwise see only the post-snapshot tail and miss the whole compacted
+    /// prefix. Handing it this observation first rebuilds the projection from the
+    /// snapshot, the leaderless counterpart of a leader-driven InstallSnapshot
+    /// (§9). Its `commit` watermark is the snapshot base: the snapshot proves the
+    /// projection current only through `snapshot_index`, never beyond.
+    ///
+    /// [`new`]: RaftGroup::new
+    pub(crate) fn snapshot_observation(&self) -> Option<Committed> {
+        let state = self.lock();
+        if state.snapshot_index == 0 {
+            return None;
+        }
+        state.snapshot.clone().map(|snapshot| Committed::Snapshot {
+            index: state.snapshot_index,
+            snapshot,
+            commit: state.snapshot_index,
+        })
     }
 
     /// This group's highest committed index (test-only inspection).
@@ -845,6 +925,7 @@ impl RaftGroup {
                     out.committed.push(Committed::Apply {
                         index: state.applied,
                         command: bytes,
+                        commit: state.commit,
                     });
                 }
                 EntryPayload::Noop | EntryPayload::AddVoter(_) => {}
@@ -1066,6 +1147,7 @@ impl RaftGroup {
             out.committed.push(Committed::Snapshot {
                 index: snapshot_index,
                 snapshot: data,
+                commit: snapshot_index,
             });
         }
         out.frames.push((
@@ -1585,7 +1667,7 @@ mod tests {
         learner: NodeId,
     ) {
         for observation in out.committed {
-            if let Committed::Snapshot { index, snapshot } = observation {
+            if let Committed::Snapshot { index, snapshot, .. } = observation {
                 if src == learner {
                     *learner_snapshot = Some((index, snapshot));
                 }

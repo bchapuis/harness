@@ -238,6 +238,170 @@ fn quorum_loss_pauses_writes_with_unavailable() {
 }
 
 #[test]
+fn a_full_cluster_cold_restart_rehydrates_before_serving() {
+    // The whole cluster goes down and comes back — no survivor keeps a leader or an
+    // advanced commit index, so every group must re-elect from scratch before its
+    // restored log is re-committed and replayed. That opens the rehydration race the
+    // single-node restart above never can: a grain can activate and read its head in
+    // the window after a node reloads but before the new leader's term-opening Noop
+    // commits the restored prefix. The barrier ([`Journal::catch_up`]) must hold the
+    // read until the projection reflects that prefix; before the fix it returned as
+    // soon as the not-yet-driven commit stream looked empty, and the head raced ahead
+    // to an empty projection (surfacing downstream as the host's `stale head`).
+    let sim = Simulation::new(7);
+    let (net, systems, journals) = cluster(&sim);
+    let leader = shard_leader(&systems).expect("the shard group elected a leader");
+    let grain = GrainName::new("test.Acct", "1");
+
+    // Commit fewer than COMPACT_EVERY (64) events, so the shard log is NOT compacted:
+    // rehydration must replay the restored log entry-by-entry — the path a cold
+    // restart of an uncompacted shard stresses (and the one the demo hit).
+    for i in 1..=5u64 {
+        let outcome = {
+            let journal = journals[leader].clone();
+            let grain = grain.clone();
+            drive(&sim, Duration::from_secs(3), async move {
+                journal.append(&grain, Seq::ZERO, vec![b"e".to_vec()]).await
+            })
+        };
+        assert_eq!(outcome, AppendOutcome::Committed(Seq::new(i)), "pre-restart append committed");
+    }
+
+    // Cold-restart EVERY node: each reloads only its own persisted log (no peer to
+    // replicate from), and fresh journals subscribe before the restarted groups are
+    // driven (subscribe-before-drive).
+    let mut systems = systems;
+    for (idx, node) in [A, B, C].into_iter().enumerate() {
+        let system = net.restart(node);
+        system.create_group(SHARD, vec![A, B, C], vec![]);
+        systems[idx] = system;
+    }
+    let journals: Vec<RaftJournal<SimCluster>> =
+        systems.iter().map(|s| RaftJournal::new(s.clone(), SHARD)).collect();
+
+    // Rehydrate THEN read the head in one shot, with no prior settle: `catch_up`
+    // itself must do the waiting. The drive advances virtual time so the cluster
+    // re-elects and replays its log *while* `catch_up` is blocked on the barrier.
+    let head = {
+        let journal = journals[0].clone();
+        let grain = grain.clone();
+        drive(&sim, Duration::from_secs(8), async move {
+            journal.catch_up().await;
+            journal.head(&grain).await
+        })
+    }
+    .expect("head read");
+    assert_eq!(
+        head,
+        Seq::new(5),
+        "catch_up holds the read until the cold-restarted projection reflects every committed event",
+    );
+
+    // The re-elected leader commits the next event from the rebuilt head — landing at
+    // base+1, exactly the contiguous advance whose absence is the host's stale-head
+    // step-down.
+    let leader = shard_leader(&systems).expect("a node re-led the shard group after the cold restart");
+    let outcome = {
+        let journal = journals[leader].clone();
+        let grain = grain.clone();
+        drive(&sim, Duration::from_secs(5), async move {
+            journal.append(&grain, Seq::new(5), vec![b"after".to_vec()]).await
+        })
+    };
+    assert_eq!(
+        outcome,
+        AppendOutcome::Committed(Seq::new(6)),
+        "a cold-restarted, re-elected leader commits the next event without a head gap",
+    );
+}
+
+#[test]
+fn a_full_cluster_cold_restart_rehydrates_a_compacted_shard() {
+    // Like the cold restart above, but the shard log is COMPACTED first (more than
+    // COMPACT_EVERY events), so each node reloads a state-machine *snapshot* plus a
+    // short tail rather than a full log. With no survivor, a node cannot catch up
+    // from a leader's InstallSnapshot — it must rebuild its projection from the
+    // snapshot it reloaded itself. The engine re-delivers that reloaded snapshot to
+    // a fresh subscriber as the first observation on its stream; without it, the
+    // projection would see only the post-snapshot tail and silently drop the whole
+    // compacted prefix.
+    let sim = Simulation::new(8);
+    let (net, systems, journals) = cluster(&sim);
+    let leader = shard_leader(&systems).expect("the shard group elected a leader");
+    let grain = GrainName::new("test.Acct", "1");
+
+    // Commit past COMPACT_EVERY (64) so every replica compacts its shard log to a
+    // snapshot at 64 and retains only the 65..=70 tail.
+    for i in 1..=70u64 {
+        let outcome = {
+            let journal = journals[leader].clone();
+            let grain = grain.clone();
+            drive(&sim, Duration::from_secs(3), async move {
+                journal.append(&grain, Seq::ZERO, vec![b"e".to_vec()]).await
+            })
+        };
+        assert_eq!(outcome, AppendOutcome::Committed(Seq::new(i)), "pre-restart append committed");
+    }
+    sim.run_for(Duration::from_secs(2)); // let every replica apply and compact
+
+    // Cold-restart EVERY node: each reloads its own snapshot + tail (no peer to
+    // install a snapshot from), and fresh journals subscribe before the groups run.
+    let mut systems = systems;
+    for (idx, node) in [A, B, C].into_iter().enumerate() {
+        let system = net.restart(node);
+        system.create_group(SHARD, vec![A, B, C], vec![]);
+        systems[idx] = system;
+    }
+    let journals: Vec<RaftJournal<SimCluster>> =
+        systems.iter().map(|s| RaftJournal::new(s.clone(), SHARD)).collect();
+
+    // Rehydrate THEN read the head with no prior settle: the head must reflect the
+    // full history — the 64 events folded from the reloaded snapshot plus the 6 tail
+    // events — not just the tail.
+    let head = {
+        let journal = journals[0].clone();
+        let grain = grain.clone();
+        drive(&sim, Duration::from_secs(8), async move {
+            journal.catch_up().await;
+            journal.head(&grain).await
+        })
+    }
+    .expect("head read");
+    assert_eq!(
+        head,
+        Seq::new(70),
+        "the cold-restarted projection rebuilds from the reloaded snapshot, not just the post-snapshot tail",
+    );
+
+    // Every event is durably present, including ones from inside the compacted
+    // prefix — proof the snapshot's contents survived, not merely its head count.
+    let loaded = {
+        let journal = journals[0].clone();
+        let grain = grain.clone();
+        drive(&sim, Duration::from_secs(1), async move {
+            journal.load(&grain, Seq::ZERO, 100).await
+        })
+    }
+    .expect("load read");
+    assert_eq!(loaded.len(), 70, "all 70 committed events survived the cold restart");
+
+    // And the re-elected leader keeps committing from the rebuilt head.
+    let leader = shard_leader(&systems).expect("a node re-led the shard group after the cold restart");
+    let outcome = {
+        let journal = journals[leader].clone();
+        let grain = grain.clone();
+        drive(&sim, Duration::from_secs(5), async move {
+            journal.append(&grain, Seq::new(70), vec![b"after".to_vec()]).await
+        })
+    };
+    assert_eq!(
+        outcome,
+        AppendOutcome::Committed(Seq::new(71)),
+        "a cold-restarted, re-elected leader commits the next event atop the rehydrated snapshot",
+    );
+}
+
+#[test]
 fn a_restarted_leader_keeps_committing_after_reusing_its_node_id() {
     // A node that crashes and re-starts reuses its stable `NodeId` but builds a
     // fresh journal (§7.2). After it catches up and is re-elected, it must keep

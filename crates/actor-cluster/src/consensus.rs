@@ -84,6 +84,17 @@ pub trait RaftLog: Clone + Send + Sync + 'static {
     /// out to the group's voters.
     fn propose_to(&self, group: GroupId, command: Vec<u8>) -> impl Future<Output = ()> + Send;
 
+    /// `group`'s rehydration target: the highest committed application index,
+    /// available only once the current leader has committed in its term, else
+    /// `None` (spec §9). A consumer of [`subscribe_commits`](RaftLog::subscribe_commits)
+    /// that just (re)subscribed waits until the watermark it has folded from the
+    /// stream (`Committed::commit`) reaches this, so a grain activating right after
+    /// a cluster restart rebuilds from a projection that reflects the whole
+    /// restored, re-committed log rather than a still-empty prefix. `None` while a
+    /// fresh election is still settling (or on a leaderless minority) — the
+    /// consumer keeps waiting, bounded, then falls back to its local projection.
+    fn group_ready_commit(&self, group: GroupId) -> Option<u64>;
+
     /// Whether this node currently leads `group`.
     fn group_is_leader(&self, group: GroupId) -> bool;
 
