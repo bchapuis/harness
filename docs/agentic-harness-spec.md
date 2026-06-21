@@ -167,7 +167,7 @@ pub trait Model: Send + Sync + 'static {
 
 `ModelRequest` carries the kind's system prompt, model parameters, the tool declarations (name, description, input schema) of the kind's toolset, the folded transcript, and `max_tokens`. `ModelResponse` carries the assistant content, zero or more requested tool calls, and the **reported usage** (input and output tokens) that feeds budget accounting (§9.1).
 
-The model is a seam exactly like `Transport` (core §7) and the grain's `GrainJournal` (grain §7.3): the harness core depends only on the trait. `harness-anthropic` implements it over the Anthropic Messages API for production; the simulator supplies a **scripted model**, a deterministic function of the request and the run's seed (§12.2).
+The model is a seam exactly like `Transport` (core §7) and the `GrainJournal` (grain §7.3): the harness core depends only on the trait. `harness-anthropic` implements it over the Anthropic Messages API for production; the simulator supplies a **scripted model**, a deterministic function of the request and the run's seed (§12.2).
 
 ### 4.2 Determinism rules
 
@@ -526,7 +526,7 @@ The harness adds **two** rows to the table the grain already virtualizes (grain 
 |---|---|---|
 | `Model` (§4) | `harness-anthropic`: Anthropic Messages API over HTTPS; retry backoff from `Clock`/`Entropy` | **scripted model**: a deterministic function of the request and the seed; emits final messages, tool calls, malformed calls, and faults under seed control |
 | `Sandbox` (§5.3) | a deployment-supplied `SandboxProvider` (process, container, or microVM; §13) | **scripted sandbox**: deterministic outcomes per call and seed; seeded open failures, latency, crashes, environment loss, and tier-provisioning failure |
-| *(journal)* | *the grain's `GrainJournal` (grain §7.3, §7.4): single-node or sharded-Raft* | *the grain's simulation seam (grain §14); the harness drives the real consensus code, not a model of it* |
+| *(journal)* | *the `GrainJournal` (grain §7.3, §7.4): single-node or sharded-Raft* | *the grain's simulation seam (grain §14); the harness drives the real consensus code, not a model of it* |
 
 The `harness` crate itself MUST satisfy core §18.1: no wall clock, no OS threads, no unseeded randomness; all I/O launched through `Spawner` (§3.2). `harness-anthropic` is production-only and the single place HTTP exists; production sandbox providers are likewise separate crates. Because the journal, the fence, placement, and resume are the grain's, simulating the harness *runs the real granary host, gateway, shard, and rehydration code* (grain §14) under the same seed. The agent's loop is the only new code on the simulated path, joined to consensus that is already exercised by granary's own suite.
 
