@@ -1,13 +1,13 @@
 //! The journal seam (spec §7.3).
 //!
 //! A grain's journal is its durable, totally-ordered, append-only log of events
-//! — the **source of truth** (§1, invariant **G3**). The [`Journal`] trait is a
+//! — the **source of truth** (§1, invariant **G3**). The [`GrainJournal`] trait is a
 //! simulation and deployment seam like `Transport` and `Clock` (actor §4.6, §7),
 //! operating on opaque, codec-encoded event bytes so it stays codec-agnostic.
 //!
 //! Two reference tiers implement it (§7.4): the Tier-1 single-node
-//! [`MemoryJournal`](crate::memory::MemoryJournal) and the Tier-2 sharded Raft
-//! [`RaftJournal`](crate::shard::RaftJournal). Because the methods return
+//! [`MemoryGrainJournal`](crate::memory::MemoryGrainJournal) and the Tier-2 sharded Raft
+//! [`RaftGrainJournal`](crate::shard::RaftGrainJournal). Because the methods return
 //! `impl Future`, the trait is not object-safe; it is threaded as a concrete type,
 //! the way the framework threads its other seams (actor §4.6).
 
@@ -45,8 +45,8 @@ impl std::fmt::Display for Seq {
     }
 }
 
-/// The outcome of an [`append`](Journal::append) or
-/// [`save_snapshot`](Journal::save_snapshot) (spec §7.3).
+/// The outcome of an [`append`](GrainJournal::append) or
+/// [`save_snapshot`](GrainJournal::save_snapshot) (spec §7.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppendOutcome {
     /// Durable on a quorum; carries the new head (for a snapshot, the snapshot
@@ -62,24 +62,24 @@ pub enum AppendOutcome {
 
 /// A failure of a *local* journal read (spec §7.3): I/O or corruption.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum JournalError {
+pub enum GrainJournalError {
     /// A local read could not complete (I/O or corruption).
     Unavailable(String),
 }
 
-impl std::fmt::Display for JournalError {
+impl std::fmt::Display for GrainJournalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            JournalError::Unavailable(why) => write!(f, "journal read failed: {why}"),
+            GrainJournalError::Unavailable(why) => write!(f, "journal read failed: {why}"),
         }
     }
 }
 
-impl std::error::Error for JournalError {}
+impl std::error::Error for GrainJournalError {}
 
 /// Up to `limit` of a grain's events after `from` (exclusive), each tagged with
 /// its 1-based [`Seq`] (the event at vec index `i` is `Seq` `i + 1`). The one
-/// read primitive shared by both journal tiers' [`load`](Journal::load) (§7.3),
+/// read primitive shared by both journal tiers' [`load`](GrainJournal::load) (§7.3),
 /// so the slice arithmetic lives in a single place.
 pub(crate) fn slice(events: &[Vec<u8>], from: Seq, limit: usize) -> Vec<(Seq, Vec<u8>)> {
     let start = from.value() as usize;
@@ -101,10 +101,10 @@ pub(crate) fn head_of(events: &[Vec<u8>]) -> Seq {
 /// A grain's durable, append-only event log and snapshot store (spec §7.3).
 ///
 /// All methods address one grain by name; the implementation keys each grain's
-/// events and snapshot independently. The host calls [`append`](Journal::append)
+/// events and snapshot independently. The host calls [`append`](GrainJournal::append)
 /// only from the shard leader and behind the grain's input gate (§6), so `after`
 /// always equals the grain's known head.
-pub trait Journal: Clone + Send + Sync + 'static {
+pub trait GrainJournal: Clone + Send + Sync + 'static {
     /// Append `events` for one grain immediately after `after`, as one atomic
     /// entry. Commits on a Raft quorum (Tier 2) or a local store (Tier 1).
     fn append(
@@ -122,7 +122,7 @@ pub trait Journal: Clone + Send + Sync + 'static {
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> impl Future<Output = Result<Vec<(Seq, Vec<u8>)>, JournalError>> + Send;
+    ) -> impl Future<Output = Result<Vec<(Seq, Vec<u8>)>, GrainJournalError>> + Send;
 
     /// The grain's committed head — the authoritative source of `head` on
     /// rehydration (§9, invariant **G3**). `Seq::ZERO` for a grain with no
@@ -133,7 +133,7 @@ pub trait Journal: Clone + Send + Sync + 'static {
     /// trusting memory; the log always knows its head, and Tier-2 Raft knows the
     /// per-grain commit index.
     fn head(&self, grain: &GrainName)
-    -> impl Future<Output = Result<Seq, JournalError>> + Send;
+    -> impl Future<Output = Result<Seq, GrainJournalError>> + Send;
 
     /// Persist a snapshot for one grain at a committed seq (§9). Returns
     /// `Committed(at)` on success, or `NotLeader` if this node no longer leads.
@@ -148,11 +148,11 @@ pub trait Journal: Clone + Send + Sync + 'static {
     fn load_snapshot(
         &self,
         grain: &GrainName,
-    ) -> impl Future<Output = Result<Option<(Seq, Vec<u8>)>, JournalError>> + Send;
+    ) -> impl Future<Output = Result<Option<(Seq, Vec<u8>)>, GrainJournalError>> + Send;
 
     /// Block until this node's local view reflects every event committed *as of
     /// now* — the **rehydration barrier** (spec §9, invariant **G3**). The host
-    /// awaits this before reading [`head`](Journal::head)/[`load`](Journal::load)
+    /// awaits this before reading [`head`](GrainJournal::head)/[`load`](GrainJournal::load)
     /// on activation, so a grain never rebuilds its state from a still-draining
     /// view and then serves stale reads or folds onto a short head.
     ///
@@ -164,23 +164,23 @@ pub trait Journal: Clone + Send + Sync + 'static {
     }
 }
 
-/// The object-safe form of [`Journal`], so the runtime can hold a journal as
-/// `Arc<dyn DynJournal>` and **select the durability tier at construction** —
-/// the Tier-1 [`MemoryJournal`](crate::memory::MemoryJournal) or the Tier-2
-/// [`RaftJournal`](crate::shard::RaftJournal) — without threading a `J` type
+/// The object-safe form of [`GrainJournal`], so the runtime can hold a journal as
+/// `Arc<dyn DynGrainJournal>` and **select the durability tier at construction** —
+/// the Tier-1 [`MemoryGrainJournal`](crate::memory::MemoryGrainJournal) or the Tier-2
+/// [`RaftGrainJournal`](crate::shard::RaftGrainJournal) — without threading a `J` type
 /// parameter through `Host`/`Gateway`/`GrainRef`/`Granary` (which would leak `J`
 /// into the user-facing `GrainCtx` and handler signatures).
 ///
-/// `Journal`'s `impl Future` returns are not object-safe; this mirror boxes them
-/// (`BoxFuture`). The blanket impl below adapts any [`Journal`] — it clones the
-/// journal (a [`Journal`] is `Clone`) and the grain name into each boxed future,
+/// `GrainJournal`'s `impl Future` returns are not object-safe; this mirror boxes them
+/// (`BoxFuture`). The blanket impl below adapts any [`GrainJournal`] — it clones the
+/// journal (a [`GrainJournal`] is `Clone`) and the grain name into each boxed future,
 /// so the returned future is `'static` and the caller borrows nothing.
-/// The boxed result of [`DynJournal::load`].
-pub type LoadFuture = BoxFuture<'static, Result<Vec<(Seq, Vec<u8>)>, JournalError>>;
-/// The boxed result of [`DynJournal::load_snapshot`].
-pub type LoadSnapshotFuture = BoxFuture<'static, Result<Option<(Seq, Vec<u8>)>, JournalError>>;
+/// The boxed result of [`DynGrainJournal::load`].
+pub type LoadFuture = BoxFuture<'static, Result<Vec<(Seq, Vec<u8>)>, GrainJournalError>>;
+/// The boxed result of [`DynGrainJournal::load_snapshot`].
+pub type LoadSnapshotFuture = BoxFuture<'static, Result<Option<(Seq, Vec<u8>)>, GrainJournalError>>;
 
-pub trait DynJournal: Send + Sync + 'static {
+pub trait DynGrainJournal: Send + Sync + 'static {
     fn append(
         &self,
         grain: &GrainName,
@@ -190,7 +190,7 @@ pub trait DynJournal: Send + Sync + 'static {
 
     fn load(&self, grain: &GrainName, from: Seq, limit: usize) -> LoadFuture;
 
-    fn head(&self, grain: &GrainName) -> BoxFuture<'static, Result<Seq, JournalError>>;
+    fn head(&self, grain: &GrainName) -> BoxFuture<'static, Result<Seq, GrainJournalError>>;
 
     fn save_snapshot(
         &self,
@@ -204,7 +204,7 @@ pub trait DynJournal: Send + Sync + 'static {
     fn catch_up(&self) -> BoxFuture<'static, ()>;
 }
 
-impl<J: Journal> DynJournal for J {
+impl<J: GrainJournal> DynGrainJournal for J {
     fn append(
         &self,
         grain: &GrainName,
@@ -222,7 +222,7 @@ impl<J: Journal> DynJournal for J {
         Box::pin(async move { journal.load(&grain, from, limit).await })
     }
 
-    fn head(&self, grain: &GrainName) -> BoxFuture<'static, Result<Seq, JournalError>> {
+    fn head(&self, grain: &GrainName) -> BoxFuture<'static, Result<Seq, GrainJournalError>> {
         let journal = self.clone();
         let grain = grain.clone();
         Box::pin(async move { journal.head(&grain).await })

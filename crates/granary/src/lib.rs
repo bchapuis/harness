@@ -18,10 +18,10 @@
 //! The full grain programming model runs on either durability tier, selected by
 //! the system a grain is hosted on (§7.4):
 //!
-//! - **Tier 1, single-node** ([`MemoryJournal`]): one linearizable local store, CP
+//! - **Tier 1, single-node** ([`MemoryGrainJournal`]): one linearizable local store, CP
 //!   trivially, the sweet spot for embedded use, tests, and the deterministic
 //!   simulator. Hosted on a [`LocalSystem`](actor_core::LocalSystem).
-//! - **Tier 2, sharded Raft** ([`RaftJournal`]): the namespace is partitioned into
+//! - **Tier 2, sharded Raft** ([`RaftGrainJournal`]): the namespace is partitioned into
 //!   shards (`GranaryConfig::shards`), each a Raft group on a clustered system. A
 //!   grain activates on its shard's leader (§5.2), a [`GrainRef`] call from any
 //!   node routes name→shard→leader (§5.4), the §8 single-writer fence and the
@@ -76,12 +76,12 @@ pub use grainref::Granary;
 pub use grainref::GranaryExt;
 pub use grainref::GrainRef;
 pub use journal::AppendOutcome;
-pub use journal::DynJournal;
-pub use journal::Journal;
-pub use journal::JournalError;
+pub use journal::DynGrainJournal;
+pub use journal::GrainJournal;
+pub use journal::GrainJournalError;
 pub use journal::Seq;
-pub use memory::MemoryJournal;
-pub use shard::RaftJournal;
+pub use memory::MemoryGrainJournal;
+pub use shard::RaftGrainJournal;
 pub use shardmap::ShardMapSource;
 pub use system::GranarySystem;
 pub use system::ShardId;

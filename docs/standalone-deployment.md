@@ -30,7 +30,7 @@ and one node's harness — host actor, session actors, and the three seams:
 
 - **Model** — the Anthropic Messages API (`harness-anthropic`), over a small
   tokio/rustls HTTP client.
-- **Journal** — a file-backed store in the shared `--data` directory. The
+- **GrainJournal** — a file-backed store in the shared `--data` directory. The
   journal is one logical store for the whole cluster (spec §6.1), which is
   why every node must point at the same directory; it is also durable, which
   is what makes the failure drill work. Each fenced append commits as an

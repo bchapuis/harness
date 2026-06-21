@@ -1,13 +1,13 @@
 //! Durable Raft state on the local filesystem (spec §9.4.3 item 2).
 //!
-//! [`FileRaftStorage`] is the production [`RaftStorage`]: a voter's term, vote,
+//! [`FileRaftWAL`] is the production [`RaftWAL`]: a voter's term, vote,
 //! and log survive a process restart, so a restarted voter can never grant a
 //! second vote in a term it already voted in (election safety, invariant #22).
 //! The layout matches the trait's two write paths, each with the durability
 //! technique that fits it:
 //!
 //! - **`term`** — one tiny JSON record `{term, voted_for}`, rewritten on every
-//!   [`save_term_and_vote`](RaftStorage::save_term_and_vote) by atomic replace
+//!   [`save_term_and_vote`](RaftWAL::save_term_and_vote) by atomic replace
 //!   (write `term.tmp` → fsync → rename → fsync dir). A torn write is
 //!   impossible: a reader sees either the old record or the new one.
 //! - **`log`** — append-only framed records, one per [`RaftEntry`]:
@@ -15,7 +15,7 @@
 //!   truncate-then-append maps to `set_len` at the entry's recorded offset
 //!   followed by appends; every write is fsynced before the method returns.
 //!
-//! **Recovery.** At [`open`](FileRaftStorage::open), the log is scanned from
+//! **Recovery.** At [`open`](FileRaftWAL::open), the log is scanned from
 //! the start; the first incomplete or checksum-failing record ends the valid
 //! prefix and everything after it is discarded (the file is truncated back).
 //! A torn tail is an entry whose write never returned, so the caller never
@@ -23,7 +23,7 @@
 //! corrupt `term` file is different: silently resetting the term could let the
 //! voter vote twice, so it is a hard error at open.
 //!
-//! **Failure policy.** [`RaftStorage`]'s methods are infallible by signature;
+//! **Failure policy.** [`RaftWAL`]'s methods are infallible by signature;
 //! a voter whose state cannot be made durable cannot safely continue (it might
 //! otherwise announce un-persisted state). This implementation therefore
 //! panics on an I/O error after open, taking the consensus task down rather
@@ -32,7 +32,7 @@
 //! **Single writer.** A storage directory must belong to one process at a
 //! time. Advisory locking (`File::try_lock`) needs a newer toolchain than the
 //! workspace MSRV, so this is documented, not enforced; the
-//! [`factory`](FileRaftStorage::factory) layout (one subdirectory per node)
+//! [`factory`](FileRaftWAL::factory) layout (one subdirectory per node)
 //! makes accidental sharing unlikely.
 
 use std::fs;
@@ -48,7 +48,7 @@ use std::sync::Mutex;
 use actor_cluster::GroupId;
 use actor_cluster::PersistedRaft;
 use actor_cluster::RaftEntry;
-use actor_cluster::RaftStorage;
+use actor_cluster::RaftWAL;
 use actor_core::NodeId;
 use serde::Deserialize;
 use serde::Serialize;
@@ -141,19 +141,19 @@ struct Inner {
     /// The log file's current (valid) length — where the next record lands.
     end: u64,
     /// The in-memory mirror of the durable state; every write updates it after
-    /// the disk write succeeds, and [`RaftStorage::load`] clones it.
+    /// the disk write succeeds, and [`RaftWAL::load`] clones it.
     state: PersistedRaft,
 }
 
-/// The production [`RaftStorage`]: a voter's Raft state on the local
+/// The production [`RaftWAL`]: a voter's Raft state on the local
 /// filesystem, durable before every method returns (see the module docs for
 /// the layout, recovery, and failure policy).
-pub struct FileRaftStorage {
+pub struct FileRaftWAL {
     dir: PathBuf,
     inner: Mutex<Inner>,
 }
 
-impl FileRaftStorage {
+impl FileRaftWAL {
     /// Open (creating if needed) the storage directory, recover the log's
     /// valid prefix — truncating any torn tail — and load the persisted state.
     ///
@@ -162,7 +162,7 @@ impl FileRaftStorage {
     /// Any filesystem error, and — deliberately — a corrupt `term` file:
     /// guessing a term could let the voter vote twice (election safety), so
     /// only the operator may resolve that.
-    pub fn open(dir: impl Into<PathBuf>) -> io::Result<FileRaftStorage> {
+    pub fn open(dir: impl Into<PathBuf>) -> io::Result<FileRaftWAL> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
 
@@ -206,7 +206,7 @@ impl FileRaftStorage {
         // Make the directory entries (a freshly created `log`) durable.
         sync_dir(&dir)?;
 
-        Ok(FileRaftStorage {
+        Ok(FileRaftWAL {
             dir,
             inner: Mutex::new(Inner {
                 log,
@@ -238,10 +238,10 @@ impl FileRaftStorage {
     /// [`RaftConfig::storage`]: actor_cluster::RaftConfig
     pub fn factory(
         data_dir: PathBuf,
-    ) -> Arc<dyn Fn(GroupId, NodeId) -> Arc<dyn RaftStorage> + Send + Sync> {
+    ) -> Arc<dyn Fn(GroupId, NodeId) -> Arc<dyn RaftWAL> + Send + Sync> {
         Arc::new(move |group, node| {
             let dir = data_dir.join(group.to_string()).join(node.to_string());
-            let storage = FileRaftStorage::open(&dir).unwrap_or_else(|err| {
+            let storage = FileRaftWAL::open(&dir).unwrap_or_else(|err| {
                 panic!("cannot open raft storage at {}: {err}", dir.display())
             });
             Arc::new(storage)
@@ -252,7 +252,7 @@ impl FileRaftStorage {
         self.inner.lock().expect("raft storage mutex poisoned")
     }
 
-    /// The fallible body of [`RaftStorage::save_term_and_vote`]: atomic
+    /// The fallible body of [`RaftWAL::save_term_and_vote`]: atomic
     /// replace of the `term` file.
     fn persist_term(&self, record: &TermRecord) -> io::Result<()> {
         let tmp_path = self.dir.join("term.tmp");
@@ -265,7 +265,7 @@ impl FileRaftStorage {
         sync_dir(&self.dir)
     }
 
-    /// The fallible body of [`RaftStorage::append`]: truncate the log file at
+    /// The fallible body of [`RaftWAL::append`]: truncate the log file at
     /// `from_index`'s recorded offset, then append the framed records.
     fn persist_append(&self, from_index: u64, entries: &[RaftEntry]) -> io::Result<()> {
         let mut inner = self.lock();
@@ -299,7 +299,7 @@ impl FileRaftStorage {
     }
 }
 
-impl RaftStorage for FileRaftStorage {
+impl RaftWAL for FileRaftWAL {
     fn load(&self) -> PersistedRaft {
         self.lock().state.clone()
     }
@@ -334,7 +334,7 @@ impl RaftStorage for FileRaftStorage {
 mod tests {
     use super::*;
     use actor_cluster::EntryPayload;
-    use actor_cluster::InMemoryRaftStorage;
+    use actor_cluster::InMemoryRaftWAL;
 
     fn entry(term: u64, payload: EntryPayload) -> RaftEntry {
         RaftEntry { term, payload }
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn state_round_trips_across_a_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = FileRaftStorage::open(dir.path()).unwrap();
+        let storage = FileRaftWAL::open(dir.path()).unwrap();
         storage.save_term_and_vote(3, Some(node(2)));
         storage.append(
             0,
@@ -368,7 +368,7 @@ mod tests {
         );
         drop(storage);
 
-        let reopened = FileRaftStorage::open(dir.path()).unwrap();
+        let reopened = FileRaftWAL::open(dir.path()).unwrap();
         let state = reopened.load();
         assert_eq!(state.term, 3);
         assert_eq!(state.voted_for, Some(node(2)));
@@ -384,14 +384,14 @@ mod tests {
     #[test]
     fn a_fresh_directory_loads_the_default_state() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = FileRaftStorage::open(dir.path().join("sub")).unwrap();
+        let storage = FileRaftWAL::open(dir.path().join("sub")).unwrap();
         assert_eq!(storage.load(), PersistedRaft::default());
     }
 
     #[test]
     fn truncate_then_append_replaces_the_conflicting_suffix() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = FileRaftStorage::open(dir.path()).unwrap();
+        let storage = FileRaftWAL::open(dir.path()).unwrap();
         storage.append(
             0,
             &[
@@ -410,7 +410,7 @@ mod tests {
         );
         drop(storage);
 
-        let reopened = FileRaftStorage::open(dir.path()).unwrap();
+        let reopened = FileRaftWAL::open(dir.path()).unwrap();
         assert_eq!(
             reopened.load().log,
             vec![
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn a_torn_tail_is_discarded_and_appends_continue() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = FileRaftStorage::open(dir.path()).unwrap();
+        let storage = FileRaftWAL::open(dir.path()).unwrap();
         storage.append(
             0,
             &[
@@ -441,7 +441,7 @@ mod tests {
         file.write_all(&[0x12, 0x34, 0x56]).unwrap();
         drop(file);
 
-        let reopened = FileRaftStorage::open(dir.path()).unwrap();
+        let reopened = FileRaftWAL::open(dir.path()).unwrap();
         assert_eq!(
             reopened.load().log,
             vec![
@@ -453,14 +453,14 @@ mod tests {
         // The recovery truncated the garbage; appends land cleanly after it.
         reopened.append(2, &[entry(2, EntryPayload::Noop)]);
         drop(reopened);
-        let again = FileRaftStorage::open(dir.path()).unwrap();
+        let again = FileRaftWAL::open(dir.path()).unwrap();
         assert_eq!(again.load().log.len(), 3);
     }
 
     #[test]
     fn a_record_cut_mid_payload_is_discarded() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = FileRaftStorage::open(dir.path()).unwrap();
+        let storage = FileRaftWAL::open(dir.path()).unwrap();
         storage.append(
             0,
             &[entry(1, EntryPayload::Noop), entry(1, EntryPayload::Noop)],
@@ -474,7 +474,7 @@ mod tests {
         file.set_len(len - 3).unwrap();
         drop(file);
 
-        let reopened = FileRaftStorage::open(dir.path()).unwrap();
+        let reopened = FileRaftWAL::open(dir.path()).unwrap();
         assert_eq!(
             reopened.load().log,
             vec![entry(1, EntryPayload::Noop)],
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn a_corrupted_checksum_ends_the_valid_prefix() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = FileRaftStorage::open(dir.path()).unwrap();
+        let storage = FileRaftWAL::open(dir.path()).unwrap();
         storage.append(
             0,
             &[entry(1, EntryPayload::Noop), entry(1, EntryPayload::Noop)],
@@ -502,7 +502,7 @@ mod tests {
         bytes[second_start + 5] ^= 0xff;
         fs::write(&log_path, &bytes).unwrap();
 
-        let reopened = FileRaftStorage::open(dir.path()).unwrap();
+        let reopened = FileRaftWAL::open(dir.path()).unwrap();
         assert_eq!(
             reopened.load().log.len(),
             1,
@@ -513,12 +513,12 @@ mod tests {
     #[test]
     fn a_corrupt_term_file_is_a_hard_error() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = FileRaftStorage::open(dir.path()).unwrap();
+        let storage = FileRaftWAL::open(dir.path()).unwrap();
         storage.save_term_and_vote(7, None);
         drop(storage);
 
         fs::write(dir.path().join("term"), b"not json").unwrap();
-        let err = match FileRaftStorage::open(dir.path()) {
+        let err = match FileRaftWAL::open(dir.path()) {
             Err(err) => err,
             Ok(_) => panic!("a corrupt term must not be guessed"),
         };
@@ -526,8 +526,8 @@ mod tests {
     }
 
     /// The differential workhorse: drive the same operation sequence through
-    /// `FileRaftStorage` — reopening from disk before every step — and
-    /// `InMemoryRaftStorage`; `load()` must agree at every step. Covers the
+    /// `FileRaftWAL` — reopening from disk before every step — and
+    /// `InMemoryRaftWAL`; `load()` must agree at every step. Covers the
     /// offset index, truncation, and reopen logic across interleavings.
     #[test]
     fn file_storage_matches_in_memory_storage_across_reopens() {
@@ -563,10 +563,10 @@ mod tests {
         ];
 
         let dir = tempfile::tempdir().unwrap();
-        let mirror = InMemoryRaftStorage::new();
+        let mirror = InMemoryRaftWAL::new();
         for (step, op) in ops.iter().enumerate() {
             // A fresh open every step: the state must come back from disk.
-            let file = FileRaftStorage::open(dir.path()).unwrap();
+            let file = FileRaftWAL::open(dir.path()).unwrap();
             assert_eq!(file.load(), mirror.load(), "diverged before step {step}");
             match op {
                 Op::Save(term, voted_for) => {
@@ -581,7 +581,7 @@ mod tests {
             }
             assert_eq!(file.load(), mirror.load(), "diverged after step {step}");
         }
-        let final_state = FileRaftStorage::open(dir.path()).unwrap();
+        let final_state = FileRaftWAL::open(dir.path()).unwrap();
         assert_eq!(final_state.load(), mirror.load(), "diverged at the end");
     }
 }

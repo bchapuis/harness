@@ -17,8 +17,8 @@ use std::sync::Mutex;
 
 use crate::grain::GrainName;
 use crate::journal::AppendOutcome;
-use crate::journal::Journal;
-use crate::journal::JournalError;
+use crate::journal::GrainJournal;
+use crate::journal::GrainJournalError;
 use crate::journal::Seq;
 use crate::journal::head_of;
 use crate::journal::slice;
@@ -41,18 +41,18 @@ impl GrainLog {
 /// The Tier-1 single-node journal (spec §7.4). Cloning shares one underlying
 /// store, so every host spawned for the same `Granary` writes to the same log.
 #[derive(Clone, Default)]
-pub struct MemoryJournal {
+pub struct MemoryGrainJournal {
     grains: Arc<Mutex<HashMap<GrainName, GrainLog>>>,
 }
 
-impl MemoryJournal {
+impl MemoryGrainJournal {
     /// A fresh, empty journal.
-    pub fn new() -> MemoryJournal {
-        MemoryJournal::default()
+    pub fn new() -> MemoryGrainJournal {
+        MemoryGrainJournal::default()
     }
 }
 
-impl Journal for MemoryJournal {
+impl GrainJournal for MemoryGrainJournal {
     async fn append(&self, grain: &GrainName, after: Seq, events: Vec<Vec<u8>>) -> AppendOutcome {
         let mut grains = self.grains.lock().expect("journal mutex poisoned");
         let log = grains.entry(grain.clone()).or_default();
@@ -74,7 +74,7 @@ impl Journal for MemoryJournal {
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> Result<Vec<(Seq, Vec<u8>)>, JournalError> {
+    ) -> Result<Vec<(Seq, Vec<u8>)>, GrainJournalError> {
         let grains = self.grains.lock().expect("journal mutex poisoned");
         let Some(log) = grains.get(grain) else {
             return Ok(Vec::new());
@@ -82,7 +82,7 @@ impl Journal for MemoryJournal {
         Ok(slice(&log.events, from, limit))
     }
 
-    async fn head(&self, grain: &GrainName) -> Result<Seq, JournalError> {
+    async fn head(&self, grain: &GrainName) -> Result<Seq, GrainJournalError> {
         let grains = self.grains.lock().expect("journal mutex poisoned");
         Ok(grains.get(grain).map(GrainLog::head).unwrap_or(Seq::ZERO))
     }
@@ -97,7 +97,7 @@ impl Journal for MemoryJournal {
     async fn load_snapshot(
         &self,
         grain: &GrainName,
-    ) -> Result<Option<(Seq, Vec<u8>)>, JournalError> {
+    ) -> Result<Option<(Seq, Vec<u8>)>, GrainJournalError> {
         let grains = self.grains.lock().expect("journal mutex poisoned");
         Ok(grains.get(grain).and_then(|log| log.snapshot.clone()))
     }
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn append_commits_at_sequential_heads() {
-        let j = MemoryJournal::new();
+        let j = MemoryGrainJournal::new();
         let n = name("a");
         assert_eq!(run(j.head(&n)), Ok(Seq::ZERO));
         assert_eq!(
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn load_is_exclusive_of_from_and_bounded_by_limit() {
-        let j = MemoryJournal::new();
+        let j = MemoryGrainJournal::new();
         let n = name("a");
         run(j.append(&n, Seq::ZERO, vec![b"e1".to_vec(), b"e2".to_vec(), b"e3".to_vec()]));
         // from = ZERO returns the whole log, first event at seq 1.
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips_and_grains_are_independent() {
-        let j = MemoryJournal::new();
+        let j = MemoryGrainJournal::new();
         let a = name("a");
         let b = name("b");
         assert_eq!(run(j.load_snapshot(&a)), Ok(None));
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "single-writer invariant")]
     fn append_with_stale_after_panics() {
-        let j = MemoryJournal::new();
+        let j = MemoryGrainJournal::new();
         let n = name("a");
         run(j.append(&n, Seq::ZERO, vec![b"e1".to_vec()]));
         // A second writer with a stale view of the head violates the single-writer

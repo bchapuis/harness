@@ -273,7 +273,7 @@ impl SimNetwork {
     /// under the same identity and mode. Volatile state is lost exactly as a
     /// process death loses it (actors, the membership view, Raft's role and
     /// commit index); durable state survives through the mode's storage seam —
-    /// the per-node-cached [`RaftStorage`](actor_cluster::RaftStorage), the
+    /// the per-node-cached [`RaftWAL`](actor_cluster::RaftWAL), the
     /// external registry. Network blocks involving the node are cleared: the
     /// new process comes up with working connectivity.
     ///

@@ -14,7 +14,7 @@
 //! and the voter-set-change handling are application-specific. So a single
 //! [`RaftGroup`] carries an opaque application command as bytes
 //! ([`EntryPayload::App`]) — the same opaque-bytes seam philosophy as `Transport`
-//! and granary's `Journal` — and [`MultiRaft`] runs O(groups) independent groups
+//! and granary's `GrainJournal` — and [`MultiRaft`] runs O(groups) independent groups
 //! keyed by [`GroupId`], each with its own log, leadership, and term sequence.
 //! The membership control plane is one well-known group ([`GroupId::CONTROL`]);
 //! granary's per-shard journals are additional groups.
@@ -110,9 +110,9 @@ pub struct PersistedRaft {
 /// persisted before the state takes effect, reloaded on restart. The methods
 /// are synchronous on purpose: when one returns, the data MUST be durable —
 /// the caller sends the messages announcing the state right after. In-memory
-/// for simulation ([`InMemoryRaftStorage`]); `actor-runtime` supplies the
-/// production `FileRaftStorage`. One instance backs one `(group, node)`.
-pub trait RaftStorage: Send + Sync + 'static {
+/// for simulation ([`InMemoryRaftWAL`]); `actor-runtime` supplies the
+/// production `FileRaftWAL`. One instance backs one `(group, node)`.
+pub trait RaftWAL: Send + Sync + 'static {
     /// Load the persisted state (empty/default on first start).
     fn load(&self) -> PersistedRaft;
 
@@ -135,20 +135,20 @@ pub trait RaftStorage: Send + Sync + 'static {
     }
 }
 
-/// A volatile [`RaftStorage`]: state survives as long as the value does. The
+/// A volatile [`RaftWAL`]: state survives as long as the value does. The
 /// simulation implementation, and a starting point for production.
 #[derive(Default)]
-pub struct InMemoryRaftStorage {
+pub struct InMemoryRaftWAL {
     state: Mutex<PersistedRaft>,
 }
 
-impl InMemoryRaftStorage {
-    pub fn new() -> InMemoryRaftStorage {
-        InMemoryRaftStorage::default()
+impl InMemoryRaftWAL {
+    pub fn new() -> InMemoryRaftWAL {
+        InMemoryRaftWAL::default()
     }
 }
 
-impl RaftStorage for InMemoryRaftStorage {
+impl RaftWAL for InMemoryRaftWAL {
     fn load(&self) -> PersistedRaft {
         self.state
             .lock()
@@ -205,17 +205,17 @@ pub struct RaftConfig {
     /// term it voted in rather than a blank slate (the double-vote hazard). A
     /// filesystem-backed factory is stable through the disk; the default caches
     /// one in-memory storage per `(group, node)`.
-    pub storage: Arc<dyn Fn(GroupId, NodeId) -> Arc<dyn RaftStorage> + Send + Sync>,
+    pub storage: Arc<dyn Fn(GroupId, NodeId) -> Arc<dyn RaftWAL> + Send + Sync>,
 }
 
 impl RaftConfig {
     /// A config for `voters` with in-memory storage and default timing
     /// (1s election timeout, 250ms heartbeats). The default storage factory
-    /// caches one [`InMemoryRaftStorage`] per `(group, node)`, so state survives
+    /// caches one [`InMemoryRaftWAL`] per `(group, node)`, so state survives
     /// as long as the config does — under simulation, a restarted node reloads
     /// its persisted Raft state exactly as a production node reloads it from disk.
     pub fn new(voters: Vec<NodeId>) -> RaftConfig {
-        let cache: Mutex<BTreeMap<(GroupId, NodeId), Arc<dyn RaftStorage>>> =
+        let cache: Mutex<BTreeMap<(GroupId, NodeId), Arc<dyn RaftWAL>>> =
             Mutex::new(BTreeMap::new());
         RaftConfig {
             voters,
@@ -227,7 +227,7 @@ impl RaftConfig {
                         .lock()
                         .expect("raft storage cache poisoned")
                         .entry((group, node))
-                        .or_insert_with(|| Arc::new(InMemoryRaftStorage::new())),
+                        .or_insert_with(|| Arc::new(InMemoryRaftWAL::new())),
                 )
             }),
         }
@@ -244,7 +244,7 @@ impl RaftConfig {
 pub(crate) struct MultiRaft {
     node: NodeId,
     election_timeout: Duration,
-    storage: Arc<dyn Fn(GroupId, NodeId) -> Arc<dyn RaftStorage> + Send + Sync>,
+    storage: Arc<dyn Fn(GroupId, NodeId) -> Arc<dyn RaftWAL> + Send + Sync>,
     groups: Mutex<BTreeMap<GroupId, Arc<RaftGroup>>>,
 }
 
@@ -502,7 +502,7 @@ pub(crate) struct RaftGroup {
     group: GroupId,
     node: NodeId,
     election_timeout: Duration,
-    storage: Arc<dyn RaftStorage>,
+    storage: Arc<dyn RaftWAL>,
     state: Mutex<RaftState>,
 }
 
@@ -516,7 +516,7 @@ impl RaftGroup {
         voters: Vec<NodeId>,
         learners: Vec<NodeId>,
         election_timeout: Duration,
-        storage: Arc<dyn RaftStorage>,
+        storage: Arc<dyn RaftWAL>,
         now: Instant,
     ) -> RaftGroup {
         let persisted = storage.load();
@@ -592,7 +592,7 @@ impl RaftGroup {
     /// has applied nothing already satisfies.
     ///
     /// [`new`]: RaftGroup::new
-    /// [`subscribe_commits`]: crate::RaftLog::subscribe_commits
+    /// [`subscribe_commits`]: crate::RaftConsensus::subscribe_commits
     pub(crate) fn ready_commit(&self) -> Option<u64> {
         let state = self.lock();
         if state.commit <= state.snapshot_index || state.term_at(state.commit) != state.term {
@@ -1382,7 +1382,7 @@ mod tests {
                         nodes.to_vec(),
                         Vec::new(),
                         timeout,
-                        Arc::new(InMemoryRaftStorage::new()),
+                        Arc::new(InMemoryRaftWAL::new()),
                         Instant::ZERO,
                     ),
                 );
@@ -1476,7 +1476,7 @@ mod tests {
                     voters.to_vec(),
                     vec![learner],
                     timeout,
-                    Arc::new(InMemoryRaftStorage::new()),
+                    Arc::new(InMemoryRaftWAL::new()),
                     Instant::ZERO,
                 ),
             );
@@ -1566,7 +1566,7 @@ mod tests {
                     voters.to_vec(),
                     vec![learner],
                     timeout,
-                    Arc::new(InMemoryRaftStorage::new()),
+                    Arc::new(InMemoryRaftWAL::new()),
                     Instant::ZERO,
                 ),
             );

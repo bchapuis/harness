@@ -1,6 +1,6 @@
 //! The Tier-2 Raft-backed journal under deterministic simulation (granary §14).
 //!
-//! Drives a 3-node leader-mode cluster and exercises [`RaftJournal`] directly
+//! Drives a 3-node leader-mode cluster and exercises [`RaftGrainJournal`] directly
 //! (not yet through a running `Granary`): an append is durable on a quorum and
 //! visible on every replica (§7.2); a follower's append is fenced with
 //! `NotLeader` (§8, G8); committed state survives leader failover (G14); and
@@ -13,7 +13,7 @@ use std::time::Duration;
 use actor_cluster::DowningPolicy;
 use actor_cluster::GroupId;
 use actor_cluster::RaftConfig;
-use actor_cluster::RaftLog;
+use actor_cluster::RaftConsensus;
 use actor_cluster::SwimConfig;
 use actor_core::NodeId;
 use actor_core::Spawner;
@@ -22,8 +22,8 @@ use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use granary::AppendOutcome;
 use granary::GrainName;
-use granary::Journal;
-use granary::RaftJournal;
+use granary::GrainJournal;
+use granary::RaftGrainJournal;
 use granary::Seq;
 
 const A: NodeId = NodeId::new(1);
@@ -71,16 +71,16 @@ fn drive<T: Send + 'static>(
 }
 
 /// Bring up a 3-node leader cluster, create the shard group on every node, and
-/// build a [`RaftJournal`] per node (subscribing before the group is driven).
-fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<RaftJournal<SimCluster>>) {
+/// build a [`RaftGrainJournal`] per node (subscribing before the group is driven).
+fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<RaftGrainJournal<SimCluster>>) {
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
-    let journals: Vec<RaftJournal<SimCluster>> = systems
+    let journals: Vec<RaftGrainJournal<SimCluster>> = systems
         .iter()
         .map(|system| {
             system.create_group(SHARD, vec![A, B, C], vec![]);
-            RaftJournal::new(system.clone(), SHARD)
+            RaftGrainJournal::new(system.clone(), SHARD)
         })
         .collect();
     sim.run_for(Duration::from_secs(2)); // elect the shard group's leader
@@ -244,7 +244,7 @@ fn a_full_cluster_cold_restart_rehydrates_before_serving() {
     // restored log is re-committed and replayed. That opens the rehydration race the
     // single-node restart above never can: a grain can activate and read its head in
     // the window after a node reloads but before the new leader's term-opening Noop
-    // commits the restored prefix. The barrier ([`Journal::catch_up`]) must hold the
+    // commits the restored prefix. The barrier ([`GrainJournal::catch_up`]) must hold the
     // read until the projection reflects that prefix; before the fix it returned as
     // soon as the not-yet-driven commit stream looked empty, and the head raced ahead
     // to an empty projection (surfacing downstream as the host's `stale head`).
@@ -276,8 +276,8 @@ fn a_full_cluster_cold_restart_rehydrates_before_serving() {
         system.create_group(SHARD, vec![A, B, C], vec![]);
         systems[idx] = system;
     }
-    let journals: Vec<RaftJournal<SimCluster>> =
-        systems.iter().map(|s| RaftJournal::new(s.clone(), SHARD)).collect();
+    let journals: Vec<RaftGrainJournal<SimCluster>> =
+        systems.iter().map(|s| RaftGrainJournal::new(s.clone(), SHARD)).collect();
 
     // Rehydrate THEN read the head in one shot, with no prior settle: `catch_up`
     // itself must do the waiting. The drive advances virtual time so the cluster
@@ -352,8 +352,8 @@ fn a_full_cluster_cold_restart_rehydrates_a_compacted_shard() {
         system.create_group(SHARD, vec![A, B, C], vec![]);
         systems[idx] = system;
     }
-    let journals: Vec<RaftJournal<SimCluster>> =
-        systems.iter().map(|s| RaftJournal::new(s.clone(), SHARD)).collect();
+    let journals: Vec<RaftGrainJournal<SimCluster>> =
+        systems.iter().map(|s| RaftGrainJournal::new(s.clone(), SHARD)).collect();
 
     // Rehydrate THEN read the head with no prior settle: the head must reflect the
     // full history — the 64 events folded from the reloaded snapshot plus the 6 tail
@@ -433,7 +433,7 @@ fn a_restarted_leader_keeps_committing_after_reusing_its_node_id() {
     // then let it catch up via snapshot install and re-win the election.
     let restarted_system = net.restart(leader_node);
     restarted_system.create_group(SHARD, vec![A, B, C], vec![]);
-    let restarted = RaftJournal::new(restarted_system.clone(), SHARD);
+    let restarted = RaftGrainJournal::new(restarted_system.clone(), SHARD);
     sim.run_for(Duration::from_secs(6));
     assert!(
         restarted_system.group_is_leader(SHARD),

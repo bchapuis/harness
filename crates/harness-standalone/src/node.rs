@@ -29,7 +29,7 @@ use actor_core::NodeId;
 use actor_runtime::DEFAULT_CONNECT_TIMEOUT;
 use actor_runtime::DEFAULT_HANDSHAKE_TIMEOUT;
 use actor_runtime::DEFAULT_OUTBOUND_CAPACITY;
-use actor_runtime::FileRaftStorage;
+use actor_runtime::FileRaftWAL;
 use actor_runtime::OsEntropy;
 use actor_runtime::TcpCluster;
 use actor_runtime::TcpConfig;
@@ -209,7 +209,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
                 swim: SwimConfig::default(),
                 raft: {
                     let mut raft = RaftConfig::new(roster.clone());
-                    raft.storage = FileRaftStorage::factory(opts.data.join("raft"));
+                    raft.storage = FileRaftWAL::factory(opts.data.join("raft"));
                     raft
                 },
                 downing: DowningPolicy::Conservative,

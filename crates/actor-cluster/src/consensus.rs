@@ -1,14 +1,14 @@
 //! The application consensus seam (spec §9.4.3).
 //!
-//! [`RaftLog`] is the narrow capability a layer built *on* the cluster — granary's
+//! [`RaftConsensus`] is the narrow capability a layer built *on* the cluster — granary's
 //! sharded journal — needs from a Raft-hosting [`ClusterSystem`](crate::ClusterSystem):
 //! create an application group, propose opaque command bytes to its leader, and
 //! observe the committed stream. It is the consensus analogue of granary's own
-//! `GranarySystem` seam: it lets that crate stay generic over `R: RaftLog`
+//! `GranarySystem` seam: it lets that crate stay generic over `R: RaftConsensus`
 //! instead of naming the concrete `ClusterSystem<C, E, S, T>` and its four type
 //! parameters.
 //!
-//! It is used as a **generic bound** (`R: RaftLog`), never as `dyn RaftLog`, so
+//! It is used as a **generic bound** (`R: RaftConsensus`), never as `dyn RaftConsensus`, so
 //! the `impl Future` / concrete-`Receiver` return types are fine — no object
 //! safety is required and the futures are never boxed on the hot path.
 
@@ -25,14 +25,14 @@ use crate::raft::GroupId;
 /// The consensus capability granary's sharded journal builds on (spec §9.4.3).
 /// Implemented by [`ClusterSystem`](crate::ClusterSystem) in leader-based mode;
 /// outside it, the methods are inert (no group, no leader).
-pub trait RaftLog: Clone + Send + Sync + 'static {
+pub trait RaftConsensus: Clone + Send + Sync + 'static {
     /// This node's identity (the `NotLeader` fallback when no leader is known).
     fn node(&self) -> NodeId;
 
     /// The cluster's consensus-agreed control-plane voter set (spec §9.4.3): the
     /// control group's *current* committed voters, which grows/shrinks as nodes are
     /// added/removed. A layer above uses it as the target membership for a metadata
-    /// group (reconciled via [`reconfigure_group`](RaftLog::reconfigure_group)).
+    /// group (reconciled via [`reconfigure_group`](RaftConsensus::reconfigure_group)).
     /// Empty outside leader-based mode.
     fn cluster_voters(&self) -> Vec<NodeId>;
 
@@ -59,7 +59,7 @@ pub trait RaftLog: Clone + Send + Sync + 'static {
     /// absent from the quorum — bounding `voters` to `R` keeps write quorum at
     /// `⌈R/2⌉` regardless of cluster size. The membership control group is created
     /// at startup; this is for application groups. To see a group's log from its
-    /// first entry, call [`subscribe_commits`](RaftLog::subscribe_commits) right
+    /// first entry, call [`subscribe_commits`](RaftConsensus::subscribe_commits) right
     /// after this, before the engine next ticks.
     fn create_group(&self, group: GroupId, voters: Vec<NodeId>, learners: Vec<NodeId>);
 
@@ -86,7 +86,7 @@ pub trait RaftLog: Clone + Send + Sync + 'static {
 
     /// `group`'s rehydration target: the highest committed application index,
     /// available only once the current leader has committed in its term, else
-    /// `None` (spec §9). A consumer of [`subscribe_commits`](RaftLog::subscribe_commits)
+    /// `None` (spec §9). A consumer of [`subscribe_commits`](RaftConsensus::subscribe_commits)
     /// that just (re)subscribed waits until the watermark it has folded from the
     /// stream (`Committed::commit`) reaches this, so a grain activating right after
     /// a cluster restart rebuilds from a projection that reflects the whole
@@ -115,6 +115,6 @@ pub trait RaftLog: Clone + Send + Sync + 'static {
 
     /// Launch a detached background task on the system's executor — used by the
     /// journal to run its commit-applying loop over
-    /// [`subscribe_commits`](RaftLog::subscribe_commits).
+    /// [`subscribe_commits`](RaftConsensus::subscribe_commits).
     fn launch(&self, task: BoxFuture<'static, ()>);
 }

@@ -11,7 +11,7 @@
 //! order.
 //!
 //! Reached through the object-safe [`ShardMapSource`] seam — the map analogue of
-//! [`DynJournal`](crate::journal::DynJournal) — so the gateway and `Granary` stay
+//! [`DynGrainJournal`](crate::journal::DynGrainJournal) — so the gateway and `Granary` stay
 //! free of the consensus type. Two implementations: the single-node
 //! [`LocalShardMap`] (Tier 1) and the [`RaftShardMap`] over a clustered system
 //! (Tier 2). The allocation is static after bootstrap (rebalancing and split/merge
@@ -25,15 +25,15 @@ use std::time::Duration;
 
 use actor_cluster::Committed;
 use actor_cluster::GroupId;
-use actor_cluster::RaftLog;
+use actor_cluster::RaftConsensus;
 use actor_core::NodeId;
 use async_channel::Receiver;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::journal::DynJournal;
-use crate::memory::MemoryJournal;
-use crate::shard::RaftJournal;
+use crate::journal::DynGrainJournal;
+use crate::memory::MemoryGrainJournal;
+use crate::shard::RaftGrainJournal;
 use crate::system::MAP_SHARD_INDEX;
 use crate::system::ShardId;
 use crate::system::group_id_for;
@@ -46,7 +46,7 @@ const ALLOCATE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A node's read access to the shard map (spec §7.6): which nodes replicate a
 /// shard, and — if this node is one of them — the local store for it. The map
-/// analogue of [`DynJournal`]; erases the consensus type so the gateway stays
+/// analogue of [`DynGrainJournal`]; erases the consensus type so the gateway stays
 /// generic over just the grain.
 pub trait ShardMapSource: Send + Sync + 'static {
     /// The shard's replica set once the allocation has committed, else `None`
@@ -55,7 +55,7 @@ pub trait ShardMapSource: Send + Sync + 'static {
 
     /// This node's durable store for the shard — `Some` iff this node replicates
     /// it and has built the journal.
-    fn journal(&self, shard: u32) -> Option<Arc<dyn DynJournal>>;
+    fn journal(&self, shard: u32) -> Option<Arc<dyn DynGrainJournal>>;
 }
 
 /// The map group's id for a grain type: [`group_id_for`] at the reserved
@@ -89,13 +89,13 @@ fn decode(bytes: &[u8]) -> Option<ShardMapCommand> {
 /// shard, each backed by an independent in-memory store.
 pub(crate) struct LocalShardMap {
     node: NodeId,
-    journals: Vec<Arc<dyn DynJournal>>,
+    journals: Vec<Arc<dyn DynGrainJournal>>,
 }
 
 impl LocalShardMap {
     pub(crate) fn new(node: NodeId, shards: usize) -> LocalShardMap {
         let journals = (0..shards)
-            .map(|_| Arc::new(MemoryJournal::new()) as Arc<dyn DynJournal>)
+            .map(|_| Arc::new(MemoryGrainJournal::new()) as Arc<dyn DynGrainJournal>)
             .collect();
         LocalShardMap { node, journals }
     }
@@ -106,7 +106,7 @@ impl ShardMapSource for LocalShardMap {
         (shard < self.journals.len() as u32).then(|| vec![self.node])
     }
 
-    fn journal(&self, shard: u32) -> Option<Arc<dyn DynJournal>> {
+    fn journal(&self, shard: u32) -> Option<Arc<dyn DynGrainJournal>> {
         self.journals.get(shard as usize).cloned()
     }
 }
@@ -120,7 +120,7 @@ struct Inner {
     /// shard index → replica set, as committed.
     allocation: BTreeMap<u32, Vec<NodeId>>,
     /// shard index → local store, for shards this node replicates.
-    journals: BTreeMap<u32, Arc<dyn DynJournal>>,
+    journals: BTreeMap<u32, Arc<dyn DynGrainJournal>>,
 }
 
 /// A [`ShardMapSource`] backed by a per-type Raft group (Tier 2). The group's
@@ -133,10 +133,10 @@ pub(crate) struct RaftShardMap {
 impl RaftShardMap {
     /// Create the map group and start tracking the allocation (spec §7.6). The
     /// group's voters are the cluster's consensus-agreed control-plane voters
-    /// ([`RaftLog::cluster_voters`]), so every node forms the identical group.
+    /// ([`RaftConsensus::cluster_voters`]), so every node forms the identical group.
     /// Subscribes before driving and launches the apply loop and the leader-only
     /// allocator.
-    pub(crate) fn new<R: RaftLog>(
+    pub(crate) fn new<R: RaftConsensus>(
         consensus: R,
         grain_type: &'static str,
         shards: usize,
@@ -200,7 +200,7 @@ impl ShardMapSource for RaftShardMap {
         self.inner.lock().expect("shard map mutex poisoned").allocation.get(&shard).cloned()
     }
 
-    fn journal(&self, shard: u32) -> Option<Arc<dyn DynJournal>> {
+    fn journal(&self, shard: u32) -> Option<Arc<dyn DynGrainJournal>> {
         self.inner.lock().expect("shard map mutex poisoned").journals.get(&shard).cloned()
     }
 }
@@ -210,7 +210,7 @@ impl ShardMapSource for RaftShardMap {
 /// it. The first `Assign` is the founding allocation; later `Assign`s are
 /// rebalances (membership changed). On each change this node:
 /// - **becomes a replica** (in new, not old): builds the shard's store. Subscribe
-///   before create (`RaftJournal::new` registers the commit sink, then
+///   before create (`RaftGrainJournal::new` registers the commit sink, then
 ///   `create_group`), so the projection sees the shard log from the start. The
 ///   group is created over the **old** replica set so a node newly joining the
 ///   shard is a non-member that does not disrupt the shard's election — the shard
@@ -223,7 +223,7 @@ impl ShardMapSource for RaftShardMap {
 ///   re-activates the grain on a current replica.
 ///
 /// Runs until the map group's commit stream closes.
-async fn apply_loop<R: RaftLog>(
+async fn apply_loop<R: RaftConsensus>(
     consensus: R,
     grain_type: &'static str,
     self_node: NodeId,
@@ -258,8 +258,8 @@ async fn apply_loop<R: RaftLog>(
             // Newly a replica: subscribe, then create the group over the *old* set
             // (a non-member join — no election disruption); the shard leader's
             // reconcile loop adds this node, which then catches up.
-            let journal: Arc<dyn DynJournal> =
-                Arc::new(RaftJournal::new(consensus.clone(), shard_group));
+            let journal: Arc<dyn DynGrainJournal> =
+                Arc::new(RaftGrainJournal::new(consensus.clone(), shard_group));
             let create_voters = old.unwrap_or_else(|| replicas.clone());
             consensus.create_group(shard_group, create_voters, Vec::new());
             inner
@@ -284,7 +284,7 @@ async fn apply_loop<R: RaftLog>(
 /// cluster grows or shrinks, shards rebalance onto/off the changed members. All
 /// nodes see the same committed `cluster_voters()`, so the rendezvous is agreed;
 /// only the map leader proposes. Exits when the map is dropped.
-async fn allocator_loop<R: RaftLog>(
+async fn allocator_loop<R: RaftConsensus>(
     consensus: R,
     grain_type: &'static str,
     group: GroupId,
@@ -341,7 +341,7 @@ async fn allocator_loop<R: RaftLog>(
 /// leader-only, so only one node reconfigures a given group. Exits when the map is
 /// dropped. (Bounding the map group to fewer than all voters — learners for
 /// routing-only nodes — remains a refinement.)
-async fn reconcile_loop<R: RaftLog>(
+async fn reconcile_loop<R: RaftConsensus>(
     consensus: R,
     grain_type: &'static str,
     map_group: GroupId,

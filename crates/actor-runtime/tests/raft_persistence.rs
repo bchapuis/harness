@@ -2,7 +2,7 @@
 //! item 2).
 //!
 //! A three-voter leader-mode cluster runs over real TCP on loopback, with each
-//! voter's Raft state in a [`FileRaftStorage`] directory. A committed
+//! voter's Raft state in a [`FileRaftWAL`] directory. A committed
 //! transition must be on a stopped voter's disk; the voter must come back —
 //! same identity, same directory, same port — with that state, and the cluster
 //! must keep committing transitions with the restarted voter participating.
@@ -22,10 +22,10 @@ use actor_cluster::GroupId;
 use actor_cluster::MemberStatus;
 use actor_cluster::MembershipCommand;
 use actor_cluster::RaftConfig;
-use actor_cluster::RaftStorage;
+use actor_cluster::RaftWAL;
 use actor_cluster::SwimConfig;
 use actor_core::NodeId;
-use actor_runtime::FileRaftStorage;
+use actor_runtime::FileRaftWAL;
 use actor_runtime::TcpCluster;
 use support::bind_local;
 use support::start_node_leader;
@@ -85,7 +85,7 @@ async fn a_restarted_voter_recovers_its_persisted_raft_state() {
     let mut raft = RaftConfig::new(vec![A, B, C]);
     raft.election_timeout = Duration::from_millis(500);
     raft.heartbeat_interval = Duration::from_millis(100);
-    raft.storage = FileRaftStorage::factory(data_dir.path().to_path_buf());
+    raft.storage = FileRaftWAL::factory(data_dir.path().to_path_buf());
 
     let nodes: Vec<TcpCluster> = listeners
         .into_iter()
@@ -142,7 +142,7 @@ async fn a_restarted_voter_recovers_its_persisted_raft_state() {
         .join(GroupId::CONTROL.to_string())
         .join(B.to_string());
     {
-        let persisted = FileRaftStorage::open(&b_dir).unwrap().load();
+        let persisted = FileRaftWAL::open(&b_dir).unwrap().load();
         assert!(
             persisted.term > 0,
             "B persisted the term it participated in"

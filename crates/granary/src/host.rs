@@ -15,7 +15,7 @@
 //!   no observer is ever told an effect happened that did not durably happen
 //!   (invariant **G5**).
 //!
-//! The host appends through the [`Journal`] seam, so the same protocol runs over
+//! The host appends through the [`GrainJournal`] seam, so the same protocol runs over
 //! the Tier-1 memory journal and (later) the Tier-2 sharded-Raft journal.
 
 use actor_core::Actor;
@@ -43,7 +43,7 @@ use crate::grain::GrainRegistry;
 use std::sync::Arc;
 
 use crate::journal::AppendOutcome;
-use crate::journal::DynJournal;
+use crate::journal::DynGrainJournal;
 use crate::journal::Seq;
 use crate::system::GranarySystem;
 
@@ -91,7 +91,7 @@ pub struct Host<G: Grain> {
     /// Threaded into [`GrainCtx`] so a self-reference resolves under the right type.
     grain_type: &'static str,
     name: GrainName,
-    journal: Arc<dyn DynJournal>,
+    journal: Arc<dyn DynGrainJournal>,
     config: GranaryConfig,
     gateway: ActorRef<Gateway<G>>,
     /// Virtual time of the last *command* (not a tick), for idle eviction (§10).
@@ -106,7 +106,7 @@ impl<G: Grain> Host<G> {
         grain_type: &'static str,
         grain: G,
         name: GrainName,
-        journal: Arc<dyn DynJournal>,
+        journal: Arc<dyn DynGrainJournal>,
         config: GranaryConfig,
         gateway: ActorRef<Gateway<G>>,
     ) -> Host<G> {

@@ -56,7 +56,7 @@ use crate::membership::SwimConfig;
 use crate::protocol::CallId;
 use crate::protocol::Frame;
 use crate::protocol::ReceptionistEntry;
-use crate::consensus::RaftLog;
+use crate::consensus::RaftConsensus;
 use crate::raft::Committed;
 use crate::raft::EntryPayload;
 use crate::raft::GroupId;
@@ -118,7 +118,7 @@ impl Default for ClusterConfig {
 }
 
 /// A subscriber to one Raft group's committed `(index, app-bytes)` stream
-/// (the [`RaftLog`](crate::RaftLog) seam).
+/// (the [`RaftConsensus`](crate::RaftConsensus) seam).
 type CommitSink = Sender<Committed>;
 
 struct Inner<C, E, S, T> {
@@ -149,12 +149,12 @@ struct Inner<C, E, S, T> {
     /// incarnation, so a relay can report it back to the requester (spec §10).
     pings: Correlator<u64, oneshot::Sender<u64>>,
     receptionist: Arc<ReceptionistState>,
-    /// Per-group subscribers to committed application entries (the [`RaftLog`]
+    /// Per-group subscribers to committed application entries (the [`RaftConsensus`]
     /// seam, granary's sharded journal). A non-`CONTROL` group's committed
     /// `(index, bytes)` are broadcast here in `apply_raft_output`; the control
     /// group's entries drive membership instead and are never published.
     ///
-    /// [`RaftLog`]: crate::RaftLog
+    /// [`RaftConsensus`]: crate::RaftConsensus
     commit_sinks: Mutex<BTreeMap<GroupId, Vec<CommitSink>>>,
     /// Set on a graceful stop (spec §9.3): the detector and receptionist gossip
     /// loops return once they see it. Default `false`, so a system that never
@@ -501,7 +501,7 @@ where
     /// The Raft group `group` if this node runs the consensus engine and hosts
     /// that group (spec §9.4.3). The receive loop routes each group's frames
     /// through it; an unknown group is dropped. Also the basis of the
-    /// [`RaftLog`](crate::RaftLog) seam (see `consensus.rs`).
+    /// [`RaftConsensus`](crate::RaftConsensus) seam (see `consensus.rs`).
     pub(crate) fn group(&self, group: GroupId) -> Option<Arc<RaftGroup>> {
         self.inner.raft.as_ref().and_then(|raft| raft.group(group))
     }
@@ -1221,7 +1221,7 @@ async fn receive_loop<C, E, S, T>(
     }
 }
 
-impl<C, E, S, T> RaftLog for ClusterSystem<C, E, S, T>
+impl<C, E, S, T> RaftConsensus for ClusterSystem<C, E, S, T>
 where
     C: Clock,
     E: Entropy,

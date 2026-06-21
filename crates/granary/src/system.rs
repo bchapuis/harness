@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use actor_cluster::ClusterSystem;
 use actor_cluster::GroupId;
-use actor_cluster::RaftLog;
+use actor_cluster::RaftConsensus;
 use actor_cluster::Transport;
 use actor_core::ActorSystem;
 use actor_core::BoxFuture;

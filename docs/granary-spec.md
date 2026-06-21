@@ -62,7 +62,7 @@ A grain's in-memory activation is a **cache** of state folded from the journal. 
 | **Event** | A serializable value appended to a grain's journal; the unit of durable change. |
 | **`apply`** | The pure fold that applies an event to state. Runs identically on live commit and on replay. |
 | **State** | The value obtained by folding a grain's events; the snapshot payload. A cache of the journal. |
-| **Journal** | A grain's durable, totally-ordered, append-only log of events, stored in its shard's Raft log. The source of truth. |
+| **GrainJournal** | A grain's durable, totally-ordered, append-only log of events, stored in its shard's Raft log. The source of truth. |
 | **Snapshot** | A persisted `(Seq, State)` checkpoint that bounds replay cost (§9). |
 | **`Seq`** | The position of an event in one grain's total order; first event at 1. |
 | **Quorum** | The majority of a shard's replicas whose acknowledgment commits a Raft entry. |
@@ -337,7 +337,7 @@ Each grain's own events stay totally ordered within the shared log: the host app
 The journal is a trait, a simulation and deployment seam like `Transport` and `Clock` (actor §4.6, §7), operating on opaque, codec-encoded event bytes so it stays codec-agnostic:
 
 ```rust
-pub trait Journal: Send + Sync + 'static {
+pub trait GrainJournal: Send + Sync + 'static {
     /// Append `events` for one grain immediately after `after`, as one atomic
     /// entry in the shard log. Commits on a Raft quorum.
     fn append(&self, grain: &GrainName, after: Seq, events: Vec<Vec<u8>>)
@@ -346,7 +346,7 @@ pub trait Journal: Send + Sync + 'static {
     /// Up to `limit` committed events for one grain from `from` (exclusive)
     /// toward its head. A local, fence-free read on the leader.
     fn load(&self, grain: &GrainName, from: Seq, limit: usize)
-        -> impl Future<Output = Result<Vec<(Seq, Vec<u8>)>, JournalError>> + Send;
+        -> impl Future<Output = Result<Vec<(Seq, Vec<u8>)>, GrainJournalError>> + Send;
 
     /// The grain's committed head — the authoritative source of `head` on
     /// rehydration (§9, invariant G3/G4). `Seq::ZERO` for a grain with no
@@ -354,7 +354,7 @@ pub trait Journal: Send + Sync + 'static {
     /// memory: the log always knows its head, and the sharded tier knows the
     /// per-grain commit index.
     fn head(&self, grain: &GrainName)
-        -> impl Future<Output = Result<Seq, JournalError>> + Send;
+        -> impl Future<Output = Result<Seq, GrainJournalError>> + Send;
 
     /// Persist a snapshot for one grain at a committed seq (§9). Returns
     /// `Committed(at)` on success, or `NotLeader` if this node no longer leads.
@@ -363,7 +363,7 @@ pub trait Journal: Send + Sync + 'static {
 
     /// The latest snapshot for one grain, if any (§9).
     fn load_snapshot(&self, grain: &GrainName)
-        -> impl Future<Output = Result<Option<(Seq, Vec<u8>)>, JournalError>> + Send;
+        -> impl Future<Output = Result<Option<(Seq, Vec<u8>)>, GrainJournalError>> + Send;
 
     /// Block until this node's local view reflects every write committed as of
     /// now — the rehydration barrier (§9). A no-op on a synchronous single-node
@@ -380,7 +380,7 @@ pub enum AppendOutcome {
     Unavailable(String),     // quorum unreachable, OR the commit timed out (ambiguous); pause (§11)
 }
 
-pub enum JournalError {
+pub enum GrainJournalError {
     Unavailable(String),     // a local read could not complete (I/O or corruption)
 }
 ```
@@ -551,7 +551,7 @@ These invariants appear as MUSTs above; collected here, they are the contract a 
 |---|---|---|
 | **G1** | **Single writer per grain.** Only the shard leader appends; Raft elects one leader per term and a deposed leader cannot commit, so a grain's log never forks. A commit advances the grain's head by exactly the batch appended; the host folds only such a contiguous commit and steps down on any other outcome. | §6, §8 |
 | **G2** | **Deterministic fold.** `apply` produces identical state on live commit and on replay from any snapshot/journal prefix. | §4.1 |
-| **G3** | **Journal is the source of truth.** `head` and state derive only from journal/snapshot returns; in-memory state is never trusted across activation. | §1, §9 |
+| **G3** | **GrainJournal is the source of truth.** `head` and state derive only from journal/snapshot returns; in-memory state is never trusted across activation. | §1, §9 |
 | **G4** | **Snapshot never shortens the log.** A snapshot seq beyond a grain's committed head is ignored; replay always reaches the true head. | §9 |
 | **G5** | **Reply iff durable.** A command's reply is released, and its events folded, only after the entry commits; a `NotLeader`/`Unavailable` outcome yields an error, no fold, no success reply. | §6 |
 | **G6** | **Exactly-once activation per node.** The serial gateway activates a name at most once; concurrent requests find the same host. | §5.3 |
@@ -645,7 +645,7 @@ granary/                 # the grain runtime, built on actor-core + actor-cluste
   grainref.rs            # GrainRef + Granary handle + the system extension (`granary`/`grain`) (§4.3, §5.4)
   shard.rs               # the shard: a Raft group over a key range; per-grain append/load/snapshot (§7)
   shardmap.rs            # the consensus-agreed shard map (per-type map group); allocator + reconcile (§7.6, §7.7)
-  journal.rs             # the Journal seam + AppendOutcome + Seq + DynJournal (§7.3)
+  journal.rs             # the GrainJournal seam + AppendOutcome + Seq + DynGrainJournal (§7.3)
   memory.rs              # single-node local journal (tier 1, §7.4)
   system.rs              # the GranarySystem capability seam + name→shard/group hashing (§5.1, §7)
   event.rs               # GrainEvent observability stream (§13)

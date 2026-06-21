@@ -1,7 +1,7 @@
 //! The Tier-2 Raft-backed journal (spec §7, §7.4 tier 2).
 //!
-//! A shard is one Raft group; [`RaftJournal`] implements the [`Journal`] seam
-//! over it via the [`RaftLog`] capability of a clustered system. A grain write
+//! A shard is one Raft group; [`RaftGrainJournal`] implements the [`GrainJournal`] seam
+//! over it via the [`RaftConsensus`] capability of a clustered system. A grain write
 //! becomes one committed log entry (the engine's `EntryPayload::App` bytes, the
 //! opaque-bytes seam granary already uses), so it is durable on a quorum (§7.2)
 //! and survives leader failover (leader completeness, invariant **G14**).
@@ -24,7 +24,7 @@
 //! and never collides with a prior incarnation's already-applied ids — which would
 //! otherwise make the dedup silently swallow its new writes.
 //!
-//! **The rehydration barrier.** [`catch_up`](RaftJournal::catch_up) holds a
+//! **The rehydration barrier.** [`catch_up`](RaftGrainJournal::catch_up) holds a
 //! grain's head read until the apply loop has folded the commit stream up to the
 //! leader's *established* commit — the highest committed index once the current
 //! leader has committed in its term (`group_ready_commit`). It compares that
@@ -50,7 +50,7 @@ use std::time::Duration;
 
 use actor_cluster::Committed;
 use actor_cluster::GroupId;
-use actor_cluster::RaftLog;
+use actor_cluster::RaftConsensus;
 use actor_core::NodeId;
 use async_channel::Receiver;
 use futures::channel::oneshot;
@@ -61,8 +61,8 @@ use serde::Serialize;
 
 use crate::grain::GrainName;
 use crate::journal::AppendOutcome;
-use crate::journal::Journal;
-use crate::journal::JournalError;
+use crate::journal::GrainJournal;
+use crate::journal::GrainJournalError;
 use crate::journal::Seq;
 use crate::journal::head_of;
 use crate::journal::slice;
@@ -72,7 +72,7 @@ use crate::journal::slice;
 /// has not landed within it means the shard cannot reach a quorum.
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How often [`catch_up`](RaftJournal::catch_up) re-checks whether the commit
+/// How often [`catch_up`](RaftGrainJournal::catch_up) re-checks whether the commit
 /// stream has drained. Short relative to a commit, so the rehydration barrier adds
 /// negligible latency.
 const CATCH_UP_POLL: Duration = Duration::from_millis(10);
@@ -115,7 +115,7 @@ const COMPACT_EVERY: u64 = 64;
 
 /// One journal command. The application command bytes of the group's Raft log.
 #[derive(Serialize, Deserialize)]
-enum JournalCommand {
+enum GrainJournalCommand {
     /// A grain's atomic event batch, tagged with its [`ProposalId`] so the
     /// proposer's `append` waiter can be completed (and re-applies deduped) on
     /// commit. The id is unique shard-wide, even across leaders and restarts.
@@ -132,18 +132,18 @@ enum JournalCommand {
     },
 }
 
-fn encode(command: &JournalCommand) -> Vec<u8> {
-    serde_json::to_vec(command).expect("a JournalCommand always serializes")
+fn encode(command: &GrainJournalCommand) -> Vec<u8> {
+    serde_json::to_vec(command).expect("a GrainJournalCommand always serializes")
 }
 
-fn decode(bytes: &[u8]) -> Option<JournalCommand> {
+fn decode(bytes: &[u8]) -> Option<GrainJournalCommand> {
     serde_json::from_slice(bytes).ok()
 }
 
 type Projection = Arc<Mutex<BTreeMap<GrainName, GrainLog>>>;
 type Waiters = Arc<Mutex<HashMap<u64, oneshot::Sender<Seq>>>>;
 
-struct Inner<R: RaftLog> {
+struct Inner<R: RaftConsensus> {
     consensus: R,
     group: GroupId,
     self_node: NodeId,
@@ -155,34 +155,34 @@ struct Inner<R: RaftLog> {
     next_nonce: AtomicU64,
     /// The commit high-water mark the apply loop has folded from the stream
     /// (`Committed::commit`). The rehydration barrier
-    /// ([`catch_up`](RaftJournal::catch_up)) waits for it to reach the leader's
+    /// ([`catch_up`](RaftGrainJournal::catch_up)) waits for it to reach the leader's
     /// established commit, so a freshly-activated grain never rebuilds from a
     /// still-draining projection — the cold-restart race (spec §9, invariant
     /// **G3**/**G14**). Folded monotonically, so it never regresses.
     seen: Arc<AtomicU64>,
 }
 
-/// A [`Journal`] backed by a Raft group (spec §7.4 tier 2). Cloning shares one
+/// A [`GrainJournal`] backed by a Raft group (spec §7.4 tier 2). Cloning shares one
 /// projection and one consensus handle.
-pub struct RaftJournal<R: RaftLog> {
+pub struct RaftGrainJournal<R: RaftConsensus> {
     inner: Arc<Inner<R>>,
 }
 
-impl<R: RaftLog> Clone for RaftJournal<R> {
+impl<R: RaftConsensus> Clone for RaftGrainJournal<R> {
     fn clone(&self) -> Self {
-        RaftJournal {
+        RaftGrainJournal {
             inner: Arc::clone(&self.inner),
         }
     }
 }
 
-impl<R: RaftLog> RaftJournal<R> {
+impl<R: RaftConsensus> RaftGrainJournal<R> {
     /// Build a journal over `group` on `consensus`. Subscribes to the group's
     /// committed stream and launches the apply task **now**, so the projection
     /// sees the log from its first entry (subscribe-before-drive, per
-    /// [`RaftLog::subscribe_commits`]). The caller must have `create_group`'d the
+    /// [`RaftConsensus::subscribe_commits`]). The caller must have `create_group`'d the
     /// group first.
-    pub fn new(consensus: R, group: GroupId) -> RaftJournal<R> {
+    pub fn new(consensus: R, group: GroupId) -> RaftGrainJournal<R> {
         let self_node = consensus.node();
         let epoch = consensus.next_u64();
         let projection: Projection = Arc::new(Mutex::new(BTreeMap::new()));
@@ -201,7 +201,7 @@ impl<R: RaftLog> RaftJournal<R> {
             Arc::clone(&waiters),
             Arc::clone(&seen),
         )));
-        RaftJournal {
+        RaftGrainJournal {
             inner: Arc::new(Inner {
                 consensus,
                 group,
@@ -250,7 +250,7 @@ fn restore_projection(bytes: &[u8]) -> BTreeMap<GrainName, GrainLog> {
 /// (a freshly added or lagging replica catching up without replaying the log).
 /// Runs until the journal is dropped and the channel closes.
 #[allow(clippy::too_many_arguments)]
-async fn apply_loop<R: RaftLog>(
+async fn apply_loop<R: RaftConsensus>(
     consensus: R,
     group: GroupId,
     self_node: NodeId,
@@ -289,7 +289,7 @@ async fn apply_loop<R: RaftLog>(
             continue;
         };
         match command {
-            JournalCommand::Append { grain, events, id } => {
+            GrainJournalCommand::Append { grain, events, id } => {
                 // Apply once per `ProposalId`: a timed-out append whose entry
                 // commits later must not double-apply (commit-once, the analogue
                 // of the membership stamp rule).
@@ -317,7 +317,7 @@ async fn apply_loop<R: RaftLog>(
                     }
                 }
             }
-            JournalCommand::Snapshot { grain, at, state } => {
+            GrainJournalCommand::Snapshot { grain, at, state } => {
                 let mut projection = projection.lock().expect("projection mutex poisoned");
                 projection.entry(grain).or_default().snapshot = Some((Seq::new(at), state));
             }
@@ -339,9 +339,9 @@ async fn apply_loop<R: RaftLog>(
     }
 }
 
-impl<R: RaftLog> Journal for RaftJournal<R> {
+impl<R: RaftConsensus> GrainJournal for RaftGrainJournal<R> {
     async fn append(&self, grain: &GrainName, _after: Seq, events: Vec<Vec<u8>>) -> AppendOutcome {
-        // Tier 2 ignores `after` (which `MemoryJournal` asserts against its head):
+        // Tier 2 ignores `after` (which `MemoryGrainJournal` asserts against its head):
         // commit order in the shard's Raft log is the authority for `Seq`, the
         // single-writer fence is leadership, and re-applies are deduped by nonce —
         // so the caller's optimistic head is neither needed nor trusted here.
@@ -359,7 +359,7 @@ impl<R: RaftLog> Journal for RaftJournal<R> {
             .expect("waiters mutex poisoned")
             .insert(nonce, tx);
 
-        let command = JournalCommand::Append {
+        let command = GrainJournalCommand::Append {
             grain: grain.clone(),
             events,
             id: ProposalId {
@@ -396,7 +396,7 @@ impl<R: RaftLog> Journal for RaftJournal<R> {
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> Result<Vec<(Seq, Vec<u8>)>, JournalError> {
+    ) -> Result<Vec<(Seq, Vec<u8>)>, GrainJournalError> {
         let projection = self.inner.projection.lock().expect("projection mutex poisoned");
         let Some(log) = projection.get(grain) else {
             return Ok(Vec::new());
@@ -404,7 +404,7 @@ impl<R: RaftLog> Journal for RaftJournal<R> {
         Ok(slice(&log.events, from, limit))
     }
 
-    async fn head(&self, grain: &GrainName) -> Result<Seq, JournalError> {
+    async fn head(&self, grain: &GrainName) -> Result<Seq, GrainJournalError> {
         let projection = self.inner.projection.lock().expect("projection mutex poisoned");
         Ok(projection
             .get(grain)
@@ -419,7 +419,7 @@ impl<R: RaftLog> Journal for RaftJournal<R> {
         // Best-effort (§9, G4): the snapshot is only an optimization, so we
         // propose it and report success without blocking on its commit. The
         // projection applies it when it lands; the journal stays the authority.
-        let command = JournalCommand::Snapshot {
+        let command = GrainJournalCommand::Snapshot {
             grain: grain.clone(),
             at: at.value(),
             state,
@@ -434,7 +434,7 @@ impl<R: RaftLog> Journal for RaftJournal<R> {
     async fn load_snapshot(
         &self,
         grain: &GrainName,
-    ) -> Result<Option<(Seq, Vec<u8>)>, JournalError> {
+    ) -> Result<Option<(Seq, Vec<u8>)>, GrainJournalError> {
         let projection = self.inner.projection.lock().expect("projection mutex poisoned");
         Ok(projection.get(grain).and_then(|log| log.snapshot.clone()))
     }
@@ -444,7 +444,7 @@ impl<R: RaftLog> Journal for RaftJournal<R> {
         // reflects the leader's *established* commit, so a grain that just
         // activated rebuilds from the whole committed log rather than a prefix.
         //
-        // [`ready_commit`](actor_cluster::RaftLog::group_ready_commit) is the
+        // [`ready_commit`](actor_cluster::RaftConsensus::group_ready_commit) is the
         // highest committed application index, available only once the current
         // leader has committed in its term; `seen` is the commit watermark the
         // apply loop has folded from the stream. Both are indices on the same
