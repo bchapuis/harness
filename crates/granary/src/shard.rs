@@ -107,9 +107,9 @@ struct GrainLog {
 /// from one snapshot install instead of replaying the whole history.
 const COMPACT_EVERY: u64 = 64;
 
-/// One shard-log record. The application command bytes of the group's Raft log.
+/// One journal command. The application command bytes of the group's Raft log.
 #[derive(Serialize, Deserialize)]
-enum Record {
+enum JournalCommand {
     /// A grain's atomic event batch, tagged with its [`ProposalId`] so the
     /// proposer's `append` waiter can be completed (and re-applies deduped) on
     /// commit. The id is unique shard-wide, even across leaders and restarts.
@@ -126,8 +126,12 @@ enum Record {
     },
 }
 
-fn encode(record: &Record) -> Vec<u8> {
-    serde_json::to_vec(record).expect("a Record always serializes")
+fn encode(command: &JournalCommand) -> Vec<u8> {
+    serde_json::to_vec(command).expect("a JournalCommand always serializes")
+}
+
+fn decode(bytes: &[u8]) -> Option<JournalCommand> {
+    serde_json::from_slice(bytes).ok()
 }
 
 type Projection = Arc<Mutex<BTreeMap<GrainName, GrainLog>>>;
@@ -262,11 +266,11 @@ async fn apply_loop<R: RaftLog>(
                 continue;
             }
         };
-        let Ok(record) = serde_json::from_slice::<Record>(&bytes) else {
-            continue; // a record this journal cannot parse is defensively ignored
+        let Some(command) = decode(&bytes) else {
+            continue; // a command this journal cannot parse is defensively ignored
         };
-        match record {
-            Record::Append { grain, events, id } => {
+        match command {
+            JournalCommand::Append { grain, events, id } => {
                 // Apply once per `ProposalId`: a timed-out append whose entry
                 // commits later must not double-apply (commit-once, the analogue
                 // of the membership stamp rule).
@@ -294,7 +298,7 @@ async fn apply_loop<R: RaftLog>(
                     }
                 }
             }
-            Record::Snapshot { grain, at, state } => {
+            JournalCommand::Snapshot { grain, at, state } => {
                 let mut projection = projection.lock().expect("projection mutex poisoned");
                 projection.entry(grain).or_default().snapshot = Some((Seq::new(at), state));
             }
@@ -333,7 +337,7 @@ impl<R: RaftLog> Journal for RaftJournal<R> {
             .expect("waiters mutex poisoned")
             .insert(nonce, tx);
 
-        let record = Record::Append {
+        let command = JournalCommand::Append {
             grain: grain.clone(),
             events,
             id: ProposalId {
@@ -344,7 +348,7 @@ impl<R: RaftLog> Journal for RaftJournal<R> {
         };
         self.inner
             .consensus
-            .propose_to(self.inner.group, encode(&record))
+            .propose_to(self.inner.group, encode(&command))
             .await;
 
         // Await the commit, bounded by the timeout (quorum loss → Unavailable).
@@ -393,14 +397,14 @@ impl<R: RaftLog> Journal for RaftJournal<R> {
         // Best-effort (§9, G4): the snapshot is only an optimization, so we
         // propose it and report success without blocking on its commit. The
         // projection applies it when it lands; the journal stays the authority.
-        let record = Record::Snapshot {
+        let command = JournalCommand::Snapshot {
             grain: grain.clone(),
             at: at.value(),
             state,
         };
         self.inner
             .consensus
-            .propose_to(self.inner.group, encode(&record))
+            .propose_to(self.inner.group, encode(&command))
             .await;
         AppendOutcome::Committed(at)
     }

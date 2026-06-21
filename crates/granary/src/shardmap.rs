@@ -60,23 +60,27 @@ pub trait ShardMapSource: Send + Sync + 'static {
 
 /// The map group's id for a grain type: [`group_id_for`] at the reserved
 /// [`MAP_SHARD_INDEX`], so it never collides with a data shard's group.
-fn map_group_id(grain_type: &'static str) -> GroupId {
+fn map_group_id_for(grain_type: &'static str) -> GroupId {
     group_id_for(ShardId {
         grain_type,
         index: MAP_SHARD_INDEX,
     })
 }
 
-/// One committed allocation record in the map group's log (spec §7.6).
+/// One committed allocation command in the map group's log (spec §7.6).
 #[derive(Serialize, Deserialize)]
-enum MapRecord {
+enum ShardMapCommand {
     /// Shard `shard` is replicated by `replicas` — the only nodes that hold its
     /// data and can lead it (§7.1).
     Assign { shard: u32, replicas: Vec<NodeId> },
 }
 
-fn encode(record: &MapRecord) -> Vec<u8> {
-    serde_json::to_vec(record).expect("a MapRecord always serializes")
+fn encode(command: &ShardMapCommand) -> Vec<u8> {
+    serde_json::to_vec(command).expect("a ShardMapCommand always serializes")
+}
+
+fn decode(bytes: &[u8]) -> Option<ShardMapCommand> {
+    serde_json::from_slice(bytes).ok()
 }
 
 // --- Tier 1: the single node replicates everything ---------------------------
@@ -138,7 +142,7 @@ impl RaftShardMap {
         shards: usize,
         replicas: usize,
     ) -> RaftShardMap {
-        let group = map_group_id(grain_type);
+        let group = map_group_id_for(grain_type);
         let self_node = consensus.node();
         // Tier 2 rides Raft: the map group and every shard group elect through the
         // system's consensus engine. A clustered system with no configured voters
@@ -233,9 +237,8 @@ async fn apply_loop<R: RaftLog>(
         let Committed::Apply { command: bytes, .. } = observation else {
             continue;
         };
-        let Ok(MapRecord::Assign { shard, replicas }) = serde_json::from_slice::<MapRecord>(&bytes)
-        else {
-            continue; // a record this map cannot parse is defensively ignored
+        let Some(ShardMapCommand::Assign { shard, replicas }) = decode(&bytes) else {
+            continue; // a command this map cannot parse is defensively ignored
         };
         // Record the latest allocation; capture the prior set to diff against.
         let old = {
@@ -276,7 +279,7 @@ async fn apply_loop<R: RaftLog>(
 
 /// The leader-only allocator (spec §7.6, §7.7): while this node leads the map
 /// group, keep each shard's committed replica set equal to its rendezvous choice
-/// over the **current cluster voters**. It re-proposes an [`Assign`](MapRecord::Assign)
+/// over the **current cluster voters**. It re-proposes an [`Assign`](ShardMapCommand::Assign)
 /// whenever a shard's desired set differs from the committed one — so as the
 /// cluster grows or shrinks, shards rebalance onto/off the changed members. All
 /// nodes see the same committed `cluster_voters()`, so the rendezvous is agreed;
@@ -316,7 +319,7 @@ async fn allocator_loop<R: RaftLog>(
             let committed = inner.lock().expect("shard map mutex poisoned").allocation.get(&shard).cloned();
             if committed.as_ref() != Some(&desired) {
                 consensus
-                    .propose_to(group, encode(&MapRecord::Assign { shard, replicas: desired }))
+                    .propose_to(group, encode(&ShardMapCommand::Assign { shard, replicas: desired }))
                     .await;
             }
         }
