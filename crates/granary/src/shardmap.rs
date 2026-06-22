@@ -13,8 +13,8 @@
 //! Reached through the object-safe [`ShardMapSource`] seam — the map analogue of
 //! [`DynGrainJournal`](crate::journal::DynGrainJournal) — so the gateway and `Granary` stay
 //! free of the consensus type. Two implementations: the single-node
-//! [`LocalShardMap`] (Tier 1) and the [`RaftShardMap`] over a clustered system
-//! (Tier 2). The allocation is static after bootstrap (rebalancing and split/merge
+//! [`LocalShardMap`] (the `Local` tier) and the [`RaftShardMap`] over a clustered system
+//! (the `Quorum` tier). The allocation is static after bootstrap (rebalancing and split/merge
 //! are deferred).
 
 use std::collections::BTreeMap;
@@ -32,8 +32,10 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::journal::DynGrainJournal;
-use crate::memory::MemoryGrainJournal;
-use crate::shard::RaftGrainJournal;
+use crate::memory::LocalGrainJournal;
+use crate::replica_store::ReplicaTransport;
+use crate::shard::QuorumGrainJournal;
+use crate::store::GrainStore;
 use crate::system::MAP_SHARD_INDEX;
 use crate::system::ShardId;
 use crate::system::group_id_for;
@@ -83,19 +85,22 @@ fn decode(bytes: &[u8]) -> Option<ShardMapCommand> {
     serde_json::from_slice(bytes).ok()
 }
 
-// --- Tier 1: the single node replicates everything ---------------------------
+// --- the `Local` tier: the single node replicates everything ---------------------------
 
-/// The single-node shard map (Tier 1): this node is the sole replica of every
-/// shard, each backed by an independent in-memory store.
+/// The single-node shard map (`Local` tier): this node is the sole replica of every
+/// shard, all keyed in one local [`GrainStore`] by shard index.
 pub(crate) struct LocalShardMap {
     node: NodeId,
     journals: Vec<Arc<dyn DynGrainJournal>>,
 }
 
 impl LocalShardMap {
-    pub(crate) fn new(node: NodeId, shards: usize) -> LocalShardMap {
+    pub(crate) fn new(node: NodeId, shards: usize, store: Arc<dyn GrainStore>) -> LocalShardMap {
         let journals = (0..shards)
-            .map(|_| Arc::new(MemoryGrainJournal::new()) as Arc<dyn DynGrainJournal>)
+            .map(|shard| {
+                Arc::new(LocalGrainJournal::over(Arc::clone(&store), shard as u32))
+                    as Arc<dyn DynGrainJournal>
+            })
             .collect();
         LocalShardMap { node, journals }
     }
@@ -111,7 +116,7 @@ impl ShardMapSource for LocalShardMap {
     }
 }
 
-// --- Tier 2: the consensus-agreed map over a Raft group ----------------------
+// --- the `Quorum` tier: the consensus-agreed map over a Raft group ----------------------
 
 /// The committed allocation and the local journals built from it. Shared between
 /// the apply loop (writer) and the [`ShardMapSource`] reads.
@@ -123,7 +128,7 @@ struct Inner {
     journals: BTreeMap<u32, Arc<dyn DynGrainJournal>>,
 }
 
-/// A [`ShardMapSource`] backed by a per-type Raft group (Tier 2). The group's
+/// A [`ShardMapSource`] backed by a per-type Raft group (the `Quorum` tier). The group's
 /// committed log is the allocation. The consensus handle lives only in the
 /// spawned loops, so the source itself is just the shared `Inner`.
 pub(crate) struct RaftShardMap {
@@ -141,19 +146,21 @@ impl RaftShardMap {
         grain_type: &'static str,
         shards: usize,
         replicas: usize,
+        local: Arc<dyn GrainStore>,
+        transport: Arc<dyn ReplicaTransport>,
     ) -> RaftShardMap {
         let group = map_group_id_for(grain_type);
         let self_node = consensus.node();
-        // Tier 2 rides Raft: the map group and every shard group elect through the
+        // the `Quorum` tier rides Raft: the map group and every shard group elect through the
         // system's consensus engine. A clustered system with no configured voters
         // has no engine at all (only `MembershipMode::Leader` builds one) — so no
         // group would ever elect, the gateway's redirect would hint this node back
         // at itself, and every grain call would loop on `NotLeader`. Fail loud at
-        // host-construction (`granary()`), not silently at the first call. Tier 1
+        // host-construction (`granary()`), not silently at the first call. the `Local` tier
         // never reaches here: `LocalSystem` serves a `LocalShardMap` instead.
         assert!(
             !consensus.configured_voters().is_empty(),
-            "granary Tier-2 requires leader-based consensus, but the system reports \
+            "granary `Quorum` requires leader-based consensus, but the system reports \
              no configured Raft voters: start the node in MembershipMode::Leader \
              (the only mode that builds the Raft engine). Static, Registry, and \
              Gossip modes have no engine, so no shard can elect a leader and every \
@@ -175,6 +182,8 @@ impl RaftShardMap {
             self_node,
             commits,
             Arc::clone(&inner),
+            local,
+            transport,
         )));
         consensus.launch(Box::pin(allocator_loop(
             consensus.clone(),
@@ -209,26 +218,30 @@ impl ShardMapSource for RaftShardMap {
 /// each shard's **latest** replica set and reconcile this node's local store with
 /// it. The first `Assign` is the founding allocation; later `Assign`s are
 /// rebalances (membership changed). On each change this node:
-/// - **becomes a replica** (in new, not old): builds the shard's store. Subscribe
-///   before create (`RaftGrainJournal::new` registers the commit sink, then
-///   `create_group`), so the projection sees the shard log from the start. The
-///   group is created over the **old** replica set so a node newly joining the
-///   shard is a non-member that does not disrupt the shard's election — the shard
-///   leader's reconcile loop then `AddVoter`s it and it catches up via replication.
-///   (On the founding `Assign` there is no old set, so it is created over the
-///   founding replicas, of which this node is one.)
+/// - **becomes a replica** (in new, not old): creates the shard's leader-election
+///   group and builds its [`QuorumGrainJournal`]. The group is created over the
+///   **old** replica set so a node newly joining the shard is a non-member that does
+///   not disrupt the shard's election — the shard leader's reconcile loop then
+///   `AddVoter`s it. (On the founding `Assign` there is no old set, so it is created
+///   over the founding replicas, of which this node is one.) Note: grain data is not
+///   replicated through this group, so a newly-added replica must be streamed each
+///   grain's records before it counts toward a quorum (§7.6) — that data movement is
+///   deferred; the current cut assumes a fixed replica set.
 /// - **stops being a replica** (in old, not new): drops the store from the registry.
 ///   An active `Host` keeps its own `Arc`, so its in-flight append still completes
 ///   or fails cleanly as `NotLeader` when the shard leader removes it; the next call
 ///   re-activates the grain on a current replica.
 ///
 /// Runs until the map group's commit stream closes.
+#[allow(clippy::too_many_arguments)]
 async fn apply_loop<R: RaftConsensus>(
     consensus: R,
     grain_type: &'static str,
     self_node: NodeId,
     commits: Receiver<Committed>,
     inner: Arc<Mutex<Inner>>,
+    local: Arc<dyn GrainStore>,
+    transport: Arc<dyn ReplicaTransport>,
 ) {
     while let Ok(observation) = commits.recv().await {
         // The map group is tiny and never compacts, so it only ever applies
@@ -255,13 +268,21 @@ async fn apply_loop<R: RaftConsensus>(
             index: shard,
         });
         if now_replica && !was_replica {
-            // Newly a replica: subscribe, then create the group over the *old* set
+            // Newly a replica: create the leader-election group over the *old* set
             // (a non-member join — no election disruption); the shard leader's
-            // reconcile loop adds this node, which then catches up.
-            let journal: Arc<dyn DynGrainJournal> =
-                Arc::new(RaftGrainJournal::new(consensus.clone(), shard_group));
+            // reconcile loop adds this node, which then catches up. The group holds no
+            // grain data; the journal's per-grain quorum append (§7.2) provides
+            // durability over this node's local store and the peer transport.
             let create_voters = old.unwrap_or_else(|| replicas.clone());
             consensus.create_group(shard_group, create_voters, Vec::new());
+            let journal: Arc<dyn DynGrainJournal> = Arc::new(QuorumGrainJournal::new(
+                consensus.clone(),
+                shard_group,
+                shard,
+                replicas.clone(),
+                Arc::clone(&local),
+                Arc::clone(&transport),
+            ));
             inner
                 .lock()
                 .expect("shard map mutex poisoned")

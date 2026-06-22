@@ -38,6 +38,8 @@ use actor_runtime::TokioClock;
 use actor_runtime::TokioSpawner;
 use actor_serialization::JsonCodec;
 use harness::Budget;
+use harness::FileGrainStore;
+use harness::GranaryConfig;
 use harness::Harness;
 use harness::HarnessConfig;
 use harness::HarnessEvent;
@@ -359,6 +361,20 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode) -> Kinds {
                 .sandbox(harness::SandboxProfile::image(&opts.fc_rootfs)),
         }
     };
+    // Durable grain storage under --data (§7.4): a session is a grain, so its
+    // journal must outlive a process restart for a cold-restarted cluster to recover
+    // the conversation. Without this, each node's grain store is in-memory and a full
+    // restart loses every session (the records do NOT ride the Raft log — that log
+    // only carries leader election and the shard map, §7.1). One factory, shared by
+    // both kinds: it caches per node, so a node's two grain types share one on-disk
+    // store keyed by (shard, grain) — the grain analogue of the Raft WAL one line up.
+    let grain_store = FileGrainStore::factory(opts.data.join("grains"));
+    let grain = |kind: Kind| -> Kind {
+        kind.grain(GranaryConfig {
+            grain_store: Some(grain_store.clone()),
+            ..GranaryConfig::default()
+        })
+    };
     // The Compute tier exists only behind TieredSandboxes; steer toward it
     // for JavaScript exactly where it is offered, and nowhere it is not.
     let js_hint = if sandbox_mode == SandboxMode::Local {
@@ -379,6 +395,7 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode) -> Kinds {
     )
     .delegates_to(&["worker"])
     .budget(Budget::new(200_000, 50));
+    let assistant = grain(assistant);
     let worker = tools(
         Kind::new(format!(
             "You are a worker agent. Complete the task you were delegated using the `shell` \
@@ -387,6 +404,7 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode) -> Kinds {
         .model(params),
     )
     .budget(Budget::new(100_000, 25));
+    let worker = grain(worker);
     Kinds::new()
         .register("assistant", assistant)
         .register("worker", worker)

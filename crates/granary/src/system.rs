@@ -10,7 +10,7 @@
 //! gateway, and ref are then generic over just `G: Grain`, and `G::System`
 //! supplies these capabilities.
 //!
-//! This is the seam Tier 2 reuses: a clustered system that can host shards
+//! This is the seam the `Quorum` tier reuses: a clustered system that can host shards
 //! implements `GranarySystem` the same way, and no grain code changes.
 
 use std::sync::Arc;
@@ -31,14 +31,16 @@ use actor_core::NodeId;
 use actor_core::Spawner;
 
 use crate::event::GrainEvent;
+use crate::replica_store::ReplicaTransport;
 use crate::shardmap::LocalShardMap;
 use crate::shardmap::RaftShardMap;
 use crate::shardmap::ShardMapSource;
+use crate::store::GrainStore;
 
 /// A shard of one grain type's namespace (spec §7.1): the granary-local handle a
 /// [`GranarySystem`] maps to its backing store and consensus group. Kept distinct
 /// from `actor_cluster::GroupId` so the seam signature stays system-agnostic — a
-/// Tier-1 single-node system has no Raft group at all.
+/// `Local` single-node system has no Raft group at all.
 ///
 /// A grain's name maps to one `ShardId` by a stable hash ([`shard_for`]); the
 /// number of shards per type is fixed at `granary()` time (control-plane-stored
@@ -131,7 +133,7 @@ pub(crate) fn select_replicas(members: &[NodeId], group: GroupId, replicas: usiz
 /// An [`ActorSystem`] that can host grains: it exposes virtual time, task
 /// launching, the grain event channel (§10, §13), and the shard seam that places
 /// a grain's durable storage and resolves its leader (§5.1, §5.2, §7). Implemented
-/// for [`LocalSystem`] (Tier 1, single-node) and [`ClusterSystem`] (Tier 2,
+/// for [`LocalSystem`] (the `Local` tier, single-node) and [`ClusterSystem`] (the `Quorum` tier,
 /// sharded Raft); a grain is generic over just `G`, and `G::System` supplies these.
 pub trait GranarySystem: ActorSystem {
     /// The current virtual time (for the idle/hibernation clock, §10).
@@ -151,26 +153,30 @@ pub trait GranarySystem: ActorSystem {
 
     /// Build the **shard map** for a grain type (spec §7.6): the consensus-agreed
     /// record of which nodes replicate each of its `shards`, and this node's local
-    /// store for shards it replicates. Tier 1 returns a single-node map (this node
-    /// replicates everything); Tier 2 creates a per-type Raft group whose committed
-    /// log is the allocation, so every node agrees regardless of join order. The
-    /// allocation targets `replicas` nodes per shard. Created once at `granary()`
-    /// time; routing reads it through the [`ShardMapSource`] seam.
+    /// store for shards it replicates. The `Local` tier returns a single-node map
+    /// (this node replicates everything); the `Quorum` tier creates a per-type Raft
+    /// group whose committed log is the allocation, so every node agrees regardless
+    /// of join order. The allocation targets `replicas` nodes per shard. `local` is
+    /// this node's durable [`GrainStore`] and `transport` reaches peer replicas'
+    /// stores (§7.2). Created once at `granary()` time; routing reads it through the
+    /// [`ShardMapSource`] seam.
     fn shard_map(
         &self,
         grain_type: &'static str,
         shards: usize,
         replicas: usize,
+        local: Arc<dyn GrainStore>,
+        transport: Arc<dyn ReplicaTransport>,
     ) -> Arc<dyn ShardMapSource>;
 
     /// The node that currently leads `shard`, where its grains activate (§5.2), or
     /// `None` if this node does not replicate the shard (so cannot know) or a shard
-    /// election is in flight. Tier 1 is always its own leader.
+    /// election is in flight. the `Local` tier is always its own leader.
     fn shard_leader(&self, shard: ShardId) -> Option<NodeId>;
 
     /// Whether this node leads `shard` — the single-writer fence (§8) and the gate
     /// for local activation (§5.4). `false` on a node that does not replicate the
-    /// shard. Tier 1 leads every shard.
+    /// shard. the `Local` tier leads every shard.
     fn leads_shard(&self, shard: ShardId) -> bool;
 }
 
@@ -197,9 +203,12 @@ impl<C: Clock, E: Entropy, S: Spawner> GranarySystem for LocalSystem<C, E, S> {
         _grain_type: &'static str,
         shards: usize,
         _replicas: usize,
+        local: Arc<dyn GrainStore>,
+        _transport: Arc<dyn ReplicaTransport>,
     ) -> Arc<dyn ShardMapSource> {
-        // Tier 1: the single node replicates every shard, each an in-memory log.
-        Arc::new(LocalShardMap::new(self.node(), shards))
+        // `Local` tier: the single node replicates every shard, all keyed in one
+        // local store (the peer transport is unused — there are no peers).
+        Arc::new(LocalShardMap::new(self.node(), shards, local))
     }
 
     fn shard_leader(&self, _shard: ShardId) -> Option<NodeId> {
@@ -240,11 +249,21 @@ where
         grain_type: &'static str,
         shards: usize,
         replicas: usize,
+        local: Arc<dyn GrainStore>,
+        transport: Arc<dyn ReplicaTransport>,
     ) -> Arc<dyn ShardMapSource> {
-        // Tier 2: a per-type Raft group whose committed log is the allocation, so
-        // every node agrees on each shard's replica set (§7.6). It creates each
-        // assigned shard's group + journal as the allocation commits.
-        Arc::new(RaftShardMap::new(self.clone(), grain_type, shards, replicas))
+        // `Quorum` tier: a per-type Raft group whose committed log is the allocation,
+        // so every node agrees on each shard's replica set (§7.6). It creates each
+        // assigned shard's leader-election group + per-grain quorum journal as the
+        // allocation commits.
+        Arc::new(RaftShardMap::new(
+            self.clone(),
+            grain_type,
+            shards,
+            replicas,
+            local,
+            transport,
+        ))
     }
 
     fn shard_leader(&self, shard: ShardId) -> Option<NodeId> {

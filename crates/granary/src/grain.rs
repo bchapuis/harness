@@ -63,7 +63,7 @@ impl std::fmt::Display for GrainName {
 /// and the lifecycle.
 ///
 /// `Self::System` must be a [`GranarySystem`] — a system that can host grains
-/// (Tier-1 [`LocalSystem`](actor_core::LocalSystem), or a Tier-2 shard-hosting
+/// (`Local` [`LocalSystem`](actor_core::LocalSystem), or a `Quorum` shard-hosting
 /// clustered system). This refines the spec's `System: ActorSystem` with the
 /// capabilities a grain activation needs (timer, task launch, event stream).
 pub trait Grain: Sized + Send + 'static {
@@ -94,7 +94,7 @@ pub trait Grain: Sized + Send + 'static {
 
     /// List the command messages this grain accepts over the network (§5.5).
     /// Mirrors `Actor::register`; the default registers nothing (a grain reached
-    /// only locally, as in Tier 1).
+    /// only locally, as in the `Local` tier).
     fn register(_registry: &mut GrainRegistry<Self>) {}
 
     /// Called once after the activation has rehydrated, before the first command

@@ -7,7 +7,7 @@
 //! the grain's rehydration (§7.5), exercised here by crashing a node and
 //! re-submitting until the run completes on the new leader.
 //!
-//! This is the converged-cluster check. Pushing granary's Tier-2 consensus
+//! This is the converged-cluster check. Pushing granary's `Quorum`-tier consensus
 //! through a *continuous* partition/crash nemesis is granary's own V&V remit
 //! (its swarm harness), not the harness's.
 
@@ -215,7 +215,7 @@ fn assert_invariants(events: &[Event]) {
 }
 
 /// Regression (the standalone-harness `NotLeader` livelock): a kind carries a
-/// `GranaryConfig`, so each kind becomes a Tier-2 grain type that needs the
+/// `GranaryConfig`, so each kind becomes a `Quorum`-tier grain type that needs the
 /// system's Raft engine to elect a shard leader. Building the harness on a
 /// cluster left in the default `Static` membership mode — no `.with_leader(...)`,
 /// hence no engine — must panic at construction (granary's guard), not hand back

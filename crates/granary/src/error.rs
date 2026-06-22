@@ -26,11 +26,11 @@ pub enum GrainError {
     Call(CallError),
     /// Leadership moved off the contacted node; the runtime retries against the
     /// hint and surfaces this only once the bounded redirect is exhausted (§5.4,
-    /// §8). Unreachable in the Tier-1 single-node journal, kept for API stability.
+    /// §8). Unreachable in the `Local` single-node journal, kept for API stability.
     NotLeader(NodeId),
     /// The grain's shard could not reach a quorum, so the write did not commit
     /// (§11). CP, not AP: the caller retries or fails over rather than forking.
-    /// Unreachable in the Tier-1 single-node journal, kept for API stability.
+    /// Unreachable in the `Local` single-node journal, kept for API stability.
     Unavailable(String),
     /// No registered handler for the command's manifest (§5.5).
     Unhandled,

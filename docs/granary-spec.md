@@ -482,7 +482,7 @@ Replaying a long event history on every activation is wasteful, so a grain perio
 - **Rehydration (§10).** On activation, after the barrier, the leader loads the grain's latest snapshot `(s_seq, s_state)`, itself recovered from a quorum on the `Quorum` tier (`load_snapshot`, §7.3), and the records after `s_seq` up to the recovered head, replaying them and folding via `apply` (§4.1) to reach the head. The head is set **only** from journal/snapshot returns, never trusted from a prior activation's memory (invariant **G3**).
 - **A snapshot MUST NOT shorten the effective log.** If a snapshot's `s_seq` exceeds the grain's committed head, the host MUST ignore it and replay from `ZERO`. The journal is always the authority; the snapshot is only an optimization (invariant **G4**).
 
-Compaction (truncating record prefixes for a grain once a snapshot covers them) is a background operation of the Replicator, below the seam. Because a fresh leader rebuilds from `load_snapshot` plus the records after it (§8), compaction MUST NOT remove a record prefix until a snapshot covering it is **durable on a quorum**; otherwise a recovery that misses that snapshot could find neither the snapshot nor the compacted records. It MUST NOT remove any record not yet covered by such a snapshot. Per-grain snapshots let a grain's history compact independently of its shard-mates.
+Compaction — truncating a grain's record prefix once a snapshot subsumes it — is a per-replica operation of the Replicator, below the seam: a replica drops the records up to a snapshot's `Seq` when it stores that snapshot, advancing a per-grain **base** (the file-backed store then rewrites its on-disk log to a single checkpoint, reclaiming the space). Its safety rests on two facts, so it need not wait for the snapshot to be durable on a quorum. First, a snapshot is only ever taken at the **committed head** (§9), so every record it subsumes was already quorum-committed. Second, a fresh leader recovers a grain's head by taking the **highest snapshot `Seq` any replica in its read quorum holds** as the head base and merging the records above it (§8). A replica has dropped a record prefix only if it holds a snapshot covering that prefix, so any recovery quorum finds, for every committed record, *either* the record itself *or* a snapshot that subsumes it — never neither. Quorum intersection thus still loses no acknowledged write (invariant **G14**). Per-grain snapshots let a grain's history compact independently of its shard-mates.
 
 ---
 
@@ -660,9 +660,15 @@ granary/                 # the grain runtime, built on actor-core + actor-cluste
   election.rs            # the per-shard leader-election group: a small Raft group owning leadership/term/replica-set (§8)
   replicator.rs          # the Replicator: per-grain quorum append fenced by the shard term;
                          #   Local (single-node) and Quorum (clustered) tiers (§7.2, §7.4)
+  store.rs               # the per-node GrainStore seam: term-fenced records keyed by (shard, grain),
+                         #   plus the in-memory MemoryGrainStore reference impl (§7.2, §7.4)
+  replica_store.rs       # the per-node replica-store actor + ReplicaTransport: the Quorum replicator
+                         #   quorum-appends to and recovers from peers over actor messaging (§7.2, §8)
   shard.rs               # the clustered GrainJournal: composes the leader-election group + Replicator over a key range (§7)
   shardmap.rs            # the consensus-agreed shard map (per-type map group); allocator + reconcile (§7.6, §7.7)
   memory.rs              # the single-node journal: Local replicator + in-memory event log (tier 1, §7.4)
+  file_store.rs          # the file-backed GrainStore: a node's records durable across a restart,
+                         #   so a cold-restarted cluster recovers each grain from a quorum (§7.4, G14)
   system.rs              # the GranarySystem capability seam + name→shard/group hashing (§5.1, §7)
   event.rs               # GrainEvent observability stream (§13)
   config.rs              # GranaryConfig (Appendix A)

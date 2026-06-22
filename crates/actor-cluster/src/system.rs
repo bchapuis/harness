@@ -1330,12 +1330,12 @@ where
         }
     }
 
-    fn group_ready_commit(&self, group: GroupId) -> Option<u64> {
-        self.group(group).and_then(|g| g.ready_commit())
-    }
-
     fn group_is_leader(&self, group: GroupId) -> bool {
         self.group(group).map(|g| g.is_leader()).unwrap_or(false)
+    }
+
+    fn group_term(&self, group: GroupId) -> Option<u64> {
+        self.group(group).map(|g| g.term())
     }
 
     fn group_leader(&self, group: GroupId) -> Option<NodeId> {

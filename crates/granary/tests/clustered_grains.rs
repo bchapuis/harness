@@ -1,5 +1,5 @@
-//! Cross-node grains on the Tier-2 sharded-Raft journal, under deterministic
-//! simulation (granary §14).
+//! Cross-node grains on the clustered `Quorum` journal (per-grain quorum append),
+//! under deterministic simulation (granary §14).
 //!
 //! These exercise the cluster-only invariants the single-node tier cannot reach:
 //! a grain hosted on a 3-node cluster activates on its shard's Raft leader and is
@@ -535,14 +535,26 @@ fn shrinking_the_cluster_moves_shards_off_a_removed_node() {
 
 #[test]
 fn quorum_loss_pauses_grain_writes_with_unavailable() {
-    // G11 (CP): with the shard's two followers crashed, the leader still believes
-    // it leads and accepts the write, but the entry can never commit — the output
-    // gate releases `Unavailable`, not a forked success. State is untouched.
+    // G11 (CP): an active grain whose shard loses quorum still believes it leads and
+    // accepts the write, but the per-grain append can never reach a quorum — the
+    // output gate releases `Unavailable`, not a forked success. State is untouched.
     let sim = Simulation::new(4);
     let (net, systems, granaries) = cluster(&sim);
     let key = "account/99";
     let leader = granaries[0].leader(key).expect("the shard elected a leader");
     let leader_idx = systems.iter().position(|s| s.node() == leader).unwrap();
+
+    // Activate the grain and commit one write *with* a quorum, so the leader holds a
+    // live, quorum-recovered activation (§8): the §11 scenario is an active grain
+    // that then loses quorum, not a cold activation under quorum loss (which can never
+    // recover its head and so fails to activate at all — also CP-correct).
+    let committed = {
+        let granary = granaries[leader_idx].clone();
+        drive(&sim, Duration::from_secs(5), async move {
+            granary.grain(key).ask(Deposit { cents: 100 }).await
+        })
+    };
+    assert_eq!(committed, Ok(100), "the first write commits with a quorum");
 
     // Crash the two non-leaders, leaving the leader without a quorum.
     for (idx, system) in systems.iter().enumerate() {
@@ -552,8 +564,9 @@ fn quorum_loss_pauses_grain_writes_with_unavailable() {
     }
     sim.run_for(Duration::from_secs(1));
 
-    // A write from the (local) leader proposes but never commits. The ask deadline
-    // outlasts the journal's commit timeout so the durability outcome surfaces.
+    // The next write appends to the local replica but can never reach a write quorum
+    // (§7.2); the ask deadline outlasts the per-grain append timeout, so the
+    // durability outcome surfaces.
     let outcome = {
         let granary = granaries[leader_idx].clone();
         drive(&sim, Duration::from_secs(13), async move {

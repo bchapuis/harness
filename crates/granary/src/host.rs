@@ -16,7 +16,7 @@
 //!   (invariant **G5**).
 //!
 //! The host appends through the [`GrainJournal`] seam, so the same protocol runs over
-//! the Tier-1 memory journal and (later) the Tier-2 sharded-Raft journal.
+//! the single-node `Local` journal and the clustered `Quorum` journal unchanged.
 
 use actor_core::Actor;
 use actor_core::ActorRef;
@@ -140,11 +140,12 @@ impl<G: Grain> Host<G> {
     /// ignored and replay starts from `ZERO` (**G4**).
     async fn rehydrate(&mut self, ctx: &Ctx<Host<G>>) -> Result<(), BoxError> {
         let codec = ctx.system().codec();
-        // Barrier first (spec §9, invariant G3/G14): wait until the journal's local
-        // view reflects every committed write before reading the head, so a grain
-        // activating on a freshly-elected leader never rebuilds from a still-
-        // draining projection and then serves stale reads. A no-op on Tier 1.
-        self.journal.catch_up().await;
+        // `head` is the rehydration barrier (spec §8, §9, invariant G3/G14): on the
+        // `Quorum` tier it recovers the grain's head from a write quorum by
+        // read-repair, so a grain activating on a freshly-elected leader never
+        // rebuilds from a stale head and then serves stale reads; it fails fast with
+        // `Unavailable` while the shard is still electing (§8.3), aborting the
+        // activation so the caller retries. A local read on the `Local` tier.
         let head = self.journal.head(&self.name).await.map_err(boxed)?;
 
         let (mut seq, from_snapshot) = match self.journal.load_snapshot(&self.name).await.map_err(boxed)? {

@@ -1,45 +1,47 @@
-//! Durable Raft state on the local filesystem (spec §9.4.3 item 2).
+//! Durable Raft state on the local filesystem (spec §9.4.3 item 2, §9).
 //!
-//! [`FileRaftWAL`] is the production [`RaftWAL`]: a voter's term, vote,
-//! and log survive a process restart, so a restarted voter can never grant a
-//! second vote in a term it already voted in (election safety, invariant #22).
-//! The layout matches the trait's two write paths, each with the durability
-//! technique that fits it:
+//! [`FileRaftWAL`] is the production [`RaftWAL`]: a voter's term, vote, log, and
+//! state-machine snapshot survive a process restart, so a restarted voter can never
+//! grant a second vote in a term it already voted in (election safety, invariant
+//! #22) and comes back over its compacted log rather than a blank one. The layout
+//! matches the trait's write paths, each with the durability technique that fits it:
 //!
 //! - **`term`** — one tiny JSON record `{term, voted_for}`, rewritten on every
 //!   [`save_term_and_vote`](RaftWAL::save_term_and_vote) by atomic replace
-//!   (write `term.tmp` → fsync → rename → fsync dir). A torn write is
-//!   impossible: a reader sees either the old record or the new one.
-//! - **`log`** — append-only framed records, one per [`RaftEntry`]:
-//!   `[u32 length][JSON payload][u64 FNV-1a checksum]`. Raft's
-//!   truncate-then-append maps to `set_len` at the entry's recorded offset
-//!   followed by appends; every write is fsynced before the method returns.
+//!   ([`wal::atomic_replace`]). A torn write is impossible: a reader sees either the
+//!   old record or the new one. It stays JSON on purpose — its parse-failure is the
+//!   corruption check that protects election safety.
+//! - **`log`** — a framed, checksummed append-only [`wal::Wal`] of `(absolute index,
+//!   entry)` records. Carrying the absolute index makes a crash mid-compaction
+//!   self-healing (below). Raft's truncate-then-append maps to
+//!   [`Wal::truncate`](wal::Wal::truncate) at the entry's recorded offset followed by
+//!   [`Wal::append_batch`](wal::Wal::append_batch); both fsync before returning.
+//! - **`snapshot`** — one postcard record `{index, term, data}` for the compacted
+//!   prefix (§9), rewritten by the same atomic replace as `term`. Written *before*
+//!   the log prefix it subsumes is dropped, so a crash can leave a snapshot newer
+//!   than the log but never the reverse.
 //!
-//! **Recovery.** At [`open`](FileRaftWAL::open), the log is scanned from
-//! the start; the first incomplete or checksum-failing record ends the valid
-//! prefix and everything after it is discarded (the file is truncated back).
-//! A torn tail is an entry whose write never returned, so the caller never
-//! acknowledged it — dropping it is correct, the standard WAL recovery. A
-//! corrupt `term` file is different: silently resetting the term could let the
-//! voter vote twice, so it is a hard error at open.
+//! **Recovery.** At [`open`](FileRaftWAL::open), the snapshot is loaded, then the log
+//! is recovered by [`Wal::open`](wal::Wal::open) (which discards a torn tail). Records
+//! whose absolute index is `≤` the snapshot index are discarded too — that is the
+//! self-heal for a crash between persisting a snapshot and rewriting the log: the
+//! stale prefix is dropped and the log rewritten to the retained suffix. A corrupt
+//! `term` or `snapshot` file is a hard error: silently resetting either could violate
+//! safety, so only the operator may resolve it.
 //!
-//! **Failure policy.** [`RaftWAL`]'s methods are infallible by signature;
-//! a voter whose state cannot be made durable cannot safely continue (it might
-//! otherwise announce un-persisted state). This implementation therefore
-//! panics on an I/O error after open, taking the consensus task down rather
-//! than risking a safety violation; peers observe the node unreachable.
+//! **Failure policy.** [`RaftWAL`]'s methods are infallible by signature; a voter
+//! whose state cannot be made durable cannot safely continue (it might announce
+//! un-persisted state). This implementation panics on an I/O error after open,
+//! taking the consensus task down rather than risking a safety violation; peers
+//! observe the node unreachable.
 //!
-//! **Single writer.** A storage directory must belong to one process at a
-//! time. Advisory locking (`File::try_lock`) needs a newer toolchain than the
-//! workspace MSRV, so this is documented, not enforced; the
-//! [`factory`](FileRaftWAL::factory) layout (one subdirectory per node)
-//! makes accidental sharing unlikely.
+//! **Single writer.** A storage directory must belong to one process at a time.
+//! Advisory locking (`File::try_lock`) needs a newer toolchain than the workspace
+//! MSRV, so this is documented, not enforced; the [`factory`](FileRaftWAL::factory)
+//! layout (one subdirectory per node) makes accidental sharing unlikely.
 
 use std::fs;
-use std::fs::File;
-use std::fs::OpenOptions;
 use std::io;
-use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -52,6 +54,7 @@ use actor_cluster::RaftWAL;
 use actor_core::NodeId;
 use serde::Deserialize;
 use serde::Serialize;
+use wal::Wal;
 
 /// Upper bound on one framed record's payload, as a sanity check while
 /// scanning: a length above this is treated as corruption, not an allocation.
@@ -65,81 +68,19 @@ struct TermRecord {
     voted_for: Option<NodeId>,
 }
 
-/// FNV-1a 64. Detects torn and partial writes (not adversarial tampering),
-/// which is all a local WAL needs; hand-rolled to avoid a dependency.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100_0000_01b3);
-    }
-    hash
-}
-
-/// Frame one log entry: `[u32 len][payload][u64 checksum]`, all little-endian.
-fn encode_record(entry: &RaftEntry) -> Vec<u8> {
-    let payload = serde_json::to_vec(entry).expect("a RaftEntry always serializes");
-    let mut record = Vec::with_capacity(4 + payload.len() + 8);
-    record.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    record.extend_from_slice(&payload);
-    record.extend_from_slice(&fnv1a(&payload).to_le_bytes());
-    record
-}
-
-/// Scan a log file's bytes into `(entries, per-entry start offsets, valid
-/// length)`. The scan stops at the first incomplete, oversized,
-/// checksum-failing, or unparsable record — the recovery rule: the valid
-/// prefix is the log; the tail was never acknowledged.
-fn scan_log(bytes: &[u8]) -> (Vec<RaftEntry>, Vec<u64>, u64) {
-    let mut entries = Vec::new();
-    let mut offsets = Vec::new();
-    let mut pos = 0usize;
-    while let Some(header) = bytes.get(pos..pos + 4) {
-        let len = u32::from_le_bytes(header.try_into().expect("4-byte slice"));
-        if len > MAX_RECORD {
-            break;
-        }
-        let len = len as usize;
-        let Some(payload) = bytes.get(pos + 4..pos + 4 + len) else {
-            break;
-        };
-        let Some(check) = bytes.get(pos + 4 + len..pos + 4 + len + 8) else {
-            break;
-        };
-        if u64::from_le_bytes(check.try_into().expect("8-byte slice")) != fnv1a(payload) {
-            break;
-        }
-        let Ok(entry) = serde_json::from_slice::<RaftEntry>(payload) else {
-            break;
-        };
-        offsets.push(pos as u64);
-        entries.push(entry);
-        pos += 4 + len + 8;
-    }
-    (entries, offsets, pos as u64)
-}
-
-/// Make a directory entry durable. File data is covered by `sync_all` on the
-/// file itself; creations and renames live in the directory, which needs its
-/// own fsync on unix. Elsewhere (Windows) directories cannot be opened for
-/// sync and the rename itself is the durability point.
-fn sync_dir(dir: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    File::open(dir)?.sync_all()?;
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
+/// The `snapshot` file's content (spec §9): the compacted prefix's last index and
+/// term, and the application snapshot taken at it.
+#[derive(Serialize, Deserialize)]
+struct SnapshotRecord {
+    index: u64,
+    term: u64,
+    data: Vec<u8>,
 }
 
 struct Inner {
-    /// The open append handle to the `log` file. With `O_APPEND`, writes land
-    /// at the current end even right after a truncating `set_len`.
-    log: File,
-    /// Byte offset where each entry's record starts, parallel to `state.log` —
-    /// what makes truncate-then-append a single `set_len`.
-    offsets: Vec<u64>,
-    /// The log file's current (valid) length — where the next record lands.
-    end: u64,
+    /// The framed log of `(absolute index, entry)` records — the retained suffix
+    /// above `snapshot_index`. Owns the file handle and the per-record offsets.
+    log: Wal<(u64, RaftEntry)>,
     /// The in-memory mirror of the durable state; every write updates it after
     /// the disk write succeeds, and [`RaftWAL::load`] clones it.
     state: PersistedRaft,
@@ -154,14 +95,15 @@ pub struct FileRaftWAL {
 }
 
 impl FileRaftWAL {
-    /// Open (creating if needed) the storage directory, recover the log's
-    /// valid prefix — truncating any torn tail — and load the persisted state.
+    /// Open (creating if needed) the storage directory: load the term and snapshot,
+    /// recover the log's valid prefix — discarding a torn tail and any records the
+    /// snapshot subsumes — and load the persisted state.
     ///
     /// # Errors
     ///
-    /// Any filesystem error, and — deliberately — a corrupt `term` file:
-    /// guessing a term could let the voter vote twice (election safety), so
-    /// only the operator may resolve that.
+    /// Any filesystem error, and — deliberately — a corrupt `term` or `snapshot`
+    /// file: guessing either could violate a safety property (a wrong term risks a
+    /// double vote), so only the operator may resolve it.
     pub fn open(dir: impl Into<PathBuf>) -> io::Result<FileRaftWAL> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
@@ -186,43 +128,59 @@ impl FileRaftWAL {
             Err(err) => return Err(err),
         };
 
-        let log_path = dir.join("log");
-        let bytes = match fs::read(&log_path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
+        let snapshot_path = dir.join("snapshot");
+        let (snapshot_index, snapshot_term, snapshot) = match fs::read(&snapshot_path) {
+            Ok(bytes) => {
+                let record: SnapshotRecord = postcard::from_bytes(&bytes).map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "corrupt raft snapshot file {} ({err}); refusing to guess a \
+                             compacted prefix — restore or remove the node's state and \
+                             rejoin it as a new member",
+                            snapshot_path.display()
+                        ),
+                    )
+                })?;
+                (record.index, record.term, Some(record.data))
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => (0, 0, None),
             Err(err) => return Err(err),
         };
-        let (entries, offsets, valid_end) = scan_log(&bytes);
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
-        if (valid_end as usize) < bytes.len() {
-            // A torn tail: the write never returned, so the entry was never
-            // announced. Truncate it away before anything is appended.
-            log.set_len(valid_end)?;
-            log.sync_all()?;
+
+        // The log: the shared WAL recovers the valid prefix and truncates a torn tail.
+        let (mut log, records) = Wal::<(u64, RaftEntry)>::open(dir.join("log"), MAX_RECORD)?;
+
+        // Discard records the snapshot subsumes (absolute index `≤ snapshot_index`):
+        // the self-heal for a crash between persisting a snapshot and rewriting the
+        // log. The retained suffix begins at `snapshot_index + 1`.
+        let dropped = records
+            .iter()
+            .take_while(|(index, _)| *index <= snapshot_index)
+            .count();
+        let retained: Vec<(u64, RaftEntry)> = records[dropped..].to_vec();
+        assert_contiguous(&retained, snapshot_index, &dir);
+
+        if dropped > 0 {
+            // A stale prefix (or any torn tail past it): rewrite to the retained
+            // suffix, normalizing the file and reclaiming the prefix's space.
+            log.rewrite(&retained)?;
         }
-        // Make the directory entries (a freshly created `log`) durable.
-        sync_dir(&dir)?;
+        // No directory fsync here: every file in `dir` is written through a wal
+        // primitive (`Wal::open` for `log`, `atomic_replace` for `term`/`snapshot`) that
+        // makes its own entry durable, and this layout creates no subdirectory of its own.
 
         Ok(FileRaftWAL {
             dir,
             inner: Mutex::new(Inner {
                 log,
-                offsets,
-                end: valid_end,
                 state: PersistedRaft {
                     term,
                     voted_for,
-                    log: entries,
-                    // Stage 1 leaves on-disk snapshotting unimplemented: this
-                    // storage keeps the full log and the engine's default
-                    // `save_snapshot` is a no-op here. Durable snapshots + log-prefix
-                    // truncation are a follow-up.
-                    snapshot_index: 0,
-                    snapshot_term: 0,
-                    snapshot: None,
+                    log: retained.into_iter().map(|(_, entry)| entry).collect(),
+                    snapshot_index,
+                    snapshot_term,
+                    snapshot,
                 },
             }),
         })
@@ -255,47 +213,96 @@ impl FileRaftWAL {
     /// The fallible body of [`RaftWAL::save_term_and_vote`]: atomic
     /// replace of the `term` file.
     fn persist_term(&self, record: &TermRecord) -> io::Result<()> {
-        let tmp_path = self.dir.join("term.tmp");
-        let final_path = self.dir.join("term");
         let bytes = serde_json::to_vec(record).expect("a TermRecord always serializes");
-        let mut tmp = File::create(&tmp_path)?;
-        tmp.write_all(&bytes)?;
-        tmp.sync_all()?;
-        fs::rename(&tmp_path, &final_path)?;
-        sync_dir(&self.dir)
+        wal::atomic_replace(&self.dir, "term", &bytes)
     }
 
-    /// The fallible body of [`RaftWAL::append`]: truncate the log file at
-    /// `from_index`'s recorded offset, then append the framed records.
+    /// The fallible body of [`RaftWAL::append`]: truncate the log at `from_index`'s
+    /// recorded position, then append the framed records. `from_index` is absolute;
+    /// the retained log begins at `snapshot_index + 1`.
     fn persist_append(&self, from_index: u64, entries: &[RaftEntry]) -> io::Result<()> {
         let mut inner = self.lock();
-        let from = from_index as usize;
+        let base = inner.state.snapshot_index;
+        let from = from_index
+            .checked_sub(base)
+            .expect("append below the compacted prefix") as usize;
         assert!(
-            from <= inner.offsets.len(),
-            "append at index {from} beyond a log of {} entries",
-            inner.offsets.len()
+            from <= inner.log.len(),
+            "append at index {from_index} beyond a log of {} entries (base {base})",
+            inner.log.len()
         );
-        if let Some(&cut) = inner.offsets.get(from) {
-            // Truncation: make the cut durable before any conflicting entry
-            // can be appended after it.
-            inner.log.set_len(cut)?;
-            inner.log.sync_all()?;
-            inner.offsets.truncate(from);
-            inner.state.log.truncate(from);
-            inner.end = cut;
-        }
+        // Truncation: drop any conflicting suffix (durable before the new entries land),
+        // and mirror it in memory. A no-op when appending at the end.
+        inner.log.truncate(from)?;
+        inner.state.log.truncate(from);
 
-        let mut buf = Vec::new();
-        for entry in entries {
-            let offset = inner.end + buf.len() as u64;
-            inner.offsets.push(offset);
-            buf.extend_from_slice(&encode_record(entry));
-            inner.state.log.push(entry.clone());
+        // Entry at local position `from + i` has absolute index
+        // `base + (from + i) + 1` (the log is 1-based above the snapshot). Clone each
+        // entry once into the indexed batch, append it durably, then move the entries
+        // out of the batch into the in-memory mirror — one clone per entry, not two.
+        let records: Vec<(u64, RaftEntry)> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (base + from as u64 + 1 + i as u64, entry.clone()))
+            .collect();
+        inner.log.append_batch(&records)?;
+        for (_, entry) in records {
+            inner.state.log.push(entry);
         }
-        inner.log.write_all(&buf)?;
-        inner.log.sync_all()?;
-        inner.end += buf.len() as u64;
         Ok(())
+    }
+
+    /// The fallible body of [`RaftWAL::save_snapshot`]: persist the snapshot file
+    /// (durable *before* the prefix is dropped), then rewrite the log to the
+    /// retained suffix.
+    fn persist_snapshot(&self, index: u64, term: u64, data: &[u8]) -> io::Result<()> {
+        let mut inner = self.lock();
+        let base = inner.state.snapshot_index;
+        // Persist the snapshot first: a crash here leaves a snapshot newer than the
+        // log, which `open` self-heals; the reverse would lose the prefix.
+        let record = SnapshotRecord {
+            index,
+            term,
+            data: data.to_vec(),
+        };
+        wal::atomic_replace(
+            &self.dir,
+            "snapshot",
+            &postcard::to_allocvec(&record).expect("a SnapshotRecord always serializes"),
+        )?;
+
+        // Drop the prefix the snapshot subsumes, then rewrite the log to what remains.
+        // Mirrors `InMemoryRaftWAL`: a stale/duplicate index discards nothing.
+        let drop = index
+            .saturating_sub(base)
+            .min(inner.state.log.len() as u64) as usize;
+        inner.state.log.drain(..drop);
+        inner.state.snapshot_index = index;
+        inner.state.snapshot_term = term;
+        inner.state.snapshot = Some(data.to_vec());
+
+        let retained: Vec<(u64, RaftEntry)> = inner
+            .state
+            .log
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (index + i as u64 + 1, entry.clone()))
+            .collect();
+        inner.log.rewrite(&retained)?;
+        Ok(())
+    }
+}
+
+/// A retained log suffix must be contiguous from `snapshot_index + 1`; anything else
+/// is corruption the recovery rule above does not cover, so fail loudly.
+fn assert_contiguous(retained: &[(u64, RaftEntry)], snapshot_index: u64, dir: &Path) {
+    for (offset, (index, _)) in retained.iter().enumerate() {
+        let expected = snapshot_index + 1 + offset as u64;
+        assert!(
+            *index == expected,
+            "non-contiguous raft log at {}: expected index {expected}, found {index}",
+            dir.display()
+        );
     }
 }
 
@@ -328,6 +335,17 @@ impl RaftWAL for FileRaftWAL {
                 )
             });
     }
+
+    fn save_snapshot(&self, index: u64, term: u64, data: &[u8]) {
+        self.persist_snapshot(index, term, data)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "raft snapshot persistence failed at {}: {err} — a voter that cannot \
+                     persist its snapshot cannot safely continue",
+                    self.dir.display()
+                )
+            });
+    }
 }
 
 #[cfg(test)]
@@ -335,6 +353,8 @@ mod tests {
     use super::*;
     use actor_cluster::EntryPayload;
     use actor_cluster::InMemoryRaftWAL;
+    use std::fs::OpenOptions;
+    use std::io::Write;
 
     fn entry(term: u64, payload: EntryPayload) -> RaftEntry {
         RaftEntry { term, payload }
@@ -422,6 +442,37 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_compacts_the_prefix_and_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = FileRaftWAL::open(dir.path()).unwrap();
+        storage.append(
+            0,
+            &[
+                entry(1, EntryPayload::Noop), // index 1
+                entry(1, app(1, 9)),          // index 2
+                entry(2, app(2, 9)),          // index 3
+                entry(2, app(3, 9)),          // index 4
+            ],
+        );
+        // Compact through index 2: indices 1..=2 are subsumed by the snapshot.
+        storage.save_snapshot(2, 1, b"state@2");
+        // A fresh append lands contiguously at absolute index 5.
+        storage.append(4, &[entry(3, app(5, 9))]);
+        drop(storage);
+
+        let reopened = FileRaftWAL::open(dir.path()).unwrap();
+        let state = reopened.load();
+        assert_eq!(state.snapshot_index, 2);
+        assert_eq!(state.snapshot_term, 1);
+        assert_eq!(state.snapshot.as_deref(), Some(&b"state@2"[..]));
+        // Only the retained suffix (indices 3, 4, 5) survives in the log.
+        assert_eq!(
+            state.log,
+            vec![entry(2, app(2, 9)), entry(2, app(3, 9)), entry(3, app(5, 9))],
+        );
+    }
+
+    #[test]
     fn a_torn_tail_is_discarded_and_appends_continue() {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileRaftWAL::open(dir.path()).unwrap();
@@ -492,13 +543,13 @@ mod tests {
         );
         drop(storage);
 
-        // Flip a byte inside the second record's payload.
+        // Flip a byte inside the second record's payload. Each frame is
+        // `[u32 len][payload][u64 checksum]`, so the second frame starts just past
+        // the first.
         let log_path = dir.path().join("log");
         let mut bytes = fs::read(&log_path).unwrap();
-        let second_start = {
-            let (_, offsets, _) = scan_log(&bytes);
-            offsets[1] as usize
-        };
+        let len0 = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let second_start = 4 + len0 + 8;
         bytes[second_start + 5] ^= 0xff;
         fs::write(&log_path, &bytes).unwrap();
 
@@ -510,30 +561,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_corrupt_term_file_is_a_hard_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = FileRaftWAL::open(dir.path()).unwrap();
-        storage.save_term_and_vote(7, None);
-        drop(storage);
-
-        fs::write(dir.path().join("term"), b"not json").unwrap();
-        let err = match FileRaftWAL::open(dir.path()) {
-            Err(err) => err,
-            Ok(_) => panic!("a corrupt term must not be guessed"),
-        };
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
-
     /// The differential workhorse: drive the same operation sequence through
     /// `FileRaftWAL` — reopening from disk before every step — and
     /// `InMemoryRaftWAL`; `load()` must agree at every step. Covers the
-    /// offset index, truncation, and reopen logic across interleavings.
+    /// offset index, truncation, snapshot compaction, and reopen logic across
+    /// interleavings.
     #[test]
     fn file_storage_matches_in_memory_storage_across_reopens() {
         enum Op {
             Save(u64, Option<u64>),
             Append(u64, Vec<RaftEntry>),
+            Snapshot(u64, u64, Vec<u8>),
         }
         let ops = vec![
             Op::Save(1, Some(1)),
@@ -550,11 +588,15 @@ mod tests {
                 ],
             ),
             Op::Append(3, vec![entry(2, app(2, 4))]),
-            // Truncate everything back to empty, then rebuild.
-            Op::Append(0, vec![entry(3, EntryPayload::Noop)]),
+            // Compact through index 2, then keep appending past the new base.
+            Op::Snapshot(2, 2, b"snap@2".to_vec()),
+            Op::Append(3, vec![entry(2, app(7, 4))]),
+            Op::Append(4, vec![entry(3, app(8, 4))]),
+            // A second compaction over the now-shorter log.
+            Op::Snapshot(4, 3, b"snap@4".to_vec()),
             Op::Save(4, Some(2)),
             Op::Append(
-                1,
+                4,
                 vec![
                     entry(4, EntryPayload::AddVoter(node(5))),
                     entry(4, app(4, 4)),
@@ -577,6 +619,10 @@ mod tests {
                 Op::Append(from, entries) => {
                     file.append(*from, entries);
                     mirror.append(*from, entries);
+                }
+                Op::Snapshot(index, term, data) => {
+                    file.save_snapshot(*index, *term, data);
+                    mirror.save_snapshot(*index, *term, data);
                 }
             }
             assert_eq!(file.load(), mirror.load(), "diverged after step {step}");

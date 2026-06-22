@@ -82,6 +82,8 @@ pub use tool::ToolRegistry;
 
 // Re-exported granary types that appear in the harness's public surface, so a
 // consumer needs no direct granary dependency for ordinary use.
+pub use granary::FileGrainStore;
 pub use granary::GrainError;
+pub use granary::GrainStoreFactory;
 pub use granary::GranaryConfig;
 pub use granary::Seq;

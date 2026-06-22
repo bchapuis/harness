@@ -342,12 +342,11 @@ enum Role {
 pub enum Committed {
     /// A committed application command at this 1-based log index. `commit` is the
     /// group's commit index at the moment this batch was drained — a high-water
-    /// mark a consumer folds monotonically (`seen = max(seen, commit)`) so it can
-    /// tell, after a restart, when its projection has caught up to the leader's
-    /// established commit (see [`RaftGroup::ready_commit`]). It rides the same
-    /// ordered stream as the command, so it never races the data it covers; and
-    /// it carries the *commit*, not this entry's `index`, so the last delivered
-    /// observation reflects any `Noop`/voter-change tail that the stream filters.
+    /// mark a consumer MAY fold monotonically (`seen = max(seen, commit)`) to track
+    /// how far its projection trails the leader's commit. It rides the same ordered
+    /// stream as the command, so it never races the data it covers; and it carries
+    /// the *commit*, not this entry's `index`, so the last delivered observation
+    /// reflects any `Noop`/voter-change tail that the stream filters.
     Apply { index: u64, command: Vec<u8>, commit: u64 },
     /// Install this state-machine snapshot, which subsumes every command through
     /// `index`; the receiver replaces its state with it. `commit` is the
@@ -365,8 +364,8 @@ impl Committed {
     }
 
     /// The commit high-water mark this observation was drained at — a consumer
-    /// folds it monotonically to track how far its projection has caught up (see
-    /// the variant docs and [`RaftGroup::ready_commit`]).
+    /// MAY fold it monotonically to track how far its projection trails the
+    /// leader's commit (see the variant docs).
     pub fn commit(&self) -> u64 {
         match self {
             Committed::Apply { commit, .. } | Committed::Snapshot { commit, .. } => *commit,
@@ -571,41 +570,11 @@ impl RaftGroup {
         self.lock().role == Role::Leader
     }
 
-    /// The highest committed **application** index, but only once the current
-    /// leader has committed an entry in its own term — `None` until then (spec
-    /// §9, leader completeness).
-    ///
-    /// This is the rehydration target a consumer of [`subscribe_commits`] waits
-    /// for after a restart. The subtlety it resolves: a just-reloaded node starts
-    /// with `commit`/`applied` at its persisted snapshot base (see [`new`]), so
-    /// its restored log tail is *not yet known-committed* — only after the new
-    /// leader's term-opening `Noop` commits does `advance_commit` carry `commit`
-    /// over the whole restored prefix. Gating on `term_at(commit) == term` is
-    /// exactly that "the prefix is now final" signal.
-    ///
-    /// The returned index is the highest *App* entry at or below `commit`, not
-    /// `commit` itself: `Noop` and voter-change entries are filtered from the
-    /// commit stream ([`drain_committed`]), so a consumer can never observe a
-    /// watermark above the last App entry — targeting raw `commit` would make it
-    /// wait forever behind a `Noop` tail. With no committed App entry (a fresh or
-    /// fully-compacted group) it returns the snapshot base, which a consumer that
-    /// has applied nothing already satisfies.
-    ///
-    /// [`new`]: RaftGroup::new
-    /// [`subscribe_commits`]: crate::RaftConsensus::subscribe_commits
-    pub(crate) fn ready_commit(&self) -> Option<u64> {
-        let state = self.lock();
-        if state.commit <= state.snapshot_index || state.term_at(state.commit) != state.term {
-            return None;
-        }
-        let mut index = state.commit;
-        while index > state.snapshot_index {
-            if matches!(state.entry_at(index).payload, EntryPayload::App(_)) {
-                return Some(index);
-            }
-            index -= 1;
-        }
-        Some(state.snapshot_index)
+    /// This group's current Raft term. A layer above (granary's per-shard
+    /// leader-election group, §8) uses it as the single-writer fencing token every
+    /// per-grain append carries: one leader per term, monotonic across the quorum.
+    pub(crate) fn term(&self) -> u64 {
+        self.lock().term
     }
 
     /// The reloaded state-machine snapshot as a [`Committed::Snapshot`], if this

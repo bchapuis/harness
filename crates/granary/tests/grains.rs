@@ -3,9 +3,9 @@
 //! Mirrors the actor framework's V&V doctrine: drive grains through the public
 //! API only, assert the grain invariants over the §13 event stream, decide a
 //! recorded history against a reference model, and check seed-reproducibility.
-//! Single-node Tier-1 covers G2, G3, G5, G6, and the G12 hibernation round-trip;
-//! the cluster-only invariants (G1-under-election, G11, G13–G15) arrive with
-//! Tier 2.
+//! The single-node `Local` tier covers G2, G3, G5, G6, and the G12 hibernation
+//! round-trip; the cluster-only invariants (G1-under-election, G11, G13–G15)
+//! arrive with the `Quorum` tier.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

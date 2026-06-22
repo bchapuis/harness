@@ -23,7 +23,13 @@ use crate::grain::GrainHandler;
 use crate::grain::GrainName;
 use crate::host::Host;
 use crate::host::RunTyped;
+use crate::replica_store::ActorReplicaTransport;
+use crate::replica_store::ReplicaStore;
+use crate::replica_store::ReplicaTransport;
+use crate::replica_store::replica_store_key;
 use crate::shardmap::ShardMapSource;
+use crate::store::GrainStore;
+use crate::store::MemoryGrainStore;
 use crate::system::GranarySystem;
 use crate::system::shard_for;
 
@@ -471,9 +477,10 @@ impl<G: Grain> Granary<G> {
 
     /// The nodes that replicate the shard a grain key maps to (spec §7.6) — the
     /// only nodes that hold its data and can lead it. Read live from the
-    /// consensus-agreed shard map (Tier 2 rebalances it as membership changes; Tier
-    /// 1 is the single node), so it reflects the latest committed allocation, not a
-    /// `granary()`-time snapshot. Exposed for metrics and tests.
+    /// consensus-agreed shard map (the `Quorum` tier rebalances it as membership
+    /// changes; the `Local` tier is the single node), so it reflects the latest
+    /// committed allocation, not a `granary()`-time snapshot. Exposed for metrics
+    /// and tests.
     pub fn replicas(&self, key: impl Into<String>) -> Vec<NodeId> {
         let name = GrainName::new(self.grain_type, key);
         let index = shard_for(self.grain_type, name.key(), self.shards).index;
@@ -505,7 +512,7 @@ pub trait GranaryExt: GranarySystem {
     ///
     /// - `grain_type` overrides `G::GRAIN_TYPE`, so the same `G` hosts under
     ///   several names — distinct gateways (one `gateway_key` each), distinct
-    ///   shard maps, distinct consensus groups (Tier 2). It MUST be stable
+    ///   shard maps, distinct consensus groups (the `Quorum` tier). It MUST be stable
     ///   cluster-wide and across runs, exactly as `G::GRAIN_TYPE` must be (§5.1);
     ///   a `&'static str` makes that lifetime explicit (deployment leaks its
     ///   bounded set of names if they are not literals).
@@ -536,14 +543,29 @@ impl<T: GranarySystem> GranaryExt for T {
     {
         let shards = config.shards.max(1);
         let replicas = config.replication_factor.max(1);
+        // This node's durable grain store (§7.4): the injected factory if a
+        // deployment supplied one (so records survive a restart), else a fresh
+        // ephemeral in-memory store. The replica-store actor makes it reachable from
+        // a shard leader's replicator (§7.2), registered under one key per type like
+        // the gateway (§5.3); the transport reaches the peers' stores by `ask`.
+        let store: Arc<dyn GrainStore> = match &config.grain_store {
+            Some(factory) => factory(self.node()),
+            None => Arc::new(MemoryGrainStore::new()),
+        };
+        let replica_store = self.spawn(ReplicaStore::<G>::new(Arc::clone(&store)));
+        self.receptionist()
+            .register(replica_store_key::<G>(grain_type), &replica_store);
+        let transport: Arc<dyn ReplicaTransport> =
+            Arc::new(ActorReplicaTransport::<G>::new(self.clone(), grain_type));
         // Build the consensus-agreed shard map (§7.6): a per-type Raft group whose
         // committed log is the allocation, so every node agrees on each shard's
-        // replica set and only the replicas store it. Tier 1 is a trivial
-        // single-node map. The map creates each assigned shard's group + journal as
-        // the allocation commits; routing reads the map live and the gateway's
-        // bounded redirect absorbs the brief bootstrap window. Keyed by the runtime
-        // `grain_type`, so two type names get separate maps and groups.
-        let shard_map = self.shard_map(grain_type, shards, replicas);
+        // replica set and only the replicas store it. The `Local` tier is a trivial
+        // single-node map. The map creates each assigned shard's leader-election
+        // group + per-grain quorum journal as the allocation commits; routing reads
+        // the map live and the gateway's bounded redirect absorbs the brief bootstrap
+        // window. Keyed by the runtime `grain_type`, so two type names get separate
+        // maps and groups.
+        let shard_map = self.shard_map(grain_type, shards, replicas, store, transport);
         let gateway = self.spawn(Gateway::new(
             grain_type,
             Arc::clone(&shard_map),

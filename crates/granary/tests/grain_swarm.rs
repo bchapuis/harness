@@ -1,6 +1,6 @@
 //! Grains under the cluster fault swarm (granary §14, V&V checklist #4, #7, #8).
 //!
-//! `tests/clustered_grains.rs` drives the Tier-2 paths through *scripted* faults
+//! `tests/clustered_grains.rs` drives the `Quorum`-tier paths through *scripted* faults
 //! (a crash here, a quorum loss there). This file applies the V&V doctrine the
 //! other way round: a [`ClusterWorkload`] is swept across many seeds while a
 //! seeded nemesis injects partitions, crashes, heals, loss, duplication, and

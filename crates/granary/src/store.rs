@@ -1,0 +1,643 @@
+//! Per-node durable grain storage — the `GrainStore` seam (spec §7.2, §7.4).
+//!
+//! In the per-grain quorum substrate (§7.2) the grains' records live **off** the
+//! leader-election group's Raft log: each replica persists, on its own, the records
+//! quorum-appended to it by the shard leader's [`Replicator`](crate::replicator).
+//! `GrainStore` is that per-node durable store — the granary analogue of the Raft
+//! WAL (actor §9.4.3), injected at construction and preserved across a process
+//! restart, so a full-cluster cold restart recovers each grain from a quorum of the
+//! replicas' reloaded stores (§8, **G14**).
+//!
+//! It keys records by `(shard index, GrainName)` and stamps each with the **shard
+//! term** under which it was written — the fencing token (§8) and the key to
+//! highest-term-per-slot read-repair on recovery. A single in-memory tier
+//! ([`MemoryGrainStore`]) is the reference implementation, used by the `Local`
+//! journal directly and by the `Quorum` replica store on each node; a deployment
+//! that must survive total power loss supplies a file-backed `GrainStore` through
+//! the same seam (the harness file-log prior art, §7.4).
+//!
+//! **Per-grain segmentation.** A grain's records are an independent **segment** —
+//! its own [`GrainRecords`] behind its own lock — so concurrent grains never
+//! serialize on a single store-wide lock, and one grain's snapshot compaction
+//! touches only its own segment (§9). The one piece shared across a shard's grains
+//! is the **fence**: the highest shard term the store has acknowledged (§8). It sits
+//! behind its own leaf lock, taken *inside* a grain's segment lock, so a grain's
+//! write and that same grain's recovery `prepare` serialize on the segment lock
+//! (the only fencing-critical race, §8) while cross-grain fence bumps stay
+//! monotonic and contend on nothing else.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use actor_core::NodeId;
+use serde::Deserialize;
+use serde::Serialize;
+
+use crate::grain::GrainName;
+use crate::journal::Seq;
+
+/// One stored record: the opaque event bytes and the **shard term** under which it
+/// was committed. The term is what lets a recovering leader pick, per `Seq` slot,
+/// the record a higher term last won — the highest-term-per-slot read-repair of §8.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordSlot {
+    /// The shard term under which this record was written (the fencing token, §8).
+    pub term: u64,
+    /// The opaque, codec-encoded event bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// The outcome of a fenced store (`store_record`/`store_snapshot`, §7.2, §8).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StoreAck {
+    /// Durable in this store; carries the replica's contiguous head after the write.
+    Stored(Seq),
+    /// Refused: this replica has acknowledged a higher shard term (the fence, §8).
+    /// Carries that higher term so the stale leader learns it has been deposed.
+    Fenced(u64),
+    /// Refused: a normal append landed on a stale head — this replica already holds a
+    /// different committed record at the first target slot, so the leader's head is
+    /// behind (it recovered from local state without a quorum, §7.5). Carries the
+    /// replica's actual head so the leader steps down and re-recovers. Optimistic
+    /// concurrency on the head: it keeps a stale leader from overwriting a committed
+    /// record even though its term is current (§8).
+    Stale(Seq),
+}
+
+/// The reply to a read: every occupied slot with its committing term, and the
+/// latest snapshot, so a recovering leader can merge a write quorum by
+/// highest-term-per-slot (**G14**).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadReply {
+    /// `(seq, term, bytes)` for each occupied slot, ascending by `seq`.
+    pub slots: Vec<(Seq, u64, Vec<u8>)>,
+    /// The latest snapshot `(seq, term, state)`, if any.
+    pub snapshot: Option<(Seq, u64, Vec<u8>)>,
+}
+
+/// The outcome of a recovery `prepare` (spec §8): the replica's records, or a
+/// refusal because it has promised a higher term. `prepare` is a fenced read — a
+/// Paxos-style promise — so that once a new leader has read a quorum, a deposed
+/// leader can no longer commit on any of those replicas (closing the
+/// commit-after-read race, §8). An ordinary [`read`](GrainStore::read) does not
+/// fence and is used only for local replay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReadOutcome {
+    /// The replica's slots and snapshot; it has promised not to accept a lower term.
+    Prepared(ReadReply),
+    /// Refused: the replica has acknowledged a higher shard term (the fence, §8).
+    Fenced(u64),
+}
+
+/// A node's durable store of grain records and snapshots (spec §7.2, §7.4).
+///
+/// All methods are fenced by the shard **term** (§8): a write stamped with a term
+/// below the highest the store has acknowledged for that shard is refused
+/// (`Fenced`), so a deposed leader cannot land a write. Reads return each slot's
+/// term so the leader's recovery can read-repair (§8). Implementations key by
+/// `(shard, grain)` and persist durably enough to survive the restart their
+/// deployment targets (in-memory for the simulator, file-backed in production).
+pub trait GrainStore: Send + Sync + 'static {
+    /// Store `records` for a grain beginning at the slot after `after`, fenced by
+    /// `term`. Idempotent per slot: a slot already holding an equal-or-higher term
+    /// is kept (a re-delivered or late append does not regress it). Returns
+    /// `Stored(head)` with the replica's contiguous head, `Fenced(higher)`, or — for
+    /// a normal append (`repair == false`) onto a stale head — `Stale(head)`.
+    ///
+    /// `repair == true` is a recovery write-back (§8): it fills/repairs slots by
+    /// highest-term and never reports `Stale`. `repair == false` is a normal append
+    /// and applies the optimistic head check that yields `Stale`.
+    fn store_record(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        after: Seq,
+        term: u64,
+        records: Vec<Vec<u8>>,
+        repair: bool,
+    ) -> StoreAck;
+
+    /// Every occupied slot (with its term) and the latest snapshot for a grain —
+    /// a non-fencing local read, used for recovery merge and replay (§9). Empty for a
+    /// grain this store has never seen.
+    fn read(&self, shard: u32, grain: &GrainName) -> ReadReply;
+
+    /// Up to `limit` records for a grain after `from` (exclusive), ascending by
+    /// `Seq`, as `(Seq, bytes)` — the `load` seam (§7.3). A ranged read so paging a
+    /// grain's tail on replay costs `O(limit)`, not `O(grain size)`: only the
+    /// returned window's bytes are cloned. Records the snapshot already subsumes
+    /// (`Seq <= base`) are absent, as in [`read`](GrainStore::read).
+    fn read_from(&self, shard: u32, grain: &GrainName, from: Seq, limit: usize) -> Vec<(Seq, Vec<u8>)>;
+
+    /// A **fenced** read for recovery (§8): promise not to accept a shard term below
+    /// `term` (so a deposed leader cannot commit on this replica once a new leader
+    /// has read it), then return this replica's slots and snapshot. Refuses with
+    /// `Fenced(higher)` if it has already promised a higher term.
+    fn prepare(&self, shard: u32, grain: &GrainName, term: u64) -> ReadOutcome;
+
+    /// Persist a snapshot at `at` fenced by `term` (§9). Kept only if it advances
+    /// the stored snapshot. Returns `Stored(at)` or `Fenced(higher)`.
+    fn store_snapshot(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        at: Seq,
+        term: u64,
+        state: Vec<u8>,
+    ) -> StoreAck;
+
+    /// Drop any records past slot `after` for a grain — the leader rolling back the
+    /// tentative local write of an append that failed to reach a quorum (§7.2), so an
+    /// uncommitted record never becomes visible to a later stale-local recovery (§7.5,
+    /// G5). The record survives on any peers that stored it, so a quorum that does
+    /// hold it can still commit it late.
+    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq);
+}
+
+/// How the runtime obtains a node's [`GrainStore`] (spec §7.4). Supplied on
+/// [`GranaryConfig`](crate::GranaryConfig); a factory that **caches per node**, held
+/// by the deployment across a restart, is what makes a grain's records survive a
+/// full-cluster cold restart (the WAL-storage analogue, actor §9.4.3). The default
+/// is a fresh ephemeral [`MemoryGrainStore`] per node (lost on restart).
+pub type GrainStoreFactory = Arc<dyn Fn(NodeId) -> Arc<dyn GrainStore> + Send + Sync>;
+
+/// One grain's stored records and its latest snapshot — the per-grain **segment**
+/// (§7.2). Shared by [`MemoryGrainStore`] and the file-backed store, which each wrap
+/// it in their own per-grain lock and add durability; the fence lives in the store,
+/// not here (it is per *shard*, §8).
+///
+/// Records with `Seq <= base` have been compacted away — subsumed by `snapshot`
+/// (§9), so `base` always equals the snapshot's seq whenever a snapshot is present.
+/// `slots` is the sparse vector of records *after* `base`: slot `i` is `Seq`
+/// `base + i + 1`. The head is `base` plus the leading gap-free run of `slots`.
+#[derive(Clone, Default)]
+pub(crate) struct GrainRecords {
+    /// The compacted prefix's last seq (`ZERO` = nothing compacted), equal to the
+    /// snapshot's seq when a snapshot is present. The store reports it implicitly:
+    /// a reader recovers it from the snapshot's seq, so it never crosses the wire.
+    base: Seq,
+    slots: Vec<Option<RecordSlot>>,
+    snapshot: Option<(Seq, u64, Vec<u8>)>,
+}
+
+/// A serializable checkpoint of one grain's segment (spec §9): the basis for the
+/// file store's per-grain, snapshot-driven log compaction. The file store rewrites a
+/// grain's segment to a single `Checkpoint` op holding this, folding away the record
+/// ops the grain's snapshot made redundant — so compaction touches one grain's file,
+/// never the whole node's store.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct GrainCheckpoint {
+    base: Seq,
+    slots: Vec<Option<RecordSlot>>,
+    snapshot: Option<(Seq, u64, Vec<u8>)>,
+}
+
+impl GrainRecords {
+    /// A serializable checkpoint of this segment's whole current state.
+    pub(crate) fn export(&self) -> GrainCheckpoint {
+        GrainCheckpoint {
+            base: self.base,
+            slots: self.slots.clone(),
+            snapshot: self.snapshot.clone(),
+        }
+    }
+
+    /// Reconstruct a segment from a [`GrainCheckpoint`] (the file store's replay of a
+    /// compacted segment).
+    pub(crate) fn from_checkpoint(checkpoint: GrainCheckpoint) -> GrainRecords {
+        GrainRecords {
+            base: checkpoint.base,
+            slots: checkpoint.slots,
+            snapshot: checkpoint.snapshot,
+        }
+    }
+
+    /// The committed head: `base` plus the leading gap-free run of `slots`. A
+    /// committed prefix is gap-free (quorum intersection, §8); a gap marks an
+    /// uncommitted tail, correctly excluded from the head.
+    pub(crate) fn head(&self) -> Seq {
+        let mut run = 0u64;
+        for slot in &self.slots {
+            if slot.is_some() {
+                run += 1;
+            } else {
+                break;
+            }
+        }
+        Seq::new(self.base.value() + run)
+    }
+
+    /// `(seq, term, bytes)` for each occupied slot, ascending — `seq = base + i + 1`.
+    /// The compacted prefix is absent (covered by the snapshot).
+    fn occupied(&self) -> Vec<(Seq, u64, Vec<u8>)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                slot.as_ref()
+                    .map(|s| (Seq::new(self.base.value() + i as u64 + 1), s.term, s.bytes.clone()))
+            })
+            .collect()
+    }
+
+    /// The reply to a non-fencing read: all occupied slots and the latest snapshot.
+    pub(crate) fn read(&self) -> ReadReply {
+        ReadReply {
+            slots: self.occupied(),
+            snapshot: self.snapshot.clone(),
+        }
+    }
+
+    /// Up to `limit` occupied records after `from` (exclusive), ascending. Clones
+    /// only the returned window — the ranged `load` read (§7.3).
+    pub(crate) fn read_from(&self, from: Seq, limit: usize) -> Vec<(Seq, Vec<u8>)> {
+        let base = self.base.value();
+        // Records at or below `from` (and the compacted prefix) are skipped; start at
+        // the first slot above `max(from, base)`.
+        let start = from.value().max(base).saturating_sub(base) as usize;
+        let mut out = Vec::new();
+        for (i, slot) in self.slots.iter().enumerate().skip(start) {
+            if out.len() == limit {
+                break;
+            }
+            if let Some(record) = slot {
+                out.push((Seq::new(base + i as u64 + 1), record.bytes.clone()));
+            }
+        }
+        out
+    }
+
+    /// Apply a fenced record store (the fence is checked by the caller). Mirrors the
+    /// idempotent-per-slot and optimistic-head-check semantics of §7.2/§8.
+    pub(crate) fn store_record(&mut self, after: Seq, term: u64, records: Vec<Vec<u8>>, repair: bool) -> StoreAck {
+        let base = self.base.value();
+        // Optimistic head check (§8): a normal append whose first target slot already
+        // holds a *different* record means the leader's head is stale — reject so it
+        // steps down and re-recovers rather than overwriting a committed record. An
+        // append whose `after` is below our compacted base is stale by the same logic
+        // (the leader recovered without seeing our snapshot).
+        if !repair {
+            if after.value() < base {
+                return StoreAck::Stale(self.head());
+            }
+            let first_local = (after.value() - base) as usize;
+            if let (Some(Some(existing)), Some(incoming)) = (self.slots.get(first_local), records.first()) {
+                if &existing.bytes != incoming {
+                    return StoreAck::Stale(self.head());
+                }
+            }
+        }
+        for (offset, bytes) in records.into_iter().enumerate() {
+            // The absolute seq of this record; skip any the snapshot already subsumes
+            // (a recovery write-back landing on a more-compacted replica, §8).
+            let abs = after.value() + offset as u64 + 1;
+            if abs <= base {
+                continue;
+            }
+            let idx = (abs - base - 1) as usize;
+            if self.slots.len() <= idx {
+                self.slots.resize_with(idx + 1, || None);
+            }
+            // Idempotent per slot: keep an equal-or-higher-term record (a re-delivered
+            // or late append, §7.2); overwrite a strictly-lower-term one (read-repair,
+            // §8). An empty slot is filled.
+            match &self.slots[idx] {
+                Some(existing) if existing.term >= term => {}
+                _ => self.slots[idx] = Some(RecordSlot { term, bytes }),
+            }
+        }
+        StoreAck::Stored(self.head())
+    }
+
+    /// Apply a fenced snapshot store (§9). Returns the ack and whether the snapshot
+    /// **advanced the base** — i.e. just compacted records — so a file store knows to
+    /// rewrite the grain's segment.
+    pub(crate) fn store_snapshot(&mut self, at: Seq, term: u64, state: Vec<u8>) -> (StoreAck, bool) {
+        // A snapshot only ever advances (§9, G4). When it does it subsumes every
+        // record up to `at`, so compact them: advance the base and drop the covered
+        // slots (records past `at`, if any, shift down behind the new base). This is
+        // the snapshot-driven compaction of the records the snapshot makes redundant.
+        let current = self.snapshot.as_ref().map_or(0, |(s, _, _)| s.value());
+        if at.value() > current {
+            let drop = at
+                .value()
+                .saturating_sub(self.base.value())
+                .min(self.slots.len() as u64) as usize;
+            self.slots.drain(..drop);
+            self.base = at;
+            self.snapshot = Some((at, term, state));
+            return (StoreAck::Stored(at), true);
+        }
+        (StoreAck::Stored(at), false)
+    }
+
+    /// Drop records past slot `after` (the rollback of an uncommitted tail, §7.2).
+    pub(crate) fn truncate(&mut self, after: Seq) {
+        // `after` is absolute; keep the slots up to it, behind the base.
+        let keep = after.value().saturating_sub(self.base.value()) as usize;
+        self.slots.truncate(keep);
+    }
+}
+
+/// One grain's in-memory segment handle: its [`GrainRecords`] behind its own lock,
+/// shared (cloned) out of the registry so an op holds only that grain's lock.
+type Segment = Arc<Mutex<GrainRecords>>;
+
+/// The per-shard fence and per-grain segment registry shared by one
+/// [`MemoryGrainStore`] (and its clones).
+#[derive(Default)]
+struct Inner {
+    /// The fence: the highest shard term this store has acknowledged (§8), behind its
+    /// own leaf lock so cross-grain bumps never block a grain's data ops.
+    fences: Mutex<HashMap<u32, u64>>,
+    /// One independent segment per `(shard, grain)`, each behind its own lock.
+    segments: Mutex<HashMap<(u32, GrainName), Segment>>,
+}
+
+/// The reference in-memory [`GrainStore`] (spec §7.4). Cloning shares one store, so
+/// a factory that hands the same clone to a restarted node's replica store makes
+/// the records survive the restart (the simulator's stand-in for a durable disk).
+#[derive(Clone, Default)]
+pub struct MemoryGrainStore {
+    inner: Arc<Inner>,
+}
+
+impl MemoryGrainStore {
+    /// A fresh, empty store.
+    pub fn new() -> MemoryGrainStore {
+        MemoryGrainStore::default()
+    }
+
+    /// The segment for `(shard, grain)`, creating an empty one if absent.
+    fn segment(&self, shard: u32, grain: &GrainName) -> Segment {
+        let mut segments = self.inner.segments.lock().expect("grain store segments poisoned");
+        Arc::clone(
+            segments
+                .entry((shard, grain.clone()))
+                .or_insert_with(|| Arc::new(Mutex::new(GrainRecords::default()))),
+        )
+    }
+
+    /// The segment for `(shard, grain)` if it exists — no allocation for a grain
+    /// this store has never seen (the read path).
+    fn existing(&self, shard: u32, grain: &GrainName) -> Option<Segment> {
+        let segments = self.inner.segments.lock().expect("grain store segments poisoned");
+        segments.get(&(shard, grain.clone())).map(Arc::clone)
+    }
+
+    /// Check the shard fence against `term` and bump it to the max. Returns the
+    /// blocking fence on refusal. Taken *inside* a held segment lock, so it is a
+    /// short leaf critical section.
+    fn check_and_bump_fence(&self, shard: u32, term: u64) -> Result<(), u64> {
+        let mut fences = self.inner.fences.lock().expect("grain store fences poisoned");
+        let fence = *fences.get(&shard).unwrap_or(&0);
+        if term < fence {
+            return Err(fence);
+        }
+        // `term >= fence` here, so only a strict advance changes the fence — skip the
+        // map write in the steady-state append case where `term == fence`.
+        if term > fence {
+            fences.insert(shard, term);
+        }
+        Ok(())
+    }
+}
+
+impl GrainStore for MemoryGrainStore {
+    fn store_record(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        after: Seq,
+        term: u64,
+        records: Vec<Vec<u8>>,
+        repair: bool,
+    ) -> StoreAck {
+        let segment = self.segment(shard, grain);
+        // Hold the segment lock across the fence check and the apply, so a concurrent
+        // `prepare` for *this* grain cannot slip between them (the fencing race, §8).
+        let mut records_guard = segment.lock().expect("grain segment poisoned");
+        if let Err(fence) = self.check_and_bump_fence(shard, term) {
+            return StoreAck::Fenced(fence);
+        }
+        records_guard.store_record(after, term, records, repair)
+    }
+
+    fn read(&self, shard: u32, grain: &GrainName) -> ReadReply {
+        match self.existing(shard, grain) {
+            Some(segment) => segment.lock().expect("grain segment poisoned").read(),
+            None => ReadReply {
+                slots: Vec::new(),
+                snapshot: None,
+            },
+        }
+    }
+
+    fn read_from(&self, shard: u32, grain: &GrainName, from: Seq, limit: usize) -> Vec<(Seq, Vec<u8>)> {
+        match self.existing(shard, grain) {
+            Some(segment) => segment.lock().expect("grain segment poisoned").read_from(from, limit),
+            None => Vec::new(),
+        }
+    }
+
+    fn prepare(&self, shard: u32, grain: &GrainName, term: u64) -> ReadOutcome {
+        let segment = self.segment(shard, grain);
+        let records_guard = segment.lock().expect("grain segment poisoned");
+        // Promise: bump the fence so a deposed leader at a lower term can no longer
+        // commit here (the Paxos-prepare half of recovery, §8).
+        if let Err(fence) = self.check_and_bump_fence(shard, term) {
+            return ReadOutcome::Fenced(fence);
+        }
+        ReadOutcome::Prepared(records_guard.read())
+    }
+
+    fn store_snapshot(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        at: Seq,
+        term: u64,
+        state: Vec<u8>,
+    ) -> StoreAck {
+        let segment = self.segment(shard, grain);
+        let mut records_guard = segment.lock().expect("grain segment poisoned");
+        if let Err(fence) = self.check_and_bump_fence(shard, term) {
+            return StoreAck::Fenced(fence);
+        }
+        records_guard.store_snapshot(at, term, state).0
+    }
+
+    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq) {
+        if let Some(segment) = self.existing(shard, grain) {
+            segment.lock().expect("grain segment poisoned").truncate(after);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name(key: &str) -> GrainName {
+        GrainName::new("test.Grain", key)
+    }
+
+    #[test]
+    fn records_store_and_read_back_with_their_terms() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        assert_eq!(
+            store.store_record(0, &n, Seq::ZERO, 1, vec![b"e1".to_vec(), b"e2".to_vec()], false),
+            StoreAck::Stored(Seq::new(2))
+        );
+        let reply = store.read(0, &n);
+        assert_eq!(
+            reply.slots,
+            vec![(Seq::new(1), 1, b"e1".to_vec()), (Seq::new(2), 1, b"e2".to_vec())]
+        );
+    }
+
+    #[test]
+    fn read_from_is_exclusive_of_from_and_bounded_by_limit() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        store.store_record(0, &n, Seq::ZERO, 1, vec![b"e1".to_vec(), b"e2".to_vec(), b"e3".to_vec()], false);
+        assert_eq!(
+            store.read_from(0, &n, Seq::ZERO, 10),
+            vec![
+                (Seq::new(1), b"e1".to_vec()),
+                (Seq::new(2), b"e2".to_vec()),
+                (Seq::new(3), b"e3".to_vec()),
+            ]
+        );
+        // Exclusive of `from`, bounded by `limit`.
+        assert_eq!(store.read_from(0, &n, Seq::new(1), 1), vec![(Seq::new(2), b"e2".to_vec())]);
+        assert_eq!(store.read_from(0, &n, Seq::new(3), 10), Vec::new());
+        // A read past a compacted base returns the live tail only.
+        store.store_snapshot(0, &n, Seq::new(2), 1, b"snap@2".to_vec());
+        assert_eq!(store.read_from(0, &n, Seq::ZERO, 10), vec![(Seq::new(3), b"e3".to_vec())]);
+    }
+
+    #[test]
+    fn a_lower_term_write_is_fenced() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        store.store_record(0, &n, Seq::ZERO, 5, vec![b"e1".to_vec()], false);
+        // A write stamped with a term below the acknowledged shard term is refused.
+        assert_eq!(
+            store.store_record(0, &n, Seq::ZERO, 4, vec![b"stale".to_vec()], true),
+            StoreAck::Fenced(5)
+        );
+    }
+
+    #[test]
+    fn the_fence_is_shared_across_a_shards_grains() {
+        let store = MemoryGrainStore::new();
+        // A prepare on grain `a` at term 5 promises the whole shard not to accept a
+        // lower term; a write to grain `b` in the same shard at term 4 is then fenced.
+        assert!(matches!(store.prepare(0, &name("a"), 5), ReadOutcome::Prepared(_)));
+        assert_eq!(
+            store.store_record(0, &name("b"), Seq::ZERO, 4, vec![b"stale".to_vec()], false),
+            StoreAck::Fenced(5)
+        );
+        // A different shard keeps its own fence.
+        assert_eq!(
+            store.store_record(1, &name("b"), Seq::ZERO, 4, vec![b"ok".to_vec()], false),
+            StoreAck::Stored(Seq::new(1))
+        );
+    }
+
+    #[test]
+    fn a_stale_head_append_is_rejected_but_repair_overwrites_by_term() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        store.store_record(0, &n, Seq::ZERO, 1, vec![b"e1".to_vec()], false);
+        // A normal append at a stale head (slot 1 already holds a different record)
+        // is rejected, so a stale leader cannot overwrite a committed record.
+        assert_eq!(
+            store.store_record(0, &n, Seq::ZERO, 3, vec![b"other".to_vec()], false),
+            StoreAck::Stale(Seq::new(1))
+        );
+        assert_eq!(store.read(0, &n).slots, vec![(Seq::new(1), 1, b"e1".to_vec())]);
+        // A recovery write-back (repair) read-repairs the slot to the higher term.
+        store.store_record(0, &n, Seq::ZERO, 3, vec![b"repaired".to_vec()], true);
+        assert_eq!(store.read(0, &n).slots, vec![(Seq::new(1), 3, b"repaired".to_vec())]);
+    }
+
+    #[test]
+    fn contiguous_head_stops_at_the_first_gap() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        store.store_record(0, &n, Seq::ZERO, 1, vec![b"e1".to_vec(), b"e2".to_vec()], false);
+        // A write that skips a slot (an uncommitted tail) does not advance the head.
+        assert_eq!(
+            store.store_record(0, &n, Seq::new(3), 1, vec![b"e4".to_vec()], false),
+            StoreAck::Stored(Seq::new(2))
+        );
+    }
+
+    #[test]
+    fn a_snapshot_compacts_the_covered_records_and_holds_the_head() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            1,
+            vec![b"e1".to_vec(), b"e2".to_vec(), b"e3".to_vec()],
+            false,
+        );
+        // A snapshot at seq 2 subsumes e1, e2: they drop, the base advances to 2, and
+        // only e3 remains as a live record.
+        assert_eq!(
+            store.store_snapshot(0, &n, Seq::new(2), 1, b"snap@2".to_vec()),
+            StoreAck::Stored(Seq::new(2))
+        );
+        let reply = store.read(0, &n);
+        assert_eq!(reply.slots, vec![(Seq::new(3), 1, b"e3".to_vec())]);
+        assert_eq!(reply.snapshot, Some((Seq::new(2), 1, b"snap@2".to_vec())));
+        // The head still reads 3 (base 2 + the one retained record) — compaction
+        // never regresses it. The next append lands contiguously at seq 4.
+        assert_eq!(
+            store.store_record(0, &n, Seq::new(3), 1, vec![b"e4".to_vec()], false),
+            StoreAck::Stored(Seq::new(4))
+        );
+    }
+
+    #[test]
+    fn a_far_ahead_snapshot_carries_a_lagging_replica_to_its_seq() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        store.store_record(0, &n, Seq::ZERO, 1, vec![b"e1".to_vec()], false);
+        // A snapshot well past this replica's records (an InstallSnapshot analogue):
+        // all slots drop, the base jumps to 5, and the head follows.
+        store.store_snapshot(0, &n, Seq::new(5), 2, b"snap@5".to_vec());
+        assert!(store.read(0, &n).slots.is_empty());
+        // A write-back of the recovered tail lands cleanly after the new base.
+        assert_eq!(
+            store.store_record(0, &n, Seq::new(5), 2, vec![b"e6".to_vec()], true),
+            StoreAck::Stored(Seq::new(6))
+        );
+    }
+
+    #[test]
+    fn a_write_back_skips_records_a_higher_snapshot_already_covers() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        // This replica compacted through seq 3.
+        store.store_snapshot(0, &n, Seq::new(3), 2, b"snap@3".to_vec());
+        // A recovery write-back from base 1 re-offers seqs 2..=4; seqs 2,3 are already
+        // subsumed by the snapshot, so only seq 4 is stored — no gap, no regression.
+        store.store_record(
+            0,
+            &n,
+            Seq::new(1),
+            2,
+            vec![b"e2".to_vec(), b"e3".to_vec(), b"e4".to_vec()],
+            true,
+        );
+        assert_eq!(store.read(0, &n).slots, vec![(Seq::new(4), 2, b"e4".to_vec())]);
+    }
+}

@@ -1,7 +1,7 @@
 //! Regression: hosting grains on a clustered system that has **no consensus
 //! engine** must fail loud at construction, not silently at the first call.
 //!
-//! granary Tier-2 rides Raft: a shard elects its leader through the system's
+//! granary's `Quorum` tier rides Raft: a shard elects its leader through the system's
 //! consensus engine, and only `MembershipMode::Leader` builds one. A clustered
 //! deployment wired in any other mode (Static, Registry, Gossip) reports no
 //! configured voters, so no shard ever elects — the gateway's redirect then hints
