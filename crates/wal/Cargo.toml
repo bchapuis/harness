@@ -1,6 +1,6 @@
 [package]
 name = "wal"
-description = "A generic, framed, checksummed write-ahead log primitive: append, truncate, compact, and torn-tail recovery — the shared substrate behind the file-backed Raft WAL and grain store."
+description = "A generic, framed, checksummed write-ahead log primitive: append, truncate, compact, and torn-tail recovery for file-backed durable stores."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

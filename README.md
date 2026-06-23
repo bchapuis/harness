@@ -70,6 +70,8 @@ continues the same transcript.
 - [docs/distributed-actor-spec.md](docs/distributed-actor-spec.md) and
   [docs/cluster-utilities-spec.md](docs/cluster-utilities-spec.md) — the
   framework underneath.
+- [docs/wal-spec.md](docs/wal-spec.md) — the framed, checksummed
+  write-ahead log primitive for file-backed durable stores.
 - [docs/verification-and-validation.md](docs/verification-and-validation.md)
   — how the simulation testing earns the claims above.
 

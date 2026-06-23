@@ -1,49 +1,44 @@
 //! A generic, framed, checksummed write-ahead log on the local filesystem.
 //!
-//! This is the shared substrate behind two file-backed durable stores that used to
-//! hand-roll the identical machinery: the Raft WAL
-//! ([`FileRaftWAL`](../actor_runtime/storage)) and the grain store
-//! ([`FileGrainStore`](../granary/file_store)). Both frame records the same way,
-//! checksum them the same way, recover the same way (scan the valid prefix, discard a
-//! torn tail), and rewrite atomically the same way. That logic — small but
-//! safety-critical, because a divergence between the write path and the recovery path
-//! mis-recovers a node — now lives here, once.
+//! A file-backed durable store needs the same small, safety-critical machinery every
+//! time: frame records the same way, checksum them the same way, recover the same way
+//! (scan the valid prefix, discard a torn tail), and rewrite atomically the same way.
+//! A divergence between the write path and the recovery path mis-recovers a node, so
+//! that logic lives here, once.
 //!
 //! # The log
 //!
 //! [`Wal<T>`] is an append-only log of postcard-encoded `T` records, each framed
 //! `[u32 little-endian length][postcard payload][u64 little-endian FNV-1a checksum]`
-//! and fsynced before the call that wrote it returns. It exposes the four operations
-//! the two callers need:
+//! and fsynced before the call that wrote it returns. It exposes four operations:
 //!
 //! - [`append`](Wal::append) / [`append_batch`](Wal::append_batch) — frame and fsync
-//!   one record, or many in a single write and a single fsync (the Raft batch append).
+//!   one record, or many in a single write and a single fsync.
 //! - [`truncate`](Wal::truncate) — drop a conflicting suffix back to the first `keep`
-//!   records (Raft conflict resolution), a `set_len` at the record's recorded offset.
+//!   records, a `set_len` at the record's recorded offset.
 //! - [`rewrite`](Wal::rewrite) — atomically replace the whole file with exactly the
-//!   given records (Raft compaction to a retained suffix; a grain segment's
-//!   compaction to a single checkpoint op).
+//!   given records (compaction to a retained suffix, or to a single record that
+//!   subsumes the prior history).
 //!
 //! [`open`](Wal::open) scans the file into its records, **truncating any torn tail to
 //! disk** before returning — a record whose write never completed was never
-//! acknowledged, so dropping it is correct. Whatever higher-level recovery a caller
-//! layers on top (a Raft snapshot subsuming a log prefix, a grain segment replayed
-//! into its in-memory form) operates on the returned records.
+//! acknowledged, so dropping it is correct. Whatever higher-level recovery runs on top
+//! operates on the returned records.
 //!
 //! # Sidecars
 //!
 //! Some durable state is not a log but a single small file rewritten in place (a
-//! Raft term/vote, a Raft snapshot, a grain shard's fence). For those,
+//! generation counter, a small piece of metadata, a checkpoint pointer). For those,
 //! [`atomic_replace`] writes `tmp → fsync → rename → fsync dir` so a reader sees
 //! either the old file or the whole new one, never a torn mix. [`checksum`] and
-//! [`sync_dir`] are exposed for callers that frame their own sidecar bytes.
+//! [`sync_dir`] are exposed for framing one's own sidecar bytes.
 //!
 //! # Failure policy
 //!
 //! Every method returns [`io::Result`]: this crate does not decide what an I/O
-//! failure *means*. The callers do — a voter that cannot persist its vote, or a
-//! replica that cannot persist a record, cannot safely continue, so they panic with
-//! a domain-specific message. Keeping the policy in the caller is deliberate.
+//! failure *means*. The caller does — code that cannot persist a record it must not
+//! lose may have no safe way to continue, so it panics with a domain-specific message.
+//! Keeping that policy out of this crate is deliberate.
 //!
 //! The checksum is FNV-1a: it catches torn and partial writes, not adversarial
 //! tampering, which is all a local log needs.
@@ -62,7 +57,7 @@ use serde::de::DeserializeOwned;
 
 /// FNV-1a 64. Detects torn and partial writes (not adversarial tampering), all a
 /// local log needs. Exposed so a caller framing its own sidecar bytes (e.g. a
-/// fixed-width fence file) checksums them the same way the log does.
+/// fixed-width value file) checksums them the same way the log does.
 pub fn checksum(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &byte in bytes {
@@ -107,6 +102,14 @@ fn parent_dir(path: &Path) -> &Path {
     }
 }
 
+/// Width of the little-endian length prefix that opens every frame. Tied to the
+/// prefix's own type so the write path ([`encode`]) and the recovery path ([`scan`])
+/// frame from one definition and cannot drift apart on the layout — the divergence this
+/// crate exists to prevent.
+const LEN_BYTES: usize = size_of::<u32>();
+/// Width of the little-endian FNV-1a checksum that closes every frame.
+const CHECKSUM_BYTES: usize = size_of::<u64>();
+
 /// Frame one record: `[u32 len][postcard payload][u64 checksum]`, all little-endian.
 ///
 /// Panics if the payload exceeds `max_record`. The scan that recovers the log treats a
@@ -122,7 +125,7 @@ fn encode<T: Serialize>(value: &T, max_record: u32) -> Vec<u8> {
          discard it, so it must not be written",
         payload.len(),
     );
-    let mut record = Vec::with_capacity(4 + payload.len() + 8);
+    let mut record = Vec::with_capacity(LEN_BYTES + payload.len() + CHECKSUM_BYTES);
     record.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     record.extend_from_slice(&payload);
     record.extend_from_slice(&checksum(&payload).to_le_bytes());
@@ -137,19 +140,20 @@ fn scan<T: DeserializeOwned>(bytes: &[u8], max_record: u32) -> (Vec<T>, Vec<u64>
     let mut records = Vec::new();
     let mut offsets = Vec::new();
     let mut pos = 0usize;
-    while let Some(header) = bytes.get(pos..pos + 4) {
-        let len = u32::from_le_bytes(header.try_into().expect("4-byte slice"));
+    while let Some(header) = bytes.get(pos..pos + LEN_BYTES) {
+        let len = u32::from_le_bytes(header.try_into().expect("length-prefix slice"));
         if len > max_record {
             break;
         }
         let len = len as usize;
-        let Some(payload) = bytes.get(pos + 4..pos + 4 + len) else {
+        let Some(payload) = bytes.get(pos + LEN_BYTES..pos + LEN_BYTES + len) else {
             break;
         };
-        let Some(check) = bytes.get(pos + 4 + len..pos + 4 + len + 8) else {
+        let check_start = pos + LEN_BYTES + len;
+        let Some(check) = bytes.get(check_start..check_start + CHECKSUM_BYTES) else {
             break;
         };
-        if u64::from_le_bytes(check.try_into().expect("8-byte slice")) != checksum(payload) {
+        if u64::from_le_bytes(check.try_into().expect("checksum slice")) != checksum(payload) {
             break;
         }
         let Ok(record) = postcard::from_bytes::<T>(payload) else {
@@ -157,7 +161,7 @@ fn scan<T: DeserializeOwned>(bytes: &[u8], max_record: u32) -> (Vec<T>, Vec<u64>
         };
         offsets.push(pos as u64);
         records.push(record);
-        pos += 4 + len + 8;
+        pos += LEN_BYTES + len + CHECKSUM_BYTES;
     }
     (records, offsets, pos as u64)
 }
@@ -168,7 +172,7 @@ pub struct Wal<T> {
     path: PathBuf,
     /// The open append handle. With `O_APPEND`, writes land at the current end even
     /// right after a truncating `set_len`.
-    log: File,
+    file: File,
     /// The byte offset where each record's frame starts, parallel to the records the
     /// caller holds — what makes [`truncate`](Wal::truncate) a single `set_len`.
     offsets: Vec<u64>,
@@ -203,25 +207,25 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
             Err(err) => return Err(err),
         };
         let (records, offsets, valid_end) = scan::<T>(&bytes, max_record);
-        let log = OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         if !existed {
             // The file was just created. Its bytes become durable on the first append's
             // fsync, but the directory entry that names it needs its own fsync, or a
             // crash could lose a file whose appends were already acknowledged. Doing it
-            // here makes the new log's entry durable for every caller — including a
-            // lazily-created grain segment — so no caller has to remember to.
+            // here makes the new log's entry durable for every caller, including one
+            // that creates its logs lazily, so no caller has to remember to.
             sync_dir(parent_dir(&path))?;
         }
         if (valid_end as usize) < bytes.len() {
             // A torn tail: the write never returned, so the record was never
             // acknowledged. Truncate it away before anything is appended.
-            log.set_len(valid_end)?;
-            log.sync_all()?;
+            file.set_len(valid_end)?;
+            file.sync_all()?;
         }
         Ok((
             Wal {
                 path,
-                log,
+                file,
                 offsets,
                 end: valid_end,
                 max_record,
@@ -282,8 +286,8 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
             return Ok(());
         }
         let (buf, offsets) = self.frame_all(records, self.end);
-        self.log.write_all(&buf)?;
-        self.log.sync_all()?;
+        self.file.write_all(&buf)?;
+        self.file.sync_all()?;
         self.offsets.extend(offsets);
         self.end += buf.len() as u64;
         Ok(())
@@ -291,7 +295,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
 
     /// Drop everything past the first `keep` records — a `set_len` at record `keep`'s
     /// recorded offset, made durable before any conflicting record can be appended
-    /// after it (Raft conflict resolution). A no-op when `keep` is already the length.
+    /// after it. A no-op when `keep` is already the length.
     ///
     /// # Errors
     ///
@@ -301,17 +305,17 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
             return Ok(());
         }
         let cut = self.offsets[keep];
-        self.log.set_len(cut)?;
-        self.log.sync_all()?;
+        self.file.set_len(cut)?;
+        self.file.sync_all()?;
         self.offsets.truncate(keep);
         self.end = cut;
         Ok(())
     }
 
     /// Atomically replace the whole file with exactly `records` (via `tmp` → fsync →
-    /// rename → fsync dir) and reopen the append handle. Used to compact: a Raft log to
-    /// its retained suffix, a grain segment to a single checkpoint op. A crash leaves
-    /// either the old file or the whole new one.
+    /// rename → fsync dir) and reopen the append handle. Used to compact: replace the
+    /// log with a retained suffix, or with a single record that subsumes the prior
+    /// history. A crash leaves either the old file or the whole new one.
     ///
     /// # Errors
     ///
@@ -325,7 +329,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
             .and_then(|n| n.to_str())
             .expect("a WAL path always has a file name");
         atomic_replace(dir, name, &buf)?;
-        self.log = OpenOptions::new().append(true).open(&self.path)?;
+        self.file = OpenOptions::new().append(true).open(&self.path)?;
         self.offsets = offsets;
         self.end = buf.len() as u64;
         Ok(())
@@ -493,10 +497,10 @@ mod tests {
     #[test]
     fn atomic_replace_round_trips_a_sidecar() {
         let dir = tempfile::tempdir().unwrap();
-        atomic_replace(dir.path(), "fence", b"hello").unwrap();
-        assert_eq!(fs::read(dir.path().join("fence")).unwrap(), b"hello");
+        atomic_replace(dir.path(), "state", b"hello").unwrap();
+        assert_eq!(fs::read(dir.path().join("state")).unwrap(), b"hello");
         // A second replace overwrites it whole.
-        atomic_replace(dir.path(), "fence", b"world!").unwrap();
-        assert_eq!(fs::read(dir.path().join("fence")).unwrap(), b"world!");
+        atomic_replace(dir.path(), "state", b"world!").unwrap();
+        assert_eq!(fs::read(dir.path().join("state")).unwrap(), b"world!");
     }
 }
