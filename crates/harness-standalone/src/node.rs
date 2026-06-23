@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,11 +96,22 @@ pub struct NodeOptions {
     pub id: u64,
     /// Roster size; every node must agree on it.
     pub nodes: u64,
-    /// The shared data directory (journal + workspaces).
+    /// This node's own data directory (journal + workspaces). Each node keeps
+    /// its own: the journal replicates over the transport (a quorum append per
+    /// grain, §7.2), so nodes never share a directory or a filesystem.
     pub data: PathBuf,
-    /// Node `i` binds its transport on `127.0.0.1:(port_base + i - 1)`.
+    /// The local interface the transport and control ports bind. `0.0.0.0`
+    /// binds every interface, which is what a container or pod needs; the
+    /// `127.0.0.1` default keeps a single-host cluster on loopback.
+    pub bind_host: String,
+    /// Each node's reachable host, from `--peer <id>=<host>`. A node advertises
+    /// its own entry to peers and dials the others at theirs. Empty leaves every
+    /// node at `127.0.0.1` (single host); supplying the roster's hosts — pod DNS
+    /// names, say — is the whole of what makes the cluster multi-host.
+    pub peer_hosts: BTreeMap<u64, String>,
+    /// Node `i`'s transport port is `port_base + i - 1`.
     pub port_base: u16,
-    /// Node `i` binds its control port on `127.0.0.1:(control_base + i - 1)`.
+    /// Node `i`'s control port is `control_base + i - 1`.
     pub control_base: u16,
     /// The Anthropic model id every kind runs on.
     pub model: String,
@@ -133,6 +145,8 @@ impl Default for NodeOptions {
             id: 0,
             nodes: 3,
             data: PathBuf::from("./harness-data"),
+            bind_host: "127.0.0.1".to_string(),
+            peer_hosts: BTreeMap::new(),
             port_base: 7401,
             control_base: 7501,
             model: ModelParams::default().model,
@@ -165,15 +179,23 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     )?;
     let node = NodeId::new(opts.id);
     let roster: Vec<NodeId> = (1..=opts.nodes).map(NodeId::new).collect();
+    // Each node's reachable host: its `--peer` entry, or loopback if unset. With
+    // no `--peer` flags every host is 127.0.0.1 and the cluster is single-host,
+    // exactly as before.
+    let host_of = |id: u64| -> &str {
+        opts.peer_hosts.get(&id).map(String::as_str).unwrap_or("127.0.0.1")
+    };
     let peers: BTreeMap<NodeId, SocketAddr> = roster
         .iter()
-        .map(|peer| (*peer, loopback(opts.port_base, peer.uid())))
-        .collect();
+        .map(|peer| Ok((*peer, resolve(host_of(peer.uid()), opts.port_base, peer.uid())?)))
+        .collect::<Result<_, String>>()?;
+    // Advertise the routable host (what peers dial back), but bind the local
+    // interface — they differ when bound to the 0.0.0.0 wildcard in a container.
     let advertised = peers[&node];
-
-    let listener = TcpListener::bind(advertised)
+    let bind = resolve(&opts.bind_host, opts.port_base, opts.id)?;
+    let listener = TcpListener::bind(bind)
         .await
-        .map_err(|e| format!("bind transport {advertised}: {e}"))?;
+        .map_err(|e| format!("bind transport {bind}: {e}"))?;
     let (transport, inbound) = TcpTransport::start(
         TcpConfig {
             node,
@@ -186,7 +208,8 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
             codec: Arc::new(JsonCodec),
             cluster_secret: opts.secret.clone(),
             allowlist: Some(roster.iter().copied().collect::<BTreeSet<_>>()),
-            // Plaintext is acceptable on loopback; a multi-host deployment
+            // Plaintext, guarded by the cluster secret. Fine on loopback or a
+            // trusted cluster network; a deployment crossing untrusted links
             // would provision certificates and set `TlsConfig` here.
             tls: None,
         },
@@ -291,24 +314,34 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     );
     wait_for_hosts(&system, opts.nodes as usize).await;
 
-    let control = loopback(opts.control_base, opts.id);
-    let listener = TcpListener::bind(control)
+    let control_bind = resolve(&opts.bind_host, opts.control_base, opts.id)?;
+    let control_addr = resolve(host_of(opts.id), opts.control_base, opts.id)?;
+    let listener = TcpListener::bind(control_bind)
         .await
-        .map_err(|e| format!("bind control {control}: {e}"))?;
+        .map_err(|e| format!("bind control {control_bind}: {e}"))?;
     eprintln!(
-        "[{node}] control listening on {control} — attach with: harness-standalone repl {control}"
+        "[{node}] control listening on {control_bind} — attach with: harness-standalone repl {control_addr}"
     );
     loop {
         let (stream, _) = listener
             .accept()
             .await
-            .map_err(|e| format!("accept on {control}: {e}"))?;
+            .map_err(|e| format!("accept on {control_bind}: {e}"))?;
         tokio::spawn(serve_connection(harness.clone(), stream));
     }
 }
 
-fn loopback(base: u16, id: u64) -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], base + (id - 1) as u16))
+/// Resolve node `id`'s address on `host` at port `base + id - 1`. An IP literal
+/// (the `127.0.0.1` default) passes straight through; a hostname — a container
+/// or pod DNS name like `harness-0.harness` — resolves through the system
+/// resolver, which is what lets the roster span machines instead of loopback.
+fn resolve(host: &str, base: u16, id: u64) -> Result<SocketAddr, String> {
+    let port = base + (id - 1) as u16;
+    (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve {host}:{port}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("resolve {host}:{port}: no address"))
 }
 
 /// The cluster-wide kind map (harness spec §7.1). One pure function of the

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Your agentic distributed harness in two minutes: build, boot a three-node
-# cluster (three OS processes, one shared journal), attach a REPL.
+# cluster (three OS processes, each its own journal, replicated over the
+# transport), attach a REPL.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -48,7 +49,10 @@ trap cleanup EXIT INT TERM
 
 echo "▸ booting three nodes (logs in $DATA/node*.log)"
 for i in 1 2 3; do
-  "$BIN" node --id "$i" --data "$DATA" --api-url "$API_URL" \
+  # Each node keeps its own data dir: the journal replicates over the
+  # transport (a quorum append per grain), so nodes share nothing on disk.
+  # They find each other on loopback here; --bind-host and --peer span hosts.
+  "$BIN" node --id "$i" --data "$DATA/node$i" --api-url "$API_URL" \
     --sandbox docker --sandbox-image "$IMAGE" \
     > "$DATA/node$i.log" 2>&1 &
   NODE_PIDS+=($!)

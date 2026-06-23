@@ -1,9 +1,9 @@
 //! `harness-standalone`: a runnable deployment of the agentic harness.
 //!
 //! Two subcommands:
-//! - `node` boots one cluster node — production runtime (tokio, TCP),
-//!   shared file journal, the Anthropic model, a workspace sandbox — and
-//!   serves a loopback control port.
+//! - `node` boots one cluster node — production runtime (tokio, TCP), its own
+//!   file journal replicated to peers, the Anthropic model, a workspace
+//!   sandbox — and serves a control port.
 //! - `repl` attaches to any node's control port and drives sessions.
 //!
 //! See `docs/standalone-deployment.md` for the three-node walkthrough.
@@ -26,7 +26,10 @@ usage:
 node options (defaults in parentheses; every node must agree on all of them):
   --id <n>             this node's id, 1..=--nodes        (required)
   --nodes <n>          roster size                        (3)
-  --data <dir>         shared data directory              (./harness-data)
+  --data <dir>         this node's data directory         (./harness-data)
+  --bind-host <addr>   interface the ports bind; 0.0.0.0 in a container (127.0.0.1)
+  --peer <id>=<host>   a node's reachable host; repeat for the roster. Omit for
+                       a single-host loopback cluster.    (all 127.0.0.1)
   --port-base <p>      node i's transport port = p+i-1    (7401)
   --control-base <p>   node i's control port = p+i-1      (7501)
   --model <id>         Anthropic model id                 (claude-sonnet-4-6)
@@ -76,6 +79,13 @@ async fn run_node(args: &[String]) -> Result<(), String> {
             "--id" => opts.id = parse(flag, value)?,
             "--nodes" => opts.nodes = parse(flag, value)?,
             "--data" => opts.data = PathBuf::from(value),
+            "--bind-host" => opts.bind_host = value.clone(),
+            "--peer" => {
+                let (id, host) = value
+                    .split_once('=')
+                    .ok_or_else(|| format!("--peer expects <id>=<host>, got {value}"))?;
+                opts.peer_hosts.insert(parse("--peer <id>", id)?, host.to_string());
+            }
             "--port-base" => opts.port_base = parse(flag, value)?,
             "--control-base" => opts.control_base = parse(flag, value)?,
             "--model" => opts.model = value.clone(),

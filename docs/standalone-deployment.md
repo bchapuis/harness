@@ -1,10 +1,11 @@
-# Standalone deployment: a three-node agentic harness on one machine
+# Standalone deployment: a three-node agentic harness
 
 This guide installs `harness-standalone` — the runnable deployment of the
-agentic harness — and walks through a local three-node cluster: one OS
-process per node, agentic sessions backed by the Anthropic API, and the
-failure drill the architecture exists for (kill a node, watch its sessions
-resume on a survivor).
+agentic harness — and walks through a three-node cluster: one OS process per
+node, each with its own data directory, agentic sessions backed by the
+Anthropic API, and the failure drill the architecture exists for (kill a node,
+watch its sessions resume on a survivor). It starts on one host and spans
+machines with two flags ("Across machines").
 
 ## What runs
 
@@ -14,14 +15,15 @@ resume on a survivor).
  │ node 1         │    │ node 2         │    │ node 3         │
  │ transport :7401│◄──►│ transport :7402│◄──►│ transport :7403│
  │ control   :7501│    │ control   :7502│    │ control   :7503│
- └───────┬────────┘    └───────┬────────┘    └───────┬────────┘
-         │      shared --data directory             │
-         └──────┬───── journal/ ── workspaces/ ─────┘
-                │
- terminal 4     │                          api.anthropic.com
- ┌──────────────┴─┐                        ▲ (one HTTPS call
+ │ --data node1/  │    │ --data node2/  │    │ --data node3/  │
+ └───────┬────────┘    └────────────────┘    └────────────────┘
+         │   each node its own --data; the journal replicates
+         │   over the transport links above (a quorum per grain)
+ terminal 4                                api.anthropic.com
+ ┌───────┴────────┐                        ▲ (one HTTPS call
  │ repl           │                        │  per model step,
- └────────────────┘                        │  from any node)
+ │ → control 7501 │                        │  from any node)
+ └────────────────┘
 ```
 
 Each `node` process is a full cluster member: a TCP transport on loopback, a
@@ -30,12 +32,13 @@ and one node's harness — host actor, session actors, and the three seams:
 
 - **Model** — the Anthropic Messages API (`harness-anthropic`), over a small
   tokio/rustls HTTP client.
-- **GrainJournal** — a file-backed store in the shared `--data` directory. The
-  journal is one logical store for the whole cluster (spec §6.1), which is
-  why every node must point at the same directory; it is also durable, which
-  is what makes the failure drill work. Each fenced append commits as an
-  atomic `hard_link` of a fully-fsynced batch file — the conditional write of
-  spec §6.2, enforced by the filesystem.
+- **GrainJournal** — a file-backed store in each node's own `--data` directory.
+  The journal is one logical store for the whole cluster (spec §6.1), but it is
+  *replicated*, not shared: a session's record is appended to a quorum of the
+  shard's replicas over the transport, fenced by the shard's term (spec §7.2,
+  §8). A node writes only its own directory, so nodes share neither a directory
+  nor a filesystem. It is durable, which is what makes the failure drill work:
+  a new owner recovers a grain's head from a quorum on activation (§8, G14).
 - **Sandbox** — one private workspace directory per session under
   `--data/workspaces`, where the `shell` tool runs.
 
@@ -60,8 +63,9 @@ Native-only provider, with no Compute engine.
 
 - Rust ≥ 1.85 (`rustup` recommended).
 - An Anthropic API key in `ANTHROPIC_API_KEY`.
-- macOS or Linux (the journal relies on POSIX hard-link semantics; all nodes
-  must share a local filesystem).
+- macOS or Linux. Each node keeps its own `--data` directory; the journal
+  replicates over the transport, so nodes need not share a filesystem (see
+  "Across machines" below).
 
 ## Install
 
@@ -76,7 +80,7 @@ Or run uninstalled with `cargo run -p harness-standalone --` in place of
 
 ## Start the cluster
 
-One terminal per node, all pointing at the same data directory. `--sandbox`
+One terminal per node, each with its own `--data` directory. `--sandbox`
 is required, and with a real API key the confined mode is the right one (a
 real model composes the shell commands these nodes will run):
 
@@ -85,12 +89,40 @@ export ANTHROPIC_API_KEY=sk-ant-…
 docker pull python:3.12-slim   # once; the first shell call would otherwise eat its timeout
 
 # terminal 1
-harness-standalone node --id 1 --data ./harness-data --sandbox docker --sandbox-image python:3.12-slim
+harness-standalone node --id 1 --data ./harness-data/node1 --sandbox docker --sandbox-image python:3.12-slim
 # terminal 2
-harness-standalone node --id 2 --data ./harness-data --sandbox docker --sandbox-image python:3.12-slim
+harness-standalone node --id 2 --data ./harness-data/node2 --sandbox docker --sandbox-image python:3.12-slim
 # terminal 3
-harness-standalone node --id 3 --data ./harness-data --sandbox docker --sandbox-image python:3.12-slim
+harness-standalone node --id 3 --data ./harness-data/node3 --sandbox docker --sandbox-image python:3.12-slim
 ```
+
+On one host the nodes find each other on loopback (the default). Nothing is
+shared between the three directories; the journal replicates over the
+transport.
+
+### Across machines
+
+The roster spans hosts once each node binds a reachable interface and learns
+its peers by name instead of loopback. Two flags do it, the same on every
+node except `--id`:
+
+- `--bind-host 0.0.0.0` — bind every interface, not just loopback.
+- `--peer <id>=<host>` — the reachable host of each node in the roster; repeat
+  for the whole roster. A node advertises its own entry to the others and
+  dials them at theirs.
+
+```sh
+# on host-a (the others are identical but for --id):
+harness-standalone node --id 1 --data ./harness-data \
+  --bind-host 0.0.0.0 \
+  --peer 1=host-a --peer 2=host-b --peer 3=host-c \
+  --sandbox docker --sandbox-image python:3.12-slim
+```
+
+A hostname resolves through the system resolver, so container or pod DNS names
+(`harness-0.harness.default.svc`, say) work directly. The transport stays
+plaintext, guarded by `--secret`; keep the roster on a trusted network, or
+provision TLS, before crossing untrusted links (see Limitations).
 
 Any image works; the choice is just what `shell` finds on its `PATH`.
 `python:3.12-slim` carries python3, bash, and coreutils — enough for the
@@ -179,8 +211,9 @@ that was running it.
    placement stops routing to the dead node.
 5. If your REPL was attached to the killed node, re-attach to a survivor:
    `harness-standalone repl 127.0.0.1:7502`.
-6. `:retry` — the same turn id is re-submitted. The new owner folds the
-   shared journal, resumes the run from its last committed record, and the
+6. `:retry` — the same turn id is re-submitted. The new owner recovers the
+   grain's head from a quorum, folds the journal, resumes the run from its last
+   committed record, and the
    outcome comes back as if nothing happened. A tool call that was in flight
    when the node died is resolved per its declared policy (the `shell` tool
    interrupts: the model is told and decides whether to re-run it).
@@ -205,7 +238,9 @@ harness-standalone repl [host:port]        # default 127.0.0.1:7501
 |------------------|-----------------------------|-------|
 | `--id <n>`       | required                    | 1..=`--nodes` |
 | `--nodes <n>`    | `3`                         | roster size; agree everywhere |
-| `--data <dir>`   | `./harness-data`            | the shared journal + workspaces |
+| `--data <dir>`   | `./harness-data`            | this node's own journal + workspaces |
+| `--bind-host <addr>` | `127.0.0.1`             | interface the ports bind; `0.0.0.0` in a container |
+| `--peer <id>=<host>` | all `127.0.0.1`         | each node's reachable host; repeat for the roster |
 | `--port-base <p>`| `7401`                      | node *i*'s transport = p+i−1 |
 | `--control-base <p>` | `7501`                  | node *i*'s control = p+i−1 |
 | `--model <id>`   | `claude-sonnet-4-6`         | agree everywhere (kind digests are pinned per session) |
@@ -231,7 +266,7 @@ API key.
 
 | this deployment | agentic harness spec |
 |---|---|
-| `--data/journal`, batch files committed by `hard_link` | the fenced, per-session journal (§6.1–§6.2); the journal **is** the session (§2.1) |
+| `--data/grains`, a quorum append per grain fenced by the shard term | the fenced, per-session journal (§6.1–§6.2, §7.2); the journal **is** the session (§2.1) |
 | killing a node, `:retry` | caller-driven resumption (§7.5), idempotent turns (H7) |
 | any control port accepts any session | placement is routing, not a lease (utilities spec §2.3); exclusivity lives in the fence |
 | `--data/workspaces/<session>` | the sandbox seam (§5.3); working state, not session state (§5.5) |
@@ -261,9 +296,10 @@ API key.
   built by `guest/fc-rootfs/build.sh`) for the microVM grade instead: one
   Firecracker VM per activation, the workspace synced over vsock, no
   network device (sandbox spec §3.5's reference choice).
-- **The journal needs one shared local filesystem**, so "cluster" here means
-  one machine. A multi-host deployment needs a networked journal
-  implementation (spec §13 leaves durable stores open).
+- **Each node keeps its own `--data` directory**; the journal replicates over
+  the transport (a quorum append per grain, §7.2), so the roster spans machines
+  — set `--bind-host` and `--peer` (see "Across machines"). The store is local
+  to each node, never shared.
 - **The fake-friendly `--api-url`** speaks HTTP/1.1 without retry-relevant
   streaming; long completions are bounded by a 300s per-request timeout
   under the model client's retry policy.
