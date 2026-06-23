@@ -9,7 +9,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["bchapuis <bchapuis@gmail.com>"]
 repository = "https://github.com/bchapuis/harness"
-rust-version = "1.85"
+# edition 2024 needs 1.85, but the tree uses let-chains (stable in 1.88).
+rust-version = "1.88"
 
 # Centralized dependency versions. Member crates opt in with
 # `some-dep.workspace = true`, keeping versions consistent across the workspace.

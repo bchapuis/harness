@@ -18,9 +18,29 @@ transport, a quorum append per grain (spec §7.2).
 
 ## Prerequisites
 
-- A cluster: `kind`, `minikube`, Docker Desktop, or a real one.
+- A cluster: `kind`, `minikube`, Docker Desktop, OrbStack, or a real one.
 - `kubectl` pointed at it.
 - An Anthropic API key in `ANTHROPIC_API_KEY`.
+
+## Quick start
+
+`start.sh` does steps 1–3 in one go: it builds the image, makes it reachable
+(detecting `kind`/`minikube` vs. a shared daemon store from the current
+context), creates the secret if it is missing, applies the manifest, and waits
+for all three pods.
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-…
+k8s/start.sh
+```
+
+It is idempotent — re-run it after editing the manifest, and it leaves an
+existing secret untouched. Override the image name with `HARNESS_IMAGE`, or
+force the load step with `HARNESS_IMAGE_LOADER=kind|minikube|none`.
+
+The rest of this page is the manual path the script automates, plus the parts
+it deliberately leaves to you: talking to the cluster, the failure drill, the
+sandbox trade-off, and tear-down.
 
 ## 1. Build the image
 

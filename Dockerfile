@@ -9,10 +9,10 @@
 #
 # Build from the repository root:  docker build -t harness-standalone:latest .
 
-FROM rust:1.85-bookworm AS build
+FROM rust:1.88-bookworm AS build
 WORKDIR /src
 COPY . .
-# edition 2024 → Rust ≥ 1.85 (workspace rust-version).
+# edition 2024 needs Rust ≥ 1.85, but the tree uses let-chains (stable in 1.88).
 RUN cargo build --release -p harness-standalone
 
 FROM python:3.12-slim
