@@ -331,6 +331,10 @@ struct EventOutbox {
     /// — scoped to journaled spend, so an uncommitted response emits nothing and
     /// a resume re-counts nothing (§10.4, §9.1.4): `(turn, tokens)`.
     model: Vec<(TurnId, u64)>,
+    /// Tool calls whose `ToolOutcome` just committed, awaiting `ToolCompleted`
+    /// (§10.4). Like `model`, populated only where a record is produced — a
+    /// discarded straggler emits nothing.
+    tools: Vec<TurnId>,
 }
 
 /// Ephemeral, per-activation working state (§5.5, §5.6, §7.4): never journaled,
@@ -711,6 +715,9 @@ impl<S: HarnessSystem> Agent<S> {
             self.release_sandbox(&mut act, ctx);
             act.env.reconciled = false;
         }
+        // The outcome record is produced below, so its `ToolCompleted` is owed
+        // once it commits (drained by `emit_run_events`, §10.4).
+        act.events.tools.push(turn.clone());
         drop(act);
         self.schedule_advance(ctx);
         vec![self.rec(ctx, RecordBody::ToolOutcome { turn, call, outcome })]
@@ -1165,6 +1172,11 @@ impl<S: HarnessSystem> Agent<S> {
         for (turn, usage) in std::mem::take(&mut act.events.model) {
             ctx.system().emit_app(
                 HarnessEvent::ModelCompleted { session: session.clone(), turn, node, usage }.into(),
+            );
+        }
+        for turn in std::mem::take(&mut act.events.tools) {
+            ctx.system().emit_app(
+                HarnessEvent::ToolCompleted { session: session.clone(), turn, node }.into(),
             );
         }
         for turn in std::mem::take(&mut act.events.ended) {

@@ -289,6 +289,8 @@ impl Repl {
                 println!("· cancel of {turn} acknowledged");
             }
             (Reply::Cancelled, _) => println!("· cancel acknowledged"),
+            // The REPL never issues `Watch`; a stray terminal frame is noise.
+            (Reply::WatchEnded, _) => {}
             (Reply::Error { message }, pending) => {
                 let about = match pending {
                     Some(PendingOp::Prompt { turn }) => format!(" ({turn})"),

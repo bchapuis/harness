@@ -48,9 +48,11 @@ use harness::Kind;
 use harness::Kinds;
 use harness::Model;
 use harness::ModelParams;
+use harness::RecordBody;
 use harness::SandboxProvider;
 use harness::Seq;
 use harness::SessionId;
+use harness::SessionRef;
 use harness::Tier;
 use harness::Turn;
 use harness::TurnId;
@@ -59,6 +61,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
 use crate::http::HttpsPost;
@@ -215,6 +218,13 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         },
         listener,
     );
+    // The harness-event fan-out behind `Op::Watch`: every `HarnessEvent` the
+    // sink sees is republished here, and each watch subscribes to learn when a
+    // run committed new records (the event carries no content, so the watch
+    // still tails — but only when woken, never on a blind interval). A bounded
+    // buffer; a lagged watch catches up by tailing, so drops cost only latency.
+    let (runs_tx, _) = broadcast::channel::<HarnessEvent>(1024);
+
     let system: TcpCluster = ClusterSystem::start(
         node,
         TokioClock::new(),
@@ -223,7 +233,10 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         transport,
         inbound,
         ClusterConfig {
-            events: Arc::new(StderrEvents { node }),
+            events: Arc::new(NodeEvents {
+                node,
+                runs: runs_tx.clone(),
+            }),
             // Granary's sharded journal rides Raft, so the node must run the
             // consensus engine: leader-based membership is the only mode that
             // builds one (system.rs). Voters are the full roster; the shard-map
@@ -327,7 +340,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
             .accept()
             .await
             .map_err(|e| format!("accept on {control_bind}: {e}"))?;
-        tokio::spawn(serve_connection(harness.clone(), stream));
+        tokio::spawn(serve_connection(harness.clone(), stream, runs_tx.clone()));
     }
 }
 
@@ -479,7 +492,11 @@ async fn wait_for_hosts(system: &TcpCluster, expected: usize) {
 
 /// One control connection: requests handled concurrently (a parked prompt
 /// must not block a tail or cancel), responses serialized by a writer task.
-async fn serve_connection(harness: Harness<TcpCluster>, stream: tokio::net::TcpStream) {
+async fn serve_connection(
+    harness: Harness<TcpCluster>,
+    stream: tokio::net::TcpStream,
+    runs: broadcast::Sender<HarnessEvent>,
+) {
     let (read, mut write) = stream.into_split();
     let (tx, mut rx) = mpsc::channel::<Response>(64);
     let writer = tokio::spawn(async move {
@@ -514,6 +531,20 @@ async fn serve_connection(harness: Harness<TcpCluster>, stream: tokio::net::TcpS
         };
         let harness = harness.clone();
         let tx = tx.clone();
+        // `Watch` streams many replies on one id over the run's life; the other
+        // ops resolve to a single reply. Subscribe before spawning so no event
+        // committed after this point is missed (the watch then tails for it).
+        if let Op::Watch {
+            kind,
+            session,
+            turn,
+            from,
+        } = request.op
+        {
+            let events = runs.subscribe();
+            tokio::spawn(watch(harness, tx, request.id, kind, session, turn, from, events));
+            continue;
+        }
         tokio::spawn(async move {
             let body = handle(harness, request.op).await;
             let _ = tx
@@ -576,20 +607,155 @@ async fn handle(harness: Harness<TcpCluster>, op: Op) -> Reply {
                 },
             }
         }
+        // Streamed over many replies; intercepted in `serve_connection` before
+        // ever reaching the single-reply path.
+        Op::Watch { .. } => unreachable!("Op::Watch is dispatched by serve_connection"),
+    }
+}
+
+/// Journal page size for a watch's catch-up tails.
+const WATCH_PAGE: u32 = 500;
+
+/// One subscription (`Op::Watch`): stream a run's records as they commit. The
+/// harness-event stream is the wake signal — events carry no content (§10.4),
+/// so each wake re-tails — and the run's `RunEnded` record (not the event) is
+/// the authoritative stop, so a terminal event missed before subscription is
+/// still caught by the initial drain.
+#[allow(clippy::too_many_arguments)]
+async fn watch(
+    harness: Harness<TcpCluster>,
+    tx: mpsc::Sender<Response>,
+    id: u64,
+    kind: String,
+    session: String,
+    turn: String,
+    from: u64,
+    mut events: broadcast::Receiver<HarnessEvent>,
+) {
+    let session_ref = harness.session(&kind, SessionId::new(session.clone()));
+    let mut from = Seq::new(from);
+    loop {
+        match drain(&session_ref, &mut from, &tx, id, &turn).await {
+            WatchState::Ended => {
+                let _ = tx.send(Response {
+                    id,
+                    body: Reply::WatchEnded,
+                })
+                .await;
+                return;
+            }
+            WatchState::Closed => return,
+            WatchState::Live => {}
+        }
+        // Wait for the next wake: any event for our session, or a lag (drop)
+        // that we recover from by tailing anyway. A closed channel means the
+        // node is shutting down.
+        loop {
+            match events.recv().await {
+                Ok(event) if event_targets(&event, &session) => break,
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => break,
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
+}
+
+/// Where a `drain` left the watch.
+enum WatchState {
+    /// Streamed (or found nothing); the run continues.
+    Live,
+    /// The run's terminal record was streamed; the watch is done.
+    Ended,
+    /// The client hung up mid-stream.
+    Closed,
+}
+
+/// Tail and stream every record after `*from`, advancing it, until the journal
+/// is exhausted or the watched turn's `RunEnded` is reached.
+async fn drain(
+    session_ref: &SessionRef<TcpCluster>,
+    from: &mut Seq,
+    tx: &mpsc::Sender<Response>,
+    id: u64,
+    turn: &str,
+) -> WatchState {
+    loop {
+        let records = match session_ref.tail(*from, WATCH_PAGE).await {
+            Ok(records) => records,
+            // A transient grain error (redirect, no leader): report it and keep
+            // the watch alive — the next wake re-tails. Mirrors `Tail`.
+            Err(e) => {
+                let _ = tx.send(Response {
+                    id,
+                    body: Reply::Error {
+                        message: format!("{e:?}"),
+                    },
+                })
+                .await;
+                return WatchState::Live;
+            }
+        };
+        if records.is_empty() {
+            return WatchState::Live;
+        }
+        let len = records.len();
+        let ended = records.iter().any(|(_, r)| {
+            matches!(&r.body, RecordBody::RunEnded { turn: t, .. } if t.as_str() == turn)
+        });
+        if let Some((seq, _)) = records.last() {
+            *from = *seq;
+        }
+        if tx
+            .send(Response {
+                id,
+                body: Reply::Records { records },
+            })
+            .await
+            .is_err()
+        {
+            return WatchState::Closed;
+        }
+        if ended {
+            return WatchState::Ended;
+        }
+        if len < WATCH_PAGE as usize {
+            return WatchState::Live;
+        }
+    }
+}
+
+/// Whether a harness event signals possible new records for `session` (a model
+/// call committed, a turn started, or a run ended). The sandbox bind/release
+/// pair carries no transcript record, so it never wakes a watch.
+fn event_targets(event: &HarnessEvent, session: &str) -> bool {
+    match event {
+        HarnessEvent::RunStarted { session: s, .. }
+        | HarnessEvent::ModelCompleted { session: s, .. }
+        | HarnessEvent::ToolCompleted { session: s, .. }
+        | HarnessEvent::RunEnded { session: s, .. } => s.as_str() == session,
+        HarnessEvent::SandboxBound { .. } | HarnessEvent::SandboxReleased { .. } => false,
     }
 }
 
 /// The observability stream on stderr (harness spec §10.4): membership and
 /// reachability transitions — the narration of the kill-a-node demo — and
 /// every harness event. Dispatch-level core events are swallowed as noise.
-struct StderrEvents {
+///
+/// It also republishes every `HarnessEvent` onto `runs`, the fan-out behind
+/// `Op::Watch`: a watch subscribes there to learn when a run committed records,
+/// then tails for the content (the event carries none, §10.4).
+struct NodeEvents {
     node: NodeId,
+    runs: broadcast::Sender<HarnessEvent>,
 }
 
-impl EventSink for StderrEvents {
+impl EventSink for NodeEvents {
     fn emit(&self, event: Event) {
         if let Some(harness_event) = event.as_app::<HarnessEvent>() {
             eprintln!("[{}] {harness_event:?}", self.node);
+            // Wake any watches; an error just means none are subscribed.
+            let _ = self.runs.send(harness_event.clone());
             return;
         }
         match &event {
@@ -603,5 +769,61 @@ impl EventSink for StderrEvents {
             | Event::MemberResumed { .. } => eprintln!("[{}] {event:?}", self.node),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_wakes_only_for_its_own_sessions_content_events() {
+        let mine = SessionId::new("demo");
+        let other = SessionId::new("else");
+        let turn = TurnId::new("t-1");
+        // A content-bearing event for our session wakes the watch.
+        assert!(event_targets(
+            &HarnessEvent::ModelCompleted {
+                session: mine.clone(),
+                turn: turn.clone(),
+                node: NodeId::new(1),
+                usage: 10,
+            },
+            "demo"
+        ));
+        assert!(event_targets(
+            &HarnessEvent::RunEnded {
+                session: mine.clone(),
+                turn: turn.clone(),
+                outcome: "ok",
+            },
+            "demo"
+        ));
+        // A tool outcome committing is a wake too — the whole point of (1).
+        assert!(event_targets(
+            &HarnessEvent::ToolCompleted {
+                session: mine.clone(),
+                turn,
+                node: NodeId::new(1),
+            },
+            "demo"
+        ));
+        // Another session's event, or a sandbox bind/release (no record), does not.
+        assert!(!event_targets(
+            &HarnessEvent::ModelCompleted {
+                session: other,
+                turn: TurnId::new("t-1"),
+                node: NodeId::new(1),
+                usage: 10,
+            },
+            "demo"
+        ));
+        assert!(!event_targets(
+            &HarnessEvent::SandboxBound {
+                session: mine,
+                node: NodeId::new(1),
+            },
+            "demo"
+        ));
     }
 }

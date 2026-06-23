@@ -1,13 +1,16 @@
 //! `harness-standalone`: a runnable deployment of the agentic harness.
 //!
-//! Two subcommands:
+//! Three subcommands:
 //! - `node` boots one cluster node — production runtime (tokio, TCP), its own
 //!   file journal replicated to peers, the Anthropic model, a workspace
 //!   sandbox — and serves a control port.
 //! - `repl` attaches to any node's control port and drives sessions.
+//! - `acp` bridges a node's control port to an Agent Client Protocol editor
+//!   over stdio, so any ACP client can drive sessions.
 //!
 //! See `docs/standalone-deployment.md` for the three-node walkthrough.
 
+mod acp;
 mod http;
 mod ids;
 mod node;
@@ -21,6 +24,8 @@ const USAGE: &str = "\
 usage:
   harness-standalone node --id <n> [options]   run one cluster node
   harness-standalone repl [host:port]          attach a REPL to a node's control port
+                                               (default 127.0.0.1:7501)
+  harness-standalone acp  [host:port]          bridge a node to an ACP editor over stdio
                                                (default 127.0.0.1:7501)
 
 node options (defaults in parentheses; every node must agree on all of them):
@@ -55,6 +60,7 @@ async fn main() {
     let result = match args.first().map(String::as_str) {
         Some("node") => run_node(&args[1..]).await,
         Some("repl") => run_repl(&args[1..]).await,
+        Some("acp") => run_acp(&args[1..]).await,
         Some("--help") | Some("-h") | None => {
             println!("{USAGE}");
             return;
@@ -125,6 +131,14 @@ async fn run_repl(args: &[String]) -> Result<(), String> {
         [] => repl::run("127.0.0.1:7501").await,
         [addr] => repl::run(addr).await,
         _ => Err("repl takes at most one address".to_string()),
+    }
+}
+
+async fn run_acp(args: &[String]) -> Result<(), String> {
+    match args {
+        [] => acp::run("127.0.0.1:7501").await,
+        [addr] => acp::run(addr).await,
+        _ => Err("acp takes at most one address".to_string()),
     }
 }
 

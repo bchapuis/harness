@@ -47,6 +47,18 @@ pub enum Op {
         session: String,
         turn: String,
     },
+    /// Stream records as they commit, for one run. Unlike `Tail` (one page,
+    /// one reply), a `Watch` produces many `Records` replies — all tagged with
+    /// the request id — driven by the node's harness-event stream, and a final
+    /// `WatchEnded` once `turn`'s `RunEnded` record is observed. `from` is the
+    /// exclusive lower bound the first page starts after (the journal end at
+    /// submit time, so a watch streams only its own run).
+    Watch {
+        kind: String,
+        session: String,
+        turn: String,
+        from: u64,
+    },
 }
 
 /// One server response, correlated to its request.
@@ -65,6 +77,9 @@ pub enum Reply {
     Records { records: Vec<(Seq, Record)> },
     /// The cancel was accepted (idempotent; says nothing about the run).
     Cancelled,
+    /// A `Watch` reached its run's terminal record; no more frames follow on
+    /// this id. The caller closes the stream.
+    WatchEnded,
     /// A transport- or protocol-level failure; the caller may retry the same
     /// turn id once the cluster converges.
     Error { message: String },

@@ -593,6 +593,13 @@ impl Invariant for RunDiscipline {
                     "model call for {session}/{turn} completed after the run ended (H4/H5)"
                 ));
             }
+            HarnessEvent::ToolCompleted { session, turn, .. }
+                if self.ended.contains(&(session.clone(), turn.clone())) =>
+            {
+                return Err(format!(
+                    "tool call for {session}/{turn} completed after the run ended (§3.2)"
+                ));
+            }
             _ => {}
         }
         Ok(())

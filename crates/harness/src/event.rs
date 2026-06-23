@@ -18,7 +18,7 @@ use actor_core::NodeId;
 use crate::session::SessionId;
 use crate::session::TurnId;
 
-/// One harness event (harness spec §10.4). The five events a stream checker
+/// One harness event (harness spec §10.4). The events a stream checker
 /// cannot reconstruct from the grain's own events: session activation,
 /// deactivation, and the single-writer fence are observed through the grain's
 /// `Activated`/`Passivated`/`LeaderChanged` (granary §13), never duplicated here.
@@ -45,6 +45,17 @@ pub enum HarnessEvent {
         turn: TurnId,
         node: NodeId,
         usage: u64,
+    },
+    /// One tool call's `ToolOutcome` committed on a live activation (§5.4,
+    /// §6.4). Content-free like the rest — a wake that a record landed, so a
+    /// follower learns of a tool result without waiting for the next model
+    /// call. Scoped to a live run: a straggler of an ended or cancelled run
+    /// commits no record, so emits nothing (§3.2, §9.2). `node` attributes it
+    /// to its enclosing activation.
+    ToolCompleted {
+        session: SessionId,
+        turn: TurnId,
+        node: NodeId,
     },
     /// The run's exactly-one terminal outcome was journaled (H3). `outcome`
     /// is the terminal kind: `"ok"`, `"budget"`, `"cancelled"`, or `"model"`
