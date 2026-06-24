@@ -11,15 +11,26 @@
 //! The editor spawns this process and exchanges newline-delimited JSON-RPC 2.0
 //! over stdin/stdout (ACP's framing). We translate its session methods to the
 //! node's `Op`/`Reply`, and — the one piece of real logic — stream a parked
-//! `Prompt` to the editor as `session/update` notifications by polling `Tail`
-//! while the run is in flight (`proto.rs` already multiplexes requests by id,
-//! the same property that lets the REPL `:tail` a parked prompt).
+//! `Prompt` to the editor as `session/update` notifications off a `Watch` on the
+//! run (`proto.rs` multiplexes requests by id, so the watch and the parked
+//! prompt share one connection — the same property that lets the REPL `:tail` a
+//! parked prompt).
 //!
-//! Two deliberate divergences from a typical ACP agent: tools run *inside* the
-//! node's sandbox, so we never call back for `fs/*` or `terminal/*`; and the
-//! harness auto-runs tools, so there is no `session/request_permission`. What
-//! we do offer that most agents cannot is `session/load` — the durable journal
-//! *is* the replayable conversation.
+//! We implement the v1 core: `initialize` (with real version negotiation and
+//! capability advertisement), `session/new`, `session/prompt` with its streamed
+//! `session/update`s, `session/cancel`, and `session/load`. Prompt content
+//! honors the ACP baseline — `text` and `resource_link` — plus embedded text
+//! `resource` blocks (the `embeddedContext` capability we advertise); image and
+//! audio are not advertised and are dropped.
+//!
+//! Three deliberate divergences from a typical ACP agent: tools run *inside* the
+//! node's sandbox, so we never call back for `fs/*` or `terminal/*`; the harness
+//! auto-runs tools, so there is no `session/request_permission`; and we do not
+//! advertise the optional session-lifecycle capabilities (`session/list`,
+//! `session/delete`, modes, config) — the node addresses a session only by
+//! `(kind, session)`, with no enumeration primitive to back a listing. What we
+//! offer that most agents cannot is `session/load` — the durable journal *is*
+//! the replayable conversation.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,24 +65,37 @@ const PROMPT_SECS: u64 = 600;
 /// Journal page size for tail-based replay (`session/load`).
 const TAIL_PAGE: u32 = 500;
 
-/// Run the adapter against a node's control port until stdin closes.
+/// Run the adapter against a node's control port over the process's stdio —
+/// the framing an ACP editor speaks when it spawns this binary.
 pub async fn run(control_addr: &str) -> Result<(), String> {
+    serve(tokio::io::stdin(), tokio::io::stdout(), control_addr).await
+}
+
+/// The adapter loop over an arbitrary byte stream pair: read newline-delimited
+/// JSON-RPC from `reader`, write it to `writer`. `run` passes stdio; the tests
+/// pass an in-process pipe so the official ACP client can drive the adapter
+/// without a real editor. Closes when `reader` reaches EOF.
+pub async fn serve<R, W>(reader: R, writer: W, control_addr: &str) -> Result<(), String>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let backend = Backend::connect(control_addr).await?;
 
-    // One writer task serializes every JSON-RPC frame to stdout, so concurrent
+    // One writer task serializes every JSON-RPC frame, so concurrent
     // notifications and responses never interleave mid-line.
     let (out_tx, mut out_rx) = mpsc::channel::<Value>(64);
     tokio::spawn(async move {
-        let mut stdout = tokio::io::stdout();
+        let mut writer = writer;
         while let Some(frame) = out_rx.recv().await {
             let Ok(mut line) = serde_json::to_vec(&frame) else {
                 continue;
             };
             line.push(b'\n');
-            if stdout.write_all(&line).await.is_err() {
+            if writer.write_all(&line).await.is_err() {
                 break;
             }
-            let _ = stdout.flush().await;
+            let _ = writer.flush().await;
         }
     });
 
@@ -81,8 +105,8 @@ pub async fn run(control_addr: &str) -> Result<(), String> {
         in_flight: Mutex::new(HashMap::new()),
     });
 
-    let mut stdin = BufReader::new(tokio::io::stdin()).lines();
-    while let Some(line) = stdin.next_line().await.map_err(|e| format!("stdin: {e}"))? {
+    let mut lines = BufReader::new(reader).lines();
+    while let Some(line) = lines.next_line().await.map_err(|e| format!("input: {e}"))? {
         if line.trim().is_empty() {
             continue;
         }
@@ -131,7 +155,7 @@ async fn dispatch(conn: Arc<Conn>, msg: Value) {
     }
 
     let result = match method.as_str() {
-        "initialize" => Ok(initialize_result()),
+        "initialize" => Ok(initialize_result(&params)),
         "authenticate" => Ok(json!({})), // no auth for a local control port
         "session/new" => session_new(&conn, &params).await,
         "session/load" => session_load(&conn, &params).await,
@@ -148,11 +172,43 @@ async fn dispatch(conn: Arc<Conn>, msg: Value) {
     }
 }
 
-/// `initialize`: announce the version and the one capability we genuinely add.
-fn initialize_result() -> Value {
+/// `initialize`: negotiate the protocol version and advertise exactly the
+/// capabilities we honor.
+///
+/// Negotiation: ACP bumps the integer version only for breaking changes, so the
+/// answer is the highest version we and the client share — and we support
+/// exactly [`PROTOCOL_VERSION`], so that is `min(client, ours)`. A client that
+/// omits the field (or sends a newer one) is met at our version.
+///
+/// The client's `clientCapabilities` (`fs`, `terminal`) are read but need no
+/// action: tools run inside the node's sandbox, so the adapter never calls back
+/// for `fs/*` or `terminal/*` — the two deliberate divergences in the module
+/// header. We advertise `loadSession` (the journal makes replay free), the
+/// prompt content we accept, and our identity.
+fn initialize_result(params: &Value) -> Value {
+    let client_version = params
+        .get("protocolVersion")
+        .and_then(Value::as_u64)
+        .map(|v| v as u32)
+        .unwrap_or(PROTOCOL_VERSION);
+    let negotiated = client_version.min(PROTOCOL_VERSION);
     json!({
-        "protocolVersion": PROTOCOL_VERSION,
-        "agentCapabilities": { "loadSession": true },
+        "protocolVersion": negotiated,
+        "agentCapabilities": {
+            "loadSession": true,
+            // `text` and `resource_link` are the ACP baseline (always handled).
+            // We additionally accept embedded text resources as context, and we
+            // drop image/audio — so the editor knows not to send those.
+            "promptCapabilities": {
+                "image": false,
+                "audio": false,
+                "embeddedContext": true,
+            },
+        },
+        "agentInfo": {
+            "name": "harness-standalone",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
         "authMethods": [],
     })
 }
@@ -172,7 +228,7 @@ async fn session_new(_conn: &Conn, _params: &Value) -> Result<Value, RpcErr> {
 async fn session_load(conn: &Conn, params: &Value) -> Result<Value, RpcErr> {
     let sid = session_id_param(params)?;
     let (kind, session) = decode_session(&sid)?;
-    let _ = stream_since(conn, &sid, &kind, &session, 0).await?;
+    stream_since(conn, &sid, &kind, &session, 0).await?;
     Ok(json!({}))
 }
 
@@ -183,14 +239,15 @@ async fn session_prompt(conn: &Conn, params: &Value) -> Result<Value, RpcErr> {
     let (kind, session) = decode_session(&sid)?;
     let content = flatten_prompt(params);
     // Derive the next turn id from the journal, exactly as the REPL does, so a
-    // reconnected editor never collides an id (H7 would dedup it anyway).
-    let turn = next_turn_id(&conn.backend, &kind, &session).await?;
+    // reconnected editor never collides an id (H7 would dedup it anyway). The
+    // same pass yields the journal's current end, which the watch starts from.
+    let (turn, from) = turn_cursor(&conn.backend, &kind, &session).await?;
 
     conn.in_flight
         .lock()
         .unwrap()
         .insert(sid.clone(), turn.clone());
-    let outcome = prompt_streaming(conn, &sid, &kind, &session, &turn, content).await;
+    let outcome = prompt_streaming(conn, &sid, &kind, &session, &turn, from, content).await;
     conn.in_flight.lock().unwrap().remove(&sid);
 
     match outcome? {
@@ -232,10 +289,11 @@ async fn prompt_streaming(
     kind: &str,
     session: &str,
     turn: &str,
+    from: u64,
     content: String,
 ) -> Result<RunOutcome, RpcErr> {
-    // Stream only this turn's records: watch from the journal's current end.
-    let from = journal_len(&conn.backend, kind, session).await?;
+    // Stream only this turn's records: watch from the journal end captured at
+    // submit time.
     let mut watch = conn
         .backend
         .watch(Op::Watch {
@@ -290,14 +348,14 @@ async fn emit_frame(conn: &Conn, sid: &str, frame: Reply) {
 }
 
 /// Emit a `session/update` for every record after `from` (a one-shot replay for
-/// `session/load`), returning the new high-water seq.
+/// `session/load`).
 async fn stream_since(
     conn: &Conn,
     sid: &str,
     kind: &str,
     session: &str,
     mut from: u64,
-) -> Result<u64, RpcErr> {
+) -> Result<(), RpcErr> {
     loop {
         let records = tail(&conn.backend, kind, session, from).await?;
         if records.is_empty() {
@@ -313,28 +371,14 @@ async fn stream_since(
             break;
         }
     }
-    Ok(from)
+    Ok(())
 }
 
-/// The current end of a session's journal (its last committed seq, or 0).
-async fn journal_len(backend: &Backend, kind: &str, session: &str) -> Result<u64, RpcErr> {
-    let mut from = 0;
-    loop {
-        let records = tail(backend, kind, session, from).await?;
-        if records.is_empty() {
-            break;
-        }
-        from = records.last().map(|(seq, _)| seq.value()).unwrap_or(from);
-        if records.len() < TAIL_PAGE as usize {
-            break;
-        }
-    }
-    Ok(from)
-}
-
-/// The next turn id, derived by counting submitted turns — the REPL's
-/// `seed_turns` logic, so the two front-ends allocate ids the same way.
-async fn next_turn_id(backend: &Backend, kind: &str, session: &str) -> Result<String, RpcErr> {
+/// Walk the journal once, returning the next turn id and the journal's current
+/// end seq. The turn id counts submitted turns — the REPL's `seed_turns` logic,
+/// so the two front-ends allocate ids the same way; the end seq is where a new
+/// turn's watch begins. `session_prompt` needs both, and one pass yields them.
+async fn turn_cursor(backend: &Backend, kind: &str, session: &str) -> Result<(String, u64), RpcErr> {
     let mut turns = 0u64;
     let mut from = 0;
     loop {
@@ -346,12 +390,12 @@ async fn next_turn_id(backend: &Backend, kind: &str, session: &str) -> Result<St
             .iter()
             .filter(|(_, r)| matches!(r.body, RecordBody::TurnSubmitted { .. }))
             .count() as u64;
-        from = records.last().map(|(seq, _)| seq.value()).unwrap_or(from);
+        from = records.last().expect("non-empty page").0.value();
         if records.len() < TAIL_PAGE as usize {
             break;
         }
     }
-    Ok(format!("t-{}", turns + 1))
+    Ok((format!("t-{}", turns + 1), from))
 }
 
 /// One tail page, with the protocol-level replies folded into an error.
@@ -394,28 +438,38 @@ fn record_updates(sid: &str, record: &Record) -> Vec<Value> {
                 })));
             }
             for call in calls {
+                // `kind` lets the editor pick an icon and a progress treatment;
+                // `rawInput` carries the arguments verbatim. The call opens in
+                // `pending` and its `ToolOutcome` closes it (below).
                 updates.push(wrap(json!({
                     "sessionUpdate": "tool_call",
                     "toolCallId": call.id.as_str(),
                     "title": call.name,
+                    "kind": tool_kind(&call.name),
                     "status": "pending",
                     "rawInput": call.input,
                 })));
             }
             updates
         }
-        RecordBody::ToolOutcome { call, outcome, .. } => {
-            let (status, text) = match outcome {
-                Ok(value) => ("completed", value.to_string()),
-                Err(error) => ("failed", format!("{error}")),
-            };
-            vec![wrap(json!({
+        // `wrap` adds the `sessionId`/`update` envelope.
+        RecordBody::ToolOutcome { call, outcome, .. } => vec![wrap(match outcome {
+            Ok(value) => json!({
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": call.as_str(),
-                "status": status,
-                "content": [ { "type": "content", "content": { "type": "text", "text": text } } ],
-            }))]
-        }
+                "status": "completed",
+                "content": [ { "type": "content",
+                               "content": { "type": "text", "text": value.to_string() } } ],
+                "rawOutput": value,
+            }),
+            Err(error) => json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": call.as_str(),
+                "status": "failed",
+                "content": [ { "type": "content",
+                               "content": { "type": "text", "text": error.to_string() } } ],
+            }),
+        })],
         RecordBody::ChildRun {
             call,
             child_session,
@@ -424,6 +478,7 @@ fn record_updates(sid: &str, record: &Record) -> Vec<Value> {
             "sessionUpdate": "tool_call",
             "toolCallId": call.as_str(),
             "title": format!("delegate \u{2192} {}", child_session.as_str()),
+            "kind": "other",
             "status": "pending",
         }))],
         // SessionCreated, WorkspaceReset, TierAcquired, RunEnded carry nothing
@@ -432,21 +487,59 @@ fn record_updates(sid: &str, record: &Record) -> Vec<Value> {
     }
 }
 
+/// Map a harness tool name to an ACP `ToolKind`, so the editor can pick an icon
+/// and a progress treatment. The harness's sandbox tools (`shell`, `run_js`)
+/// are `execute`; a delegation is `other`. An unknown name falls back to
+/// `other` rather than guessing.
+fn tool_kind(name: &str) -> &'static str {
+    match name {
+        "shell" | "run_js" => "execute",
+        _ => "other",
+    }
+}
+
 /// Flatten an ACP prompt (an array of content blocks) to the plain text the
-/// node's `content: String` takes; non-text blocks are dropped for now.
+/// node's `content: String` takes.
+///
+/// We honor the ACP baseline — `text` and `resource_link` — and additionally
+/// inline embedded text `resource` blocks (the `embeddedContext` capability we
+/// advertise). A `resource_link` becomes a `[name](uri)` reference the model can
+/// act on; an embedded text resource contributes its text. Image and audio
+/// blocks are dropped: we do not advertise them, so a conforming client never
+/// sends them, and a non-conforming one gets them ignored rather than mistaken
+/// for text.
 fn flatten_prompt(params: &Value) -> String {
-    params
-        .get("prompt")
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default()
+    let Some(blocks) = params.get("prompt").and_then(Value::as_array) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    out.push_str(text);
+                }
+            }
+            Some("resource_link") => {
+                let uri = block.get("uri").and_then(Value::as_str).unwrap_or_default();
+                let name = block.get("name").and_then(Value::as_str).unwrap_or(uri);
+                out.push_str(&format!("[{name}]({uri})"));
+            }
+            // An embedded resource inlines its contents; we carry the text of
+            // text resources (a binary blob has no text to flatten).
+            Some("resource") => {
+                if let Some(text) = block
+                    .get("resource")
+                    .and_then(|r| r.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    out.push_str(text);
+                }
+            }
+            _ => {} // image, audio, or unknown — dropped
+        }
+    }
+    out
 }
 
 /// Encode the harness `(kind, session)` pair into one opaque ACP session id.

@@ -23,6 +23,7 @@ use crate::grain::GrainHandler;
 use crate::grain::GrainName;
 use crate::host::Host;
 use crate::host::RunTyped;
+use crate::journal::Seq;
 use crate::replica_store::ActorReplicaTransport;
 use crate::replica_store::ReplicaStore;
 use crate::replica_store::ReplicaTransport;
@@ -30,6 +31,10 @@ use crate::replica_store::replica_store_key;
 use crate::shardmap::ShardMapSource;
 use crate::store::GrainStore;
 use crate::store::MemoryGrainStore;
+use crate::subscription::RecordSink;
+use crate::subscription::SUB_BUFFER;
+use crate::subscription::Subscribe;
+use crate::subscription::Subscription;
 use crate::system::GranarySystem;
 use crate::system::shard_for;
 
@@ -267,6 +272,31 @@ impl<G: Grain> GrainRef<G> {
             return Err(GrainError::Call(call));
         }
         Ok(())
+    }
+
+    /// Subscribe to the grain's committed records (spec §7.9): resolve the shard
+    /// leader, spawn a local [`RecordSink`] to receive pushed batches, register
+    /// it, and return the committed `head` with the live stream. A framework
+    /// built-in, available for every grain type without a `GrainHandler` bound —
+    /// the push analogue of `load`/`head`.
+    ///
+    /// Delivery is best-effort; the caller MUST reconcile by `Seq` (§7.9,
+    /// **G16**): backfill `from`..`head` by reading the journal, then on each
+    /// batch close any gap and ignore anything already seen. When the stream
+    /// closes — a move, a lag-drop, or hibernation — re-subscribe and backfill
+    /// from the last seq.
+    pub async fn subscribe(&self, from: Seq) -> Result<Subscription<G>, GrainError> {
+        let (tx, rx) = async_channel::bounded(SUB_BUFFER);
+        let sink = self.system.spawn(RecordSink::<G>::new(tx));
+        let host = self.resolve(false, DEFAULT_ASK_TIMEOUT).await?;
+        let subscribed = host
+            .ask_timeout(Subscribe::new(from, sink), DEFAULT_ASK_TIMEOUT)
+            .await
+            .map_err(GrainError::Call)?;
+        Ok(Subscription {
+            head: subscribed.head,
+            records: rx,
+        })
     }
 
     /// Resolve the name to its live host (§5.4). With `use_cache`, a cached handle

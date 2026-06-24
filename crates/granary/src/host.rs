@@ -45,6 +45,10 @@ use std::sync::Arc;
 use crate::journal::AppendOutcome;
 use crate::journal::DynGrainJournal;
 use crate::journal::Seq;
+use crate::subscription::RecordBatch;
+use crate::subscription::SUB_BUFFER;
+use crate::subscription::Subscribe;
+use crate::subscription::Subscribed;
 use crate::system::GranarySystem;
 
 /// How many events a single rehydration read pulls from the journal at a time.
@@ -96,6 +100,11 @@ pub struct Host<G: Grain> {
     gateway: ActorRef<Gateway<G>>,
     /// Virtual time of the last *command* (not a tick), for idle eviction (§10).
     last_active: actor_core::Instant,
+    /// Live record sinks (spec §7.9): one bounded channel per subscription, drained
+    /// by a forwarder task that pushes to the subscriber's sink. Ephemeral
+    /// activation state (§1, §10) — dropped when the host stops, so a move or
+    /// hibernation ends every subscription and subscribers re-subscribe (**G3**).
+    sinks: Vec<async_channel::Sender<Arc<RecordBatch>>>,
 }
 
 impl<G: Grain> Host<G> {
@@ -121,6 +130,7 @@ impl<G: Grain> Host<G> {
             config,
             gateway,
             last_active: actor_core::Instant::ZERO,
+            sinks: Vec::new(),
         }
     }
 
@@ -242,6 +252,12 @@ impl<G: Grain> Host<G> {
             }
         }
 
+        // Keep the encoded bytes for subscription delivery (§7.9) only when a
+        // sink is attached, so an unsubscribed grain pays nothing; `append`
+        // consumes the original.
+        let from = self.head;
+        let to_deliver = (!self.sinks.is_empty()).then(|| encoded.clone());
+
         match self.journal.append(&self.name, self.head, encoded).await {
             // 4. Durable on a quorum: fold AFTER durability, advance head, reply.
             AppendOutcome::Committed(new_head) => {
@@ -266,6 +282,12 @@ impl<G: Grain> Host<G> {
                     name: self.name.clone(),
                     seq: new_head.value(),
                 });
+                // Push the batch to subscribers (§7.9), at the same point as the
+                // `Committed` event and after the output gate — observational, so
+                // it never gates the commit (**G5**).
+                if let Some(bytes) = to_deliver {
+                    self.deliver_records(from, new_head, bytes);
+                }
                 self.maybe_snapshot(ctx).await;
                 Ok(reply) // OUTPUT GATE releases here.
             }
@@ -371,6 +393,20 @@ impl<G: Grain> Host<G> {
             let _ = me.tell(CheckIdle).await;
         }));
     }
+
+    /// Push one committed batch to every live sink (spec §7.9). `try_send`, never
+    /// `send`: a sink whose buffer is full is dropped — its forwarder ends when
+    /// the channel closes, the subscriber re-subscribes and backfills by `load` —
+    /// so a slow subscriber never blocks a write. This only enqueues to
+    /// in-process channels; the cross-node push happens in each forwarder.
+    fn deliver_records(&mut self, from: Seq, to: Seq, bytes: Vec<Vec<u8>>) {
+        let records: Vec<(u64, Vec<u8>)> = (from.value() + 1..=to.value()).zip(bytes).collect();
+        let batch = Arc::new(RecordBatch {
+            from: from.value(),
+            records,
+        });
+        self.sinks.retain(|sink| sink.try_send(batch.clone()).is_ok());
+    }
 }
 
 impl<G: Grain> Actor for Host<G> {
@@ -382,6 +418,10 @@ impl<G: Grain> Actor for Host<G> {
     /// list is the grain's own `register` allowlist, bridged through
     /// [`GrainRegistry`] — the framework's dispatch registry is the grain registry.
     fn register(registry: &mut HandlerRegistry<Host<G>>) {
+        // The framework built-in: every grain type's host accepts `Subscribe`
+        // (spec §7.9), the read-path analogue of `head`/`load`, independent of
+        // the grain's own command allowlist below.
+        registry.accept::<Subscribe<G>>();
         let mut grain_registry = GrainRegistry::<G>::new();
         G::register(&mut grain_registry);
         for entry in grain_registry.host_entries() {
@@ -401,6 +441,28 @@ where
 {
     async fn handle(&mut self, msg: RunTyped<M>, ctx: &Ctx<Host<G>>) -> Result<M::Reply, GrainError> {
         self.run_protocol(msg.0, ctx).await
+    }
+}
+
+impl<G: Grain> Handler<Subscribe<G>> for Host<G> {
+    /// Register a record sink (spec §7.9). Spawns a forwarder that drains a
+    /// bounded channel and pushes batches to the subscriber's sink off the host's
+    /// executor — so transport backpressure never reaches the write path — and
+    /// returns the committed head so the subscriber knows how far to backfill.
+    async fn handle(&mut self, msg: Subscribe<G>, ctx: &Ctx<Host<G>>) -> Subscribed {
+        let (tx, rx) = async_channel::bounded::<Arc<RecordBatch>>(SUB_BUFFER);
+        let sink = msg.sink;
+        ctx.system().launch(Box::pin(async move {
+            // Ends when the host drops `tx` (deactivation, §10) or the sink is
+            // gone; either way the subscriber re-subscribes and backfills (§7.9).
+            while let Ok(batch) = rx.recv().await {
+                if sink.tell((*batch).clone()).await.is_err() {
+                    break;
+                }
+            }
+        }));
+        self.sinks.push(tx);
+        Subscribed { head: self.head }
     }
 }
 

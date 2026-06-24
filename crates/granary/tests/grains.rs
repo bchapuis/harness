@@ -41,6 +41,7 @@ use granary::GrainName;
 use granary::GrainRef;
 use granary::GranaryConfig;
 use granary::GranaryExt;
+use granary::Seq;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -286,6 +287,87 @@ fn counter_grain_run_is_reproducible() {
         ops: 6,
     };
     for seed in 0..64 {
+        if let Err(divergence) = check_reproducible(&workload, seed) {
+            panic!("{divergence}");
+        }
+    }
+}
+
+// --- Record subscription (§7.9, G16) ------------------------------------------
+
+/// A subscriber registers from the empty head, the grain takes a run of writes,
+/// and the pushed stream is reconciled by `Seq`. The reconstructed sequence MUST
+/// equal the committed records — contiguous `1..=writes`, in order, no gap or
+/// duplicate — which is exactly what `load` to the head would return (**G16**).
+struct SubscriptionWorkload {
+    writes: u64,
+}
+
+impl Workload for SubscriptionWorkload {
+    fn name(&self) -> &'static str {
+        "record-subscription"
+    }
+
+    fn run(&self, system: SimSystem) -> BoxFuture<'static, ()> {
+        let writes = self.writes;
+        Box::pin(async move {
+            let counters = system.granary::<CounterGrain>(GranaryConfig::default());
+            let counter = counters.grain("counter/sub");
+
+            // Subscribe from the empty head, before any write, so every commit is
+            // pushed live.
+            let sub = counter.subscribe(Seq::ZERO).await.expect("subscribe");
+            assert_eq!(sub.head, Seq::ZERO, "a fresh grain's head is ZERO");
+
+            let mut expected = Vec::new();
+            for i in 0..writes {
+                let delta = 1 + (i as i64 % 3);
+                counter.ask(Add(delta)).await.expect("add commits");
+                expected.push(delta);
+            }
+
+            // Drain the stream, reconciling by seq (§7.9): each batch must begin
+            // exactly after the last seq seen, and seqs strictly increase.
+            let mut deltas = Vec::new();
+            let mut last = 0u64;
+            while (deltas.len() as u64) < writes {
+                let batch = sub.records.recv().await.expect("a live batch");
+                assert_eq!(batch.from.value(), last, "batch begins after the last seq (no gap)");
+                for (seq, event) in batch.records {
+                    assert_eq!(seq.value(), last + 1, "seqs are contiguous and ordered");
+                    last = seq.value();
+                    match event {
+                        CounterEvent::Added(d) => deltas.push(d),
+                    }
+                }
+            }
+
+            assert_eq!(deltas, expected, "pushed records match the committed writes, in order");
+            assert_eq!(last, writes, "the stream reached the committed head (push == load, G16)");
+        })
+    }
+
+    fn invariants(&self) -> Vec<Box<dyn Invariant>> {
+        grain_invariants()
+    }
+}
+
+#[test]
+fn a_subscription_streams_the_committed_records_in_order() {
+    let workload = SubscriptionWorkload { writes: 8 };
+    for seed in 0..32 {
+        if let Err(failure) = run_seed(&workload, seed) {
+            panic!("{failure}");
+        }
+    }
+}
+
+#[test]
+fn a_subscription_run_is_reproducible() {
+    // Delivery rides the Spawner/Transport seams, so a seeded run's event stream
+    // stays byte-identical (§7.9, §14).
+    let workload = SubscriptionWorkload { writes: 6 };
+    for seed in 0..32 {
         if let Err(divergence) = check_reproducible(&workload, seed) {
             panic!("{divergence}");
         }

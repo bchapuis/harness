@@ -212,10 +212,16 @@ impl<G: Grain> GrainRef<G> {
     pub async fn ask<M>(&self, msg: M)  -> Result<M::Reply, GrainError> where G: GrainHandler<M>, M: Clone;
     pub async fn tell<M>(&self, msg: M) -> Result<(), GrainError>       where G: GrainHandler<M>, M: Clone;
     pub async fn ask_timeout<M>(&self, msg: M, within: Duration) -> Result<M::Reply, GrainError> where G: GrainHandler<M>, M: Clone;
+
+    /// Subscribe to the grain's committed records from `from` (exclusive),
+    /// returning the current head and a stream of live record batches (§7.9). A
+    /// framework built-in, available for every grain type without the author
+    /// registering it — the analogue of `load`/`head`, surfaced as a push.
+    pub async fn subscribe(&self, from: Seq) -> Result<Subscription<G>, GrainError>;
 }
 ```
 
-The `G: GrainHandler<M>` bound proves at compile time that the grain accepts `M`, so an invalid call does not compile (invariant **G10**, the grain analogue of actor §3.3). The call site is identical whether the activation is local or on another node (§5).
+The `G: GrainHandler<M>` bound proves at compile time that the grain accepts `M`, so an invalid call does not compile (invariant **G10**, the grain analogue of actor §3.3). The call site is identical whether the activation is local or on another node (§5). `subscribe` is grain-type-agnostic and so carries no such bound (§7.9).
 
 The `M: Clone` bound lets the runtime re-issue the command when the first attempt provably did not run: a stale cached host that hibernated (`DeadLetter`) or whose leadership moved (`NotLeader`), neither of which commits (§6, §8). An *ambiguous* transport failure (`Unreachable`/`Timeout`) is never auto-retried, because the command may have committed before the reply was lost (at-most-once, §2.2). The clone is of the caller's own small command value.
 
@@ -442,6 +448,20 @@ The residual bounded cost is per-shard placement: a hot shard's grains share one
 
 ---
 
+### 7.9 Record subscriptions (the journal follower)
+
+A **subscription** is a live, best-effort delivery of a grain's committed records to a sink, layered over the durable `load` (§7.3). It exists so a follower learns of each record as it commits rather than by polling, without making delivery a source of truth. It is the push analogue of §7.5's local read: cheap, off the write path, and never authoritative.
+
+`GrainRef::subscribe(from, sink)` routes to the shard leader (§5.4), registers `sink` — an `ActorRef` to a mailbox accepting the grain's record batches — in the activation's **sink set**, and returns the committed `head`. After each commit (§6 step 4), the host delivers a batch of the seqs just appended to every sink. Delivery occurs **after** the fold and the output-gate release and MUST NOT gate the commit or any caller's reply; it is observational, emitted at the same point as `Committed` (§13), and so cannot affect a write's outcome (preserves **G5**). `subscribe` is a framework built-in, dispatched to the host for *any* grain type without appearing in the grain's `register` allowlist (§5.5) — the read-path analogue of `head`/`load`, not a user command.
+
+**Reconcile by `Seq`.** A sink treats `Seq` as authoritative. Each batch carries the `from` it begins after; a sink that has seen up to `last` MUST close any gap (`from > last`) by `load` (§7.3), and MUST ignore records at or below `last` — a re-subscribe replay, or a timed-out append that committed late (§7.2). At-most-once delivery (actor §7.2) MAY drop, duplicate, or — across a re-subscribe — reorder batches; seq reconciliation absorbs all three. Push is a latency optimization over `load`; correctness rests on the journal (**G3**), never on delivery reliability. The reconstructed sequence a sink obtains by applying this rule is exactly what `load(from, …)` to the head would return (**G16**).
+
+**Bounded, never blocking.** Each sink has a bounded delivery buffer. On overflow the host drops the sink rather than awaiting it; a slow or dead subscriber MUST NOT stall a grain's writes or its input gate (§6) — the subscription is off the write path entirely. A dropped sink observes its stream close and re-subscribes, backfilling from its last seq. Delivery runs through the framework's `Spawner`/`Transport` seams (actor §4.6), so it stays seed-reproducible under simulation (§14); the drop decision is a pure function of buffer occupancy, not the wall clock.
+
+**Ephemeral.** The sink set is per-activation, never journaled (§1) — like the in-memory head, it is a cache rebuilt by subscribers re-contacting, exactly as a layered runtime rebuilds its outcome subscribers after a resume (the agentic harness, harness §7.3). On hibernation, migration, or forced step-down it is dropped and `Passivated` emitted (§13); subscribers re-subscribe against the current leader (§5.4) and backfill from their last seq. A subscription does **not** veto idle eviction (`can_passivate`, §10): a hibernated grain produces no records, and the next write re-activates it, at which point subscribers re-establish. (Parking a subscription across hibernation — holding the registration while the grain sleeps, so no re-subscribe is needed — is the deferred *hibernatable connections* extension, §16.)
+
+---
+
 ## 8. The single-writer fence
 
 A grain must have one writer. The fence is the shard's **leadership term**: one leader per term, and a per-grain append that carries that term as its fencing token.
@@ -500,6 +520,7 @@ activate → rehydrate (snapshot + replay, §9) → on_activate → serve comman
 - **Forced step-down.** When leadership moves (§8) or the shard goes unavailable (§11), the activation deactivates involuntarily: it runs `on_passivate` (to release non-durable per-activation resources) but takes **no snapshot**, since the journal may be unwritable, then emits `Passivated` and stops. The journal is the authority; the next access rehydrates.
   - **Default and tuning.** `idle_after` SHOULD default to about **10 seconds**, matching the Durable Objects eviction window (DO §5), because reactivation is cheap: at most a quorum head-recovery plus a snapshot-bounded replay (§9). To avoid thrashing when a grain is accessed just slower than the timer, an implementation SHOULD apply a small minimum residency or jitter so a barely-idle grain is not evicted and reloaded repeatedly.
 - **Eviction races.** If a command reaches the gateway for a name whose host has stopped but whose `Terminated` has not yet pruned the table, the host `ask` returns `CallError::DeadLetter`; the gateway MUST treat that as "reactivate" (drop the stale entry and activate afresh), bounded to avoid a loop.
+- **Subscriptions are ephemeral activation state.** A grain's record sinks (§7.9) live only in the activation, never in the journal, and are dropped on every deactivation path — hibernation, migration, and forced step-down alike. Subscribers re-establish them by re-subscribing against the current leader and backfilling from their last seq (§7.9); they do not preserve in-memory state across the move any more than the grain itself does (**G3**).
 
 Durable **alarms**, a stored timer that re-activates a grain to run an `alarm()` handler with no caller present (DO §5), are a named extension, deferred (§16).
 
@@ -541,7 +562,7 @@ pub enum GrainError {
 ## 13. Security and observability
 
 - **Security.** Granary adds no transport; it inherits mutual-TLS associations, the handshake allowlist, and the deserialization allowlist (the grain dispatch registry, §5.5) from actor §15. The gateway MAY consult an `Authorizer` per `(peer, GrainName, manifest)` before activating or dispatching, as actor §15.4 gates `deliver`.
-- **Observability.** Granary emits, on the actor framework's single extensible `Event` stream (actor §16), grain and shard events: `Activated`, `Rehydrated { from_snapshot, replayed }`, `Committed { seq }`, `Snapshotted { at }`, `Passivated`, `LeaderChanged { shard }`, `ShardSplit`, `ShardMerged`. These drive both operator tooling and the simulator's invariant checks (§14). Metrics SHOULD include per-shard commit latency and log size, per-node active-grain count, shard count, and leadership changes.
+- **Observability.** Granary emits, on the actor framework's single extensible `Event` stream (actor §16), grain and shard events: `Activated`, `Rehydrated { from_snapshot, replayed }`, `Committed { seq }`, `Snapshotted { at }`, `Passivated`, `LeaderChanged { shard }`, `ShardSplit`, `ShardMerged`. These drive both operator tooling and the simulator's invariant checks (§14). Metrics SHOULD include per-shard commit latency and log size, per-node active-grain count, shard count, and leadership changes. Record subscriptions (§7.9) add **no** content-bearing event: they reuse `Committed { seq }` as their commit signal and deliver the records out of band, keeping the journal the one place a grain's content lives.
 
 ---
 
@@ -552,6 +573,7 @@ Granary is testable by the same deterministic simulation as the actor framework 
 - The journal (§7.3) is a **simulation seam**, like `Transport`, and so are the parts below it. The shard **leader-election group** reuses the actor framework's Raft (the leader-based control plane's implementation, actor §9.4.3), so simulation drives the real consensus code, not a model of it; the **Replicator** (`Local`/`Quorum`) is exercised directly on the per-grain quorum-append path.
 - Reusing the framework's seams (`Clock`/`Entropy`/`Spawner`/`Transport`, actor §4.6, §7) means simulation runs the real host, gateway, shard, and rehydration code.
 - Fault injection MUST be able to produce: a shard **leader** crash and election mid-write (to exercise the term fence and quorum recovery, §8); **leader-election loss** (no leader elected) and **per-grain write-quorum loss** as distinct routes to `Unavailable` (§11); a stale-term append from a deposed leader racing a new election (to exercise the fencing token, §8); a timed-out append that commits late, re-read on the next activation (to exercise idempotency by `Seq` slot without a dedup token, §7.2); eviction mid-command (to exercise rehydration and the output gate, §6, §10); and a shard split under concurrent writes (to exercise §7.7). A no-fault run is the simplest case and MUST pass.
+- For **record subscriptions** (§7.9), fault injection MUST be able to produce: a **leader move mid-stream** (the subscriber re-subscribes against the new leader and backfills, reconstructing the sequence with no gap or duplicate); a **slow sink** whose buffer overflows (dropped, then re-subscribed and backfilled); **hibernation and reactivation** under a live subscription; and a **timed-out append that commits late** (delivered or backfilled once, at its slot). In every case the sink's seq-reconciled sequence MUST equal what `load` to the head returns (**G16**).
 
 ---
 
@@ -576,6 +598,7 @@ These invariants appear as MUSTs above; collected here, they are the contract a 
 | **G13** | **Location transparency.** A call to a local versus remote grain produces observably identical replies and ordering. | §5.4 |
 | **G14** | **Lossless failover.** A new shard leader recovers each grain's committed head from a write quorum on activation; by quorum intersection no acknowledged write is lost across a leadership change. | §8, §8.3 |
 | **G15** | **Split/merge safety.** A grain is writable in exactly one shard at any time; a split or merge transfers the committed prefix atomically and loses or duplicates no write. | §7.7 |
+| **G16** | **Subscriptions are observational and lossless-by-seq.** Every committed record is delivered to a live sink or left as a gap the sink closes by `load`; subscription delivery never gates a commit, never forks state, and never advances a grain's head. By seq reconciliation a sink reconstructs the exact committed sequence regardless of drops, duplicates, reordering, moves, or hibernation (push ⊆ `load`). | §7.9 |
 
 A `granary` implementation conforms iff every invariant holds, verified under deterministic simulation (§14) for the distributed ones and by compile-fail tests for **G10**.
 
@@ -586,7 +609,7 @@ A `granary` implementation conforms iff every invariant holds, verified under de
 Named here, specified elsewhere or later, so the core stays small:
 
 - **Durable alarms.** A stored timer (`set_alarm` → `alarm()` handler) that re-activates a grain with no caller present (DO §5). The basis for retries, timeouts, and batch flushes.
-- **Hibernatable connections.** Parking WebSocket/stream connections across hibernation, re-delivering via callbacks (DO §5), so a grain sleeps without dropping clients.
+- **Hibernatable connections.** Parking a record subscription (§7.9) — or a WebSocket/stream connection — *across* hibernation, holding the registration while the grain sleeps and re-delivering on wake (DO §5), so a follower need not re-subscribe after every idle eviction. An extension of the §7.9 primitive, not a separate mechanism: subscriptions today are dropped on deactivation and re-established by the subscriber; this would persist the registration instead.
 - **Alternative record interpretations (SQLite, File).** Interpreting a grain's records as something other than an event log, over the same per-grain Replicator substrate (§7.2): a SQLite store ships a grain's writes as WAL frames into a private on-disk database (the Cloudflare Durable Objects model, DO §4.2), a file store as byte-range writes to a file. Both make a grain a true durable object without event-sourcing, while the `apply`-fold event log remains the first-class default. A *statement-sourced* SQLite grain (SQL commands as events folded into an in-memory database) is already expressible today and needs none of this: the deferred work is the on-disk, WAL-frame-shipped store for large databases and zero-latency local reads.
 - **Linearizable reads (check-quorum lease).** Extending the shard's leader-election group (§8) with a check-quorum property, so the leader serves reads locally while it can still confirm a quorum and the activation self-fences when it can no longer confirm shard ownership, rather than returning stale state (§7.5). The DO-faithful single-instance fence; cheaper than a per-read Raft read-index. Requires a check-quorum primitive on the leader-election group's Raft engine (a leader that has not heard from a quorum within an election timeout is no longer read-valid).
 - **Follower reads.** Serving reads from a shard's followers with a freshness bound, trading linearizability for read scale (§7.5).

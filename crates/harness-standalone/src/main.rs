@@ -10,15 +10,11 @@
 //!
 //! See `docs/standalone-deployment.md` for the three-node walkthrough.
 
-mod acp;
-mod http;
-mod ids;
-mod node;
-mod proto;
-mod repl;
-mod sandbox;
-
 use std::path::PathBuf;
+
+use harness_standalone::acp;
+use harness_standalone::node;
+use harness_standalone::repl;
 
 const USAGE: &str = "\
 usage:

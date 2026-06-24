@@ -25,6 +25,13 @@ webpki-roots.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `tokio.workspace` carries the macros/rt/io-util/net/sync features the tests
+# need (the library target asks for a narrower set).
+tokio = { workspace = true }
+futures.workspace = true
+# The official ACP client, used by `tests/acp_sdk.rs` to drive the adapter
+# end-to-end exactly as a real editor would.
+agent-client-protocol = "0.15"
 
 [lints]
 workspace = true

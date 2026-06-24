@@ -47,11 +47,10 @@ pub enum HarnessEvent {
         usage: u64,
     },
     /// One tool call's `ToolOutcome` committed on a live activation (§5.4,
-    /// §6.4). Content-free like the rest — a wake that a record landed, so a
-    /// follower learns of a tool result without waiting for the next model
-    /// call. Scoped to a live run: a straggler of an ended or cancelled run
-    /// commits no record, so emits nothing (§3.2, §9.2). `node` attributes it
-    /// to its enclosing activation.
+    /// §6.4). Content-free like the rest — observability that a tool result
+    /// landed, the tool-side counterpart to `ModelCompleted`. Scoped to a live
+    /// run: a straggler of an ended or cancelled run commits no record, so emits
+    /// nothing (§3.2, §9.2). `node` attributes it to its enclosing activation.
     ToolCompleted {
         session: SessionId,
         turn: TurnId,

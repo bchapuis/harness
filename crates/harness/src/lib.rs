@@ -40,6 +40,7 @@ pub use agent::Tail;
 pub use budget::Budget;
 pub use budget::Spend;
 pub use budget::Usage;
+pub use client::Follower;
 pub use client::Harness;
 pub use client::HarnessConfig;
 pub use client::HarnessSystem;
