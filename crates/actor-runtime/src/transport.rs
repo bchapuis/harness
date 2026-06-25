@@ -208,18 +208,18 @@ impl Shared {
         if hello.cluster_secret != self.config.cluster_secret {
             return Err("cluster secret mismatch".to_string());
         }
-        if let Some(allow) = &self.config.allowlist {
-            if !allow.contains(&hello.node) {
-                return Err(format!("node {} not in allowlist", hello.node));
-            }
+        if let Some(allow) = &self.config.allowlist
+            && !allow.contains(&hello.node)
+        {
+            return Err(format!("node {} not in allowlist", hello.node));
         }
-        if let Some(expected) = expected {
-            if hello.node != expected {
-                return Err(format!(
-                    "dialed {expected} but peer identified as {}",
-                    hello.node
-                ));
-            }
+        if let Some(expected) = expected
+            && hello.node != expected
+        {
+            return Err(format!(
+                "dialed {expected} but peer identified as {}",
+                hello.node
+            ));
         }
         Ok(hello.node)
     }

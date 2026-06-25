@@ -874,23 +874,23 @@ async fn receive_loop<C, E, S, T>(
                 // Authorization gate (spec §15): an unauthorized message is
                 // rejected as a system failure and never reaches the actor. An
                 // `ask` gets the failure as its reply; a `tell` is dropped.
-                if let Some(authorizer) = &system.inner.authorizer {
-                    if !authorizer.authorize(from, &recipient, &manifest) {
-                        if let Some(call) = correlation {
-                            let _ = system
-                                .inner
-                                .transport
-                                .send(
-                                    from,
-                                    Frame::Reply {
-                                        correlation: call,
-                                        outcome: Err(CallError::System("unauthorized".into())),
-                                    },
-                                )
-                                .await;
-                        }
-                        continue;
+                if let Some(authorizer) = &system.inner.authorizer
+                    && !authorizer.authorize(from, &recipient, &manifest)
+                {
+                    if let Some(call) = correlation {
+                        let _ = system
+                            .inner
+                            .transport
+                            .send(
+                                from,
+                                Frame::Reply {
+                                    correlation: call,
+                                    outcome: Err(CallError::System("unauthorized".into())),
+                                },
+                            )
+                            .await;
                     }
+                    continue;
                 }
                 let codec = system.codec();
                 let (reply, reply_rx) = ReplyHandle::channel(Arc::clone(&codec));
@@ -1205,15 +1205,15 @@ async fn receive_loop<C, E, S, T>(
                 if let Some(raft) = system.group(group) {
                     if raft.is_leader() {
                         raft.propose(EntryPayload::App(command));
-                    } else if !forwarded {
-                        if let Some(target) = raft.leader_hint() {
-                            let frame = Frame::RaftPropose {
-                                group,
-                                command,
-                                forwarded: true,
-                            };
-                            let _ = system.inner.transport.send(target, frame).await;
-                        }
+                    } else if !forwarded
+                        && let Some(target) = raft.leader_hint()
+                    {
+                        let frame = Frame::RaftPropose {
+                            group,
+                            command,
+                            forwarded: true,
+                        };
+                        let _ = system.inner.transport.send(target, frame).await;
                     }
                 }
             }
@@ -1464,24 +1464,20 @@ where
         }
         // The control group's leader performs the membership control-plane
         // duties, encoding each transition as the group's opaque app payload.
-        if let Some(control) = raft.group(GroupId::CONTROL) {
-            if control.is_leader() {
-                let propose = |command: MembershipCommand| {
-                    control.propose(EntryPayload::App(command.encode()));
-                };
-                for node in system.inner.membership.admission_candidates() {
-                    propose(MembershipCommand::Admit(node));
-                }
-                for node in system.inner.membership.leaving_members() {
-                    propose(MembershipCommand::Leave(node));
-                }
-                for node in system
-                    .inner
-                    .membership
-                    .downing_candidates(mode.downing, now)
-                {
-                    propose(MembershipCommand::Down(node));
-                }
+        if let Some(control) = raft.group(GroupId::CONTROL)
+            && control.is_leader()
+        {
+            let propose = |command: MembershipCommand| {
+                control.propose(EntryPayload::App(command.encode()));
+            };
+            for node in system.inner.membership.admission_candidates() {
+                propose(MembershipCommand::Admit(node));
+            }
+            for node in system.inner.membership.leaving_members() {
+                propose(MembershipCommand::Leave(node));
+            }
+            for node in system.inner.membership.downing_candidates(mode.downing, now) {
+                propose(MembershipCommand::Down(node));
             }
         }
     }

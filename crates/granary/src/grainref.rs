@@ -312,10 +312,10 @@ impl<G: Grain> GrainRef<G> {
     /// **G13**). Driving the loop here, not in the gateway's serial handler, keeps
     /// one slow resolution from blocking another grain's activation on that node.
     async fn resolve(&self, use_cache: bool, within: Duration) -> Result<ActorRef<Host<G>>, GrainError> {
-        if use_cache {
-            if let Some(host) = self.cache.as_ref().and_then(|cache| cache.get(&self.name)) {
-                return Ok(host);
-            }
+        if use_cache
+            && let Some(host) = self.cache.as_ref().and_then(|cache| cache.get(&self.name))
+        {
+            return Ok(host);
         }
         let deadline = self.system.now() + within;
         // Start at this ref's own gateway: local for a `Granary`-minted ref (the

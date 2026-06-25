@@ -261,7 +261,7 @@ impl ClusterWorkload for AccountSwarm {
                         // A small key space so several grains share each shard.
                         let key = format!("account/{}", entropy.next_u64() % 4);
                         let acct = granary.grain(key);
-                        if entropy.next_u64() % 2 == 0 {
+                        if entropy.next_u64().is_multiple_of(2) {
                             // A short deadline so a faulted call fails fast and the
                             // client keeps issuing traffic rather than blocking.
                             let _ = acct

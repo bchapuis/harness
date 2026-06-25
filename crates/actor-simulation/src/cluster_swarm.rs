@@ -197,7 +197,7 @@ async fn nemesis(
                 let mut left = Vec::new();
                 let mut right = Vec::new();
                 for &node in &nodes {
-                    if entropy.next_u64() % 2 == 0 {
+                    if entropy.next_u64().is_multiple_of(2) {
                         left.push(node);
                     } else {
                         right.push(node);

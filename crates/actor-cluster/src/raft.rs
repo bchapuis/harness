@@ -1388,15 +1388,14 @@ mod tests {
 
             // Once both groups have a leader, propose disjoint commands — each to
             // its own group's leader, exactly once.
-            if !proposed {
-                if let (Some(l1), Some(l2)) =
+            if !proposed
+                && let (Some(l1), Some(l2)) =
                     (leader_of(&groups, g1, &nodes), leader_of(&groups, g2, &nodes))
-                {
-                    groups[&(g1, l1)].propose(EntryPayload::App(b"g1-a".to_vec()));
-                    groups[&(g1, l1)].propose(EntryPayload::App(b"g1-b".to_vec()));
-                    groups[&(g2, l2)].propose(EntryPayload::App(b"g2-x".to_vec()));
-                    proposed = true;
-                }
+            {
+                groups[&(g1, l1)].propose(EntryPayload::App(b"g1-a".to_vec()));
+                groups[&(g1, l1)].propose(EntryPayload::App(b"g1-b".to_vec()));
+                groups[&(g2, l2)].propose(EntryPayload::App(b"g2-x".to_vec()));
+                proposed = true;
             }
         }
 
@@ -1474,12 +1473,12 @@ mod tests {
                 let out = deliver(&groups[&(g, to)], from, frame, now, &entropy[&to]);
                 record(g, to, out, &mut queue, &mut committed, &mut winners);
             }
-            if !proposed {
-                if let Some(leader) = leader_of(&groups, group, &all) {
-                    groups[&(group, leader)].propose(EntryPayload::App(b"x".to_vec()));
-                    groups[&(group, leader)].propose(EntryPayload::App(b"y".to_vec()));
-                    proposed = true;
-                }
+            if !proposed
+                && let Some(leader) = leader_of(&groups, group, &all)
+            {
+                groups[&(group, leader)].propose(EntryPayload::App(b"x".to_vec()));
+                groups[&(group, leader)].propose(EntryPayload::App(b"y".to_vec()));
+                proposed = true;
             }
         }
 
@@ -1579,14 +1578,14 @@ mod tests {
             }
 
             // Once a leader exists, push a run of writes through it.
-            if !proposed {
-                if let Some(leader) = leader_of(&groups, group, &all) {
-                    for i in 0..WRITES {
-                        groups[&(group, leader)]
-                            .propose(EntryPayload::App(format!("e{i}").into_bytes()));
-                    }
-                    proposed = true;
+            if !proposed
+                && let Some(leader) = leader_of(&groups, group, &all)
+            {
+                for i in 0..WRITES {
+                    groups[&(group, leader)]
+                        .propose(EntryPayload::App(format!("e{i}").into_bytes()));
                 }
+                proposed = true;
             }
             // Once those writes have committed on the leader, compact its log.
             if proposed && !compacted {
@@ -1636,10 +1635,10 @@ mod tests {
         learner: NodeId,
     ) {
         for observation in out.committed {
-            if let Committed::Snapshot { index, snapshot, .. } = observation {
-                if src == learner {
-                    *learner_snapshot = Some((index, snapshot));
-                }
+            if let Committed::Snapshot { index, snapshot, .. } = observation
+                && src == learner
+            {
+                *learner_snapshot = Some((index, snapshot));
             }
         }
         for (to, frame) in out.frames {

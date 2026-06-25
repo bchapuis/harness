@@ -282,10 +282,10 @@ impl GrainRecords {
                 return StoreAck::Stale(self.head());
             }
             let first_local = (after.value() - base) as usize;
-            if let (Some(Some(existing)), Some(incoming)) = (self.slots.get(first_local), records.first()) {
-                if &existing.bytes != incoming {
-                    return StoreAck::Stale(self.head());
-                }
+            if let (Some(Some(existing)), Some(incoming)) = (self.slots.get(first_local), records.first())
+                && &existing.bytes != incoming
+            {
+                return StoreAck::Stale(self.head());
             }
         }
         for (offset, bytes) in records.into_iter().enumerate() {

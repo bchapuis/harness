@@ -341,7 +341,7 @@ impl Model for FaultyModel {
             Duration::from_nanos(self.entropy.next_u64() % self.max_latency.as_nanos() as u64)
         };
         let fail = self.fail_num > 0 && self.entropy.buggify(self.fail_num, self.fail_den);
-        let overloaded = self.entropy.next_u64() % 2 == 0;
+        let overloaded = self.entropy.next_u64().is_multiple_of(2);
         if fail {
             self.fired.fetch_add(1, Ordering::SeqCst);
         }

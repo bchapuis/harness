@@ -576,7 +576,7 @@ impl ClusterWorkload for WatchUnderChaos {
                     .iter()
                     .enumerate()
                 {
-                    let poke = if (round as usize + i) % 2 == 0 {
+                    let poke = if (round as usize + i).is_multiple_of(2) {
                         Poke::Stop
                     } else {
                         Poke::Fail

@@ -197,7 +197,7 @@ async fn counter_client(
     ops: u64,
 ) {
     for _ in 0..ops {
-        if entropy.next_u64() % 2 == 0 {
+        if entropy.next_u64().is_multiple_of(2) {
             let delta = 1 + (entropy.next_u64() % 3) as i64;
             let id = history.invoke(CounterOp::Add(delta));
             match counter.ask(Add(delta)).await {

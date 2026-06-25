@@ -143,10 +143,10 @@ impl Terminations {
     fn record(&mut self, id: &ActorId, reason: TerminationReason) {
         if self.reason.insert(id.clone(), reason).is_none() {
             self.order.push_back(id.clone());
-            if self.order.len() > Self::CAP {
-                if let Some(evicted) = self.order.pop_front() {
-                    self.reason.remove(&evicted);
-                }
+            if self.order.len() > Self::CAP
+                && let Some(evicted) = self.order.pop_front()
+            {
+                self.reason.remove(&evicted);
             }
         }
     }

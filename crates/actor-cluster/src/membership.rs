@@ -855,20 +855,18 @@ impl Membership {
                     node: *node,
                 });
             }
-            if is_coordinator && m.reachability == Reachability::Unreachable {
-                if let DowningPolicy::Timeout(after) = self.downing {
-                    if now.duration_since(m.changed_at) >= after {
-                        let prev = m.status;
-                        m.status = MemberStatus::Down;
-                        m.changed_at = now;
-                        if let Some(event) =
-                            self.transition_event(*node, Some(prev), MemberStatus::Down)
-                        {
-                            self.events.emit(event);
-                        }
-                        downed.push(*node);
-                    }
+            if is_coordinator
+                && m.reachability == Reachability::Unreachable
+                && let DowningPolicy::Timeout(after) = self.downing
+                && now.duration_since(m.changed_at) >= after
+            {
+                let prev = m.status;
+                m.status = MemberStatus::Down;
+                m.changed_at = now;
+                if let Some(event) = self.transition_event(*node, Some(prev), MemberStatus::Down) {
+                    self.events.emit(event);
                 }
+                downed.push(*node);
             }
         }
     }

@@ -651,6 +651,10 @@ fn storage_distributes_and_non_replicas_still_route() {
     }
 }
 
+/// The chosen victim/bystander pair: X's `(key, leader)`, Y's `(key, leader)`,
+/// and X's two followers to kill.
+type ChosenShards = ((String, NodeId), (String, NodeId), [NodeId; 2]);
+
 #[test]
 fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
     // G11 / §11 BLAST RADIUS: "only that shard's grains are affected; the rest of
@@ -694,21 +698,22 @@ fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
         let idx = granary::shard_for("bank.Account", &key, SHARDS).index;
         if let std::collections::btree_map::Entry::Vacant(slot) = shard_of.entry(idx) {
             let replicas = granaries[0].replicas(&key);
-            if let Some(leader) = granaries[0].leader(&key) {
-                if replicas.len() == 3 && replicas.contains(&leader) {
-                    slot.insert((key, replicas, leader));
-                }
+            if let Some(leader) = granaries[0].leader(&key)
+                && replicas.len() == 3
+                && replicas.contains(&leader)
+            {
+                slot.insert((key, replicas, leader));
             }
         }
     }
 
     // Find a target shard X (kill its two followers) and a bystander shard Y that
     // keeps a quorum once those two are gone, with Y's leader still alive.
-    let mut chosen: Option<((String, NodeId), (String, NodeId), [NodeId; 2])> = None;
-    'outer: for (_xi, (xkey, xreplicas, xleader)) in &shard_of {
+    let mut chosen: Option<ChosenShards> = None;
+    'outer: for (xkey, xreplicas, xleader) in shard_of.values() {
         let followers: Vec<NodeId> = xreplicas.iter().copied().filter(|&n| n != *xleader).collect();
         let victims = [followers[0], followers[1]];
-        for (_yi, (ykey, yreplicas, yleader)) in &shard_of {
+        for (ykey, yreplicas, yleader) in shard_of.values() {
             if ykey == xkey {
                 continue;
             }
@@ -732,7 +737,7 @@ fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
         let label = key.clone();
         let committed =
             drive(&sim, Duration::from_secs(8), async move { g.grain(key).ask(Deposit { cents: amount }).await });
-        assert!(matches!(committed, Ok(_)), "baseline commit for {label} failed: {committed:?}");
+        assert!(committed.is_ok(), "baseline commit for {label} failed: {committed:?}");
     }
 
     // Kill shard X's two followers: X's leader survives but can no longer reach a
@@ -890,7 +895,7 @@ fn concurrent_counter_grain_is_linearizable_across_failover() {
             sim.spawner().launch(Box::pin(async move {
                 let counter = granary.grain(key);
                 for _ in 0..8 {
-                    if entropy.next_u64() % 2 == 0 {
+                    if entropy.next_u64().is_multiple_of(2) {
                         let delta = 1 + (entropy.next_u64() % 3) as i64;
                         let id = history.invoke(CounterOp::Add(delta));
                         match counter.ask_timeout(Add(delta), Duration::from_secs(8)).await {
@@ -1087,7 +1092,7 @@ fn a_multi_event_command_commits_atomically_across_failover() {
     for seed in 0..12 {
         let sim = Simulation::new(seed);
         let net = leader_net(&sim);
-        let systems = vec![net.join(A), net.join(B), net.join(C)];
+        let systems = [net.join(A), net.join(B), net.join(C)];
         sim.run_for(Duration::from_secs(2));
         let granaries: Vec<Granary<Pair>> =
             systems.iter().map(|s| s.granary::<Pair>(config())).collect();
@@ -1108,12 +1113,12 @@ fn a_multi_event_command_commits_atomically_across_failover() {
             sim.spawner().launch(Box::pin(async move {
                 let pair = granary.grain(key);
                 for _ in 0..8 {
-                    if entropy.next_u64() % 2 == 0 {
+                    if entropy.next_u64().is_multiple_of(2) {
                         let _ = pair.ask_timeout(Bump, Duration::from_secs(8)).await;
-                    } else if let Ok((a, b)) = pair.ask_timeout(ReadPair, Duration::from_secs(8)).await {
-                        if a != b {
-                            torn.lock().unwrap().push((a, b));
-                        }
+                    } else if let Ok((a, b)) = pair.ask_timeout(ReadPair, Duration::from_secs(8)).await
+                        && a != b
+                    {
+                        torn.lock().unwrap().push((a, b));
                     }
                 }
             }));

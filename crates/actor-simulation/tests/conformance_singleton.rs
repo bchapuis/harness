@@ -265,10 +265,10 @@ fn a_partition_may_dual_activate_but_heals_to_exactly_one() {
     // Every stop paired with a prior start of the same activation.
     let all_started = started(&recorder);
     for event in recorder.events().iter() {
-        if let Event::SingletonStopped { name, actor } = event {
-            if *name == NAME {
-                assert!(all_started.contains(actor), "stop without a start");
-            }
+        if let Event::SingletonStopped { name, actor } = event
+            && *name == NAME
+        {
+            assert!(all_started.contains(actor), "stop without a start");
         }
     }
 }
