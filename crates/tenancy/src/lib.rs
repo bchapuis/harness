@@ -68,6 +68,34 @@ impl Ownership {
         self.owned.iter()
     }
 
+    /// The names this principal owns of one grain type, in stable key order.
+    ///
+    /// A range scan, not a full scan: names sort by `(grain_type, key)` (the
+    /// first field of [`GrainName`]), so one type's names are contiguous — the
+    /// scan starts at the type's first name and stops when the type changes.
+    pub fn names_of_type<'a>(&'a self, grain_type: &'a str) -> impl Iterator<Item = &'a GrainName> {
+        self.owned
+            .range(GrainName::new(grain_type, String::new())..)
+            .take_while(move |n| n.grain_type() == grain_type)
+    }
+
+    /// The distinct grain types this principal owns at least one of, in order.
+    ///
+    /// The set is sorted by `(grain_type, key)`, so equal types are adjacent and
+    /// a single dedup-adjacent pass suffices.
+    pub fn types(&self) -> impl Iterator<Item = &str> {
+        self.owned
+            .iter()
+            .map(GrainName::grain_type)
+            .scan(None, |last, t| {
+                let fresh = *last != Some(t);
+                *last = Some(t);
+                Some((fresh, t))
+            })
+            .filter(|(fresh, _)| *fresh)
+            .map(|(_, t)| t)
+    }
+
     /// How many grains this principal owns.
     pub fn len(&self) -> usize {
         self.owned.len()
@@ -133,8 +161,11 @@ impl<S: GranarySystem> Grain for Directory<S> {
         r.accept::<Forget>();
         r.accept::<Clear>();
         r.accept::<List>();
+        r.accept::<ListByType>();
+        r.accept::<Types>();
         r.accept::<Contains>();
         r.accept::<Count>();
+        r.accept::<CountByType>();
     }
 }
 
@@ -182,6 +213,27 @@ impl Message for List {
     const MANIFEST: Manifest = Manifest::new("tenancy.List");
 }
 
+/// Enumerate the names the principal owns of one grain type — the query for "all
+/// my sessions" when a principal holds several grains per type. A range scan
+/// (names sort by `(grain_type, key)`), not a full scan. Emits no events.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListByType {
+    pub grain_type: String,
+}
+impl Message for ListByType {
+    type Reply = Vec<GrainName>;
+    const MANIFEST: Manifest = Manifest::new("tenancy.ListByType");
+}
+
+/// The distinct grain types the principal owns at least one of. A read; emits no
+/// events.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Types;
+impl Message for Types {
+    type Reply = Vec<String>;
+    const MANIFEST: Manifest = Manifest::new("tenancy.Types");
+}
+
 /// Whether the principal owns `name`. A read; emits no events.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Contains {
@@ -198,6 +250,17 @@ pub struct Count;
 impl Message for Count {
     type Reply = u64;
     const MANIFEST: Manifest = Manifest::new("tenancy.Count");
+}
+
+/// How many grains of one grain type the principal owns. A range scan; emits no
+/// events.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CountByType {
+    pub grain_type: String,
+}
+impl Message for CountByType {
+    type Reply = u64;
+    const MANIFEST: Manifest = Manifest::new("tenancy.CountByType");
 }
 
 impl<S: GranarySystem> GrainHandler<Record> for Directory<S> {
@@ -234,6 +297,24 @@ impl<S: GranarySystem> GrainHandler<Clear> for Directory<S> {
 impl<S: GranarySystem> GrainHandler<List> for Directory<S> {
     async fn handle(&self, state: &Ownership, _: List, _: &GrainCtx<Self>) -> (Vec<Change>, Vec<GrainName>) {
         (Vec::new(), state.owned.iter().cloned().collect())
+    }
+}
+
+impl<S: GranarySystem> GrainHandler<ListByType> for Directory<S> {
+    async fn handle(&self, state: &Ownership, msg: ListByType, _: &GrainCtx<Self>) -> (Vec<Change>, Vec<GrainName>) {
+        (Vec::new(), state.names_of_type(&msg.grain_type).cloned().collect())
+    }
+}
+
+impl<S: GranarySystem> GrainHandler<Types> for Directory<S> {
+    async fn handle(&self, state: &Ownership, _: Types, _: &GrainCtx<Self>) -> (Vec<Change>, Vec<String>) {
+        (Vec::new(), state.types().map(str::to_owned).collect())
+    }
+}
+
+impl<S: GranarySystem> GrainHandler<CountByType> for Directory<S> {
+    async fn handle(&self, state: &Ownership, msg: CountByType, _: &GrainCtx<Self>) -> (Vec<Change>, u64) {
+        (Vec::new(), state.names_of_type(&msg.grain_type).count() as u64)
     }
 }
 

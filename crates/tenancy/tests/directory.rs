@@ -15,13 +15,20 @@ use granary::GranaryExt;
 use tenancy::Clear;
 use tenancy::Contains;
 use tenancy::Count;
+use tenancy::CountByType;
 use tenancy::Directory;
 use tenancy::Forget;
 use tenancy::List;
+use tenancy::ListByType;
 use tenancy::Record;
+use tenancy::Types;
 
 fn owned(key: &str) -> GrainName {
     GrainName::new("app.Session", key)
+}
+
+fn named(grain_type: &str, key: &str) -> GrainName {
+    GrainName::new(grain_type, key)
 }
 
 #[test]
@@ -56,6 +63,49 @@ fn records_enumerates_and_forgets() {
         assert_eq!(dir.ask(Clear).await.unwrap(), 2, "clear forgets the remaining two");
         assert_eq!(dir.ask(Clear).await.unwrap(), 0, "clearing an empty index commits nothing");
         assert!(dir.ask(List).await.unwrap().is_empty());
+    });
+}
+
+#[test]
+fn queries_grains_by_type() {
+    let sim = Simulation::new(0);
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
+    let directories = system.granary::<Directory<_>>(GranaryConfig::default());
+    let dir = directories.grain("tenant/carol");
+
+    sim.block_on(async move {
+        // A principal with several grains across several types.
+        for name in [
+            named("app.Session", "s/2"),
+            named("app.Session", "s/1"),
+            named("app.Repo", "r/1"),
+            named("app.Sandbox", "box/1"),
+            named("app.Repo", "r/2"),
+        ] {
+            dir.ask(Record { name }).await.unwrap();
+        }
+
+        // By-type enumeration returns only that type's names, in key order.
+        assert_eq!(
+            dir.ask(ListByType { grain_type: "app.Session".into() }).await.unwrap(),
+            vec![named("app.Session", "s/1"), named("app.Session", "s/2")],
+        );
+        assert_eq!(
+            dir.ask(ListByType { grain_type: "app.Repo".into() }).await.unwrap(),
+            vec![named("app.Repo", "r/1"), named("app.Repo", "r/2")],
+        );
+        // A type the principal owns none of yields nothing.
+        assert!(dir.ask(ListByType { grain_type: "app.Other".into() }).await.unwrap().is_empty());
+
+        assert_eq!(dir.ask(CountByType { grain_type: "app.Repo".into() }).await.unwrap(), 2);
+        assert_eq!(dir.ask(CountByType { grain_type: "app.Sandbox".into() }).await.unwrap(), 1);
+
+        // The distinct types owned, in order, deduped.
+        assert_eq!(
+            dir.ask(Types).await.unwrap(),
+            vec!["app.Repo".to_string(), "app.Sandbox".to_string(), "app.Session".to_string()],
+        );
+        assert_eq!(dir.ask(Count).await.unwrap(), 5, "by-type views do not change the total");
     });
 }
 
