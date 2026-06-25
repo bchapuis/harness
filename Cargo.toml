@@ -30,6 +30,10 @@ wal = { path = "crates/wal", version = "0.1.0" }
 # Granary: durable objects ("grains") built on the actor framework (granary spec).
 granary = { path = "crates/granary", version = "0.1.0" }
 
+# Tenancy: an ownership-index grain layered on granary, so principals own and
+# enumerate their grains without granary itself becoming tenant-aware.
+tenancy = { path = "crates/tenancy", version = "0.1.0" }
+
 # The agentic harness (Appendix B layout of the agentic harness spec).
 harness = { path = "crates/harness", version = "0.1.0" }
 harness-anthropic = { path = "crates/harness-anthropic", version = "0.1.0" }
