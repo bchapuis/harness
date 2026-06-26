@@ -28,6 +28,7 @@ use crate::replica_store::ActorReplicaTransport;
 use crate::replica_store::ReplicaStore;
 use crate::replica_store::ReplicaTransport;
 use crate::replica_store::replica_store_key;
+use crate::shardmap::EmptyShardMap;
 use crate::shardmap::ShardMapSource;
 use crate::store::GrainStore;
 use crate::store::MemoryGrainStore;
@@ -531,6 +532,40 @@ pub trait GranaryExt: GranarySystem {
         G: Grain<System = Self> + Default,
     {
         self.granary_named(G::GRAIN_TYPE, config, Arc::new(G::default))
+    }
+
+    /// Address grains of type `G` as a routing-only **client** — the Orleans
+    /// cluster-client pattern. Unlike [`granary`](GranaryExt::granary) /
+    /// [`granary_named`](GranaryExt::granary_named) it hosts **nothing**: no
+    /// gateway, replica store, or shard-map group is started. The handle routes
+    /// through a *host's* gateway, discovered in the receptionist (§5.3) and
+    /// seeded here; `GrainRef`'s bounded redirect re-discovers a live gateway on
+    /// failover, so the seed only has to be reachable once.
+    ///
+    /// Returns `None` until at least one host's gateway for `grain_type` has
+    /// gossiped into this client's receptionist — the caller polls, exactly as a
+    /// node waits for its peers before serving. `shards` MUST match the hosts'
+    /// `GranaryConfig.shards` (so a name hashes to the same shard); the client
+    /// never reads the shard map on the data path, so it is left empty.
+    fn granary_client<G>(&self, grain_type: &'static str, shards: usize) -> Option<Granary<G>>
+    where
+        G: Grain<System = Self>,
+    {
+        let shards = shards.max(1);
+        let gateway = self
+            .receptionist()
+            .lookup(gateway_key::<G>(grain_type))
+            .into_vec()
+            .into_iter()
+            .next()?;
+        Some(Granary {
+            system: self.clone(),
+            grain_type,
+            gateway,
+            shards,
+            shard_map: Arc::new(EmptyShardMap),
+            cache: HostCache::new(self.clone(), grain_type, shards),
+        })
     }
 
     /// Host grains of type `G` under an explicit runtime **type name** (spec

@@ -116,6 +116,24 @@ impl ShardMapSource for LocalShardMap {
     }
 }
 
+// --- the client view: no allocation, no local journals ----------------------------------
+
+/// The shard map of a routing-only **client** (an Orleans-style cluster client): it
+/// hosts nothing, so it knows no allocation and holds no journal. A client never
+/// reads `replicas`/`journal` on the data path — it routes through a host's gateway
+/// — so both answer `None`. The handle exists only to satisfy [`Granary`]'s field.
+pub(crate) struct EmptyShardMap;
+
+impl ShardMapSource for EmptyShardMap {
+    fn replicas(&self, _shard: u32) -> Option<Vec<NodeId>> {
+        None
+    }
+
+    fn journal(&self, _shard: u32) -> Option<Arc<dyn DynGrainJournal>> {
+        None
+    }
+}
+
 // --- the `Quorum` tier: the consensus-agreed map over a Raft group ----------------------
 
 /// The committed allocation and the local journals built from it. Shared between

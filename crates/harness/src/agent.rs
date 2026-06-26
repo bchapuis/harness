@@ -840,7 +840,13 @@ impl<S: HarnessSystem> Agent<S> {
         act.run.model_inflight = true;
         let request = self.build_request(state, kind, live);
         let this = act.this.clone().expect("self-ref set in on_activate");
-        let model = Arc::clone(&self.shared.model);
+        // An `Agent` only ever activates on a host, where the seam is present; a
+        // routing-only client never reaches this path (`Harness::client`).
+        let model = self
+            .shared
+            .model
+            .clone()
+            .expect("the model seam is present on a host");
         ctx.system().launch(Box::pin(async move {
             let result = model.complete(request).await;
             let _ = this.tell(ModelDone { turn, result }).await;
@@ -1080,7 +1086,12 @@ impl<S: HarnessSystem> Agent<S> {
     fn launch_open(&self, ctx: &GrainCtx<Agent<S>>, profile: crate::sandbox::SandboxProfile) {
         let this = ctx.this();
         let system = ctx.system().clone();
-        let provider = Arc::clone(&self.shared.sandboxes);
+        // Present on a host; a routing-only client never opens a sandbox.
+        let provider = self
+            .shared
+            .sandboxes
+            .clone()
+            .expect("the sandbox seam is present on a host");
         let act = Arc::clone(&self.act);
         let session = Self::session(ctx);
         let node = ctx.system().node();

@@ -109,8 +109,12 @@ impl Default for HarnessConfig {
 /// into each `Agent` activation by the [`Harness::new`] factory.
 pub struct Shared<S: HarnessSystem> {
     pub(crate) kinds: Kinds,
-    pub(crate) model: Arc<dyn Model>,
-    pub(crate) sandboxes: Arc<dyn SandboxProvider>,
+    /// The model and sandbox seams, injected into each `Agent` activation on a
+    /// **host**. `None` on a routing-only client ([`Harness::client`]), which
+    /// never activates a grain — so the activation path that reads them is never
+    /// reached there.
+    pub(crate) model: Option<Arc<dyn Model>>,
+    pub(crate) sandboxes: Option<Arc<dyn SandboxProvider>>,
     pub(crate) config: HarnessConfig,
     /// One `Granary` handle per kind, set once after all kinds are hosted, so a
     /// grain can address children of any kind for delegation (§8.1) and cancel
@@ -166,8 +170,8 @@ impl<S: HarnessSystem> Harness<S> {
     ) -> Harness<S> {
         let shared = Arc::new(Shared {
             kinds: kinds.clone(),
-            model,
-            sandboxes,
+            model: Some(model),
+            sandboxes: Some(sandboxes),
             config,
             granaries: OnceLock::new(),
         });
@@ -196,6 +200,38 @@ impl<S: HarnessSystem> Harness<S> {
             .set(granaries)
             .unwrap_or_else(|_| panic!("granaries set once"));
         Harness { shared, system }
+    }
+
+    /// Build a routing-only **client** harness (the Orleans cluster-client
+    /// pattern): it hosts no grains and runs no agent loop, it only *addresses*
+    /// sessions hosted on the cluster. Used by a stateless gateway tier that joins
+    /// the transport as a non-voting member and drives sessions over `GrainRef`.
+    ///
+    /// Each kind's `Granary` comes from `granary_client` (no model/sandbox seams,
+    /// no factory). Returns `None` until every kind's host gateway has gossiped
+    /// into this client's receptionist — the caller polls, as a node waits for its
+    /// peers. `kinds` must name the same kinds with the same `GranaryConfig.shards`
+    /// the hosts run, so names hash to the same shards; the model params/tools in
+    /// `kinds` are ignored (the client never activates).
+    pub fn client(system: S, kinds: Kinds) -> Option<Harness<S>> {
+        let mut granaries = BTreeMap::new();
+        for (kind_id, kind) in kinds.iter() {
+            let grain_type: &'static str = Box::leak(kind_id.as_str().to_string().into_boxed_str());
+            let granary = system.granary_client::<Agent<S>>(grain_type, kind.config.shards)?;
+            granaries.insert(kind_id.clone(), granary);
+        }
+        let shared = Arc::new(Shared {
+            kinds,
+            model: None,
+            sandboxes: None,
+            config: HarnessConfig::default(),
+            granaries: OnceLock::new(),
+        });
+        shared
+            .granaries
+            .set(granaries)
+            .unwrap_or_else(|_| panic!("granaries set once"));
+        Some(Harness { shared, system })
     }
 
     /// A client view of `session` under `kind` (harness spec §7.4). Pure:
