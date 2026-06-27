@@ -1,0 +1,36 @@
+[package]
+name = "harness-tui"
+description = "A terminal client for the agentic harness: connects to a harness-gateway over HTTP/SSE, lists a tenant's sessions, and streams a turn's records live as a chat transcript"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "harness-tui"
+path = "src/main.rs"
+
+[dependencies]
+# The harness record/outcome types the gateway serializes onto the wire. Sharing
+# them keeps the client in lockstep with the server's JSON instead of mirroring a
+# second copy that could drift.
+harness.workspace = true
+
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# The client opens its own TCP/TLS connection to the gateway (same hand-rolled
+# HTTP/1.1 approach as the standalone deployment's model seam — no `reqwest`),
+# but reads the response as a live stream for SSE rather than to EOF.
+rustls.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+
+[lints]
+workspace = true

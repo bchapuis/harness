@@ -63,6 +63,11 @@ tokio-rustls = "0.26"
 rcgen = "0.13"
 # The HTTP/SSE gateway (`harness-gateway`) only: the public multi-tenant edge.
 axum = "0.8"
+# The terminal client (`harness-tui`) only: a full-screen ratatui frontend over
+# crossterm, with crossterm's async `EventStream` so input multiplexes with the
+# gateway's SSE record stream in one `tokio::select!`.
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
 # Standalone deployment only (`harness-standalone`): trust anchors for the
 # rustls connection its HttpPost seam opens to the Anthropic API.
 webpki-roots = "1"
