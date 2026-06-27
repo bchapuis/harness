@@ -85,10 +85,9 @@ pub struct App {
     pub input_mode: InputMode,
 
     /// The committed records, in sequence order: the source of truth the view
-    /// projects each frame.
+    /// projects each frame, and the watermark a live batch dedups against (the
+    /// highest applied seq is just the last record's, see [`App::last_seq`]).
     pub records: Vec<(Seq, Record)>,
-    /// The highest record sequence applied, so a live batch never double-appends.
-    last_seq: u64,
     pub streaming: bool,
     /// A per-process nonce and an in-run counter together mint turn ids that are
     /// unique by construction — see [`App::turn_id`].
@@ -130,7 +129,6 @@ impl App {
             cursor: 0,
             input_mode: InputMode::Prompt,
             records: Vec::new(),
-            last_seq: 0,
             streaming: false,
             nonce,
             turn_counter: 0,
@@ -166,7 +164,6 @@ impl App {
     pub fn load_session(&mut self, session: String) {
         self.session = session.clone();
         self.records.clear();
-        self.last_seq = 0;
         self.follow = true;
         self.scroll = 0;
         self.status = format!("loading {session}…");
@@ -204,7 +201,7 @@ impl App {
         let tx = self.tx.clone();
         let kind = self.kind.clone();
         let session = self.session.clone();
-        let from = self.last_seq;
+        let from = self.last_seq();
         tokio::spawn(async move {
             match client
                 .open_prompt(&kind, &session, &turn, &content, from)
@@ -433,7 +430,6 @@ impl App {
                 }
                 match records {
                     Ok(records) => {
-                        self.last_seq = records.last().map(|(s, _)| s.value()).unwrap_or(0);
                         self.records = records;
                         self.status = self.idle_status();
                     }
@@ -472,12 +468,17 @@ impl App {
         )
     }
 
+    /// The highest record sequence applied — just the last record's, since records
+    /// are appended in order. The watermark a live batch dedups against.
+    fn last_seq(&self) -> u64 {
+        self.records.last().map(|(s, _)| s.value()).unwrap_or(0)
+    }
+
     /// Append a record, skipping anything already applied.
     fn push_record(&mut self, seq: Seq, record: Record) {
-        if seq.value() <= self.last_seq {
+        if seq.value() <= self.last_seq() {
             return;
         }
-        self.last_seq = seq.value();
         self.records.push((seq, record));
     }
 }
