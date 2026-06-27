@@ -14,7 +14,11 @@
 //! time, task launching, placement, the journal — is granary's.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -31,9 +35,9 @@ use actor_core::HandlerRegistry;
 use actor_core::LocalSystem;
 use actor_core::Spawner;
 use futures::channel::oneshot;
-use granary::Granary;
 use granary::GrainError;
 use granary::GrainRef;
+use granary::Granary;
 use granary::GranaryExt;
 use granary::GranarySystem;
 
@@ -43,6 +47,7 @@ use crate::agent::Cancel;
 use crate::agent::RunCompleted;
 use crate::agent::Tail;
 use crate::agent::submit_and_attach;
+use crate::kind::Kind;
 use crate::kind::Kinds;
 use crate::model::Model;
 use crate::sandbox::SandboxProvider;
@@ -55,6 +60,25 @@ use crate::session::Turn;
 use crate::session::TurnId;
 use granary::Seq;
 use granary::Subscription;
+
+/// Interned grain-type names, keyed by kind name (granary keys purely by string,
+/// §5.1). A build re-tried in a discovery poll loop ([`Harness::client`]) reuses
+/// the leaked name instead of leaking a fresh copy each attempt.
+static GRAIN_TYPE_IDS: LazyLock<Mutex<HashMap<String, &'static str>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A grain type name must be `&'static` (the `GrainName` tag, §5.1); kinds are a
+/// bounded deployment-time set, so interning one leaked `&'static str` per distinct
+/// kind name is sound (the same bounded-leak the runtime type name already permits).
+fn leak_grain_type(kind_id: &KindId) -> &'static str {
+    let mut ids = GRAIN_TYPE_IDS.lock().expect("grain-type name cache poisoned");
+    if let Some(id) = ids.get(kind_id.as_str()) {
+        return id;
+    }
+    let id: &'static str = Box::leak(kind_id.as_str().to_owned().into_boxed_str());
+    ids.insert(kind_id.as_str().to_owned(), id);
+    id
+}
 
 /// What the harness needs from the actor system beyond [`GranarySystem`]: a way
 /// to emit its observability events (§10.4) onto the framework's stream — the
@@ -105,34 +129,44 @@ impl Default for HarnessConfig {
     }
 }
 
-/// The node-local seams and handles every activation shares (§7.4). Injected
-/// into each `Agent` activation by the [`Harness::new`] factory.
-pub struct Shared<S: HarnessSystem> {
+/// The node-global addressing context shared by a [`Harness`] and every `Agent`
+/// activation it hosts (§7.4): the per-kind granary directory (for routing and
+/// delegation), the cluster-wide kind registry, and the harness tuning. It holds
+/// **no** activation seams — those live on the hosted kind's [`Seams`], present
+/// only where a grain actually activates.
+pub(crate) struct Shared<S: HarnessSystem> {
     pub(crate) kinds: Kinds,
-    /// The model and sandbox seams, injected into each `Agent` activation on a
-    /// **host**. `None` on a routing-only client ([`Harness::client`]), which
-    /// never activates a grain — so the activation path that reads them is never
-    /// reached there.
-    pub(crate) model: Option<Arc<dyn Model>>,
-    pub(crate) sandboxes: Option<Arc<dyn SandboxProvider>>,
     pub(crate) config: HarnessConfig,
-    /// One `Granary` handle per kind, set once after all kinds are hosted, so a
+    /// One `Granary` handle per kind, set once after every kind is built, so a
     /// grain can address children of any kind for delegation (§8.1) and cancel
-    /// propagation (§9.2). Filled after construction (the factories that produce
-    /// activations are themselves captured before the handles exist).
+    /// propagation (§9.2). Filled after construction — the factories that produce
+    /// activations are captured before the handles exist.
     pub(crate) granaries: OnceLock<BTreeMap<KindId, Granary<Agent<S>>>>,
 }
 
 impl<S: HarnessSystem> Shared<S> {
-    /// The per-kind `Granary` handles (set in [`Harness::new`]).
+    /// The per-kind `Granary` handles (set in [`HarnessBuilder::build`]).
     pub(crate) fn granaries(&self) -> &BTreeMap<KindId, Granary<Agent<S>>> {
-        self.granaries.get().expect("granaries set in Harness::new")
+        self.granaries
+            .get()
+            .expect("granaries set in HarnessBuilder::build")
     }
 }
 
-/// One node's harness (harness spec §7.4): hosts every kind's grain type and
-/// injects the model and sandbox seams (§4, §5.3). Cheap to clone; every clone
-/// shares the node's granaries and seams.
+/// A hosted kind's activation seams (§4, §5.3): the node's model and sandbox,
+/// injected into each activation of that kind. An `Agent` exists only for a
+/// **hosted** kind, so the seams are always present — no `Option`, no host-only
+/// runtime check. A routing-only kind has no `Seams`: it never activates.
+#[derive(Clone)]
+pub(crate) struct Seams {
+    pub(crate) model: Arc<dyn Model>,
+    pub(crate) sandbox: Arc<dyn SandboxProvider>,
+}
+
+/// One node's view of the session-grain namespace (harness spec §7.4): it
+/// addresses every kind's sessions, and for the kinds this node **hosts** it runs
+/// their grain type with the node's model and sandbox seams (§4, §5.3). Built with
+/// [`Harness::builder`]; cheap to clone, every clone shares the node's directory.
 pub struct Harness<S: HarnessSystem> {
     shared: Arc<Shared<S>>,
     system: S,
@@ -148,90 +182,57 @@ impl<S: HarnessSystem> Clone for Harness<S> {
 }
 
 impl<S: HarnessSystem> Harness<S> {
-    /// Stand up the harness on this node: host one `Agent` grain per kind, each
-    /// under the kind's name with the kind's `GranaryConfig` (§2.2, §7.1). Call
-    /// once per node, with the same `kinds` everywhere.
-    pub fn new(
-        system: S,
-        kinds: Kinds,
-        model: Arc<dyn Model>,
-        sandboxes: Arc<dyn SandboxProvider>,
-    ) -> Harness<S> {
-        Harness::with_config(system, kinds, model, sandboxes, HarnessConfig::default())
-    }
-
-    /// [`Harness::new`] with explicit tuning.
-    pub fn with_config(
-        system: S,
-        kinds: Kinds,
-        model: Arc<dyn Model>,
-        sandboxes: Arc<dyn SandboxProvider>,
-        config: HarnessConfig,
-    ) -> Harness<S> {
-        let shared = Arc::new(Shared {
-            kinds: kinds.clone(),
-            model: Some(model),
-            sandboxes: Some(sandboxes),
-            config,
-            granaries: OnceLock::new(),
-        });
-        // Host one grain type per kind. The factory captures this node's seams
-        // (via `shared`) and builds a fresh activation per (re)activation, so the
-        // grain needs no `Default` and no process-global — multi-node-in-one-
-        // process simulations each get their own (§12.1).
-        let mut granaries = BTreeMap::new();
-        for (kind_id, kind) in kinds.iter() {
-            // A grain type name must be `&'static` (the `GrainName` tag, §5.1);
-            // kinds are a bounded deployment-time set, so leaking is sound.
-            let grain_type: &'static str = Box::leak(kind_id.as_str().to_string().into_boxed_str());
-            let factory_shared = Arc::clone(&shared);
-            // Capture this kind's definition so the activation resolves its kind
-            // without a lookup — one grain type per kind, so it is always this one.
-            let factory_kind = Arc::clone(kind);
-            let granary = system.granary_named::<Agent<S>>(
-                grain_type,
-                kind.config.clone(),
-                Arc::new(move || Agent::new(Arc::clone(&factory_shared), Arc::clone(&factory_kind))),
-            );
-            granaries.insert(kind_id.clone(), granary);
-        }
-        shared
-            .granaries
-            .set(granaries)
-            .unwrap_or_else(|_| panic!("granaries set once"));
-        Harness { shared, system }
-    }
-
-    /// Build a routing-only **client** harness (the Orleans cluster-client
-    /// pattern): it hosts no grains and runs no agent loop, it only *addresses*
-    /// sessions hosted on the cluster. Used by a stateless gateway tier that joins
-    /// the transport as a non-voting member and drives sessions over `GrainRef`.
+    /// Start building a harness on this node over the cluster-wide `kinds`
+    /// registry (§7.1, identical on every node). Select which kinds this node
+    /// hosts with [`host`](HarnessBuilder::host) / [`host_all`](HarnessBuilder::host_all)
+    /// and which it only routes with [`route`](HarnessBuilder::route) /
+    /// [`route_all`](HarnessBuilder::route_all), then `build`. The common full node
+    /// hosts every kind:
     ///
-    /// Each kind's `Granary` comes from `granary_client` (no model/sandbox seams,
-    /// no factory). Returns `None` until every kind's host gateway has gossiped
-    /// into this client's receptionist — the caller polls, as a node waits for its
-    /// peers. `kinds` must name the same kinds with the same `GranaryConfig.shards`
-    /// the hosts run, so names hash to the same shards; the model params/tools in
-    /// `kinds` are ignored (the client never activates).
-    pub fn client(system: S, kinds: Kinds) -> Option<Harness<S>> {
-        let mut granaries = BTreeMap::new();
-        for (kind_id, kind) in kinds.iter() {
-            let grain_type: &'static str = Box::leak(kind_id.as_str().to_string().into_boxed_str());
-            let granary = system.granary_client::<Agent<S>>(grain_type, kind.config.shards)?;
-            granaries.insert(kind_id.clone(), granary);
-        }
-        let shared = Arc::new(Shared {
-            kinds,
-            model: None,
-            sandboxes: None,
+    /// ```ignore
+    /// let h = Harness::builder(system, &kinds).host_all(model, sandbox).build();
+    /// ```
+    ///
+    /// A routing-only gateway tier (the Orleans cluster-client) routes every kind
+    /// and polls until the hosts have gossiped in:
+    ///
+    /// ```ignore
+    /// let h: Option<_> = Harness::builder(system, &kinds).route_all().build();
+    /// ```
+    pub fn builder(system: S, kinds: &Kinds) -> HarnessBuilder<S, NoRoutes> {
+        HarnessBuilder {
+            system,
+            kinds: kinds.clone(),
             config: HarnessConfig::default(),
-            granaries: OnceLock::new(),
-        });
-        shared
-            .granaries
-            .set(granaries)
-            .unwrap_or_else(|_| panic!("granaries set once"));
-        Some(Harness { shared, system })
+            hosted: Vec::new(),
+            routed: Vec::new(),
+            _state: PhantomData,
+        }
+    }
+
+    /// Build a harness that **hosts every** registered kind on this node — a full
+    /// cluster member (the common case). Shorthand for
+    /// `Harness::builder(system, kinds).host_all(model, sandbox).build()`; reach for
+    /// the builder directly for a custom [`HarnessConfig`], or to host some kinds
+    /// and route others.
+    pub fn cluster(
+        system: S,
+        kinds: &Kinds,
+        model: Arc<dyn Model>,
+        sandbox: Arc<dyn SandboxProvider>,
+    ) -> Harness<S> {
+        Harness::builder(system, kinds).host_all(model, sandbox).build()
+    }
+
+    /// Build a routing-only **client** harness (the Orleans cluster-client): it
+    /// hosts no grains, it only *addresses* sessions hosted elsewhere on the
+    /// cluster. Shorthand for `Harness::builder(system, kinds).route_all().build()`.
+    /// Returns `None` until every kind's host gateway has gossiped into this node's
+    /// receptionist — the caller polls, as a node waits for its peers. The model
+    /// params/tools in `kinds` are ignored (a client never activates); only the
+    /// names and `GranaryConfig.shards` matter, and they MUST match the hosts'.
+    pub fn client(system: S, kinds: &Kinds) -> Option<Harness<S>> {
+        Harness::builder(system, kinds).route_all().build()
     }
 
     /// A client view of `session` under `kind` (harness spec §7.4). Pure:
@@ -242,7 +243,7 @@ impl<S: HarnessSystem> Harness<S> {
             .shared
             .granaries()
             .get(&kind)
-            .expect("kind registered on this node")
+            .expect("kind hosted or routed on this node")
             .grain(session.as_str());
         SessionRef {
             grain,
@@ -256,6 +257,182 @@ impl<S: HarnessSystem> Harness<S> {
     /// The actor system this harness runs on.
     pub fn system(&self) -> &S {
         &self.system
+    }
+}
+
+/// [`HarnessBuilder`] type-state: no routed kinds yet, so `build` is infallible —
+/// hosting starts no discovery.
+pub struct NoRoutes;
+
+/// [`HarnessBuilder`] type-state: at least one routed kind, so `build` returns
+/// `Option` — `None` until every routed kind's host gateway has gossiped into this
+/// node's receptionist.
+pub struct HasRoutes;
+
+/// Builds a [`Harness`], choosing **per kind** whether this node hosts the grain
+/// type — starting its gateway, replica store, and shard-map group and injecting
+/// the model/sandbox [`Seams`] into each activation — or only routes to a host of
+/// it (the Orleans cluster-client path: no hosting, the gateway discovered through
+/// the receptionist). Because the choice is per kind, one node can host some kinds
+/// and route others. See [`Harness::builder`].
+pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
+    system: S,
+    kinds: Kinds,
+    config: HarnessConfig,
+    hosted: Vec<(KindId, Arc<Kind>, Seams)>,
+    routed: Vec<(KindId, usize)>,
+    _state: PhantomData<R>,
+}
+
+impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
+    /// Override the harness tuning (§7.2); defaults to [`HarnessConfig::default`].
+    pub fn config(mut self, config: HarnessConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Host the registered kind named `kind` on this node, injecting `model` and
+    /// `sandbox` into each of its activations. Panics if `kind` is not in the
+    /// registry this builder was seeded with (§7.1: a node hosts only kinds it
+    /// knows).
+    pub fn host(
+        mut self,
+        kind: &str,
+        model: Arc<dyn Model>,
+        sandbox: Arc<dyn SandboxProvider>,
+    ) -> Self {
+        let id = KindId::new(kind);
+        let def = self
+            .kinds
+            .get(&id)
+            .unwrap_or_else(|| panic!("kind '{kind}' is not registered"));
+        self.hosted.push((id, def, Seams { model, sandbox }));
+        self
+    }
+
+    /// Host every registered kind on this node with the same seams — the common
+    /// case for a full node.
+    pub fn host_all(mut self, model: Arc<dyn Model>, sandbox: Arc<dyn SandboxProvider>) -> Self {
+        for (id, def) in self.kinds.iter() {
+            self.hosted.push((
+                id.clone(),
+                Arc::clone(def),
+                Seams {
+                    model: Arc::clone(&model),
+                    sandbox: Arc::clone(&sandbox),
+                },
+            ));
+        }
+        self
+    }
+
+    /// Route to a host of the registered kind named `kind` instead of hosting it
+    /// (the Orleans cluster-client path). Shards come from the kind's
+    /// `GranaryConfig` so a name hashes to the same shard as on the hosts. Panics
+    /// if `kind` is not registered. Moves the builder to the `HasRoutes`
+    /// type-state, so `build` then returns `Option`.
+    pub fn route(self, kind: &str) -> HarnessBuilder<S, HasRoutes> {
+        let id = KindId::new(kind);
+        let shards = self
+            .kinds
+            .get(&id)
+            .unwrap_or_else(|| panic!("kind '{kind}' is not registered"))
+            .config
+            .shards
+            .max(1);
+        let mut builder = self.into_has_routes();
+        builder.routed.push((id, shards));
+        builder
+    }
+
+    /// Route every registered kind — a routing-only tier (e.g. the gateway).
+    pub fn route_all(self) -> HarnessBuilder<S, HasRoutes> {
+        let routed: Vec<(KindId, usize)> = self
+            .kinds
+            .iter()
+            .map(|(id, def)| (id.clone(), def.config.shards.max(1)))
+            .collect();
+        let mut builder = self.into_has_routes();
+        builder.routed.extend(routed);
+        builder
+    }
+
+    /// Retag to the `HasRoutes` type-state, carrying the accumulated builder.
+    fn into_has_routes(self) -> HarnessBuilder<S, HasRoutes> {
+        HarnessBuilder {
+            system: self.system,
+            kinds: self.kinds,
+            config: self.config,
+            hosted: self.hosted,
+            routed: self.routed,
+            _state: PhantomData,
+        }
+    }
+
+    /// Resolve routed kinds, then host hosted kinds, then publish the directory.
+    /// Resolving routed kinds first means a `None` return (one not yet discovered)
+    /// starts no hosting, so a poll loop never double-hosts.
+    fn assemble(self) -> Option<Harness<S>> {
+        let mut granaries: BTreeMap<KindId, Granary<Agent<S>>> = BTreeMap::new();
+        for (id, shards) in &self.routed {
+            let grain_type = leak_grain_type(id);
+            let granary = self.system.granary_client::<Agent<S>>(grain_type, *shards)?;
+            granaries.insert(id.clone(), granary);
+        }
+        let shared = Arc::new(Shared {
+            kinds: self.kinds,
+            config: self.config,
+            granaries: OnceLock::new(),
+        });
+        // Host one grain type per hosted kind. The factory captures the node's
+        // directory (via `shared`), this kind's definition, and its seams, and
+        // builds a fresh activation per (re)activation — so the grain needs no
+        // `Default` and no process-global; multi-node-in-one-process simulations
+        // each get their own (§12.1).
+        for (id, def, seams) in &self.hosted {
+            let grain_type = leak_grain_type(id);
+            let factory_shared = Arc::clone(&shared);
+            let factory_kind = Arc::clone(def);
+            let factory_seams = seams.clone();
+            let granary = self.system.granary_named::<Agent<S>>(
+                grain_type,
+                def.config.clone(),
+                Arc::new(move || {
+                    Agent::new(
+                        Arc::clone(&factory_shared),
+                        Arc::clone(&factory_kind),
+                        factory_seams.clone(),
+                    )
+                }),
+            );
+            granaries.insert(id.clone(), granary);
+        }
+        shared
+            .granaries
+            .set(granaries)
+            .unwrap_or_else(|_| panic!("granaries set once"));
+        Some(Harness {
+            shared,
+            system: self.system,
+        })
+    }
+}
+
+impl<S: HarnessSystem> HarnessBuilder<S, NoRoutes> {
+    /// Build the harness. Infallible: with no routed kinds there is nothing to
+    /// discover, so hosting always succeeds.
+    pub fn build(self) -> Harness<S> {
+        self.assemble()
+            .expect("a host-only build has no routed kinds to discover")
+    }
+}
+
+impl<S: HarnessSystem> HarnessBuilder<S, HasRoutes> {
+    /// Build the harness, or `None` until every routed kind's host gateway has
+    /// gossiped into this node's receptionist (poll, exactly as a node waits for
+    /// its peers). Hosting side effects run only once all routed kinds resolve.
+    pub fn build(self) -> Option<Harness<S>> {
+        self.assemble()
     }
 }
 
@@ -297,7 +474,11 @@ impl<S: HarnessSystem> SessionRef<S> {
     }
 
     /// [`prompt`](Self::prompt) with an explicit wait deadline.
-    pub async fn prompt_within(&self, turn: Turn, within: Duration) -> Result<RunOutcome, GrainError> {
+    pub async fn prompt_within(
+        &self,
+        turn: Turn,
+        within: Duration,
+    ) -> Result<RunOutcome, GrainError> {
         self.submit(turn, None, within).await
     }
 

@@ -1,0 +1,127 @@
+//! The harness gateway: the public HTTP/SSE edge, an Orleans-style cluster
+//! **client** of the harness cluster.
+//!
+//! It is the public multi-tenant edge (design: `docs/multi-tenant-acp-design.md`).
+//! A caller presents a bearer token; the gateway verifies it to a [`PrincipalId`]
+//! (it **terminates** tenant auth), scopes the caller's session key under that
+//! principal, and drives the session by addressing its grain **directly** — no
+//! control protocol, no per-node listener, no forwarding hop.
+//!
+//! The gateway joins the actor transport as a non-voting, routing-only **member**
+//! (`Harness::builder(..).route_all()` /
+//! [`granary_client`](granary::GranaryExt::granary_client)): a full local actor
+//! system that hosts no grains but is still a member — it holds `GrainRef`s
+//! discovered through the receptionist gossip, routes `ask`/`subscribe` to the
+//! shard leader, and spawns the ephemeral reply mailbox the host calls back. This
+//! puts the gateway **inside** the cluster's trust boundary (it holds the cluster
+//! secret and rides the receptionist bus) — the Akka-`ClusterClient` tradeoff we
+//! accept, because the gateway is already where tenant auth terminates. Untrusted
+//! callers reach it only over HTTP with a bearer token.
+//!
+//! Stateless: the gateway holds no durable state. Run N replicas behind a load
+//! balancer; each joins the cluster as its own client id.
+
+pub mod auth;
+pub mod cluster;
+pub mod http;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use granary::Grain;
+use granary::Granary;
+use granary::GranaryExt;
+use harness::GranaryConfig;
+use harness::Harness;
+use harness::HarnessSystem;
+use harness::Kind;
+use harness::Kinds;
+use tenancy::Directory;
+
+use crate::auth::PrincipalId;
+use crate::auth::TokenVerifier;
+
+/// The kinds the gateway addresses. They MUST name the same kinds with the same
+/// `GranaryConfig.shards` the nodes host (so a session name hashes to the same
+/// shard); the model params and tools are ignored — the client never activates a
+/// grain, it only addresses one. Keep this in step with `harness-standalone`'s
+/// `node::kinds` (the `assistant`/`worker` pair on the default four shards).
+pub fn client_kinds() -> Kinds {
+    let grain = |k: Kind| k.grain(GranaryConfig::default());
+    Kinds::new()
+        .register("assistant", grain(Kind::new("")))
+        .register("worker", grain(Kind::new("")))
+}
+
+/// The running gateway's shared state: a routing-only client [`Harness`], a
+/// client [`Granary`] for the tenancy ownership index, and the tenant-token
+/// verifier. Shared behind an `Arc` across all requests; cheap, stateless.
+pub struct Gateway<S: HarnessSystem> {
+    harness: Harness<S>,
+    directory: Granary<Directory<S>>,
+    tokens: Box<dyn TokenVerifier>,
+}
+
+impl<S: HarnessSystem> Gateway<S> {
+    /// Build the shared state from an already-connected client harness and
+    /// directory granary. Split out of [`connect`] so a test can drive the router
+    /// over a single in-process system without the discovery poll.
+    pub fn new(
+        harness: Harness<S>,
+        directory: Granary<Directory<S>>,
+        tokens: Box<dyn TokenVerifier>,
+    ) -> Arc<Gateway<S>> {
+        Arc::new(Gateway {
+            harness,
+            directory,
+            tokens,
+        })
+    }
+
+    /// Verify an incoming bearer token to the principal it names, or `None`.
+    pub fn principal(&self, token: &str) -> Option<PrincipalId> {
+        self.tokens.verify(token)
+    }
+
+    /// The routing-only client harness (no model/sandbox seams, never activates).
+    pub fn harness(&self) -> &Harness<S> {
+        &self.harness
+    }
+
+    /// The client handle to the tenancy ownership index (one grain per principal).
+    pub fn directory(&self) -> &Granary<Directory<S>> {
+        &self.directory
+    }
+}
+
+/// Join the cluster as a client and build the [`Gateway`]: poll until both the
+/// kinds' and the directory's host gateways have gossiped into this client's
+/// receptionist (exactly as a node waits for its peers), then assemble the shared
+/// state. `directory_shards` MUST match the nodes' `Directory` shards (the
+/// granary default). Errors if discovery does not complete within `timeout`.
+pub async fn connect<S: HarnessSystem>(
+    system: S,
+    kinds: Kinds,
+    directory_shards: usize,
+    tokens: Box<dyn TokenVerifier>,
+    timeout: Duration,
+) -> Result<Arc<Gateway<S>>, String> {
+    let directory_type = <Directory<S> as Grain>::GRAIN_TYPE;
+    let deadline = system.now() + timeout;
+    loop {
+        let harness = Harness::client(system.clone(), &kinds);
+        let directory = system.granary_client::<Directory<S>>(directory_type, directory_shards);
+        if let (Some(harness), Some(directory)) = (harness, directory) {
+            return Ok(Gateway::new(harness, directory, tokens));
+        }
+        if system.now() >= deadline {
+            return Err(
+                "no host gateway gossiped into the client within the discovery timeout: is the \
+                 cluster up, the --secret matching, and this client admitted with --client on the \
+                 nodes?"
+                    .to_string(),
+            );
+        }
+        system.sleep(Duration::from_millis(200)).await;
+    }
+}

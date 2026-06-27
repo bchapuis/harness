@@ -81,12 +81,17 @@ fn a_cancel_takes_effect_during_a_model_call() {
     // the cancelled run's terminal record is the last word.
     let records = records.lock().unwrap();
     assert!(
-        records.iter().all(|r| !matches!(r.body, RecordBody::ModelResponse { .. })),
+        records
+            .iter()
+            .all(|r| !matches!(r.body, RecordBody::ModelResponse { .. })),
         "no model response journaled for the cancelled run"
     );
     assert!(matches!(
         records.last().expect("records").body,
-        RecordBody::RunEnded { outcome: Err(RunError::Cancelled), .. }
+        RecordBody::RunEnded {
+            outcome: Err(RunError::Cancelled),
+            ..
+        }
     ));
 }
 
@@ -131,9 +136,14 @@ fn a_cancel_propagates_down_the_delegation_tree() {
         Kinds::new()
             .register(
                 "parent",
-                Kind::new("parent agent").delegates_to(&["child"]).budget(Budget::new(10_000, 10)),
+                Kind::new("parent agent")
+                    .delegates_to(&["child"])
+                    .budget(Budget::new(10_000, 10)),
             )
-            .register("child", Kind::new("child agent").budget(Budget::new(2_000, 4)))
+            .register(
+                "child",
+                Kind::new("child agent").budget(Budget::new(2_000, 4)),
+            )
     };
     let make_model = |system: &SimSystem| -> Arc<dyn Model> {
         // The parent delegates immediately; the child's model call hangs for an
@@ -148,7 +158,11 @@ fn a_cancel_propagates_down_the_delegation_tree() {
                     .filter(|e| matches!(e, harness::Entry::Assistant { .. }))
                     .count();
                 if step == 0 {
-                    Ok(tool_call("d1", "delegate", json!({ "kind": "child", "prompt": "sub-task" })))
+                    Ok(tool_call(
+                        "d1",
+                        "delegate",
+                        json!({ "kind": "child", "prompt": "sub-task" }),
+                    ))
                 } else {
                     Ok(final_message("parent-answer"))
                 }
@@ -171,8 +185,10 @@ fn a_cancel_propagates_down_the_delegation_tree() {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let session = harness.session("parent", SessionId::new("root"));
-                let prompting =
-                    session.prompt_within(Turn::new(TurnId::new("t-1"), "go"), Duration::from_secs(20_000));
+                let prompting = session.prompt_within(
+                    Turn::new(TurnId::new("t-1"), "go"),
+                    Duration::from_secs(20_000),
+                );
                 let canceller = {
                     let session = session.clone();
                     let clock = system.clock().clone();
@@ -194,9 +210,11 @@ fn a_cancel_propagates_down_the_delegation_tree() {
                 let (child_kind, child_session) = parent_records
                     .iter()
                     .find_map(|r| match &r.body {
-                        RecordBody::ChildRun { child_kind, child_session, .. } => {
-                            Some((child_kind.clone(), child_session.clone()))
-                        }
+                        RecordBody::ChildRun {
+                            child_kind,
+                            child_session,
+                            ..
+                        } => Some((child_kind.clone(), child_session.clone())),
                         _ => None,
                     })
                     .expect("journaled delegation");
@@ -211,7 +229,10 @@ fn a_cancel_propagates_down_the_delegation_tree() {
     assert!(
         child_records.lock().unwrap().iter().any(|r| matches!(
             &r.body,
-            RecordBody::RunEnded { outcome: Err(RunError::Cancelled), .. }
+            RecordBody::RunEnded {
+                outcome: Err(RunError::Cancelled),
+                ..
+            }
         )),
         "the child's run ended Cancelled (§9.2 item 2)"
     );

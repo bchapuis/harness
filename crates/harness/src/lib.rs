@@ -14,7 +14,7 @@
 //! unchanged: one seed reproduces an entire multi-node agentic run (§12).
 //!
 //! ```ignore
-//! let h = Harness::new(system, kinds, model, sandboxes);
+//! let h = Harness::builder(system, &kinds).host_all(model, sandboxes).build();
 //! let s = h.session("researcher", SessionId::new("report-42"));
 //! let out = s.prompt(Turn::new(TurnId::new("t-1"), "Summarize the corpus.")).await;
 //! ```
@@ -42,8 +42,11 @@ pub use budget::Spend;
 pub use budget::Usage;
 pub use client::Follower;
 pub use client::Harness;
+pub use client::HarnessBuilder;
 pub use client::HarnessConfig;
 pub use client::HarnessSystem;
+pub use client::HasRoutes;
+pub use client::NoRoutes;
 pub use client::SessionRef;
 pub use event::HarnessEvent;
 pub use kind::Kind;

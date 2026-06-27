@@ -96,7 +96,12 @@ impl Message for ReadFrom {
     const MANIFEST: Manifest = Manifest::new("test.ReadFrom");
 }
 impl GrainHandler<ReadFrom> for LogGrain {
-    async fn handle(&self, state: &Log, msg: ReadFrom, _: &GrainCtx<Self>) -> (Vec<Val>, Vec<(u64, i64)>) {
+    async fn handle(
+        &self,
+        state: &Log,
+        msg: ReadFrom,
+        _: &GrainCtx<Self>,
+    ) -> (Vec<Val>, Vec<(u64, i64)>) {
         let recs = (msg.from as usize..state.events.len())
             .map(|i| (i as u64 + 1, state.events[i]))
             .collect();
@@ -211,21 +216,28 @@ fn drive<T: Send + 'static>(
         *out.lock().unwrap() = Some(future.await);
     }));
     sim.run_for(settle);
-    cell.lock().unwrap().take().expect("future did not complete")
+    cell.lock()
+        .unwrap()
+        .take()
+        .expect("future did not complete")
 }
 
 fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<LogGrain>>) {
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2));
-    let granaries: Vec<Granary<LogGrain>> =
-        systems.iter().map(|system| system.granary::<LogGrain>(config())).collect();
+    let granaries: Vec<Granary<LogGrain>> = systems
+        .iter()
+        .map(|system| system.granary::<LogGrain>(config()))
+        .collect();
     sim.run_for(Duration::from_secs(3));
     (net, systems, granaries)
 }
 
 fn surviving_caller(systems: &[SimCluster], granaries: &[Granary<LogGrain>], key: &str) -> usize {
-    let leader = granaries[0].leader(key).expect("the shard elected a leader");
+    let leader = granaries[0]
+        .leader(key)
+        .expect("the shard elected a leader");
     systems
         .iter()
         .position(|s| s.node() != leader)
@@ -260,7 +272,11 @@ fn subscription_reconstructs_the_log_with_no_faults() {
         out
     });
 
-    assert_eq!(out, (0..N as i64).collect::<Vec<_>>(), "pushed stream reconstructs the log (G16)");
+    assert_eq!(
+        out,
+        (0..N as i64).collect::<Vec<_>>(),
+        "pushed stream reconstructs the log (G16)"
+    );
 }
 
 #[test]
@@ -268,7 +284,9 @@ fn subscription_survives_a_leader_crash_mid_stream() {
     let sim = Simulation::new(7);
     let (net, systems, granaries) = cluster(&sim);
     let key = "log/crash";
-    let leader = granaries[0].leader(key).expect("the shard elected a leader");
+    let leader = granaries[0]
+        .leader(key)
+        .expect("the shard elected a leader");
     let caller = surviving_caller(&systems, &granaries, key);
     let system = systems[caller].clone();
     let granary = granaries[caller].clone();
@@ -330,6 +348,14 @@ fn subscription_reconstructs_a_burst_that_overflows_the_buffer() {
         out
     });
 
-    assert_eq!(out.len(), N, "every committed record is reconstructed despite drops (G16)");
-    assert_eq!(out, (0..N as i64).collect::<Vec<_>>(), "in order, no gap or duplicate");
+    assert_eq!(
+        out.len(),
+        N,
+        "every committed record is reconstructed despite drops (G16)"
+    );
+    assert_eq!(
+        out,
+        (0..N as i64).collect::<Vec<_>>(),
+        "in order, no gap or duplicate"
+    );
 }

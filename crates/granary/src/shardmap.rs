@@ -224,11 +224,21 @@ impl RaftShardMap {
 
 impl ShardMapSource for RaftShardMap {
     fn replicas(&self, shard: u32) -> Option<Vec<NodeId>> {
-        self.inner.lock().expect("shard map mutex poisoned").allocation.get(&shard).cloned()
+        self.inner
+            .lock()
+            .expect("shard map mutex poisoned")
+            .allocation
+            .get(&shard)
+            .cloned()
     }
 
     fn journal(&self, shard: u32) -> Option<Arc<dyn DynGrainJournal>> {
-        self.inner.lock().expect("shard map mutex poisoned").journals.get(&shard).cloned()
+        self.inner
+            .lock()
+            .expect("shard map mutex poisoned")
+            .journals
+            .get(&shard)
+            .cloned()
     }
 }
 
@@ -309,7 +319,11 @@ async fn apply_loop<R: RaftConsensus>(
         } else if was_replica && !now_replica {
             // No longer a replica: drop the store from the registry (the shard
             // leader removes this node from the group via reconfigure).
-            inner.lock().expect("shard map mutex poisoned").journals.remove(&shard);
+            inner
+                .lock()
+                .expect("shard map mutex poisoned")
+                .journals
+                .remove(&shard);
         }
         // (Still a replica with a changed peer set: the shard leader's reconcile
         // loop drives the membership; this node's store is unchanged.)
@@ -355,10 +369,21 @@ async fn allocator_loop<R: RaftConsensus>(
             .0;
             // Re-propose only when the desired set differs from what is committed —
             // the steady state proposes nothing.
-            let committed = inner.lock().expect("shard map mutex poisoned").allocation.get(&shard).cloned();
+            let committed = inner
+                .lock()
+                .expect("shard map mutex poisoned")
+                .allocation
+                .get(&shard)
+                .cloned();
             if committed.as_ref() != Some(&desired) {
                 consensus
-                    .propose_to(group, encode(&ShardMapCommand::Assign { shard, replicas: desired }))
+                    .propose_to(
+                        group,
+                        encode(&ShardMapCommand::Assign {
+                            shard,
+                            replicas: desired,
+                        }),
+                    )
                     .await;
             }
         }
@@ -401,7 +426,11 @@ async fn reconcile_loop<R: RaftConsensus>(
         // Each shard group this node leads → its committed allocation.
         let allocation: Vec<(u32, Vec<NodeId>)> = {
             let guard = inner.lock().expect("shard map mutex poisoned");
-            guard.allocation.iter().map(|(&s, v)| (s, v.clone())).collect()
+            guard
+                .allocation
+                .iter()
+                .map(|(&s, v)| (s, v.clone()))
+                .collect()
         };
         for (shard, replicas) in allocation {
             let shard_group = group_id_for(ShardId {

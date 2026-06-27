@@ -1,0 +1,29 @@
+[package]
+name = "harness-gateway"
+description = "The public HTTP/SSE edge for the agentic harness: an Orleans-style cluster client that terminates tenant auth and addresses session grains directly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-runtime.workspace = true
+actor-serialization.workspace = true
+granary.workspace = true
+tenancy.workspace = true
+harness.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

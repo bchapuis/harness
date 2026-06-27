@@ -74,7 +74,12 @@ impl Message for Add {
     const MANIFEST: Manifest = Manifest::new("client.Add");
 }
 impl GrainHandler<Add> for Counter {
-    async fn handle(&self, state: &CounterState, msg: Add, _: &GrainCtx<Self>) -> (Vec<CounterEvent>, i64) {
+    async fn handle(
+        &self,
+        state: &CounterState,
+        msg: Add,
+        _: &GrainCtx<Self>,
+    ) -> (Vec<CounterEvent>, i64) {
         (vec![CounterEvent::Added(msg.0)], state.value + msg.0)
     }
 }
@@ -86,7 +91,12 @@ impl Message for Read {
     const MANIFEST: Manifest = Manifest::new("client.Read");
 }
 impl GrainHandler<Read> for Counter {
-    async fn handle(&self, state: &CounterState, _: Read, _: &GrainCtx<Self>) -> (Vec<CounterEvent>, i64) {
+    async fn handle(
+        &self,
+        state: &CounterState,
+        _: Read,
+        _: &GrainCtx<Self>,
+    ) -> (Vec<CounterEvent>, i64) {
         (vec![], state.value)
     }
 }
@@ -129,7 +139,10 @@ fn drive<T: Send + 'static>(
         *out.lock().unwrap() = Some(future.await);
     }));
     sim.run_for(settle);
-    cell.lock().unwrap().take().expect("future did not complete")
+    cell.lock()
+        .unwrap()
+        .take()
+        .expect("future did not complete")
 }
 
 #[test]
@@ -138,9 +151,12 @@ fn a_non_hosting_client_routes_to_a_cluster_grain() {
     let net = SimNetwork::new(&sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
 
     // Hosts: a 3-node leader cluster hosting the Counter grain.
-    let hosts = vec![net.join(A), net.join(B), net.join(C)];
+    let hosts = [net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
-    let _granaries: Vec<_> = hosts.iter().map(|s| s.granary::<Counter>(config())).collect();
+    let _granaries: Vec<_> = hosts
+        .iter()
+        .map(|s| s.granary::<Counter>(config()))
+        .collect();
     sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
 
     // The client: wired into everyone's membership view by `join`, but NOT in the
@@ -170,6 +186,10 @@ fn a_non_hosting_client_routes_to_a_cluster_grain() {
         (added, read)
     });
 
-    assert_eq!(after_add, Ok(7), "the client's Add routed to the leader and committed");
+    assert_eq!(
+        after_add,
+        Ok(7),
+        "the client's Add routed to the leader and committed"
+    );
     assert_eq!(after_read, Ok(7), "the client reads the committed value");
 }

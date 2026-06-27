@@ -158,7 +158,12 @@ impl<G: Grain> Host<G> {
         // activation so the caller retries. A local read on the `Local` tier.
         let head = self.journal.head(&self.name).await.map_err(boxed)?;
 
-        let (mut seq, from_snapshot) = match self.journal.load_snapshot(&self.name).await.map_err(boxed)? {
+        let (mut seq, from_snapshot) = match self
+            .journal
+            .load_snapshot(&self.name)
+            .await
+            .map_err(boxed)?
+        {
             Some((s_seq, bytes)) if s_seq <= head => {
                 self.state = actor_serialization::decode(&*codec, &bytes).map_err(boxed)?;
                 self.last_snapshot = s_seq;
@@ -175,12 +180,17 @@ impl<G: Grain> Host<G> {
 
         let mut replayed = 0u64;
         loop {
-            let batch = self.journal.load(&self.name, seq, REPLAY_BATCH).await.map_err(boxed)?;
+            let batch = self
+                .journal
+                .load(&self.name, seq, REPLAY_BATCH)
+                .await
+                .map_err(boxed)?;
             if batch.is_empty() {
                 break;
             }
             for (s, bytes) in batch {
-                let event: G::Event = actor_serialization::decode(&*codec, &bytes).map_err(boxed)?;
+                let event: G::Event =
+                    actor_serialization::decode(&*codec, &bytes).map_err(boxed)?;
                 G::apply(&mut self.state, &event);
                 seq = s;
                 replayed += 1;
@@ -338,7 +348,8 @@ impl<G: Grain> Host<G> {
         if self.config.snapshot_every == 0 {
             return;
         }
-        if self.head.value().saturating_sub(self.last_snapshot.value()) < self.config.snapshot_every {
+        if self.head.value().saturating_sub(self.last_snapshot.value()) < self.config.snapshot_every
+        {
             return;
         }
         self.snapshot_now(ctx).await;
@@ -355,8 +366,10 @@ impl<G: Grain> Host<G> {
         let Ok(bytes) = actor_serialization::encode(&*codec, &self.state) else {
             return;
         };
-        if let AppendOutcome::Committed(at) =
-            self.journal.save_snapshot(&self.name, self.head, bytes).await
+        if let AppendOutcome::Committed(at) = self
+            .journal
+            .save_snapshot(&self.name, self.head, bytes)
+            .await
         {
             self.last_snapshot = at;
             ctx.system().emit_grain_event(GrainEvent::Snapshotted {
@@ -405,7 +418,8 @@ impl<G: Grain> Host<G> {
             from: from.value(),
             records,
         });
-        self.sinks.retain(|sink| sink.try_send(batch.clone()).is_ok());
+        self.sinks
+            .retain(|sink| sink.try_send(batch.clone()).is_ok());
     }
 }
 
@@ -439,7 +453,11 @@ where
     G: GrainHandler<M>,
     M: Message,
 {
-    async fn handle(&mut self, msg: RunTyped<M>, ctx: &Ctx<Host<G>>) -> Result<M::Reply, GrainError> {
+    async fn handle(
+        &mut self,
+        msg: RunTyped<M>,
+        ctx: &Ctx<Host<G>>,
+    ) -> Result<M::Reply, GrainError> {
         self.run_protocol(msg.0, ctx).await
     }
 }

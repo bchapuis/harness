@@ -1,15 +1,12 @@
-//! `harness-standalone` as a library: the node runtime, the control protocol,
-//! and the two client-facing front-ends (REPL and ACP). The `main.rs` binary is
-//! a thin argument parser over these modules.
+//! `harness-standalone` as a library: the node (silo) runtime. The `main.rs`
+//! binary is a thin argument parser over it.
 //!
-//! Exposing the modules as a library is what lets the integration tests under
-//! `tests/` drive [`acp::serve`] over an in-process pipe and stand up a fake
-//! control port from the real [`proto`] types — the same wire the node serves.
+//! A node hosts grains and votes in Raft; it has no client-facing protocol. The
+//! public multi-tenant edge lives in `harness-gateway`, a trusted cluster client
+//! that joins the transport as a non-voting member and addresses the grains
+//! directly over `GrainRef`.
 
-pub mod acp;
 pub mod http;
 pub mod ids;
 pub mod node;
-pub mod proto;
-pub mod repl;
 pub mod sandbox;

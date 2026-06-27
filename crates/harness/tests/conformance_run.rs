@@ -38,7 +38,12 @@ fn echo_kind() -> Kinds {
     Kinds::new().register(
         "echo",
         Kind::new("You are a test agent.")
-            .sandboxed("shell", "Run a command", &json!({ "type": "object" }), Tier::Workspace)
+            .sandboxed(
+                "shell",
+                "Run a command",
+                &json!({ "type": "object" }),
+                Tier::Workspace,
+            )
             .budget(Budget::new(10_000, 10))
             .grain(brisk_idle()),
     )
@@ -55,21 +60,27 @@ fn a_final_message_completes_the_run() {
     let sandboxes = Arc::new(ScriptedSandboxes::echo());
     let records: Arc<Mutex<Vec<Record>>> = Arc::default();
     let sink = Arc::clone(&records);
-    let workload = Scenario::new("happy-path", echo_kind(), model, sandboxes, move |harness, system| {
-        let sink = Arc::clone(&sink);
-        Box::pin(async move {
-            let session = harness.session("echo", SessionId::new("s-1"));
-            let outcome = session
-                .prompt(Turn::new(TurnId::new("t-1"), "go"))
-                .await
-                .expect("call")
-                .expect("run");
-            assert_eq!(outcome.text(), "the answer");
-            assert_eq!(outcome.tokens, 120);
-            *sink.lock().unwrap() = tail_records(&session).await;
-            flush(&system).await;
-        })
-    });
+    let workload = Scenario::new(
+        "happy-path",
+        echo_kind(),
+        model,
+        sandboxes,
+        move |harness, system| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move {
+                let session = harness.session("echo", SessionId::new("s-1"));
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
+                assert_eq!(outcome.text(), "the answer");
+                assert_eq!(outcome.tokens, 120);
+                *sink.lock().unwrap() = tail_records(&session).await;
+                flush(&system).await;
+            })
+        },
+    );
     run_seed(&workload, 7).expect("invariants hold");
 
     // The journal is the session (§2.1): audit the record order (§6.4).
@@ -90,20 +101,26 @@ fn the_tool_loop_journals_intent_before_effect() {
     let stats = sandboxes.stats.clone();
     let records: Arc<Mutex<Vec<Record>>> = Arc::default();
     let sink = Arc::clone(&records);
-    let workload = Scenario::new("tool-loop", echo_kind(), model, sandboxes, move |harness, system| {
-        let sink = Arc::clone(&sink);
-        Box::pin(async move {
-            let session = harness.session("echo", SessionId::new("s-2"));
-            let outcome = session
-                .prompt(Turn::new(TurnId::new("t-1"), "use the tool"))
-                .await
-                .expect("call")
-                .expect("run");
-            assert_eq!(outcome.text(), "done");
-            *sink.lock().unwrap() = tail_records(&session).await;
-            flush(&system).await;
-        })
-    });
+    let workload = Scenario::new(
+        "tool-loop",
+        echo_kind(),
+        model,
+        sandboxes,
+        move |harness, system| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move {
+                let session = harness.session("echo", SessionId::new("s-2"));
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "use the tool"))
+                    .await
+                    .expect("call")
+                    .expect("run");
+                assert_eq!(outcome.text(), "done");
+                *sink.lock().unwrap() = tail_records(&session).await;
+                flush(&system).await;
+            })
+        },
+    );
     run_seed(&workload, 11).expect("invariants hold");
 
     assert_eq!(
@@ -124,27 +141,42 @@ fn resubmitting_a_turn_never_starts_a_second_run() {
     let sandboxes = Arc::new(ScriptedSandboxes::echo());
     let records: Arc<Mutex<Vec<Record>>> = Arc::default();
     let sink = Arc::clone(&records);
-    let workload =
-        Scenario::new("idempotent-submit", echo_kind(), model, sandboxes, move |harness, system| {
+    let workload = Scenario::new(
+        "idempotent-submit",
+        echo_kind(),
+        model,
+        sandboxes,
+        move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let session = harness.session("echo", SessionId::new("s-3"));
                 let turn = Turn::new(TurnId::new("t-1"), "go");
                 // Concurrent duplicate submissions attach to one run (§7.4).
-                let (a, b) = futures::join!(session.prompt(turn.clone()), session.prompt(turn.clone()));
+                let (a, b) =
+                    futures::join!(session.prompt(turn.clone()), session.prompt(turn.clone()));
                 assert_eq!(a.expect("call").expect("run").text(), "once");
                 assert_eq!(b.expect("call").expect("run").text(), "once");
                 // A later re-submission returns the recorded outcome (§7.4).
-                let again = session.prompt(turn.clone()).await.expect("call").expect("run");
+                let again = session
+                    .prompt(turn.clone())
+                    .await
+                    .expect("call")
+                    .expect("run");
                 assert_eq!(again.text(), "once");
                 // Same TurnId, different content: a caller bug, rejected without
                 // journaling (§7.4).
-                let mismatch = session.prompt(Turn::new(TurnId::new("t-1"), "different")).await;
-                assert!(matches!(mismatch, Err(GrainError::Call(CallError::System(_)))));
+                let mismatch = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "different"))
+                    .await;
+                assert!(matches!(
+                    mismatch,
+                    Err(GrainError::Call(CallError::System(_)))
+                ));
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;
             })
-        });
+        },
+    );
     run_seed(&workload, 13).expect("invariants hold");
 
     let turns = records
@@ -164,13 +196,21 @@ fn turns_are_serialized_by_the_journal() {
             .iter()
             .filter(|e| matches!(e, harness::Entry::User(_)))
             .count();
-        Ok(final_message(if user_turns == 1 { "first" } else { "second" }))
+        Ok(final_message(if user_turns == 1 {
+            "first"
+        } else {
+            "second"
+        }))
     }));
     let sandboxes = Arc::new(ScriptedSandboxes::echo());
     let records: Arc<Mutex<Vec<Record>>> = Arc::default();
     let sink = Arc::clone(&records);
-    let workload =
-        Scenario::new("serialized-turns", echo_kind(), model, sandboxes, move |harness, system| {
+    let workload = Scenario::new(
+        "serialized-turns",
+        echo_kind(),
+        model,
+        sandboxes,
+        move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let session = harness.session("echo", SessionId::new("s-4"));
@@ -186,12 +226,15 @@ fn turns_are_serialized_by_the_journal() {
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;
             })
-        });
+        },
+    );
     run_seed(&workload, 17).expect("invariants hold");
 
     assert_eq!(
         record_kinds(&records.lock().unwrap()),
-        vec!["created", "turn", "model", "ended", "turn", "model", "ended"],
+        vec![
+            "created", "turn", "model", "ended", "turn", "model", "ended"
+        ],
         "the second run starts only after the first's terminal record (§3.1)"
     );
 }
@@ -205,8 +248,12 @@ fn an_unknown_tool_is_a_transcript_value_not_a_run_failure() {
     ]));
     let sandboxes = Arc::new(ScriptedSandboxes::echo());
     let stats = sandboxes.stats.clone();
-    let workload =
-        Scenario::new("unknown-tool", echo_kind(), model, sandboxes, move |harness, system| {
+    let workload = Scenario::new(
+        "unknown-tool",
+        echo_kind(),
+        model,
+        sandboxes,
+        move |harness, system| {
             Box::pin(async move {
                 let session = harness.session("echo", SessionId::new("s-5"));
                 let outcome = session
@@ -217,7 +264,8 @@ fn an_unknown_tool_is_a_transcript_value_not_a_run_failure() {
                 assert_eq!(outcome.text(), "recovered");
                 flush(&system).await;
             })
-        });
+        },
+    );
     run_seed(&workload, 19).expect("invariants hold");
 
     // Both synthesized outcomes are journaled errors; nothing was executed (§5.4).

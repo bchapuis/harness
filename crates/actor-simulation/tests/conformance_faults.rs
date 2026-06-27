@@ -297,7 +297,9 @@ impl ClusterWorkload for Chatter {
             for _ in 0..rounds {
                 clock.sleep(Duration::from_millis(150)).await;
                 for service in caller.receptionist().lookup(GREETERS).iter() {
-                    let _ = service.ask_timeout(CovGreet, Duration::from_millis(500)).await;
+                    let _ = service
+                        .ask_timeout(CovGreet, Duration::from_millis(500))
+                        .await;
                 }
             }
         })
@@ -399,7 +401,9 @@ impl ClusterWorkload for RegistryChatter {
                     registry.resume(victim);
                 }
                 for service in caller.receptionist().lookup(GREETERS).iter() {
-                    let _ = service.ask_timeout(CovGreet, Duration::from_millis(500)).await;
+                    let _ = service
+                        .ask_timeout(CovGreet, Duration::from_millis(500))
+                        .await;
                 }
             }
         })
@@ -502,11 +506,15 @@ impl ClusterWorkload for UtilityChatter {
                 for node in &nodes {
                     let rr = Router::new(node, GREETERS, RouteStrategy::RoundRobin);
                     if let Some(routee) = rr.route() {
-                        let _ = routee.ask_timeout(CovGreet, Duration::from_millis(500)).await;
+                        let _ = routee
+                            .ask_timeout(CovGreet, Duration::from_millis(500))
+                            .await;
                     }
                     let key = format!("k-{round}");
                     if let Some(routee) = rr.route_by(key.as_bytes()) {
-                        let _ = routee.ask_timeout(CovGreet, Duration::from_millis(500)).await;
+                        let _ = routee
+                            .ask_timeout(CovGreet, Duration::from_millis(500))
+                            .await;
                     }
                     // Fire-and-forget through the router, and a call through the
                     // singleton proxy; any outcome is acceptable under faults.

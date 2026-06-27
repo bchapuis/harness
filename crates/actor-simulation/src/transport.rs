@@ -425,13 +425,19 @@ impl SimNetwork {
         let copies = if self.faults.active() {
             // Seeded loss (also models corruption / association loss): the node
             // never sees the frame, so it cannot be wedged by it (spec §7.3).
-            if self.entropy.buggify(self.faults.drop_num, self.faults.drop_den) {
+            if self
+                .entropy
+                .buggify(self.faults.drop_num, self.faults.drop_den)
+            {
                 self.stats.record_dropped();
                 return Ok(());
             }
             // Seeded duplication (spec §18.3): the framework tolerates it; the
             // caller still sees a single outcome (§7.2).
-            if self.entropy.buggify(self.faults.duplicate_num, self.faults.duplicate_den) {
+            if self
+                .entropy
+                .buggify(self.faults.duplicate_num, self.faults.duplicate_den)
+            {
                 self.stats.record_duplicated();
                 2
             } else {

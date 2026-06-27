@@ -220,7 +220,9 @@ impl FileGrainStore {
         if let Some(segment) = segments.get(&(shard, grain.clone())) {
             return Arc::clone(segment);
         }
-        let id = self.segment_id(shard, grain, true).expect("create allocates an id");
+        let id = self
+            .segment_id(shard, grain, true)
+            .expect("create allocates an id");
         let segment = Arc::new(open_segment(&self.dir, id));
         segments.insert((shard, grain.clone()), Arc::clone(&segment));
         segment
@@ -260,7 +262,10 @@ impl FileGrainStore {
                 id,
             })
             .unwrap_or_else(|err| {
-                panic!("grain store manifest persistence failed at {}: {err}", path.display())
+                panic!(
+                    "grain store manifest persistence failed at {}: {err}",
+                    path.display()
+                )
             });
         manifest.ids.insert((shard, grain.clone()), id);
         Some(id)
@@ -296,7 +301,10 @@ impl FileGrainStore {
             .log
             .rewrite(&[SegOp::Checkpoint(inner.records.export())])
             .unwrap_or_else(|err| {
-                panic!("grain store compaction failed at {}: {err}", segment.path.display())
+                panic!(
+                    "grain store compaction failed at {}: {err}",
+                    segment.path.display()
+                )
             });
     }
 }
@@ -347,7 +355,12 @@ fn open_segment(dir: &Path, id: u64) -> Segment {
     for op in ops {
         match op {
             SegOp::Checkpoint(checkpoint) => records = GrainRecords::from_checkpoint(checkpoint),
-            SegOp::Record { after, term, records: recs, repair } => {
+            SegOp::Record {
+                after,
+                term,
+                records: recs,
+                repair,
+            } => {
                 records.store_record(after, term, recs, repair);
             }
             SegOp::Snapshot { at, term, state } => {
@@ -425,7 +438,12 @@ impl GrainStore for FileGrainStore {
 
     fn read(&self, shard: u32, grain: &GrainName) -> ReadReply {
         match self.segment_existing(shard, grain) {
-            Some(segment) => segment.inner.lock().expect("grain segment poisoned").records.read(),
+            Some(segment) => segment
+                .inner
+                .lock()
+                .expect("grain segment poisoned")
+                .records
+                .read(),
             None => ReadReply {
                 slots: Vec::new(),
                 snapshot: None,
@@ -433,7 +451,13 @@ impl GrainStore for FileGrainStore {
         }
     }
 
-    fn read_from(&self, shard: u32, grain: &GrainName, from: Seq, limit: usize) -> Vec<(Seq, Vec<u8>)> {
+    fn read_from(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        from: Seq,
+        limit: usize,
+    ) -> Vec<(Seq, Vec<u8>)> {
         match self.segment_existing(shard, grain) {
             Some(segment) => segment
                 .inner
@@ -453,7 +477,9 @@ impl GrainStore for FileGrainStore {
         // Hold the segment lock (if the grain exists) across the fence bump and the
         // read, so prepare's promise and its returned view are atomic against a
         // concurrent append to this grain (the fencing race, §8).
-        let guard = segment.as_ref().map(|s| s.inner.lock().expect("grain segment poisoned"));
+        let guard = segment
+            .as_ref()
+            .map(|s| s.inner.lock().expect("grain segment poisoned"));
         if let Err(fence) = self.bump_fence(shard, term) {
             return ReadOutcome::Fenced(fence);
         }
@@ -495,9 +521,15 @@ impl GrainStore for FileGrainStore {
     fn truncate(&self, shard: u32, grain: &GrainName, after: Seq) {
         let segment = self.segment_or_create(shard, grain);
         let mut inner = segment.inner.lock().expect("grain segment poisoned");
-        inner.log.append(&SegOp::Truncate { after }).unwrap_or_else(|err| {
-            panic!("grain store persistence failed at {}: {err}", segment.path.display())
-        });
+        inner
+            .log
+            .append(&SegOp::Truncate { after })
+            .unwrap_or_else(|err| {
+                panic!(
+                    "grain store persistence failed at {}: {err}",
+                    segment.path.display()
+                )
+            });
         inner.records.truncate(after);
     }
 }
@@ -520,11 +552,21 @@ mod tests {
         {
             let store = FileGrainStore::open(dir.path()).unwrap();
             assert_eq!(
-                store.store_record(0, &n, Seq::ZERO, 1, vec![b"e1".to_vec(), b"e2".to_vec()], false),
+                store.store_record(
+                    0,
+                    &n,
+                    Seq::ZERO,
+                    1,
+                    vec![b"e1".to_vec(), b"e2".to_vec()],
+                    false
+                ),
                 StoreAck::Stored(Seq::new(2))
             );
             // A snapshot below the head leaves a live tail, so records survive reopen.
-            assert_eq!(store.store_snapshot(0, &n, Seq::new(1), 1, b"snap".to_vec()), StoreAck::Stored(Seq::new(1)));
+            assert_eq!(
+                store.store_snapshot(0, &n, Seq::new(1), 1, b"snap".to_vec()),
+                StoreAck::Stored(Seq::new(1))
+            );
         }
         // A fresh open recovers the retained record (e1 is compacted under the
         // snapshot at seq 1), its term, and the snapshot from disk.
@@ -543,7 +585,13 @@ mod tests {
         for i in 0..50u64 {
             store.store_record(0, &n, Seq::new(i), 1, vec![vec![b'x'; 1000]], false);
         }
-        let id = *store.manifest.lock().unwrap().ids.get(&(0, n.clone())).unwrap();
+        let id = *store
+            .manifest
+            .lock()
+            .unwrap()
+            .ids
+            .get(&(0, n.clone()))
+            .unwrap();
         let seg_path = dir.path().join("segments").join(id.to_string());
         let before = fs::metadata(&seg_path).unwrap().len();
 
@@ -575,13 +623,30 @@ mod tests {
         let (a, b) = (name("a"), name("b"));
         let store = FileGrainStore::open(dir.path()).unwrap();
         store.store_record(0, &a, Seq::ZERO, 1, vec![b"a1".to_vec()], false);
-        store.store_record(0, &b, Seq::ZERO, 1, vec![b"b1".to_vec(), b"b2".to_vec()], false);
-        let id_b = *store.manifest.lock().unwrap().ids.get(&(0, b.clone())).unwrap();
+        store.store_record(
+            0,
+            &b,
+            Seq::ZERO,
+            1,
+            vec![b"b1".to_vec(), b"b2".to_vec()],
+            false,
+        );
+        let id_b = *store
+            .manifest
+            .lock()
+            .unwrap()
+            .ids
+            .get(&(0, b.clone()))
+            .unwrap();
         let b_path = dir.path().join("segments").join(id_b.to_string());
         let b_before = fs::read(&b_path).unwrap();
         // Compacting grain `a` must not rewrite grain `b`'s segment.
         store.store_snapshot(0, &a, Seq::new(1), 1, b"snap-a".to_vec());
-        assert_eq!(fs::read(&b_path).unwrap(), b_before, "grain b's segment was rewritten");
+        assert_eq!(
+            fs::read(&b_path).unwrap(),
+            b_before,
+            "grain b's segment was rewritten"
+        );
     }
 
     #[test]
@@ -589,10 +654,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let n = name("a");
         let store = FileGrainStore::open(dir.path()).unwrap();
-        store.store_record(0, &n, Seq::ZERO, 1, vec![b"e1".to_vec(), b"e2".to_vec()], false);
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            1,
+            vec![b"e1".to_vec(), b"e2".to_vec()],
+            false,
+        );
         // A first snapshot advances the base and compacts to a checkpoint.
         store.store_snapshot(0, &n, Seq::new(2), 1, b"snap@2".to_vec());
-        let id = *store.manifest.lock().unwrap().ids.get(&(0, n.clone())).unwrap();
+        let id = *store
+            .manifest
+            .lock()
+            .unwrap()
+            .ids
+            .get(&(0, n.clone()))
+            .unwrap();
         let seg_path = dir.path().join("segments").join(id.to_string());
         let after_first = fs::metadata(&seg_path).unwrap().len();
         // Re-storing the same (non-advancing) snapshot many times — as repeated
@@ -611,7 +689,10 @@ mod tests {
         // And the state still recovers correctly.
         drop(store);
         let reopened = FileGrainStore::open(dir.path()).unwrap();
-        assert_eq!(reopened.read(0, &n).snapshot, Some((Seq::new(2), 1, b"snap@2".to_vec())));
+        assert_eq!(
+            reopened.read(0, &n).snapshot,
+            Some((Seq::new(2), 1, b"snap@2".to_vec()))
+        );
     }
 
     #[test]
@@ -638,7 +719,10 @@ mod tests {
             // Prepare a grain that has no records yet: the promise is the shard fence,
             // which must survive even though no segment was ever written.
             let store = FileGrainStore::open(dir.path()).unwrap();
-            assert!(matches!(store.prepare(0, &name("ghost"), 7), ReadOutcome::Prepared(_)));
+            assert!(matches!(
+                store.prepare(0, &name("ghost"), 7),
+                ReadOutcome::Prepared(_)
+            ));
         }
         let reopened = FileGrainStore::open(dir.path()).unwrap();
         // A different grain in the same shard is fenced by the recovered promise.
@@ -659,7 +743,13 @@ mod tests {
         // A torn write: garbage lands after the valid record in the grain's segment.
         let id = {
             let store = FileGrainStore::open(dir.path()).unwrap();
-            *store.manifest.lock().unwrap().ids.get(&(0, n.clone())).unwrap()
+            *store
+                .manifest
+                .lock()
+                .unwrap()
+                .ids
+                .get(&(0, n.clone()))
+                .unwrap()
         };
         let seg_path = dir.path().join("segments").join(id.to_string());
         let mut file = OpenOptions::new().append(true).open(&seg_path).unwrap();
@@ -667,7 +757,10 @@ mod tests {
         drop(file);
 
         let reopened = FileGrainStore::open(dir.path()).unwrap();
-        assert_eq!(reopened.read(0, &n).slots, vec![(Seq::new(1), 1, b"e1".to_vec())]);
+        assert_eq!(
+            reopened.read(0, &n).slots,
+            vec![(Seq::new(1), 1, b"e1".to_vec())]
+        );
         // The recovery truncated the garbage; appends land cleanly after it.
         assert_eq!(
             reopened.store_record(0, &n, Seq::new(1), 1, vec![b"e2".to_vec()], false),
@@ -705,7 +798,11 @@ mod tests {
         for (step, op) in ops.iter().enumerate() {
             // A fresh open every step: the state must come back from disk.
             let file = FileGrainStore::open(dir.path()).unwrap();
-            assert_eq!(file.read(0, &n).slots, mirror.read(0, &n).slots, "diverged before step {step}");
+            assert_eq!(
+                file.read(0, &n).slots,
+                mirror.read(0, &n).slots,
+                "diverged before step {step}"
+            );
             match op {
                 Op::Record(after, term, recs, repair) => {
                     file.store_record(0, &n, *after, *term, recs.clone(), *repair);
@@ -727,7 +824,10 @@ mod tests {
             let f = file.read(0, &n);
             let m = mirror.read(0, &n);
             assert_eq!(f.slots, m.slots, "slots diverged after step {step}");
-            assert_eq!(f.snapshot, m.snapshot, "snapshot diverged after step {step}");
+            assert_eq!(
+                f.snapshot, m.snapshot,
+                "snapshot diverged after step {step}"
+            );
         }
     }
 }

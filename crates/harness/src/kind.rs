@@ -7,7 +7,7 @@
 //!
 //! The inheritance made literal (§2.2): a `KindId` **is** a grain type. The
 //! harness hosts one `Agent` grain ([`crate::agent`]) under each kind's name via
-//! `granary_named` ([`crate::client::Harness::new`]), so each kind is its own
+//! `granary_named` ([`crate::client::Harness::builder`]), so each kind is its own
 //! grain type — its own gateway, shard map, namespace, and `GranaryConfig` —
 //! while sharing one run loop. A session of a kind is one grain of that type.
 

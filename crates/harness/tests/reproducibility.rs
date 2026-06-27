@@ -53,7 +53,12 @@ struct FaultyWorkload {
 
 impl FaultyWorkload {
     fn new(name: &'static str, sessions: usize, model_fail_num: u64) -> Self {
-        FaultyWorkload { name, sessions, model_fail_num, model_fired: Arc::new(AtomicUsize::new(0)) }
+        FaultyWorkload {
+            name,
+            sessions,
+            model_fail_num,
+            model_fired: Arc::new(AtomicUsize::new(0)),
+        }
     }
 }
 
@@ -66,7 +71,12 @@ impl Workload for FaultyWorkload {
         let kinds = Kinds::new().register(
             "worker",
             Kind::new("worker")
-                .sandboxed("shell", "run", &json!({ "type": "object" }), Tier::Workspace)
+                .sandboxed(
+                    "shell",
+                    "run",
+                    &json!({ "type": "object" }),
+                    Tier::Workspace,
+                )
                 .budget(Budget::new(10_000, 10))
                 .grain(brisk_idle()),
         );
@@ -83,9 +93,9 @@ impl Workload for FaultyWorkload {
             fail_den: 4,
             fired: Arc::clone(&self.model_fired),
         };
-        let harness = Harness::new(
+        let harness = Harness::cluster(
             system.clone(),
-            kinds,
+            &kinds,
             Arc::new(model),
             Arc::new(ScriptedSandboxes::echo()),
         );

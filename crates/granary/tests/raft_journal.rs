@@ -28,10 +28,10 @@ use actor_core::Spawner;
 use actor_simulation::SimCluster;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
+use granary::FileGrainStore;
 use granary::Grain;
 use granary::GrainCtx;
 use granary::GrainHandler;
-use granary::FileGrainStore;
 use granary::GrainStore;
 use granary::GrainStoreFactory;
 use granary::Granary;
@@ -87,8 +87,16 @@ impl Message for Deposit {
     const MANIFEST: Manifest = Manifest::new("bank.Deposit");
 }
 impl GrainHandler<Deposit> for Account {
-    async fn handle(&self, state: &Balance, msg: Deposit, _ctx: &GrainCtx<Self>) -> (Vec<Ledger>, i64) {
-        (vec![Ledger::Deposited(msg.cents)], state.cents + msg.cents as i64)
+    async fn handle(
+        &self,
+        state: &Balance,
+        msg: Deposit,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<Ledger>, i64) {
+        (
+            vec![Ledger::Deposited(msg.cents)],
+            state.cents + msg.cents as i64,
+        )
     }
 }
 
@@ -99,7 +107,12 @@ impl Message for ReadBalance {
     const MANIFEST: Manifest = Manifest::new("bank.ReadBalance");
 }
 impl GrainHandler<ReadBalance> for Account {
-    async fn handle(&self, state: &Balance, _msg: ReadBalance, _ctx: &GrainCtx<Self>) -> (Vec<Ledger>, i64) {
+    async fn handle(
+        &self,
+        state: &Balance,
+        _msg: ReadBalance,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<Ledger>, i64) {
         (vec![], state.cents)
     }
 }
@@ -165,7 +178,10 @@ fn drive<T: Send + 'static>(
         *out.lock().unwrap() = Some(future.await);
     }));
     sim.run_for(settle);
-    cell.lock().unwrap().take().expect("future did not complete")
+    cell.lock()
+        .unwrap()
+        .take()
+        .expect("future did not complete")
 }
 
 /// Commit `deposits` to `key` through the cluster, returning the final balance.
@@ -215,19 +231,31 @@ fn committed_writes_survive_a_full_cluster_cold_restart() {
     let balance = {
         let g = granaries[0].clone();
         drive(&sim, Duration::from_secs(8), async move {
-            g.grain(key).ask_timeout(ReadBalance, Duration::from_secs(7)).await
+            g.grain(key)
+                .ask_timeout(ReadBalance, Duration::from_secs(7))
+                .await
         })
     };
-    assert_eq!(balance, Ok(150), "every committed deposit survives the cold restart");
+    assert_eq!(
+        balance,
+        Ok(150),
+        "every committed deposit survives the cold restart"
+    );
 
     // A fresh write lands contiguously on the recovered head — no gap, no loss.
     let after = {
         let g = granaries[0].clone();
         drive(&sim, Duration::from_secs(8), async move {
-            g.grain(key).ask_timeout(Deposit { cents: 5 }, Duration::from_secs(7)).await
+            g.grain(key)
+                .ask_timeout(Deposit { cents: 5 }, Duration::from_secs(7))
+                .await
         })
     };
-    assert_eq!(after, Ok(155), "a re-elected leader commits the next event from the recovered head");
+    assert_eq!(
+        after,
+        Ok(155),
+        "a re-elected leader commits the next event from the recovered head"
+    );
 }
 
 #[test]
@@ -271,19 +299,31 @@ fn committed_writes_survive_a_full_cluster_cold_restart_with_a_file_store() {
     let balance = {
         let g = granaries[0].clone();
         drive(&sim, Duration::from_secs(8), async move {
-            g.grain(key).ask_timeout(ReadBalance, Duration::from_secs(7)).await
+            g.grain(key)
+                .ask_timeout(ReadBalance, Duration::from_secs(7))
+                .await
         })
     };
-    assert_eq!(balance, Ok(150), "every committed deposit survives the cold restart from disk");
+    assert_eq!(
+        balance,
+        Ok(150),
+        "every committed deposit survives the cold restart from disk"
+    );
 
     // A fresh write lands contiguously on the head recovered from the reloaded files.
     let after = {
         let g = granaries[0].clone();
         drive(&sim, Duration::from_secs(8), async move {
-            g.grain(key).ask_timeout(Deposit { cents: 5 }, Duration::from_secs(7)).await
+            g.grain(key)
+                .ask_timeout(Deposit { cents: 5 }, Duration::from_secs(7))
+                .await
         })
     };
-    assert_eq!(after, Ok(155), "a re-elected leader commits the next event from the recovered head");
+    assert_eq!(
+        after,
+        Ok(155),
+        "a re-elected leader commits the next event from the recovered head"
+    );
 }
 
 #[test]
@@ -321,7 +361,9 @@ fn a_compacted_grain_survives_a_full_cluster_cold_restart() {
     let balance = {
         let g = granaries[0].clone();
         drive(&sim, Duration::from_secs(8), async move {
-            g.grain(key).ask_timeout(ReadBalance, Duration::from_secs(7)).await
+            g.grain(key)
+                .ask_timeout(ReadBalance, Duration::from_secs(7))
+                .await
         })
     };
     assert_eq!(
@@ -369,8 +411,14 @@ fn an_ephemeral_store_loses_state_on_a_full_cluster_cold_restart() {
     let balance = {
         let g = granaries[0].clone();
         drive(&sim, Duration::from_secs(8), async move {
-            g.grain(key).ask_timeout(ReadBalance, Duration::from_secs(7)).await
+            g.grain(key)
+                .ask_timeout(ReadBalance, Duration::from_secs(7))
+                .await
         })
     };
-    assert_ne!(balance, Ok(100), "an ephemeral store cannot survive a total cold restart");
+    assert_ne!(
+        balance,
+        Ok(100),
+        "an ephemeral store cannot survive a total cold restart"
+    );
 }

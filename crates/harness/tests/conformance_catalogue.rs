@@ -49,6 +49,10 @@ fn the_catalogue_covers_the_live_h_invariants() {
     let numbers: Vec<u8> = harness_catalogue().iter().map(|e| e.invariant).collect();
     assert_eq!(numbers, vec![1, 3, 4, 5, 6, 7, 8]);
     for entry in harness_catalogue() {
-        assert!(!entry.verify.is_empty(), "H{} has no verification method", entry.invariant);
+        assert!(
+            !entry.verify.is_empty(),
+            "H{} has no verification method",
+            entry.invariant
+        );
     }
 }

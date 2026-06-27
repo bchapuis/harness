@@ -61,7 +61,12 @@ fn kinds() -> Kinds {
     Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .sandboxed("shell", "run", &json!({ "type": "object" }), Tier::Workspace)
+            .sandboxed(
+                "shell",
+                "run",
+                &json!({ "type": "object" }),
+                Tier::Workspace,
+            )
             .budget(Budget::new(10_000, 10))
             // Two shards over the 3-node cluster, replicated, no hibernation
             // during the test.
@@ -75,7 +80,10 @@ fn kinds() -> Kinds {
 }
 
 fn model() -> ScriptedModel {
-    ScriptedModel::steps(vec![Ok(tool_call("c1", "shell", json!({}))), Ok(final_message("done"))])
+    ScriptedModel::steps(vec![
+        Ok(tool_call("c1", "shell", json!({}))),
+        Ok(final_message("done")),
+    ])
 }
 
 /// Drive an async call to completion under the perpetually-running cluster loops.
@@ -90,12 +98,18 @@ fn drive<T: Send + 'static>(
         *out.lock().unwrap() = Some(future.await);
     }));
     sim.run_for(settle);
-    cell.lock().unwrap().take().expect("future did not complete in the settle window")
+    cell.lock()
+        .unwrap()
+        .take()
+        .expect("future did not complete in the settle window")
 }
 
 /// Bring up a 3-node leader cluster, host the worker kind on every node, and
 /// return the systems and a harness per node.
-fn cluster(sim: &Simulation, sink: Arc<dyn actor_core::EventSink>) -> (SimNetwork, Vec<Harness<SimCluster>>) {
+fn cluster(
+    sim: &Simulation,
+    sink: Arc<dyn actor_core::EventSink>,
+) -> (SimNetwork, Vec<Harness<SimCluster>>) {
     let net = SimNetwork::new(sim)
         .with_leader(SwimConfig::default(), raft(), DowningPolicy::Conservative)
         .with_events(sink);
@@ -103,7 +117,7 @@ fn cluster(sim: &Simulation, sink: Arc<dyn actor_core::EventSink>) -> (SimNetwor
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
     let harnesses: Vec<Harness<SimCluster>> = systems
         .iter()
-        .map(|s| Harness::new(s.clone(), kinds(), Arc::new(model()), Arc::new(ScriptedSandboxes::echo())))
+        .map(|s| Harness::cluster(s.clone(), &kinds(), Arc::new(model()), Arc::new(ScriptedSandboxes::echo())))
         .collect();
     sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
     (net, harnesses)
@@ -143,8 +157,14 @@ fn sessions_run_once_across_a_converged_cluster() {
                 }
             }
         });
-        let submitted = records.iter().filter(|b| matches!(b, RecordBody::TurnSubmitted { .. })).count();
-        let ended = records.iter().filter(|b| matches!(b, RecordBody::RunEnded { .. })).count();
+        let submitted = records
+            .iter()
+            .filter(|b| matches!(b, RecordBody::TurnSubmitted { .. }))
+            .count();
+        let ended = records
+            .iter()
+            .filter(|b| matches!(b, RecordBody::RunEnded { .. }))
+            .count();
         assert_eq!((submitted, ended), (1, 1), "session s-{i} ran exactly once");
     }
 
@@ -202,8 +222,14 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
             }
         }
     });
-    let submitted = records.iter().filter(|b| matches!(b, RecordBody::TurnSubmitted { .. })).count();
-    let ended = records.iter().filter(|b| matches!(b, RecordBody::RunEnded { .. })).count();
+    let submitted = records
+        .iter()
+        .filter(|b| matches!(b, RecordBody::TurnSubmitted { .. }))
+        .count();
+    let ended = records
+        .iter()
+        .filter(|b| matches!(b, RecordBody::RunEnded { .. }))
+        .count();
     assert_eq!((submitted, ended), (1, 1), "one run survives the crash");
 
     assert_invariants(&sink.events());
@@ -227,5 +253,5 @@ fn building_a_harness_without_consensus_panics() {
     let sim = Simulation::new(1);
     // No `.with_leader(...)`: the cluster has no Raft engine.
     let system = SimNetwork::new(&sim).join(A);
-    let _ = Harness::new(system, kinds(), Arc::new(model()), Arc::new(ScriptedSandboxes::echo()));
+    let _ = Harness::cluster(system, &kinds(), Arc::new(model()), Arc::new(ScriptedSandboxes::echo()));
 }

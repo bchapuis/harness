@@ -142,7 +142,9 @@ impl Invariant for ExactlyOnceActivation {
             GrainEvent::Activated { node, name } => {
                 let fresh = self.live.insert((*node, name.clone()));
                 if !fresh {
-                    return Err(format!("grain {name} activated while already live on {node} (G6)"));
+                    return Err(format!(
+                        "grain {name} activated while already live on {node} (G6)"
+                    ));
                 }
             }
             GrainEvent::Passivated { node, name } => {
@@ -267,10 +269,7 @@ fn register_populates_the_command_allowlist() {
 
 #[test]
 fn counter_grain_is_linearizable_across_seeds() {
-    let workload = CounterWorkload {
-        clients: 4,
-        ops: 8,
-    };
+    let workload = CounterWorkload { clients: 4, ops: 8 };
     for seed in 0..96 {
         if let Err(failure) = run_seed(&workload, seed) {
             panic!("{failure}");
@@ -282,10 +281,7 @@ fn counter_grain_is_linearizable_across_seeds() {
 fn counter_grain_run_is_reproducible() {
     // The determinism contract (§14): the same seed yields a byte-identical event
     // stream — and grain `App` events are part of it, so this guards G2 too.
-    let workload = CounterWorkload {
-        clients: 3,
-        ops: 6,
-    };
+    let workload = CounterWorkload { clients: 3, ops: 6 };
     for seed in 0..64 {
         if let Err(divergence) = check_reproducible(&workload, seed) {
             panic!("{divergence}");
@@ -332,7 +328,11 @@ impl Workload for SubscriptionWorkload {
             let mut last = 0u64;
             while (deltas.len() as u64) < writes {
                 let batch = sub.records.recv().await.expect("a live batch");
-                assert_eq!(batch.from.value(), last, "batch begins after the last seq (no gap)");
+                assert_eq!(
+                    batch.from.value(),
+                    last,
+                    "batch begins after the last seq (no gap)"
+                );
                 for (seq, event) in batch.records {
                     assert_eq!(seq.value(), last + 1, "seqs are contiguous and ordered");
                     last = seq.value();
@@ -342,8 +342,14 @@ impl Workload for SubscriptionWorkload {
                 }
             }
 
-            assert_eq!(deltas, expected, "pushed records match the committed writes, in order");
-            assert_eq!(last, writes, "the stream reached the committed head (push == load, G16)");
+            assert_eq!(
+                deltas, expected,
+                "pushed records match the committed writes, in order"
+            );
+            assert_eq!(
+                last, writes,
+                "the stream reached the committed head (push == load, G16)"
+            );
         })
     }
 
@@ -471,22 +477,25 @@ fn hibernated_grain_reactivates_with_state() {
     sim.run();
     let events = recorder.events();
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Passivated { .. }))),
+        events.iter().any(|e| matches!(
+            e.as_app::<GrainEvent>(),
+            Some(GrainEvent::Passivated { .. })
+        )),
         "the idle grain must hibernate",
     );
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Snapshotted { .. }))),
+        events.iter().any(|e| matches!(
+            e.as_app::<GrainEvent>(),
+            Some(GrainEvent::Snapshotted { .. })
+        )),
         "snapshots must bound the next replay",
     );
 
     // A fresh ref reactivates the name: it rehydrates from the journal and the
     // acknowledged writes survive (G12).
     let reread = counters.grain("counter/0");
-    let value = sim.block_on(async move { reread.ask(ReadCount).await.expect("read after rehydrate") });
+    let value =
+        sim.block_on(async move { reread.ask(ReadCount).await.expect("read after rehydrate") });
     assert_eq!(value, 10, "hibernation must not lose acknowledged writes");
 
     // The second activation rehydrated from the snapshot, not a full replay.
@@ -498,7 +507,11 @@ fn hibernated_grain_reactivates_with_state() {
             _ => None,
         })
         .collect();
-    assert_eq!(rehydrations, vec![false, true], "reactivation seeds from the snapshot");
+    assert_eq!(
+        rehydrations,
+        vec![false, true],
+        "reactivation seeds from the snapshot"
+    );
 }
 
 // --- can_passivate: a grain that vetoes idle hibernation (§10) ----------------
@@ -530,7 +543,12 @@ impl Grain for PinnedGrain {
 }
 
 impl GrainHandler<Add> for PinnedGrain {
-    async fn handle(&self, state: &CounterState, msg: Add, _ctx: &GrainCtx<Self>) -> (Vec<CounterEvent>, i64) {
+    async fn handle(
+        &self,
+        state: &CounterState,
+        msg: Add,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<CounterEvent>, i64) {
         (vec![CounterEvent::Added(msg.0)], state.value + msg.0)
     }
 }
@@ -560,11 +578,16 @@ fn can_passivate_vetoes_idle_hibernation() {
 
     let events = recorder.events();
     assert!(
-        events.iter().any(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Activated { .. }))),
+        events
+            .iter()
+            .any(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Activated { .. }))),
         "the grain activated",
     );
     assert!(
-        !events.iter().any(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Passivated { .. }))),
+        !events.iter().any(|e| matches!(
+            e.as_app::<GrainEvent>(),
+            Some(GrainEvent::Passivated { .. })
+        )),
         "can_passivate = false must veto idle hibernation (§10)",
     );
 }
@@ -651,7 +674,10 @@ impl GrainHandler<Deposit> for Account {
         msg: Deposit,
         _ctx: &GrainCtx<Self>,
     ) -> (Vec<Ledger>, i64) {
-        (vec![Ledger::Deposited(msg.cents)], state.cents + msg.cents as i64)
+        (
+            vec![Ledger::Deposited(msg.cents)],
+            state.cents + msg.cents as i64,
+        )
     }
 }
 
@@ -685,7 +711,10 @@ fn account_grain_end_to_end() {
         assert_eq!(acct.ask(Deposit { cents: 1000 }).await.unwrap(), 1000);
         assert_eq!(acct.ask(Withdraw { cents: 500 }).await.unwrap(), Ok(500));
         // Application outcome — an error value inside the reply, not a GrainError.
-        assert_eq!(acct.ask(Withdraw { cents: 9999 }).await.unwrap(), Err(Overdraft));
+        assert_eq!(
+            acct.ask(Withdraw { cents: 9999 }).await.unwrap(),
+            Err(Overdraft)
+        );
         // The overdrawn withdraw committed nothing (§7.5): balance is unchanged.
         assert_eq!(acct.ask(ReadBalance).await.unwrap(), 500);
     });
@@ -700,7 +729,9 @@ fn tell_commits_fire_and_forget() {
     let acct = accounts.grain("account/99");
     let balance = sim.block_on(async move {
         // `tell` returns once the host accepts the command, not after the commit.
-        acct.tell(Deposit { cents: 300 }).await.expect("tell enqueues");
+        acct.tell(Deposit { cents: 300 })
+            .await
+            .expect("tell enqueues");
         // The follow-up `ask` reaches the same host behind the telled deposit
         // (FIFO mailbox), so it observes the committed effect.
         acct.ask(ReadBalance).await.unwrap()
@@ -726,12 +757,19 @@ fn cached_host_is_reused_and_self_heals_after_hibernation() {
     let cached_after_first = sim.block_on({
         let accounts = accounts.clone();
         async move {
-            let _ = accounts.grain("account/1").ask(Deposit { cents: 1000 }).await.unwrap();
+            let _ = accounts
+                .grain("account/1")
+                .ask(Deposit { cents: 1000 })
+                .await
+                .unwrap();
             // The first call populated the cache: a second call now bypasses the gateway.
             accounts.is_cached("account/1")
         }
     });
-    assert!(cached_after_first, "the first call must cache the resolved host (§5.4)");
+    assert!(
+        cached_after_first,
+        "the first call must cache the resolved host (§5.4)"
+    );
 
     // Drive past the idle window so the cached host hibernates and stops.
     sim.run();
@@ -742,7 +780,10 @@ fn cached_host_is_reused_and_self_heals_after_hibernation() {
         let accounts = accounts.clone();
         async move { accounts.grain("account/1").ask(ReadBalance).await.unwrap() }
     });
-    assert_eq!(balance, 1000, "a stale cached host must self-heal, losing no acknowledged write");
+    assert_eq!(
+        balance, 1000,
+        "a stale cached host must self-heal, losing no acknowledged write"
+    );
 }
 
 #[test]
@@ -762,7 +803,10 @@ fn account_balance_survives_reactivation() {
     sim.run();
     let reread = accounts.grain("account/7");
     let balance = sim.block_on(async move { reread.ask(ReadBalance).await.unwrap() });
-    assert_eq!(balance, 250, "a durable deposit must survive hibernation (G12)");
+    assert_eq!(
+        balance, 250,
+        "a durable deposit must survive hibernation (G12)"
+    );
 }
 
 #[test]
@@ -788,8 +832,14 @@ fn granary_named_hosts_one_grain_under_many_type_names() {
     );
 
     // The runtime type name lands in the `GrainName`, overriding `G::GRAIN_TYPE`.
-    assert_eq!(researchers.grain("c/0").name().grain_type(), "harness.researcher");
-    assert_eq!(summarizers.grain("c/0").name().grain_type(), "harness.summarizer");
+    assert_eq!(
+        researchers.grain("c/0").name().grain_type(),
+        "harness.researcher"
+    );
+    assert_eq!(
+        summarizers.grain("c/0").name().grain_type(),
+        "harness.summarizer"
+    );
 
     sim.block_on(async move {
         // Same key under two type names → two independent grains, no crosstalk.

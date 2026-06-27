@@ -102,8 +102,16 @@ impl Message for Deposit {
 }
 
 impl GrainHandler<Deposit> for Account {
-    async fn handle(&self, state: &Balance, msg: Deposit, _ctx: &GrainCtx<Self>) -> (Vec<Ledger>, i64) {
-        (vec![Ledger::Deposited(msg.cents)], state.cents + msg.cents as i64)
+    async fn handle(
+        &self,
+        state: &Balance,
+        msg: Deposit,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<Ledger>, i64) {
+        (
+            vec![Ledger::Deposited(msg.cents)],
+            state.cents + msg.cents as i64,
+        )
     }
 }
 
@@ -115,7 +123,12 @@ impl Message for ReadBalance {
 }
 
 impl GrainHandler<ReadBalance> for Account {
-    async fn handle(&self, state: &Balance, _msg: ReadBalance, _ctx: &GrainCtx<Self>) -> (Vec<Ledger>, i64) {
+    async fn handle(
+        &self,
+        state: &Balance,
+        _msg: ReadBalance,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<Ledger>, i64) {
         (vec![], state.cents)
     }
 }
@@ -166,15 +179,20 @@ fn drive<T: Send + 'static>(
         *out.lock().unwrap() = Some(future.await);
     }));
     sim.run_for(settle);
-    cell.lock().unwrap().take().expect("future did not complete")
+    cell.lock()
+        .unwrap()
+        .take()
+        .expect("future did not complete")
 }
 
 fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<Account>>) {
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // control-plane leader
-    let granaries: Vec<Granary<Account>> =
-        systems.iter().map(|system| system.granary::<Account>(config())).collect();
+    let granaries: Vec<Granary<Account>> = systems
+        .iter()
+        .map(|system| system.granary::<Account>(config()))
+        .collect();
     sim.run_for(Duration::from_secs(3)); // shard-group leader
     (net, systems, granaries)
 }
@@ -186,8 +204,13 @@ fn leader_and_majority(
     granaries: &[Granary<Account>],
     key: &str,
 ) -> (usize, Vec<usize>) {
-    let leader = granaries[0].leader(key).expect("the shard elected a leader");
-    let leader_idx = systems.iter().position(|s| s.node() == leader).expect("leader is a node");
+    let leader = granaries[0]
+        .leader(key)
+        .expect("the shard elected a leader");
+    let leader_idx = systems
+        .iter()
+        .position(|s| s.node() == leader)
+        .expect("leader is a node");
     let majority: Vec<usize> = (0..systems.len()).filter(|&i| i != leader_idx).collect();
     (leader_idx, majority)
 }
@@ -235,7 +258,9 @@ fn split_brain_partition_neither_forks_nor_loses() {
         let majority_commit = {
             let g = granaries[majority[0]].clone();
             drive(&sim, Duration::from_secs(12), async move {
-                g.grain(key).ask_timeout(Deposit { cents: 30 }, Duration::from_secs(11)).await
+                g.grain(key)
+                    .ask_timeout(Deposit { cents: 30 }, Duration::from_secs(11))
+                    .await
             })
         };
         assert_eq!(
@@ -250,7 +275,9 @@ fn split_brain_partition_neither_forks_nor_loses() {
         let minority_write = {
             let g = granaries[leader_idx].clone();
             drive(&sim, Duration::from_secs(13), async move {
-                g.grain(key).ask_timeout(Deposit { cents: 9000 }, Duration::from_secs(12)).await
+                g.grain(key)
+                    .ask_timeout(Deposit { cents: 9000 }, Duration::from_secs(12))
+                    .await
             })
         };
         assert!(
@@ -268,7 +295,9 @@ fn split_brain_partition_neither_forks_nor_loses() {
             let balance = {
                 let g = granaries[idx].clone();
                 drive(&sim, Duration::from_secs(10), async move {
-                    g.grain(key).ask_timeout(ReadBalance, Duration::from_secs(9)).await
+                    g.grain(key)
+                        .ask_timeout(ReadBalance, Duration::from_secs(9))
+                        .await
                 })
             };
             assert_eq!(
@@ -317,16 +346,24 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
     let advanced = {
         let g = granaries[majority[0]].clone();
         drive(&sim, Duration::from_secs(12), async move {
-            g.grain(key).ask_timeout(Deposit { cents: 50 }, Duration::from_secs(11)).await
+            g.grain(key)
+                .ask_timeout(Deposit { cents: 50 }, Duration::from_secs(11))
+                .await
         })
     };
-    assert_eq!(advanced, Ok(150), "the majority advanced the committed value to 150");
+    assert_eq!(
+        advanced,
+        Ok(150),
+        "the majority advanced the committed value to 150"
+    );
 
     // A WRITE on the deposed leader is fenced — it can never reach a quorum.
     let minority_write = {
         let g = granaries[leader_idx].clone();
         drive(&sim, Duration::from_secs(13), async move {
-            g.grain(key).ask_timeout(Deposit { cents: 1 }, Duration::from_secs(12)).await
+            g.grain(key)
+                .ask_timeout(Deposit { cents: 1 }, Duration::from_secs(12))
+                .await
         })
     };
     assert!(
@@ -341,7 +378,9 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
     let minority_read = {
         let g = granaries[leader_idx].clone();
         drive(&sim, Duration::from_secs(4), async move {
-            g.grain(key).ask_timeout(ReadBalance, Duration::from_secs(3)).await
+            g.grain(key)
+                .ask_timeout(ReadBalance, Duration::from_secs(3))
+                .await
         })
     };
     assert_ne!(
@@ -362,10 +401,16 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
     let reconciled = {
         let g = granaries[leader_idx].clone();
         drive(&sim, Duration::from_secs(10), async move {
-            g.grain(key).ask_timeout(ReadBalance, Duration::from_secs(9)).await
+            g.grain(key)
+                .ask_timeout(ReadBalance, Duration::from_secs(9))
+                .await
         })
     };
-    assert_eq!(reconciled, Ok(150), "after heal the deposed leader serves the reconciled value");
+    assert_eq!(
+        reconciled,
+        Ok(150),
+        "after heal the deposed leader serves the reconciled value"
+    );
 }
 
 // --- Liveness: the cluster reconverges and keeps serving after a heal ----------
@@ -389,10 +434,16 @@ fn cluster_reconverges_after_a_partition_heals() {
     let committed = {
         let g = granaries[majority[0]].clone();
         drive(&sim, Duration::from_secs(12), async move {
-            g.grain(key).ask_timeout(Deposit { cents: 70 }, Duration::from_secs(11)).await
+            g.grain(key)
+                .ask_timeout(Deposit { cents: 70 }, Duration::from_secs(11))
+                .await
         })
     };
-    assert_eq!(committed, Ok(70), "the majority served writes during the partition");
+    assert_eq!(
+        committed,
+        Ok(70),
+        "the majority served writes during the partition"
+    );
 
     net.heal();
     sim.run_for(Duration::from_secs(6));
@@ -402,19 +453,31 @@ fn cluster_reconverges_after_a_partition_heals() {
     let after_heal = {
         let g = granaries[leader_idx].clone();
         drive(&sim, Duration::from_secs(12), async move {
-            g.grain(key).ask_timeout(Deposit { cents: 5 }, Duration::from_secs(11)).await
+            g.grain(key)
+                .ask_timeout(Deposit { cents: 5 }, Duration::from_secs(11))
+                .await
         })
     };
-    assert_eq!(after_heal, Ok(75), "the formerly-isolated node serves writes again after heal");
+    assert_eq!(
+        after_heal,
+        Ok(75),
+        "the formerly-isolated node serves writes again after heal"
+    );
 
     for &idx in &[leader_idx, majority[0], majority[1]] {
         let balance = {
             let g = granaries[idx].clone();
             drive(&sim, Duration::from_secs(10), async move {
-                g.grain(key).ask_timeout(ReadBalance, Duration::from_secs(9)).await
+                g.grain(key)
+                    .ask_timeout(ReadBalance, Duration::from_secs(9))
+                    .await
             })
         };
-        assert_eq!(balance, Ok(75), "node index {idx} reconverged to the durable value");
+        assert_eq!(
+            balance,
+            Ok(75),
+            "node index {idx} reconverged to the durable value"
+        );
     }
 }
 
@@ -441,9 +504,15 @@ fn tell_under_quorum_loss_never_surfaces_unavailable() {
     // be confirmed) — that is the resolve path, not the tell contract.
     let warmup = {
         let g = granaries[leader_idx].clone();
-        drive(&sim, Duration::from_secs(8), async move { g.grain(key).ask(Deposit { cents: 10 }).await })
+        drive(&sim, Duration::from_secs(8), async move {
+            g.grain(key).ask(Deposit { cents: 10 }).await
+        })
     };
-    assert_eq!(warmup, Ok(10), "the grain activated and committed while healthy");
+    assert_eq!(
+        warmup,
+        Ok(10),
+        "the grain activated and committed while healthy"
+    );
 
     // Crash the leader's two followers: the leader still believes it leads (no
     // check-quorum) and will accept a command on its cached host, but it can reach
@@ -476,7 +545,9 @@ fn tell_under_quorum_loss_never_surfaces_unavailable() {
     let asked = {
         let g = granaries[leader_idx].clone();
         drive(&sim, Duration::from_secs(13), async move {
-            g.grain(key).ask_timeout(Deposit { cents: 1 }, Duration::from_secs(12)).await
+            g.grain(key)
+                .ask_timeout(Deposit { cents: 1 }, Duration::from_secs(12))
+                .await
         })
     };
     assert!(
@@ -526,7 +597,12 @@ impl Message for Add {
 }
 
 impl GrainHandler<Add> for CounterGrain {
-    async fn handle(&self, state: &CounterState, msg: Add, _ctx: &GrainCtx<Self>) -> (Vec<CounterEvent>, i64) {
+    async fn handle(
+        &self,
+        state: &CounterState,
+        msg: Add,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<CounterEvent>, i64) {
         (vec![CounterEvent::Added(msg.0)], state.value + msg.0)
     }
 }
@@ -539,7 +615,12 @@ impl Message for ReadCount {
 }
 
 impl GrainHandler<ReadCount> for CounterGrain {
-    async fn handle(&self, state: &CounterState, _msg: ReadCount, _ctx: &GrainCtx<Self>) -> (Vec<CounterEvent>, i64) {
+    async fn handle(
+        &self,
+        state: &CounterState,
+        _msg: ReadCount,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<CounterEvent>, i64) {
         (vec![], state.value)
     }
 }
@@ -548,8 +629,10 @@ fn counter_cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granar
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2));
-    let granaries: Vec<Granary<CounterGrain>> =
-        systems.iter().map(|s| s.granary::<CounterGrain>(config())).collect();
+    let granaries: Vec<Granary<CounterGrain>> = systems
+        .iter()
+        .map(|s| s.granary::<CounterGrain>(config()))
+        .collect();
     sim.run_for(Duration::from_secs(3));
     (net, systems, granaries)
 }
@@ -572,7 +655,9 @@ fn counter_grain_is_linearizable_across_a_partition_and_heal() {
         let sim = Simulation::new(seed);
         let (net, systems, granaries) = counter_cluster(&sim);
         let key = "counter/0";
-        let leader = granaries[0].leader(key).expect("the shard elected a leader");
+        let leader = granaries[0]
+            .leader(key)
+            .expect("the shard elected a leader");
         let leader_idx = systems.iter().position(|s| s.node() == leader).unwrap();
         let majority: Vec<usize> = (0..systems.len()).filter(|&i| i != leader_idx).collect();
 
@@ -589,13 +674,19 @@ fn counter_grain_is_linearizable_across_a_partition_and_heal() {
                     if entropy.next_u64() % 2 == 0 {
                         let delta = 1 + (entropy.next_u64() % 3) as i64;
                         let id = history.invoke(CounterOp::Add(delta));
-                        match counter.ask_timeout(Add(delta), Duration::from_secs(11)).await {
+                        match counter
+                            .ask_timeout(Add(delta), Duration::from_secs(11))
+                            .await
+                        {
                             Ok(_) => history.ok(id, CounterRet::AddOk),
                             Err(_) => history.info(id),
                         }
                     } else {
                         let id = history.invoke(CounterOp::Read);
-                        match counter.ask_timeout(ReadCount, Duration::from_secs(11)).await {
+                        match counter
+                            .ask_timeout(ReadCount, Duration::from_secs(11))
+                            .await
+                        {
                             Ok(value) => history.ok(id, CounterRet::Read(value)),
                             Err(_) => history.info(id),
                         }
@@ -615,7 +706,10 @@ fn counter_grain_is_linearizable_across_a_partition_and_heal() {
                 for _ in 0..8 {
                     let delta = 1 + (entropy.next_u64() % 3) as i64;
                     let id = history.invoke(CounterOp::Add(delta));
-                    match counter.ask_timeout(Add(delta), Duration::from_secs(11)).await {
+                    match counter
+                        .ask_timeout(Add(delta), Duration::from_secs(11))
+                        .await
+                    {
                         Ok(_) => history.ok(id, CounterRet::AddOk),
                         Err(_) => history.info(id),
                     }

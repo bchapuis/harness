@@ -41,9 +41,17 @@ pub enum GrainEvent {
     },
     /// A command's events committed at the grain's new head (§6, §7). The reply
     /// is released only after this (the output gate, invariant **G5**).
-    Committed { node: NodeId, name: GrainName, seq: u64 },
+    Committed {
+        node: NodeId,
+        name: GrainName,
+        seq: u64,
+    },
     /// A snapshot was persisted at a committed seq (§9).
-    Snapshotted { node: NodeId, name: GrainName, at: u64 },
+    Snapshotted {
+        node: NodeId,
+        name: GrainName,
+        at: u64,
+    },
     /// An activation hibernated on idle and dropped its in-memory state (§10);
     /// the journal survives, so the next message rehydrates it (invariant **G12**).
     Passivated { node: NodeId, name: GrainName },

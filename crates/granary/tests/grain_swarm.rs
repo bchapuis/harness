@@ -94,8 +94,16 @@ impl Message for Deposit {
 }
 
 impl GrainHandler<Deposit> for Account {
-    async fn handle(&self, state: &Balance, msg: Deposit, _ctx: &GrainCtx<Self>) -> (Vec<Ledger>, i64) {
-        (vec![Ledger::Deposited(msg.cents)], state.cents + msg.cents as i64)
+    async fn handle(
+        &self,
+        state: &Balance,
+        msg: Deposit,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<Ledger>, i64) {
+        (
+            vec![Ledger::Deposited(msg.cents)],
+            state.cents + msg.cents as i64,
+        )
     }
 }
 
@@ -107,7 +115,12 @@ impl Message for ReadBalance {
 }
 
 impl GrainHandler<ReadBalance> for Account {
-    async fn handle(&self, state: &Balance, _msg: ReadBalance, _ctx: &GrainCtx<Self>) -> (Vec<Ledger>, i64) {
+    async fn handle(
+        &self,
+        state: &Balance,
+        _msg: ReadBalance,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<Ledger>, i64) {
         (vec![], state.cents)
     }
 }
@@ -171,7 +184,9 @@ impl Invariant for ActivationSingletonPerNode {
             Some(GrainEvent::Activated { node, name }) => {
                 let fresh = self.live.insert((*node, name.clone()));
                 if !fresh {
-                    return Err(format!("grain {name} activated while already live on {node} (G6)"));
+                    return Err(format!(
+                        "grain {name} activated while already live on {node} (G6)"
+                    ));
                 }
             }
             Some(GrainEvent::Passivated { node, name }) => {
@@ -246,7 +261,10 @@ impl ClusterWorkload for AccountSwarm {
             // Host the type on every node: each starts its gateway and joins/leads
             // its shards (§5.3). Done at drive start; the bounded redirect absorbs
             // the bootstrap window.
-            let granaries: Vec<_> = nodes.iter().map(|s| s.granary::<Account>(config())).collect();
+            let granaries: Vec<_> = nodes
+                .iter()
+                .map(|s| s.granary::<Account>(config()))
+                .collect();
             let clock = nodes[0].clock().clone();
             let entropy = nodes[0].entropy().clone();
             // Let the control-plane and shard groups elect before traffic.
@@ -329,8 +347,20 @@ fn grain_swarm_actually_fires_each_fault_type() {
         Ok(stats) => stats,
         Err(failure) => panic!("{failure}"),
     };
-    assert!(stats.dropped > 0, "the sweep never dropped a frame (loss uncovered): {stats:?}");
-    assert!(stats.duplicated > 0, "the sweep never duplicated a frame: {stats:?}");
-    assert!(stats.delayed > 0, "the sweep never delayed a frame (reordering uncovered): {stats:?}");
-    assert!(stats.blocked > 0, "the sweep never blocked a frame (partition/crash uncovered): {stats:?}");
+    assert!(
+        stats.dropped > 0,
+        "the sweep never dropped a frame (loss uncovered): {stats:?}"
+    );
+    assert!(
+        stats.duplicated > 0,
+        "the sweep never duplicated a frame: {stats:?}"
+    );
+    assert!(
+        stats.delayed > 0,
+        "the sweep never delayed a frame (reordering uncovered): {stats:?}"
+    );
+    assert!(
+        stats.blocked > 0,
+        "the sweep never blocked a frame (partition/crash uncovered): {stats:?}"
+    );
 }

@@ -143,7 +143,10 @@ impl Ownership {
 
     /// The entries this principal owns of one grain type — name and metadata — in
     /// stable key order. The same range scan as [`names_of_type`](Self::names_of_type).
-    pub fn entries_of_type<'a>(&'a self, grain_type: &'a str) -> impl Iterator<Item = (&'a GrainName, &'a Meta)> {
+    pub fn entries_of_type<'a>(
+        &'a self,
+        grain_type: &'a str,
+    ) -> impl Iterator<Item = (&'a GrainName, &'a Meta)> {
         self.entries
             .range(GrainName::new(grain_type, String::new())..)
             .take_while(move |(n, _)| n.grain_type() == grain_type)
@@ -355,17 +358,29 @@ fn entry(name: &GrainName, meta: &Meta) -> Entry {
 }
 
 impl<S: GranarySystem> GrainHandler<Record> for Directory<S> {
-    async fn handle(&self, state: &Ownership, msg: Record, _: &GrainCtx<Self>) -> (Vec<Change>, Recorded) {
+    async fn handle(
+        &self,
+        state: &Ownership,
+        msg: Record,
+        _: &GrainCtx<Self>,
+    ) -> (Vec<Change>, Recorded) {
         match state.entries.get(&msg.name) {
             None => (vec![Change::Put(msg.name, msg.meta)], Recorded::Created),
-            Some(existing) if *existing != msg.meta => (vec![Change::Put(msg.name, msg.meta)], Recorded::Updated),
+            Some(existing) if *existing != msg.meta => {
+                (vec![Change::Put(msg.name, msg.meta)], Recorded::Updated)
+            }
             Some(_) => (Vec::new(), Recorded::Unchanged),
         }
     }
 }
 
 impl<S: GranarySystem> GrainHandler<Forget> for Directory<S> {
-    async fn handle(&self, state: &Ownership, msg: Forget, _: &GrainCtx<Self>) -> (Vec<Change>, bool) {
+    async fn handle(
+        &self,
+        state: &Ownership,
+        msg: Forget,
+        _: &GrainCtx<Self>,
+    ) -> (Vec<Change>, bool) {
         if state.entries.contains_key(&msg.name) {
             (vec![Change::Forgotten(msg.name)], true)
         } else {
@@ -386,31 +401,65 @@ impl<S: GranarySystem> GrainHandler<Clear> for Directory<S> {
 }
 
 impl<S: GranarySystem> GrainHandler<Get> for Directory<S> {
-    async fn handle(&self, state: &Ownership, msg: Get, _: &GrainCtx<Self>) -> (Vec<Change>, Option<Meta>) {
+    async fn handle(
+        &self,
+        state: &Ownership,
+        msg: Get,
+        _: &GrainCtx<Self>,
+    ) -> (Vec<Change>, Option<Meta>) {
         (Vec::new(), state.entries.get(&msg.name).cloned())
     }
 }
 
 impl<S: GranarySystem> GrainHandler<List> for Directory<S> {
-    async fn handle(&self, state: &Ownership, _: List, _: &GrainCtx<Self>) -> (Vec<Change>, Vec<Entry>) {
-        (Vec::new(), state.entries.iter().map(|(n, m)| entry(n, m)).collect())
+    async fn handle(
+        &self,
+        state: &Ownership,
+        _: List,
+        _: &GrainCtx<Self>,
+    ) -> (Vec<Change>, Vec<Entry>) {
+        (
+            Vec::new(),
+            state.entries.iter().map(|(n, m)| entry(n, m)).collect(),
+        )
     }
 }
 
 impl<S: GranarySystem> GrainHandler<ListByType> for Directory<S> {
-    async fn handle(&self, state: &Ownership, msg: ListByType, _: &GrainCtx<Self>) -> (Vec<Change>, Vec<Entry>) {
-        (Vec::new(), state.entries_of_type(&msg.grain_type).map(|(n, m)| entry(n, m)).collect())
+    async fn handle(
+        &self,
+        state: &Ownership,
+        msg: ListByType,
+        _: &GrainCtx<Self>,
+    ) -> (Vec<Change>, Vec<Entry>) {
+        (
+            Vec::new(),
+            state
+                .entries_of_type(&msg.grain_type)
+                .map(|(n, m)| entry(n, m))
+                .collect(),
+        )
     }
 }
 
 impl<S: GranarySystem> GrainHandler<Types> for Directory<S> {
-    async fn handle(&self, state: &Ownership, _: Types, _: &GrainCtx<Self>) -> (Vec<Change>, Vec<String>) {
+    async fn handle(
+        &self,
+        state: &Ownership,
+        _: Types,
+        _: &GrainCtx<Self>,
+    ) -> (Vec<Change>, Vec<String>) {
         (Vec::new(), state.types().map(str::to_owned).collect())
     }
 }
 
 impl<S: GranarySystem> GrainHandler<Contains> for Directory<S> {
-    async fn handle(&self, state: &Ownership, msg: Contains, _: &GrainCtx<Self>) -> (Vec<Change>, bool) {
+    async fn handle(
+        &self,
+        state: &Ownership,
+        msg: Contains,
+        _: &GrainCtx<Self>,
+    ) -> (Vec<Change>, bool) {
         (Vec::new(), state.entries.contains_key(&msg.name))
     }
 }
@@ -422,7 +471,15 @@ impl<S: GranarySystem> GrainHandler<Count> for Directory<S> {
 }
 
 impl<S: GranarySystem> GrainHandler<CountByType> for Directory<S> {
-    async fn handle(&self, state: &Ownership, msg: CountByType, _: &GrainCtx<Self>) -> (Vec<Change>, u64) {
-        (Vec::new(), state.names_of_type(&msg.grain_type).count() as u64)
+    async fn handle(
+        &self,
+        state: &Ownership,
+        msg: CountByType,
+        _: &GrainCtx<Self>,
+    ) -> (Vec<Change>, u64) {
+        (
+            Vec::new(),
+            state.names_of_type(&msg.grain_type).count() as u64,
+        )
     }
 }

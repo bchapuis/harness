@@ -65,7 +65,10 @@ impl std::fmt::Debug for GranaryConfig {
             .field("shard_target_bytes", &self.shard_target_bytes)
             .field("idle_after", &self.idle_after)
             .field("snapshot_every", &self.snapshot_every)
-            .field("grain_store", &self.grain_store.as_ref().map(|_| "<factory>"))
+            .field(
+                "grain_store",
+                &self.grain_store.as_ref().map(|_| "<factory>"),
+            )
             .finish()
     }
 }

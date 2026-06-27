@@ -1,38 +1,33 @@
 //! `harness-standalone`: a runnable deployment of the agentic harness.
 //!
-//! Three subcommands:
-//! - `node` boots one cluster node — production runtime (tokio, TCP), its own
-//!   file journal replicated to peers, the Anthropic model, a workspace
-//!   sandbox — and serves a control port.
-//! - `repl` attaches to any node's control port and drives sessions.
-//! - `acp` bridges a node's control port to an Agent Client Protocol editor
-//!   over stdio, so any ACP client can drive sessions.
+//! One subcommand, `node`, boots one cluster node (silo): the production runtime
+//! (tokio, TCP), its own file journal replicated to peers, the Anthropic model,
+//! and a workspace sandbox. A node hosts grains and votes in Raft; it has no
+//! client-facing listener. The public edge is the separate `harness-gateway`
+//! binary — a trusted cluster *client* that joins this transport as a non-voting
+//! member and drives sessions over `GrainRef`.
 //!
-//! See `docs/standalone-deployment.md` for the three-node walkthrough.
+//! See `docs/standalone-deployment.md` for the walkthrough.
 
 use std::path::PathBuf;
 
-use harness_standalone::acp;
 use harness_standalone::node;
-use harness_standalone::repl;
 
 const USAGE: &str = "\
 usage:
-  harness-standalone node --id <n> [options]   run one cluster node
-  harness-standalone repl [host:port]          attach a REPL to a node's control port
-                                               (default 127.0.0.1:7501)
-  harness-standalone acp  [host:port]          bridge a node to an ACP editor over stdio
-                                               (default 127.0.0.1:7501)
+  harness-standalone node --id <n> [options]   run one cluster node (silo)
 
 node options (defaults in parentheses; every node must agree on all of them):
   --id <n>             this node's id, 1..=--nodes        (required)
   --nodes <n>          roster size                        (3)
   --data <dir>         this node's data directory         (./harness-data)
-  --bind-host <addr>   interface the ports bind; 0.0.0.0 in a container (127.0.0.1)
+  --bind-host <addr>   interface the transport binds; 0.0.0.0 in a container
+                                                          (127.0.0.1)
   --peer <id>=<host>   a node's reachable host; repeat for the roster. Omit for
                        a single-host loopback cluster.    (all 127.0.0.1)
-  --port-base <p>      node i's transport port = p+i-1    (7401)
-  --control-base <p>   node i's control port = p+i-1      (7501)
+  --client <id>=<host> admit a non-voting cluster client (the gateway): an id
+                       OUTSIDE 1..=--nodes, reachable at <host>. Repeatable.
+  --port-base <p>      node/client i's transport port = p+i-1 (7401)
   --model <id>         Anthropic model id                 (claude-sonnet-4-6)
   --secret <s>         cluster secret                     (harness-standalone)
   --api-url <url>      Messages API base                  (https://api.anthropic.com)
@@ -55,8 +50,6 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("node") => run_node(&args[1..]).await,
-        Some("repl") => run_repl(&args[1..]).await,
-        Some("acp") => run_acp(&args[1..]).await,
         Some("--help") | Some("-h") | None => {
             println!("{USAGE}");
             return;
@@ -86,10 +79,17 @@ async fn run_node(args: &[String]) -> Result<(), String> {
                 let (id, host) = value
                     .split_once('=')
                     .ok_or_else(|| format!("--peer expects <id>=<host>, got {value}"))?;
-                opts.peer_hosts.insert(parse("--peer <id>", id)?, host.to_string());
+                opts.peer_hosts
+                    .insert(parse("--peer <id>", id)?, host.to_string());
+            }
+            "--client" => {
+                let (id, host) = value
+                    .split_once('=')
+                    .ok_or_else(|| format!("--client expects <id>=<host>, got {value}"))?;
+                opts.clients
+                    .insert(parse("--client <id>", id)?, host.to_string());
             }
             "--port-base" => opts.port_base = parse(flag, value)?,
-            "--control-base" => opts.control_base = parse(flag, value)?,
             "--model" => opts.model = value.clone(),
             "--secret" => opts.secret = value.clone(),
             "--api-url" => opts.api_url = value.clone(),
@@ -120,22 +120,6 @@ async fn run_node(args: &[String]) -> Result<(), String> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "ANTHROPIC_API_KEY is not set; the node needs it for the model seam")?;
     node::run(opts, api_key).await
-}
-
-async fn run_repl(args: &[String]) -> Result<(), String> {
-    match args {
-        [] => repl::run("127.0.0.1:7501").await,
-        [addr] => repl::run(addr).await,
-        _ => Err("repl takes at most one address".to_string()),
-    }
-}
-
-async fn run_acp(args: &[String]) -> Result<(), String> {
-    match args {
-        [] => acp::run("127.0.0.1:7501").await,
-        [addr] => acp::run(addr).await,
-        _ => Err("acp takes at most one address".to_string()),
-    }
 }
 
 fn parse<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, String>

@@ -60,7 +60,13 @@ fn spend_of(records: &[Record]) -> (u64, u32) {
 }
 
 /// Run a single-session budget scenario and return its journal.
-fn run_single(name: &'static str, kinds: Kinds, model: ScriptedModel, session: &'static str, seed: u64) -> Vec<Record> {
+fn run_single(
+    name: &'static str,
+    kinds: Kinds,
+    model: ScriptedModel,
+    session: &'static str,
+    seed: u64,
+) -> Vec<Record> {
     let records: Arc<Mutex<Vec<Record>>> = Arc::default();
     let sink = Arc::clone(&records);
     let workload = Scenario::new(
@@ -72,7 +78,10 @@ fn run_single(name: &'static str, kinds: Kinds, model: ScriptedModel, session: &
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let session = harness.session("looper", SessionId::new(session));
-                let outcome = session.prompt(Turn::new(TurnId::new("t-1"), "go")).await.expect("call");
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call");
                 assert_eq!(outcome, Err(RunError::BudgetExhausted));
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;
@@ -91,7 +100,12 @@ fn an_exhausted_budget_ends_the_run_with_no_further_calls() {
     let kinds = Kinds::new().register(
         "looper",
         Kind::new("loop forever")
-            .sandboxed("shell", "run", &json!({ "type": "object" }), Tier::Workspace)
+            .sandboxed(
+                "shell",
+                "run",
+                &json!({ "type": "object" }),
+                Tier::Workspace,
+            )
             .budget(Budget::new(100_000, 3))
             .grain(brisk_idle()),
     );
@@ -101,7 +115,11 @@ fn an_exhausted_budget_ends_the_run_with_no_further_calls() {
             .iter()
             .filter(|e| matches!(e, harness::Entry::Assistant { .. }))
             .count();
-        Ok(tool_call(&format!("c{step}"), "shell", json!({ "n": step })))
+        Ok(tool_call(
+            &format!("c{step}"),
+            "shell",
+            json!({ "n": step }),
+        ))
     });
     let records = run_single("budget-exhaustion", kinds, model, "s-loop", 23);
 
@@ -109,7 +127,10 @@ fn an_exhausted_budget_ends_the_run_with_no_further_calls() {
     assert_eq!(steps, 3, "exactly the budgeted steps were issued (H4)");
     assert!(matches!(
         records.last().expect("records").body,
-        RecordBody::RunEnded { outcome: Err(RunError::BudgetExhausted), .. }
+        RecordBody::RunEnded {
+            outcome: Err(RunError::BudgetExhausted),
+            ..
+        }
     ));
 }
 
@@ -120,7 +141,12 @@ fn token_exhaustion_is_enforced_before_the_call() {
     let kinds = Kinds::new().register(
         "looper",
         Kind::new("loop forever")
-            .sandboxed("shell", "run", &json!({ "type": "object" }), Tier::Workspace)
+            .sandboxed(
+                "shell",
+                "run",
+                &json!({ "type": "object" }),
+                Tier::Workspace,
+            )
             .budget(Budget::new(250, 100))
             .grain(brisk_idle()),
     );
@@ -137,7 +163,10 @@ fn token_exhaustion_is_enforced_before_the_call() {
     let (tokens, steps) = spend_of(&records);
     assert_eq!(steps, 2, "the third call was never issued (§9.1 item 2)");
     // Overshoot is bounded by one call (§9.1 item 2): 130 over at worst.
-    assert!(tokens <= 250 + 130, "journaled spend {tokens} within the bound");
+    assert!(
+        tokens <= 250 + 130,
+        "journaled spend {tokens} within the bound"
+    );
 }
 
 /// Parent/child kinds for the delegation tests.
@@ -145,9 +174,17 @@ fn tree_kinds() -> Kinds {
     Kinds::new()
         .register(
             "parent",
-            Kind::new("parent agent").delegates_to(&["child"]).budget(Budget::new(10_000, 10)).grain(brisk_idle()),
+            Kind::new("parent agent")
+                .delegates_to(&["child"])
+                .budget(Budget::new(10_000, 10))
+                .grain(brisk_idle()),
         )
-        .register("child", Kind::new("child agent").budget(Budget::new(2_000, 4)).grain(brisk_idle()))
+        .register(
+            "child",
+            Kind::new("child agent")
+                .budget(Budget::new(2_000, 4))
+                .grain(brisk_idle()),
+        )
 }
 
 fn tree_model(child_fails: bool) -> ScriptedModel {
@@ -176,7 +213,12 @@ fn tree_model(child_fails: bool) -> ScriptedModel {
 }
 
 /// Run a delegation tree and return (parent records, child records).
-fn run_tree(name: &'static str, model: ScriptedModel, root: &'static str, seed: u64) -> (Vec<Record>, Vec<Record>) {
+fn run_tree(
+    name: &'static str,
+    model: ScriptedModel,
+    root: &'static str,
+    seed: u64,
+) -> (Vec<Record>, Vec<Record>) {
     let out: Arc<Mutex<(Vec<Record>, Vec<Record>)>> = Arc::default();
     let sink = Arc::clone(&out);
     let workload = Scenario::new(
@@ -196,9 +238,11 @@ fn run_tree(name: &'static str, model: ScriptedModel, root: &'static str, seed: 
                 assert_eq!(outcome.text(), "parent-answer");
                 let parent = tail_records(&session).await;
                 let child = match parent.iter().find_map(|r| match &r.body {
-                    RecordBody::ChildRun { child_kind, child_session, .. } => {
-                        Some((child_kind.clone(), child_session.clone()))
-                    }
+                    RecordBody::ChildRun {
+                        child_kind,
+                        child_session,
+                        ..
+                    } => Some((child_kind.clone(), child_session.clone())),
                     _ => None,
                 }) {
                     Some((kind, id)) => tail_records(&harness.session(kind.as_str(), id)).await,
@@ -224,7 +268,11 @@ fn a_delegation_is_a_full_session_with_a_carved_budget() {
     let (child_session, carved) = parent
         .iter()
         .find_map(|r| match &r.body {
-            RecordBody::ChildRun { child_session, budget, .. } => Some((child_session.clone(), *budget)),
+            RecordBody::ChildRun {
+                child_session,
+                budget,
+                ..
+            } => Some((child_session.clone(), *budget)),
             _ => None,
         })
         .expect("a journaled ChildRun");
@@ -233,7 +281,10 @@ fn a_delegation_is_a_full_session_with_a_carved_budget() {
         RecordBody::ToolOutcome { outcome: Ok(v), .. } => Some(v.clone()),
         _ => None,
     });
-    assert_eq!(child_outcome, Some(serde_json::Value::String("child-answer".to_string())));
+    assert_eq!(
+        child_outcome,
+        Some(serde_json::Value::String("child-answer".to_string()))
+    );
 
     // The child is a full session (§8.1): its lineage and root are recorded (§10.3).
     let (parent_lineage, child_root) = child
@@ -245,7 +296,10 @@ fn a_delegation_is_a_full_session_with_a_carved_budget() {
         .expect("child SessionCreated");
     assert_eq!(parent_lineage.expect("lineage").session, root);
     assert_eq!(child_root, root, "the root names the tree (§10.3)");
-    assert!(!child.is_empty(), "the child {child_session} has a journal of its own");
+    assert!(
+        !child.is_empty(),
+        "the child {child_session} has a journal of its own"
+    );
 
     // The compositional bound (H4): own spend + carve-outs ≤ budget, child within slice.
     let (parent_tokens, parent_steps) = spend_of(&parent);
@@ -261,9 +315,15 @@ fn a_delegation_is_a_full_session_with_a_carved_budget() {
 fn a_failing_child_is_a_tool_outcome_not_a_parent_failure() {
     let (parent, _child) = run_tree("delegation-failure", tree_model(true), "root-2", 37);
     // The child's failure reached the parent's transcript as a tool value (§5.4).
-    let failed = parent
-        .iter()
-        .any(|r| matches!(&r.body, RecordBody::ToolOutcome { outcome: Err(ToolError::Delegation(_)), .. }));
+    let failed = parent.iter().any(|r| {
+        matches!(
+            &r.body,
+            RecordBody::ToolOutcome {
+                outcome: Err(ToolError::Delegation(_)),
+                ..
+            }
+        )
+    });
     assert!(failed, "the child's terminal error is the tool outcome");
 }
 
@@ -281,7 +341,11 @@ fn delegating_outside_the_allowlist_is_synthesized_not_executed() {
         if step == 0 {
             // "parent" is not in its own allowlist: a locked-down kind cannot
             // escalate (§8.1).
-            Ok(tool_call("d1", "delegate", json!({ "kind": "parent", "prompt": "escalate" })))
+            Ok(tool_call(
+                "d1",
+                "delegate",
+                json!({ "kind": "parent", "prompt": "escalate" }),
+            ))
         } else {
             Ok(final_message("recovered"))
         }
@@ -297,8 +361,11 @@ fn delegating_outside_the_allowlist_is_synthesized_not_executed() {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let session = harness.session("parent", SessionId::new("root-3"));
-                let outcome =
-                    session.prompt(Turn::new(TurnId::new("t-1"), "go")).await.expect("call").expect("run");
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
                 assert_eq!(outcome.text(), "recovered");
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;
@@ -309,14 +376,19 @@ fn delegating_outside_the_allowlist_is_synthesized_not_executed() {
 
     let records = records.lock().unwrap();
     assert!(
-        records.iter().all(|r| !matches!(r.body, RecordBody::ChildRun { .. })),
+        records
+            .iter()
+            .all(|r| !matches!(r.body, RecordBody::ChildRun { .. })),
         "no child run was journaled"
     );
     // The disallowed delegation is a synthesized tool failure, never executed (§5.4).
     assert!(
         records.iter().any(|r| matches!(
             &r.body,
-            RecordBody::ToolOutcome { outcome: Err(ToolError::InvalidArguments(_)), .. }
+            RecordBody::ToolOutcome {
+                outcome: Err(ToolError::InvalidArguments(_)),
+                ..
+            }
         )),
         "the disallowed delegation is a synthesized InvalidArguments outcome"
     );

@@ -81,7 +81,10 @@ fn drive<T: Send + 'static>(
         *out.lock().unwrap() = Some(future.await);
     }));
     sim.run_for(settle);
-    cell.lock().unwrap().take().expect("future did not complete")
+    cell.lock()
+        .unwrap()
+        .take()
+        .expect("future did not complete")
 }
 
 /// Bring up the 5-voter cluster plus the non-voter member F, with an event
@@ -152,7 +155,11 @@ fn rolling_partitions_never_fork_the_committed_membership_log() {
                 .expect("a majority node exists")
                 .clone();
             let ok = drive(&sim, Duration::from_secs(6), async move {
-                if round % 2 == 0 { proposer.drain(F).await } else { proposer.resume(F).await }
+                if round % 2 == 0 {
+                    proposer.drain(F).await
+                } else {
+                    proposer.resume(F).await
+                }
             });
             if ok {
                 committed_proposals += 1;
@@ -319,7 +326,11 @@ fn the_cluster_keeps_committing_and_reconverges_after_the_storm() {
         sim.run_for(Duration::from_secs(3));
         let proposer = systems.iter().find(|s| s.node() != leader).unwrap().clone();
         let _ = drive(&sim, Duration::from_secs(6), async move {
-            if round % 2 == 0 { proposer.drain(F).await } else { proposer.resume(F).await }
+            if round % 2 == 0 {
+                proposer.drain(F).await
+            } else {
+                proposer.resume(F).await
+            }
         });
         net.heal();
         sim.run_for(Duration::from_secs(4));
@@ -331,14 +342,29 @@ fn the_cluster_keeps_committing_and_reconverges_after_the_storm() {
     // A fresh proposal after the storm commits through the (re-stabilized) leader.
     let leader = agreed_leader(&systems).expect("the cluster reconverged on a leader");
     let proposer = systems.iter().find(|s| s.node() == leader).unwrap().clone();
-    let committed = drive(&sim, Duration::from_secs(8), async move { proposer.drain(F).await });
-    assert!(committed, "the control plane commits again after the storm (#14 liveness)");
+    let committed = drive(&sim, Duration::from_secs(8), async move {
+        proposer.drain(F).await
+    });
+    assert!(
+        committed,
+        "the control plane commits again after the storm (#14 liveness)"
+    );
     sim.run_for(Duration::from_secs(3));
 
     // Every voter sees F draining at one and the same committed stamp.
     let stamp = systems[0].membership().stamp(F);
     for s in &systems {
-        assert_eq!(s.membership().status(F), Some(MemberStatus::Draining), "voter {:?} sees the commit", s.node());
-        assert_eq!(s.membership().stamp(F), stamp, "voter {:?} holds it at the one log index", s.node());
+        assert_eq!(
+            s.membership().status(F),
+            Some(MemberStatus::Draining),
+            "voter {:?} sees the commit",
+            s.node()
+        );
+        assert_eq!(
+            s.membership().stamp(F),
+            stamp,
+            "voter {:?} holds it at the one log index",
+            s.node()
+        );
     }
 }

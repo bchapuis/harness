@@ -175,7 +175,9 @@ impl RaftWAL for InMemoryRaftWAL {
         // Discard the prefix the snapshot subsumes (absolute indices `≤ index`),
         // then record the new base. A stale or duplicate call (index already
         // compacted) discards nothing.
-        let drop = index.saturating_sub(state.snapshot_index).min(state.log.len() as u64);
+        let drop = index
+            .saturating_sub(state.snapshot_index)
+            .min(state.log.len() as u64);
         state.log.drain(..drop as usize);
         state.snapshot_index = index;
         state.snapshot_term = term;
@@ -304,7 +306,11 @@ impl MultiRaft {
     /// Drive every group one tick, in `GroupId` order (deterministic). Returns
     /// each group's output for the caller to apply (frames to send, committed
     /// app commands, the term won if it just became leader).
-    pub(crate) fn tick_all<E: Entropy>(&self, now: Instant, entropy: &E) -> Vec<(GroupId, RaftOutput)> {
+    pub(crate) fn tick_all<E: Entropy>(
+        &self,
+        now: Instant,
+        entropy: &E,
+    ) -> Vec<(GroupId, RaftOutput)> {
         let groups: Vec<(GroupId, Arc<RaftGroup>)> = self
             .groups
             .lock()
@@ -347,11 +353,19 @@ pub enum Committed {
     /// stream as the command, so it never races the data it covers; and it carries
     /// the *commit*, not this entry's `index`, so the last delivered observation
     /// reflects any `Noop`/voter-change tail that the stream filters.
-    Apply { index: u64, command: Vec<u8>, commit: u64 },
+    Apply {
+        index: u64,
+        command: Vec<u8>,
+        commit: u64,
+    },
     /// Install this state-machine snapshot, which subsumes every command through
     /// `index`; the receiver replaces its state with it. `commit` is the
     /// high-water mark as for [`Apply`](Committed::Apply).
-    Snapshot { index: u64, snapshot: Vec<u8>, commit: u64 },
+    Snapshot {
+        index: u64,
+        snapshot: Vec<u8>,
+        commit: u64,
+    },
 }
 
 impl Committed {
@@ -729,7 +743,12 @@ impl RaftGroup {
         // the leader sends each the right log suffix. Only voters' progress is
         // consulted for the commit quorum (`advance_commit`).
         let next = state.last_index() + 1;
-        let members: Vec<NodeId> = state.voters.iter().chain(state.learners.iter()).copied().collect();
+        let members: Vec<NodeId> = state
+            .voters
+            .iter()
+            .chain(state.learners.iter())
+            .copied()
+            .collect();
         state.next = members.iter().map(|&n| (n, next)).collect();
         state.matched = members.iter().map(|&n| (n, 0)).collect();
         let term = state.term;
@@ -1111,7 +1130,8 @@ impl RaftGroup {
             (state.voters, state.learners) = normalize_membership(voters, learners);
             // Persist the snapshot, then clear the stored log tail so a reload
             // reconstructs from the base alone (the in-memory log is now empty).
-            self.storage.save_snapshot(snapshot_index, snapshot_term, &data);
+            self.storage
+                .save_snapshot(snapshot_index, snapshot_term, &data);
             self.storage.append(snapshot_index, &[]);
             out.committed.push(Committed::Snapshot {
                 index: snapshot_index,
@@ -1292,11 +1312,9 @@ mod tests {
                 }
                 // Election safety, per group: two groups may reach the same term
                 // number, but one (group, term) never has two leaders.
-                Entry::Occupied(slot) => assert_eq!(
-                    *slot.get(),
-                    src,
-                    "two leaders for {group} term {term}"
-                ),
+                Entry::Occupied(slot) => {
+                    assert_eq!(*slot.get(), src, "two leaders for {group} term {term}")
+                }
             }
         }
         for observation in out.committed {
@@ -1337,7 +1355,12 @@ mod tests {
         let entropy: BTreeMap<NodeId, TestEntropy> = nodes
             .iter()
             .enumerate()
-            .map(|(i, &node)| (node, TestEntropy::new((i as u64 + 1).wrapping_mul(0x9e37_79b9))))
+            .map(|(i, &node)| {
+                (
+                    node,
+                    TestEntropy::new((i as u64 + 1).wrapping_mul(0x9e37_79b9)),
+                )
+            })
             .collect();
 
         let mut groups: BTreeMap<(GroupId, NodeId), RaftGroup> = BTreeMap::new();
@@ -1389,8 +1412,10 @@ mod tests {
             // Once both groups have a leader, propose disjoint commands — each to
             // its own group's leader, exactly once.
             if !proposed
-                && let (Some(l1), Some(l2)) =
-                    (leader_of(&groups, g1, &nodes), leader_of(&groups, g2, &nodes))
+                && let (Some(l1), Some(l2)) = (
+                    leader_of(&groups, g1, &nodes),
+                    leader_of(&groups, g2, &nodes),
+                )
             {
                 groups[&(g1, l1)].propose(EntryPayload::App(b"g1-a".to_vec()));
                 groups[&(g1, l1)].propose(EntryPayload::App(b"g1-b".to_vec()));
@@ -1431,7 +1456,12 @@ mod tests {
         let entropy: BTreeMap<NodeId, TestEntropy> = all
             .iter()
             .enumerate()
-            .map(|(i, &node)| (node, TestEntropy::new((i as u64 + 1).wrapping_mul(0x9e37_79b9))))
+            .map(|(i, &node)| {
+                (
+                    node,
+                    TestEntropy::new((i as u64 + 1).wrapping_mul(0x9e37_79b9)),
+                )
+            })
             .collect();
 
         let mut groups: BTreeMap<(GroupId, NodeId), RaftGroup> = BTreeMap::new();
@@ -1473,9 +1503,7 @@ mod tests {
                 let out = deliver(&groups[&(g, to)], from, frame, now, &entropy[&to]);
                 record(g, to, out, &mut queue, &mut committed, &mut winners);
             }
-            if !proposed
-                && let Some(leader) = leader_of(&groups, group, &all)
-            {
+            if !proposed && let Some(leader) = leader_of(&groups, group, &all) {
                 groups[&(group, leader)].propose(EntryPayload::App(b"x".to_vec()));
                 groups[&(group, leader)].propose(EntryPayload::App(b"y".to_vec()));
                 proposed = true;
@@ -1485,18 +1513,27 @@ mod tests {
         assert!(proposed, "the voters elected a leader");
         // The learner never won an election in any term.
         for (&(g, term), &winner) in &winners {
-            assert_ne!(winner, learner, "the learner led {g} term {term} — learners must not lead");
+            assert_ne!(
+                winner, learner,
+                "the learner led {g} term {term} — learners must not lead"
+            );
         }
         // The learner replicated the committed log, identical to a voter's — so it
         // can route and serve reads without being part of the quorum.
         let expected = vec![b"x".to_vec(), b"y".to_vec()];
         assert_eq!(
-            committed.get(&(group, learner)).cloned().unwrap_or_default(),
+            committed
+                .get(&(group, learner))
+                .cloned()
+                .unwrap_or_default(),
             expected,
             "the learner replicates committed state",
         );
         assert_eq!(
-            committed.get(&(group, voters[0])).cloned().unwrap_or_default(),
+            committed
+                .get(&(group, voters[0]))
+                .cloned()
+                .unwrap_or_default(),
             expected,
             "a voter has the same committed log as the learner",
         );
@@ -1521,7 +1558,12 @@ mod tests {
         let entropy: BTreeMap<NodeId, TestEntropy> = all
             .iter()
             .enumerate()
-            .map(|(i, &node)| (node, TestEntropy::new((i as u64 + 1).wrapping_mul(0x9e37_79b9))))
+            .map(|(i, &node)| {
+                (
+                    node,
+                    TestEntropy::new((i as u64 + 1).wrapping_mul(0x9e37_79b9)),
+                )
+            })
             .collect();
 
         let mut groups: BTreeMap<(GroupId, NodeId), RaftGroup> = BTreeMap::new();
@@ -1578,9 +1620,7 @@ mod tests {
             }
 
             // Once a leader exists, push a run of writes through it.
-            if !proposed
-                && let Some(leader) = leader_of(&groups, group, &all)
-            {
+            if !proposed && let Some(leader) = leader_of(&groups, group, &all) {
                 for i in 0..WRITES {
                     groups[&(group, leader)]
                         .propose(EntryPayload::App(format!("e{i}").into_bytes()));
@@ -1600,12 +1640,18 @@ mod tests {
             }
         }
 
-        assert!(compacted, "the leader committed the writes and compacted its log");
+        assert!(
+            compacted,
+            "the leader committed the writes and compacted its log"
+        );
         let leader = leader_of(&groups, group, &all).expect("a stable leader");
         let leader_group = &groups[&(group, leader)];
         // The compaction discarded the prefix: the base advanced and the retained
         // log is far smaller than the number of committed entries.
-        assert!(leader_group.snapshot_index() >= WRITES as u64, "the snapshot base advanced past the writes");
+        assert!(
+            leader_group.snapshot_index() >= WRITES as u64,
+            "the snapshot base advanced past the writes"
+        );
         assert!(
             leader_group.retained_len() < WRITES,
             "the retained log is bounded ({} entries) well under {WRITES} writes",
@@ -1616,8 +1662,15 @@ mod tests {
         // the leader's snapshot and reached the leader's commit index, without ever
         // replaying the compacted entries.
         let (snap_index, snap_data) = learner_snapshot.expect("the learner installed a snapshot");
-        assert_eq!(snap_data, snapshot_bytes, "the learner installed the leader's snapshot bytes");
-        assert_eq!(snap_index, leader_group.snapshot_index(), "the install carried the snapshot base");
+        assert_eq!(
+            snap_data, snapshot_bytes,
+            "the learner installed the leader's snapshot bytes"
+        );
+        assert_eq!(
+            snap_index,
+            leader_group.snapshot_index(),
+            "the install carried the snapshot base"
+        );
         assert_eq!(
             groups[&(group, learner)].commit_index(),
             leader_group.commit_index(),
@@ -1635,7 +1688,9 @@ mod tests {
         learner: NodeId,
     ) {
         for observation in out.committed {
-            if let Committed::Snapshot { index, snapshot, .. } = observation
+            if let Committed::Snapshot {
+                index, snapshot, ..
+            } = observation
                 && src == learner
             {
                 *learner_snapshot = Some((index, snapshot));

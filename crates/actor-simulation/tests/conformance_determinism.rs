@@ -343,7 +343,9 @@ impl ClusterWorkload for DiscoverAndCall {
             for _ in 0..rounds {
                 clock.sleep(Duration::from_millis(200)).await;
                 for service in caller.receptionist().lookup(GREETERS).iter() {
-                    let _ = service.ask_timeout(ReproGreet, Duration::from_millis(500)).await;
+                    let _ = service
+                        .ask_timeout(ReproGreet, Duration::from_millis(500))
+                        .await;
                 }
             }
         })
@@ -440,7 +442,9 @@ impl ClusterWorkload for RegistryChurn {
                     registry.resume(victim);
                 }
                 for service in caller.receptionist().lookup(GREETERS).iter() {
-                    let _ = service.ask_timeout(ReproGreet, Duration::from_millis(500)).await;
+                    let _ = service
+                        .ask_timeout(ReproGreet, Duration::from_millis(500))
+                        .await;
                 }
             }
         })
@@ -525,7 +529,9 @@ impl ClusterWorkload for LeaderChurn {
                     let _ = proposer.resume(victim).await;
                 }
                 for service in proposer.receptionist().lookup(GREETERS).iter() {
-                    let _ = service.ask_timeout(ReproGreet, Duration::from_millis(500)).await;
+                    let _ = service
+                        .ask_timeout(ReproGreet, Duration::from_millis(500))
+                        .await;
                 }
             }
         })
@@ -589,7 +595,9 @@ impl ClusterWorkload for RestartReplay {
                     net.restart(victim);
                 }
                 for service in caller.receptionist().lookup(GREETERS).iter() {
-                    let _ = service.ask_timeout(ReproGreet, Duration::from_millis(500)).await;
+                    let _ = service
+                        .ask_timeout(ReproGreet, Duration::from_millis(500))
+                        .await;
                 }
             }
         })
@@ -737,11 +745,15 @@ impl ClusterWorkload for UtilitiesChurn {
                     // the stream.
                     let random = Router::new(node, GREETERS, RouteStrategy::Random);
                     if let Some(routee) = random.route() {
-                        let _ = routee.ask_timeout(ReproGreet, Duration::from_millis(500)).await;
+                        let _ = routee
+                            .ask_timeout(ReproGreet, Duration::from_millis(500))
+                            .await;
                     }
                     let key = format!("k-{round}");
                     if let Some(routee) = random.route_by(key.as_bytes()) {
-                        let _ = routee.ask_timeout(ReproGreet, Duration::from_millis(500)).await;
+                        let _ = routee
+                            .ask_timeout(ReproGreet, Duration::from_millis(500))
+                            .await;
                     }
                     let proxy = node.singleton_proxy::<ReproGreeter>(UTILITIES_SINGLETON);
                     if let Some(instance) = proxy.resolve() {

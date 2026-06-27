@@ -61,6 +61,8 @@ getrandom = "0.2"
 rustls = "0.23"
 tokio-rustls = "0.26"
 rcgen = "0.13"
+# The HTTP/SSE gateway (`harness-gateway`) only: the public multi-tenant edge.
+axum = "0.8"
 # Standalone deployment only (`harness-standalone`): trust anchors for the
 # rustls connection its HttpPost seam opens to the Anthropic API.
 webpki-roots = "1"

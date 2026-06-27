@@ -1,6 +1,6 @@
 [package]
 name = "harness-standalone"
-description = "A standalone multi-process deployment of the agentic harness: TCP nodes, a shared file journal, the Anthropic model, and a REPL"
+description = "A standalone multi-process deployment of the agentic harness: TCP nodes (silos) hosting grains over a shared file journal and the Anthropic model"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,25 +13,23 @@ actor-core.workspace = true
 actor-cluster.workspace = true
 actor-runtime.workspace = true
 actor-serialization.workspace = true
+granary.workspace = true
+tenancy.workspace = true
 harness.workspace = true
 harness-anthropic.workspace = true
 harness-sandbox = { workspace = true, features = ["native", "firecracker", "quickjs"] }
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["io-std", "process", "fs"] }
+tokio = { workspace = true, features = ["process", "fs"] }
 rustls.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-# `tokio.workspace` carries the macros/rt/io-util/net/sync features the tests
-# need (the library target asks for a narrower set).
+# `tokio.workspace` carries the macros/rt/io-util/net/sync features the unit
+# tests need (the library target asks for a narrower set).
 tokio = { workspace = true }
-futures.workspace = true
-# The official ACP client, used by `tests/acp_sdk.rs` to drive the adapter
-# end-to-end exactly as a real editor would.
-agent-client-protocol = "0.15"
 
 [lints]
 workspace = true

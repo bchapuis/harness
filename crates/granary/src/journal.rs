@@ -21,7 +21,9 @@ use crate::grain::GrainName;
 
 /// The position of an event in one grain's total order (spec §7.3). The first
 /// event commits at `1`; [`Seq::ZERO`] is the empty head.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
+)]
 pub struct Seq(u64);
 
 impl Seq {
@@ -112,8 +114,10 @@ pub trait GrainJournal: Clone + Send + Sync + 'static {
     /// under the leader's own term, §8), so a fresh leader never folds onto a stale
     /// head and subsequent `load`s read locally; on the `Local` tier it reads
     /// locally. Rehydration derives `head` from this, never from memory.
-    fn head(&self, grain: &GrainName)
-    -> impl Future<Output = Result<Seq, GrainJournalError>> + Send;
+    fn head(
+        &self,
+        grain: &GrainName,
+    ) -> impl Future<Output = Result<Seq, GrainJournalError>> + Send;
 
     /// Persist a snapshot for one grain at a committed seq (§9). Returns
     /// `Committed(at)` on success, or `NotLeader` if this node no longer leads.

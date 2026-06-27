@@ -54,42 +54,99 @@ fn records_enumerates_and_forgets() {
 
     sim.block_on(async move {
         // Record is idempotent on identical metadata, and updates on changed.
-        let r = dir.ask(Record { name: owned("s/1"), meta: meta("first", 100) }).await.unwrap();
+        let r = dir
+            .ask(Record {
+                name: owned("s/1"),
+                meta: meta("first", 100),
+            })
+            .await
+            .unwrap();
         assert_eq!(r, Recorded::Created, "first record is new");
-        let r = dir.ask(Record { name: owned("s/1"), meta: meta("first", 100) }).await.unwrap();
-        assert_eq!(r, Recorded::Unchanged, "re-record with same meta commits nothing");
-        let r = dir.ask(Record { name: owned("s/1"), meta: meta("renamed", 100) }).await.unwrap();
+        let r = dir
+            .ask(Record {
+                name: owned("s/1"),
+                meta: meta("first", 100),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            Recorded::Unchanged,
+            "re-record with same meta commits nothing"
+        );
+        let r = dir
+            .ask(Record {
+                name: owned("s/1"),
+                meta: meta("renamed", 100),
+            })
+            .await
+            .unwrap();
         assert_eq!(r, Recorded::Updated, "changed meta updates in place");
 
-        dir.ask(Record { name: owned("s/2"), meta: meta("second", 200) }).await.unwrap();
-        dir.ask(Record { name: owned("s/3"), meta: meta("third", 300) }).await.unwrap();
+        dir.ask(Record {
+            name: owned("s/2"),
+            meta: meta("second", 200),
+        })
+        .await
+        .unwrap();
+        dir.ask(Record {
+            name: owned("s/3"),
+            meta: meta("third", 300),
+        })
+        .await
+        .unwrap();
 
         assert_eq!(dir.ask(Count).await.unwrap(), 3);
         assert!(dir.ask(Contains { name: owned("s/2") }).await.unwrap());
         assert!(!dir.ask(Contains { name: owned("s/9") }).await.unwrap());
 
         // Metadata round-trips: the listing shows the chosen label and time.
-        let got = dir.ask(Get { name: owned("s/1") }).await.unwrap().expect("owned");
+        let got = dir
+            .ask(Get { name: owned("s/1") })
+            .await
+            .unwrap()
+            .expect("owned");
         assert_eq!(got.label.as_deref(), Some("renamed"));
         assert_eq!(got.created_at, Some(100));
         assert!(dir.ask(Get { name: owned("s/9") }).await.unwrap().is_none());
 
         // Enumeration is stable (key order) and carries each entry's metadata.
         let listing = dir.ask(List).await.unwrap();
-        let view: Vec<_> = listing.iter().map(|e| (e.name.key(), e.meta.label.as_deref())).collect();
+        let view: Vec<_> = listing
+            .iter()
+            .map(|e| (e.name.key(), e.meta.label.as_deref()))
+            .collect();
         assert_eq!(
             view,
-            vec![("s/1", Some("renamed")), ("s/2", Some("second")), ("s/3", Some("third"))],
+            vec![
+                ("s/1", Some("renamed")),
+                ("s/2", Some("second")),
+                ("s/3", Some("third"))
+            ],
         );
 
         // Forget is idempotent too.
-        assert!(dir.ask(Forget { name: owned("s/2") }).await.unwrap(), "present name removed");
-        assert!(!dir.ask(Forget { name: owned("s/2") }).await.unwrap(), "absent name is a no-op");
+        assert!(
+            dir.ask(Forget { name: owned("s/2") }).await.unwrap(),
+            "present name removed"
+        );
+        assert!(
+            !dir.ask(Forget { name: owned("s/2") }).await.unwrap(),
+            "absent name is a no-op"
+        );
         assert_eq!(dir.ask(Count).await.unwrap(), 2);
 
         // Clear drops the rest and reports how many it forgot.
-        assert_eq!(dir.ask(Clear).await.unwrap(), 2, "clear forgets the remaining two");
-        assert_eq!(dir.ask(Clear).await.unwrap(), 0, "clearing an empty index commits nothing");
+        assert_eq!(
+            dir.ask(Clear).await.unwrap(),
+            2,
+            "clear forgets the remaining two"
+        );
+        assert_eq!(
+            dir.ask(Clear).await.unwrap(),
+            0,
+            "clearing an empty index commits nothing"
+        );
         assert!(dir.ask(List).await.unwrap().is_empty());
     });
 }
@@ -115,25 +172,70 @@ fn queries_grains_by_type() {
 
         // By-type enumeration returns only that type's entries, in key order,
         // with metadata attached.
-        let sessions = dir.ask(ListByType { grain_type: "app.Session".into() }).await.unwrap();
-        let view: Vec<_> = sessions.iter().map(|e| (e.name.key(), e.meta.label.as_deref())).collect();
+        let sessions = dir
+            .ask(ListByType {
+                grain_type: "app.Session".into(),
+            })
+            .await
+            .unwrap();
+        let view: Vec<_> = sessions
+            .iter()
+            .map(|e| (e.name.key(), e.meta.label.as_deref()))
+            .collect();
         assert_eq!(view, vec![("s/1", Some("first")), ("s/2", Some("second"))]);
 
-        let repos = dir.ask(ListByType { grain_type: "app.Repo".into() }).await.unwrap();
-        assert_eq!(repos.iter().map(|e| e.name.key()).collect::<Vec<_>>(), vec!["r/1", "r/2"]);
+        let repos = dir
+            .ask(ListByType {
+                grain_type: "app.Repo".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            repos.iter().map(|e| e.name.key()).collect::<Vec<_>>(),
+            vec!["r/1", "r/2"]
+        );
 
         // A type the principal owns none of yields nothing.
-        assert!(dir.ask(ListByType { grain_type: "app.Other".into() }).await.unwrap().is_empty());
+        assert!(
+            dir.ask(ListByType {
+                grain_type: "app.Other".into()
+            })
+            .await
+            .unwrap()
+            .is_empty()
+        );
 
-        assert_eq!(dir.ask(CountByType { grain_type: "app.Repo".into() }).await.unwrap(), 2);
-        assert_eq!(dir.ask(CountByType { grain_type: "app.Sandbox".into() }).await.unwrap(), 1);
+        assert_eq!(
+            dir.ask(CountByType {
+                grain_type: "app.Repo".into()
+            })
+            .await
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            dir.ask(CountByType {
+                grain_type: "app.Sandbox".into()
+            })
+            .await
+            .unwrap(),
+            1
+        );
 
         // The distinct types owned, in order, deduped.
         assert_eq!(
             dir.ask(Types).await.unwrap(),
-            vec!["app.Repo".to_string(), "app.Sandbox".to_string(), "app.Session".to_string()],
+            vec![
+                "app.Repo".to_string(),
+                "app.Sandbox".to_string(),
+                "app.Session".to_string()
+            ],
         );
-        assert_eq!(dir.ask(Count).await.unwrap(), 5, "by-type views do not change the total");
+        assert_eq!(
+            dir.ask(Count).await.unwrap(),
+            5,
+            "by-type views do not change the total"
+        );
     });
 }
 
@@ -150,8 +252,18 @@ fn index_survives_hibernation() {
     let dir = directories.grain("tenant/bob");
 
     sim.block_on(async move {
-        dir.ask(Record { name: owned("repo/x"), meta: meta("x", 1) }).await.unwrap();
-        dir.ask(Record { name: owned("repo/y"), meta: meta("y", 2) }).await.unwrap();
+        dir.ask(Record {
+            name: owned("repo/x"),
+            meta: meta("x", 1),
+        })
+        .await
+        .unwrap();
+        dir.ask(Record {
+            name: owned("repo/y"),
+            meta: meta("y", 2),
+        })
+        .await
+        .unwrap();
     });
 
     // Drive past the idle window: the grain snapshots, passivates, and stops.
@@ -161,7 +273,10 @@ fn index_survives_hibernation() {
     // rehydrate intact.
     let reread = directories.grain("tenant/bob");
     let listing = sim.block_on(async move { reread.ask(List).await.unwrap() });
-    let view: Vec<_> = listing.iter().map(|e| (e.name.key(), e.meta.label.as_deref())).collect();
+    let view: Vec<_> = listing
+        .iter()
+        .map(|e| (e.name.key(), e.meta.label.as_deref()))
+        .collect();
     assert_eq!(
         view,
         vec![("repo/x", Some("x")), ("repo/y", Some("y"))],

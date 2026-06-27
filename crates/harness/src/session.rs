@@ -300,7 +300,9 @@ pub(crate) mod arc_transcript {
         (**v).serialize(s)
     }
 
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Arc<Vec<Entry>>, D::Error> {
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Arc<Vec<Entry>>, D::Error> {
         Vec::<Entry>::deserialize(d).map(Arc::new)
     }
 }

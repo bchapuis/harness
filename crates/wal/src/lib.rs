@@ -435,7 +435,11 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
 
         let (_wal, recovered) = open(&path);
-        assert_eq!(recovered.len(), 1, "the corrupt record and after are dropped");
+        assert_eq!(
+            recovered.len(),
+            1,
+            "the corrupt record and after are dropped"
+        );
     }
 
     #[test]
@@ -443,7 +447,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log");
         let (mut wal, _) = open(&path);
-        wal.append_batch(&[rec(1, b"a"), rec(2, b"b"), rec(3, b"c")]).unwrap();
+        wal.append_batch(&[rec(1, b"a"), rec(2, b"b"), rec(3, b"c")])
+            .unwrap();
         // Keep the first record, then append a different suffix.
         wal.truncate(1).unwrap();
         assert_eq!(wal.len(), 1);
@@ -471,12 +476,16 @@ mod tests {
         let path = dir.path().join("log");
         {
             let (mut wal, _) = open(&path);
-            wal.append_batch(&[rec(1, b"a"), rec(2, b"b"), rec(3, b"c")]).unwrap();
+            wal.append_batch(&[rec(1, b"a"), rec(2, b"b"), rec(3, b"c")])
+                .unwrap();
             let before = fs::metadata(&path).unwrap().len();
             // Compact to a single record; the file shrinks and the handle keeps working.
             wal.rewrite(&[rec(9, b"z")]).unwrap();
             let after = fs::metadata(&path).unwrap().len();
-            assert!(after < before, "rewrite shrank the file: {after} < {before}");
+            assert!(
+                after < before,
+                "rewrite shrank the file: {after} < {before}"
+            );
             wal.append(&rec(10, b"w")).unwrap();
         }
         let (_wal, recovered) = open(&path);

@@ -46,6 +46,7 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use futures::channel::oneshot;
 
+use crate::consensus::RaftConsensus;
 use crate::correlator::Correlator;
 use crate::membership::LeaderMode;
 use crate::membership::MemberStatus;
@@ -56,7 +57,6 @@ use crate::membership::SwimConfig;
 use crate::protocol::CallId;
 use crate::protocol::Frame;
 use crate::protocol::ReceptionistEntry;
-use crate::consensus::RaftConsensus;
 use crate::raft::Committed;
 use crate::raft::EntryPayload;
 use crate::raft::GroupId;
@@ -1205,9 +1205,7 @@ async fn receive_loop<C, E, S, T>(
                 if let Some(raft) = system.group(group) {
                     if raft.is_leader() {
                         raft.propose(EntryPayload::App(command));
-                    } else if !forwarded
-                        && let Some(target) = raft.leader_hint()
-                    {
+                    } else if !forwarded && let Some(target) = raft.leader_hint() {
                         let frame = Frame::RaftPropose {
                             group,
                             command,
@@ -1476,7 +1474,11 @@ where
             for node in system.inner.membership.leaving_members() {
                 propose(MembershipCommand::Leave(node));
             }
-            for node in system.inner.membership.downing_candidates(mode.downing, now) {
+            for node in system
+                .inner
+                .membership
+                .downing_candidates(mode.downing, now)
+            {
                 propose(MembershipCommand::Down(node));
             }
         }

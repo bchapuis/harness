@@ -146,7 +146,12 @@ impl<G: Grain> Gateway<G> {
     /// (**G6**): a concurrent caller for the same name finds the host the first one
     /// activated. Called only when this node replicates and leads the shard, so the
     /// shard's `journal` is present.
-    fn get_or_activate(&mut self, name: GrainName, shard: ShardId, ctx: &Ctx<Gateway<G>>) -> ActorRef<Host<G>> {
+    fn get_or_activate(
+        &mut self,
+        name: GrainName,
+        shard: ShardId,
+        ctx: &Ctx<Gateway<G>>,
+    ) -> ActorRef<Host<G>> {
         // Get: return the live host if the cached entry is still alive. The
         // liveness check closes the eviction race (§10): a host that hibernated
         // but whose `Terminated` has not yet pruned the table is dropped here and

@@ -564,9 +564,24 @@ fn a_voter_removed_during_a_partition_commits_consistently() {
     // commit the change immediately. `keep` is the other survivor.
     let others: Vec<NodeId> = [A, B, C].into_iter().filter(|&n| n != leader).collect();
     let (victim, keep) = (others[0], others[1]);
-    let victim_sys = nodes.iter().find(|n| n.node() == victim).unwrap().to_owned().clone();
-    let keep_sys = nodes.iter().find(|n| n.node() == keep).unwrap().to_owned().clone();
-    let leader_sys = nodes.iter().find(|n| n.node() == leader).unwrap().to_owned().clone();
+    let victim_sys = nodes
+        .iter()
+        .find(|n| n.node() == victim)
+        .unwrap()
+        .to_owned()
+        .clone();
+    let keep_sys = nodes
+        .iter()
+        .find(|n| n.node() == keep)
+        .unwrap()
+        .to_owned()
+        .clone();
+    let leader_sys = nodes
+        .iter()
+        .find(|n| n.node() == leader)
+        .unwrap()
+        .to_owned()
+        .clone();
 
     // Isolate the victim; the leader and `keep` retain a quorum of the old config.
     net.partition(&[victim], &[leader, keep]);
@@ -575,17 +590,29 @@ fn a_voter_removed_during_a_partition_commits_consistently() {
     // Remove the isolated voter — committed over the old config's majority.
     let removed = {
         let l = leader_sys.clone();
-        drive(&sim, Duration::from_secs(12), async move { l.remove_voter(victim).await })
+        drive(&sim, Duration::from_secs(12), async move {
+            l.remove_voter(victim).await
+        })
     };
-    assert!(removed, "the voter removal committed on the majority during the partition");
+    assert!(
+        removed,
+        "the voter removal committed on the majority during the partition"
+    );
 
     // The cluster keeps committing over the reduced voter set: drain `keep`, a
     // membership entry that must commit *without* the removed voter's vote.
     let drained = {
         let l = leader_sys.clone();
-        drive(&sim, Duration::from_secs(12), async move { l.drain(keep).await })
+        drive(
+            &sim,
+            Duration::from_secs(12),
+            async move { l.drain(keep).await },
+        )
     };
-    assert!(drained, "the cluster commits over the reduced voter set (the removal took effect)");
+    assert!(
+        drained,
+        "the cluster commits over the reduced voter set (the removal took effect)"
+    );
 
     // Heal: the isolated node adopts the majority's log — there is no forked config.
     net.heal();
@@ -642,7 +669,12 @@ fn a_leader_that_cannot_send_is_deposed_when_it_hears_the_new_term() {
     let nodes = [&a, &b, &c];
     let old_leader = elected_leader(&nodes).node();
     let majority: Vec<NodeId> = [A, B, C].into_iter().filter(|&n| n != old_leader).collect();
-    let old_sys = nodes.iter().find(|n| n.node() == old_leader).unwrap().to_owned().clone();
+    let old_sys = nodes
+        .iter()
+        .find(|n| n.node() == old_leader)
+        .unwrap()
+        .to_owned()
+        .clone();
 
     // One-way: the old leader can no longer SEND to the others, but still RECEIVES.
     net.partition_one_way(&[old_leader], &majority);
@@ -650,8 +682,13 @@ fn a_leader_that_cannot_send_is_deposed_when_it_hears_the_new_term() {
 
     // The majority elected a new leader at a higher term.
     let survivor = nodes.iter().find(|n| n.node() == majority[0]).unwrap();
-    let new_leader = survivor.leader().expect("the majority elected a new leader");
-    assert_ne!(new_leader, old_leader, "a new leader was elected on the reachable side");
+    let new_leader = survivor
+        .leader()
+        .expect("the majority elected a new leader");
+    assert_ne!(
+        new_leader, old_leader,
+        "a new leader was elected on the reachable side"
+    );
 
     // The crux (§8.1): the old leader, still partitioned for sending, has ALREADY
     // stepped down — it heard the newer term on its open inbound link, with no heal.
@@ -663,13 +700,27 @@ fn a_leader_that_cannot_send_is_deposed_when_it_hears_the_new_term() {
 
     // The cluster commits through the new leader while the old one is still one-way
     // partitioned — its participation was never needed.
-    let new_sys = nodes.iter().find(|n| n.node() == new_leader).unwrap().to_owned().clone();
-    let committed = drive(&sim, Duration::from_secs(10), async move { new_sys.drain(old_leader).await });
-    assert!(committed, "the new leader commits a transition while the old leader is deposed");
+    let new_sys = nodes
+        .iter()
+        .find(|n| n.node() == new_leader)
+        .unwrap()
+        .to_owned()
+        .clone();
+    let committed = drive(&sim, Duration::from_secs(10), async move {
+        new_sys.drain(old_leader).await
+    });
+    assert!(
+        committed,
+        "the new leader commits a transition while the old leader is deposed"
+    );
 
     net.heal();
     sim.run_for(Duration::from_secs(4));
-    assert_eq!(b.leader(), c.leader(), "the cluster holds a single leader after heal");
+    assert_eq!(
+        b.leader(),
+        c.leader(),
+        "the cluster holds a single leader after heal"
+    );
 }
 
 #[test]
@@ -694,7 +745,12 @@ fn a_send_only_leader_is_a_zombie_that_stalls_the_control_plane() {
     let leader = elected_leader(&nodes).node();
     let others: Vec<NodeId> = [A, B, C].into_iter().filter(|&n| n != leader).collect();
     let victim = others[0];
-    let leader_sys = nodes.iter().find(|n| n.node() == leader).unwrap().to_owned().clone();
+    let leader_sys = nodes
+        .iter()
+        .find(|n| n.node() == leader)
+        .unwrap()
+        .to_owned()
+        .clone();
 
     // One-way: the others can no longer reach the leader, but the leader still
     // heartbeats outward — so the followers keep their election timers reset.
@@ -713,9 +769,14 @@ fn a_send_only_leader_is_a_zombie_that_stalls_the_control_plane() {
     // (inbound is blocked), so the control plane is stalled — nothing commits.
     let stalled = {
         let l = leader_sys.clone();
-        drive(&sim, Duration::from_secs(8), async move { l.drain(victim).await })
+        drive(&sim, Duration::from_secs(8), async move {
+            l.drain(victim).await
+        })
     };
-    assert!(!stalled, "the zombie leader cannot commit — the control plane is stalled, not progressing");
+    assert!(
+        !stalled,
+        "the zombie leader cannot commit — the control plane is stalled, not progressing"
+    );
     assert_ne!(
         a.membership().status(victim),
         Some(MemberStatus::Draining),
@@ -727,8 +788,15 @@ fn a_send_only_leader_is_a_zombie_that_stalls_the_control_plane() {
     net.heal();
     sim.run_for(Duration::from_secs(3));
     let recovered = {
-        let l = nodes.iter().find(|n| n.node() == a.leader().unwrap()).unwrap().to_owned().clone();
-        drive(&sim, Duration::from_secs(10), async move { l.drain(victim).await })
+        let l = nodes
+            .iter()
+            .find(|n| n.node() == a.leader().unwrap())
+            .unwrap()
+            .to_owned()
+            .clone();
+        drive(&sim, Duration::from_secs(10), async move {
+            l.drain(victim).await
+        })
     };
     assert!(recovered, "after heal the control plane commits again");
 }
@@ -791,12 +859,25 @@ fn a_paused_leader_wakes_already_deposed_and_does_not_disrupt() {
     // (draining the frozen node) WITHOUT the frozen one's participation.
     let surv = nodes.iter().find(|n| n.node() == survivors[0]).unwrap();
     let new_leader = surv.leader().expect("the survivors elected a new leader");
-    assert_ne!(new_leader, old_leader, "a survivor leads while the old leader is frozen");
+    assert_ne!(
+        new_leader, old_leader,
+        "a survivor leads while the old leader is frozen"
+    );
     let committed = {
-        let new_sys = nodes.iter().find(|n| n.node() == new_leader).unwrap().to_owned().clone();
-        drive(&sim, Duration::from_secs(10), async move { new_sys.drain(old_leader).await })
+        let new_sys = nodes
+            .iter()
+            .find(|n| n.node() == new_leader)
+            .unwrap()
+            .to_owned()
+            .clone();
+        drive(&sim, Duration::from_secs(10), async move {
+            new_sys.drain(old_leader).await
+        })
     };
-    assert!(committed, "the cluster commits through the new leader while the old one is frozen");
+    assert!(
+        committed,
+        "the cluster commits through the new leader while the old one is frozen"
+    );
 
     // Resume the old leader: it drains its backlog, hears the newer term, and steps
     // down cleanly — already deposed the moment it wakes (§8.1).
@@ -816,7 +897,11 @@ fn a_paused_leader_wakes_already_deposed_and_does_not_disrupt() {
         Some(new_leader),
         "the stale wakeup did not disrupt the new leader (no clock-based fencing needed, §8.1)",
     );
-    assert_eq!(b.leader(), c.leader(), "the cluster holds a single agreed leader after the wakeup");
+    assert_eq!(
+        b.leader(),
+        c.leader(),
+        "the cluster holds a single agreed leader after the wakeup"
+    );
 
     // The woken leader caused NO new election: the highest term is unchanged since
     // the single post-pause election, so its rejoin was a clean step-down, not a

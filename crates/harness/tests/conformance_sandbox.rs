@@ -49,7 +49,12 @@ fn shell_kind() -> Kinds {
     Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .sandboxed("shell", "run", &json!({ "type": "object" }), Tier::Workspace)
+            .sandboxed(
+                "shell",
+                "run",
+                &json!({ "type": "object" }),
+                Tier::Workspace,
+            )
             .budget(Budget::new(10_000, 10))
             .grain(brisk_idle()),
     )
@@ -91,8 +96,11 @@ fn a_failed_open_fails_the_calls_not_the_run() {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let session = harness.session("worker", SessionId::new("s-1"));
-                let outcome =
-                    session.prompt(Turn::new(TurnId::new("t-1"), "go")).await.expect("call").expect("run");
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
                 assert_eq!(outcome.text(), "done");
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;
@@ -110,7 +118,11 @@ fn a_failed_open_fails_the_calls_not_the_run() {
             _ => None,
         })
         .collect();
-    assert_eq!(outcomes, vec![false, true], "the provisioning failure is the first call's outcome (§5.4)");
+    assert_eq!(
+        outcomes,
+        vec![false, true],
+        "the provisioning failure is the first call's outcome (§5.4)"
+    );
     assert_eq!(stats.opened(), 1, "the retry opened lazily");
 }
 
@@ -140,8 +152,11 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let session = harness.session("worker", SessionId::new("s-2"));
-                let outcome =
-                    session.prompt(Turn::new(TurnId::new("t-1"), "go")).await.expect("call").expect("run");
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
                 assert_eq!(outcome.text(), "done");
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;
@@ -154,7 +169,9 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
     // (§5.5): tool error → WorkspaceReset → next model call.
     assert_eq!(
         record_kinds(&records.lock().unwrap()),
-        vec!["created", "turn", "model", "tool", "reset", "model", "tool", "model", "ended"],
+        vec![
+            "created", "turn", "model", "tool", "reset", "model", "tool", "model", "ended"
+        ],
     );
     // The loss tore down one environment; the next call opened a fresh one (§5.5)
     // — and both were released exactly once (H8).
@@ -178,8 +195,10 @@ fn a_slow_tool_is_bounded_by_its_declared_timeout() {
             .budget(Budget::new(10_000, 10))
             .grain(brisk_idle()),
     );
-    let model =
-        ScriptedModel::steps(vec![Ok(tool_call("c1", "slow", json!({}))), Ok(final_message("done"))]);
+    let model = ScriptedModel::steps(vec![
+        Ok(tool_call("c1", "slow", json!({}))),
+        Ok(final_message("done")),
+    ]);
     let records: Arc<Mutex<Vec<Record>>> = Arc::default();
     let sink = Arc::clone(&records);
     // The sandbox needs the run's clock for its 60s delay against a 1s bound.
@@ -197,8 +216,11 @@ fn a_slow_tool_is_bounded_by_its_declared_timeout() {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let session = harness.session("worker", SessionId::new("s-3"));
-                let outcome =
-                    session.prompt(Turn::new(TurnId::new("t-1"), "go")).await.expect("call").expect("run");
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
                 assert_eq!(outcome.text(), "done");
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;
@@ -232,8 +254,18 @@ fn tiered_kind() -> Kinds {
     Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .sandboxed("read", "read a file", &json!({ "type": "object" }), Tier::Workspace)
-            .sandboxed("run", "run guest code", &json!({ "type": "object" }), Tier::Compute)
+            .sandboxed(
+                "read",
+                "read a file",
+                &json!({ "type": "object" }),
+                Tier::Workspace,
+            )
+            .sandboxed(
+                "run",
+                "run guest code",
+                &json!({ "type": "object" }),
+                Tier::Compute,
+            )
             .sandbox(SandboxProfile::default().cap([Tier::Workspace, Tier::Compute]))
             .budget(Budget::new(10_000, 10))
             .grain(brisk_idle()),
@@ -241,11 +273,18 @@ fn tiered_kind() -> Kinds {
 }
 
 fn worker_kind() -> Arc<Kind> {
-    tiered_kind().get(&KindId::new("worker")).expect("registered")
+    tiered_kind()
+        .get(&KindId::new("worker"))
+        .expect("registered")
 }
 
 /// Run a tiered-kind scenario over `steps` and return the session's journal.
-fn run_tiered(name: &'static str, model: ScriptedModel, session: &'static str, seed: u64) -> (Vec<Record>, support::SandboxStats) {
+fn run_tiered(
+    name: &'static str,
+    model: ScriptedModel,
+    session: &'static str,
+    seed: u64,
+) -> (Vec<Record>, support::SandboxStats) {
     let sandboxes = ScriptedSandboxes::echo();
     let stats = sandboxes.stats.clone();
     let records: Arc<Mutex<Vec<Record>>> = Arc::default();
@@ -259,7 +298,11 @@ fn run_tiered(name: &'static str, model: ScriptedModel, session: &'static str, s
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let s = harness.session("worker", SessionId::new(session));
-                let outcome = s.prompt(Turn::new(TurnId::new("t-1"), "go")).await.expect("call").expect("run");
+                let outcome = s
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
                 assert_eq!(outcome.text(), "done");
                 *sink.lock().unwrap() = tail_records(&s).await;
                 flush(&system).await;
@@ -285,7 +328,9 @@ fn a_tier_is_acquired_under_a_journaled_record_before_its_first_effect() {
     // outcome: intent before effect (§6.4).
     assert_eq!(
         record_kinds(&records),
-        vec!["created", "turn", "model", "tool", "model", "tier", "tool", "model", "ended"],
+        vec![
+            "created", "turn", "model", "tool", "model", "tier", "tool", "model", "ended"
+        ],
     );
     let acquired: Vec<Tier> = records
         .iter()
@@ -296,11 +341,17 @@ fn a_tier_is_acquired_under_a_journaled_record_before_its_first_effect() {
         .collect();
     assert_eq!(acquired, vec![Tier::Compute]);
     // The provider saw each call at its declared tier (§5.3 item 1).
-    let calls: Vec<(Tier, String)> =
-        stats.calls().into_iter().map(|(tier, name, _)| (tier, name)).collect();
+    let calls: Vec<(Tier, String)> = stats
+        .calls()
+        .into_iter()
+        .map(|(tier, name, _)| (tier, name))
+        .collect();
     assert_eq!(
         calls,
-        vec![(Tier::Workspace, "read".to_string()), (Tier::Compute, "run".to_string())],
+        vec![
+            (Tier::Workspace, "read".to_string()),
+            (Tier::Compute, "run".to_string())
+        ],
     );
     audit_tier_acquisition(&records, &worker_kind());
 }
@@ -308,7 +359,11 @@ fn a_tier_is_acquired_under_a_journaled_record_before_its_first_effect() {
 #[test]
 fn two_same_step_calls_at_one_new_tier_journal_one_acquisition() {
     let mut both = tool_call("c1", "run", json!({}));
-    both.calls.push(ToolCall { id: CallId::new("c2"), name: "run".to_string(), input: json!({}) });
+    both.calls.push(ToolCall {
+        id: CallId::new("c2"),
+        name: "run".to_string(),
+        input: json!({}),
+    });
     let model = ScriptedModel::steps(vec![Ok(both), Ok(final_message("done"))]);
     let (records, _) = run_tiered("tier-acquisition-dedup", model, "s-5", 73);
 
@@ -316,7 +371,10 @@ fn two_same_step_calls_at_one_new_tier_journal_one_acquisition() {
         .iter()
         .filter(|r| matches!(&r.body, RecordBody::TierAcquired { .. }))
         .count();
-    assert_eq!(acquisitions, 1, "the second sibling parks on the first's record, no duplicate (§5.6)");
+    assert_eq!(
+        acquisitions, 1,
+        "the second sibling parks on the first's record, no duplicate (§5.6)"
+    );
     let outcomes = records
         .iter()
         .filter(|r| matches!(&r.body, RecordBody::ToolOutcome { outcome: Ok(_), .. }))
@@ -350,7 +408,11 @@ fn a_reset_restarts_the_held_set_and_reacquisition_is_rejournaled() {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let s = harness.session("worker", SessionId::new("s-6"));
-                let outcome = s.prompt(Turn::new(TurnId::new("t-1"), "go")).await.expect("call").expect("run");
+                let outcome = s
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
                 assert_eq!(outcome.text(), "done");
                 *sink.lock().unwrap() = tail_records(&s).await;
                 flush(&system).await;
@@ -365,7 +427,10 @@ fn a_reset_restarts_the_held_set_and_reacquisition_is_rejournaled() {
     // re-journals its acquisition — never silently inherited.
     assert_eq!(
         record_kinds(&records),
-        vec!["created", "turn", "model", "tier", "tool", "reset", "model", "tier", "tool", "model", "ended"],
+        vec![
+            "created", "turn", "model", "tier", "tool", "reset", "model", "tier", "tool", "model",
+            "ended"
+        ],
     );
     audit_tier_acquisition(&records, &worker_kind());
 }
@@ -379,6 +444,11 @@ fn a_tool_beyond_the_cap_is_a_registration_error() {
         "worker",
         Kind::new("worker")
             .sandbox(SandboxProfile::default().cap([Tier::Workspace]))
-            .sandboxed("run", "run guest code", &json!({ "type": "object" }), Tier::Compute),
+            .sandboxed(
+                "run",
+                "run guest code",
+                &json!({ "type": "object" }),
+                Tier::Compute,
+            ),
     );
 }

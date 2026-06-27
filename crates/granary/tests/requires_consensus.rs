@@ -18,9 +18,9 @@ use actor_simulation::SimCluster;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use granary::Grain;
+use granary::GrainRegistry;
 use granary::GranaryConfig;
 use granary::GranaryExt;
-use granary::GrainRegistry;
 use serde::Deserialize;
 use serde::Serialize;
 

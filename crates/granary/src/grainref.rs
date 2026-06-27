@@ -103,7 +103,10 @@ impl<G: Grain> HostCache<G> {
     fn get(&self, name: &GrainName) -> Option<ActorRef<Host<G>>> {
         let mut hosts = self.hosts.lock().expect("host cache mutex poisoned");
         let host = hosts.get(name)?.clone();
-        match self.system.shard_leader(shard_for(self.grain_type, name.key(), self.shards)) {
+        match self
+            .system
+            .shard_leader(shard_for(self.grain_type, name.key(), self.shards))
+        {
             // Replica node, leader moved: drop the stale handle before it is used.
             Some(leader) if host.id().node() != leader => {
                 hosts.remove(name);
@@ -115,15 +118,24 @@ impl<G: Grain> HostCache<G> {
     }
 
     fn put(&self, name: GrainName, host: ActorRef<Host<G>>) {
-        self.hosts.lock().expect("host cache mutex poisoned").insert(name, host);
+        self.hosts
+            .lock()
+            .expect("host cache mutex poisoned")
+            .insert(name, host);
     }
 
     fn remove(&self, name: &GrainName) {
-        self.hosts.lock().expect("host cache mutex poisoned").remove(name);
+        self.hosts
+            .lock()
+            .expect("host cache mutex poisoned")
+            .remove(name);
     }
 
     fn contains(&self, name: &GrainName) -> bool {
-        self.hosts.lock().expect("host cache mutex poisoned").contains_key(name)
+        self.hosts
+            .lock()
+            .expect("host cache mutex poisoned")
+            .contains_key(name)
     }
 }
 
@@ -312,9 +324,12 @@ impl<G: Grain> GrainRef<G> {
     /// stays observably identical to a local one across a failover (invariant
     /// **G13**). Driving the loop here, not in the gateway's serial handler, keeps
     /// one slow resolution from blocking another grain's activation on that node.
-    async fn resolve(&self, use_cache: bool, within: Duration) -> Result<ActorRef<Host<G>>, GrainError> {
-        if use_cache
-            && let Some(host) = self.cache.as_ref().and_then(|cache| cache.get(&self.name))
+    async fn resolve(
+        &self,
+        use_cache: bool,
+        within: Duration,
+    ) -> Result<ActorRef<Host<G>>, GrainError> {
+        if use_cache && let Some(host) = self.cache.as_ref().and_then(|cache| cache.get(&self.name))
         {
             return Ok(host);
         }
@@ -331,7 +346,10 @@ impl<G: Grain> GrainRef<G> {
             // Cap each attempt so a dead target fails fast and we re-resolve,
             // rather than spending the whole deadline on one unreachable gateway.
             let attempt = remaining.min(FORWARD_TIMEOUT);
-            match target.ask_timeout(Activate::new(self.name.clone()), attempt).await {
+            match target
+                .ask_timeout(Activate::new(self.name.clone()), attempt)
+                .await
+            {
                 Ok(Ok(host)) => {
                     if let Some(cache) = &self.cache {
                         cache.put(self.name.clone(), host.clone());
@@ -641,7 +659,8 @@ impl<T: GranarySystem> GranaryExt for T {
         // Register this node's gateway under the type's well-known key so other
         // nodes route activations to it (§5.3). Each node hosting the type does
         // this, giving one gateway entry per node.
-        self.receptionist().register(gateway_key::<G>(grain_type), &gateway);
+        self.receptionist()
+            .register(gateway_key::<G>(grain_type), &gateway);
         Granary {
             system: self.clone(),
             grain_type,

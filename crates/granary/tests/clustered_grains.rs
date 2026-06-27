@@ -97,8 +97,16 @@ impl Message for Deposit {
 }
 
 impl GrainHandler<Deposit> for Account {
-    async fn handle(&self, state: &Balance, msg: Deposit, _ctx: &GrainCtx<Self>) -> (Vec<Ledger>, i64) {
-        (vec![Ledger::Deposited(msg.cents)], state.cents + msg.cents as i64)
+    async fn handle(
+        &self,
+        state: &Balance,
+        msg: Deposit,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<Ledger>, i64) {
+        (
+            vec![Ledger::Deposited(msg.cents)],
+            state.cents + msg.cents as i64,
+        )
     }
 }
 
@@ -121,7 +129,10 @@ impl GrainHandler<Withdraw> for Account {
         if (state.cents as u64) < msg.cents {
             return (vec![], Err(Overdraft));
         }
-        (vec![Ledger::Withdrew(msg.cents)], Ok(state.cents - msg.cents as i64))
+        (
+            vec![Ledger::Withdrew(msg.cents)],
+            Ok(state.cents - msg.cents as i64),
+        )
     }
 }
 
@@ -133,7 +144,12 @@ impl Message for ReadBalance {
 }
 
 impl GrainHandler<ReadBalance> for Account {
-    async fn handle(&self, state: &Balance, _msg: ReadBalance, _ctx: &GrainCtx<Self>) -> (Vec<Ledger>, i64) {
+    async fn handle(
+        &self,
+        state: &Balance,
+        _msg: ReadBalance,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<Ledger>, i64) {
         (vec![], state.cents)
     }
 }
@@ -188,7 +204,10 @@ fn drive<T: Send + 'static>(
         *out.lock().unwrap() = Some(future.await);
     }));
     sim.run_for(settle);
-    cell.lock().unwrap().take().expect("future did not complete")
+    cell.lock()
+        .unwrap()
+        .take()
+        .expect("future did not complete")
 }
 
 /// Bring up a 3-node leader cluster and host `Account` on every node, so each
@@ -198,8 +217,10 @@ fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<Accoun
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
-    let granaries: Vec<Granary<Account>> =
-        systems.iter().map(|system| system.granary::<Account>(config())).collect();
+    let granaries: Vec<Granary<Account>> = systems
+        .iter()
+        .map(|system| system.granary::<Account>(config()))
+        .collect();
     sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
     (net, systems, granaries)
 }
@@ -207,7 +228,9 @@ fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<Accoun
 /// The index of a node that does **not** lead `key`'s shard — a node that must
 /// route the call to the leader.
 fn non_leader_of(systems: &[SimCluster], granaries: &[Granary<Account>], key: &str) -> usize {
-    let leader = granaries[0].leader(key).expect("the shard elected a leader");
+    let leader = granaries[0]
+        .leader(key)
+        .expect("the shard elected a leader");
     systems
         .iter()
         .position(|s| s.node() != leader)
@@ -234,9 +257,17 @@ fn grain_is_callable_from_a_non_leader_node() {
         (deposit, withdraw, overdraft, balance)
     });
 
-    assert_eq!(deposit, Ok(1000), "deposit committed and the reply is post-state");
+    assert_eq!(
+        deposit,
+        Ok(1000),
+        "deposit committed and the reply is post-state"
+    );
     assert_eq!(withdraw, Ok(Ok(500)), "withdraw committed durably");
-    assert_eq!(overdraft, Ok(Err(Overdraft)), "overdraw is an application error, not a GrainError");
+    assert_eq!(
+        overdraft,
+        Ok(Err(Overdraft)),
+        "overdraw is an application error, not a GrainError"
+    );
     assert_eq!(balance, Ok(500), "the overdraw left the balance unchanged");
 }
 
@@ -248,7 +279,9 @@ fn committed_state_survives_shard_leader_failover() {
     let sim = Simulation::new(2);
     let (net, systems, granaries) = cluster(&sim);
     let key = "account/7";
-    let leader = granaries[0].leader(key).expect("the shard elected a leader");
+    let leader = granaries[0]
+        .leader(key)
+        .expect("the shard elected a leader");
     let caller = systems
         .iter()
         .position(|s| s.node() != leader)
@@ -271,10 +304,17 @@ fn committed_state_survives_shard_leader_failover() {
     let balance = {
         let granary = granaries[caller].clone();
         drive(&sim, Duration::from_secs(10), async move {
-            granary.grain(key).ask_timeout(ReadBalance, Duration::from_secs(9)).await
+            granary
+                .grain(key)
+                .ask_timeout(ReadBalance, Duration::from_secs(9))
+                .await
         })
     };
-    assert_eq!(balance, Ok(250), "committed state survived the leader crash (G14)");
+    assert_eq!(
+        balance,
+        Ok(250),
+        "committed state survived the leader crash (G14)"
+    );
 }
 
 #[test]
@@ -286,12 +326,19 @@ fn a_call_during_failover_is_absorbed_by_the_redirect() {
     let sim = Simulation::new(3);
     let (net, systems, granaries) = cluster(&sim);
     let key = "account/13";
-    let leader = granaries[0].leader(key).expect("the shard elected a leader");
+    let leader = granaries[0]
+        .leader(key)
+        .expect("the shard elected a leader");
     // The two survivors of the crash. Write through one, then read through the
     // *other*: its cache is cold, so the read resolves through the gateway and
     // exercises the bounded redirect (a cached host on the just-crashed leader
     // would instead time out, which a write must not auto-retry — §6, §2.2).
-    let survivors: Vec<usize> = systems.iter().enumerate().filter(|(_, s)| s.node() != leader).map(|(i, _)| i).collect();
+    let survivors: Vec<usize> = systems
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.node() != leader)
+        .map(|(i, _)| i)
+        .collect();
     let (writer, reader) = (survivors[0], survivors[1]);
 
     let committed = {
@@ -308,10 +355,17 @@ fn a_call_during_failover_is_absorbed_by_the_redirect() {
     let balance = {
         let granary = granaries[reader].clone();
         drive(&sim, Duration::from_secs(12), async move {
-            granary.grain(key).ask_timeout(ReadBalance, Duration::from_secs(11)).await
+            granary
+                .grain(key)
+                .ask_timeout(ReadBalance, Duration::from_secs(11))
+                .await
         })
     };
-    assert_eq!(balance, Ok(400), "the call during failover was absorbed and succeeded");
+    assert_eq!(
+        balance,
+        Ok(400),
+        "the call during failover was absorbed and succeeded"
+    );
 }
 
 #[test]
@@ -322,10 +376,19 @@ fn the_shard_map_is_consensus_agreed_across_nodes() {
     // observation. Checks several keys (which hash to different shards).
     let sim = Simulation::new(8);
     let (_net, _systems, granaries) = cluster(&sim);
-    for key in ["account/1", "account/42", "account/13", "account/99", "account/replicated"] {
+    for key in [
+        "account/1",
+        "account/42",
+        "account/13",
+        "account/99",
+        "account/replicated",
+    ] {
         let sets: Vec<Vec<NodeId>> = granaries.iter().map(|g| g.replicas(key)).collect();
         let first = &sets[0];
-        assert!(!first.is_empty(), "the shard for {key} has a committed allocation");
+        assert!(
+            !first.is_empty(),
+            "the shard for {key} has a committed allocation"
+        );
         assert!(
             sets.iter().all(|s| s == first),
             "every node agrees on {key}'s replica set (got {sets:?})",
@@ -345,7 +408,10 @@ fn add_control_voter(sim: &Simulation, systems: &[SimCluster], node: NodeId) {
     let ok = drive(sim, Duration::from_secs(15), async move {
         leader.admit(node).await && leader.add_voter(node).await
     });
-    assert!(ok, "node {node:?} is admitted and added to the control quorum");
+    assert!(
+        ok,
+        "node {node:?} is admitted and added to the control quorum"
+    );
 }
 
 #[test]
@@ -360,8 +426,10 @@ fn a_compacted_shard_brings_a_new_replica_up_via_snapshot() {
     let net = leader_net(&sim);
     let founders = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2));
-    let granaries: Vec<Granary<Account>> =
-        founders.iter().map(|s| s.granary::<Account>(config())).collect();
+    let granaries: Vec<Granary<Account>> = founders
+        .iter()
+        .map(|s| s.granary::<Account>(config()))
+        .collect();
     sim.run_for(Duration::from_secs(3));
 
     // Many deposits on one grain — well past the shard's compaction threshold
@@ -378,7 +446,11 @@ fn a_compacted_shard_brings_a_new_replica_up_via_snapshot() {
             acct.ask(ReadBalance).await
         })
     };
-    assert_eq!(total, Ok(DEPOSITS as i64), "all deposits committed before growth");
+    assert_eq!(
+        total,
+        Ok(DEPOSITS as i64),
+        "all deposits committed before growth"
+    );
 
     // Grow the cluster so the shard rebalances onto fresh nodes.
     let d = net.join(D);
@@ -402,10 +474,16 @@ fn a_compacted_shard_brings_a_new_replica_up_via_snapshot() {
     let balance = {
         let gd = gd.clone();
         drive(&sim, Duration::from_secs(12), async move {
-            gd.grain(key).ask_timeout(ReadBalance, Duration::from_secs(11)).await
+            gd.grain(key)
+                .ask_timeout(ReadBalance, Duration::from_secs(11))
+                .await
         })
     };
-    assert_eq!(balance, Ok(DEPOSITS as i64), "the new replica serves the committed balance via snapshot");
+    assert_eq!(
+        balance,
+        Ok(DEPOSITS as i64),
+        "the new replica serves the committed balance via snapshot"
+    );
 }
 
 #[test]
@@ -420,8 +498,10 @@ fn growing_the_cluster_rebalances_shards_onto_new_nodes() {
     let net = leader_net(&sim);
     let founders = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
-    let granaries: Vec<Granary<Account>> =
-        founders.iter().map(|s| s.granary::<Account>(config())).collect();
+    let granaries: Vec<Granary<Account>> = founders
+        .iter()
+        .map(|s| s.granary::<Account>(config()))
+        .collect();
     sim.run_for(Duration::from_secs(3)); // map group + shards
 
     // Commit a deposit; with three founders each shard's replica set is all three.
@@ -434,7 +514,11 @@ fn growing_the_cluster_rebalances_shards_onto_new_nodes() {
     };
     assert_eq!(committed, Ok(300));
     let founding = granaries[0].replicas(key);
-    assert_eq!(founding.len(), 3, "the founding shard has the configured three replicas");
+    assert_eq!(
+        founding.len(),
+        3,
+        "the founding shard has the configured three replicas"
+    );
 
     // Two nodes join and are promoted into the control quorum, and host the type.
     let d = net.join(D);
@@ -456,7 +540,11 @@ fn growing_the_cluster_rebalances_shards_onto_new_nodes() {
     );
     // Every node still agrees on the (new) allocation.
     let from_new = gd.replicas(key);
-    assert_eq!(from_new, granaries[0].replicas(key), "the new node agrees on the rebalanced allocation");
+    assert_eq!(
+        from_new,
+        granaries[0].replicas(key),
+        "the new node agrees on the rebalanced allocation"
+    );
 
     // The grain committed before the growth survived the in-place reconfiguration:
     // a read on the new node sees the durable balance, and a further write commits.
@@ -464,11 +552,16 @@ fn growing_the_cluster_rebalances_shards_onto_new_nodes() {
         let gd = gd.clone();
         drive(&sim, Duration::from_secs(12), async move {
             let acct = gd.grain(key);
-            acct.ask_timeout(Deposit { cents: 200 }, Duration::from_secs(11)).await?;
+            acct.ask_timeout(Deposit { cents: 200 }, Duration::from_secs(11))
+                .await?;
             acct.ask_timeout(ReadBalance, Duration::from_secs(11)).await
         })
     };
-    assert_eq!(balance, Ok(500), "no committed write was lost across the rebalance (G14)");
+    assert_eq!(
+        balance,
+        Ok(500),
+        "no committed write was lost across the rebalance (G14)"
+    );
 }
 
 #[test]
@@ -480,10 +573,18 @@ fn shrinking_the_cluster_moves_shards_off_a_removed_node() {
     // committed value — the shard's surviving quorum carries it (G14).
     let sim = Simulation::new(11);
     let net = leader_net(&sim);
-    let founders = vec![net.join(A), net.join(B), net.join(C), net.join(D), net.join(E)];
+    let founders = vec![
+        net.join(A),
+        net.join(B),
+        net.join(C),
+        net.join(D),
+        net.join(E),
+    ];
     sim.run_for(Duration::from_secs(2));
-    let granaries: Vec<Granary<Account>> =
-        founders.iter().map(|s| s.granary::<Account>(config())).collect();
+    let granaries: Vec<Granary<Account>> = founders
+        .iter()
+        .map(|s| s.granary::<Account>(config()))
+        .collect();
     // Five founders, but their RaftConfig only seeds {A,B,C} as control voters, so
     // promote D and E so the allocator can place shards across all five.
     add_control_voter(&sim, &founders, D);
@@ -501,7 +602,9 @@ fn shrinking_the_cluster_moves_shards_off_a_removed_node() {
     };
     assert_eq!(committed, Ok(700));
     let before = granaries[0].replicas(key);
-    let shard_leader = granaries[0].leader(key).expect("the shard elected a leader");
+    let shard_leader = granaries[0]
+        .leader(key)
+        .expect("the shard elected a leader");
     let victim = *before
         .iter()
         .find(|n| **n != shard_leader)
@@ -520,17 +623,30 @@ fn shrinking_the_cluster_moves_shards_off_a_removed_node() {
     sim.run_for(Duration::from_secs(10)); // allocator re-proposes; shard reconfigures
 
     let after = granaries[0].replicas(key);
-    assert!(!after.contains(&victim), "the removed node no longer replicates the shard (got {after:?})");
-    assert_eq!(after.len(), before.len(), "the shard kept its replication factor on survivors");
+    assert!(
+        !after.contains(&victim),
+        "the removed node no longer replicates the shard (got {after:?})"
+    );
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "the shard kept its replication factor on survivors"
+    );
 
     // The committed value survived the reconfiguration onto survivors.
     let balance = {
         let g = granaries[0].clone();
         drive(&sim, Duration::from_secs(12), async move {
-            g.grain(key).ask_timeout(ReadBalance, Duration::from_secs(11)).await
+            g.grain(key)
+                .ask_timeout(ReadBalance, Duration::from_secs(11))
+                .await
         })
     };
-    assert_eq!(balance, Ok(700), "no committed write was lost across the shrink (G14)");
+    assert_eq!(
+        balance,
+        Ok(700),
+        "no committed write was lost across the shrink (G14)"
+    );
 }
 
 #[test]
@@ -541,7 +657,9 @@ fn quorum_loss_pauses_grain_writes_with_unavailable() {
     let sim = Simulation::new(4);
     let (net, systems, granaries) = cluster(&sim);
     let key = "account/99";
-    let leader = granaries[0].leader(key).expect("the shard elected a leader");
+    let leader = granaries[0]
+        .leader(key)
+        .expect("the shard elected a leader");
     let leader_idx = systems.iter().position(|s| s.node() == leader).unwrap();
 
     // Activate the grain and commit one write *with* a quorum, so the leader holds a
@@ -610,15 +728,21 @@ fn storage_distributes_and_non_replicas_still_route() {
         snapshot_every: 8,
         ..GranaryConfig::default()
     };
-    let granaries: Vec<Granary<Account>> =
-        systems.iter().map(|s| s.granary::<Account>(cfg.clone())).collect();
+    let granaries: Vec<Granary<Account>> = systems
+        .iter()
+        .map(|s| s.granary::<Account>(cfg.clone()))
+        .collect();
     sim.run_for(Duration::from_secs(3)); // elect the shard group's leader
 
     let key = "account/replicated";
     // The shard is replicated on exactly 3 of the 5 nodes — storage is bounded to
     // the replication factor, not the cluster size.
     let replicas = granaries[0].replicas(key);
-    assert_eq!(replicas.len(), 3, "the shard lives on exactly R replicas, not all 5 nodes");
+    assert_eq!(
+        replicas.len(),
+        3,
+        "the shard lives on exactly R replicas, not all 5 nodes"
+    );
     // Pick a node that does NOT replicate the shard — it holds no data for it and
     // must route to a replica.
     let non_replica = systems
@@ -633,14 +757,21 @@ fn storage_distributes_and_non_replicas_still_route() {
             granary.grain(key).ask(Deposit { cents: 700 }).await
         })
     };
-    assert_eq!(committed, Ok(700), "a non-replica routes the write to a replica leader");
+    assert_eq!(
+        committed,
+        Ok(700),
+        "a non-replica routes the write to a replica leader"
+    );
 
     // Every node — replicas and non-replicas — reads the durable balance.
     for (index, granary) in granaries.iter().enumerate() {
         let balance = {
             let granary = granary.clone();
             drive(&sim, Duration::from_secs(8), async move {
-                granary.grain(key).ask_timeout(ReadBalance, Duration::from_secs(7)).await
+                granary
+                    .grain(key)
+                    .ask_timeout(ReadBalance, Duration::from_secs(7))
+                    .await
             })
         };
         assert_eq!(
@@ -681,8 +812,10 @@ fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
         snapshot_every: 8,
         ..GranaryConfig::default()
     };
-    let granaries: Vec<Granary<Account>> =
-        systems.iter().map(|s| s.granary::<Account>(cfg.clone())).collect();
+    let granaries: Vec<Granary<Account>> = systems
+        .iter()
+        .map(|s| s.granary::<Account>(cfg.clone()))
+        .collect();
     // The allocator spreads shards over `cluster_voters()`; the RaftConfig listing
     // D and E is not enough — they must be admitted to the control quorum, exactly
     // as the rebalance tests do, or every shard collapses onto the same 3 voters.
@@ -711,7 +844,11 @@ fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
     // keeps a quorum once those two are gone, with Y's leader still alive.
     let mut chosen: Option<ChosenShards> = None;
     'outer: for (xkey, xreplicas, xleader) in shard_of.values() {
-        let followers: Vec<NodeId> = xreplicas.iter().copied().filter(|&n| n != *xleader).collect();
+        let followers: Vec<NodeId> = xreplicas
+            .iter()
+            .copied()
+            .filter(|&n| n != *xleader)
+            .collect();
         let victims = [followers[0], followers[1]];
         for (ykey, yreplicas, yleader) in shard_of.values() {
             if ykey == xkey {
@@ -732,12 +869,19 @@ fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
     let yleader_idx = systems.iter().position(|s| s.node() == yleader).unwrap();
 
     // Baseline: both grains commit while healthy.
-    for (idx, key, amount) in [(xleader_idx, xkey.clone(), 100u64), (yleader_idx, ykey.clone(), 200)] {
+    for (idx, key, amount) in [
+        (xleader_idx, xkey.clone(), 100u64),
+        (yleader_idx, ykey.clone(), 200),
+    ] {
         let g = granaries[idx].clone();
         let label = key.clone();
-        let committed =
-            drive(&sim, Duration::from_secs(8), async move { g.grain(key).ask(Deposit { cents: amount }).await });
-        assert!(committed.is_ok(), "baseline commit for {label} failed: {committed:?}");
+        let committed = drive(&sim, Duration::from_secs(8), async move {
+            g.grain(key).ask(Deposit { cents: amount }).await
+        });
+        assert!(
+            committed.is_ok(),
+            "baseline commit for {label} failed: {committed:?}"
+        );
     }
 
     // Kill shard X's two followers: X's leader survives but can no longer reach a
@@ -752,7 +896,9 @@ fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
         let g = granaries[xleader_idx].clone();
         let xkey = xkey.clone();
         drive(&sim, Duration::from_secs(13), async move {
-            g.grain(xkey).ask_timeout(Deposit { cents: 9 }, Duration::from_secs(12)).await
+            g.grain(xkey)
+                .ask_timeout(Deposit { cents: 9 }, Duration::from_secs(12))
+                .await
         })
     };
     assert!(
@@ -765,7 +911,9 @@ fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
         let g = granaries[yleader_idx].clone();
         let ykey = ykey.clone();
         drive(&sim, Duration::from_secs(9), async move {
-            g.grain(ykey).ask_timeout(Deposit { cents: 5 }, Duration::from_secs(8)).await
+            g.grain(ykey)
+                .ask_timeout(Deposit { cents: 5 }, Duration::from_secs(8))
+                .await
         })
     };
     assert_eq!(
@@ -826,7 +974,12 @@ impl Message for Add {
 }
 
 impl GrainHandler<Add> for CounterGrain {
-    async fn handle(&self, state: &CounterState, msg: Add, _ctx: &GrainCtx<Self>) -> (Vec<CounterEvent>, i64) {
+    async fn handle(
+        &self,
+        state: &CounterState,
+        msg: Add,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<CounterEvent>, i64) {
         // Non-idempotent: a double-fold shows up as a wrong Read the checker flags.
         (vec![CounterEvent::Added(msg.0)], state.value + msg.0)
     }
@@ -840,7 +993,12 @@ impl Message for ReadCount {
 }
 
 impl GrainHandler<ReadCount> for CounterGrain {
-    async fn handle(&self, state: &CounterState, _msg: ReadCount, _ctx: &GrainCtx<Self>) -> (Vec<CounterEvent>, i64) {
+    async fn handle(
+        &self,
+        state: &CounterState,
+        _msg: ReadCount,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<CounterEvent>, i64) {
         (vec![], state.value)
     }
 }
@@ -850,8 +1008,10 @@ fn counter_cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granar
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // control-plane leader
-    let granaries: Vec<Granary<CounterGrain>> =
-        systems.iter().map(|s| s.granary::<CounterGrain>(config())).collect();
+    let granaries: Vec<Granary<CounterGrain>> = systems
+        .iter()
+        .map(|s| s.granary::<CounterGrain>(config()))
+        .collect();
     sim.run_for(Duration::from_secs(3)); // shard-group leaders
     (net, systems, granaries)
 }
@@ -876,7 +1036,9 @@ fn concurrent_counter_grain_is_linearizable_across_failover() {
         let sim = Simulation::new(seed);
         let (net, systems, granaries) = counter_cluster(&sim);
         let key = "counter/0";
-        let leader = granaries[0].leader(key).expect("the shard elected a leader");
+        let leader = granaries[0]
+            .leader(key)
+            .expect("the shard elected a leader");
         let survivors: Vec<usize> = systems
             .iter()
             .enumerate()
@@ -898,7 +1060,10 @@ fn concurrent_counter_grain_is_linearizable_across_failover() {
                     if entropy.next_u64().is_multiple_of(2) {
                         let delta = 1 + (entropy.next_u64() % 3) as i64;
                         let id = history.invoke(CounterOp::Add(delta));
-                        match counter.ask_timeout(Add(delta), Duration::from_secs(8)).await {
+                        match counter
+                            .ask_timeout(Add(delta), Duration::from_secs(8))
+                            .await
+                        {
                             Ok(_) => history.ok(id, CounterRet::AddOk),
                             Err(_) => history.info(id), // unknown outcome: pending
                         }
@@ -951,7 +1116,10 @@ fn many_grains_collapse_onto_a_bounded_set_of_shards() {
         let key = format!("account/{i}");
         shard_indices.insert(granary::shard_for("bank.Account", &key, shards).index);
         let replicas = granaries[0].replicas(&key);
-        assert!(!replicas.is_empty(), "every grain's shard has a committed allocation");
+        assert!(
+            !replicas.is_empty(),
+            "every grain's shard has a committed allocation"
+        );
         replica_sets.insert(replicas);
     }
     assert!(
@@ -977,8 +1145,10 @@ fn activations_and_writes_leave_the_shard_map_unchanged() {
     let (_net, _systems, granaries) = cluster(&sim);
     let probe_keys: Vec<String> = (0..40u64).map(|i| format!("account/{i}")).collect();
 
-    let allocation_before: Vec<Vec<NodeId>> =
-        probe_keys.iter().map(|k| granaries[0].replicas(k)).collect();
+    let allocation_before: Vec<Vec<NodeId>> = probe_keys
+        .iter()
+        .map(|k| granaries[0].replicas(k))
+        .collect();
     let leaders_before: Vec<Option<NodeId>> =
         probe_keys.iter().map(|k| granaries[0].leader(k)).collect();
 
@@ -996,10 +1166,15 @@ fn activations_and_writes_leave_the_shard_map_unchanged() {
             sum
         })
     };
-    assert_eq!(total, 40, "every fresh grain activated and committed its deposit");
+    assert_eq!(
+        total, 40,
+        "every fresh grain activated and committed its deposit"
+    );
 
-    let allocation_after: Vec<Vec<NodeId>> =
-        probe_keys.iter().map(|k| granaries[0].replicas(k)).collect();
+    let allocation_after: Vec<Vec<NodeId>> = probe_keys
+        .iter()
+        .map(|k| granaries[0].replicas(k))
+        .collect();
     let leaders_after: Vec<Option<NodeId>> =
         probe_keys.iter().map(|k| granaries[0].leader(k)).collect();
 
@@ -1068,7 +1243,12 @@ impl Message for Bump {
 }
 
 impl GrainHandler<Bump> for Pair {
-    async fn handle(&self, _state: &PairState, _msg: Bump, _ctx: &GrainCtx<Self>) -> (Vec<PairEvent>, ()) {
+    async fn handle(
+        &self,
+        _state: &PairState,
+        _msg: Bump,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<PairEvent>, ()) {
         // Two events in one command — they must commit and fold atomically.
         (vec![PairEvent::IncA, PairEvent::IncB], ())
     }
@@ -1082,7 +1262,12 @@ impl Message for ReadPair {
 }
 
 impl GrainHandler<ReadPair> for Pair {
-    async fn handle(&self, state: &PairState, _msg: ReadPair, _ctx: &GrainCtx<Self>) -> (Vec<PairEvent>, (i64, i64)) {
+    async fn handle(
+        &self,
+        state: &PairState,
+        _msg: ReadPair,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<PairEvent>, (i64, i64)) {
         (vec![], (state.a, state.b))
     }
 }
@@ -1094,14 +1279,22 @@ fn a_multi_event_command_commits_atomically_across_failover() {
         let net = leader_net(&sim);
         let systems = [net.join(A), net.join(B), net.join(C)];
         sim.run_for(Duration::from_secs(2));
-        let granaries: Vec<Granary<Pair>> =
-            systems.iter().map(|s| s.granary::<Pair>(config())).collect();
+        let granaries: Vec<Granary<Pair>> = systems
+            .iter()
+            .map(|s| s.granary::<Pair>(config()))
+            .collect();
         sim.run_for(Duration::from_secs(3));
 
         let key = "pair/0";
-        let leader = granaries[0].leader(key).expect("the shard elected a leader");
-        let survivors: Vec<usize> =
-            systems.iter().enumerate().filter(|(_, s)| s.node() != leader).map(|(i, _)| i).collect();
+        let leader = granaries[0]
+            .leader(key)
+            .expect("the shard elected a leader");
+        let survivors: Vec<usize> = systems
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.node() != leader)
+            .map(|(i, _)| i)
+            .collect();
 
         // Concurrent writers and readers on the survivor nodes; every read asserts
         // the invariant a == b (a partial batch would break it).
@@ -1115,7 +1308,8 @@ fn a_multi_event_command_commits_atomically_across_failover() {
                 for _ in 0..8 {
                     if entropy.next_u64().is_multiple_of(2) {
                         let _ = pair.ask_timeout(Bump, Duration::from_secs(8)).await;
-                    } else if let Ok((a, b)) = pair.ask_timeout(ReadPair, Duration::from_secs(8)).await
+                    } else if let Ok((a, b)) =
+                        pair.ask_timeout(ReadPair, Duration::from_secs(8)).await
                         && a != b
                     {
                         torn.lock().unwrap().push((a, b));

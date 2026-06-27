@@ -146,8 +146,14 @@ impl<G: Grain> Actor for ReplicaStore<G> {
 
 impl<G: Grain> Handler<StoreRecord> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreRecord, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
-        self.store
-            .store_record(msg.shard, &msg.grain, msg.after, msg.term, msg.records, msg.repair)
+        self.store.store_record(
+            msg.shard,
+            &msg.grain,
+            msg.after,
+            msg.term,
+            msg.records,
+            msg.repair,
+        )
     }
 }
 

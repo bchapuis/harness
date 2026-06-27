@@ -1,10 +1,18 @@
-# A three-node harness-standalone cluster as a StatefulSet: three pods, each
-# with its OWN data volume (no shared filesystem) and a stable DNS name. The
-# journal replicates over the transport (a quorum append per grain), so the
-# nodes share nothing on disk.
+# A three-node harness-standalone cluster (silos) as a StatefulSet, fronted by a
+# harness-gateway StatefulSet that joins the same cluster as a non-voting,
+# non-hosting CLIENT (the Orleans cluster-client pattern). Each pod has its OWN
+# data volume (no shared filesystem) and a stable DNS name; the journal replicates
+# over the transport (a quorum append per grain), so the nodes share nothing on
+# disk.
+#
+# Why the gateway is a StatefulSet (not a Deployment): as a cluster client it
+# needs a stable transport identity — a fixed non-voting node id and a DNS name
+# the nodes admit with `--client <id>=<host>`. Ordinals give both: gateway pod N
+# is node id 100+N at harness-gw-N.harness-gw.
 #
 # Prerequisites:
-#   1. Build and load the image so the cluster can pull it:
+#   1. Build and load the image so the cluster can pull it (it ships both the
+#      `harness-standalone` and `harness-gateway` binaries):
 #        docker build -t harness-standalone:latest .
 #        # kind:    kind load docker-image harness-standalone:latest
 #        # minikube: minikube image load harness-standalone:latest
@@ -12,11 +20,18 @@
 #   2. Create the API-key secret (NOT committed):
 #        kubectl create secret generic harness-anthropic \
 #          --from-literal=api-key="$ANTHROPIC_API_KEY"
-#   3. kubectl apply -f k8s/harness.yaml
+#   3. Create the cluster-secret and tenants secrets (start.sh does this for you;
+#      see k8s/README.md to do it by hand):
+#        harness-cluster  — the cluster secret guarding the transport handshake
+#        harness-auth     — a tenants file (`<principal> <token>` per line)
+#   4. kubectl apply -f k8s/harness.yaml
 #
-# Attach a REPL (placement routes any request to the session's owner, so any
-# pod works):
-#   kubectl exec -it harness-0 -- harness-standalone repl 127.0.0.1:7501
+# Drive sessions over HTTP through the gateway Service (the only tenant-facing
+# path; the nodes have no client-facing listener):
+#   kubectl port-forward service/harness-gateway 8080:8080
+#   curl -N -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
+#     -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+#     -H "Accept: text/event-stream" -d '{"turn":"t-1","content":"hello"}'
 #
 # See k8s/README.md for the walkthrough, the failure drill, and the sandbox
 # trade-off (`local` here vs. a per-session container).
@@ -36,12 +51,11 @@ spec:
   publishNotReadyAddresses: true
   selector:
     app: harness
-  # Node i binds transport 7401+i-1 and control 7501+i-1. Ports on a headless
-  # service are informational (it never proxies), so listing the bases is for
-  # documentation; pod-to-pod traffic reaches any port the process binds.
+  # Node i binds transport 7401+i-1. The port on a headless service is
+  # informational (it never proxies); pod-to-pod traffic reaches any port the
+  # process binds.
   ports:
     - { name: transport, port: 7401 }
-    - { name: control, port: 7501 }
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -53,8 +67,8 @@ spec:
   serviceName: harness
   replicas: 3
   # Start all pods at once. Each node waits to discover every peer before it
-  # opens its control port, so the default one-at-a-time (OrderedReady) startup
-  # would deadlock: pod 0 would wait forever for pods 1 and 2 to exist.
+  # reports ready, so the default one-at-a-time (OrderedReady) startup would
+  # deadlock: pod 0 would wait forever for pods 1 and 2 to exist.
   podManagementPolicy: Parallel
   selector:
     matchLabels:
@@ -82,6 +96,11 @@ spec:
                 until getent hosts "$p.harness" >/dev/null 2>&1; do sleep 1; done
               done
               echo "[$HOSTNAME] peers resolved; starting node"
+              # The node has no client-facing listener: the transport binds
+              # 0.0.0.0 and is guarded by the cluster secret. --client admits the
+              # two gateway pods (ids 100/101) as non-voting members so the
+              # receptionist gossip reaches them; an admitted client that is not
+              # up yet simply dials in later (the host need not resolve at boot).
               exec harness-standalone node \
                 --id "$ID" \
                 --nodes 3 \
@@ -90,14 +109,24 @@ spec:
                 --peer 1=harness-0.harness \
                 --peer 2=harness-1.harness \
                 --peer 3=harness-2.harness \
+                --client 100=harness-gw-0.harness-gw \
+                --client 101=harness-gw-1.harness-gw \
                 --model "${MODEL:-claude-sonnet-4-6}" \
-                --sandbox local
+                --sandbox local \
+                --secret "$CLUSTER_SECRET"
           env:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: harness-anthropic
                   key: api-key
+            # The cluster secret guarding the transport handshake; the nodes and
+            # the gateway must agree. Same Secret the gateway mounts.
+            - name: CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: harness-cluster
+                  key: secret
             # Override to pick a different model; every node must agree, which
             # a single StatefulSet template guarantees.
             - name: MODEL
@@ -122,3 +151,117 @@ spec:
         resources:
           requests:
             storage: 1Gi
+---
+# Stable per-replica DNS for the gateway pods, so the nodes' --client flags name
+# them (harness-gw-0.harness-gw, …) and the gateway advertises a routable host.
+apiVersion: v1
+kind: Service
+metadata:
+  name: harness-gw
+  labels:
+    app: harness-gateway
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: harness-gateway
+  ports:
+    - { name: transport, port: 7500 }
+---
+# The gateway tier: the public HTTP/SSE edge, joined to the cluster as a
+# non-voting CLIENT. It verifies a caller's bearer token to a tenant (it
+# terminates auth, with the harness-auth tenants file) and addresses the
+# session's grain directly over the transport — no control protocol. Holds no
+# durable state, so scale `replicas` freely (each gets its own non-voting id;
+# admit more by extending the nodes' --client flags). Public TLS is expected to
+# terminate at an Ingress/LoadBalancer; the transport link is plaintext, guarded
+# by the cluster secret.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: harness-gw
+  labels:
+    app: harness-gateway
+spec:
+  serviceName: harness-gw
+  replicas: 2
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: harness-gateway
+  template:
+    metadata:
+      labels:
+        app: harness-gateway
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: gateway
+          image: harness-standalone:latest
+          imagePullPolicy: IfNotPresent
+          # Override the image's `harness-standalone` entrypoint to run the
+          # gateway binary the image also ships.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Pod "harness-gw-1" → ordinal 1 → node id 101 (gateways are
+              # 100-based, outside the nodes' 1..=3 voter roster).
+              ORD="${HOSTNAME##*-}"
+              NODE_ID="$(( 100 + ORD ))"
+              echo "[$HOSTNAME] gateway node id $NODE_ID; waiting for node DNS…"
+              for p in harness-0 harness-1 harness-2; do
+                until getent hosts "$p.harness" >/dev/null 2>&1; do sleep 1; done
+              done
+              echo "[$HOSTNAME] nodes resolved; joining as a cluster client"
+              exec harness-gateway \
+                --bind 0.0.0.0:8080 \
+                --secret "$CLUSTER_SECRET" \
+                --node-id "$NODE_ID" \
+                --nodes 3 \
+                --bind-host 0.0.0.0 \
+                --advertise-host "$HOSTNAME.harness-gw" \
+                --peer 1=harness-0.harness \
+                --peer 2=harness-1.harness \
+                --peer 3=harness-2.harness \
+                --auth-tokens /auth/tenants
+          env:
+            - name: CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: harness-cluster
+                  key: secret
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: auth
+              mountPath: /auth
+              readOnly: true
+      volumes:
+        - name: auth
+          secret:
+            secretName: harness-auth
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harness-gateway
+  labels:
+    app: harness-gateway
+spec:
+  selector:
+    app: harness-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  # ClusterIP by default. Switch to LoadBalancer (or front with an Ingress) to
+  # expose it outside the cluster, terminating public TLS there.

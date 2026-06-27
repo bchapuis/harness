@@ -59,30 +59,65 @@ else
     --from-literal=api-key="$ANTHROPIC_API_KEY" >/dev/null
 fi
 
+# The cluster secret guards the transport handshake; the nodes and the gateway
+# pods all read it from this Secret, so they admit one another and reject anyone
+# else. Random and opaque; provisioned once, idempotently.
+if kubectl get secret harness-cluster >/dev/null 2>&1; then
+  echo "▸ secret harness-cluster already exists — leaving it as is"
+else
+  echo "▸ creating secret harness-cluster (the transport cluster secret)"
+  secret=$(head -c 30 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
+  kubectl create secret generic harness-cluster \
+    --from-literal=secret="$secret" >/dev/null
+fi
+
+if kubectl get secret harness-auth >/dev/null 2>&1; then
+  echo "▸ secret harness-auth already exists — leaving it as is"
+else
+  echo "▸ creating secret harness-auth (one tenant: demo, with a random token)"
+  # An opaque high-entropy token the gateway verifies. Pull it back from the
+  # mounted Secret when you curl. Add more `<principal> <token>` lines for more
+  # tenants.
+  token=$(head -c 30 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
+  tenants=$(mktemp)
+  printf 'demo %s\n' "$token" > "$tenants"
+  kubectl create secret generic harness-auth --from-file=tenants="$tenants" >/dev/null
+  rm -f "$tenants"
+fi
+
 echo "▸ applying manifest"
 kubectl apply -f k8s/harness.yaml
 
 # Each node blocks until it has discovered every peer before going Ready, so
 # this waits for the whole cluster to form, not just for containers to start.
-echo "▸ waiting for the rollout (all three pods Ready)…"
+echo "▸ waiting for the rollout (all three nodes + both gateways Ready)…"
 kubectl rollout status statefulset/harness --timeout=180s
+kubectl rollout status statefulset/harness-gw --timeout=120s
 
-cat <<EOF
+cat <<'EOF'
 
-  cluster up — three pods: harness-0 (node 1), harness-1 (node 2), harness-2 (node 3)
+  cluster up — three node pods (harness-0/1/2) and two gateway pods (harness-gw-0/1)
 
-  Attach a REPL (any pod works — placement routes to the session's owner):
-    kubectl exec -it harness-0 -- harness-standalone repl 127.0.0.1:7501
+  Drive sessions over HTTP through the gateway (the only tenant-facing path). The
+  bearer token is verified against the tenants Secret; pull the demo token:
+    token=$(kubectl get secret harness-auth -o jsonpath='{.data.tenants}' | base64 -d | awk 'NR==1{print $2}')
+    kubectl port-forward service/harness-gateway 8080:8080            # another terminal
+    curl -N -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
+      -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+      -H "Accept: text/event-stream" \
+      -d '{"turn":"t-1","content":"Create numbers.txt holding 1..10 and sum them."}'
 
   Watch it form / find a session's owner:
     kubectl logs harness-0 | tail            # "cluster ready (leader elected)"
+    kubectl logs harness-gw-0 | tail         # "joined the cluster (client of nodes 1..=3)"
 
   Failure drill (a session outlives its pod):
-    kubectl delete pod harness-1 --grace-period=5   # then :retry on a survivor
+    kubectl delete pod harness-1 --grace-period=5   # re-issue the same prompt;
+                                                    # placement re-runs it on a survivor
 
   Tear down:
     kubectl delete -f k8s/harness.yaml
     kubectl delete pvc -l app=harness        # PVCs outlive the StatefulSet
-    kubectl delete secret harness-anthropic
+    kubectl delete secret harness-anthropic harness-auth harness-cluster
 
 EOF

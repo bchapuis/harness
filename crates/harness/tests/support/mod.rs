@@ -74,7 +74,7 @@ pub fn harness_on(
     sandboxes: Arc<dyn SandboxProvider>,
 ) -> Harness<SimSystem> {
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
-    Harness::new(system, kinds, model, sandboxes)
+    Harness::cluster(system, &kinds, model, sandboxes)
 }
 
 /// Read a session's whole journal via `Tail` (§10.2) — the journal is the
@@ -109,7 +109,8 @@ pub fn record_kinds(records: &[harness::Record]) -> Vec<&'static str> {
     records.iter().map(|r| record_kind(&r.body)).collect()
 }
 
-type ScenarioBody = Arc<dyn Fn(Harness<SimSystem>, SimSystem) -> BoxFuture<'static, ()> + Send + Sync>;
+type ScenarioBody =
+    Arc<dyn Fn(Harness<SimSystem>, SimSystem) -> BoxFuture<'static, ()> + Send + Sync>;
 type ModelFactory = Arc<dyn Fn(&SimSystem) -> Arc<dyn Model> + Send + Sync>;
 type SandboxFactory = Arc<dyn Fn(&SimSystem) -> Arc<dyn SandboxProvider> + Send + Sync>;
 
@@ -174,13 +175,12 @@ impl actor_simulation::Workload for Scenario {
     }
 
     fn run(&self, system: SimSystem) -> BoxFuture<'static, ()> {
-        let harness = Harness::with_config(
-            system.clone(),
-            self.kinds.clone(),
-            (self.model)(&system),
-            (self.sandboxes)(&system),
-            self.config.clone(),
-        );
+        let model = (self.model)(&system);
+        let sandboxes = (self.sandboxes)(&system);
+        let harness = Harness::builder(system.clone(), &self.kinds)
+            .config(self.config.clone())
+            .host_all(model, sandboxes)
+            .build();
         (self.body)(harness, system)
     }
 
@@ -215,7 +215,9 @@ impl ScriptedModel {
     pub fn new(
         script: impl Fn(&ModelRequest) -> Result<ModelResponse, ModelError> + Send + Sync + 'static,
     ) -> ScriptedModel {
-        ScriptedModel { script: Arc::new(script) }
+        ScriptedModel {
+            script: Arc::new(script),
+        }
     }
 
     /// A script keyed by step: the n-th model call of a run gets `responses[n]`;
@@ -248,7 +250,10 @@ pub fn final_message(text: &str) -> ModelResponse {
     ModelResponse {
         content: text.to_string(),
         calls: Vec::new(),
-        usage: Usage { input_tokens: 100, output_tokens: 20 },
+        usage: Usage {
+            input_tokens: 100,
+            output_tokens: 20,
+        },
     }
 }
 
@@ -256,8 +261,15 @@ pub fn final_message(text: &str) -> ModelResponse {
 pub fn tool_call(id: &str, name: &str, input: Value) -> ModelResponse {
     ModelResponse {
         content: format!("calling {name}"),
-        calls: vec![ToolCall { id: harness::CallId::new(id), name: name.to_string(), input }],
-        usage: Usage { input_tokens: 100, output_tokens: 30 },
+        calls: vec![ToolCall {
+            id: harness::CallId::new(id),
+            name: name.to_string(),
+            input,
+        }],
+        usage: Usage {
+            input_tokens: 100,
+            output_tokens: 30,
+        },
     }
 }
 
@@ -297,7 +309,10 @@ impl CollectingSink {
 
 impl actor_core::EventSink for CollectingSink {
     fn emit(&self, event: Event) {
-        self.events.lock().expect("events mutex").push(event.clone());
+        self.events
+            .lock()
+            .expect("events mutex")
+            .push(event.clone());
     }
 }
 
@@ -349,7 +364,11 @@ impl Model for FaultyModel {
         Box::pin(async move {
             clock.sleep(latency).await;
             if fail {
-                return Err(if overloaded { ModelError::Overloaded } else { ModelError::RateLimited });
+                return Err(if overloaded {
+                    ModelError::Overloaded
+                } else {
+                    ModelError::RateLimited
+                });
             }
             inner.complete(req).await
         })
@@ -426,8 +445,17 @@ struct ScriptedSandbox {
 }
 
 impl Sandbox for ScriptedSandbox {
-    fn call(&self, tier: Tier, name: &str, input: Value) -> BoxFuture<'static, Result<Value, ToolError>> {
-        self.stats.calls.lock().expect("calls mutex").push((tier, name.to_string(), input.clone()));
+    fn call(
+        &self,
+        tier: Tier,
+        name: &str,
+        input: Value,
+    ) -> BoxFuture<'static, Result<Value, ToolError>> {
+        self.stats
+            .calls
+            .lock()
+            .expect("calls mutex")
+            .push((tier, name.to_string(), input.clone()));
         let result = (self.behavior)(name, &input);
         let delay = self.delay.clone();
         Box::pin(async move {
@@ -450,16 +478,17 @@ impl SandboxProvider for ScriptedSandboxes {
         _session: &SessionId,
         _profile: &SandboxProfile,
     ) -> BoxFuture<'static, Result<Arc<dyn Sandbox>, SandboxError>> {
-        let result: Result<Arc<dyn Sandbox>, SandboxError> = if self.fail_open.load(Ordering::SeqCst) {
-            Err(SandboxError("scripted open failure".to_string()))
-        } else {
-            self.stats.opened.fetch_add(1, Ordering::SeqCst);
-            Ok(Arc::new(ScriptedSandbox {
-                behavior: Arc::clone(&self.behavior),
-                delay: self.delay.clone(),
-                stats: self.stats.clone(),
-            }))
-        };
+        let result: Result<Arc<dyn Sandbox>, SandboxError> =
+            if self.fail_open.load(Ordering::SeqCst) {
+                Err(SandboxError("scripted open failure".to_string()))
+            } else {
+                self.stats.opened.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(ScriptedSandbox {
+                    behavior: Arc::clone(&self.behavior),
+                    delay: self.delay.clone(),
+                    stats: self.stats.clone(),
+                }))
+            };
         Box::pin(async move { result })
     }
 }
@@ -487,7 +516,9 @@ pub struct HarnessEventGrammar {
 
 impl HarnessEventGrammar {
     fn window(&mut self, session: SessionId, node: NodeId) -> &mut (bool, bool) {
-        self.windows.entry((session, node)).or_insert((false, false))
+        self.windows
+            .entry((session, node))
+            .or_insert((false, false))
     }
 }
 
@@ -503,14 +534,18 @@ impl Invariant for HarnessEventGrammar {
                 GrainEvent::Activated { node, name } => {
                     let w = self.window(session_of(name), *node);
                     if w.0 {
-                        return Err(format!("second activation of {name} on {node} without passivation (G6)"));
+                        return Err(format!(
+                            "second activation of {name} on {node} without passivation (G6)"
+                        ));
                     }
                     *w = (true, false);
                 }
                 GrainEvent::Passivated { node, name } => {
                     let w = self.window(session_of(name), *node);
                     if w.1 {
-                        return Err(format!("passivation of {name} on {node} with the sandbox still bound (H8)"));
+                        return Err(format!(
+                            "passivation of {name} on {node} with the sandbox still bound (H8)"
+                        ));
                     }
                     *w = (false, false);
                 }
@@ -525,7 +560,9 @@ impl Invariant for HarnessEventGrammar {
             HarnessEvent::SandboxBound { session, node } => {
                 let w = self.window(session.clone(), *node);
                 if !w.0 {
-                    return Err(format!("sandbox bound for {session} on {node} outside an activation (H8)"));
+                    return Err(format!(
+                        "sandbox bound for {session} on {node} outside an activation (H8)"
+                    ));
                 }
                 if w.1 {
                     return Err(format!("second sandbox bound for {session} on {node} (H8)"));
@@ -535,14 +572,18 @@ impl Invariant for HarnessEventGrammar {
             HarnessEvent::SandboxReleased { session, node } => {
                 let w = self.window(session.clone(), *node);
                 if !w.1 {
-                    return Err(format!("sandbox released for {session} on {node} without a bind (H8)"));
+                    return Err(format!(
+                        "sandbox released for {session} on {node} without a bind (H8)"
+                    ));
                 }
                 w.1 = false;
             }
             HarnessEvent::ModelCompleted { session, node, .. } => {
                 let w = self.window(session.clone(), *node);
                 if !w.0 {
-                    return Err(format!("model completion for {session} on {node} outside an activation (H6)"));
+                    return Err(format!(
+                        "model completion for {session} on {node} outside an activation (H6)"
+                    ));
                 }
             }
             _ => {}
@@ -580,7 +621,9 @@ impl Invariant for RunDiscipline {
             HarnessEvent::RunEnded { session, turn, .. } => {
                 let key = (session.clone(), turn.clone());
                 if !self.started.contains(&key) {
-                    return Err(format!("RunEnded without RunStarted for {session}/{turn} (H3)"));
+                    return Err(format!(
+                        "RunEnded without RunStarted for {session}/{turn} (H3)"
+                    ));
                 }
                 if !self.ended.insert(key) {
                     return Err(format!("second RunEnded for {session}/{turn} (H3)"));

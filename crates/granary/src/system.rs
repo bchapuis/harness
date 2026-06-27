@@ -76,9 +76,8 @@ pub(crate) const MAP_SHARD_INDEX: u32 = u32::MAX;
 /// onto `0..shards`. Stable across nodes and runs, so resolution is consistent
 /// cluster-wide; it changes only if the shard count changes.
 pub fn shard_for(grain_type: &'static str, key: &str, shards: usize) -> ShardId {
-    let mixed = fnv1a(grain_type.as_bytes())
-        .wrapping_mul(0x0000_0100_0000_01b3)
-        ^ fnv1a(key.as_bytes());
+    let mixed =
+        fnv1a(grain_type.as_bytes()).wrapping_mul(0x0000_0100_0000_01b3) ^ fnv1a(key.as_bytes());
     ShardId {
         grain_type,
         index: (mixed % shards.max(1) as u64) as u32,
@@ -90,8 +89,7 @@ pub fn shard_for(grain_type: &'static str, key: &str, shards: usize) -> ShardId 
 /// control group ([`GroupId::CONTROL`] = 0, spec §8.2). Every node derives the
 /// same group id for the same shard, so they form one Raft group.
 pub(crate) fn group_id_for(shard: ShardId) -> GroupId {
-    let id = fnv1a(shard.grain_type.as_bytes())
-        .wrapping_mul(0x0000_0100_0000_01b3)
+    let id = fnv1a(shard.grain_type.as_bytes()).wrapping_mul(0x0000_0100_0000_01b3)
         ^ (shard.index as u64).wrapping_add(1);
     GroupId(id.max(1))
 }
@@ -103,7 +101,11 @@ pub(crate) fn group_id_for(shard: ShardId) -> GroupId {
 /// computes the identical split — and it spreads each shard's voters across the
 /// cluster while moving only `~1/N` of shards when membership changes. `members`
 /// is assumed sorted (the tie-break) and non-empty; `replicas` is clamped to it.
-pub(crate) fn select_replicas(members: &[NodeId], group: GroupId, replicas: usize) -> (Vec<NodeId>, Vec<NodeId>) {
+pub(crate) fn select_replicas(
+    members: &[NodeId],
+    group: GroupId,
+    replicas: usize,
+) -> (Vec<NodeId>, Vec<NodeId>) {
     // Rendezvous (HRW) score per node. The group id MUST be hashed, not XORed in
     // raw: `group_id_for` derives a type's shard groups as `BASE ^ (index+1)`, so
     // consecutive shards' ids differ only in the low ~4 bits. XORing that raw into a
@@ -115,8 +117,7 @@ pub(crate) fn select_replicas(members: &[NodeId], group: GroupId, replicas: usiz
     let mut scored: Vec<(u64, NodeId)> = members
         .iter()
         .map(|&node| {
-            let score = fnv1a(&node.uid().to_le_bytes())
-                .wrapping_mul(0x0000_0100_0000_01b3)
+            let score = fnv1a(&node.uid().to_le_bytes()).wrapping_mul(0x0000_0100_0000_01b3)
                 ^ fnv1a(&group.0.to_le_bytes());
             (score, node)
         })
@@ -293,7 +294,10 @@ mod tests {
         // Disjoint, and together they are exactly the membership.
         let mut all: Vec<NodeId> = voters.iter().chain(learners.iter()).copied().collect();
         all.sort_unstable();
-        assert_eq!(all, members, "every member is a voter or a learner, none both");
+        assert_eq!(
+            all, members,
+            "every member is a voter or a learner, none both"
+        );
     }
 
     #[test]

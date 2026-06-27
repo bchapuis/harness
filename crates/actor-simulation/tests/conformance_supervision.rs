@@ -878,7 +878,6 @@ mod merged_escalation {
     }
 }
 
-
 // =============================================================================
 // Merged from actor.rs (spec §11, invariant #18): a handler panic is contained
 // to its actor — the caller observes DeadLetter, the faulted actor resigns, and

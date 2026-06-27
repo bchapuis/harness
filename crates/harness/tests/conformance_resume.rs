@@ -18,7 +18,6 @@ use actor_simulation::Simulation;
 use granary::GrainEvent;
 use harness::Budget;
 use harness::Harness;
-use harness::HarnessConfig;
 use harness::Kind;
 use harness::Kinds;
 use harness::Record;
@@ -42,7 +41,12 @@ fn worker_kinds() -> Kinds {
     Kinds::new().register(
         "worker",
         Kind::new("worker")
-            .sandboxed("fetch", "an idempotent read", &json!({ "type": "object" }), Tier::Workspace)
+            .sandboxed(
+                "fetch",
+                "an idempotent read",
+                &json!({ "type": "object" }),
+                Tier::Workspace,
+            )
             .budget(Budget::new(10_000, 10))
             .grain(brisk_idle()),
     )
@@ -70,24 +74,31 @@ fn run_two_turns(seed: u64, session: &'static str, hibernate: bool) -> (Vec<Reco
     let system: SimSystem = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
         .events(Arc::new(sink.clone()))
         .build();
-    let harness = Harness::with_config(
+    let harness = Harness::cluster(
         system.clone(),
-        worker_kinds(),
+        &worker_kinds(),
         Arc::new(two_turn_model()),
         Arc::new(ScriptedSandboxes::new(|_, _| Ok(json!("fetched")))),
-        HarnessConfig::default(),
     );
     let clock = system.clock().clone();
     let records = sim.block_on(async move {
         let s = harness.session("worker", SessionId::new(session));
-        let first = s.prompt(Turn::new(TurnId::new("t-1"), "one")).await.expect("call").expect("run");
+        let first = s
+            .prompt(Turn::new(TurnId::new("t-1"), "one"))
+            .await
+            .expect("call")
+            .expect("run");
         assert_eq!(first.text(), "done");
         if hibernate {
             // Idle past the brisk window so the activation hibernates; the next
             // turn reactivates and rehydrates from the journal (§7.5).
             clock.sleep(Duration::from_secs(5)).await;
         }
-        let second = s.prompt(Turn::new(TurnId::new("t-2"), "two")).await.expect("call").expect("run");
+        let second = s
+            .prompt(Turn::new(TurnId::new("t-2"), "two"))
+            .await
+            .expect("call")
+            .expect("run");
         assert_eq!(second.text(), "done");
         let records = tail_records(&s).await;
         clock.sleep(Duration::from_secs(5)).await;
@@ -111,7 +122,10 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
         .filter_map(|e| e.as_app::<GrainEvent>())
         .filter(|e| matches!(e, GrainEvent::Activated { .. }))
         .count();
-    assert!(activations >= 2, "the session hibernated and reactivated, got {activations} activations");
+    assert!(
+        activations >= 2,
+        "the session hibernated and reactivated, got {activations} activations"
+    );
 
     // A resume emits no second RunStarted (§10.4): one per turn, two total.
     let starts = events
@@ -125,11 +139,15 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
     // the fresh sandbox cannot match the workspace the journal asserts (§5.5),
     // the one mandated divergence from the control.
     assert!(
-        resumed.iter().any(|r| matches!(r.body, RecordBody::WorkspaceReset)),
+        resumed
+            .iter()
+            .any(|r| matches!(r.body, RecordBody::WorkspaceReset)),
         "the resume surfaces the lost workspace (§5.5)"
     );
     assert!(
-        !control.iter().any(|r| matches!(r.body, RecordBody::WorkspaceReset)),
+        !control
+            .iter()
+            .any(|r| matches!(r.body, RecordBody::WorkspaceReset)),
         "the uninterrupted control never resets"
     );
 
@@ -143,5 +161,9 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
             .filter(|b| !matches!(b, RecordBody::WorkspaceReset))
             .collect()
     };
-    assert_eq!(strip(resumed), strip(control), "fold-equivalence after resume (H1)");
+    assert_eq!(
+        strip(resumed),
+        strip(control),
+        "fold-equivalence after resume (H1)"
+    );
 }

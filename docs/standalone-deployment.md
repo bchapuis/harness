@@ -12,18 +12,19 @@ machines with two flags ("Across machines").
 ```
  terminal 1            terminal 2            terminal 3
  ┌────────────────┐    ┌────────────────┐    ┌────────────────┐
- │ node 1         │    │ node 2         │    │ node 3         │
+ │ node 1 (silo)  │    │ node 2 (silo)  │    │ node 3 (silo)  │
  │ transport :7401│◄──►│ transport :7402│◄──►│ transport :7403│
- │ control   :7501│    │ control   :7502│    │ control   :7503│
  │ --data node1/  │    │ --data node2/  │    │ --data node3/  │
  └───────┬────────┘    └────────────────┘    └────────────────┘
          │   each node its own --data; the journal replicates
-         │   over the transport links above (a quorum per grain)
- terminal 4                                api.anthropic.com
- ┌───────┴────────┐                        ▲ (one HTTPS call
- │ repl           │                        │  per model step,
- │ → control 7501 │                        │  from any node)
- └────────────────┘
+         │   over the transport links above (a quorum per grain).
+         │   Nodes host grains and vote in Raft; no client listener.
+ terminal 4 (joins the transport as a non-voting client)
+ ┌────────────────────┐                    api.anthropic.com
+ │ harness-gateway     │                   ▲ (one HTTPS call
+ │ HTTP :8080 ─► grains│                   │  per model step,
+ │ transport :7500     │                   │  from the owning node)
+ └────────────────────┘
 ```
 
 Each `node` process is a full cluster member: a TCP transport on loopback, a
@@ -43,8 +44,9 @@ and one node's harness — host actor, session actors, and the three seams:
   `--data/workspaces`, where the `shell` tool runs.
 
 Sessions are placed by rendezvous hashing over the members every node
-currently considers serving. Any node accepts any request and routes it to
-the session's owner, so the REPL can attach anywhere.
+currently considers serving. The gateway holds a `GrainRef` per session and the
+transport routes each `ask` to the session's current owner, so the gateway
+addresses any session regardless of which node hosts it.
 
 Two agent kinds are registered on every node:
 
@@ -89,16 +91,18 @@ export ANTHROPIC_API_KEY=sk-ant-…
 docker pull python:3.12-slim   # once; the first shell call would otherwise eat its timeout
 
 # terminal 1
-harness-standalone node --id 1 --data ./harness-data/node1 --sandbox docker --sandbox-image python:3.12-slim
+harness-standalone node --id 1 --data ./harness-data/node1 --client 100=127.0.0.1 --sandbox docker --sandbox-image python:3.12-slim
 # terminal 2
-harness-standalone node --id 2 --data ./harness-data/node2 --sandbox docker --sandbox-image python:3.12-slim
+harness-standalone node --id 2 --data ./harness-data/node2 --client 100=127.0.0.1 --sandbox docker --sandbox-image python:3.12-slim
 # terminal 3
-harness-standalone node --id 3 --data ./harness-data/node3 --sandbox docker --sandbox-image python:3.12-slim
+harness-standalone node --id 3 --data ./harness-data/node3 --client 100=127.0.0.1 --sandbox docker --sandbox-image python:3.12-slim
 ```
 
 On one host the nodes find each other on loopback (the default). Nothing is
 shared between the three directories; the journal replicates over the
-transport.
+transport. `--client 100=127.0.0.1` admits the gateway (node id 100, outside the
+`1..=3` voter roster) as a non-voting member, so it can join and route through
+the receptionist gossip.
 
 ### Across machines
 
@@ -137,64 +141,67 @@ Each node logs its bootstrap and then the cluster's life on stderr:
 
 ```
 [node-2] transport 127.0.0.1:7402, data ./harness-data, model claude-sonnet-4-6
-[node-2] all 3 hosts discovered
-[node-2] control listening on 127.0.0.1:7502 — attach with: harness-standalone repl 127.0.0.1:7502
+[node-2] cluster ready (leader elected)
+[node-2] hosting grains; the public edge is harness-gateway (a cluster client). No client-facing listener on this node.
 ```
 
-A node holds its control port closed until it has discovered every peer's
-host, so the first prompt of a fresh cluster does not race membership
-convergence.
+## Start the gateway
+
+The gateway is the public edge. It joins the same cluster as a non-voting
+client (node id 100, the one the nodes admitted with `--client`) and serves
+HTTP/SSE on `127.0.0.1:8080`:
+
+```sh
+# terminal 4  (build with `cargo build -p harness-gateway`, or `cargo run -p harness-gateway --`)
+harness-gateway --bind 127.0.0.1:8080 --node-id 100 --nodes 3
+```
+
+It logs `joined the cluster (client of nodes 1..=3)` once it discovers a host
+gateway through the receptionist gossip. With no `--auth-tokens`, the bearer
+token is taken as the tenant, unverified — loopback dev mode.
 
 ## Talk to it
 
-Attach a REPL to **any** node's control port (placement decides who actually
-hosts the session, not the entry point):
+Drive sessions over the gateway's HTTP API. The bearer token names the tenant;
+every session is scoped under it. Stream a turn as Server-Sent Events:
 
 ```sh
-harness-standalone repl 127.0.0.1:7501
+curl -N -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
+  -H 'Authorization: Bearer alice' -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -d '{"turn":"t-1","content":"Create a file named numbers.txt that holds 1..10, then tell me their sum."}'
 ```
 
-A plain line submits a turn to the current session (`assistant/demo` by
-default); `:`-commands do the rest:
-
 ```
-assistant/demo> Create a file named numbers.txt that holds 1..10, then tell me their sum.
-· submitted t-1 (waiting for the run; :retry re-attaches after a failure)
-I created numbers.txt with the numbers 1 through 10, one per line. Their sum is 55.
-· t-1 done, 1843 tokens
-assistant/demo> :tail
-@1 session created, kind assistant
-@2 turn t-1 submitted: Create a file named numbers.txt that holds 1..10, then tell me their sum.
-@3 model (792 tokens): I'll create the file and compute the sum. [calls: shell]
-@4 tool tu_01 ok: {"exit_code":0,"stderr":"","stdout":"55\n"}
-@5 model (1051 tokens): I created numbers.txt with the numbers 1 through 10…
-@6 run t-1 ended ok (1843 tokens)
+event: records   {"… one committed record per batch …"}
+event: outcome   {"Ok":{"content":"…Their sum is 55.","tokens":1843}}
 ```
 
-The `:tail` output *is* the session: every record above is a line in
-`./harness-data/journal/<session>/`, and folding them back is how any node
-reconstructs the session — there is no other session state.
+Drop the `Accept: text/event-stream` header to block and get the final outcome
+as JSON (`{"outcome":{"Ok":{…}}}`). The endpoints:
 
-Useful commands:
+| method + path                                   | effect |
+|-------------------------------------------------|--------|
+| `POST /v1/{kind}/{session}/prompt`              | submit a turn (`{"turn","content","within_secs"}`); SSE with `Accept: text/event-stream` |
+| `GET  /v1/{kind}/{session}/records?from=&limit=`| read a page of the journal |
+| `GET  /v1/{kind}/{session}/stream?turn=&from=`  | observe a run live (SSE) |
+| `POST /v1/{kind}/{session}/cancel?turn=`        | cancel a run (idempotent) |
+| `GET  /v1/sessions?kind=`                       | this tenant's sessions |
 
-| command         | effect |
-|-----------------|--------|
-| `<text>`        | submit the text as the session's next turn |
-| `:retry`        | re-submit the **same** turn id — re-attach after a failure |
-| `:cancel`       | cancel the last submitted turn (idempotent) |
-| `:tail`         | print the session's journal |
-| `:session <id>` | switch session; it is created on its first turn |
-| `:kind <name>`  | switch kind (`assistant` or `worker`) |
-| `:quit`         | leave — the cluster and its sessions keep running |
+Re-issuing the **same** `turn` id is the resume primitive: a completed run
+returns its recorded outcome, a live run re-attaches, never run twice (H7).
 
-Sessions are durable and named: `:session report-42` from any REPL, on any
-node, days later, resumes the same transcript (the REPL seeds its turn
-counter from the journal, so turn ids keep counting where they left off).
+The records *are* the session: each is a line in
+`./harness-data/grains/<shard>/<session>/`, and folding them back is how any
+node reconstructs the session — there is no other session state.
+
+Sessions are durable and named: prompt `demo` again days later (any gateway
+replica, any node) and it resumes the same transcript.
 
 Delegation works out of the box: ask the assistant to farm something out and
 it calls the `delegate` tool; the child runs as its own session of the
 `worker` kind — possibly on a different node — with a budget carved from the
-parent's, and `:tail` shows the `delegated to …` record.
+parent's, and the records show the `delegated to …` entry.
 
 ## The failure drill
 
@@ -209,14 +216,18 @@ that was running it.
 4. Watch the survivors: within a few seconds (SWIM defaults: 1s probes, 3s
    suspicion) they log `Suspected { … }` then `Unreachable { … }`, and
    placement stops routing to the dead node.
-5. If your REPL was attached to the killed node, re-attach to a survivor:
-   `harness-standalone repl 127.0.0.1:7502`.
-6. `:retry` — the same turn id is re-submitted. The new owner recovers the
-   grain's head from a quorum, folds the journal, resumes the run from its last
-   committed record, and the
-   outcome comes back as if nothing happened. A tool call that was in flight
-   when the node died is resolved per its declared policy (the `shell` tool
-   interrupts: the model is told and decides whether to re-run it).
+5. Re-issue the **same** prompt through the gateway (same `turn` id) — its
+   `GrainRef` re-resolves to a live owner automatically:
+   ```sh
+   curl -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
+     -H 'Authorization: Bearer alice' -H 'Content-Type: application/json' \
+     -d '{"turn":"t-1","content":"…the same turn…"}'
+   ```
+6. The new owner recovers the grain's head from a quorum, folds the journal,
+   resumes the run from its last committed record, and the outcome comes back as
+   if nothing happened. A tool call that was in flight when the node died is
+   resolved per its declared policy (the `shell` tool interrupts: the model is
+   told and decides whether to re-run it).
 7. Restart the node (the same `node --id N …` command, same flags — the
    sandbox mode shapes the kind digest existing sessions have pinned):
    survivors log `Reachable`, and new sessions place onto it again.
@@ -231,7 +242,7 @@ recorded outcome, a live run is re-attached, never run twice (invariant H7).
 
 ```
 harness-standalone node --id <n> [options]
-harness-standalone repl [host:port]        # default 127.0.0.1:7501
+harness-gateway [options]                  # the public HTTP edge
 ```
 
 | flag             | default                     | notes |
@@ -239,10 +250,10 @@ harness-standalone repl [host:port]        # default 127.0.0.1:7501
 | `--id <n>`       | required                    | 1..=`--nodes` |
 | `--nodes <n>`    | `3`                         | roster size; agree everywhere |
 | `--data <dir>`   | `./harness-data`            | this node's own journal + workspaces |
-| `--bind-host <addr>` | `127.0.0.1`             | interface the ports bind; `0.0.0.0` in a container |
+| `--bind-host <addr>` | `127.0.0.1`             | interface the transport binds; `0.0.0.0` in a container |
 | `--peer <id>=<host>` | all `127.0.0.1`         | each node's reachable host; repeat for the roster |
-| `--port-base <p>`| `7401`                      | node *i*'s transport = p+i−1 |
-| `--control-base <p>` | `7501`                  | node *i*'s control = p+i−1 |
+| `--client <id>=<host>` | —                     | admit a non-voting cluster client (the gateway); id outside `1..=--nodes`. Repeatable |
+| `--port-base <p>`| `7401`                      | node/client *i*'s transport = p+i−1 |
 | `--model <id>`   | `claude-sonnet-4-6`         | agree everywhere (kind digests are pinned per session) |
 | `--secret <s>`   | `harness-standalone`        | cluster association secret |
 | `--api-url <url>`| `https://api.anthropic.com` | `http://…` points at a fake for offline testing |
@@ -258,9 +269,16 @@ Environment: `ANTHROPIC_API_KEY` (required by `node`).
 Every flag marked "agree everywhere" is deployment configuration in the
 spec's sense (§7.1): all nodes must be started with the same values.
 
+The **gateway** (`harness-gateway`) takes: `--bind <host:port>` (public HTTP,
+default `127.0.0.1:8080`), `--secret` / `--node-id` / `--nodes` / `--peer` /
+`--port-base` (the transport join, mirroring the nodes; `--node-id` must be
+outside `1..=--nodes` and admitted by the nodes' `--client`),
+`--advertise-host` (the host the nodes dial it back at), and `--auth-tokens`
+(a tenants file; without it the bearer token is the tenant, loopback only).
+
 `crates/harness-standalone/smoke.sh` scripts the whole walkthrough — three
-nodes against a canned fake API, prompt, tail, kill, resume — and needs no
-API key.
+nodes plus the gateway against a canned fake API, prompt, records, kill, resume
+over HTTP — and needs no API key.
 
 ## How it maps to the spec
 
@@ -268,7 +286,7 @@ API key.
 |---|---|
 | `--data/grains`, a quorum append per grain fenced by the shard term | the fenced, per-session journal (§6.1–§6.2, §7.2); the journal **is** the session (§2.1) |
 | killing a node, `:retry` | caller-driven resumption (§7.5), idempotent turns (H7) |
-| any control port accepts any session | placement is routing, not a lease (utilities spec §2.3); exclusivity lives in the fence |
+| the gateway's `GrainRef` reaches any session | placement is routing, not a lease (utilities spec §2.3); exclusivity lives in the fence |
 | `--data/workspaces/<session>` | the sandbox seam (§5.3); working state, not session state (§5.5) |
 | `assistant` → `delegate` → `worker` | delegation with budget carve-outs (§8, §9.1) |
 | stderr `RunStarted`/`SessionActivated`/… | the observability stream (§10.4) |

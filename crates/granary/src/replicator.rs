@@ -76,9 +76,14 @@ impl LocalReplicator {
     ) -> AppendOutcome {
         // A single writer at term 0 is never fenced or stale (its fence stays 0 and
         // `after` always equals the head behind the input gate, §6).
-        match self.store.store_record(self.shard, grain, after, 0, events, false) {
+        match self
+            .store
+            .store_record(self.shard, grain, after, 0, events, false)
+        {
             StoreAck::Stored(head) => AppendOutcome::Committed(head),
-            other => AppendOutcome::Unavailable(format!("local store rejected the append: {other:?}")),
+            other => {
+                AppendOutcome::Unavailable(format!("local store rejected the append: {other:?}"))
+            }
         }
     }
 
@@ -103,7 +108,9 @@ impl LocalReplicator {
     ) -> AppendOutcome {
         match self.store.store_snapshot(self.shard, grain, at, 0, state) {
             StoreAck::Stored(seq) => AppendOutcome::Committed(seq),
-            other => AppendOutcome::Unavailable(format!("local store rejected the snapshot: {other:?}")),
+            other => {
+                AppendOutcome::Unavailable(format!("local store rejected the snapshot: {other:?}"))
+            }
         }
     }
 
@@ -163,7 +170,10 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// The replica nodes other than this one (the leader writes its own store
     /// locally, §5.2).
     fn peers(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.replicas.iter().copied().filter(|&n| n != self.self_node)
+        self.replicas
+            .iter()
+            .copied()
+            .filter(|&n| n != self.self_node)
     }
 
     /// Per-grain quorum append (spec §7.2): stamp the shard term, write the local
@@ -204,7 +214,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 )
             })
             .collect();
-        let local = self.local.store_record(self.shard, grain, after, term, events, false);
+        let local = self
+            .local
+            .store_record(self.shard, grain, after, term, events, false);
         let (outcome, pending) = self.collect_store_quorum(local, peers).await;
         if matches!(outcome, QuorumOutcome::Committed) {
             // Committed on a quorum: return now and drain the slower replicas off the
@@ -225,9 +237,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             QuorumOutcome::Fenced => self.not_leader(),
             // A stale head: an up-to-date replica rejected the append (§8). Step down
             // (ambiguous) and re-recover from a quorum on the next activation.
-            QuorumOutcome::Stale => {
-                AppendOutcome::Unavailable("stale head; reactivating".into())
-            }
+            QuorumOutcome::Stale => AppendOutcome::Unavailable("stale head; reactivating".into()),
             QuorumOutcome::Unavailable => {
                 AppendOutcome::Unavailable("append did not reach a write quorum".into())
             }
@@ -252,7 +262,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // `RECOVER_TIMEOUT`, so an unreachable peer just falls out of the quorum.
         let local = self.local.prepare(self.shard, grain, term);
         let ReadOutcome::Prepared(local_reply) = local else {
-            return Err(GrainJournalError::Unavailable("fenced by a higher term".into()));
+            return Err(GrainJournalError::Unavailable(
+                "fenced by a higher term".into(),
+            ));
         };
         let peer_reads = self.peers().map(|node| {
             self.transport
@@ -268,7 +280,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 Ok(ReadOutcome::Prepared(reply)) => replies.push(reply),
                 // A peer promised a higher term: we are deposed, do not serve.
                 Ok(ReadOutcome::Fenced(_)) => {
-                    return Err(GrainJournalError::Unavailable("fenced by a higher term".into()));
+                    return Err(GrainJournalError::Unavailable(
+                        "fenced by a higher term".into(),
+                    ));
                 }
                 Err(_) => {}
             }
@@ -322,7 +336,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 match outcome {
                     QuorumOutcome::Committed => self.drain_in_background(pending),
                     QuorumOutcome::Fenced => {
-                        return Err(GrainJournalError::Unavailable("fenced by a higher term".into()));
+                        return Err(GrainJournalError::Unavailable(
+                            "fenced by a higher term".into(),
+                        ));
                     }
                     QuorumOutcome::Stale | QuorumOutcome::Unavailable => {
                         return Err(GrainJournalError::Unavailable(
@@ -382,7 +398,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 )
             })
             .collect();
-        let local = self.local.store_snapshot(self.shard, grain, at, term, state);
+        let local = self
+            .local
+            .store_snapshot(self.shard, grain, at, term, state);
         let (outcome, pending) = self.collect_store_quorum(local, peers).await;
         match outcome {
             QuorumOutcome::Committed => {
@@ -456,9 +474,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         if pending.is_empty() {
             return;
         }
-        self.transport.launch(Box::pin(async move {
-            while pending.next().await.is_some() {}
-        }));
+        self.transport.launch(Box::pin(
+            async move { while pending.next().await.is_some() {} },
+        ));
     }
 }
 

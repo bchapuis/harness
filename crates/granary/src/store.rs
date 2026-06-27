@@ -128,7 +128,13 @@ pub trait GrainStore: Send + Sync + 'static {
     /// grain's tail on replay costs `O(limit)`, not `O(grain size)`: only the
     /// returned window's bytes are cloned. Records the snapshot already subsumes
     /// (`Seq <= base`) are absent, as in [`read`](GrainStore::read).
-    fn read_from(&self, shard: u32, grain: &GrainName, from: Seq, limit: usize) -> Vec<(Seq, Vec<u8>)>;
+    fn read_from(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        from: Seq,
+        limit: usize,
+    ) -> Vec<(Seq, Vec<u8>)>;
 
     /// A **fenced** read for recovery (§8): promise not to accept a shard term below
     /// `term` (so a deposed leader cannot commit on this replica once a new leader
@@ -235,8 +241,13 @@ impl GrainRecords {
             .iter()
             .enumerate()
             .filter_map(|(i, slot)| {
-                slot.as_ref()
-                    .map(|s| (Seq::new(self.base.value() + i as u64 + 1), s.term, s.bytes.clone()))
+                slot.as_ref().map(|s| {
+                    (
+                        Seq::new(self.base.value() + i as u64 + 1),
+                        s.term,
+                        s.bytes.clone(),
+                    )
+                })
             })
             .collect()
     }
@@ -270,7 +281,13 @@ impl GrainRecords {
 
     /// Apply a fenced record store (the fence is checked by the caller). Mirrors the
     /// idempotent-per-slot and optimistic-head-check semantics of §7.2/§8.
-    pub(crate) fn store_record(&mut self, after: Seq, term: u64, records: Vec<Vec<u8>>, repair: bool) -> StoreAck {
+    pub(crate) fn store_record(
+        &mut self,
+        after: Seq,
+        term: u64,
+        records: Vec<Vec<u8>>,
+        repair: bool,
+    ) -> StoreAck {
         let base = self.base.value();
         // Optimistic head check (§8): a normal append whose first target slot already
         // holds a *different* record means the leader's head is stale — reject so it
@@ -282,7 +299,8 @@ impl GrainRecords {
                 return StoreAck::Stale(self.head());
             }
             let first_local = (after.value() - base) as usize;
-            if let (Some(Some(existing)), Some(incoming)) = (self.slots.get(first_local), records.first())
+            if let (Some(Some(existing)), Some(incoming)) =
+                (self.slots.get(first_local), records.first())
                 && &existing.bytes != incoming
             {
                 return StoreAck::Stale(self.head());
@@ -313,7 +331,12 @@ impl GrainRecords {
     /// Apply a fenced snapshot store (§9). Returns the ack and whether the snapshot
     /// **advanced the base** — i.e. just compacted records — so a file store knows to
     /// rewrite the grain's segment.
-    pub(crate) fn store_snapshot(&mut self, at: Seq, term: u64, state: Vec<u8>) -> (StoreAck, bool) {
+    pub(crate) fn store_snapshot(
+        &mut self,
+        at: Seq,
+        term: u64,
+        state: Vec<u8>,
+    ) -> (StoreAck, bool) {
         // A snapshot only ever advances (§9, G4). When it does it subsumes every
         // record up to `at`, so compact them: advance the base and drop the covered
         // slots (records past `at`, if any, shift down behind the new base). This is
@@ -371,7 +394,11 @@ impl MemoryGrainStore {
 
     /// The segment for `(shard, grain)`, creating an empty one if absent.
     fn segment(&self, shard: u32, grain: &GrainName) -> Segment {
-        let mut segments = self.inner.segments.lock().expect("grain store segments poisoned");
+        let mut segments = self
+            .inner
+            .segments
+            .lock()
+            .expect("grain store segments poisoned");
         Arc::clone(
             segments
                 .entry((shard, grain.clone()))
@@ -382,7 +409,11 @@ impl MemoryGrainStore {
     /// The segment for `(shard, grain)` if it exists — no allocation for a grain
     /// this store has never seen (the read path).
     fn existing(&self, shard: u32, grain: &GrainName) -> Option<Segment> {
-        let segments = self.inner.segments.lock().expect("grain store segments poisoned");
+        let segments = self
+            .inner
+            .segments
+            .lock()
+            .expect("grain store segments poisoned");
         segments.get(&(shard, grain.clone())).map(Arc::clone)
     }
 
@@ -390,7 +421,11 @@ impl MemoryGrainStore {
     /// blocking fence on refusal. Taken *inside* a held segment lock, so it is a
     /// short leaf critical section.
     fn check_and_bump_fence(&self, shard: u32, term: u64) -> Result<(), u64> {
-        let mut fences = self.inner.fences.lock().expect("grain store fences poisoned");
+        let mut fences = self
+            .inner
+            .fences
+            .lock()
+            .expect("grain store fences poisoned");
         let fence = *fences.get(&shard).unwrap_or(&0);
         if term < fence {
             return Err(fence);
@@ -434,9 +469,18 @@ impl GrainStore for MemoryGrainStore {
         }
     }
 
-    fn read_from(&self, shard: u32, grain: &GrainName, from: Seq, limit: usize) -> Vec<(Seq, Vec<u8>)> {
+    fn read_from(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        from: Seq,
+        limit: usize,
+    ) -> Vec<(Seq, Vec<u8>)> {
         match self.existing(shard, grain) {
-            Some(segment) => segment.lock().expect("grain segment poisoned").read_from(from, limit),
+            Some(segment) => segment
+                .lock()
+                .expect("grain segment poisoned")
+                .read_from(from, limit),
             None => Vec::new(),
         }
     }
@@ -470,7 +514,10 @@ impl GrainStore for MemoryGrainStore {
 
     fn truncate(&self, shard: u32, grain: &GrainName, after: Seq) {
         if let Some(segment) = self.existing(shard, grain) {
-            segment.lock().expect("grain segment poisoned").truncate(after);
+            segment
+                .lock()
+                .expect("grain segment poisoned")
+                .truncate(after);
         }
     }
 }
@@ -488,13 +535,23 @@ mod tests {
         let store = MemoryGrainStore::new();
         let n = name("a");
         assert_eq!(
-            store.store_record(0, &n, Seq::ZERO, 1, vec![b"e1".to_vec(), b"e2".to_vec()], false),
+            store.store_record(
+                0,
+                &n,
+                Seq::ZERO,
+                1,
+                vec![b"e1".to_vec(), b"e2".to_vec()],
+                false
+            ),
             StoreAck::Stored(Seq::new(2))
         );
         let reply = store.read(0, &n);
         assert_eq!(
             reply.slots,
-            vec![(Seq::new(1), 1, b"e1".to_vec()), (Seq::new(2), 1, b"e2".to_vec())]
+            vec![
+                (Seq::new(1), 1, b"e1".to_vec()),
+                (Seq::new(2), 1, b"e2".to_vec())
+            ]
         );
     }
 
@@ -502,7 +559,14 @@ mod tests {
     fn read_from_is_exclusive_of_from_and_bounded_by_limit() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        store.store_record(0, &n, Seq::ZERO, 1, vec![b"e1".to_vec(), b"e2".to_vec(), b"e3".to_vec()], false);
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            1,
+            vec![b"e1".to_vec(), b"e2".to_vec(), b"e3".to_vec()],
+            false,
+        );
         assert_eq!(
             store.read_from(0, &n, Seq::ZERO, 10),
             vec![
@@ -512,11 +576,17 @@ mod tests {
             ]
         );
         // Exclusive of `from`, bounded by `limit`.
-        assert_eq!(store.read_from(0, &n, Seq::new(1), 1), vec![(Seq::new(2), b"e2".to_vec())]);
+        assert_eq!(
+            store.read_from(0, &n, Seq::new(1), 1),
+            vec![(Seq::new(2), b"e2".to_vec())]
+        );
         assert_eq!(store.read_from(0, &n, Seq::new(3), 10), Vec::new());
         // A read past a compacted base returns the live tail only.
         store.store_snapshot(0, &n, Seq::new(2), 1, b"snap@2".to_vec());
-        assert_eq!(store.read_from(0, &n, Seq::ZERO, 10), vec![(Seq::new(3), b"e3".to_vec())]);
+        assert_eq!(
+            store.read_from(0, &n, Seq::ZERO, 10),
+            vec![(Seq::new(3), b"e3".to_vec())]
+        );
     }
 
     #[test]
@@ -536,7 +606,10 @@ mod tests {
         let store = MemoryGrainStore::new();
         // A prepare on grain `a` at term 5 promises the whole shard not to accept a
         // lower term; a write to grain `b` in the same shard at term 4 is then fenced.
-        assert!(matches!(store.prepare(0, &name("a"), 5), ReadOutcome::Prepared(_)));
+        assert!(matches!(
+            store.prepare(0, &name("a"), 5),
+            ReadOutcome::Prepared(_)
+        ));
         assert_eq!(
             store.store_record(0, &name("b"), Seq::ZERO, 4, vec![b"stale".to_vec()], false),
             StoreAck::Fenced(5)
@@ -559,17 +632,30 @@ mod tests {
             store.store_record(0, &n, Seq::ZERO, 3, vec![b"other".to_vec()], false),
             StoreAck::Stale(Seq::new(1))
         );
-        assert_eq!(store.read(0, &n).slots, vec![(Seq::new(1), 1, b"e1".to_vec())]);
+        assert_eq!(
+            store.read(0, &n).slots,
+            vec![(Seq::new(1), 1, b"e1".to_vec())]
+        );
         // A recovery write-back (repair) read-repairs the slot to the higher term.
         store.store_record(0, &n, Seq::ZERO, 3, vec![b"repaired".to_vec()], true);
-        assert_eq!(store.read(0, &n).slots, vec![(Seq::new(1), 3, b"repaired".to_vec())]);
+        assert_eq!(
+            store.read(0, &n).slots,
+            vec![(Seq::new(1), 3, b"repaired".to_vec())]
+        );
     }
 
     #[test]
     fn contiguous_head_stops_at_the_first_gap() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        store.store_record(0, &n, Seq::ZERO, 1, vec![b"e1".to_vec(), b"e2".to_vec()], false);
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            1,
+            vec![b"e1".to_vec(), b"e2".to_vec()],
+            false,
+        );
         // A write that skips a slot (an uncommitted tail) does not advance the head.
         assert_eq!(
             store.store_record(0, &n, Seq::new(3), 1, vec![b"e4".to_vec()], false),
@@ -638,6 +724,9 @@ mod tests {
             vec![b"e2".to_vec(), b"e3".to_vec(), b"e4".to_vec()],
             true,
         );
-        assert_eq!(store.read(0, &n).slots, vec![(Seq::new(4), 2, b"e4".to_vec())]);
+        assert_eq!(
+            store.read(0, &n).slots,
+            vec![(Seq::new(4), 2, b"e4".to_vec())]
+        );
     }
 }

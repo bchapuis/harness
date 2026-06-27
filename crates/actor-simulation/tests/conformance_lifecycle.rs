@@ -283,10 +283,10 @@ mod local_lifecycle {
     use actor_core::Ctx;
     use actor_core::Event;
     use actor_core::Handler;
+    use actor_core::LocalSystem;
     use actor_core::LocalSystemBuilder;
     use actor_core::Manifest;
     use actor_core::Message;
-    use actor_core::LocalSystem;
     use actor_simulation::Recorder;
     use actor_simulation::SimClock;
     use actor_simulation::SimEntropy;

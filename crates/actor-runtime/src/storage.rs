@@ -273,9 +273,7 @@ impl FileRaftWAL {
 
         // Drop the prefix the snapshot subsumes, then rewrite the log to what remains.
         // Mirrors `InMemoryRaftWAL`: a stale/duplicate index discards nothing.
-        let drop = index
-            .saturating_sub(base)
-            .min(inner.state.log.len() as u64) as usize;
+        let drop = index.saturating_sub(base).min(inner.state.log.len() as u64) as usize;
         inner.state.log.drain(..drop);
         inner.state.snapshot_index = index;
         inner.state.snapshot_term = term;
@@ -379,13 +377,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileRaftWAL::open(dir.path()).unwrap();
         storage.save_term_and_vote(3, Some(node(2)));
-        storage.append(
-            0,
-            &[
-                entry(1, EntryPayload::Noop),
-                entry(3, app(0, 4)),
-            ],
-        );
+        storage.append(0, &[entry(1, EntryPayload::Noop), entry(3, app(0, 4))]);
         drop(storage);
 
         let reopened = FileRaftWAL::open(dir.path()).unwrap();
@@ -394,10 +386,7 @@ mod tests {
         assert_eq!(state.voted_for, Some(node(2)));
         assert_eq!(
             state.log,
-            vec![
-                entry(1, EntryPayload::Noop),
-                entry(3, app(0, 4)),
-            ],
+            vec![entry(1, EntryPayload::Noop), entry(3, app(0, 4)),],
         );
     }
 
@@ -421,13 +410,7 @@ mod tests {
             ],
         );
         // Raft conflict resolution: overwrite from index 1 with a higher term.
-        storage.append(
-            1,
-            &[
-                entry(2, EntryPayload::Noop),
-                entry(2, app(4, 4)),
-            ],
-        );
+        storage.append(1, &[entry(2, EntryPayload::Noop), entry(2, app(4, 4))]);
         drop(storage);
 
         let reopened = FileRaftWAL::open(dir.path()).unwrap();
@@ -468,7 +451,11 @@ mod tests {
         // Only the retained suffix (indices 3, 4, 5) survives in the log.
         assert_eq!(
             state.log,
-            vec![entry(2, app(2, 9)), entry(2, app(3, 9)), entry(3, app(5, 9))],
+            vec![
+                entry(2, app(2, 9)),
+                entry(2, app(3, 9)),
+                entry(3, app(5, 9))
+            ],
         );
     }
 
@@ -476,13 +463,7 @@ mod tests {
     fn a_torn_tail_is_discarded_and_appends_continue() {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileRaftWAL::open(dir.path()).unwrap();
-        storage.append(
-            0,
-            &[
-                entry(1, EntryPayload::Noop),
-                entry(1, app(3, 9)),
-            ],
-        );
+        storage.append(0, &[entry(1, EntryPayload::Noop), entry(1, app(3, 9))]);
         drop(storage);
 
         // A torn write: garbage lands after the valid records (a record whose
@@ -495,10 +476,7 @@ mod tests {
         let reopened = FileRaftWAL::open(dir.path()).unwrap();
         assert_eq!(
             reopened.load().log,
-            vec![
-                entry(1, EntryPayload::Noop),
-                entry(1, app(3, 9))
-            ],
+            vec![entry(1, EntryPayload::Noop), entry(1, app(3, 9))],
             "the torn tail is not part of the log",
         );
         // The recovery truncated the garbage; appends land cleanly after it.
@@ -580,13 +558,7 @@ mod tests {
             Op::Save(2, None),
             Op::Save(2, Some(3)),
             // Conflict: overwrite index 1 onward at the new term.
-            Op::Append(
-                1,
-                vec![
-                    entry(2, EntryPayload::Noop),
-                    entry(2, app(1, 4)),
-                ],
-            ),
+            Op::Append(1, vec![entry(2, EntryPayload::Noop), entry(2, app(1, 4))]),
             Op::Append(3, vec![entry(2, app(2, 4))]),
             // Compact through index 2, then keep appending past the new base.
             Op::Snapshot(2, 2, b"snap@2".to_vec()),

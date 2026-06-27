@@ -125,7 +125,11 @@ mod tests {
     fn load_is_exclusive_of_from_and_bounded_by_limit() {
         let j = LocalGrainJournal::new();
         let n = name("a");
-        run(j.append(&n, Seq::ZERO, vec![b"e1".to_vec(), b"e2".to_vec(), b"e3".to_vec()]));
+        run(j.append(
+            &n,
+            Seq::ZERO,
+            vec![b"e1".to_vec(), b"e2".to_vec(), b"e3".to_vec()],
+        ));
         assert_eq!(
             run(j.load(&n, Seq::ZERO, 10)),
             Ok(vec![

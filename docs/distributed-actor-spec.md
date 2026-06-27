@@ -163,8 +163,8 @@ impl<A: Actor> ActorRef<A> {
     where A: Handler<M>, M: Message;
 
     /// Like `tell`, but a full local mailbox fails with `CallError::MailboxFull`
-    /// at once instead of awaiting space (§6).
-    pub async fn try_tell<M>(&self, msg: M) -> Result<(), CallError>
+    /// at once instead of awaiting space (§6). Synchronous: it never awaits.
+    pub fn try_tell<M>(&self, msg: M) -> Result<(), CallError>
     where A: Handler<M>, M: Message;
 
     /// Same as `ask` but with an explicit deadline overriding the system default.
@@ -211,8 +211,8 @@ For testing and local optimizations, a system MAY offer:
 
 ```rust
 impl<A: Actor> ActorRef<A> {
-    pub async fn when_local<F, R>(&self, f: F) -> Option<R>
-    where F: FnOnce(&mut A) -> R + Send;   // runs on the actor's executor iff local
+    pub async fn when_local<F, R>(&self, f: F) -> Option<R>   // runs on the actor's executor iff local
+    where F: FnOnce(&mut A) -> R + Send + 'static, R: Send + 'static;
 }
 ```
 
@@ -365,7 +365,8 @@ The runtime needs three capabilities from its environment: time, randomness, and
 
 ```rust
 /// Virtual or real time. No subsystem may read wall-clock time directly.
-pub trait Clock: Send + Sync + 'static {
+/// `Clone`: a clock value is a cheap handle, shared across the subsystems that hold one.
+pub trait Clock: Clone + Send + Sync + 'static {
     fn now(&self) -> Instant;
     async fn sleep(&self, dur: Duration);
     async fn timeout<F: Future>(&self, within: Duration, f: F) -> Result<F::Output, Elapsed>;
@@ -666,12 +667,15 @@ pub enum SupervisionDirective {
 
 /// What `Actor::supervision()` returns (§3.1.1): the actor's decider, mapping
 /// each fault kind to a directive.
-pub struct Supervision { /* decider: fn(Fault) -> SupervisionDirective */ }
+pub struct Supervision { /* decider: Arc<dyn Fn(Fault) -> SupervisionDirective + Send + Sync> */ }
 
 impl Supervision {
-    pub fn stop() -> Self;                                       // every fault → Stop (the default)
-    pub fn directive(d: SupervisionDirective) -> Self;           // every fault → d
-    pub fn decide(f: fn(Fault) -> SupervisionDirective) -> Self; // per-fault decision
+    pub fn stop() -> Self;                          // every fault → Stop (the default)
+    pub fn resume() -> Self;                        // every fault → Resume
+    pub fn restart(max: u32, within: Duration, backoff: Backoff) -> Self; // every fault → Restart{..}
+    pub fn with<F>(decider: F) -> Self              // per-fault decision (a closure, not just a fn ptr)
+        where F: Fn(Fault) -> SupervisionDirective + Send + Sync + 'static;
+    pub fn decide(&self, fault: Fault) -> SupervisionDirective; // evaluate the decider for a fault
 }
 ```
 
@@ -726,7 +730,7 @@ Remote watch works by sending a `Watch(id)` system message to the target's node;
 Actors are addressed by `ActorRef`, but a node needs a way to obtain the initial `ActorRef` for a remote service without hardcoding its `ActorId`. The **receptionist** is a well-known, cluster-replicated registry.
 
 ```rust
-pub struct Key<A: Actor> { id: &'static str, _marker: PhantomData<A> }
+pub struct Key<A> { id: &'static str, _marker: PhantomData<fn() -> A> }
 
 impl Receptionist {
     fn register<A: Actor>(&self, key: Key<A>, who: &ActorRef<A>);
