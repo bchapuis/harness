@@ -37,7 +37,6 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::task::JoinHandle;
 
-use granary::GrainName;
 use harness::Follower;
 use harness::GrainError;
 use harness::HarnessSystem;
@@ -45,13 +44,11 @@ use harness::Record;
 use harness::RecordBody;
 use harness::RunOutcome;
 use harness::Seq;
-use harness::SessionId;
 use harness::Turn;
 use harness::TurnId;
 
 use crate::Gateway;
 use crate::auth::PrincipalId;
-use crate::auth::scoped_session;
 use crate::auth::unscope_session;
 
 /// Build the router over the shared gateway state.
@@ -126,25 +123,10 @@ async fn prompt<S: HarnessSystem>(
         Ok(p) => p,
         Err(resp) => return resp,
     };
-    let scoped = scoped_session(&principal, &session);
-    // Record ownership before the run: idempotent, re-recorded on every prompt,
-    // so a transient index failure self-heals on the next turn (the session runs
-    // regardless — the index is best-effort). The grain key is the principal's id.
-    let recorded = gw
-        .directory()
-        .grain(principal.as_str())
-        .ask(tenancy::Record {
-            name: GrainName::new(kind.clone(), scoped.clone()),
-            meta: tenancy::Meta {
-                label: Some(session.clone()),
-                ..tenancy::Meta::default()
-            },
-        })
-        .await;
-    if let Err(e) = recorded {
-        eprintln!("[tenancy] record {kind}/{scoped} failed (will retry next turn): {e:?}");
-    }
-    let session_ref = gw.harness().session(&kind, SessionId::new(scoped));
+    // Record ownership before the run (best-effort and idempotent — see
+    // `Gateway::record_ownership`); the run proceeds regardless.
+    gw.record_ownership(&principal, &kind, &session).await;
+    let session_ref = gw.session(&principal, &kind, &session);
     if wants_sse(&headers) {
         return prompt_stream(session_ref, body, q.from);
     }
@@ -169,9 +151,7 @@ async fn records<S: HarnessSystem>(
         Ok(p) => p,
         Err(resp) => return resp,
     };
-    let session_ref = gw
-        .harness()
-        .session(&kind, SessionId::new(scoped_session(&principal, &session)));
+    let session_ref = gw.session(&principal, &kind, &session);
     match session_ref.tail(Seq::new(q.from), q.limit).await {
         Ok(records) => Json(json!({ "records": records })).into_response(),
         Err(e) => bad_gateway(format!("{e:?}")),
@@ -189,9 +169,7 @@ async fn cancel<S: HarnessSystem>(
         Ok(p) => p,
         Err(resp) => return resp,
     };
-    let session_ref = gw
-        .harness()
-        .session(&kind, SessionId::new(scoped_session(&principal, &session)));
+    let session_ref = gw.session(&principal, &kind, &session);
     match session_ref.cancel(&TurnId::new(q.turn)).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => bad_gateway(format!("{e:?}")),
@@ -243,16 +221,15 @@ async fn stream<S: HarnessSystem>(
         Ok(p) => p,
         Err(resp) => return resp,
     };
-    let session_ref = gw
-        .harness()
-        .session(&kind, SessionId::new(scoped_session(&principal, &session)));
+    let session_ref = gw.session(&principal, &kind, &session);
     let follower = session_ref.follow(Seq::new(q.from));
     let body = futures::stream::unfold(
-        Observe::Streaming {
+        SessionStream::Streaming {
             follower,
             turn: q.turn,
+            tail: Tail::End,
         },
-        next_observe,
+        next_event,
     );
     Sse::new(body)
         .keep_alive(KeepAlive::default())
@@ -277,88 +254,69 @@ fn prompt_stream<S: HarnessSystem>(
             .await
     });
     let body = futures::stream::unfold(
-        PromptStream::Streaming {
+        SessionStream::Streaming {
             follower,
             turn,
-            prompt,
+            tail: Tail::Outcome(prompt),
         },
-        next_prompt,
+        next_event,
     );
     Sse::new(body)
         .keep_alive(KeepAlive::default())
         .into_response()
 }
 
-/// The observe-only `stream`'s state: forward record batches until the turn ends,
-/// then a terminal `end` event.
-enum Observe<S: HarnessSystem> {
-    Streaming { follower: Follower<S>, turn: String },
+/// The terminal step after a [`SessionStream`]'s watched turn ends: the observe-only
+/// `stream` emits a payload-less `end`; the streaming `prompt` awaits its background
+/// task and emits the run's `outcome`. This tail is the *only* thing the two
+/// endpoints differ in — the record-forwarding half is shared.
+enum Tail {
     End,
-    Done,
+    Outcome(JoinHandle<Result<RunOutcome, GrainError>>),
 }
 
-async fn next_observe<S: HarnessSystem>(
-    state: Observe<S>,
-) -> Option<(Result<Event, Infallible>, Observe<S>)> {
-    match state {
-        Observe::Streaming { mut follower, turn } => match follower.next().await {
-            Ok(records) => {
-                let ended = ends_turn(&records, &turn);
-                let event = records_event(&records);
-                let next = if ended {
-                    Observe::End
-                } else {
-                    Observe::Streaming { follower, turn }
-                };
-                Some((Ok(event), next))
-            }
-            Err(e) => Some((Ok(error_event(e)), Observe::Done)),
-        },
-        Observe::End => Some((Ok(Event::default().event("end").data("")), Observe::Done)),
-        Observe::Done => None,
-    }
-}
-
-/// The streaming `prompt`'s state: forward record batches until the turn ends,
-/// then the terminal outcome from the prompt task.
-enum PromptStream<S: HarnessSystem> {
+/// A server-sent-event stream over a session's records: forward record batches off a
+/// [`Follower`] until the watched turn ends, then run the [`Tail`]. Both the observe
+/// (`stream`) and streaming-prompt (`prompt_stream`) endpoints are this one machine.
+enum SessionStream<S: HarnessSystem> {
     Streaming {
         follower: Follower<S>,
         turn: String,
-        prompt: JoinHandle<Result<RunOutcome, GrainError>>,
+        tail: Tail,
     },
-    Outcome {
-        prompt: JoinHandle<Result<RunOutcome, GrainError>>,
-    },
+    Terminal(Tail),
     Done,
 }
 
-async fn next_prompt<S: HarnessSystem>(
-    state: PromptStream<S>,
-) -> Option<(Result<Event, Infallible>, PromptStream<S>)> {
+async fn next_event<S: HarnessSystem>(
+    state: SessionStream<S>,
+) -> Option<(Result<Event, Infallible>, SessionStream<S>)> {
     match state {
-        PromptStream::Streaming {
+        SessionStream::Streaming {
             mut follower,
             turn,
-            prompt,
+            tail,
         } => match follower.next().await {
             Ok(records) => {
-                let ended = ends_turn(&records, &turn);
                 let event = records_event(&records);
-                let next = if ended {
-                    PromptStream::Outcome { prompt }
+                let next = if ends_turn(&records, &turn) {
+                    SessionStream::Terminal(tail)
                 } else {
-                    PromptStream::Streaming {
+                    SessionStream::Streaming {
                         follower,
                         turn,
-                        prompt,
+                        tail,
                     }
                 };
                 Some((Ok(event), next))
             }
-            Err(e) => Some((Ok(error_event(e)), PromptStream::Done)),
+            Err(e) => Some((Ok(error_event(e)), SessionStream::Done)),
         },
-        PromptStream::Outcome { prompt } => {
+        SessionStream::Terminal(Tail::End) => Some((
+            Ok(Event::default().event("end").data("")),
+            SessionStream::Done,
+        )),
+        SessionStream::Terminal(Tail::Outcome(prompt)) => {
             let event = match prompt.await {
                 Ok(Ok(outcome)) => Event::default()
                     .event("outcome")
@@ -368,9 +326,9 @@ async fn next_prompt<S: HarnessSystem>(
                     .event("error")
                     .data(format!("prompt task failed: {e}")),
             };
-            Some((Ok(event), PromptStream::Done))
+            Some((Ok(event), SessionStream::Done))
         }
-        PromptStream::Done => None,
+        SessionStream::Done => None,
     }
 }
 

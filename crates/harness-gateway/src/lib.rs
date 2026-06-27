@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use granary::Grain;
+use granary::GrainName;
 use granary::Granary;
 use granary::GranaryExt;
 use harness::GranaryConfig;
@@ -36,10 +37,13 @@ use harness::Harness;
 use harness::HarnessSystem;
 use harness::Kind;
 use harness::Kinds;
+use harness::SessionId;
+use harness::SessionRef;
 use tenancy::Directory;
 
 use crate::auth::PrincipalId;
 use crate::auth::TokenVerifier;
+use crate::auth::scoped_session;
 
 /// The kinds the gateway addresses. They MUST name the same kinds with the same
 /// `GranaryConfig.shards` the nodes host (so a session name hashes to the same
@@ -91,6 +95,39 @@ impl<S: HarnessSystem> Gateway<S> {
     /// The client handle to the tenancy ownership index (one grain per principal).
     pub fn directory(&self) -> &Granary<Directory<S>> {
         &self.directory
+    }
+
+    /// The session grain for `(principal, kind, session)`: the caller's session key
+    /// scoped under its principal for tenant isolation, resolved to a routing
+    /// `SessionRef`. The principal-scoping of a session name is the gateway's
+    /// secret — a handler addresses a session by the tenant-facing triple and never
+    /// mints a scoped id itself.
+    pub fn session(&self, principal: &PrincipalId, kind: &str, session: &str) -> SessionRef<S> {
+        self.harness
+            .session(kind, SessionId::new(scoped_session(principal, session)))
+    }
+
+    /// Record the tenant's ownership of a session in the directory index, keyed by
+    /// the principal. Best-effort and idempotent: re-recorded on every prompt, so a
+    /// transient index failure self-heals next turn; the run proceeds regardless, so
+    /// the failure is logged, not returned. Owns the directory entry's `GrainName`
+    /// shape — `(kind, scoped session)` — so no handler re-derives it.
+    pub async fn record_ownership(&self, principal: &PrincipalId, kind: &str, session: &str) {
+        let scoped = scoped_session(principal, session);
+        let recorded = self
+            .directory
+            .grain(principal.as_str())
+            .ask(tenancy::Record {
+                name: GrainName::new(kind.to_string(), scoped.clone()),
+                meta: tenancy::Meta {
+                    label: Some(session.to_string()),
+                    ..tenancy::Meta::default()
+                },
+            })
+            .await;
+        if let Err(e) = recorded {
+            eprintln!("[tenancy] record {kind}/{scoped} failed (will retry next turn): {e:?}");
+        }
     }
 }
 
