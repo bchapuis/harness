@@ -30,6 +30,10 @@ wal = { path = "crates/wal", version = "0.1.0" }
 # Granary: durable objects ("grains") built on the actor framework (granary spec).
 granary = { path = "crates/granary", version = "0.1.0" }
 
+# Blob store: a namespaced, content-addressed object store on the actor framework,
+# beside granary (blob-store spec).
+blob-store = { path = "crates/blob-store", version = "0.1.0" }
+
 # Tenancy: an ownership-index grain layered on granary, so principals own and
 # enumerate their grains without granary itself becoming tenant-aware.
 tenancy = { path = "crates/tenancy", version = "0.1.0" }
@@ -51,6 +55,10 @@ postcard = { version = "1", features = ["use-std"] }
 erased-serde = "0.4"
 futures = "0.3"
 async-channel = "2"
+# Content-addressed blob ids (blob-store spec §2): BLAKE3 hashes faster than
+# SHA-256 (SIMD) — every `get` re-hashes to verify — and is internally a Merkle
+# tree whose root is the id, the structure range-verified streaming will reuse.
+blake3 = "1"
 rand = "0.8"
 rand_chacha = "0.3"
 

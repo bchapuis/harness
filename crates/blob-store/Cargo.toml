@@ -1,0 +1,30 @@
+[package]
+name = "blob-store"
+description = "A namespaced, content-addressed object store on the actor framework: immutable blobs addressed by their BLAKE3 hash within a consumer-chosen namespace (blob-store spec)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-serialization.workspace = true
+wal.workspace = true
+serde = { workspace = true }
+futures.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-simulation.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+futures.workspace = true
+tempfile.workspace = true
