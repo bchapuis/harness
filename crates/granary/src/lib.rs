@@ -53,11 +53,13 @@
 //! - Durable alarms, hibernatable connections, follower reads, and cross-grain
 //!   sagas (§16).
 
+mod blobs;
 mod config;
 mod election;
 mod error;
 mod event;
 mod file_store;
+pub mod fs;
 mod gateway;
 mod grain;
 mod grainref;
@@ -72,6 +74,8 @@ mod store;
 mod subscription;
 mod system;
 
+pub use blobs::BlobId;
+pub use blobs::GrainBlobs;
 pub use config::GranaryConfig;
 pub use error::GrainError;
 pub use event::GrainEvent;

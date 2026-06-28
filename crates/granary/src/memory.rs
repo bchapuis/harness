@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use crate::blobs::BlobId;
 use crate::grain::GrainName;
 use crate::journal::AppendOutcome;
 use crate::journal::GrainJournal;
@@ -79,6 +80,35 @@ impl GrainJournal for LocalGrainJournal {
         grain: &GrainName,
     ) -> Result<Option<(Seq, Vec<u8>)>, GrainJournalError> {
         self.replicator.load_snapshot(grain).await
+    }
+
+    async fn put_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+    ) -> Result<(), GrainJournalError> {
+        self.replicator.put_blob(grain, id, bytes).await
+    }
+
+    async fn get_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> Result<Option<Vec<u8>>, GrainJournalError> {
+        self.replicator.get_blob(grain, id).await
+    }
+
+    async fn has_blob(&self, grain: &GrainName, id: BlobId) -> Result<bool, GrainJournalError> {
+        self.replicator.has_blob(grain, id).await
+    }
+
+    async fn retain_blobs(&self, grain: &GrainName, retain: Vec<BlobId>) {
+        self.replicator.retain_blobs(grain, retain).await
+    }
+
+    async fn delete_blobs(&self, grain: &GrainName) {
+        self.replicator.delete_blobs(grain).await
     }
 }
 

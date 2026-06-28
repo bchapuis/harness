@@ -65,7 +65,9 @@
 //! serialize on its own segment lock, so different grains persist concurrently; the
 //! shared fence sits behind its own short leaf lock.
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -78,6 +80,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use wal::Wal;
 
+use crate::blobs::BlobId;
 use crate::grain::GrainName;
 use crate::journal::Seq;
 use crate::store::GrainCheckpoint;
@@ -172,6 +175,10 @@ impl FileGrainStore {
         let dir = dir.into();
         fs::create_dir_all(dir.join("segments"))?;
         fs::create_dir_all(dir.join("fences"))?;
+        // The grain-native content-addressed blob area (durable-workspace design):
+        // `blobs/<segment id>/<blob hex>`, one subtree per grain, keyed by the same
+        // collision-free segment id the manifest assigns the grain.
+        fs::create_dir_all(dir.join("blobs"))?;
 
         let fences = load_fences(&dir)?;
         let manifest = load_manifest(&dir)?;
@@ -269,6 +276,17 @@ impl FileGrainStore {
             });
         manifest.ids.insert((shard, grain.clone()), id);
         Some(id)
+    }
+
+    /// A grain's content-addressed blob subtree, `blobs/<segment id>/` — the single
+    /// place the on-disk blob layout is spelled (durable-workspace design).
+    fn blob_dir(&self, seg_id: u64) -> std::path::PathBuf {
+        self.dir.join("blobs").join(seg_id.to_string())
+    }
+
+    /// The on-disk path of one blob, `blobs/<segment id>/<blob hex>`.
+    fn blob_path(&self, seg_id: u64, id: BlobId) -> std::path::PathBuf {
+        self.blob_dir(seg_id).join(id.to_string())
     }
 
     /// Check the shard fence against `term` and, if `term` advances it, persist the
@@ -531,6 +549,84 @@ impl GrainStore for FileGrainStore {
                 )
             });
         inner.records.truncate(after);
+    }
+
+    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) {
+        // A blob is its own content-addressed file under the grain's blob subtree.
+        // Persisted with the same atomic write-and-fsync the fence uses, so a replica
+        // never acknowledges a blob it has not durably stored.
+        let seg_id = self
+            .segment_id(shard, grain, true)
+            .expect("create allocates an id");
+        let dir = self.blob_dir(seg_id);
+        let name = id.to_string();
+        // Idempotent: equal content under the same id is already durable (B2).
+        if dir.join(&name).exists() {
+            return;
+        }
+        fs::create_dir_all(&dir).unwrap_or_else(|err| {
+            panic!("grain store blob dir failed at {}: {err}", dir.display())
+        });
+        wal::atomic_replace(&dir, &name, &bytes).unwrap_or_else(|err| {
+            panic!(
+                "grain store blob persistence failed at {}: {err} — a replica that \
+                 cannot persist a blob cannot safely acknowledge it",
+                dir.display()
+            )
+        });
+    }
+
+    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>> {
+        let seg_id = self.segment_id(shard, grain, false)?;
+        let path = self.blob_path(seg_id, id);
+        match fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => panic!("grain store blob read failed at {}: {err}", path.display()),
+        }
+    }
+
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return false;
+        };
+        self.blob_path(seg_id, id).exists()
+    }
+
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return;
+        };
+        // Best-effort: removing a corrupt copy so the read path can re-store a good
+        // one (§7.10 self-heal). A missing file is already done.
+        let _ = fs::remove_file(self.blob_path(seg_id, id));
+    }
+
+    fn delete_blobs(&self, shard: u32, grain: &GrainName) {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return;
+        };
+        // Reclamation is best-effort (a leaked blob is harmless, only space): a
+        // missing subtree is already-done, any other error is left for a later sweep.
+        let _ = fs::remove_dir_all(self.blob_dir(seg_id));
+    }
+
+    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>) {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return;
+        };
+        let dir = self.blob_dir(seg_id);
+        let keep: HashSet<String> = retain.iter().map(|id| id.to_string()).collect();
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && !keep.contains(name)
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
     }
 }
 

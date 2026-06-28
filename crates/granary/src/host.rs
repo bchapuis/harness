@@ -141,6 +141,7 @@ impl<G: Grain> Host<G> {
             self.name.clone(),
             ctx.system().clone(),
             self.gateway.clone(),
+            Arc::clone(&self.journal),
         )
     }
 

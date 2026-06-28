@@ -17,6 +17,7 @@ use actor_core::BoxFuture;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::blobs::BlobId;
 use crate::grain::GrainName;
 
 /// The position of an event in one grain's total order (spec §7.3). The first
@@ -136,6 +137,49 @@ pub trait GrainJournal: Clone + Send + Sync + 'static {
         &self,
         grain: &GrainName,
     ) -> impl Future<Output = Result<Option<(Seq, Vec<u8>)>, GrainJournalError>> + Send;
+
+    // --- The grain-native content-addressed facet (durable-workspace design) ---
+    //
+    // A grain's immutable blobs, replicated to the *same* shard replicas as its
+    // records but off the ordered/fenced path (no `Seq`, no term). Surfaced on the
+    // journal seam so the host needs no extra dependency to hand the grain a
+    // [`GrainBlobs`](crate::GrainBlobs) handle; the implementation routes to the same
+    // replicator the records use.
+
+    /// Store an immutable blob for one grain, durable on a write quorum of its
+    /// replicas (one local copy on `Local`). Idempotent and dedup'd by content.
+    fn put_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+    ) -> impl Future<Output = Result<(), GrainJournalError>> + Send;
+
+    /// Fetch a verified blob for one grain, or `None` if no replica holds it.
+    fn get_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, GrainJournalError>> + Send;
+
+    /// Whether one grain's blob is present (on a quorum on the `Quorum` tier).
+    fn has_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> impl Future<Output = Result<bool, GrainJournalError>> + Send;
+
+    /// Keep only the listed blobs of one grain, dropping the rest — the grain's
+    /// mark-from-roots GC. Best-effort.
+    fn retain_blobs(
+        &self,
+        grain: &GrainName,
+        retain: Vec<BlobId>,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// Drop **all** of one grain's blobs — grain-scoped reclamation on destroy.
+    /// Best-effort.
+    fn delete_blobs(&self, grain: &GrainName) -> impl Future<Output = ()> + Send;
 }
 
 /// The object-safe form of [`GrainJournal`], so the runtime can hold a journal as
@@ -174,6 +218,29 @@ pub trait DynGrainJournal: Send + Sync + 'static {
     ) -> BoxFuture<'static, AppendOutcome>;
 
     fn load_snapshot(&self, grain: &GrainName) -> LoadSnapshotFuture;
+
+    fn put_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'static, Result<(), GrainJournalError>>;
+
+    fn get_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> BoxFuture<'static, Result<Option<Vec<u8>>, GrainJournalError>>;
+
+    fn has_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> BoxFuture<'static, Result<bool, GrainJournalError>>;
+
+    fn retain_blobs(&self, grain: &GrainName, retain: Vec<BlobId>) -> BoxFuture<'static, ()>;
+
+    fn delete_blobs(&self, grain: &GrainName) -> BoxFuture<'static, ()>;
 }
 
 impl<J: GrainJournal> DynGrainJournal for J {
@@ -215,5 +282,48 @@ impl<J: GrainJournal> DynGrainJournal for J {
         let journal = self.clone();
         let grain = grain.clone();
         Box::pin(async move { journal.load_snapshot(&grain).await })
+    }
+
+    fn put_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'static, Result<(), GrainJournalError>> {
+        let journal = self.clone();
+        let grain = grain.clone();
+        Box::pin(async move { journal.put_blob(&grain, id, bytes).await })
+    }
+
+    fn get_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> BoxFuture<'static, Result<Option<Vec<u8>>, GrainJournalError>> {
+        let journal = self.clone();
+        let grain = grain.clone();
+        Box::pin(async move { journal.get_blob(&grain, id).await })
+    }
+
+    fn has_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> BoxFuture<'static, Result<bool, GrainJournalError>> {
+        let journal = self.clone();
+        let grain = grain.clone();
+        Box::pin(async move { journal.has_blob(&grain, id).await })
+    }
+
+    fn retain_blobs(&self, grain: &GrainName, retain: Vec<BlobId>) -> BoxFuture<'static, ()> {
+        let journal = self.clone();
+        let grain = grain.clone();
+        Box::pin(async move { journal.retain_blobs(&grain, retain).await })
+    }
+
+    fn delete_blobs(&self, grain: &GrainName) -> BoxFuture<'static, ()> {
+        let journal = self.clone();
+        let grain = grain.clone();
+        Box::pin(async move { journal.delete_blobs(&grain).await })
     }
 }

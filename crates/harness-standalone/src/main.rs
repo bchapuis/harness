@@ -98,9 +98,11 @@ async fn run_node(args: &[String]) -> Result<(), String> {
                     "local" => node::SandboxMode::Local,
                     "docker" => node::SandboxMode::Docker,
                     "firecracker" => node::SandboxMode::Firecracker,
+                    "durable" => node::SandboxMode::Durable,
                     other => {
                         return Err(format!(
-                            "--sandbox must be `local`, `docker`, or `firecracker`, got {other}"
+                            "--sandbox must be `local`, `docker`, `firecracker`, or `durable`, \
+                             got {other}"
                         ));
                     }
                 })

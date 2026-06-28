@@ -26,6 +26,7 @@
 //! (the only fencing-critical race, §8) while cross-grain fence bumps stay
 //! monotonic and contend on nothing else.
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -34,6 +35,7 @@ use actor_core::NodeId;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::blobs::BlobId;
 use crate::grain::GrainName;
 use crate::journal::Seq;
 
@@ -159,6 +161,41 @@ pub trait GrainStore: Send + Sync + 'static {
     /// G5). The record survives on any peers that stored it, so a quorum that does
     /// hold it can still commit it late.
     fn truncate(&self, shard: u32, grain: &GrainName, after: Seq);
+
+    // --- The grain-native content-addressed facet (durable-workspace design) ----
+    //
+    // A grain's immutable blobs live beside its records in the same per-node store
+    // but **off** the ordered, term-fenced record path: content addressing needs no
+    // term (a stale leader re-storing a block writes identical bytes) and no order.
+    // Keyed by `(shard, grain, BlobId)`; reclamation is grain-scoped, the grain
+    // driving it from its own live id set.
+
+    /// Store an immutable, content-addressed blob for a grain. Idempotent: an `id`
+    /// already present is kept (storing equal content writes nothing new). Unfenced.
+    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>);
+
+    /// The bytes of `id` for a grain, or `None` if this store does not hold it. The
+    /// caller re-hashes and verifies the bytes against `id` before use.
+    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>>;
+
+    /// Whether this store holds `id` for a grain.
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool;
+
+    /// Drop a **single** blob of a grain. Idempotent (a missing blob is already
+    /// done). Used by the read path to evict a copy that failed verification before
+    /// re-fetching a good one (corruption self-heal, §7.10): a content-addressed
+    /// [`put_blob`](GrainStore::put_blob) of an id already on disk writes nothing, so
+    /// a corrupt copy must be removed before its replacement can be stored.
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId);
+
+    /// Drop **every** blob of a grain — grain-scoped reclamation on destroy, with no
+    /// namespace tombstone or membership gating (the area lives only on the grain's
+    /// known replicas).
+    fn delete_blobs(&self, shard: u32, grain: &GrainName);
+
+    /// Drop every blob of a grain **not** in `retain` — the grain's mark-from-roots
+    /// sweep, reclaiming blocks orphaned by overwrites. Idempotent.
+    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>);
 }
 
 /// How the runtime obtains a node's [`GrainStore`] (spec §7.4). Supplied on
@@ -367,6 +404,10 @@ impl GrainRecords {
 /// shared (cloned) out of the registry so an op holds only that grain's lock.
 type Segment = Arc<Mutex<GrainRecords>>;
 
+/// One grain's in-memory content-addressed blob area: its immutable blobs keyed by
+/// content id (durable-workspace design), off the fenced record path.
+type BlobArea = HashMap<BlobId, Vec<u8>>;
+
 /// The per-shard fence and per-grain segment registry shared by one
 /// [`MemoryGrainStore`] (and its clones).
 #[derive(Default)]
@@ -376,6 +417,10 @@ struct Inner {
     fences: Mutex<HashMap<u32, u64>>,
     /// One independent segment per `(shard, grain)`, each behind its own lock.
     segments: Mutex<HashMap<(u32, GrainName), Segment>>,
+    /// The grain-native content-addressed blob area (durable-workspace design): one
+    /// id→bytes map per `(shard, grain)`, off the fenced record path. Behind its own
+    /// lock so blob ops never contend with a grain's record segment.
+    blobs: Mutex<HashMap<(u32, GrainName), BlobArea>>,
 }
 
 /// The reference in-memory [`GrainStore`] (spec §7.4). Cloning shares one store, so
@@ -518,6 +563,67 @@ impl GrainStore for MemoryGrainStore {
                 .lock()
                 .expect("grain segment poisoned")
                 .truncate(after);
+        }
+    }
+
+    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .entry((shard, grain.clone()))
+            .or_default()
+            .entry(id)
+            .or_insert(bytes);
+    }
+
+    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>> {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get(&(shard, grain.clone()))
+            .and_then(|area| area.get(&id).cloned())
+    }
+
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get(&(shard, grain.clone()))
+            .is_some_and(|area| area.contains_key(&id))
+    }
+
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) {
+        if let Some(area) = self
+            .inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get_mut(&(shard, grain.clone()))
+        {
+            area.remove(&id);
+        }
+    }
+
+    fn delete_blobs(&self, shard: u32, grain: &GrainName) {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .remove(&(shard, grain.clone()));
+    }
+
+    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>) {
+        if let Some(area) = self
+            .inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get_mut(&(shard, grain.clone()))
+        {
+            area.retain(|id, _| retain.contains(id));
         }
     }
 }
@@ -728,5 +834,73 @@ mod tests {
             store.read(0, &n).slots,
             vec![(Seq::new(4), 2, b"e4".to_vec())]
         );
+    }
+
+    // --- The grain-native blob facet (durable-workspace design) --------------
+
+    #[test]
+    fn blobs_round_trip_and_dedup_within_a_grain() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        let id = BlobId::of(b"block");
+        assert!(!store.has_blob(0, &n, id));
+        store.put_blob(0, &n, id, b"block".to_vec());
+        // Idempotent: a second store of equal content keeps the one copy (B2).
+        store.put_blob(0, &n, id, b"block".to_vec());
+        assert!(store.has_blob(0, &n, id));
+        assert_eq!(store.get_blob(0, &n, id), Some(b"block".to_vec()));
+        // A different grain's blob area is independent.
+        assert!(!store.has_blob(0, &name("b"), id));
+    }
+
+    #[test]
+    fn delete_blob_evicts_one_and_lets_a_replacement_be_stored() {
+        // The read path's corruption self-heal (§7.10): a content-addressed put of an
+        // id already on disk is a no-op, so a corrupt copy must be evicted with
+        // `delete_blob` before its good replacement can be re-stored.
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        let id = BlobId::of(b"good");
+        store.put_blob(0, &n, id, b"corrupt".to_vec()); // a copy that does not verify
+        assert!(store.has_blob(0, &n, id));
+        // Without eviction, a re-put keeps the corrupt copy (idempotent on the id).
+        store.put_blob(0, &n, id, b"good".to_vec());
+        assert_eq!(store.get_blob(0, &n, id), Some(b"corrupt".to_vec()));
+        // Evict, then re-put: now the good bytes land.
+        store.delete_blob(0, &n, id);
+        assert!(!store.has_blob(0, &n, id));
+        store.put_blob(0, &n, id, b"good".to_vec());
+        assert_eq!(store.get_blob(0, &n, id), Some(b"good".to_vec()));
+        // Idempotent: deleting an absent blob is a no-op, and an unrelated grain is
+        // untouched.
+        store.delete_blob(0, &name("b"), id);
+    }
+
+    #[test]
+    fn retain_blobs_keeps_only_the_live_set() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        let a = BlobId::of(b"a");
+        let b = BlobId::of(b"b");
+        let c = BlobId::of(b"c");
+        for (id, bytes) in [(a, &b"a"[..]), (b, &b"b"[..]), (c, &b"c"[..])] {
+            store.put_blob(0, &n, id, bytes.to_vec());
+        }
+        // Keep only a and c: b is swept (the mark-from-roots GC).
+        store.retain_blobs(0, &n, &BTreeSet::from([a, c]));
+        assert!(store.has_blob(0, &n, a));
+        assert!(!store.has_blob(0, &n, b));
+        assert!(store.has_blob(0, &n, c));
+    }
+
+    #[test]
+    fn delete_blobs_drops_the_whole_area() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        let a = BlobId::of(b"a");
+        store.put_blob(0, &n, a, b"a".to_vec());
+        store.delete_blobs(0, &n);
+        assert!(!store.has_blob(0, &n, a));
+        assert_eq!(store.get_blob(0, &n, a), None);
     }
 }

@@ -245,6 +245,13 @@ pub enum RecordBody {
     /// the next model call of an activation that will open a fresh sandbox
     /// for a session whose journal records sandboxed activity, and surfaced
     /// to the model with that request.
+    ///
+    /// Under a **durable** workspace provider (`harness-sandbox`'s
+    /// `DurableWorkspaces`, granary §7.10) this narrows to the non-durable
+    /// *overlay* only: durable content survives across activations, so the
+    /// provider never reports `EnvironmentLost` for it, and this record is
+    /// emitted solely when the regenerable scratch (excluded trees) is lost —
+    /// which the model rebuilds rather than re-deriving the whole workspace.
     WorkspaceReset,
     /// The activation's first call at `tier` is about to execute (§5.6):
     /// the write-ahead discipline (§6.4) applied to capability acquisition,

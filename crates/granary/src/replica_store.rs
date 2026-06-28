@@ -32,6 +32,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::blobs::BlobId;
 use crate::grain::Grain;
 use crate::grain::GrainName;
 use crate::journal::Seq;
@@ -116,6 +117,68 @@ impl Message for StoreSnapshot {
     const MANIFEST: Manifest = Manifest::new("granary.StoreSnapshot");
 }
 
+/// Store one immutable, content-addressed blob on a replica (durable-workspace
+/// design). No `after`, no `term`, no `repair`: nothing to fence or order, and so
+/// no ack variants — an immutable blob has no `Fenced`/`Stale` outcome to report (a
+/// content hash names exactly one byte sequence), so the reply is just `()`: the ask
+/// resolving is the durable acknowledgement (the blob path is the record path's
+/// immutable subset).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct StoreBlob {
+    pub(crate) shard: u32,
+    pub(crate) grain: GrainName,
+    pub(crate) id: BlobId,
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl Message for StoreBlob {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("granary.StoreBlob");
+}
+
+/// Fetch one blob's bytes from a replica, or `None` if it does not hold it. The
+/// caller verifies the bytes against the id (B1), so a misdelivery is detectable.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FetchBlob {
+    pub(crate) shard: u32,
+    pub(crate) grain: GrainName,
+    pub(crate) id: BlobId,
+}
+
+impl Message for FetchBlob {
+    type Reply = Option<Vec<u8>>;
+    const MANIFEST: Manifest = Manifest::new("granary.FetchBlob");
+}
+
+/// Whether a replica holds one blob.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct HasBlob {
+    pub(crate) shard: u32,
+    pub(crate) grain: GrainName,
+    pub(crate) id: BlobId,
+}
+
+impl Message for HasBlob {
+    type Reply = bool;
+    const MANIFEST: Manifest = Manifest::new("granary.HasBlob");
+}
+
+/// Reclaim a grain's blobs on a replica (durable-workspace design): `retain = None`
+/// drops the whole area (destroy), `retain = Some(ids)` keeps only those (the
+/// mark-from-roots sweep). Idempotent; the reply is `()` (the ask resolving is the
+/// acknowledgement).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SweepBlobs {
+    pub(crate) shard: u32,
+    pub(crate) grain: GrainName,
+    pub(crate) retain: Option<Vec<BlobId>>,
+}
+
+impl Message for SweepBlobs {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("granary.SweepBlobs");
+}
+
 /// The node-local replica store for grain type `G` (spec §7.2): a thin actor over
 /// this node's [`GrainStore`], reachable across the cluster so the shard leader's
 /// replicator can quorum-append to it and read it back for recovery. One per node
@@ -141,6 +204,10 @@ impl<G: Grain> Actor for ReplicaStore<G> {
         registry.accept::<StoreRecord>();
         registry.accept::<ReadGrain>();
         registry.accept::<StoreSnapshot>();
+        registry.accept::<StoreBlob>();
+        registry.accept::<FetchBlob>();
+        registry.accept::<HasBlob>();
+        registry.accept::<SweepBlobs>();
     }
 }
 
@@ -167,6 +234,36 @@ impl<G: Grain> Handler<StoreSnapshot> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreSnapshot, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
         self.store
             .store_snapshot(msg.shard, &msg.grain, msg.at, msg.term, msg.state)
+    }
+}
+
+impl<G: Grain> Handler<StoreBlob> for ReplicaStore<G> {
+    async fn handle(&mut self, msg: StoreBlob, _ctx: &Ctx<ReplicaStore<G>>) {
+        self.store
+            .put_blob(msg.shard, &msg.grain, msg.id, msg.bytes);
+    }
+}
+
+impl<G: Grain> Handler<FetchBlob> for ReplicaStore<G> {
+    async fn handle(&mut self, msg: FetchBlob, _ctx: &Ctx<ReplicaStore<G>>) -> Option<Vec<u8>> {
+        self.store.get_blob(msg.shard, &msg.grain, msg.id)
+    }
+}
+
+impl<G: Grain> Handler<HasBlob> for ReplicaStore<G> {
+    async fn handle(&mut self, msg: HasBlob, _ctx: &Ctx<ReplicaStore<G>>) -> bool {
+        self.store.has_blob(msg.shard, &msg.grain, msg.id)
+    }
+}
+
+impl<G: Grain> Handler<SweepBlobs> for ReplicaStore<G> {
+    async fn handle(&mut self, msg: SweepBlobs, _ctx: &Ctx<ReplicaStore<G>>) {
+        match msg.retain {
+            None => self.store.delete_blobs(msg.shard, &msg.grain),
+            Some(ids) => self
+                .store
+                .retain_blobs(msg.shard, &msg.grain, &ids.into_iter().collect()),
+        }
     }
 }
 
@@ -208,6 +305,49 @@ pub trait ReplicaTransport: Send + Sync + 'static {
         state: Vec<u8>,
         within: Duration,
     ) -> BoxFuture<'static, Result<StoreAck, CallError>>;
+
+    /// Store one immutable blob on a replica (durable-workspace design): unfenced,
+    /// unordered — the immutable subset of [`store_record`](ReplicaTransport::store_record).
+    fn store_blob(
+        &self,
+        node: NodeId,
+        shard: u32,
+        grain: GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<(), CallError>>;
+
+    /// Fetch one blob's bytes from a replica, or `None` if it lacks it.
+    fn fetch_blob(
+        &self,
+        node: NodeId,
+        shard: u32,
+        grain: GrainName,
+        id: BlobId,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<Option<Vec<u8>>, CallError>>;
+
+    /// Whether a replica holds one blob.
+    fn has_blob(
+        &self,
+        node: NodeId,
+        shard: u32,
+        grain: GrainName,
+        id: BlobId,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<bool, CallError>>;
+
+    /// Reclaim a grain's blobs on a replica: `retain = None` drops the area,
+    /// `retain = Some(ids)` keeps only those (the mark-from-roots sweep).
+    fn sweep_blobs(
+        &self,
+        node: NodeId,
+        shard: u32,
+        grain: GrainName,
+        retain: Option<Vec<BlobId>>,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<(), CallError>>;
 
     /// Launch a detached background task (spec §7.2). The replicator uses it to drain
     /// the straggler peer asks of an append that already committed on a quorum, so the
@@ -315,6 +455,90 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
                         at,
                         term,
                         state,
+                    },
+                    within,
+                )
+                .await
+        })
+    }
+
+    fn store_blob(
+        &self,
+        node: NodeId,
+        shard: u32,
+        grain: GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<(), CallError>> {
+        let store = self.resolve(node);
+        Box::pin(async move {
+            let store = store.ok_or(CallError::Unreachable)?;
+            store
+                .ask_timeout(
+                    StoreBlob {
+                        shard,
+                        grain,
+                        id,
+                        bytes,
+                    },
+                    within,
+                )
+                .await
+        })
+    }
+
+    fn fetch_blob(
+        &self,
+        node: NodeId,
+        shard: u32,
+        grain: GrainName,
+        id: BlobId,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<Option<Vec<u8>>, CallError>> {
+        let store = self.resolve(node);
+        Box::pin(async move {
+            let store = store.ok_or(CallError::Unreachable)?;
+            store
+                .ask_timeout(FetchBlob { shard, grain, id }, within)
+                .await
+        })
+    }
+
+    fn has_blob(
+        &self,
+        node: NodeId,
+        shard: u32,
+        grain: GrainName,
+        id: BlobId,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<bool, CallError>> {
+        let store = self.resolve(node);
+        Box::pin(async move {
+            let store = store.ok_or(CallError::Unreachable)?;
+            store
+                .ask_timeout(HasBlob { shard, grain, id }, within)
+                .await
+        })
+    }
+
+    fn sweep_blobs(
+        &self,
+        node: NodeId,
+        shard: u32,
+        grain: GrainName,
+        retain: Option<Vec<BlobId>>,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<(), CallError>> {
+        let store = self.resolve(node);
+        Box::pin(async move {
+            let store = store.ok_or(CallError::Unreachable)?;
+            store
+                .ask_timeout(
+                    SweepBlobs {
+                        shard,
+                        grain,
+                        retain,
                     },
                     within,
                 )

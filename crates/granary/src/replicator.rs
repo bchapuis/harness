@@ -23,6 +23,7 @@ use futures::StreamExt;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 
+use crate::blobs::BlobId;
 use crate::election::LeaderElection;
 use crate::grain::GrainName;
 use crate::journal::AppendOutcome;
@@ -35,6 +36,11 @@ use crate::store::StoreAck;
 
 /// A pending per-replica store ack from the [`ReplicaTransport`] fan-out.
 type StoreAckFuture = actor_core::BoxFuture<'static, Result<StoreAck, actor_core::CallError>>;
+
+/// A pending per-replica blob store from the [`ReplicaTransport`] blob fan-out: it
+/// resolves `Ok(())` once that peer has durably stored the blob (no ack variants —
+/// an immutable blob has nothing to fence or order).
+type BlobAckFuture = actor_core::BoxFuture<'static, Result<(), actor_core::CallError>>;
 
 /// The result of [`merge`]: the contiguous record prefix, its head, the best
 /// snapshot `(seq, term, state)`, and whether any kept record's term is below the
@@ -119,6 +125,51 @@ impl LocalReplicator {
         grain: &GrainName,
     ) -> Result<Option<(Seq, Vec<u8>)>, GrainJournalError> {
         Ok(snapshot_of(self.store.read(self.shard, grain)))
+    }
+
+    // --- The grain-native content-addressed facet (single-node) --------------
+
+    pub(crate) async fn put_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+    ) -> Result<(), GrainJournalError> {
+        self.store.put_blob(self.shard, grain, id, bytes);
+        Ok(())
+    }
+
+    pub(crate) async fn get_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> Result<Option<Vec<u8>>, GrainJournalError> {
+        // Verify the stored bytes against the id (B1): a single store can still suffer
+        // on-disk bit-rot, which must surface as an error, never as wrong bytes.
+        match self.store.get_blob(self.shard, grain, id) {
+            Some(bytes) if id.verifies(&bytes) => Ok(Some(bytes)),
+            Some(_) => Err(GrainJournalError::Unavailable(format!(
+                "blob {id} failed verification"
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn has_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> Result<bool, GrainJournalError> {
+        Ok(self.store.has_blob(self.shard, grain, id))
+    }
+
+    pub(crate) async fn retain_blobs(&self, grain: &GrainName, retain: Vec<BlobId>) {
+        self.store
+            .retain_blobs(self.shard, grain, &retain.into_iter().collect());
+    }
+
+    pub(crate) async fn delete_blobs(&self, grain: &GrainName) {
+        self.store.delete_blobs(self.shard, grain);
     }
 }
 
@@ -222,7 +273,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             // Committed on a quorum: return now and drain the slower replicas off the
             // hot path (§7.2), so the append's latency is the quorum's, not the slowest
             // replica's.
-            self.drain_in_background(pending);
+            self.drain(pending);
         } else {
             // The append did not commit: roll back this node's tentative local write
             // so a later stale-local recovery never folds an uncommitted record
@@ -334,7 +385,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                     .collect();
                 let (outcome, pending) = self.collect_store_quorum(local, peers).await;
                 match outcome {
-                    QuorumOutcome::Committed => self.drain_in_background(pending),
+                    QuorumOutcome::Committed => self.drain(pending),
                     QuorumOutcome::Fenced => {
                         return Err(GrainJournalError::Unavailable(
                             "fenced by a higher term".into(),
@@ -366,6 +417,159 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         grain: &GrainName,
     ) -> Result<Option<(Seq, Vec<u8>)>, GrainJournalError> {
         Ok(snapshot_of(self.local.read(self.shard, grain)))
+    }
+
+    // --- The grain-native content-addressed facet (clustered) ----------------
+    //
+    // A grain's immutable blobs ride the *same* shard replica set as its records,
+    // but with no term and no order: a content hash names exactly one byte sequence,
+    // so there is nothing to fence and nothing to agree on (the immutable subset of
+    // the record path). The leader always keeps a local copy, so a `get` is a local,
+    // verified read in steady state; a fresh leader after a migration that lacks a
+    // block faults it from a peer and backfills locally (lazy hydration).
+
+    /// Store an immutable blob on a write quorum of the grain's replicas, always
+    /// including this local replica (so subsequent reads are local). No term, no
+    /// leadership gate: an orphan blob from a deposed writer is harmless (content-
+    /// addressed) and reclaimed by the grain's sweep. Returns `Unavailable` if a
+    /// quorum is unreachable, so the caller learns the bytes are not yet durable.
+    pub(crate) async fn put_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+    ) -> Result<(), GrainJournalError> {
+        let quorum = self.quorum();
+        // Local copy first (the leader is a replica, §5.2): move the bytes into peers'
+        // wire messages by clone, but the local write needs no copy beyond the fan-out.
+        let mut pending: FuturesUnordered<BlobAckFuture> = self
+            .peers()
+            .map(|node| {
+                self.transport.store_blob(
+                    node,
+                    self.shard,
+                    grain.clone(),
+                    id,
+                    bytes.clone(),
+                    QUORUM_TIMEOUT,
+                )
+            })
+            .collect();
+        self.local.put_blob(self.shard, grain, id, bytes);
+        let mut acks = 1usize; // the local replica
+        if acks >= quorum {
+            self.drain(pending);
+            return Ok(());
+        }
+        while let Some(result) = pending.next().await {
+            if result.is_ok() {
+                acks += 1;
+            }
+            if acks >= quorum {
+                self.drain(pending);
+                return Ok(());
+            }
+        }
+        Err(GrainJournalError::Unavailable(
+            "blob did not reach a write quorum".into(),
+        ))
+    }
+
+    /// Fetch a verified blob (B1): the local copy if present and verifying, else the
+    /// first peer that returns verifying bytes (rank order), backfilled locally for
+    /// the next read. `None` if no replica holds it; `Unavailable` if a copy was
+    /// found but none verified (corruption on every reachable replica).
+    pub(crate) async fn get_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> Result<Option<Vec<u8>>, GrainJournalError> {
+        let mut corrupt = false;
+        if let Some(bytes) = self.local.get_blob(self.shard, grain, id) {
+            if id.verifies(&bytes) {
+                return Ok(Some(bytes));
+            }
+            // The local copy exists but is corrupt (on-disk bit-rot). Evict it so the
+            // peer-sourced backfill below can replace it in place: a content-addressed
+            // `put_blob` of an id already on disk writes nothing, so without this the
+            // bad copy would persist — forcing a network fetch on every future read
+            // and leaving this replica's durability margin permanently one short
+            // (§7.10 self-heal). It is safe to drop unconditionally: a copy that fails
+            // verification can never be returned, so it carries no value to lose.
+            corrupt = true;
+            self.local.delete_blob(self.shard, grain, id);
+        }
+        for node in self.peers() {
+            match self
+                .transport
+                .fetch_blob(node, self.shard, grain.clone(), id, QUORUM_TIMEOUT)
+                .await
+            {
+                Ok(Some(bytes)) if id.verifies(&bytes) => {
+                    // Backfill locally so the next read is local (lazy hydration), and
+                    // repair a corrupt local copy evicted above (self-heal).
+                    self.local.put_blob(self.shard, grain, id, bytes.clone());
+                    return Ok(Some(bytes));
+                }
+                Ok(Some(_)) => corrupt = true,
+                Ok(None) | Err(_) => {}
+            }
+        }
+        if corrupt {
+            Err(GrainJournalError::Unavailable(format!(
+                "blob {id} failed verification on every reachable replica"
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) async fn has_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> Result<bool, GrainJournalError> {
+        if self.local.has_blob(self.shard, grain, id) {
+            return Ok(true);
+        }
+        for node in self.peers() {
+            if let Ok(true) = self
+                .transport
+                .has_blob(node, self.shard, grain.clone(), id, QUORUM_TIMEOUT)
+                .await
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Sweep the grain's blobs on every replica, keeping only `retain` (the
+    /// mark-from-roots GC). Best-effort: a missed replica keeps its garbage until the
+    /// next sweep, never a correctness issue.
+    pub(crate) async fn retain_blobs(&self, grain: &GrainName, retain: Vec<BlobId>) {
+        self.local
+            .retain_blobs(self.shard, grain, &retain.iter().copied().collect());
+        let sweeps = self.peers().map(|node| {
+            self.transport.sweep_blobs(
+                node,
+                self.shard,
+                grain.clone(),
+                Some(retain.clone()),
+                QUORUM_TIMEOUT,
+            )
+        });
+        let _ = join_all(sweeps).await;
+    }
+
+    /// Drop the grain's whole blob area on every replica (destroy). Best-effort.
+    pub(crate) async fn delete_blobs(&self, grain: &GrainName) {
+        self.local.delete_blobs(self.shard, grain);
+        let sweeps = self.peers().map(|node| {
+            self.transport
+                .sweep_blobs(node, self.shard, grain.clone(), None, QUORUM_TIMEOUT)
+        });
+        let _ = join_all(sweeps).await;
     }
 
     /// Persist a snapshot on a quorum (spec §9), fenced by the shard term. Quorum-
@@ -404,7 +608,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let (outcome, pending) = self.collect_store_quorum(local, peers).await;
         match outcome {
             QuorumOutcome::Committed => {
-                self.drain_in_background(pending);
+                self.drain(pending);
                 AppendOutcome::Committed(at)
             }
             QuorumOutcome::Fenced => self.not_leader(),
@@ -417,7 +621,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// Count a local ack plus the peers' acks toward a quorum (spec §7.2), returning as
     /// soon as a quorum has stored — the commit waits on the quorum, never on the
     /// slowest replica. The not-yet-resolved peer asks come back with the outcome for
-    /// the caller to [`drain_in_background`](Self::drain_in_background): each still runs
+    /// the caller to [`drain`](Self::drain): each still runs
     /// to completion off the hot path, so its `AskIssued`/`AskOutcome` bracket closes
     /// (no-silent-loss, §14). A single `Fenced` short of a quorum means we are deposed;
     /// running out of replies short of a quorum is `Unavailable`. On any non-committed
@@ -465,12 +669,16 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         (outcome, pending)
     }
 
-    /// Drive the leftover peer asks of a committed quorum store to completion off the
-    /// hot path (spec §7.2). Launched as a detached task, so the commit returns at
-    /// quorum latency while every issued ask still closes its `AskIssued`/`AskOutcome`
-    /// bracket (no-silent-loss, §14). A late `Stored` is harmless (the slot already
-    /// holds the record); a late `Fenced` cannot un-commit a quorum-durable write (§8).
-    fn drain_in_background(&self, mut pending: FuturesUnordered<StoreAckFuture>) {
+    /// Drive the leftover peer asks of a committed quorum (a record store or a blob
+    /// store) to completion off the hot path (spec §7.2). Launched as a detached task,
+    /// so the commit returns at quorum latency while every issued ask still closes its
+    /// `AskIssued`/`AskOutcome` bracket (no-silent-loss, §14). A late `Stored` is
+    /// harmless (the slot already holds the record); a late `Fenced` cannot un-commit a
+    /// quorum-durable write (§8).
+    fn drain<F>(&self, mut pending: FuturesUnordered<F>)
+    where
+        F: Future + Send + 'static,
+    {
         if pending.is_empty() {
             return;
         }

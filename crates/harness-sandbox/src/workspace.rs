@@ -111,6 +111,12 @@ fn read_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
     let bytes = dir
         .read(path)
         .map_err(|e| ToolError::Sandbox(format!("read_file: {path}: {e}")))?;
+    Ok(cap_and_decode(&bytes))
+}
+
+/// Apply the 256 KiB read cap and clean UTF-8 truncation, returning the tier's
+/// `{content, truncated}` shape. Shared by the cap-std and durable read tools.
+pub(crate) fn cap_and_decode(bytes: &[u8]) -> Value {
     let truncated = bytes.len() > READ_CAP;
     let mut end = if truncated { READ_CAP } else { bytes.len() };
     // Never cut a multi-byte character in half: walk the cap back off any
@@ -120,7 +126,7 @@ fn read_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
         end -= 1;
     }
     let content = String::from_utf8_lossy(&bytes[..end]).into_owned();
-    Ok(json!({ "content": content, "truncated": truncated }))
+    json!({ "content": content, "truncated": truncated })
 }
 
 fn write_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
@@ -205,7 +211,7 @@ fn remove(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
     }
 }
 
-fn required_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, ToolError> {
+pub(crate) fn required_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, ToolError> {
     input
         .get(key)
         .and_then(Value::as_str)

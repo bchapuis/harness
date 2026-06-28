@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use actor_core::ActorRef;
 use actor_core::BoxError;
@@ -13,10 +14,12 @@ use actor_serialization::SerializationRequirement;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::blobs::GrainBlobs;
 use crate::gateway::Gateway;
 use crate::grainref::GrainRef;
 use crate::host::Host;
 use crate::host::RunTyped;
+use crate::journal::DynGrainJournal;
 use crate::system::GranarySystem;
 
 /// The stable, cluster-wide identity of a grain (spec §3): a `(grain type, key)`
@@ -151,6 +154,10 @@ pub struct GrainCtx<G: Grain> {
     name: GrainName,
     system: G::System,
     gateway: ActorRef<Gateway<G>>,
+    /// The journal seam, so the grain can reach its colocated content-addressed blob
+    /// area ([`blobs`](GrainCtx::blobs)). The journal routes to the grain's shard
+    /// replicas, the same ones its records live on.
+    journal: Arc<dyn DynGrainJournal>,
 }
 
 impl<G: Grain> GrainCtx<G> {
@@ -159,18 +166,31 @@ impl<G: Grain> GrainCtx<G> {
         name: GrainName,
         system: G::System,
         gateway: ActorRef<Gateway<G>>,
+        journal: Arc<dyn DynGrainJournal>,
     ) -> GrainCtx<G> {
         GrainCtx {
             grain_type,
             name,
             system,
             gateway,
+            journal,
         }
     }
 
     /// This grain's name.
     pub fn name(&self) -> &GrainName {
         &self.name
+    }
+
+    /// A handle to this grain's **colocated content-addressed blob area**
+    /// (durable-workspace design): immutable bulk bytes the grain stores by content
+    /// and references by [`BlobId`](crate::BlobId) from its small foldable state. The
+    /// blobs ride the grain's own shard replicas, so a read is local in steady state;
+    /// the grain drives their reclamation from its own live id set
+    /// ([`GrainBlobs::gc`](crate::GrainBlobs::gc)). This is the grain analogue of a
+    /// Durable Object's colocated storage (DO §2.3) — beside, not in, the journal.
+    pub fn blobs(&self) -> GrainBlobs {
+        GrainBlobs::new(Arc::clone(&self.journal), self.name.clone())
     }
 
     /// A shareable self-reference (spec §4.3). It resolves through the gateway each

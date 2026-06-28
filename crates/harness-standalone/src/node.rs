@@ -44,6 +44,7 @@ use actor_runtime::TokioSpawner;
 use actor_serialization::JsonCodec;
 use granary::Granary;
 use granary::GranaryExt;
+use granary::fs::Fs;
 use harness::Budget;
 use harness::FileGrainStore;
 use harness::GrainStoreFactory;
@@ -80,6 +81,12 @@ pub enum SandboxMode {
     /// network device — hardware-virtualization confinement (sandbox spec
     /// §3.4's stronger grade). Linux with `/dev/kvm` only.
     Firecracker,
+    /// `harness-sandbox`'s `DurableWorkspaces`: the `Workspace` tier backed by a
+    /// durable filesystem grain (granary §7.10), so a session's workspace survives
+    /// hibernation, migration, and node loss. Offers the typed file tools
+    /// (read/write/list/remove), no guest shell; excluded trees stay in an ephemeral
+    /// overlay (harness §5.5 reversal).
+    Durable,
 }
 
 /// Everything `node` takes from the command line. The defaults make
@@ -316,6 +323,11 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
              untrusted content belongs in --sandbox docker or firecracker."
         );
     }
+    // One durable grain store under --data (§7.4), shared by the session kinds, the
+    // tenancy directory, and — in `--sandbox durable` — the workspace filesystem grain.
+    // Its factory caches per node, so every grain type shares one on-disk store keyed by
+    // (shard, grain), the grain analogue of the Raft WAL.
+    let grain_store = FileGrainStore::factory(opts.data.join("grains"));
     let sandboxes: Arc<dyn SandboxProvider> = match sandbox_mode {
         SandboxMode::Local => Arc::new(LocalSandboxes::new(opts.data.join("workspaces"))),
         SandboxMode::Docker => {
@@ -351,12 +363,24 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
                     .with_quickjs(),
             )
         }
+        SandboxMode::Durable => {
+            // The Workspace tier is a durable filesystem grain (granary §7.10): host
+            // `Fs` on this node's system over the shared grain store, then back the
+            // provider with it. A workspace survives hibernation, migration, and node
+            // loss; the harness re-binds the same grain by session id each activation.
+            let workspaces: Granary<Fs<TcpCluster>> = system.granary(GranaryConfig {
+                grain_store: Some(grain_store.clone()),
+                ..GranaryConfig::default()
+            });
+            Arc::new(
+                harness_sandbox::DurableWorkspaces::new(
+                    workspaces,
+                    opts.data.join("durable-overlay"),
+                )
+                .map_err(|e| format!("durable overlay root: {e}"))?,
+            )
+        }
     };
-    // One durable grain store under --data, shared by the session kinds and the
-    // tenancy directory (its factory caches per node, so all grain types share a
-    // single on-disk store keyed by (shard, grain) — never two writers on one
-    // directory). Built here so the directory granary can reuse it.
-    let grain_store = FileGrainStore::factory(opts.data.join("grains"));
     // Hosting the kinds is the point; the handle is bound for the node's life (it
     // never returns) to keep the gateway actors alive, like `_directory` below.
     let node_kinds = kinds(&opts, sandbox_mode, grain_store.clone());
@@ -451,6 +475,11 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
                 .tool(harness_sandbox::fc_shell_tool())
                 .tool(harness_sandbox::run_js_tool())
                 .sandbox(harness::SandboxProfile::image(&opts.fc_rootfs)),
+            // The durable Workspace tier: the four typed file tools over the durable
+            // filesystem grain (granary §7.10), no guest shell or compute.
+            SandboxMode::Durable => harness_sandbox::workspace_tools()
+                .into_iter()
+                .fold(kind, |kind, tool| kind.tool(tool)),
         }
     };
     // Durable grain storage under --data (§7.4): a session is a grain, so its
@@ -469,7 +498,7 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
     };
     // The Compute tier exists only behind TieredSandboxes; steer toward it
     // for JavaScript exactly where it is offered, and nowhere it is not.
-    let js_hint = if sandbox_mode == SandboxMode::Local {
+    let js_hint = if matches!(sandbox_mode, SandboxMode::Local | SandboxMode::Durable) {
         ""
     } else {
         " To run JavaScript, use the `run_js` tool rather than reaching for a \
