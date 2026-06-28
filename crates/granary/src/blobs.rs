@@ -139,8 +139,11 @@ impl GrainBlobs {
         })
     }
 
-    /// Whether `id` is present in this grain's blob area (on at least a write quorum
-    /// on the `Quorum` tier).
+    /// Whether `id` is present on **any reachable replica** of this grain's blob area
+    /// (the local copy, else the first peer that holds it — short-circuit, not a quorum
+    /// count). A `true` answers "a [`get`](GrainBlobs::get) can source these bytes"; it
+    /// is not a durability assertion, since a blob is made quorum-durable at
+    /// [`put`](GrainBlobs::put) time, not measured here.
     pub async fn has(&self, id: BlobId) -> Result<bool, GrainError> {
         self.journal
             .has_blob(&self.grain, id)

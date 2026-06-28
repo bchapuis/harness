@@ -524,6 +524,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         }
     }
 
+    /// Whether any reachable replica holds the blob: short-circuit on the first holder
+    /// (the local copy, else a peer), not a quorum count — a `true` says a `get` can
+    /// source the bytes, not that they are quorum-durable (that is `put_blob`'s job).
     pub(crate) async fn has_blob(
         &self,
         grain: &GrainName,

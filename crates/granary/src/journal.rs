@@ -162,7 +162,10 @@ pub trait GrainJournal: Clone + Send + Sync + 'static {
         id: BlobId,
     ) -> impl Future<Output = Result<Option<Vec<u8>>, GrainJournalError>> + Send;
 
-    /// Whether one grain's blob is present (on a quorum on the `Quorum` tier).
+    /// Whether one grain's blob is present on **any reachable replica** (the local
+    /// copy, else the first peer that holds it — not a quorum count). A `true` means a
+    /// [`get_blob`](GrainJournal::get_blob) can source the bytes, not that they are
+    /// quorum-durable (durability is established at [`put_blob`](GrainJournal::put_blob)).
     fn has_blob(
         &self,
         grain: &GrainName,
