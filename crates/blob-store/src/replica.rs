@@ -40,6 +40,7 @@ use crate::blob::Namespace;
 use crate::event::BlobEvent;
 use crate::local::LocalBlobStore;
 use crate::system::BlobSystem;
+use crate::tombstone::Tombstone;
 use crate::tombstone::TombstoneSet;
 
 /// The receptionist key every node's [`BlobReplica`] registers under: one
@@ -114,6 +115,21 @@ impl Message for DeleteNamespace {
     const MANIFEST: Manifest = Manifest::new("blob.DeleteNamespace");
 }
 
+/// Ask a replica for its whole tombstone awareness set (spec §5.3) — the
+/// **anti-entropy pull** the reconcile loop runs each pass so a node that was
+/// partitioned or down across a `delete_namespace` re-syncs the tombstones it
+/// missed *before* it serves or re-replicates a stale blob (**B7**). The initial
+/// `delete_namespace` fan-out (spec §5.3) reaches every *then-serving* node; this
+/// pull is the "thereafter by gossip" / "re-syncs the set from the anchor owners
+/// on rejoin" half, without which a rejoining holder resurrects the namespace.
+#[derive(Serialize, Deserialize)]
+pub struct SyncTombstones;
+
+impl Message for SyncTombstones {
+    type Reply = Vec<Tombstone>;
+    const MANIFEST: Manifest = Manifest::new("blob.SyncTombstones");
+}
+
 /// A replica's response to [`StoreBlob`] (spec §6). It has **no** `Fenced` or
 /// `Stale` variant (contrast granary's `StoreAck`): there is no term and no
 /// mutable head to be stale against.
@@ -169,6 +185,7 @@ impl<S: BlobSystem> Actor for BlobReplica<S> {
         registry.accept::<FetchBlob>();
         registry.accept::<HasBlob>();
         registry.accept::<DeleteNamespace>();
+        registry.accept::<SyncTombstones>();
     }
 }
 
@@ -225,6 +242,14 @@ impl<S: BlobSystem> Handler<DeleteNamespace> for BlobReplica<S> {
     }
 }
 
+impl<S: BlobSystem> Handler<SyncTombstones> for BlobReplica<S> {
+    async fn handle(&mut self, _msg: SyncTombstones, _ctx: &Ctx<BlobReplica<S>>) -> Vec<Tombstone> {
+        // The full awareness set, for a peer's reconcile-pass anti-entropy pull
+        // (spec §5.3, B7). Cheap: one tiny record per deleted namespace.
+        self.tombstones.snapshot()
+    }
+}
+
 /// The boxed result of a [`BlobTransport::store_blob`] — the future the
 /// `Clustered` tier collects for its `W`-of-`R` quorum and drains in the
 /// background (spec §5.2).
@@ -275,6 +300,15 @@ pub trait BlobTransport: Send + Sync + 'static {
         deleted_at: u64,
         within: Duration,
     ) -> BoxFuture<'static, Result<DeleteAck, CallError>>;
+
+    /// `SyncTombstones` on `node`'s replica (spec §5.3, **B7**): pull its awareness
+    /// set so a rejoining or lagging node learns the deletes it missed, the
+    /// "thereafter by gossip" half of tombstone dissemination.
+    fn sync_tombstones(
+        &self,
+        node: NodeId,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<Vec<Tombstone>, CallError>>;
 
     /// Launch a detached background task (spec §5.2, §7): draining the straggler
     /// stores of a `put` that already reached `W`, so the commit returns at `W`
@@ -370,6 +404,18 @@ impl<S: BlobSystem> BlobTransport for ActorBlobTransport<S> {
         })
     }
 
+    fn sync_tombstones(
+        &self,
+        node: NodeId,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<Vec<Tombstone>, CallError>> {
+        let replica = self.resolve(node);
+        Box::pin(async move {
+            let replica = replica.ok_or(CallError::Unreachable)?;
+            replica.ask_timeout(SyncTombstones, within).await
+        })
+    }
+
     fn launch(&self, task: BoxFuture<'static, ()>) {
         self.system.launch(task);
     }
@@ -406,10 +452,14 @@ mod tests {
             Some(1..4),
         );
         assert_eq!(round_trip(&HasBlob { ns: ns.clone(), id }).id, id);
-        assert_eq!(round_trip(&DeleteNamespace { ns, deleted_at: 7 }).deleted_at, 7);
+        assert_eq!(round_trip(&DeleteNamespace { ns: ns.clone(), deleted_at: 7 }).deleted_at, 7);
         assert_eq!(round_trip(&StoreAck::Stored), StoreAck::Stored);
         assert_eq!(round_trip(&StoreAck::Deleted), StoreAck::Deleted);
         assert_eq!(round_trip(&DeleteAck::Acked), DeleteAck::Acked);
+        // The anti-entropy pull and its snapshot reply cross node boundaries too.
+        let _: SyncTombstones = round_trip(&SyncTombstones);
+        let snapshot = vec![Tombstone { ns, deleted_at: 9 }];
+        assert_eq!(round_trip(&snapshot), snapshot);
     }
 
     type Sim = actor_core::LocalSystem<

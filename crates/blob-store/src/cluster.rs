@@ -156,6 +156,19 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
     }
 
     async fn run_put(&self, ns: &Namespace, bytes: Vec<u8>) -> Result<BlobId, BlobError> {
+        // Enforce the size bound (spec §2: "an implementation SHOULD bound a blob's
+        // size and a consumer SHOULD chunk beyond that bound"). `max_blob_bytes` is
+        // the tier's one size lever; refuse past it rather than store an unbounded
+        // blob — the whole-blob verify and whole-blob fetch (B1) assume a bounded
+        // unit. The error is non-retryable, but the v1 error model has no dedicated
+        // variant, so it is surfaced as `Unavailable` with an explicit reason.
+        if bytes.len() > self.inner.config.max_blob_bytes {
+            return Err(BlobError::Unavailable(format!(
+                "blob of {} bytes exceeds max_blob_bytes {}",
+                bytes.len(),
+                self.inner.config.max_blob_bytes
+            )));
+        }
         let id = BlobId::of(&bytes);
         // Refuse early if this node already knows the namespace is gone (spec §5.3).
         if self.inner.tombstones.contains(ns) {

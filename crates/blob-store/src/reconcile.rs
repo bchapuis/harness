@@ -25,6 +25,7 @@ use std::sync::Weak;
 use std::time::Duration;
 
 use crate::cluster::Inner;
+use crate::event::BlobEvent;
 use crate::placement;
 use crate::system::BlobSystem;
 
@@ -37,6 +38,12 @@ const RECONCILE_INTERVAL: Duration = Duration::from_millis(250);
 /// How long a reconcile copy or probe waits on an owner before giving up; the blob
 /// is retried on the next pass, so a missed copy is eventually consistent.
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long a tombstone anti-entropy pull waits on a peer. Much shorter than
+/// [`RECONCILE_TIMEOUT`]: the pull is best-effort and retried every pass, so a peer
+/// that does not answer promptly is simply skipped this round rather than stalling
+/// the pass — which keeps B6 re-replication snappy when a peer is unreachable.
+const SYNC_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The reconcile loop for one node. Holds a `Weak` to the node's [`Inner`] and
 /// exits once the last [`ClusteredBlobStore`](crate::ClusteredBlobStore) handle is
@@ -90,6 +97,18 @@ async fn reconcile_pass<S: BlobSystem>(inner: &Inner<S>) {
         }
     }
 
+    // --- Anti-entropy: learn tombstones this node missed (spec §5.3 gossip, B7) --
+    // The initial `delete_namespace` fan-out reaches every *then-serving* node, but a
+    // node partitioned or down across the delete misses it. Pull every serving peer's
+    // awareness set and apply any tombstone we lack — durable record + sweep, then
+    // in-memory awareness — so a rejoining holder stops serving (and stops re-pushing)
+    // a stale blob of a deleted namespace. Without it, a healed `unreachable` holder
+    // resurrects the namespace it never learned was gone (B7). This runs *after*
+    // re-replication, and the pulls run concurrently, so one slow or dead peer never
+    // starves B6 re-replication; the push vector is independently guarded by the
+    // receiving owner's `StoreAck::Deleted` reject while gossip converges.
+    sync_tombstones(inner, &members).await;
+
     // --- Reclamation: release the anchor's sweep tracking when safe (B7) --------
     // Once every member at anchor time has swept or reached a terminal state, no
     // node can still hold an un-swept blob of the namespace, so the per-namespace
@@ -101,6 +120,53 @@ async fn reconcile_pass<S: BlobSystem>(inner: &Inner<S>) {
             .reclaimable(&ns, |node| inner.system.is_terminal(node))
         {
             inner.anchors.reclaim(&ns);
+        }
+    }
+}
+
+/// Pull every serving peer's tombstone set and apply the ones this node lacks
+/// (spec §5.3, **B7**). A newly-learned tombstone is recorded durably and its
+/// bytes swept — the same effect a `DeleteNamespace` would have — then added to the
+/// in-memory awareness set so `put`/`get`/reconcile short-circuit, and finally
+/// emitted so the simulator's checkers observe the node becoming aware. Peers are
+/// visited in a stable (sorted) order, and only genuinely new tombstones mutate
+/// state, so the pass is idempotent and seed-reproducible.
+async fn sync_tombstones<S: BlobSystem>(inner: &Inner<S>, members: &[actor_core::NodeId]) {
+    let mut peers: Vec<actor_core::NodeId> =
+        members.iter().copied().filter(|n| *n != inner.self_node).collect();
+    peers.sort();
+
+    // Pull every peer concurrently, so a single slow or dead peer (whose ask runs to
+    // the timeout) does not serialize the pass behind it. The asks are read-only; the
+    // learned tombstones are applied below in the deterministic peer order, so the
+    // emitted event stream stays seed-reproducible (spec §8).
+    let pulls = peers
+        .iter()
+        .map(|&peer| inner.transport.sync_tombstones(peer, SYNC_TIMEOUT));
+    let snapshots = futures::future::join_all(pulls).await;
+
+    for snapshot in snapshots {
+        let Ok(tombstones) = snapshot else {
+            continue; // an unreachable peer is retried next pass
+        };
+        for tombstone in tombstones {
+            if inner.tombstones.contains(&tombstone.ns) {
+                continue; // already known — do not re-sweep or re-emit
+            }
+            // Learn it exactly as a DeleteNamespace would: durable tombstone + sweep
+            // first (refuses later stores, survives restart), then awareness. If the
+            // durable write fails, leave it unlearned so the next pass retries.
+            if inner
+                .local
+                .tombstone(&tombstone.ns, tombstone.deleted_at)
+                .is_ok()
+            {
+                inner.tombstones.insert(&tombstone.ns, tombstone.deleted_at);
+                inner.system.emit_blob_event(BlobEvent::Tombstoned {
+                    node: inner.self_node,
+                    ns: tombstone.ns,
+                });
+            }
         }
     }
 }
