@@ -225,11 +225,12 @@ The `G: GrainHandler<M>` bound proves at compile time that the grain accepts `M`
 
 The `M: Clone` bound lets the runtime re-issue the command when the first attempt provably did not run: a stale cached host that hibernated (`DeadLetter`) or whose leadership moved (`NotLeader`), neither of which commits (§6, §8). An *ambiguous* transport failure (`Unreachable`/`Timeout`) is never auto-retried, because the command may have committed before the reply was lost (at-most-once, §2.2). The clone is of the caller's own small command value.
 
-`GrainCtx<G>` is the handler/lifecycle context. It exposes the grain's name, a `GrainRef` self-reference, and the system handle. (Surfacing the actor `Ctx` underneath for inherited capabilities such as death watch and child spawning is a deferred addition, §16; the current context exposes only the three accessors below.)
+`GrainCtx<G>` is the handler/lifecycle context. It exposes the grain's name, its colocated blob area (the content-addressed facet, §7.10), a `GrainRef` self-reference, and the system handle. (Surfacing the actor `Ctx` underneath for inherited capabilities such as death watch and child spawning is a deferred addition, §16; the current context exposes only the four accessors below.)
 
 ```rust
 impl<G: Grain> GrainCtx<G> {
     fn name(&self) -> &GrainName;
+    fn blobs(&self) -> GrainBlobs;       // the grain's content-addressed blob area (§7.10)
     fn this(&self) -> GrainRef<G>;
     fn system(&self) -> &G::System;
 }
@@ -345,7 +346,7 @@ A grain's records are totally ordered among themselves but share no order with a
 The journal is a trait, a simulation and deployment seam like `Transport` and `Clock` (actor §4.6, §7), operating on opaque, codec-encoded event bytes so it stays codec-agnostic:
 
 ```rust
-pub trait GrainJournal: Send + Sync + 'static {
+pub trait GrainJournal: Clone + Send + Sync + 'static {
     /// Append `events` for one grain immediately after `after`, as one atomic
     /// entry. Commits on a quorum, fenced by the shard term (§7.2).
     fn append(&self, grain: &GrainName, after: Seq, events: Vec<Vec<u8>>)
@@ -381,6 +382,36 @@ pub trait GrainJournal: Send + Sync + 'static {
     /// reads locally.
     fn load_snapshot(&self, grain: &GrainName)
         -> impl Future<Output = Result<Option<(Seq, Vec<u8>)>, GrainJournalError>> + Send;
+
+    // --- The grain-native content-addressed facet (§7.10) ---
+    // A grain's immutable blobs, replicated to the *same* shard replicas as its
+    // records but off the ordered/fenced path (no `Seq`, no term). They ride the
+    // journal seam so the host needs no extra dependency to hand the grain a
+    // `GrainBlobs` handle; the runtime surfaces them through `ctx.blobs()`.
+
+    /// Store an immutable blob for one grain, durable on a write quorum of its
+    /// replicas (one local copy on `Local`). Idempotent and dedup'd by content.
+    fn put_blob(&self, grain: &GrainName, id: BlobId, bytes: Vec<u8>)
+        -> impl Future<Output = Result<(), GrainJournalError>> + Send;
+
+    /// Fetch a verified blob for one grain, or `None` if no replica holds it.
+    fn get_blob(&self, grain: &GrainName, id: BlobId)
+        -> impl Future<Output = Result<Option<Vec<u8>>, GrainJournalError>> + Send;
+
+    /// Whether one grain's blob is present on **any reachable replica** (not a
+    /// quorum count): a `true` means a `get_blob` can source the bytes, not that
+    /// they are quorum-durable (durability is established at `put_blob`).
+    fn has_blob(&self, grain: &GrainName, id: BlobId)
+        -> impl Future<Output = Result<bool, GrainJournalError>> + Send;
+
+    /// Keep only the listed blobs of one grain, dropping the rest — the grain's
+    /// mark-from-roots GC (`ctx.blobs().gc`, §7.10). Best-effort.
+    fn retain_blobs(&self, grain: &GrainName, retain: Vec<BlobId>)
+        -> impl Future<Output = ()> + Send;
+
+    /// Drop **all** of one grain's blobs — grain-scoped reclamation on destroy
+    /// (`ctx.blobs().destroy`, §7.10). Best-effort.
+    fn delete_blobs(&self, grain: &GrainName) -> impl Future<Output = ()> + Send;
 }
 
 pub enum AppendOutcome {
@@ -401,7 +432,7 @@ pub enum GrainJournalError {
 - the shard's **leader-election group** (§8) supplies placement: who may write, under which term. The journal consults it to stamp every append with the current term and to answer `NotLeader`.
 - a per-grain **Replicator** supplies durability: it quorum-appends a grain's opaque record bytes to the shard's replicas, fenced by the shard term, and recovers a grain's committed head from a quorum on activation (§8, §9). The two reference tiers (§7.4) are Replicator implementations.
 
-The records are the grain's `Event`s and state is the `apply` fold (§4.1); a snapshot is the serialized `State`. (Interpreting a grain's records as something other than an event log, such as SQLite WAL frames or file byte-ranges, is a deferred extension over the same Replicator substrate, §16.) The host neither names nor depends on the parts below the seam: it sees `append`/`load`/`head`/`save_snapshot`/`load_snapshot` and nothing else. This is what lets the substrate be rebuilt, a shared shard log replaced by per-grain quorum append, with no change above the seam.
+The records are the grain's `Event`s and state is the `apply` fold (§4.1); a snapshot is the serialized `State`. (Interpreting a grain's records as something other than an event log, such as SQLite WAL frames or file byte-ranges, is a deferred extension over the same Replicator substrate, §16.) The host neither names nor depends on the parts below the seam: it sees `append`/`load`/`head`/`save_snapshot`/`load_snapshot` for the journal and `put_blob`/`get_blob`/`has_blob`/`retain_blobs`/`delete_blobs` for the colocated blob facet (§7.10), and nothing else. This is what lets the substrate be rebuilt, a shared shard log replaced by per-grain quorum append, with no change above the seam.
 
 ### 7.4 Durability tiers: the two Replicators
 
@@ -452,7 +483,7 @@ The residual bounded cost is per-shard placement: a hot shard's grains share one
 
 A **subscription** is a live, best-effort delivery of a grain's committed records to a sink, layered over the durable `load` (§7.3). It exists so a follower learns of each record as it commits rather than by polling, without making delivery a source of truth. It is the push analogue of §7.5's local read: cheap, off the write path, and never authoritative.
 
-`GrainRef::subscribe(from, sink)` routes to the shard leader (§5.4), registers `sink` — an `ActorRef` to a mailbox accepting the grain's record batches — in the activation's **sink set**, and returns the committed `head`. After each commit (§6 step 4), the host delivers a batch of the seqs just appended to every sink. Delivery occurs **after** the fold and the output-gate release and MUST NOT gate the commit or any caller's reply; it is observational, emitted at the same point as `Committed` (§13), and so cannot affect a write's outcome (preserves **G5**). `subscribe` is a framework built-in, dispatched to the host for *any* grain type without appearing in the grain's `register` allowlist (§5.5) — the read-path analogue of `head`/`load`, not a user command.
+`GrainRef::subscribe(from)` routes to the shard leader (§5.4), where the framework spawns a local **sink** — an `ActorRef` to a mailbox accepting the grain's record batches — and registers it in the activation's **sink set**. The call returns a `Subscription` carrying the committed `head` and a receiver of live record batches (the caller does not supply the sink; the framework owns it, so the subscriber just drains the receiver). After each commit (§6 step 4), the host delivers a batch of the seqs just appended to every sink. Delivery occurs **after** the fold and the output-gate release and MUST NOT gate the commit or any caller's reply; it is observational, emitted at the same point as `Committed` (§13), and so cannot affect a write's outcome (preserves **G5**). `subscribe` is a framework built-in, dispatched to the host for *any* grain type without appearing in the grain's `register` allowlist (§5.5) — the read-path analogue of `head`/`load`, not a user command.
 
 **Reconcile by `Seq`.** A sink treats `Seq` as authoritative. Each batch carries the `from` it begins after; a sink that has seen up to `last` MUST close any gap (`from > last`) by `load` (§7.3), and MUST ignore records at or below `last` — a re-subscribe replay, or a timed-out append that committed late (§7.2). At-most-once delivery (actor §7.2) MAY drop, duplicate, or — across a re-subscribe — reorder batches; seq reconciliation absorbs all three. Push is a latency optimization over `load`; correctness rests on the journal (**G3**), never on delivery reliability. The reconstructed sequence a sink obtains by applying this rule is exactly what `load(from, …)` to the head would return (**G16**).
 
@@ -466,7 +497,7 @@ A grain's journal holds its **small foldable state** — the value `apply` rebui
 
 The facet is the journal's durability half with its **hard half removed**. A content hash names exactly one byte sequence for all time, so there is nothing to *order* and nothing to *agree on*: two writers of the same bytes cannot conflict, and a reader proves it got the right bytes by re-hashing them. The single-writer term fence (§8) exists only to keep one *mutable* head from forking; a blob has no mutable slot, so the blob path carries **no `Seq`, no term, and no read-repair** — it is `StoreRecord` minus everything fencing- and order-related. What remains is a single durability question, "is the blob stored on enough replicas yet?", answered exactly as a record's is.
 
-- **The model.** A **`BlobId`** is the 32-byte BLAKE3 digest of a blob's bytes; granary defines it natively (it does not depend on a separate content store). A blob's full address is `(GrainName, BlobId)` — the id is identical wherever the bytes are stored; the grain scopes *which* area holds it. Blobs are write-once and dedup'd by content **within a grain**: equal bytes under one grain store once. `ctx.blobs()` offers `put` (→ `BlobId`), `get` (whole or a byte range), `has`, `gc`, and `destroy`.
+- **The model.** A **`BlobId`** is the 32-byte BLAKE3 digest of a blob's bytes; granary defines it natively (it does not depend on a separate content store). A blob's full address is `(GrainName, BlobId)` — the id is identical wherever the bytes are stored; the grain scopes *which* area holds it. Blobs are write-once and dedup'd by content **within a grain**: equal bytes under one grain store once. `ctx.blobs()` offers `put` (→ `BlobId`), `get` (whole or a byte range), `has` (present on **any reachable replica**, so a `get` can source the bytes — not a quorum-durability measure, since durability is established at `put`), `gc` (mark-from-roots: keep only a live id set), and `destroy` (drop the whole area).
 - **Verification on read (the blob analogue of `wal`'s torn-tail rejection, strengthened to a cryptographic digest).** Every `get` re-hashes the bytes it is about to return and compares to the requested `BlobId`; on mismatch it MUST NOT return them. On the `Quorum` tier it then falls through to the next replica, and returns an error only if no replica yields verifying bytes. Corruption and misdelivery are thus detectable at the point of use, never silent wrong bytes (**G17**).
 - **Durability is a quorum append, colocated.** A `put` writes the **local** replica (the leader is one of the shard's replicas, §5.2, so a later `get` reads locally) and fans the bytes to the peers, acknowledging once a write quorum has stored them; the blob then survives the loss of a minority of the grain's replicas. There is no leader-election, term, or agreement round on this path (**G18**). A `put` that cannot reach a quorum returns `Unavailable`, and the caller retries — idempotently, since the id is a pure function of the bytes.
 - **Reclamation is grain-scoped and root-driven.** The grain knows its own live id set (the ids its state still references), so it reclaims storage with a **mark-from-roots sweep** — `gc(live)` drops every blob not in `live` — and a whole-area `destroy`. This is what a liveness-blind shared store cannot do, and it is why the facet needs **no namespace tombstone, no membership-gated resurrection guard, and no cluster-wide delete fan-out**: deletion targets the grain's own known replicas, and a delete a partitioned replica misses leaves only *orphan bytes* (reclaimed by a later sweep), never a *resurrection of referenced data*, because nothing in the grain's state points at them and only referenced blobs are ever fetched or re-replicated.
@@ -475,6 +506,16 @@ The facet is the journal's durability half with its **hard half removed**. A con
 **Placement is colocation, not rendezvous.** A grain's blobs ride its *own shard replica set*, deliberately **not** a content-hash-rendezvous spread across the whole cluster. The trade is intentional: colocation keeps a grain's bulk data with its compute, so reads are leader-local and recovery comes from the grain's known replicas, at the cost of concentrating a grain's blob bytes on its R replicas (bounded the same way the grain's journal already is). A *cluster-shared* content store — rendezvous-placed, namespace-scoped, for cross-grain dedup, archival, or an external object-store tier — is the complementary **cold** tier of the DO hot/cold split (DO §6), off the grain's hot path and out of scope here (§16).
 
 **Deferred, in lockstep with §7.6.** Today a grain's blobs reach a newly-added shard replica the same way its records do — by **recovery-on-access** (a verified peer-fetch), not by proactive streaming. When §7.6's "stream each grain's committed records and latest snapshot to a new replica before it counts toward quorum" is realized, it MUST stream the grain's blobs too, so the durability margin is actively restored after a membership change rather than only on demand. Range-verified streaming of one large blob against the BLAKE3 tree the id already roots (the Bao encoding) is a further deferred refinement (§16); v1 verifies whole blobs and a consumer chunks beyond a bound.
+
+---
+
+### 7.11 The durable workspace filesystem (a worked consumer of the facet)
+
+The blob facet (§7.10) has a first concrete consumer shipped in the crate: a **durable workspace**, a filesystem that survives a grain's hibernation, migration, and node loss. It is the **JuiceFS split** applied directly to a grain — the *metadata* (the inode tree, the directory structure, each file's `slice → block` map) is the grain's small foldable journal state, while the *file blocks* are immutable, content-addressed blobs in the grain's colocated area (§7.10), referenced from the metadata by `BlobId` and nothing more.
+
+It is an **ordinary grain**, not a new mechanism. `Fs` implements `Grain` with `State = FsTree` (the inode tree), `Event = FsOp` (the metadata mutations its `apply` folds), and `GRAIN_TYPE = "granary.fs.Workspace"`, one grain per workspace keyed by the workspace id. It therefore inherits identity, the journal, the single-writer fence (§8), placement, activation, and hibernation unchanged. The metadata is the durable source of truth; the materialized directory and block bytes are a rebuildable cache (§1). Its commands are registered the ordinary way (§5.5): `WriteFile`, `ReadFile`, `ListDir`, `Remove`, `Rename`, `Truncate`, `Stat`, and `Destroy`, plus a framework `Repair` that re-replicates the live block set on activation (the recovery-on-access path of §7.10).
+
+The write path chunks file bytes into fixed-size blocks, `put`s each into `ctx.blobs()`, and journals only the resulting `(slice → BlobId)` map; the read path resolves slices to ids and `get`s the blocks back, verified by content (§7.10, **G17**). Deleting or truncating a file drops the slices from the metadata, and the grain's mark-from-roots GC (`ctx.blobs().gc`, §7.10) reclaims the now-unreferenced blocks; `Destroy` drops the whole area. This is what the facet was built for — a grain that is a *durable object with a working set*, not only a small event-sourced value. The filesystem lives **in** the granary crate (rather than a separate crate) so a layered runtime such as the agentic harness depends only on granary for it. (An on-disk, WAL-frame-shipped SQLite store for large databases remains a distinct, deferred record interpretation, §16.)
 
 ---
 
@@ -578,7 +619,7 @@ pub enum GrainError {
 ## 13. Security and observability
 
 - **Security.** Granary adds no transport; it inherits mutual-TLS associations, the handshake allowlist, and the deserialization allowlist (the grain dispatch registry, §5.5) from actor §15. The gateway MAY consult an `Authorizer` per `(peer, GrainName, manifest)` before activating or dispatching, as actor §15.4 gates `deliver`.
-- **Observability.** Granary emits, on the actor framework's single extensible `Event` stream (actor §16), grain and shard events: `Activated`, `Rehydrated { from_snapshot, replayed }`, `Committed { seq }`, `Snapshotted { at }`, `Passivated`, `LeaderChanged { shard }`, `ShardSplit`, `ShardMerged`. These drive both operator tooling and the simulator's invariant checks (§14). Metrics SHOULD include per-shard commit latency and log size, per-node active-grain count, shard count, and leadership changes. Record subscriptions (§7.9) add **no** content-bearing event: they reuse `Committed { seq }` as their commit signal and deliver the records out of band, keeping the journal the one place a grain's content lives.
+- **Observability.** Granary emits, on the actor framework's single extensible `Event` stream (actor §16), the grain-lifecycle events `Activated`, `Rehydrated { from_snapshot, replayed }`, `Committed { seq }`, `Snapshotted { at }`, and `Passivated`. Every variant also carries the `node` that hosts the activation (its shard's leader, §5.2) and the grain `name`, which is what makes the per-node activation guarantee (**G6**) expressible as a continuous checker over the stream. The shard events `LeaderChanged { shard }`, `ShardSplit`, and `ShardMerged` are **deferred**: leadership is observed through the system seam rather than emitted, and split/merge (§7.7) is not yet implemented. These drive both operator tooling and the simulator's invariant checks (§14). Metrics SHOULD include per-shard commit latency and log size, per-node active-grain count, shard count, and leadership changes. Record subscriptions (§7.9) add **no** content-bearing event: they reuse `Committed { seq }` as their commit signal and deliver the records out of band, keeping the journal the one place a grain's content lives.
 
 ---
 
@@ -628,7 +669,7 @@ Named here, specified elsewhere or later, so the core stays small:
 
 - **Durable alarms.** A stored timer (`set_alarm` → `alarm()` handler) that re-activates a grain with no caller present (DO §5). The basis for retries, timeouts, and batch flushes.
 - **Hibernatable connections.** Parking a record subscription (§7.9) — or a WebSocket/stream connection — *across* hibernation, holding the registration while the grain sleeps and re-delivering on wake (DO §5), so a follower need not re-subscribe after every idle eviction. An extension of the §7.9 primitive, not a separate mechanism: subscriptions today are dropped on deactivation and re-established by the subscriber; this would persist the registration instead.
-- **Alternative record interpretations (SQLite, File).** Interpreting a grain's records as something other than an event log, over the same per-grain Replicator substrate (§7.2): a SQLite store ships a grain's writes as WAL frames into a private on-disk database (the Cloudflare Durable Objects model, DO §4.2), a file store as byte-range writes to a file. Both make a grain a true durable object without event-sourcing, while the `apply`-fold event log remains the first-class default. A *statement-sourced* SQLite grain (SQL commands as events folded into an in-memory database) is already expressible today and needs none of this: the deferred work is the on-disk, WAL-frame-shipped store for large databases and zero-latency local reads. A **durable workspace** (a filesystem grain) is the motivating consumer of the §7.10 blob facet: its metadata (inode tree, slice map) folds in the journal while its file blocks live in `ctx.blobs()`.
+- **Alternative record interpretations (SQLite, File).** Interpreting a grain's records as something other than an event log, over the same per-grain Replicator substrate (§7.2): a SQLite store ships a grain's writes as WAL frames into a private on-disk database (the Cloudflare Durable Objects model, DO §4.2), a file store as byte-range writes to a file. Both make a grain a true durable object without event-sourcing, while the `apply`-fold event log remains the first-class default. A *statement-sourced* SQLite grain (SQL commands as events folded into an in-memory database) is already expressible today and needs none of this: the deferred work is the on-disk, WAL-frame-shipped store for large databases and zero-latency local reads. (The **durable workspace** filesystem — the motivating consumer of the §7.10 blob facet — is *not* deferred and *not* an alternative record interpretation: it is an ordinary event-sourced grain whose metadata folds in the journal while its file blocks live in `ctx.blobs()`, shipped in the crate and specified in §7.11.)
 - **Proactive blob re-replication on membership change.** Streaming a grain's blobs (§7.10) to a newly-added shard replica before it counts toward a quorum, restoring the durability margin actively rather than only on read-access. Deferred *in lockstep* with the same §7.6 work for records and snapshots, since both reach a new replica by recovery-on-access today.
 - **Range-verified blob streaming and a cluster-shared cold tier.** Verifying a byte range of one large blob against the BLAKE3 tree the `BlobId` already roots (the Bao encoding, §7.10), so very large blobs need not be fetched whole; and a separate rendezvous-placed, namespace-scoped content store for cross-grain dedup, archival, and an external object-store tier — the **cold** half of the DO hot/cold split (DO §6), complementary to the grain-colocated **hot** facet of §7.10.
 - **Linearizable reads (check-quorum lease).** Extending the shard's leader-election group (§8) with a check-quorum property, so the leader serves reads locally while it can still confirm a quorum and the activation self-fences when it can no longer confirm shard ownership, rather than returning stale state (§7.5). The DO-faithful single-instance fence; cheaper than a per-read Raft read-index. Requires a check-quorum primitive on the leader-election group's Raft engine (a leader that has not heard from a quorum within an election timeout is no longer read-valid).
@@ -651,6 +692,9 @@ let accounts: Granary<Account> = system.granary(GranaryConfig {
     shard_target_bytes: 256 << 20,          // split a shard past this size (§7.7, deferred)
     idle_after: Duration::from_secs(10),    // hibernation window, matches DO (§10)
     snapshot_every: 256,                    // events (§9)
+    grain_store: None,                      // None ⇒ fresh in-memory store per node; a
+                                            //   factory persists records across a cold
+                                            //   restart (§7.4, the Raft-WAL analogue, G14)
 });
 
 // --- Address a grain by name; activate-on-first-use, identical call site local or remote ---
@@ -712,10 +756,22 @@ granary/                 # the grain runtime, built on actor-core + actor-cluste
   memory.rs              # the single-node journal: Local replicator + in-memory event log (tier 1, §7.4)
   file_store.rs          # the file-backed GrainStore: a node's records durable across a restart,
                          #   so a cold-restarted cluster recovers each grain from a quorum (§7.4, G14)
+  blobs.rs               # the grain-native content-addressed facet: BlobId + GrainBlobs
+                         #   (put/get/has/gc/destroy), colocated with the journal (§7.10)
+  subscription.rs        # record subscriptions (the journal follower): the push analogue of
+                         #   load — live delivery of committed records to a Subscription's sink (§7.9)
   system.rs              # the GranarySystem capability seam + name→shard/group hashing (§5.1, §7)
   event.rs               # GrainEvent observability stream (§13)
   config.rs              # GranaryConfig (Appendix A)
   error.rs               # GrainError (§12)
+  fs/                    # the durable workspace filesystem grain (§7.11): metadata folded in
+                         #   the journal, immutable file blocks stored as blobs (§7.10)
+    mod.rs               #   module overview and the public Fs surface
+    meta.rs              #   FsTree/Inode/FileData/Slice/Block state, paths, the live-block root set
+    op.rs                #   the FsOp event and its pure apply fold (with slice GC)
+    grain.rs             #   the Fs grain and its file commands (read/write/list/rename/…)
+    chunk.rs             #   the write (bytes → blocks → blobs) and read (slices → bytes) paths
+    repair.rs            #   grain-driven re-replication of the live block set (§7.10)
 ```
 
 (`grainref.rs` rather than `ref.rs`, since `ref` is a reserved word; `system.rs`,
