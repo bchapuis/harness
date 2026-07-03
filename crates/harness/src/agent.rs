@@ -298,6 +298,12 @@ struct SandboxState {
     /// activity (§5.5): false until a `WorkspaceReset` is journaled (or none is
     /// needed); flipped false again on environment loss.
     reconciled: bool,
+    /// Whether the workspace was actually lost *during* this activation — the
+    /// provider returned `EnvironmentLost` (§5.4). A durable provider survives
+    /// reactivation, so the harness suppresses the routine reactivation reset
+    /// for it; but a genuine loss mid-activation must still reset, durable or
+    /// not. Set on `EnvironmentLost`, cleared per activation in `on_activate`.
+    lost_this_activation: bool,
 }
 
 /// The progress flags of the one live run (§3.1, §5.5): cleared between runs by
@@ -795,8 +801,11 @@ impl<S: HarnessSystem> Agent<S> {
         if let Err(ToolError::EnvironmentLost(_)) = &outcome {
             // The provider lost the workspace (§5.5): drop the binding, release
             // it, and require a `WorkspaceReset` before the next model call.
+            // Mark the loss so the reset fires even under a durable provider —
+            // this loss happened mid-activation, not a routine reactivation.
             self.release_sandbox(&mut act, ctx);
             act.env.reconciled = false;
+            act.env.lost_this_activation = true;
         }
         // The outcome record is produced below, so its `ToolCompleted` is owed
         // once it commits (drained by `emit_run_events`, §10.4).
@@ -923,8 +932,14 @@ impl<S: HarnessSystem> Agent<S> {
         }
         // Surface a lost workspace before the model acts on state that is gone
         // (§5.5). A fresh environment resets every held tier to `Workspace`;
-        // later acquisitions re-journal, never silently inherited.
-        if !act.env.reconciled && state.sandbox_activity {
+        // later acquisitions re-journal, never silently inherited. A durable
+        // provider re-binds the same workspace on reactivation, so the routine
+        // reactivation reset is a lie for it — suppress it there. A loss that
+        // happened *this* activation (`lost_this_activation`) still resets,
+        // durable or not: that workspace really is gone.
+        let durable_survives =
+            self.seams.sandbox.workspace_durable() && !act.env.lost_this_activation;
+        if !act.env.reconciled && state.sandbox_activity && !durable_survives {
             act.env.reconciled = true;
             act.env.tiers_held = BTreeSet::from([Tier::Workspace]);
             return vec![self.rec(ctx, RecordBody::WorkspaceReset)];
@@ -1503,6 +1518,7 @@ impl<S: HarnessSystem> Grain for Agent<S> {
         // tier is re-acquired under a journaled record this activation.
         act.env.tiers_held = BTreeSet::from([Tier::Workspace]);
         act.env.reconciled = false;
+        act.env.lost_this_activation = false;
         act.run.dangling_resolved = false;
         Ok(())
     }

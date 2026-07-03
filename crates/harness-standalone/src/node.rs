@@ -57,29 +57,27 @@ use harness::Kinds;
 use harness::Model;
 use harness::ModelParams;
 use harness::SandboxProvider;
-use harness::Tier;
 use harness_anthropic::AnthropicModel;
 
 use tenancy::Directory;
 
 use crate::http::HttpsPost;
-use crate::sandbox::LocalSandboxes;
 
 /// Which sandbox provider the node runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxMode {
-    /// `LocalSandboxes`: an unconfined `/bin/sh` per session directory,
-    /// trusted-input only (sandbox spec §3.4).
-    Local,
-    /// `harness-sandbox`'s container-backed `Native` tier: `shell` runs
-    /// inside a per-session OCI container, workspace bind-mounted, no
-    /// network — shared-kernel confinement (sandbox spec §3.5's development
-    /// fallback).
+    /// `harness-sandbox`'s container-backed `Native` tier wrapped in
+    /// `MaterializedSandboxes`: `shell` runs inside a per-session OCI container
+    /// (workspace bind-mounted, no network — shared-kernel confinement, sandbox
+    /// spec §3.5's development fallback), and the workspace is backed by a durable
+    /// filesystem grain (granary §7.10) so it survives hibernation, migration, and
+    /// node loss.
     Docker,
-    /// `harness-sandbox`'s microVM-backed `Native` tier: `shell` runs
-    /// inside a per-session Firecracker VM, workspace synced over vsock, no
-    /// network device — hardware-virtualization confinement (sandbox spec
-    /// §3.4's stronger grade). Linux with `/dev/kvm` only.
+    /// `harness-sandbox`'s microVM-backed `Native` tier wrapped in
+    /// `MaterializedSandboxes`: `shell` runs inside a per-session Firecracker VM
+    /// (workspace synced over vsock, no network device — hardware-virtualization
+    /// confinement, sandbox spec §3.4's stronger grade; Linux with `/dev/kvm`
+    /// only), with the same grain-backed durable workspace as `Docker`.
     Firecracker,
     /// `harness-sandbox`'s `DurableWorkspaces`: the `Workspace` tier backed by a
     /// durable filesystem grain (granary §7.10), so a session's workspace survives
@@ -191,11 +189,10 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         }
     }
     // Resolved before any port is bound: a missing confinement choice is a
-    // configuration error the operator fixes, not a half-booted node. The
-    // unconfined mode is reachable only by typing it, and says so loudly.
+    // configuration error the operator fixes, not a half-booted node.
     let sandbox_mode = opts.sandbox.ok_or(
-        "--sandbox is required: `docker` or `firecracker` (confined), or `local` \
-         (UNCONFINED /bin/sh — trusted-input only, sandbox spec §3.4)",
+        "--sandbox is required: `docker` or `firecracker` (confined shell, durable \
+         workspace), or `durable` (typed file tools, no shell)",
     )?;
     let node = NodeId::new(opts.id);
     let roster: Vec<NodeId> = (1..=opts.nodes).map(NodeId::new).collect();
@@ -315,32 +312,42 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         TokioClock::new(),
         Arc::new(OsEntropy::new()),
     ));
-    if sandbox_mode == SandboxMode::Local {
-        eprintln!(
-            "[{node}] WARNING: --sandbox local is UNCONFINED: `shell` runs as this process's \
-             user with all its permissions; only the working directory is per-session. \
-             Trusted-input only (sandbox spec §3.4) — anything that feeds a real model \
-             untrusted content belongs in --sandbox docker or firecracker."
-        );
-    }
     // One durable grain store under --data (§7.4), shared by the session kinds, the
-    // tenancy directory, and — in `--sandbox durable` — the workspace filesystem grain.
-    // Its factory caches per node, so every grain type shares one on-disk store keyed by
-    // (shard, grain), the grain analogue of the Raft WAL.
+    // tenancy directory, and the workspace filesystem grain (every shell-capable mode is
+    // now grain-backed, plus `--sandbox durable`). Its factory caches per node, so every
+    // grain type shares one on-disk store keyed by (shard, grain), the grain analogue of
+    // the Raft WAL.
     let grain_store = FileGrainStore::factory(opts.data.join("grains"));
+    // Both shell-capable modes back their workspace with a durable filesystem grain
+    // (granary §7.10): `MaterializedSandboxes` hydrates the grain into the real
+    // directory the container/VM runs against on open, and syncs it back on release, so
+    // the workspace survives hibernation, migration, and node loss. The grain is hosted
+    // on this node's system over the shared grain store, keyed by session id.
+    let workspaces_granary = || -> Granary<Fs<TcpCluster>> {
+        system.granary(GranaryConfig {
+            grain_store: Some(grain_store.clone()),
+            ..GranaryConfig::default()
+        })
+    };
     let sandboxes: Arc<dyn SandboxProvider> = match sandbox_mode {
-        SandboxMode::Local => Arc::new(LocalSandboxes::new(opts.data.join("workspaces"))),
         SandboxMode::Docker => {
             if opts.sandbox_image.is_empty() {
                 return Err("--sandbox docker requires --sandbox-image".to_string());
             }
+            let inner = harness_sandbox::TieredSandboxes::new(opts.data.join("workspaces"))
+                .map_err(|e| format!("workspaces root: {e}"))?
+                .with_container_cli(opts.container_cli.clone())
+                // The hermetic JS surface, so `run_js` runs without any
+                // language runtime in the container (sandbox spec §3.2).
+                .with_quickjs();
             Arc::new(
-                harness_sandbox::TieredSandboxes::new(opts.data.join("workspaces"))
-                    .map_err(|e| format!("workspaces root: {e}"))?
-                    .with_container_cli(opts.container_cli.clone())
-                    // The hermetic JS surface, so `run_js` runs without any
-                    // language runtime in the container (sandbox spec §3.2).
-                    .with_quickjs(),
+                harness_sandbox::MaterializedSandboxes::new(
+                    inner,
+                    workspaces_granary(),
+                    opts.data.join("workspaces"),
+                    harness_sandbox::DurabilityRules::default(),
+                )
+                .map_err(|e| format!("durable workspace root: {e}"))?,
             )
         }
         SandboxMode::Firecracker => {
@@ -351,16 +358,23 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
                         .to_string(),
                 );
             }
+            let inner = harness_sandbox::TieredSandboxes::new(opts.data.join("workspaces"))
+                .map_err(|e| format!("workspaces root: {e}"))?
+                .with_firecracker(harness_sandbox::FirecrackerConfig::new(
+                    &opts.fc_binary,
+                    &opts.fc_kernel,
+                    &opts.fc_rootfs,
+                ))
+                // The hermetic JS surface, alongside the microVM shell.
+                .with_quickjs();
             Arc::new(
-                harness_sandbox::TieredSandboxes::new(opts.data.join("workspaces"))
-                    .map_err(|e| format!("workspaces root: {e}"))?
-                    .with_firecracker(harness_sandbox::FirecrackerConfig::new(
-                        &opts.fc_binary,
-                        &opts.fc_kernel,
-                        &opts.fc_rootfs,
-                    ))
-                    // The hermetic JS surface, alongside the microVM shell.
-                    .with_quickjs(),
+                harness_sandbox::MaterializedSandboxes::new(
+                    inner,
+                    workspaces_granary(),
+                    opts.data.join("workspaces"),
+                    harness_sandbox::DurabilityRules::default(),
+                )
+                .map_err(|e| format!("durable workspace root: {e}"))?,
             )
         }
         SandboxMode::Durable => {
@@ -440,46 +454,36 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
     // The sandbox tools per mode: the same `shell` name and shape, but
     // distinct declarations (and a profile image in docker/firecracker
     // mode), so the digests differ — a mixed-mode cluster fails to agree
-    // instead of silently splitting confinement. The `TieredSandboxes`
-    // modes additionally offer `run_js` (the hermetic QuickJS Compute tier,
-    // sandbox spec §3.2): JavaScript without any runtime in the shell
-    // environment. The unconfined `LocalSandboxes` is Native-only, so it has
-    // no Compute engine and offers `shell` alone.
+    // instead of silently splitting confinement. Every mode offers the typed
+    // `Workspace` file tools (read/write/list/remove over the durable grain-backed
+    // workspace, §7.10), so the model can create and edit files directly without a
+    // container round-trip. The shell-capable modes add `shell` (the confined Native
+    // tier) and `run_js` (the hermetic QuickJS Compute tier, sandbox spec §3.2) on
+    // top, over the same workspace.
+    let with_file_tools = |kind: Kind| -> Kind {
+        harness_sandbox::workspace_tools()
+            .into_iter()
+            .fold(kind, |kind, tool| kind.tool(tool))
+    };
     let tools = |kind: Kind| -> Kind {
         match sandbox_mode {
-            SandboxMode::Local => {
-                let description = "Run a POSIX shell command (`/bin/sh -c`) in the session's \
-                                   private workspace directory. Returns exit_code, stdout, and \
-                                   stderr.";
-                let schema = serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The shell command to run."
-                        }
-                    },
-                    "required": ["command"]
-                });
-                kind.sandboxed("shell", description, &schema, Tier::Native)
-            }
-            SandboxMode::Docker => kind
-                .tool(harness_sandbox::shell_tool())
-                .tool(harness_sandbox::run_js_tool())
-                .sandbox(harness::SandboxProfile::image(&opts.sandbox_image)),
+            SandboxMode::Docker => with_file_tools(
+                kind.tool(harness_sandbox::shell_tool())
+                    .tool(harness_sandbox::run_js_tool())
+                    .sandbox(harness::SandboxProfile::image(&opts.sandbox_image)),
+            ),
             // The microVM shell declaration differs from the docker one (sync
             // semantics are model-visible), and the profile image carries
             // the rootfs path — both digest-covered, so a cluster mixing
             // realizations fails to agree instead of splitting confinement.
-            SandboxMode::Firecracker => kind
-                .tool(harness_sandbox::fc_shell_tool())
-                .tool(harness_sandbox::run_js_tool())
-                .sandbox(harness::SandboxProfile::image(&opts.fc_rootfs)),
-            // The durable Workspace tier: the four typed file tools over the durable
-            // filesystem grain (granary §7.10), no guest shell or compute.
-            SandboxMode::Durable => harness_sandbox::workspace_tools()
-                .into_iter()
-                .fold(kind, |kind, tool| kind.tool(tool)),
+            SandboxMode::Firecracker => with_file_tools(
+                kind.tool(harness_sandbox::fc_shell_tool())
+                    .tool(harness_sandbox::run_js_tool())
+                    .sandbox(harness::SandboxProfile::image(&opts.fc_rootfs)),
+            ),
+            // No guest shell or compute: the typed file tools alone, over the durable
+            // filesystem grain (granary §7.10).
+            SandboxMode::Durable => with_file_tools(kind),
         }
     };
     // Durable grain storage under --data (§7.4): a session is a grain, so its
@@ -498,19 +502,26 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
     };
     // The Compute tier exists only behind TieredSandboxes; steer toward it
     // for JavaScript exactly where it is offered, and nowhere it is not.
-    let js_hint = if matches!(sandbox_mode, SandboxMode::Local | SandboxMode::Durable) {
-        ""
+    // Mode-aware tool guidance. Every mode has the typed file tools over a durable
+    // workspace that persists across turns; the shell-capable modes add `shell` and
+    // `run_js` on top. `durable` has no shell, so its guidance must not point at one.
+    let tool_guidance = if matches!(sandbox_mode, SandboxMode::Durable) {
+        "Use the typed file tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `remove`) to work \
+         with files in your session's private workspace, which persists across your turns. \
+         There is no shell in this environment."
     } else {
-        " To run JavaScript, use the `run_js` tool rather than reaching for a \
-          `node` binary through `shell`: it runs hermetically (QuickJS) and \
-          needs no runtime installed in the environment."
+        "Use the `shell` tool for anything you need to inspect, compute, or build; it runs in \
+         your session's private workspace directory, which persists across your turns. To \
+         create, read, or edit a file you can also use the typed file tools (`read_file`, \
+         `write_file`, `edit_file`, `list_dir`, `remove`) directly, without spinning up a \
+         container. To run \
+         JavaScript, use the `run_js` tool (hermetic QuickJS, no runtime needed) rather than a \
+         `node` binary through `shell`."
     };
     let assistant = tools(
         Kind::new(format!(
-            "You are the assistant agent of a small local cluster. Use the `shell` tool for \
-             anything you need to inspect, compute, or build; it runs in your session's private \
-             workspace directory, which persists across your turns.{js_hint} You may delegate a \
-             self-contained subtask to the `worker` kind with the `delegate` tool."
+            "You are the assistant agent of a small local cluster. {tool_guidance} You may \
+             delegate a self-contained subtask to the `worker` kind with the `delegate` tool."
         ))
         .model(params.clone()),
     )
@@ -519,8 +530,8 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
     let assistant = grain(assistant);
     let worker = tools(
         Kind::new(format!(
-            "You are a worker agent. Complete the task you were delegated using the `shell` \
-             tool in your private workspace, then reply with a concise result.{js_hint}"
+            "You are a worker agent. Complete the task you were delegated, then reply with a \
+             concise result. {tool_guidance}"
         ))
         .model(params),
     )

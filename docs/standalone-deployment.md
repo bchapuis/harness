@@ -57,9 +57,13 @@ Two agent kinds are registered on every node:
 
 `shell` is the Native tier (the container or microVM `--sandbox` selected);
 `run_js` is the hermetic QuickJS Compute tier (sandbox spec §3.2), so the
-model runs JavaScript without any language runtime in the shell image. The
-unconfined `--sandbox local` mode offers `shell` only — it is the degenerate
-Native-only provider, with no Compute engine.
+model runs JavaScript without any language runtime in the shell image. Both
+shell-capable modes back the workspace with a durable filesystem grain
+(granary §7.10), so a session's files survive hibernation, migration, and node
+loss. The runtime-free `--sandbox durable` mode offers the typed file tools
+(`read_file`/`write_file`/`list_dir`/`remove`) only — a durable workspace with
+no `shell` or `run_js`, so the `assistant`/`worker` kinds carry those tools
+instead.
 
 ## Prerequisites
 
@@ -133,9 +137,9 @@ Any image works; the choice is just what `shell` finds on its `PATH`.
 model to actually run things. `alpine:3.20` is leaner (sh + awk only) if you
 only need file and text tasks.
 
-Without docker, `--sandbox local` runs `shell` directly as your user —
-unconfined, trusted-input only (see Limitations); the node says so loudly at
-startup.
+Without docker (or `/dev/kvm` for firecracker), run `--sandbox durable`: a
+grain-backed durable workspace with the typed file tools and no shell — no
+container runtime required.
 
 Each node logs its bootstrap and then the cluster's life on stderr:
 
@@ -257,7 +261,7 @@ harness-gateway [options]                  # the public HTTP edge
 | `--model <id>`   | `claude-sonnet-4-6`         | agree everywhere (kind digests are pinned per session) |
 | `--secret <s>`   | `harness-standalone`        | cluster association secret |
 | `--api-url <url>`| `https://api.anthropic.com` | `http://…` points at a fake for offline testing |
-| `--sandbox <mode>` | — (required)              | `docker`, `firecracker`, or `local` (unconfined, trusted-input only); agree everywhere (the choice shapes the kind digest) |
+| `--sandbox <mode>` | — (required)              | `docker` or `firecracker` (confined shell, durable workspace), or `durable` (typed file tools, no shell); agree everywhere (the choice shapes the kind digest) |
 | `--sandbox-image <r>` | —                       | container image for `--sandbox docker` (required there); agree everywhere |
 | `--container-cli <c>` | `docker`                | the container CLI binary (podman's compatible CLI works) |
 | `--fc-binary <path>` | `firecracker`            | the VMM executable for `--sandbox firecracker` |
@@ -296,24 +300,20 @@ over HTTP — and needs no API key.
 - **The transport is plaintext.** Fine on loopback; the transport supports
   mutual TLS (`TcpConfig.tls`) but this deployment does not provision
   certificates. Do not point the roster across untrusted networks.
-- **`--sandbox local` is a directory, not a boundary.** In that mode `shell`
-  runs as your user with your permissions; only the working directory is
-  per-session. In tier vocabulary (sandbox spec §2), `shell` declares
-  `Tier::Native` and each kind's cap is that singleton: the degenerate
-  one-tier provider of sandbox spec §5, running native environments
-  unconfined, **trusted-input only** (sandbox spec §3.4). It is never the
-  default — `--sandbox` must be chosen explicitly, and a node entering this
-  mode warns on stderr at startup. Pass `--sandbox docker --sandbox-image
-  <ref>` (e.g. `alpine:3.20`) to run `shell` inside a per-session OCI
-  container instead,
-  via `harness-sandbox`'s `Native` tier: the workspace bind-mounted, no
-  network — shared-kernel confinement (sandbox spec §3.4's SHOULD grade),
-  still not the microVM grade. Pre-pull the image: the first call otherwise
-  pulls it inside the 120s tool timeout. On Linux with `/dev/kvm`, pass
-  `--sandbox firecracker --fc-kernel <vmlinux> --fc-rootfs <ext4>` (both
-  built by `guest/fc-rootfs/build.sh`) for the microVM grade instead: one
-  Firecracker VM per activation, the workspace synced over vsock, no
-  network device (sandbox spec §3.5's reference choice).
+- **`--sandbox` must be chosen explicitly; there is no unconfined mode.** Pass
+  `--sandbox docker --sandbox-image <ref>` (e.g. `alpine:3.20`) to run `shell`
+  inside a per-session OCI container, via `harness-sandbox`'s `Native` tier:
+  the workspace bind-mounted, no network — shared-kernel confinement (sandbox
+  spec §3.4's SHOULD grade), still not the microVM grade. Pre-pull the image:
+  the first call otherwise pulls it inside the 120s tool timeout. On Linux with
+  `/dev/kvm`, pass `--sandbox firecracker --fc-kernel <vmlinux> --fc-rootfs
+  <ext4>` (both built by `guest/fc-rootfs/build.sh`) for the microVM grade
+  instead: one Firecracker VM per activation, the workspace synced over vsock,
+  no network device (sandbox spec §3.5's reference choice). Both back the
+  workspace with a durable filesystem grain, so a session's files survive
+  hibernation, migration, and node loss. Where no container runtime is
+  available, `--sandbox durable` gives the same durable workspace through typed
+  file tools with no shell.
 - **Each node keeps its own `--data` directory**; the journal replicates over
   the transport (a quorum append per grain, §7.2), so the roster spans machines
   — set `--bind-host` and `--peer` (see "Across machines"). The store is local

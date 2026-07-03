@@ -39,12 +39,12 @@ PIDS+=($!)
 export ANTHROPIC_API_KEY=sk-smoke
 NODE_PIDS=()
 for i in 1 2 3; do
-  # --sandbox local is the unconfined mode, chosen deliberately: this smoke
-  # run's only input is the canned fake API above — trusted by construction
-  # (sandbox spec §3.4) — and `local` keeps the script dependency-free.
-  # --client admits the gateway (id $GATEWAY_ID) as a non-voting member.
+  # --sandbox durable keeps the script dependency-free (no docker/KVM): the
+  # canned fake API above never returns a tool call, so the sandbox is opened
+  # but never invoked — the grain-backed Workspace tier is all this smoke run
+  # needs. --client admits the gateway (id $GATEWAY_ID) as a non-voting member.
   "$BIN" node --id "$i" --data "$DATA/data" --api-url http://127.0.0.1:7600 \
-    --sandbox local --client "$GATEWAY_ID=127.0.0.1" \
+    --sandbox durable --client "$GATEWAY_ID=127.0.0.1" \
     > "$DATA/node$i.log" 2>&1 &
   NODE_PIDS+=($!)
   PIDS+=($!)

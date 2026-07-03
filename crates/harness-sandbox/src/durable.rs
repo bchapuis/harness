@@ -49,6 +49,8 @@ use serde_json::json;
 
 use crate::ids::sanitize;
 use crate::workspace::cap_and_decode;
+use crate::workspace::edit_text;
+use crate::workspace::optional_u64;
 use crate::workspace::required_str;
 
 /// Which paths are durable. A path is **non-durable** (routed to the ephemeral
@@ -155,6 +157,13 @@ impl<S: GranarySystem> SandboxProvider for DurableWorkspaces<S> {
                 .map_err(|e| SandboxError(format!("durable overlay open: {e}")))
         })
     }
+
+    fn workspace_durable(&self) -> bool {
+        // The durable subtree is a grain that survives across activations; only
+        // the non-durable overlay resets (§5.5 reversal). The harness must not
+        // journal a routine `WorkspaceReset` on reactivation.
+        true
+    }
 }
 
 /// One session's durable workspace binding: the grain ref (durable subtree) and the
@@ -214,7 +223,8 @@ async fn dispatch<S: GranarySystem>(
         "read_file" => {
             let path = required_str(&input, "path")?;
             if rules.is_durable(path) {
-                read_durable(grain, path).await
+                let (offset, limit) = (optional_u64(&input, "offset")?, optional_u64(&input, "limit")?);
+                read_durable(grain, path, offset, limit).await
             } else {
                 overlay_call(overlay, overlay_root, overlay_name, "read_file", &input)
             }
@@ -226,6 +236,14 @@ async fn dispatch<S: GranarySystem>(
                 write_durable(grain, path, content).await
             } else {
                 overlay_call(overlay, overlay_root, overlay_name, "write_file", &input)
+            }
+        }
+        "edit_file" => {
+            let path = required_str(&input, "path")?;
+            if rules.is_durable(path) {
+                edit_durable(grain, path, &input).await
+            } else {
+                overlay_call(overlay, overlay_root, overlay_name, "edit_file", &input)
             }
         }
         "remove" => {
@@ -258,13 +276,39 @@ async fn dispatch<S: GranarySystem>(
 async fn read_durable<S: GranarySystem>(
     grain: &GrainRef<Fs<S>>,
     path: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
 ) -> Result<Value, ToolError> {
     let bytes = match grain.ask(ReadFile { path: path.into(), range: None }).await {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(e)) => return Err(fs_error(path, "read_file", e)),
         Err(e) => return Err(grain_error("read_file", e)),
     };
-    Ok(cap_and_decode(&bytes))
+    Ok(cap_and_decode(&bytes, offset, limit))
+}
+
+async fn edit_durable<S: GranarySystem>(
+    grain: &GrainRef<Fs<S>>,
+    path: &str,
+    input: &Value,
+) -> Result<Value, ToolError> {
+    let bytes = match grain.ask(ReadFile { path: path.into(), range: None }).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => return Err(fs_error(path, "edit_file", e)),
+        Err(e) => return Err(grain_error("edit_file", e)),
+    };
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| ToolError::Sandbox(format!("edit_file: {path}: not a UTF-8 text file")))?;
+    // Identical match/uniqueness semantics as the cap-std tier.
+    let edited = edit_text(text, input, path)?;
+    match grain
+        .ask(WriteFile { path: path.into(), content: edited.text.into_bytes() })
+        .await
+    {
+        Ok(Ok(_)) => Ok(json!({ "replaced": edited.replaced })),
+        Ok(Err(e)) => Err(fs_error(path, "edit_file", e)),
+        Err(e) => Err(grain_error("edit_file", e)),
+    }
 }
 
 async fn write_durable<S: GranarySystem>(

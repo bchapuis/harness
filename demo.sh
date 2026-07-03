@@ -41,8 +41,9 @@ IMAGE=${HARNESS_SANDBOX_IMAGE:-python:3.12-slim}
 mkdir -p "$DATA"
 
 # A real model composes the shell commands this demo runs, so they execute
-# confined in a per-session container — never as your user. (The unconfined
-# alternative, --sandbox local, is for trusted-input setups only.)
+# confined in a per-session container — never as your user. The container's
+# workspace is backed by a durable filesystem grain, so a session's files
+# survive hibernation and migration.
 if ! docker version >/dev/null 2>&1; then
   echo "The demo runs \`shell\` inside docker containers; start Docker (or colima) first." >&2
   exit 1

@@ -130,3 +130,39 @@ fn other_tiers_are_not_offered() {
         ));
     });
 }
+
+#[test]
+fn edit_file_and_ranged_read_route_through_the_grain() {
+    // The new tools work on a durable path (the grain), with the same semantics as
+    // the cap-std tier, so every sandbox mode behaves identically.
+    let (sim, provider, _overlay) = provider();
+    let session = SessionId::new("session-edit");
+    sim.block_on(async move {
+        let sb = provider.open(&session, &SandboxProfile::default()).await.expect("open");
+        sb.call(Tier::Workspace, "write_file",
+            json!({ "path": "src/lib.rs", "content": "a\nb\nc\nd\n" }))
+            .await
+            .expect("write");
+
+        // Targeted edit on a durable path.
+        assert_eq!(
+            sb.call(Tier::Workspace, "edit_file",
+                json!({ "path": "src/lib.rs", "old_string": "b\n", "new_string": "B\n" }))
+                .await
+                .expect("edit"),
+            json!({ "replaced": 1 }),
+        );
+        // Ranged read of the durable file.
+        assert_eq!(
+            sb.call(Tier::Workspace, "read_file",
+                json!({ "path": "src/lib.rs", "offset": 2, "limit": 2 })).await.unwrap(),
+            json!({ "content": "B\nc\n", "truncated": false }),
+        );
+        // A missing old_string is a loud error, never a silent no-op.
+        assert!(matches!(
+            sb.call(Tier::Workspace, "edit_file",
+                json!({ "path": "src/lib.rs", "old_string": "zzz", "new_string": "x" })).await,
+            Err(ToolError::InvalidArguments(_))
+        ));
+    });
+}

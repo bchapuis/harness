@@ -150,4 +150,16 @@ pub trait SandboxProvider: Send + Sync + 'static {
         session: &SessionId,
         profile: &SandboxProfile,
     ) -> BoxFuture<'static, Result<Arc<dyn Sandbox>, SandboxError>>;
+
+    /// Whether a workspace survives across activations (§5.5): `true` when the
+    /// provider re-binds the same durable workspace on the next `open` for a
+    /// session (e.g. a grain-backed filesystem), so a fresh activation is *not*
+    /// a workspace loss. The default is the conservative one — a provider that
+    /// tears its workspace down on `release` leaves this `false`, and the
+    /// harness journals a `WorkspaceReset` on reactivation. Durable providers
+    /// override to suppress that spurious reset; a genuine mid-activation loss
+    /// (the provider returns `EnvironmentLost`) still resets regardless.
+    fn workspace_durable(&self) -> bool {
+        false
+    }
 }

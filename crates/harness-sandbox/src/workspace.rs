@@ -44,11 +44,14 @@ pub fn workspace_tools() -> Vec<ToolDecl> {
         decl(
             "read_file",
             "Read a UTF-8 file from the session workspace. Returns its content, \
-             truncated past 256 KiB.",
+             truncated past 256 KiB. To page a large file, pass `offset` (1-based \
+             line) and `limit` (line count).",
             json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Workspace-relative path."}
+                    "path": {"type": "string", "description": "Workspace-relative path."},
+                    "offset": {"type": "integer", "description": "1-based first line to return; defaults to 1."},
+                    "limit": {"type": "integer", "description": "Maximum number of lines to return; defaults to all."}
                 },
                 "required": ["path"]
             }),
@@ -64,6 +67,22 @@ pub fn workspace_tools() -> Vec<ToolDecl> {
                     "content": {"type": "string", "description": "The full file content."}
                 },
                 "required": ["path", "content"]
+            }),
+        ),
+        decl(
+            "edit_file",
+            "Replace an exact string in a workspace file. `old_string` must match \
+             once unless `replace_all` is set; if it is missing or not unique the \
+             edit fails untouched. Prefer this over rewriting the whole file.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative path."},
+                    "old_string": {"type": "string", "description": "Exact text to replace."},
+                    "new_string": {"type": "string", "description": "Replacement text."},
+                    "replace_all": {"type": "boolean", "description": "Replace every occurrence; default false (requires a unique match)."}
+                },
+                "required": ["path", "old_string", "new_string"]
             }),
         ),
         decl(
@@ -98,6 +117,7 @@ pub(crate) fn call(dir: &Dir, name: &str, input: &Value) -> Result<Value, ToolEr
     match name {
         "read_file" => read_file(dir, input),
         "write_file" => write_file(dir, input),
+        "edit_file" => edit_file(dir, input),
         "list_dir" => list_dir(dir, input),
         "remove" => remove(dir, input),
         other => Err(ToolError::Sandbox(format!(
@@ -108,25 +128,103 @@ pub(crate) fn call(dir: &Dir, name: &str, input: &Value) -> Result<Value, ToolEr
 
 fn read_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
     let path = required_str(input, "path")?;
+    let (offset, limit) = (optional_u64(input, "offset")?, optional_u64(input, "limit")?);
     let bytes = dir
         .read(path)
         .map_err(|e| ToolError::Sandbox(format!("read_file: {path}: {e}")))?;
-    Ok(cap_and_decode(&bytes))
+    Ok(cap_and_decode(&bytes, offset, limit))
 }
 
-/// Apply the 256 KiB read cap and clean UTF-8 truncation, returning the tier's
-/// `{content, truncated}` shape. Shared by the cap-std and durable read tools.
-pub(crate) fn cap_and_decode(bytes: &[u8]) -> Value {
-    let truncated = bytes.len() > READ_CAP;
-    let mut end = if truncated { READ_CAP } else { bytes.len() };
-    // Never cut a multi-byte character in half: walk the cap back off any
-    // UTF-8 continuation bytes, so truncation ends cleanly at the last whole
-    // character instead of a replacement character.
-    while truncated && end > 0 && (bytes[end] & 0b1100_0000) == 0b1000_0000 {
+fn edit_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
+    let path = required_str(input, "path")?;
+    let bytes = dir
+        .read(path)
+        .map_err(|e| ToolError::Sandbox(format!("edit_file: {path}: {e}")))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| ToolError::Sandbox(format!("edit_file: {path}: not a UTF-8 text file")))?;
+    let updated = edit_text(text, input, path)?;
+    dir.write(path, updated.text.as_bytes())
+        .map_err(|e| ToolError::Sandbox(format!("edit_file: {path}: {e}")))?;
+    Ok(json!({ "replaced": updated.replaced }))
+}
+
+/// The result of one `edit_file` string replacement: the new content and how many
+/// occurrences were replaced. Shared by the cap-std and durable edit tools so both
+/// enforce identical match/uniqueness semantics.
+pub(crate) struct Edit {
+    pub text: String,
+    pub replaced: usize,
+}
+
+/// Apply an `edit_file` call (`old_string` → `new_string`, optional `replace_all`)
+/// to `text`. A pure function of the content and the call: an absent or — without
+/// `replace_all` — non-unique `old_string` is an `InvalidArguments` error, so an
+/// ambiguous edit fails loudly rather than touching the wrong site.
+pub(crate) fn edit_text(text: &str, input: &Value, path: &str) -> Result<Edit, ToolError> {
+    let old = required_str(input, "old_string")?;
+    let new = required_str(input, "new_string")?;
+    if old.is_empty() {
+        return Err(ToolError::InvalidArguments(
+            "`old_string` must be non-empty".to_string(),
+        ));
+    }
+    if old == new {
+        return Err(ToolError::InvalidArguments(
+            "`old_string` and `new_string` are identical".to_string(),
+        ));
+    }
+    let replace_all = input
+        .get("replace_all")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let count = text.matches(old).count();
+    if count == 0 {
+        return Err(ToolError::InvalidArguments(format!(
+            "`old_string` not found in {path}"
+        )));
+    }
+    if count > 1 && !replace_all {
+        return Err(ToolError::InvalidArguments(format!(
+            "`old_string` occurs {count} times in {path}; pass replace_all or include more \
+             surrounding context to make it unique"
+        )));
+    }
+    let (text, replaced) = if replace_all {
+        (text.replace(old, new), count)
+    } else {
+        (text.replacen(old, new, 1), 1)
+    };
+    Ok(Edit { text, replaced })
+}
+
+/// Decode `bytes` as UTF-8, optionally to a 1-based line window (`offset`/`limit`,
+/// for paging past the cap), then apply the 256 KiB cap with clean truncation —
+/// the tier's `{content, truncated}` shape. Shared by the cap-std and durable read
+/// tools, so both page identically. Pure: a function of the bytes and the window.
+pub(crate) fn cap_and_decode(bytes: &[u8], offset: Option<u64>, limit: Option<u64>) -> Value {
+    let text = String::from_utf8_lossy(bytes);
+    // The requested line window, if any. `split_inclusive` keeps each line's
+    // trailing newline, so the slice rejoins to the exact original bytes.
+    let content: String = if offset.is_some() || limit.is_some() {
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let start = (offset.unwrap_or(1).max(1) - 1) as usize;
+        let start = start.min(lines.len());
+        let end = match limit {
+            Some(n) => start.saturating_add(n as usize).min(lines.len()),
+            None => lines.len(),
+        };
+        lines[start..end].concat()
+    } else {
+        text.into_owned()
+    };
+    let truncated = content.len() > READ_CAP;
+    // Never cut a multi-byte character in half: walk the cap back to the last
+    // whole character.
+    let mut end = if truncated { READ_CAP } else { content.len() };
+    while truncated && end > 0 && !content.is_char_boundary(end) {
         end -= 1;
     }
-    let content = String::from_utf8_lossy(&bytes[..end]).into_owned();
-    json!({ "content": content, "truncated": truncated })
+    json!({ "content": content[..end].to_string(), "truncated": truncated })
 }
 
 fn write_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
@@ -216,4 +314,15 @@ pub(crate) fn required_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, T
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::InvalidArguments(format!("`{key}` must be a string")))
+}
+
+/// An optional non-negative integer argument (e.g. `read_file`'s `offset`/`limit`).
+/// Absent or null is `None`; a present non-integer is an error.
+pub(crate) fn optional_u64(input: &Value, key: &str) -> Result<Option<u64>, ToolError> {
+    match input.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or_else(|| {
+            ToolError::InvalidArguments(format!("`{key}` must be a non-negative integer"))
+        }),
+    }
 }

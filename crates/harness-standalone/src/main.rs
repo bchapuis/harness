@@ -32,9 +32,8 @@ node options (defaults in parentheses; every node must agree on all of them):
   --secret <s>         cluster secret                     (harness-standalone)
   --api-url <url>      Messages API base                  (https://api.anthropic.com)
   --sandbox <mode>     sandbox provider, REQUIRED — no default:
-                         docker | firecracker   confined `shell`
-                         local                  UNCONFINED /bin/sh as this user;
-                                                trusted-input only
+                         docker | firecracker   confined `shell`, durable workspace
+                         durable                typed file tools, no shell
   --sandbox-image <r>  container image for --sandbox docker (required there)
   --container-cli <c>  container CLI binary               (docker)
   --fc-binary <path>   firecracker executable, --sandbox firecracker (firecracker)
@@ -95,14 +94,12 @@ async fn run_node(args: &[String]) -> Result<(), String> {
             "--api-url" => opts.api_url = value.clone(),
             "--sandbox" => {
                 opts.sandbox = Some(match value.as_str() {
-                    "local" => node::SandboxMode::Local,
                     "docker" => node::SandboxMode::Docker,
                     "firecracker" => node::SandboxMode::Firecracker,
                     "durable" => node::SandboxMode::Durable,
                     other => {
                         return Err(format!(
-                            "--sandbox must be `local`, `docker`, `firecracker`, or `durable`, \
-                             got {other}"
+                            "--sandbox must be `docker`, `firecracker`, or `durable`, got {other}"
                         ));
                     }
                 })

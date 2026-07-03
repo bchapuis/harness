@@ -166,15 +166,16 @@ it rejoins as the same node and new sessions place onto it again.
 
 ## Sandbox boundary
 
-The manifest runs `--sandbox local`: the model's `shell` tool runs **inside the
-node's own pod container**. The pod is the isolation boundary, good enough for a
-demo, since a pod is already a confined, network-policy-governed unit. But it is
-one boundary per node, not one per session, and it offers `shell` only (no
-`run_js`, the hermetic QuickJS Compute tier the confined modes provide).
+The manifest runs `--sandbox durable`: the `Workspace` tier is backed by a
+durable filesystem grain (granary §7.10), so a session's files survive
+hibernation, migration, and node loss. It needs no extra in-cluster runtime —
+the right starter default — but it offers the typed file tools
+(`read_file`/`write_file`/`list_dir`/`remove`) only: **no `shell` and no
+`run_js`**.
 
-For a per-session boundary (and `run_js`), switch to `--sandbox docker` or
-`--sandbox firecracker`. Both need extra in-cluster plumbing this starter
-manifest leaves out:
+For a confined `shell` (and `run_js`) with the same durable workspace, switch to
+`--sandbox docker` or `--sandbox firecracker`. Both need extra in-cluster
+plumbing this starter manifest leaves out:
 
 - **docker**: the node shells out to a Docker daemon. In Kubernetes that means a
   Docker-in-Docker sidecar (a `docker:dind` container, `privileged: true`,

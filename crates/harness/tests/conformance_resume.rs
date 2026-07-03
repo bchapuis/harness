@@ -69,16 +69,30 @@ fn two_turn_model() -> ScriptedModel {
 /// hibernates and the second turn rehydrates from the journal (§7.5). Returns
 /// the journal and the observed event stream.
 fn run_two_turns(seed: u64, session: &'static str, hibernate: bool) -> (Vec<Record>, Vec<Event>) {
+    run_two_turns_with(seed, session, hibernate, false)
+}
+
+/// As [`run_two_turns`], but with a selectable workspace-durability for the sandbox:
+/// a durable provider re-binds the same workspace on reactivation, so no
+/// `WorkspaceReset` is journaled on resume (§5.5).
+fn run_two_turns_with(
+    seed: u64,
+    session: &'static str,
+    hibernate: bool,
+    durable: bool,
+) -> (Vec<Record>, Vec<Event>) {
     let sim = Simulation::new(seed);
     let sink = CollectingSink::default();
     let system: SimSystem = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
         .events(Arc::new(sink.clone()))
         .build();
+    let sandboxes = ScriptedSandboxes::new(|_, _| Ok(json!("fetched")));
+    let sandboxes = if durable { sandboxes.durable() } else { sandboxes };
     let harness = Harness::cluster(
         system.clone(),
         &worker_kinds(),
         Arc::new(two_turn_model()),
-        Arc::new(ScriptedSandboxes::new(|_, _| Ok(json!("fetched")))),
+        Arc::new(sandboxes),
     );
     let clock = system.clock().clone();
     let records = sim.block_on(async move {
@@ -165,5 +179,44 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
         strip(resumed),
         strip(control),
         "fold-equivalence after resume (H1)"
+    );
+}
+
+#[test]
+fn a_durable_workspace_resumes_without_a_reset() {
+    // Same hibernate-and-resume as above, but the provider reports a durable
+    // workspace: the grain re-binds the same files on reactivation, so the §5.5
+    // reset is a lie and must be suppressed. The resumed journal then matches the
+    // uninterrupted control record-for-record — no mandated divergence.
+    let (resumed, events) = run_two_turns_with(71, "s-durable", true, true);
+    let (control, _) = run_two_turns_with(71, "s-durable", false, true);
+
+    let violations = check_events(&events);
+    assert!(violations.is_empty(), "checkers: {violations:?}");
+
+    // It really did hibernate and reactivate (≥2 activations) ...
+    let activations = events
+        .iter()
+        .filter_map(|e| e.as_app::<GrainEvent>())
+        .filter(|e| matches!(e, GrainEvent::Activated { .. }))
+        .count();
+    assert!(activations >= 2, "expected a reactivation, got {activations}");
+
+    // ... yet no `WorkspaceReset` was journaled: the durable workspace survived.
+    assert!(
+        !resumed
+            .iter()
+            .any(|r| matches!(r.body, RecordBody::WorkspaceReset)),
+        "a durable workspace must not surface a reset on resume",
+    );
+
+    // H1 with no exception: the rehydrated journal equals the control exactly.
+    let bodies = |records: Vec<Record>| -> Vec<RecordBody> {
+        records.into_iter().map(|r| r.body).collect()
+    };
+    assert_eq!(
+        bodies(resumed),
+        bodies(control),
+        "a durable resume diverges from the control in nothing (not even a reset)",
     );
 }

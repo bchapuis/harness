@@ -112,7 +112,7 @@ spec:
                 --client 100=harness-gw-0.harness-gw \
                 --client 101=harness-gw-1.harness-gw \
                 --model "${MODEL:-claude-sonnet-4-6}" \
-                --sandbox local \
+                --sandbox durable \
                 --secret "$CLUSTER_SECRET"
           env:
             - name: ANTHROPIC_API_KEY

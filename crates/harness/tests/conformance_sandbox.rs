@@ -180,6 +180,57 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
 }
 
 #[test]
+fn a_durable_workspace_still_resets_on_a_genuine_mid_run_loss() {
+    // A durable provider suppresses the *routine* reactivation reset, but a real
+    // `EnvironmentLost` during the run is not routine — that workspace is gone, so
+    // the reset must still be journaled (the `lost_this_activation` gate).
+    let sandboxes = ScriptedSandboxes::new(|_, input| {
+        if input.get("lose").is_some() {
+            Err(ToolError::EnvironmentLost("scripted loss".to_string()))
+        } else {
+            Ok(json!("ok"))
+        }
+    })
+    .durable();
+    let model = ScriptedModel::steps(vec![
+        Ok(tool_call("c1", "shell", json!({ "lose": true }))),
+        Ok(tool_call("c2", "shell", json!({}))),
+        Ok(final_message("done")),
+    ]);
+    let records: Arc<Mutex<Vec<Record>>> = Arc::default();
+    let sink = Arc::clone(&records);
+    let workload = Scenario::new(
+        "durable-environment-loss",
+        shell_kind(),
+        Arc::new(model),
+        Arc::new(sandboxes),
+        move |harness, system| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move {
+                let session = harness.session("worker", SessionId::new("s-durable-loss"));
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
+                assert_eq!(outcome.text(), "done");
+                *sink.lock().unwrap() = tail_records(&session).await;
+                flush(&system).await;
+            })
+        },
+    );
+    run_seed(&workload, 61).expect("invariants hold");
+
+    // The reset is present despite the durable provider: the loss was real.
+    assert_eq!(
+        record_kinds(&records.lock().unwrap()),
+        vec![
+            "created", "turn", "model", "tool", "reset", "model", "tool", "model", "ended"
+        ],
+    );
+}
+
+#[test]
 fn a_slow_tool_is_bounded_by_its_declared_timeout() {
     let kinds = Kinds::new().register(
         "worker",

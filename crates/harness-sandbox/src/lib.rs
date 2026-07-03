@@ -50,8 +50,7 @@
 //!   `native` enabled, a profile that *names* egress (or caps in `Network`)
 //!   fails at `open` instead: holding `Native` implies `Network`'s grants
 //!   (sandbox spec §2.2), and `--network none` delivers exactly an empty
-//!   allowlist. The standalone deployment's `LocalSandboxes` remains the
-//!   degenerate unconfined `Native`-only provider (sandbox spec §5).
+//!   allowlist.
 //!
 //! The S-catalogue (sandbox spec §6) is machine-readable beside this crate's
 //! conformance suite, in `tests/support/mod.rs`, guarded by the same drift
@@ -73,6 +72,10 @@ mod durable;
 mod firecracker;
 #[cfg(feature = "workspace")]
 mod ids;
+#[cfg(feature = "durable")]
+mod materialize;
+#[cfg(feature = "durable")]
+mod materialized;
 #[cfg(feature = "native")]
 mod native;
 #[cfg(feature = "workspace")]
@@ -86,6 +89,8 @@ pub use compute::run_js_tool;
 pub use durable::DurabilityRules;
 #[cfg(feature = "durable")]
 pub use durable::DurableWorkspaces;
+#[cfg(feature = "durable")]
+pub use materialized::MaterializedSandboxes;
 #[cfg(feature = "compute")]
 pub use compute::run_module_tool;
 #[cfg(feature = "firecracker")]

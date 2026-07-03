@@ -408,6 +408,7 @@ pub struct ScriptedSandboxes {
     behavior: SandboxScript,
     fail_open: Arc<AtomicBool>,
     delay: Option<(SimClock, Duration)>,
+    durable: bool,
     pub stats: SandboxStats,
 }
 
@@ -419,12 +420,21 @@ impl ScriptedSandboxes {
             behavior: Arc::new(behavior),
             fail_open: Arc::new(AtomicBool::new(false)),
             delay: None,
+            durable: false,
             stats: SandboxStats::default(),
         }
     }
 
     pub fn with_delay(mut self, clock: SimClock, delay: Duration) -> ScriptedSandboxes {
         self.delay = Some((clock, delay));
+        self
+    }
+
+    /// Report a durable workspace, like the grain-backed providers: a fresh
+    /// activation re-binds the same workspace, so the harness must not journal a
+    /// routine `WorkspaceReset` on reactivation (§5.5).
+    pub fn durable(mut self) -> ScriptedSandboxes {
+        self.durable = true;
         self
     }
 
@@ -490,6 +500,10 @@ impl SandboxProvider for ScriptedSandboxes {
                 }))
             };
         Box::pin(async move { result })
+    }
+
+    fn workspace_durable(&self) -> bool {
+        self.durable
     }
 }
 
