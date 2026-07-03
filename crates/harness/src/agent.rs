@@ -237,9 +237,15 @@ impl Message for Advance {
 }
 
 /// One model call finished (§3.1 step 2): its outcome, back on the loop.
+/// `step` is the run's `own_steps` when the call was issued — the step this
+/// response answers. Receipt matches it against the live run's current
+/// `own_steps`, so a superseded call (an old activation's straggler racing the
+/// reissue after a same-node resume) can never journal a second response for a
+/// step the journal has already answered (§3.1 step 2, §9.1.4).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelDone {
     pub turn: TurnId,
+    pub step: u32,
     pub result: Result<ModelResponse, ModelError>,
 }
 
@@ -570,6 +576,13 @@ impl<S: HarnessSystem> Agent<S> {
         }
         if state.live.is_none() && act.queue.is_empty() {
             // Start now: journal SessionCreated (if first) + TurnSubmitted.
+            // This submit may be processed between the previous run's terminal
+            // commit and the post-end `Advance` that would have swept the
+            // per-run flags (`start_next_turn`), so sweep them here too: stale
+            // `launched`/`resolved` ids from the ended run must not suppress
+            // this run's calls — synthesized `call-{step}-{i}` ids repeat
+            // across runs.
+            act.run.reset();
             act.events.started.push(turn_id.clone());
             drop(act);
             let batch = self.start_records(state, ctx, self.kind(), msg.turn, msg.parent);
@@ -694,24 +707,35 @@ impl<S: HarnessSystem> Agent<S> {
         &self,
         state: &SessionState,
         turn: TurnId,
+        step: u32,
         result: Result<ModelResponse, ModelError>,
         ctx: &GrainCtx<Agent<S>>,
     ) -> Vec<Record> {
         let mut act = self.lock();
-        act.run.model_inflight = false;
         let Some(live) = state.live.as_ref().filter(|l| l.turn == turn) else {
             // The run ended while the call was in flight (a cancel, §9.2):
-            // discard, do not journal, emit nothing (§3.2, §10.4).
+            // discard, do not journal, emit nothing (§3.2, §10.4). Leave
+            // `model_inflight` alone: the flag now guards the *successor*
+            // run's own call, which this straggler must not unlock into a
+            // duplicate.
             return Vec::new();
         };
+        if live.spend.own_steps != step {
+            // A response for a step the journal has already answered: an old
+            // activation's straggler racing the reissued call after a
+            // same-node resume. Exactly one response per step commits (§3.1
+            // step 2); this one lost, and `model_inflight` still belongs to
+            // the call answering the current step.
+            return Vec::new();
+        }
+        act.run.model_inflight = false;
         match result {
             Ok(mut response) => {
                 // Assign ids the provider omitted (§5.2): deterministic in the
                 // step and position.
-                let step = live.spend.own_steps + 1;
                 for (i, call) in response.calls.iter_mut().enumerate() {
                     if call.id.as_str().is_empty() {
-                        call.id = CallId::new(format!("call-{step}-{i}"));
+                        call.id = CallId::new(format!("call-{}-{i}", step + 1));
                     }
                 }
                 // `ModelCompleted` is emitted after the response commits (§10.4),
@@ -946,12 +970,14 @@ impl<S: HarnessSystem> Agent<S> {
         }
         act.env.reconciled = true;
         act.run.model_inflight = true;
+        // Tag the call with the step it answers, matched again on receipt.
+        let step = live.spend.own_steps;
         let request = self.build_request(state, kind, live);
         let this = act.this.clone().expect("self-ref set in on_activate");
         let model = self.seams.model.clone();
         ctx.system().launch(Box::pin(async move {
             let result = model.complete(request).await;
-            let _ = this.tell(ModelDone { turn, result }).await;
+            let _ = this.tell(ModelDone { turn, step, result }).await;
         }));
         Vec::new()
     }
@@ -1622,7 +1648,10 @@ impl<S: HarnessSystem> GrainHandler<ModelDone> for Agent<S> {
         msg: ModelDone,
         ctx: &GrainCtx<Self>,
     ) -> (Vec<Record>, ()) {
-        (self.on_model_done(state, msg.turn, msg.result, ctx), ())
+        (
+            self.on_model_done(state, msg.turn, msg.step, msg.result, ctx),
+            (),
+        )
     }
 }
 
