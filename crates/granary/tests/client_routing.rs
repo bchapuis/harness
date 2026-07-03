@@ -193,3 +193,36 @@ fn a_non_hosting_client_routes_to_a_cluster_grain() {
     );
     assert_eq!(after_read, Ok(7), "the client reads the committed value");
 }
+
+#[test]
+fn ask_timeout_is_bounded_by_its_deadline_even_while_the_shard_cannot_elect() {
+    // One node of a three-voter roster: no quorum, so neither the map group nor
+    // any shard ever elects, and every resolution redirect-loops. The declared
+    // deadline must bound the WHOLE call — resolution and ask, across both
+    // dispatch attempts share one budget — never a per-step window that stacks.
+    let sim = Simulation::new(3);
+    let net = SimNetwork::new(&sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
+    let a = net.join(A);
+    sim.run_for(Duration::from_secs(1));
+    let granary = a.granary::<Counter>(config());
+    sim.run_for(Duration::from_secs(1));
+
+    let system = a.clone();
+    let (result, elapsed) = drive(&sim, Duration::from_secs(30), async move {
+        use granary::GranarySystem;
+        let g = granary.grain("counter/1");
+        let start = system.now();
+        let result = g.ask_timeout(Add(1), Duration::from_millis(300)).await;
+        (result, system.now().duration_since(start))
+    });
+
+    assert!(result.is_err(), "no leader can exist, so the ask must fail");
+    assert!(
+        elapsed >= Duration::from_millis(250),
+        "the redirect loop should wait out most of the deadline, not fail fast: {elapsed:?}"
+    );
+    assert!(
+        elapsed <= Duration::from_millis(400),
+        "the 300ms deadline bounds the whole call, resolve and ask together: {elapsed:?}"
+    );
+}

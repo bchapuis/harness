@@ -229,17 +229,25 @@ impl<G: Grain> Handler<Activate<G>> for Gateway<G> {
 
 impl<G: Grain> Gateway<G> {
     /// The node a non-leading gateway redirects the caller to (§5.4). The believed
-    /// leader when known; otherwise, on a node that does **not** replicate the
-    /// shard (so `shard_leader` cannot know the leader), a replica from the
-    /// consensus-agreed shard map — so a non-replica caller reaches a replica that
-    /// can serve or name the real leader. A replica mid-election (or a not-yet-
-    /// committed map) hints itself, so the caller backs off and retries here until
-    /// the shard settles.
+    /// leader when known **and still plausible against the committed map**;
+    /// otherwise a replica from the consensus-agreed shard map — so the caller
+    /// reaches a node that can serve or name the real leader. A replica
+    /// mid-election (or a not-yet-committed map) hints itself, so the caller backs
+    /// off and retries here until the shard settles.
+    ///
+    /// The plausibility check matters after a rebalance (§7.7): a node evicted
+    /// from the shard keeps its last local Raft view — often naming *itself*
+    /// leader — since the reconfigured group no longer heartbeats it. Trusting
+    /// that stale view would hint every caller straight back to this gateway,
+    /// pinning them in a redirect loop for their whole deadline; the committed
+    /// replica set is the authority on who can lead at all.
     fn redirect_hint(&self, shard: ShardId, ctx: &Ctx<Gateway<G>>) -> NodeId {
-        if let Some(leader) = ctx.system().shard_leader(shard) {
+        let replicas = self.shard_map.replicas(shard.index).unwrap_or_default();
+        if let Some(leader) = ctx.system().shard_leader(shard)
+            && (replicas.is_empty() || replicas.contains(&leader))
+        {
             return leader;
         }
-        let replicas = self.shard_map.replicas(shard.index).unwrap_or_default();
         let me = ctx.system().node();
         match replicas.iter().find(|&&n| n != me) {
             // A non-replica: send the caller to a replica it can route through.

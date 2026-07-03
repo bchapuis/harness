@@ -922,8 +922,22 @@ impl RaftGroup {
     }
 
     /// Handle a vote request (spec §9.4.3): grant iff the candidate's term is
-    /// current, we have not voted for another in it, the candidate's log is at
-    /// least as up-to-date as ours, and we are a voter.
+    /// current, we have not voted for another in it, and the candidate's log is
+    /// at least as up-to-date as ours.
+    ///
+    /// Deliberately **no** "am I a voter" check (Raft dissertation §4.2.3:
+    /// servers process RPCs from servers outside their own configuration view).
+    /// Config changes apply on *commit* here, so views lag: after a leader
+    /// removes itself and goes silent, the followers may still hold the old
+    /// N-voter config while a just-added voter has not yet applied its own
+    /// `AddVoter`. If receivers refused to vote whenever their own view excluded
+    /// them, that state deadlocks — the stale-view followers cannot assemble the
+    /// old quorum without the departed leader (which would refuse, its view
+    /// excluding itself) or the new voter (which would refuse, its view lagging)
+    /// — and the group never elects again. Granting is safe: one vote per term
+    /// per server still holds (`voted_for` persistence), and a candidate only
+    /// counts votes it solicited from its own voter view, so quorums are never
+    /// inflated by non-voters.
     pub(crate) fn handle_vote<E: Entropy>(
         &self,
         from: NodeId,
@@ -940,8 +954,7 @@ impl RaftGroup {
         }
         let up_to_date = last_term > state.term_at(state.last_index())
             || (last_term == state.term_at(state.last_index()) && last_index >= state.last_index());
-        let granted = state.voters.contains(&self.node)
-            && term == state.term
+        let granted = term == state.term
             && state.voted_for.is_none_or(|v| v == from)
             && up_to_date;
         if granted {

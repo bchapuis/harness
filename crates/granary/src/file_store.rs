@@ -118,6 +118,7 @@ enum SegOp {
     },
     Truncate {
         after: Seq,
+        term: u64,
     },
 }
 
@@ -384,7 +385,7 @@ fn open_segment(dir: &Path, id: u64) -> Segment {
             SegOp::Snapshot { at, term, state } => {
                 records.store_snapshot(at, term, state);
             }
-            SegOp::Truncate { after } => records.truncate(after),
+            SegOp::Truncate { after, term } => records.truncate(after, term),
         }
     }
     Segment {
@@ -489,26 +490,18 @@ impl GrainStore for FileGrainStore {
 
     fn prepare(&self, shard: u32, grain: &GrainName, term: u64) -> ReadOutcome {
         // The promise (the fence bump) must be durable before it is made — else a
-        // restart could forget it and let a deposed leader commit (§8). A grain we have
-        // never seen needs no segment: it reads empty, and the promise is the fence.
-        let segment = self.segment_existing(shard, grain);
-        // Hold the segment lock (if the grain exists) across the fence bump and the
-        // read, so prepare's promise and its returned view are atomic against a
-        // concurrent append to this grain (the fencing race, §8).
-        let guard = segment
-            .as_ref()
-            .map(|s| s.inner.lock().expect("grain segment poisoned"));
+        // restart could forget it and let a deposed leader commit (§8). Create the
+        // segment even for a grain never seen here, exactly as `MemoryGrainStore`
+        // does: holding *the grain's* segment lock across the fence bump and the
+        // read is what makes the promise and its returned view atomic against a
+        // concurrent first append (the fencing race, §8) — a lock-free empty reply
+        // could miss a lower-term record stored and acked in the window.
+        let segment = self.segment_or_create(shard, grain);
+        let inner = segment.inner.lock().expect("grain segment poisoned");
         if let Err(fence) = self.bump_fence(shard, term) {
             return ReadOutcome::Fenced(fence);
         }
-        let reply = guard.as_ref().map_or(
-            ReadReply {
-                slots: Vec::new(),
-                snapshot: None,
-            },
-            |inner| inner.records.read(),
-        );
-        ReadOutcome::Prepared(reply)
+        ReadOutcome::Prepared(inner.records.read())
     }
 
     fn store_snapshot(
@@ -536,19 +529,19 @@ impl GrainStore for FileGrainStore {
         ack
     }
 
-    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq) {
+    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: u64) {
         let segment = self.segment_or_create(shard, grain);
         let mut inner = segment.inner.lock().expect("grain segment poisoned");
         inner
             .log
-            .append(&SegOp::Truncate { after })
+            .append(&SegOp::Truncate { after, term })
             .unwrap_or_else(|err| {
                 panic!(
                     "grain store persistence failed at {}: {err}",
                     segment.path.display()
                 )
             });
-        inner.records.truncate(after);
+        inner.records.truncate(after, term);
     }
 
     fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) {
@@ -627,6 +620,43 @@ impl GrainStore for FileGrainStore {
                 let _ = fs::remove_file(entry.path());
             }
         }
+    }
+
+    fn grains(&self, shard: u32) -> Vec<GrainName> {
+        // The manifest assigns a segment id on the first record OR the first blob
+        // (`put_blob` allocates through the same map), so its keys are the union.
+        self.manifest
+            .lock()
+            .expect("grain store manifest poisoned")
+            .ids
+            .keys()
+            .filter(|(s, _)| *s == shard)
+            .map(|(_, grain)| grain.clone())
+            .collect()
+    }
+
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId> {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return Vec::new();
+        };
+        let Ok(entries) = fs::read_dir(self.blob_dir(seg_id)) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let hex = name.to_str()?;
+                if hex.len() != 64 {
+                    return None;
+                }
+                let mut bytes = [0u8; 32];
+                for (i, byte) in bytes.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+                }
+                Some(BlobId::from_bytes(bytes))
+            })
+            .collect()
     }
 }
 
@@ -809,6 +839,63 @@ mod tests {
     }
 
     #[test]
+    fn prepare_creates_and_locks_the_segment_of_an_unseen_grain() {
+        // The fencing race (§8): prepare's promise and its returned (empty) view
+        // must be atomic against a concurrent first append, which requires taking
+        // the grain's segment lock — and therefore creating the segment — exactly
+        // as `MemoryGrainStore::prepare` does. Without it, a term-1 first append
+        // could be stored and acked after a term-2 prepare returned empty.
+        let dir = tempfile::tempdir().unwrap();
+        let n = name("fresh");
+        let store = FileGrainStore::open(dir.path()).unwrap();
+        assert!(matches!(store.prepare(0, &n, 2), ReadOutcome::Prepared(_)));
+        // The segment now exists in the manifest: the prepare serialized on it.
+        assert!(store.manifest.lock().unwrap().ids.contains_key(&(0, n.clone())));
+        // And the promise still fences a later lower-term append.
+        assert_eq!(
+            store.store_record(0, &n, Seq::ZERO, 1, vec![b"late".to_vec()], false),
+            StoreAck::Fenced(2)
+        );
+    }
+
+    #[test]
+    // OS threads, not `Spawner::launch` (§18.1): this races the store's *synchronous*
+    // lock discipline itself, which an async task cannot exercise — both calls must
+    // genuinely contend on the segment and fence mutexes from separate threads.
+    #[allow(clippy::disallowed_methods)]
+    fn a_prepare_append_race_never_hides_a_stored_record() {
+        // Loop a first-ever append (term 1) against a prepare (term 2) on a fresh
+        // grain from two threads. Invariant: if the append was `Stored`, the
+        // prepare either fenced it first or observed it — a `Prepared` EMPTY view
+        // alongside a `Stored` ack is the quorum-intersection violation.
+        use std::sync::Barrier;
+        for round in 0..64 {
+            let dir = tempfile::tempdir().unwrap();
+            let store = std::sync::Arc::new(FileGrainStore::open(dir.path()).unwrap());
+            let n = name(&format!("race-{round}"));
+            let barrier = std::sync::Arc::new(Barrier::new(2));
+            let (s1, n1, b1) = (store.clone(), n.clone(), barrier.clone());
+            let append = std::thread::spawn(move || {
+                b1.wait();
+                s1.store_record(0, &n1, Seq::ZERO, 1, vec![b"e1".to_vec()], false)
+            });
+            let (s2, n2, b2) = (store.clone(), n.clone(), barrier.clone());
+            let prepare = std::thread::spawn(move || {
+                b2.wait();
+                s2.prepare(0, &n2, 2)
+            });
+            let ack = append.join().unwrap();
+            let view = prepare.join().unwrap();
+            if let (StoreAck::Stored(_), ReadOutcome::Prepared(reply)) = (&ack, &view) {
+                assert!(
+                    !reply.slots.is_empty(),
+                    "round {round}: append Stored but prepare saw an empty view"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_fence_promise_on_an_unseen_grain_is_durable() {
         let dir = tempfile::tempdir().unwrap();
         {
@@ -876,7 +963,7 @@ mod tests {
             Record(Seq, u64, Vec<Vec<u8>>, bool),
             Snapshot(Seq, u64, Vec<u8>),
             Prepare(u64),
-            Truncate(Seq),
+            Truncate(Seq, u64),
         }
         let n = name("acct");
         let ops = [
@@ -885,7 +972,7 @@ mod tests {
             Op::Record(Seq::new(2), 2, vec![b"c".to_vec()], false),
             Op::Snapshot(Seq::new(2), 2, b"snap@2".to_vec()),
             Op::Record(Seq::new(3), 2, vec![b"d".to_vec()], false),
-            Op::Truncate(Seq::new(3)),
+            Op::Truncate(Seq::new(3), 2),
             Op::Record(Seq::new(3), 2, vec![b"d2".to_vec()], false),
         ];
 
@@ -912,9 +999,9 @@ mod tests {
                     file.prepare(0, &n, *term);
                     mirror.prepare(0, &n, *term);
                 }
-                Op::Truncate(after) => {
-                    file.truncate(0, &n, *after);
-                    mirror.truncate(0, &n, *after);
+                Op::Truncate(after, term) => {
+                    file.truncate(0, &n, *after, *term);
+                    mirror.truncate(0, &n, *after, *term);
                 }
             }
             let f = file.read(0, &n);

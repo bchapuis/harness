@@ -196,6 +196,7 @@ fn gc_slices(file: &mut FileData) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::grain::FsError;
     use super::super::meta::Block;
     use super::super::meta::ROOT;
     use super::*;
@@ -229,7 +230,7 @@ mod tests {
                 dir: false,
             },
         );
-        assert_eq!(tree.resolve("a.txt"), Some(2));
+        assert_eq!(tree.resolve("a.txt"), Ok(2));
         assert_eq!(tree.next_ino, 3);
         assert!(tree.file(2).is_some());
     }
@@ -311,7 +312,7 @@ mod tests {
                 dir: false,
             },
         );
-        assert_eq!(tree.resolve("dir/f"), Some(3));
+        assert_eq!(tree.resolve("dir/f"), Ok(3));
         apply(
             &mut tree,
             &FsOp::Unlink {
@@ -319,7 +320,7 @@ mod tests {
                 name: "dir".into(),
             },
         );
-        assert_eq!(tree.resolve("dir"), None);
+        assert_eq!(tree.resolve("dir"), Err(FsError::NotFound));
         // The child inode is gone too (no orphan left in the table).
         assert!(!tree.inodes.contains_key(&3));
     }
@@ -355,8 +356,8 @@ mod tests {
                 to: "b".into(),
             },
         );
-        assert_eq!(tree.resolve("a"), None);
-        assert_eq!(tree.resolve("b"), Some(2));
+        assert_eq!(tree.resolve("a"), Err(FsError::NotFound));
+        assert_eq!(tree.resolve("b"), Ok(2));
         assert!(!tree.inodes.contains_key(&3));
     }
 

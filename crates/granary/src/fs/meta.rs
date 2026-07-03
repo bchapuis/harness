@@ -17,6 +17,8 @@ use serde::Serialize;
 
 use crate::BlobId;
 
+use super::grain::FsError;
+
 /// An inode number. The root directory is always [`ROOT`].
 pub type Ino = u64;
 
@@ -91,10 +93,20 @@ impl Default for FsTree {
 
 /// Split a path into its non-empty components, ignoring leading/trailing slashes and
 /// `.` segments. `""` and `"/"` yield no components (the root).
-pub fn components(path: &str) -> Vec<&str> {
-    path.split('/')
+///
+/// A `..` component is refused as [`FsError::InvalidPath`]: the tree keeps no parent
+/// links, so relative navigation cannot be resolved here — and treating `..` as a
+/// literal name would silently mint a directory *called* `..`. Callers that need
+/// relative paths normalize them before sending.
+pub fn components(path: &str) -> Result<Vec<&str>, FsError> {
+    let comps: Vec<&str> = path
+        .split('/')
         .filter(|c| !c.is_empty() && *c != ".")
-        .collect()
+        .collect();
+    if comps.contains(&"..") {
+        return Err(FsError::InvalidPath);
+    }
+    Ok(comps)
 }
 
 impl FsTree {
@@ -114,26 +126,34 @@ impl FsTree {
         }
     }
 
-    /// Resolve a path to its inode, walking from the root. `None` if any component is
-    /// missing or names a non-directory mid-path.
-    pub fn resolve(&self, path: &str) -> Option<Ino> {
+    /// Resolve a path to its inode, walking from the root. [`FsError::NotFound`] if
+    /// any component is missing or names a non-directory mid-path;
+    /// [`FsError::InvalidPath`] for a path with a `..` component.
+    pub fn resolve(&self, path: &str) -> Result<Ino, FsError> {
         let mut ino = ROOT;
-        for comp in components(path) {
-            ino = *self.dir(ino)?.get(comp)?;
+        for comp in components(path)? {
+            ino = *self
+                .dir(ino)
+                .and_then(|d| d.get(comp))
+                .ok_or(FsError::NotFound)?;
         }
-        Some(ino)
+        Ok(ino)
     }
 
-    /// Resolve a path's parent directory inode and the final component name. `None`
-    /// if the path is the root (no parent) or an intermediate directory is missing.
-    pub fn resolve_parent(&self, path: &str) -> Option<(Ino, String)> {
-        let comps = components(path);
-        let (name, dirs) = comps.split_last()?;
+    /// Resolve a path's parent directory inode and the final component name.
+    /// [`FsError::NotFound`] if the path is the root (no parent) or an intermediate
+    /// directory is missing; [`FsError::InvalidPath`] for a `..` component.
+    pub fn resolve_parent(&self, path: &str) -> Result<(Ino, String), FsError> {
+        let comps = components(path)?;
+        let (name, dirs) = comps.split_last().ok_or(FsError::NotFound)?;
         let mut ino = ROOT;
         for comp in dirs {
-            ino = *self.dir(ino)?.get(*comp)?;
+            ino = *self
+                .dir(ino)
+                .and_then(|d| d.get(*comp))
+                .ok_or(FsError::NotFound)?;
         }
-        Some((ino, (*name).to_string()))
+        Ok((ino, (*name).to_string()))
     }
 
     /// Every block id any file still references — the grain's **live root set** for

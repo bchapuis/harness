@@ -1335,3 +1335,96 @@ fn a_multi_event_command_commits_atomically_across_failover() {
         );
     }
 }
+
+#[test]
+fn committed_writes_survive_a_rebalance_that_replaces_their_original_replicas() {
+    // The heart of §7.7/G14: a migration must move a shard's grain data onto the
+    // target set BEFORE the map flips, so a committed write's durability never
+    // rests on replicas that left. Grow the cluster so shards rebalance; once a
+    // shard's flip commits, CRASH every node that departed its replica set — the
+    // pre-migration write must read back from the new set alone, and further
+    // writes must commit on it. (Pre-migration-protocol, the new set held no
+    // grain data, so this exact sequence lost the write.)
+    let sim = Simulation::new(17);
+    let net = leader_net(&sim);
+    let founders = vec![net.join(A), net.join(B), net.join(C)];
+    sim.run_for(Duration::from_secs(2));
+    let granaries: Vec<Granary<Account>> = founders
+        .iter()
+        .map(|s| s.granary::<Account>(config()))
+        .collect();
+    sim.run_for(Duration::from_secs(3));
+
+    // Commit writes on the founding replica sets, one per key (distinct shards).
+    let keys = ["account/42", "account/7", "account/13", "account/99"];
+    for key in keys {
+        let committed = {
+            let g = granaries[0].clone();
+            drive(&sim, Duration::from_secs(8), async move {
+                g.grain(key).ask(Deposit { cents: 900 }).await
+            })
+        };
+        assert_eq!(committed, Ok(900), "the {key} deposit committed pre-growth");
+    }
+    let before: Vec<Vec<NodeId>> = keys.iter().map(|k| granaries[0].replicas(*k)).collect();
+
+    // Grow: two nodes join the control quorum and host the type; the allocator
+    // migrates the shards whose rendezvous choice changed.
+    let d = net.join(D);
+    let e = net.join(E);
+    add_control_voter(&sim, &founders, D);
+    add_control_voter(&sim, &founders, E);
+    let gd = d.granary::<Account>(config());
+    let _ge = e.granary::<Account>(config());
+
+    // Wait for a shard whose migration completed AND dropped a founding replica
+    // (the flip is observable as a changed `replicas()` — it reports `current`,
+    // which moves only on `Migrated`).
+    let mut moved: Option<(usize, Vec<NodeId>)> = None;
+    for _ in 0..40 {
+        for (i, key) in keys.iter().enumerate() {
+            let now = granaries[0].replicas(*key);
+            if !now.is_empty() && now != before[i] && before[i].iter().any(|n| !now.contains(n)) {
+                moved = Some((i, now));
+                break;
+            }
+        }
+        if moved.is_some() {
+            break;
+        }
+        sim.run_for(Duration::from_millis(500));
+    }
+    let (idx, after) = moved.expect("some shard migrated off a founding replica");
+    let key = keys[idx];
+    let departed: Vec<NodeId> = before[idx]
+        .iter()
+        .copied()
+        .filter(|n| !after.contains(n))
+        .collect();
+
+    // Crash every departed replica: the committed value must not depend on them.
+    for node in &departed {
+        net.crash(*node);
+    }
+    sim.run_for(Duration::from_secs(6));
+
+    let balance = {
+        let gd = gd.clone();
+        drive(&sim, Duration::from_secs(15), async move {
+            let acct = gd.grain(key);
+            let read = acct
+                .ask_timeout(ReadBalance, Duration::from_secs(7))
+                .await?;
+            let write = acct
+                .ask_timeout(Deposit { cents: 100 }, Duration::from_secs(7))
+                .await?;
+            Ok::<(i64, i64), GrainError>((read, write))
+        })
+    };
+    assert_eq!(
+        balance,
+        Ok((900, 1000)),
+        "the committed write survived on the migrated set alone (G14), \
+         and the new set accepts further writes (departed: {departed:?})"
+    );
+}

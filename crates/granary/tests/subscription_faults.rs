@@ -234,10 +234,25 @@ fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<LogGra
     (net, systems, granaries)
 }
 
-fn surviving_caller(systems: &[SimCluster], granaries: &[Granary<LogGrain>], key: &str) -> usize {
-    let leader = granaries[0]
-        .leader(key)
-        .expect("the shard elected a leader");
+fn surviving_caller(
+    sim: &Simulation,
+    systems: &[SimCluster],
+    granaries: &[Granary<LogGrain>],
+    key: &str,
+) -> usize {
+    // Poll: the shard's first election lands at a schedule-dependent instant, so
+    // wait it out rather than assuming a fixed settle covered it.
+    let leader = {
+        let mut found = None;
+        for _ in 0..20 {
+            if let Some(leader) = granaries[0].leader(key) {
+                found = Some(leader);
+                break;
+            }
+            sim.run_for(Duration::from_millis(500));
+        }
+        found.expect("the shard elected a leader")
+    };
     systems
         .iter()
         .position(|s| s.node() != leader)
@@ -251,7 +266,7 @@ fn subscription_reconstructs_the_log_with_no_faults() {
     let sim = Simulation::new(1);
     let (_net, systems, granaries) = cluster(&sim);
     let key = "log/clean";
-    let caller = surviving_caller(&systems, &granaries, key);
+    let caller = surviving_caller(&sim, &systems, &granaries, key);
     let system = systems[caller].clone();
     let granary = granaries[caller].clone();
     const N: usize = 16;
@@ -287,7 +302,7 @@ fn subscription_survives_a_leader_crash_mid_stream() {
     let leader = granaries[0]
         .leader(key)
         .expect("the shard elected a leader");
-    let caller = surviving_caller(&systems, &granaries, key);
+    let caller = surviving_caller(&sim, &systems, &granaries, key);
     let system = systems[caller].clone();
     let granary = granaries[caller].clone();
     const N: usize = 16;
@@ -327,7 +342,7 @@ fn subscription_reconstructs_a_burst_that_overflows_the_buffer() {
     let sim = Simulation::new(3);
     let (_net, systems, granaries) = cluster(&sim);
     let key = "log/burst";
-    let caller = surviving_caller(&systems, &granaries, key);
+    let caller = surviving_caller(&sim, &systems, &granaries, key);
     let system = systems[caller].clone();
     let granary = granaries[caller].clone();
     const N: usize = 400;

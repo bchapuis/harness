@@ -102,6 +102,7 @@ impl<S: GranarySystem> Grain for Fs<S> {
         r.accept::<Stat>();
         r.accept::<Destroy>();
         r.accept::<Repair>();
+        r.accept::<Sweep>();
     }
 
     fn on_activate(
@@ -111,16 +112,31 @@ impl<S: GranarySystem> Grain for Fs<S> {
         // Kick grain-driven blob repair (§7.10 B6) off the activation path: tell self
         // a `Repair`, whose handler reads the folded tree for the live block set and
         // launches the background re-replication. `on_activate` has no access to the
-        // state, so the self-tell is how repair reaches it.
+        // state, so the self-tell is how repair reaches it. A `Sweep` rides along so
+        // blocks orphaned by a crash between a commit and its post-commit sweep are
+        // reclaimed on the next activation.
         let this = ctx.this();
         let system = ctx.system().clone();
         async move {
             system.launch(Box::pin(async move {
                 let _ = this.tell(Repair).await;
+                let _ = this.tell(Sweep).await;
             }));
             Ok(())
         }
     }
+}
+
+/// Schedule a post-commit [`Sweep`] for a command being decided that may orphan
+/// blocks. A detached self-tell, so it lands in the host's serial mailbox AFTER the
+/// current command's commit: the sweep then reads the *committed* tree — the new one
+/// when the commit landed, the old (unchanged) one when it failed — and so can never
+/// reclaim a block a failed commit still references.
+fn sweep_later<S: GranarySystem>(ctx: &GrainCtx<Fs<S>>) {
+    let this = ctx.this();
+    ctx.system().launch(Box::pin(async move {
+        let _ = this.tell(Sweep).await;
+    }));
 }
 
 /// Resolve a path's parent directory, creating missing intermediate directories
@@ -135,7 +151,7 @@ fn ensure_parents(
     next_ino: &mut Ino,
     pending: &mut HashMap<(Ino, String), (Ino, bool)>,
 ) -> Result<(Ino, String), FsError> {
-    let comps = components(path);
+    let comps = components(path)?;
     let (name, dirs) = comps.split_last().ok_or(FsError::InvalidPath)?;
     let mut cur = ROOT;
     for comp in dirs {
@@ -217,6 +233,11 @@ impl<S: GranarySystem> GrainHandler<WriteFile> for Fs<S> {
             Some((_, true)) => return (vec![], Err(FsError::IsADirectory)),
             Some((ino, false)) => {
                 ops.push(FsOp::Truncate { ino, size: 0 }); // replace whole file
+                // Overwriting a non-empty file orphans its old blocks: reclaim
+                // them once this command's ops have committed.
+                if state.file(ino).is_some_and(|f| f.size > 0) {
+                    sweep_later(ctx);
+                }
                 (ino, state.file(ino).map_or(0, |f| f.next_seq))
             }
             None => {
@@ -260,8 +281,9 @@ impl<S: GranarySystem> GrainHandler<ReadFile> for Fs<S> {
         msg: ReadFile,
         ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<Vec<u8>, FsError>) {
-        let Some(ino) = state.resolve(&msg.path) else {
-            return (vec![], Err(FsError::NotFound));
+        let ino = match state.resolve(&msg.path) {
+            Ok(ino) => ino,
+            Err(e) => return (vec![], Err(e)),
         };
         let Some(file) = state.file(ino) else {
             return (vec![], Err(FsError::IsADirectory));
@@ -290,8 +312,9 @@ impl<S: GranarySystem> GrainHandler<ListDir> for Fs<S> {
         msg: ListDir,
         _ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<Vec<DirEntry>, FsError>) {
-        let Some(ino) = state.resolve(&msg.path) else {
-            return (vec![], Err(FsError::NotFound));
+        let ino = match state.resolve(&msg.path) {
+            Ok(ino) => ino,
+            Err(e) => return (vec![], Err(e)),
         };
         let Some(entries) = state.dir(ino) else {
             return (vec![], Err(FsError::NotADirectory));
@@ -330,10 +353,11 @@ impl<S: GranarySystem> GrainHandler<Remove> for Fs<S> {
         &self,
         state: &FsTree,
         msg: Remove,
-        _ctx: &GrainCtx<Self>,
+        ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<(), FsError>) {
-        let Some((parent, name)) = state.resolve_parent(&msg.path) else {
-            return (vec![], Err(FsError::NotFound));
+        let (parent, name) = match state.resolve_parent(&msg.path) {
+            Ok(parent) => parent,
+            Err(e) => return (vec![], Err(e)),
         };
         let Some(&child) = state.dir(parent).and_then(|d| d.get(&name)) else {
             return (vec![], Err(FsError::NotFound));
@@ -343,6 +367,13 @@ impl<S: GranarySystem> GrainHandler<Remove> for Fs<S> {
             && !msg.recursive
         {
             return (vec![], Err(FsError::NotEmpty));
+        }
+        // Unlinking a non-empty file (or a subtree that may hold files) orphans
+        // its blocks: reclaim them once the unlink has committed.
+        if state.file(child).is_some_and(|f| f.size > 0)
+            || state.dir(child).is_some_and(|d| !d.is_empty())
+        {
+            sweep_later(ctx);
         }
         (vec![FsOp::Unlink { parent, name }], Ok(()))
     }
@@ -363,17 +394,24 @@ impl<S: GranarySystem> GrainHandler<Rename> for Fs<S> {
         &self,
         state: &FsTree,
         msg: Rename,
-        _ctx: &GrainCtx<Self>,
+        ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<(), FsError>) {
-        let Some((from_parent, from)) = state.resolve_parent(&msg.from) else {
-            return (vec![], Err(FsError::NotFound));
+        let (from_parent, from) = match state.resolve_parent(&msg.from) {
+            Ok(parent) => parent,
+            Err(e) => return (vec![], Err(e)),
         };
         if state.dir(from_parent).and_then(|d| d.get(&from)).is_none() {
             return (vec![], Err(FsError::NotFound));
         }
-        let Some((to_parent, to)) = state.resolve_parent(&msg.to) else {
-            return (vec![], Err(FsError::NotFound));
+        let (to_parent, to) = match state.resolve_parent(&msg.to) {
+            Ok(parent) => parent,
+            Err(e) => return (vec![], Err(e)),
         };
+        // Renaming over an existing target replaces it, orphaning its blocks:
+        // reclaim them once the rename has committed.
+        if state.dir(to_parent).and_then(|d| d.get(&to)).is_some() {
+            sweep_later(ctx);
+        }
         (
             vec![FsOp::Rename {
                 from_parent,
@@ -401,13 +439,19 @@ impl<S: GranarySystem> GrainHandler<Truncate> for Fs<S> {
         &self,
         state: &FsTree,
         msg: Truncate,
-        _ctx: &GrainCtx<Self>,
+        ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<(), FsError>) {
-        let Some(ino) = state.resolve(&msg.path) else {
-            return (vec![], Err(FsError::NotFound));
+        let ino = match state.resolve(&msg.path) {
+            Ok(ino) => ino,
+            Err(e) => return (vec![], Err(e)),
         };
-        if state.file(ino).is_none() {
+        let Some(file) = state.file(ino) else {
             return (vec![], Err(FsError::IsADirectory));
+        };
+        // Shrinking may clip whole blocks off the tail: reclaim them once the
+        // truncate has committed. (Growing zero-fills and orphans nothing.)
+        if msg.size < file.size {
+            sweep_later(ctx);
         }
         (
             vec![FsOp::Truncate {
@@ -435,10 +479,11 @@ impl<S: GranarySystem> GrainHandler<Stat> for Fs<S> {
         msg: Stat,
         _ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<Metadata, FsError>) {
-        let meta = match state
-            .resolve(&msg.path)
-            .and_then(|ino| state.inodes.get(&ino))
-        {
+        let ino = match state.resolve(&msg.path) {
+            Ok(ino) => ino,
+            Err(e) => return (vec![], Err(e)),
+        };
+        let meta = match state.inodes.get(&ino) {
             Some(Inode::Dir(_)) => Metadata { dir: true, size: 0 },
             Some(Inode::File(f)) => Metadata {
                 dir: false,
@@ -450,7 +495,7 @@ impl<S: GranarySystem> GrainHandler<Stat> for Fs<S> {
     }
 }
 
-/// Reclaim the whole workspace: drop the blob area and reset the tree. The grain's
+/// Reclaim the whole workspace: reset the tree and drop the blob area. The grain's
 /// identity is eternal; this is a logical reset (like `tenancy::Clear`), not a delete.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Destroy;
@@ -465,9 +510,32 @@ impl<S: GranarySystem> GrainHandler<Destroy> for Fs<S> {
         _msg: Destroy,
         ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<(), FsError>) {
-        // Drop the blob area (grain-scoped, §7.10), then journal the tree reset.
-        ctx.blobs().destroy().await;
+        // Journal the tree reset FIRST; the post-commit sweep reclaims the blob area
+        // (an empty tree has an empty live set, so the sweep drops everything).
+        // Deleting the blobs here, in the decide phase, would race the commit: a
+        // failed or crashed append rehydrates the OLD tree over an already-deleted
+        // blob area, leaving every file permanently unreadable — the §6 output gate
+        // holds the reply, not a decide-phase side effect.
+        sweep_later(ctx);
         (vec![FsOp::Destroyed], Ok(()))
+    }
+}
+
+/// Reclaim orphaned blocks: drop every blob the folded tree no longer references
+/// (the grain's mark-from-roots GC, §7.10). Internal: the grain tells itself this
+/// after any command that may orphan blocks — overwrite, shrink, remove,
+/// rename-over, destroy ([`sweep_later`]) — and on activation, so the sweep always
+/// runs against the *committed* tree. Commits nothing; idempotent and best-effort.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Sweep;
+impl Message for Sweep {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("granary.fs.Sweep");
+}
+impl<S: GranarySystem> GrainHandler<Sweep> for Fs<S> {
+    async fn handle(&self, state: &FsTree, _msg: Sweep, ctx: &GrainCtx<Self>) -> (Vec<FsOp>, ()) {
+        ctx.blobs().gc(&state.live_blobids()).await;
+        (vec![], ())
     }
 }
 

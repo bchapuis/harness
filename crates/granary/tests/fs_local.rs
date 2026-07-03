@@ -316,3 +316,289 @@ fn workspace_survives_hibernation() {
     let got = sim.block_on(async move { g.ask(read("keep/notes.txt")).await.unwrap() });
     assert_eq!(got, Ok(b"durable working state".to_vec()));
 }
+
+// --- Blob reclamation: the post-commit sweep (§7.10 GC) -------------------------
+
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+
+use granary::BlobId;
+use granary::Grain;
+use granary::GrainName;
+use granary::GrainStore;
+use granary::GranarySystem;
+use granary::GrainStoreFactory;
+use granary::MemoryGrainStore;
+use granary::ReadOutcome;
+use granary::ReadReply;
+use granary::Seq;
+use granary::StoreAck;
+use granary::shard_for;
+
+/// A workspace over a shared, inspectable store: the granary plus the handles the
+/// blob-reclamation assertions need (the grain's shard index and name).
+fn inspectable(
+    system: &SimSystem,
+    key: &str,
+) -> (
+    granary::Granary<Ws>,
+    Arc<MemoryGrainStore>,
+    u32,
+    GrainName,
+) {
+    let store = Arc::new(MemoryGrainStore::new());
+    let factory: GrainStoreFactory = {
+        let store = Arc::clone(&store);
+        Arc::new(move |_| Arc::clone(&store) as Arc<dyn GrainStore>)
+    };
+    let config = GranaryConfig {
+        grain_store: Some(factory),
+        ..GranaryConfig::default()
+    };
+    let shard = shard_for(<Ws as Grain>::GRAIN_TYPE, key, config.shards).index;
+    let name = GrainName::new(<Ws as Grain>::GRAIN_TYPE, key);
+    (system.granary::<Ws>(config), store, shard, name)
+}
+
+#[test]
+fn overwrite_reclaims_the_old_files_blocks() {
+    let (sim, system) = local();
+    let (ws, store, shard, name) = inspectable(&system, "ws/0");
+    let g = ws.grain("ws/0");
+    let old_id = BlobId::of(b"version one");
+    let new_id = BlobId::of(b"version two");
+    sim.block_on(async move {
+        g.ask(write("f", b"version one")).await.unwrap().unwrap();
+        assert!(store.has_blob(shard, &name, old_id));
+        g.ask(write("f", b"version two")).await.unwrap().unwrap();
+        // Let the post-commit sweep the overwrite scheduled run.
+        system.sleep(Duration::from_secs(1)).await;
+        assert!(
+            !store.has_blob(shard, &name, old_id),
+            "the overwritten block must be reclaimed by the sweep"
+        );
+        assert!(store.has_blob(shard, &name, new_id));
+        assert_eq!(g.ask(read("f")).await.unwrap(), Ok(b"version two".to_vec()));
+    });
+}
+
+#[test]
+fn remove_reclaims_the_files_blocks() {
+    let (sim, system) = local();
+    let (ws, store, shard, name) = inspectable(&system, "ws/0");
+    let g = ws.grain("ws/0");
+    let id = BlobId::of(b"doomed bytes");
+    sim.block_on(async move {
+        g.ask(write("dir/f", b"doomed bytes")).await.unwrap().unwrap();
+        assert!(store.has_blob(shard, &name, id));
+        g.ask(Remove {
+            path: "dir".into(),
+            recursive: true,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        system.sleep(Duration::from_secs(1)).await;
+        assert!(
+            !store.has_blob(shard, &name, id),
+            "a removed file's blocks must be reclaimed by the sweep"
+        );
+    });
+}
+
+#[test]
+fn destroy_reclaims_the_blob_area_after_the_commit() {
+    let (sim, system) = local();
+    let (ws, store, shard, name) = inspectable(&system, "ws/0");
+    let g = ws.grain("ws/0");
+    let id = BlobId::of(b"workspace bytes");
+    sim.block_on(async move {
+        g.ask(write("f", b"workspace bytes")).await.unwrap().unwrap();
+        g.ask(Destroy).await.unwrap().unwrap();
+        system.sleep(Duration::from_secs(1)).await;
+        assert!(
+            !store.has_blob(shard, &name, id),
+            "destroy must reclaim the whole blob area once the reset committed"
+        );
+    });
+}
+
+/// A [`GrainStore`] that refuses the next record append with a fence, driving the
+/// `Local` journal to report the commit `Unavailable` — the §6 commit-failure
+/// injection. Everything else delegates.
+struct FailNextAppend {
+    inner: MemoryGrainStore,
+    fail: AtomicBool,
+}
+
+impl GrainStore for FailNextAppend {
+    fn store_record(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        after: Seq,
+        term: u64,
+        records: Vec<Vec<u8>>,
+        repair: bool,
+    ) -> StoreAck {
+        if self.fail.swap(false, Ordering::SeqCst) {
+            return StoreAck::Fenced(u64::MAX);
+        }
+        self.inner
+            .store_record(shard, grain, after, term, records, repair)
+    }
+
+    fn read(&self, shard: u32, grain: &GrainName) -> ReadReply {
+        self.inner.read(shard, grain)
+    }
+
+    fn read_from(&self, shard: u32, grain: &GrainName, from: Seq, limit: usize) -> Vec<(Seq, Vec<u8>)> {
+        self.inner.read_from(shard, grain, from, limit)
+    }
+
+    fn prepare(&self, shard: u32, grain: &GrainName, term: u64) -> ReadOutcome {
+        self.inner.prepare(shard, grain, term)
+    }
+
+    fn store_snapshot(&self, shard: u32, grain: &GrainName, at: Seq, term: u64, state: Vec<u8>) -> StoreAck {
+        self.inner.store_snapshot(shard, grain, at, term, state)
+    }
+
+    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: u64) {
+        self.inner.truncate(shard, grain, after, term)
+    }
+
+    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) {
+        self.inner.put_blob(shard, grain, id, bytes)
+    }
+
+    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>> {
+        self.inner.get_blob(shard, grain, id)
+    }
+
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool {
+        self.inner.has_blob(shard, grain, id)
+    }
+
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) {
+        self.inner.delete_blob(shard, grain, id)
+    }
+
+    fn delete_blobs(&self, shard: u32, grain: &GrainName) {
+        self.inner.delete_blobs(shard, grain)
+    }
+
+    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &std::collections::BTreeSet<BlobId>) {
+        self.inner.retain_blobs(shard, grain, retain)
+    }
+
+    fn grains(&self, shard: u32) -> Vec<GrainName> {
+        self.inner.grains(shard)
+    }
+
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId> {
+        self.inner.blob_ids(shard, grain)
+    }
+}
+
+#[test]
+fn a_failed_destroy_commit_leaves_the_workspace_readable() {
+    // The critical-ordering regression: `Destroy` must journal the reset BEFORE the
+    // blob area is reclaimed. If the commit fails, the grain rehydrates the old tree
+    // — which must still resolve every block. (Pre-fix, the decide phase deleted the
+    // blobs first, leaving the workspace permanently unreadable after this exact
+    // sequence.)
+    let (sim, system) = local();
+    let store = Arc::new(FailNextAppend {
+        inner: MemoryGrainStore::new(),
+        fail: AtomicBool::new(false),
+    });
+    let factory: GrainStoreFactory = {
+        let store = Arc::clone(&store);
+        Arc::new(move |_| Arc::clone(&store) as Arc<dyn GrainStore>)
+    };
+    let ws = system.granary::<Ws>(GranaryConfig {
+        grain_store: Some(factory),
+        ..GranaryConfig::default()
+    });
+    let g = ws.grain("ws/0");
+    sim.block_on(async move {
+        let content = b"must survive a failed destroy".to_vec();
+        g.ask(write("f", &content)).await.unwrap().unwrap();
+
+        // The Destroy's append fails: the reset never commits, the ask surfaces the
+        // durability outcome, and the host steps down.
+        store.fail.store(true, Ordering::SeqCst);
+        assert!(g.ask(Destroy).await.is_err(), "the destroy must not commit");
+
+        // Let the destroy-scheduled sweep run against the (unchanged) committed
+        // tree — it must reclaim nothing the tree still references.
+        system.sleep(Duration::from_secs(1)).await;
+
+        // A fresh activation rehydrates the old tree; every block must still read.
+        assert_eq!(g.ask(read("f")).await.unwrap(), Ok(content));
+    });
+}
+
+#[test]
+fn dot_dot_path_components_are_rejected_as_invalid() {
+    // The tree keeps no parent links, so `..` cannot be resolved — and treating it
+    // as a literal name used to mint a directory *called* `..`. Every path-taking
+    // command must refuse it instead.
+    let (sim, system) = local();
+    let ws = system.granary::<Ws>(GranaryConfig::default());
+    let g = ws.grain("ws/0");
+    sim.block_on(async move {
+        g.ask(write("a/f", b"data")).await.unwrap().unwrap();
+        assert_eq!(
+            g.ask(write("a/../etc/passwd", b"nope")).await.unwrap(),
+            Err(FsError::InvalidPath)
+        );
+        assert_eq!(
+            g.ask(read("a/../a/f")).await.unwrap(),
+            Err(FsError::InvalidPath)
+        );
+        assert_eq!(
+            g.ask(Stat { path: "..".into() }).await.unwrap(),
+            Err(FsError::InvalidPath)
+        );
+        assert_eq!(
+            g.ask(ListDir { path: "a/..".into() }).await.unwrap(),
+            Err(FsError::InvalidPath)
+        );
+        assert_eq!(
+            g.ask(Remove {
+                path: "a/../a".into(),
+                recursive: true
+            })
+            .await
+            .unwrap(),
+            Err(FsError::InvalidPath)
+        );
+        assert_eq!(
+            g.ask(Rename {
+                from: "a/f".into(),
+                to: "a/../g".into()
+            })
+            .await
+            .unwrap(),
+            Err(FsError::InvalidPath)
+        );
+        assert_eq!(
+            g.ask(Truncate {
+                path: "../a/f".into(),
+                size: 0
+            })
+            .await
+            .unwrap(),
+            Err(FsError::InvalidPath)
+        );
+        // No literal `..` entry was ever created, and `.`/`//` still normalize.
+        assert_eq!(
+            g.ask(ListDir { path: "/".into() }).await.unwrap().unwrap().len(),
+            1
+        );
+        assert_eq!(g.ask(read("./a//f")).await.unwrap(), Ok(b"data".to_vec()));
+    });
+}

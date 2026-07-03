@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use actor_cluster::GroupId;
 use actor_cluster::RaftConsensus;
-use actor_core::NodeId;
 
 use crate::blobs::BlobId;
 use crate::election::LeaderElection;
@@ -30,6 +29,7 @@ use crate::journal::GrainJournalError;
 use crate::journal::Seq;
 use crate::replica_store::ReplicaTransport;
 use crate::replicator::QuorumReplicator;
+use crate::replicator::ReplicaSets;
 use crate::store::GrainStore;
 
 /// A [`GrainJournal`] over a shard's leader-election group and per-grain
@@ -48,24 +48,29 @@ impl<R: RaftConsensus> Clone for QuorumGrainJournal<R> {
 
 impl<R: RaftConsensus> QuorumGrainJournal<R> {
     /// Build the journal for one shard. `group` is the shard's leader-election group
-    /// (already created by [`shardmap`](crate::shardmap)); `replicas` is the shard's
-    /// replica set; `local` is this node's [`GrainStore`]; `transport` reaches the
-    /// peer replicas' stores (spec §7.2, §8).
+    /// (already created by [`shardmap`](crate::shardmap)); `sets` is the shard's
+    /// **live** replica sets, shared with the shard map's apply loop so a committed
+    /// reallocation reaches in-flight journals (§7.7); `local` is this node's
+    /// [`GrainStore`]; `transport` reaches the peer replicas' stores (spec §7.2, §8).
     pub(crate) fn new(
         consensus: R,
         group: GroupId,
         shard: u32,
-        replicas: Vec<NodeId>,
+        sets: Arc<std::sync::Mutex<ReplicaSets>>,
         local: Arc<dyn GrainStore>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> QuorumGrainJournal<R> {
         let self_node = consensus.node();
         let election = LeaderElection::new(consensus, group);
-        let replicator =
-            QuorumReplicator::new(election, local, transport, replicas, shard, self_node);
+        let replicator = QuorumReplicator::new(election, local, transport, sets, shard, self_node);
         QuorumGrainJournal {
             replicator: Arc::new(replicator),
         }
+    }
+
+    /// The shard's replicator — the migration driver's handle (§7.7).
+    pub(crate) fn replicator(&self) -> Arc<QuorumReplicator<R>> {
+        Arc::clone(&self.replicator)
     }
 }
 

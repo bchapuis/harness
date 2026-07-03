@@ -32,6 +32,7 @@ use crate::shardmap::EmptyShardMap;
 use crate::shardmap::ShardMapSource;
 use crate::store::GrainStore;
 use crate::store::MemoryGrainStore;
+use crate::subscription::CloseSink;
 use crate::subscription::RecordSink;
 use crate::subscription::SUB_BUFFER;
 use crate::subscription::Subscribe;
@@ -274,12 +275,14 @@ impl<G: Grain> GrainRef<G> {
     {
         // Attempt the cached host; only a `DeadLetter` (a hibernated host that
         // never received the command, §10) is re-enqueued. An ambiguous failure is
-        // surfaced, not retried — a re-enqueue could double-apply (§2.2).
-        let host = self.resolve(true, DEFAULT_ASK_TIMEOUT).await?;
+        // surfaced, not retried — a re-enqueue could double-apply (§2.2). One
+        // deadline bounds both attempts' resolutions.
+        let deadline = self.system.now() + DEFAULT_ASK_TIMEOUT;
+        let host = self.resolve(true, deadline).await?;
         if let Err(call) = host.tell(RunTyped(msg.clone())).await {
             if is_retriable(&call) {
                 self.invalidate();
-                let host = self.resolve(false, DEFAULT_ASK_TIMEOUT).await?;
+                let host = self.resolve(false, deadline).await?;
                 return host.tell(RunTyped(msg)).await.map_err(GrainError::Call);
             }
             return Err(GrainError::Call(call));
@@ -299,17 +302,28 @@ impl<G: Grain> GrainRef<G> {
     /// closes — a move, a lag-drop, or hibernation — re-subscribe and backfill
     /// from the last seq.
     pub async fn subscribe(&self, from: Seq) -> Result<Subscription<G>, GrainError> {
+        // Resolve BEFORE spawning the sink: a failed resolution (an unelectable
+        // shard, a redirect that runs out its deadline) must not leave an orphan
+        // actor behind — the framework does not reap an actor merely because every
+        // external ref to it was dropped.
+        let host = self.resolve(false, self.system.now() + DEFAULT_ASK_TIMEOUT).await?;
         let (tx, rx) = async_channel::bounded(SUB_BUFFER);
         let sink = self.system.spawn(RecordSink::<G>::new(tx));
-        let host = self.resolve(false, DEFAULT_ASK_TIMEOUT).await?;
-        let subscribed = host
-            .ask_timeout(Subscribe::new(from, sink), DEFAULT_ASK_TIMEOUT)
+        match host
+            .ask_timeout(Subscribe::new(from, sink.clone()), DEFAULT_ASK_TIMEOUT)
             .await
-            .map_err(GrainError::Call)?;
-        Ok(Subscription {
-            head: subscribed.head,
-            records: rx,
-        })
+        {
+            Ok(subscribed) => Ok(Subscription {
+                head: subscribed.head,
+                records: rx,
+            }),
+            // The host went away between resolve and register: stop the sink we
+            // just spawned (it was never registered, so no batch will ever stop it).
+            Err(call) => {
+                let _ = sink.tell(CloseSink).await;
+                Err(GrainError::Call(call))
+            }
+        }
     }
 
     /// Resolve the name to its live host (§5.4). With `use_cache`, a cached handle
@@ -324,16 +338,19 @@ impl<G: Grain> GrainRef<G> {
     /// stays observably identical to a local one across a failover (invariant
     /// **G13**). Driving the loop here, not in the gateway's serial handler, keeps
     /// one slow resolution from blocking another grain's activation on that node.
+    ///
+    /// Bounded by the **caller's** `deadline`, not a per-attempt window: the caller
+    /// computes it once from its declared budget, so a dispatch that resolves,
+    /// fails, and re-resolves still returns within the one budget (§5.4).
     async fn resolve(
         &self,
         use_cache: bool,
-        within: Duration,
+        deadline: actor_core::Instant,
     ) -> Result<ActorRef<Host<G>>, GrainError> {
         if use_cache && let Some(host) = self.cache.as_ref().and_then(|cache| cache.get(&self.name))
         {
             return Ok(host);
         }
-        let deadline = self.system.now() + within;
         // Start at this ref's own gateway: local for a `Granary`-minted ref (the
         // local fast path when this node leads), the source node's for a
         // wire-arrived one. Hints and re-discovery move it toward the leader.
@@ -367,9 +384,11 @@ impl<G: Grain> GrainRef<G> {
                 // A genuine durability outcome (quorum loss / unhandled): surface it.
                 Ok(Err(other)) => return Err(other),
                 // The target gateway is unreachable (its node crashed): re-discover a
-                // live gateway to redirect from, then back off.
+                // gateway to redirect from — any but the one that just failed, else
+                // a stale receptionist entry for the crashed node (rank-first) would
+                // pin the loop on the dead gateway for the whole deadline.
                 Err(_) => {
-                    if let Some(gateway) = self.any_gateway() {
+                    if let Some(gateway) = self.gateway_excluding(target.id().node()) {
                         target = gateway;
                     }
                 }
@@ -390,14 +409,21 @@ impl<G: Grain> GrainRef<G> {
             .find(|gateway| gateway.id().node() == node)
     }
 
-    /// Any discovered gateway — used to escape a dead starting target (§5.4).
-    fn any_gateway(&self) -> Option<ActorRef<Gateway<G>>> {
-        self.system
+    /// A discovered gateway on any node but `failed` — used to escape a dead
+    /// target (§5.4) without re-selecting the very gateway that just timed out
+    /// (its registration may outlive the crash until the membership prunes it).
+    /// Falls back to whatever is registered when nothing else is.
+    fn gateway_excluding(&self, failed: NodeId) -> Option<ActorRef<Gateway<G>>> {
+        let gateways = self
+            .system
             .receptionist()
             .lookup(gateway_key::<G>(self.grain_type))
-            .into_vec()
-            .into_iter()
-            .next()
+            .into_vec();
+        gateways
+            .iter()
+            .find(|gateway| gateway.id().node() != failed)
+            .or_else(|| gateways.first())
+            .cloned()
     }
 
     /// Drop the cached host handle for this name, so the next [`resolve`] goes back
@@ -422,9 +448,15 @@ impl<G: Grain> GrainRef<G> {
         G: GrainHandler<M>,
         M: Message + Clone,
     {
+        // ONE deadline bounds the whole call — resolution and ask, across both
+        // attempts — so the retry path never restarts the caller's budget (a
+        // per-step `within` could stack up to ~4× the declared timeout).
+        let deadline = self.system.now() + within;
+
         // Attempt 1: cached host (or a fresh resolution if nothing is cached).
-        let host = self.resolve(true, within).await?;
-        match host.ask_timeout(RunTyped(msg.clone()), within).await {
+        let host = self.resolve(true, deadline).await?;
+        let remaining = deadline.duration_since(self.system.now());
+        match host.ask_timeout(RunTyped(msg.clone()), remaining).await {
             // The host's reply is itself `Result<M::Reply, GrainError>`.
             Ok(Ok(reply)) => return Ok(reply),
             // Leadership moved off the cached host (§8): refresh and retry.
@@ -439,9 +471,17 @@ impl<G: Grain> GrainRef<G> {
             Err(call) => return Err(GrainError::Call(call)),
         }
 
-        // Attempt 2: a fresh gateway resolution (bypassing the cache) and re-issue.
-        let host = self.resolve(false, within).await?;
-        match host.ask_timeout(RunTyped(msg), within).await {
+        // Attempt 2: a fresh gateway resolution (bypassing the cache) and re-issue,
+        // within whatever budget attempt 1 left.
+        let remaining = deadline.duration_since(self.system.now());
+        if remaining.is_zero() {
+            return Err(GrainError::Unavailable(
+                "deadline exhausted before the retry".into(),
+            ));
+        }
+        let host = self.resolve(false, deadline).await?;
+        let remaining = deadline.duration_since(self.system.now());
+        match host.ask_timeout(RunTyped(msg), remaining).await {
             Ok(result) => result,
             Err(call) => Err(GrainError::Call(call)),
         }

@@ -155,12 +155,19 @@ pub trait GrainStore: Send + Sync + 'static {
         state: Vec<u8>,
     ) -> StoreAck;
 
-    /// Drop any records past slot `after` for a grain — the leader rolling back the
-    /// tentative local write of an append that failed to reach a quorum (§7.2), so an
-    /// uncommitted record never becomes visible to a later stale-local recovery (§7.5,
-    /// G5). The record survives on any peers that stored it, so a quorum that does
-    /// hold it can still commit it late.
-    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq);
+    /// Drop records past slot `after` whose term is at most `term` — the leader
+    /// rolling back the tentative local write of an append that failed to reach a
+    /// quorum (§7.2), so an uncommitted record never becomes visible to a later
+    /// stale-local recovery (§7.5, G5). The record survives on any peers that stored
+    /// it, so a quorum that does hold it can still commit it late.
+    ///
+    /// The term bound is what makes the rollback safe against a concurrent
+    /// leadership change: while the failed append's quorum wait was in flight, a
+    /// **new** leader (higher term) may have fenced this store and written back or
+    /// committed records for the same grain above `after`. Those records carry the
+    /// higher term and MUST NOT be dropped (G14); a term-blind truncate here could
+    /// silently shrink a committed write's durability below a quorum.
+    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: u64);
 
     // --- The grain-native content-addressed facet (durable-workspace design) ----
     //
@@ -196,6 +203,18 @@ pub trait GrainStore: Send + Sync + 'static {
     /// Drop every blob of a grain **not** in `retain` — the grain's mark-from-roots
     /// sweep, reclaiming blocks orphaned by overwrites. Idempotent.
     fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>);
+
+    // --- Enumeration (replica-set migration, §7.7) ---------------------------
+
+    /// Every grain this store holds anything for under `shard` — records, a
+    /// snapshot, or blobs. The migration driver enumerates a shard's grains from a
+    /// read quorum of its replicas with this, so a grain committed while this node
+    /// was down is still found on the others.
+    fn grains(&self, shard: u32) -> Vec<GrainName>;
+
+    /// Every blob id this store holds for one grain — the migration driver's
+    /// source list when copying a grain's blob area to a new replica.
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId>;
 }
 
 /// How the runtime obtains a node's [`GrainStore`] (spec §7.4). Supplied on
@@ -392,11 +411,25 @@ impl GrainRecords {
         (StoreAck::Stored(at), false)
     }
 
-    /// Drop records past slot `after` (the rollback of an uncommitted tail, §7.2).
-    pub(crate) fn truncate(&mut self, after: Seq) {
-        // `after` is absolute; keep the slots up to it, behind the base.
+    /// Drop records past slot `after` whose term is at most `term` (the rollback of
+    /// an uncommitted tail, §7.2). Term-aware, per slot: a record above `after`
+    /// written under a **higher** term is a newer leader's — possibly committed —
+    /// write that landed on this replica while the rollback's append was in flight,
+    /// and MUST survive (G14). A slot at or below `term` above the roll-backer's own
+    /// head is by construction uncommitted (a committed slot there would have raised
+    /// the head its recovery adopted), so dropping it is safe.
+    pub(crate) fn truncate(&mut self, after: Seq, term: u64) {
+        // `after` is absolute; clear matching slots above it, behind the base.
         let keep = after.value().saturating_sub(self.base.value()) as usize;
-        self.slots.truncate(keep);
+        for slot in self.slots.iter_mut().skip(keep) {
+            if slot.as_ref().is_some_and(|s| s.term <= term) {
+                *slot = None;
+            }
+        }
+        // Drop any all-empty tail so the sparse vector does not grow unboundedly.
+        while self.slots.last().is_some_and(Option::is_none) {
+            self.slots.pop();
+        }
     }
 }
 
@@ -557,12 +590,12 @@ impl GrainStore for MemoryGrainStore {
         records_guard.store_snapshot(at, term, state).0
     }
 
-    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq) {
+    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: u64) {
         if let Some(segment) = self.existing(shard, grain) {
             segment
                 .lock()
                 .expect("grain segment poisoned")
-                .truncate(after);
+                .truncate(after, term);
         }
     }
 
@@ -625,6 +658,41 @@ impl GrainStore for MemoryGrainStore {
         {
             area.retain(|id, _| retain.contains(id));
         }
+    }
+
+    fn grains(&self, shard: u32) -> Vec<GrainName> {
+        // A grain can hold blobs before its first committed record (the blob is
+        // durable before the metadata that references it, §7.10), so enumerate the
+        // union of the record segments and the blob areas.
+        let mut names: BTreeSet<GrainName> = self
+            .inner
+            .segments
+            .lock()
+            .expect("grain store segments poisoned")
+            .keys()
+            .filter(|(s, _)| *s == shard)
+            .map(|(_, grain)| grain.clone())
+            .collect();
+        names.extend(
+            self.inner
+                .blobs
+                .lock()
+                .expect("grain store blobs poisoned")
+                .keys()
+                .filter(|(s, _)| *s == shard)
+                .map(|(_, grain)| grain.clone()),
+        );
+        names.into_iter().collect()
+    }
+
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId> {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get(&(shard, grain.clone()))
+            .map(|area| area.keys().copied().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -833,6 +901,82 @@ mod tests {
         assert_eq!(
             store.read(0, &n).slots,
             vec![(Seq::new(4), 2, b"e4".to_vec())]
+        );
+    }
+
+    #[test]
+    fn truncate_drops_own_term_tentative_records() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        store.store_record(0, &n, Seq::ZERO, 5, vec![b"e1".to_vec()], false);
+        // A tentative append at head 1 that failed its quorum rolls back.
+        store.store_record(0, &n, Seq::new(1), 5, vec![b"e2".to_vec()], false);
+        store.truncate(0, &n, Seq::new(1), 5);
+        assert_eq!(
+            store.read(0, &n).slots,
+            vec![(Seq::new(1), 5, b"e1".to_vec())]
+        );
+        // Idempotent: nothing above the head remains.
+        store.truncate(0, &n, Seq::new(1), 5);
+        assert_eq!(store.read(0, &n).slots.len(), 1);
+    }
+
+    #[test]
+    fn truncate_spares_a_newer_leaders_committed_records() {
+        // The G14 regression (§7.2 rollback): a deposed leader's failed append
+        // rolls back at its own term while a NEW leader (higher term) has already
+        // written back and committed records above the same head on this replica.
+        // The rollback must drop only its own tentative slot, never the newer
+        // leader's records.
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        store.store_record(0, &n, Seq::ZERO, 5, vec![b"e1".to_vec()], false);
+        // The new leader (term 6) repairs slot 2 and appends slot 3 to this replica.
+        store.store_record(
+            0,
+            &n,
+            Seq::new(1),
+            6,
+            vec![b"e2'".to_vec(), b"e3'".to_vec()],
+            true,
+        );
+        // The deposed leader's rollback of its failed term-5 append above head 1.
+        store.truncate(0, &n, Seq::new(1), 5);
+        assert_eq!(
+            store.read(0, &n).slots,
+            vec![
+                (Seq::new(1), 5, b"e1".to_vec()),
+                (Seq::new(2), 6, b"e2'".to_vec()),
+                (Seq::new(3), 6, b"e3'".to_vec()),
+            ],
+            "a higher-term record must survive a lower-term rollback"
+        );
+    }
+
+    #[test]
+    fn truncate_drops_own_term_slots_interleaved_with_higher_terms() {
+        // Mixed tail: an own-term tentative slot below a higher-term record. The
+        // rollback clears the tentative slot per-slot and keeps the higher-term one
+        // (leaving a gap is correct: the gap marks the dropped uncommitted record,
+        // and the surviving record is re-merged by the next recovery).
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        store.store_record(0, &n, Seq::ZERO, 5, vec![b"e1".to_vec()], false);
+        // Own-term tentative at slot 2; a newer leader's record at slot 3.
+        store.store_record(0, &n, Seq::new(1), 5, vec![b"mine".to_vec()], false);
+        store.store_record(0, &n, Seq::new(2), 6, vec![b"theirs".to_vec()], true);
+        store.truncate(0, &n, Seq::new(1), 5);
+        assert_eq!(
+            store.read(0, &n).slots,
+            vec![
+                (Seq::new(1), 5, b"e1".to_vec()),
+                (Seq::new(3), 6, b"theirs".to_vec()),
+            ]
+        );
+        // The head stops at the gap: slot 3 is above an uncommitted hole.
+        assert_eq!(
+            store.store_record(0, &n, Seq::new(1), 6, vec![b"x".to_vec()], true),
+            StoreAck::Stored(Seq::new(3))
         );
     }
 

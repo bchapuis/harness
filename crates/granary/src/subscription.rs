@@ -90,6 +90,18 @@ impl<G: Grain> Message for Subscribe<G> {
     const MANIFEST: Manifest = Manifest::new("granary.Subscribe");
 }
 
+/// Stop a [`RecordSink`] that was spawned but never registered (spec §7.9): the
+/// `subscribe` error path tells it this so the actor does not linger until system
+/// shutdown (a registered sink instead stops itself when its channel closes).
+/// Local-only — sent by the spawning node, never over the wire.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CloseSink;
+
+impl Message for CloseSink {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("granary.CloseSink");
+}
+
 /// A decoded batch handed to the subscriber over the subscription channel: the
 /// typed records and the `from` they begin after (§7.9).
 pub struct RecordStream<E> {
@@ -149,9 +161,21 @@ impl<G: Grain> Handler<RecordBatch> for RecordSink<G> {
         }
         // try_send, not send: a slow subscriber is dropped on overflow rather
         // than back-pressuring the host's forwarder (§7.9). It reconciles by seq.
-        let _ = self.tx.try_send(RecordStream {
+        // The subscriber dropped its receiver: nothing will ever read this
+        // channel again, so the sink stops rather than lingering until system
+        // shutdown (the framework does not reap actors on ref drop). A `Full`
+        // overflow keeps the sink alive — the subscriber reconciles by seq.
+        if let Err(async_channel::TrySendError::Closed(_)) = self.tx.try_send(RecordStream {
             from: Seq::new(msg.from),
             records,
-        });
+        }) {
+            ctx.stop();
+        }
+    }
+}
+
+impl<G: Grain> Handler<CloseSink> for RecordSink<G> {
+    async fn handle(&mut self, _msg: CloseSink, ctx: &Ctx<RecordSink<G>>) {
+        ctx.stop();
     }
 }

@@ -34,6 +34,8 @@ use serde::Serialize;
 use crate::journal::DynGrainJournal;
 use crate::memory::LocalGrainJournal;
 use crate::replica_store::ReplicaTransport;
+use crate::replicator::QuorumReplicator;
+use crate::replicator::ReplicaSets;
 use crate::shard::QuorumGrainJournal;
 use crate::store::GrainStore;
 use crate::system::MAP_SHARD_INDEX;
@@ -69,12 +71,44 @@ fn map_group_id_for(grain_type: &'static str) -> GroupId {
     })
 }
 
-/// One committed allocation command in the map group's log (spec §7.6).
+/// One committed allocation command in the map group's log (spec §7.6, §7.7).
 #[derive(Serialize, Deserialize)]
 enum ShardMapCommand {
     /// Shard `shard` is replicated by `replicas` — the only nodes that hold its
-    /// data and can lead it (§7.1).
+    /// data and can lead it (§7.1). The **founding** `Assign` sets the shard's
+    /// replica set outright; a later `Assign` onto an already-allocated shard
+    /// starts a **migration** toward `replicas` (the committed `target`, §7.7):
+    /// writes and recoveries switch to the joint quorum, and the leader's
+    /// migration driver catches every grain up on the target set.
     Assign { shard: u32, replicas: Vec<NodeId> },
+    /// The migration for `shard` is complete — every grain's records, snapshot,
+    /// and blobs are on the target set — so the target becomes the current set
+    /// and the old-set members drop out (§7.7). Proposed only by the shard
+    /// leader's migration driver, only after a successful catch-up pass.
+    Migrated { shard: u32 },
+}
+
+/// One shard's committed allocation: the `current` replica set and, while a
+/// migration is in flight, the committed `target` (§7.7).
+#[derive(Clone)]
+struct Allocation {
+    current: Vec<NodeId>,
+    target: Option<Vec<NodeId>>,
+}
+
+impl Allocation {
+    /// The nodes involved in the shard right now: `current ∪ target`.
+    fn union(&self) -> Vec<NodeId> {
+        let mut nodes = self.current.clone();
+        if let Some(target) = &self.target {
+            for node in target {
+                if !nodes.contains(node) {
+                    nodes.push(*node);
+                }
+            }
+        }
+        nodes
+    }
 }
 
 fn encode(command: &ShardMapCommand) -> Vec<u8> {
@@ -140,11 +174,26 @@ impl ShardMapSource for EmptyShardMap {
 /// the apply loop (writer) and the [`ShardMapSource`] reads.
 #[derive(Default)]
 struct Inner {
-    /// shard index → replica set, as committed.
-    allocation: BTreeMap<u32, Vec<NodeId>>,
-    /// shard index → local store, for shards this node replicates.
+    /// shard index → the committed allocation (`current`, plus the migration
+    /// `target` while one is in flight, §7.7).
+    allocation: BTreeMap<u32, Allocation>,
+    /// shard index → local store, for shards this node replicates (or is a
+    /// migration target of).
     journals: BTreeMap<u32, Arc<dyn DynGrainJournal>>,
 }
+
+/// The typed per-shard handles the loops share (the [`ShardMapSource`] seam is
+/// object-safe, so these cannot live in [`Inner`]): each hosted shard's **live**
+/// replica sets — the apply loop mutates them in place as `Assign`/`Migrated`
+/// commit, and the shard's replicator reads them per operation (§7.7) — and its
+/// replicator, the migration driver's handle.
+type ShardHandles<R> = BTreeMap<
+    u32,
+    (
+        Arc<std::sync::Mutex<ReplicaSets>>,
+        Arc<QuorumReplicator<R>>,
+    ),
+>;
 
 /// A [`ShardMapSource`] backed by a per-type Raft group (the `Quorum` tier). The group's
 /// committed log is the allocation. The consensus handle lives only in the
@@ -193,6 +242,7 @@ impl RaftShardMap {
         // committed allocation via replication and routes (spec §7.6).
         consensus.create_group(group, consensus.configured_voters(), Vec::new());
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
+        let handles: Arc<Mutex<ShardHandles<R>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
         consensus.launch(Box::pin(apply_loop(
             consensus.clone(),
@@ -200,6 +250,7 @@ impl RaftShardMap {
             self_node,
             commits,
             Arc::clone(&inner),
+            Arc::clone(&handles),
             local,
             transport,
         )));
@@ -217,6 +268,13 @@ impl RaftShardMap {
             group,
             Arc::downgrade(&inner),
         )));
+        consensus.launch(Box::pin(migrate_loop(
+            consensus.clone(),
+            grain_type,
+            group,
+            Arc::downgrade(&inner),
+            Arc::downgrade(&handles),
+        )));
 
         RaftShardMap { inner }
     }
@@ -229,7 +287,7 @@ impl ShardMapSource for RaftShardMap {
             .expect("shard map mutex poisoned")
             .allocation
             .get(&shard)
-            .cloned()
+            .map(|alloc| alloc.current.clone())
     }
 
     fn journal(&self, shard: u32) -> Option<Arc<dyn DynGrainJournal>> {
@@ -242,23 +300,20 @@ impl ShardMapSource for RaftShardMap {
     }
 }
 
-/// Apply the map group's committed allocation records (spec §7.6, §7.7): record
-/// each shard's **latest** replica set and reconcile this node's local store with
-/// it. The first `Assign` is the founding allocation; later `Assign`s are
-/// rebalances (membership changed). On each change this node:
-/// - **becomes a replica** (in new, not old): creates the shard's leader-election
-///   group and builds its [`QuorumGrainJournal`]. The group is created over the
-///   **old** replica set so a node newly joining the shard is a non-member that does
-///   not disrupt the shard's election — the shard leader's reconcile loop then
-///   `AddVoter`s it. (On the founding `Assign` there is no old set, so it is created
-///   over the founding replicas, of which this node is one.) Note: grain data is not
-///   replicated through this group, so a newly-added replica must be streamed each
-///   grain's records before it counts toward a quorum (§7.6) — that data movement is
-///   deferred; the current cut assumes a fixed replica set.
-/// - **stops being a replica** (in old, not new): drops the store from the registry.
-///   An active `Host` keeps its own `Arc`, so its in-flight append still completes
-///   or fails cleanly as `NotLeader` when the shard leader removes it; the next call
-///   re-activates the grain on a current replica.
+/// Apply the map group's committed allocation records (spec §7.6, §7.7).
+///
+/// The **founding** `Assign` for a shard records its replica set; every node in it
+/// creates the shard's leader-election group and builds its
+/// [`QuorumGrainJournal`]. A later `Assign` onto an already-allocated shard starts
+/// a **migration** (§7.7): it commits the `target` set — from that point every
+/// write and recovery uses the joint quorum (majority of current AND of target,
+/// enforced by the shared [`ReplicaSets`]) — and a node newly involved creates the
+/// shard group as a non-member over the *current* voters (no election disruption;
+/// the reconcile loop promotes it) and builds a journal so it can serve once
+/// leadership reaches it. `Migrated` — proposed by the shard leader's driver only
+/// after every grain is caught up on the target — flips `current = target`; nodes
+/// leaving the set drop their journal (an active `Host` keeps its own `Arc`, so an
+/// in-flight append still completes or fails cleanly as `NotLeader`).
 ///
 /// Runs until the map group's commit stream closes.
 #[allow(clippy::too_many_arguments)]
@@ -268,9 +323,36 @@ async fn apply_loop<R: RaftConsensus>(
     self_node: NodeId,
     commits: Receiver<Committed>,
     inner: Arc<Mutex<Inner>>,
+    handles: Arc<Mutex<ShardHandles<R>>>,
     local: Arc<dyn GrainStore>,
     transport: Arc<dyn ReplicaTransport>,
 ) {
+    // Build this node's journal + live sets for `shard` and register them.
+    let build = |shard: u32, sets: ReplicaSets| {
+        let shard_group = group_id_for(ShardId {
+            grain_type,
+            index: shard,
+        });
+        let sets = Arc::new(std::sync::Mutex::new(sets));
+        let journal = QuorumGrainJournal::new(
+            consensus.clone(),
+            shard_group,
+            shard,
+            Arc::clone(&sets),
+            Arc::clone(&local),
+            Arc::clone(&transport),
+        );
+        handles
+            .lock()
+            .expect("shard handles mutex poisoned")
+            .insert(shard, (sets, journal.replicator()));
+        inner
+            .lock()
+            .expect("shard map mutex poisoned")
+            .journals
+            .insert(shard, Arc::new(journal) as Arc<dyn DynGrainJournal>);
+    };
+
     while let Ok(observation) = commits.recv().await {
         // The map group is tiny and never compacts, so it only ever applies
         // commands; a snapshot install (were one to occur) carries no allocation
@@ -278,55 +360,135 @@ async fn apply_loop<R: RaftConsensus>(
         let Committed::Apply { command: bytes, .. } = observation else {
             continue;
         };
-        let Some(ShardMapCommand::Assign { shard, replicas }) = decode(&bytes) else {
+        let Some(command) = decode(&bytes) else {
             continue; // a command this map cannot parse is defensively ignored
         };
-        // Record the latest allocation; capture the prior set to diff against.
-        let old = {
-            let mut guard = inner.lock().expect("shard map mutex poisoned");
-            guard.allocation.insert(shard, replicas.clone())
-        };
-        if old.as_ref() == Some(&replicas) {
-            continue; // a re-proposed identical allocation — nothing changed
+        match command {
+            ShardMapCommand::Assign { shard, replicas } => {
+                // Record the transition under the map lock; act on it below.
+                enum Change {
+                    /// The founding allocation for this shard.
+                    Founding,
+                    /// A migration toward `replicas` began; carries the current set.
+                    Migration(Vec<NodeId>),
+                    /// A re-proposed identical allocation — nothing changed.
+                    Noop,
+                }
+                let change = {
+                    let mut guard = inner.lock().expect("shard map mutex poisoned");
+                    match guard.allocation.get_mut(&shard) {
+                        None => {
+                            guard.allocation.insert(
+                                shard,
+                                Allocation {
+                                    current: replicas.clone(),
+                                    target: None,
+                                },
+                            );
+                            Change::Founding
+                        }
+                        Some(alloc)
+                            if alloc.current == replicas && alloc.target.is_none()
+                                || alloc.target.as_ref() == Some(&replicas) =>
+                        {
+                            Change::Noop
+                        }
+                        Some(alloc) => {
+                            alloc.target = Some(replicas.clone());
+                            Change::Migration(alloc.current.clone())
+                        }
+                    }
+                };
+                let shard_group = group_id_for(ShardId {
+                    grain_type,
+                    index: shard,
+                });
+                match change {
+                    Change::Noop => {}
+                    Change::Founding => {
+                        if replicas.contains(&self_node) {
+                            consensus.create_group(shard_group, replicas.clone(), Vec::new());
+                            build(shard, ReplicaSets::new(replicas));
+                        }
+                    }
+                    Change::Migration(current) => {
+                        let involved =
+                            current.contains(&self_node) || replicas.contains(&self_node);
+                        let has_handles = handles
+                            .lock()
+                            .expect("shard handles mutex poisoned")
+                            .contains_key(&shard);
+                        if has_handles {
+                            // A continuing participant: flip its live sets so every
+                            // in-flight journal switches to the joint quorum (§7.7).
+                            if let Some((sets, _)) = handles
+                                .lock()
+                                .expect("shard handles mutex poisoned")
+                                .get(&shard)
+                            {
+                                *sets.lock().expect("replica sets poisoned") = ReplicaSets {
+                                    current: current.clone(),
+                                    target: Some(replicas.clone()),
+                                };
+                            }
+                        } else if involved {
+                            // Newly a target member: form the shard group as a
+                            // non-member over the CURRENT voters (no election
+                            // disruption; the reconcile loop promotes it) and build
+                            // the journal over the joint sets.
+                            consensus.create_group(shard_group, current.clone(), Vec::new());
+                            build(
+                                shard,
+                                ReplicaSets {
+                                    current,
+                                    target: Some(replicas),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            ShardMapCommand::Migrated { shard } => {
+                // Flip `current = target` (a duplicate `Migrated` finds no target
+                // and is a no-op).
+                let flipped = {
+                    let mut guard = inner.lock().expect("shard map mutex poisoned");
+                    match guard.allocation.get_mut(&shard) {
+                        Some(alloc) => {
+                            let target = alloc.target.take();
+                            if let Some(target) = &target {
+                                alloc.current = target.clone();
+                            }
+                            target
+                        }
+                        None => None,
+                    }
+                };
+                let Some(current) = flipped else { continue };
+                if current.contains(&self_node) {
+                    if let Some((sets, _)) = handles
+                        .lock()
+                        .expect("shard handles mutex poisoned")
+                        .get(&shard)
+                    {
+                        *sets.lock().expect("replica sets poisoned") =
+                            ReplicaSets::new(current);
+                    }
+                } else {
+                    // Leaving the set: drop the journal and handles (the reconcile
+                    // loop removes this node from the group's voters).
+                    inner
+                        .lock()
+                        .expect("shard map mutex poisoned")
+                        .journals
+                        .remove(&shard);
+                    handles
+                        .lock()
+                        .expect("shard handles mutex poisoned")
+                        .remove(&shard);
+                }
+            }
         }
-        let was_replica = old.as_ref().is_some_and(|o| o.contains(&self_node));
-        let now_replica = replicas.contains(&self_node);
-        let shard_group = group_id_for(ShardId {
-            grain_type,
-            index: shard,
-        });
-        if now_replica && !was_replica {
-            // Newly a replica: create the leader-election group over the *old* set
-            // (a non-member join — no election disruption); the shard leader's
-            // reconcile loop adds this node, which then catches up. The group holds no
-            // grain data; the journal's per-grain quorum append (§7.2) provides
-            // durability over this node's local store and the peer transport.
-            let create_voters = old.unwrap_or_else(|| replicas.clone());
-            consensus.create_group(shard_group, create_voters, Vec::new());
-            let journal: Arc<dyn DynGrainJournal> = Arc::new(QuorumGrainJournal::new(
-                consensus.clone(),
-                shard_group,
-                shard,
-                replicas.clone(),
-                Arc::clone(&local),
-                Arc::clone(&transport),
-            ));
-            inner
-                .lock()
-                .expect("shard map mutex poisoned")
-                .journals
-                .insert(shard, journal);
-        } else if was_replica && !now_replica {
-            // No longer a replica: drop the store from the registry (the shard
-            // leader removes this node from the group via reconfigure).
-            inner
-                .lock()
-                .expect("shard map mutex poisoned")
-                .journals
-                .remove(&shard);
-        }
-        // (Still a replica with a changed peer set: the shard leader's reconcile
-        // loop drives the membership; this node's store is unchanged.)
     }
 }
 
@@ -367,15 +529,21 @@ async fn allocator_loop<R: RaftConsensus>(
                 replicas,
             )
             .0;
-            // Re-propose only when the desired set differs from what is committed —
-            // the steady state proposes nothing.
-            let committed = inner
+            // Propose the founding allocation, or — when the desired set has
+            // drifted from the committed one — start a migration toward it
+            // (§7.7). Never re-propose while a migration is already in flight:
+            // retargeting mid-migration would flip `current` to a set the driver
+            // never caught up (the `Migrated` guard relies on this).
+            let proposable = match inner
                 .lock()
                 .expect("shard map mutex poisoned")
                 .allocation
                 .get(&shard)
-                .cloned();
-            if committed.as_ref() != Some(&desired) {
+            {
+                None => true,
+                Some(alloc) => alloc.target.is_none() && alloc.current != desired,
+            };
+            if proposable {
                 consensus
                     .propose_to(
                         group,
@@ -423,22 +591,92 @@ async fn reconcile_loop<R: RaftConsensus>(
                 consensus.reconfigure_group(map_group, target);
             }
         }
-        // Each shard group this node leads → its committed allocation.
+        // Each shard group this node leads → its committed allocation: the union
+        // (current ∪ target) while a migration is in flight — target members must
+        // become voters so leadership can reach them, and current members must
+        // stay voters until `Migrated` — then the (new) current set.
         let allocation: Vec<(u32, Vec<NodeId>)> = {
             let guard = inner.lock().expect("shard map mutex poisoned");
             guard
                 .allocation
                 .iter()
-                .map(|(&s, v)| (s, v.clone()))
+                .map(|(&s, alloc)| (s, alloc.union()))
                 .collect()
         };
-        for (shard, replicas) in allocation {
+        for (shard, voters) in allocation {
             let shard_group = group_id_for(ShardId {
                 grain_type,
                 index: shard,
             });
             if consensus.group_is_leader(shard_group) {
-                consensus.reconfigure_group(shard_group, replicas);
+                consensus.reconfigure_group(shard_group, voters);
+            }
+        }
+    }
+}
+
+/// The migration driver (spec §7.7): while this node leads a shard whose
+/// allocation carries a `target`, catch every grain up on the target set —
+/// records via the joint-quorum recovery write-back, the snapshot via a joint
+/// `save_snapshot`, blobs via verified copy — and, once a full pass succeeds,
+/// propose [`Migrated`](ShardMapCommand::Migrated) to flip the set. Every step is
+/// idempotent, so a leader change mid-migration just re-drives on the new leader;
+/// a failed step leaves `target` in place and the next tick retries. Exits when
+/// the map is dropped.
+async fn migrate_loop<R: RaftConsensus>(
+    consensus: R,
+    grain_type: &'static str,
+    map_group: GroupId,
+    inner: Weak<Mutex<Inner>>,
+    handles: Weak<Mutex<ShardHandles<R>>>,
+) {
+    loop {
+        consensus.sleep(ALLOCATE_INTERVAL).await;
+        let (Some(inner), Some(handles)) = (inner.upgrade(), handles.upgrade()) else {
+            return; // the map was dropped — stop the loop
+        };
+        let migrating: Vec<u32> = {
+            let guard = inner.lock().expect("shard map mutex poisoned");
+            guard
+                .allocation
+                .iter()
+                .filter(|(_, alloc)| alloc.target.is_some())
+                .map(|(&shard, _)| shard)
+                .collect()
+        };
+        for shard in migrating {
+            let shard_group = group_id_for(ShardId {
+                grain_type,
+                index: shard,
+            });
+            if !consensus.group_is_leader(shard_group) {
+                continue; // another (leading) node drives this shard's migration
+            }
+            let Some((_, replicator)) = handles
+                .lock()
+                .expect("shard handles mutex poisoned")
+                .get(&shard)
+                .cloned()
+            else {
+                continue; // handles not built yet; retry next tick
+            };
+            // One catch-up pass: enumerate from a read quorum, then migrate each
+            // grain. Any failure aborts the pass; `target` stays and we retry.
+            let Ok(grains) = replicator.migration_grains().await else {
+                continue;
+            };
+            let mut complete = true;
+            for grain in grains {
+                if replicator.migrate_grain(&grain).await.is_err() {
+                    complete = false;
+                    break;
+                }
+            }
+            // Re-check the target is still the one we migrated toward, then flip.
+            if complete && replicator.migration_target().is_some() {
+                consensus
+                    .propose_to(map_group, encode(&ShardMapCommand::Migrated { shard }))
+                    .await;
             }
         }
     }

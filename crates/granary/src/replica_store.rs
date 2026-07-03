@@ -179,6 +179,32 @@ impl Message for SweepBlobs {
     const MANIFEST: Manifest = Manifest::new("granary.SweepBlobs");
 }
 
+/// Enumerate every grain a replica holds anything for under one shard — the
+/// migration driver's grain discovery (replica-set migration, §7.7). Read from a
+/// quorum of the shard's replicas so no committed grain is missed.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ListGrains {
+    pub(crate) shard: u32,
+}
+
+impl Message for ListGrains {
+    type Reply = Vec<GrainName>;
+    const MANIFEST: Manifest = Manifest::new("granary.ListGrains");
+}
+
+/// Enumerate one grain's blob ids on a replica — the migration driver's source
+/// list when copying a grain's blob area to a new replica (§7.7).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ListBlobs {
+    pub(crate) shard: u32,
+    pub(crate) grain: GrainName,
+}
+
+impl Message for ListBlobs {
+    type Reply = Vec<BlobId>;
+    const MANIFEST: Manifest = Manifest::new("granary.ListBlobs");
+}
+
 /// The node-local replica store for grain type `G` (spec §7.2): a thin actor over
 /// this node's [`GrainStore`], reachable across the cluster so the shard leader's
 /// replicator can quorum-append to it and read it back for recovery. One per node
@@ -208,6 +234,8 @@ impl<G: Grain> Actor for ReplicaStore<G> {
         registry.accept::<FetchBlob>();
         registry.accept::<HasBlob>();
         registry.accept::<SweepBlobs>();
+        registry.accept::<ListGrains>();
+        registry.accept::<ListBlobs>();
     }
 }
 
@@ -264,6 +292,18 @@ impl<G: Grain> Handler<SweepBlobs> for ReplicaStore<G> {
                 .store
                 .retain_blobs(msg.shard, &msg.grain, &ids.into_iter().collect()),
         }
+    }
+}
+
+impl<G: Grain> Handler<ListGrains> for ReplicaStore<G> {
+    async fn handle(&mut self, msg: ListGrains, _ctx: &Ctx<ReplicaStore<G>>) -> Vec<GrainName> {
+        self.store.grains(msg.shard)
+    }
+}
+
+impl<G: Grain> Handler<ListBlobs> for ReplicaStore<G> {
+    async fn handle(&mut self, msg: ListBlobs, _ctx: &Ctx<ReplicaStore<G>>) -> Vec<BlobId> {
+        self.store.blob_ids(msg.shard, &msg.grain)
     }
 }
 
@@ -348,6 +388,23 @@ pub trait ReplicaTransport: Send + Sync + 'static {
         retain: Option<Vec<BlobId>>,
         within: Duration,
     ) -> BoxFuture<'static, Result<(), CallError>>;
+
+    /// Enumerate every grain a replica holds under one shard (migration, §7.7).
+    fn list_grains(
+        &self,
+        node: NodeId,
+        shard: u32,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<Vec<GrainName>, CallError>>;
+
+    /// Enumerate one grain's blob ids on a replica (migration, §7.7).
+    fn list_blobs(
+        &self,
+        node: NodeId,
+        shard: u32,
+        grain: GrainName,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<Vec<BlobId>, CallError>>;
 
     /// Launch a detached background task (spec §7.2). The replicator uses it to drain
     /// the straggler peer asks of an append that already committed on a quorum, so the
@@ -543,6 +600,33 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
                     within,
                 )
                 .await
+        })
+    }
+
+    fn list_grains(
+        &self,
+        node: NodeId,
+        shard: u32,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<Vec<GrainName>, CallError>> {
+        let store = self.resolve(node);
+        Box::pin(async move {
+            let store = store.ok_or(CallError::Unreachable)?;
+            store.ask_timeout(ListGrains { shard }, within).await
+        })
+    }
+
+    fn list_blobs(
+        &self,
+        node: NodeId,
+        shard: u32,
+        grain: GrainName,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<Vec<BlobId>, CallError>> {
+        let store = self.resolve(node);
+        Box::pin(async move {
+            let store = store.ok_or(CallError::Unreachable)?;
+            store.ask_timeout(ListBlobs { shard, grain }, within).await
         })
     }
 

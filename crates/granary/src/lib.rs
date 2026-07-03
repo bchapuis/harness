@@ -37,8 +37,12 @@
 //!
 //! The control-plane-stored shard map (§7.6) is **built**: a per-type Raft group
 //! whose committed log is the allocation ([`ShardMapSource`]), so every node agrees
-//! on each shard's replica set regardless of join order, and a shard's voter set is
-//! reconfigured as cluster membership changes (the allocator and reconcile loops).
+//! on each shard's replica set regardless of join order. As cluster membership
+//! changes, a shard rebalances by **joint-quorum migration** (§7.7): the new set
+//! commits as a `target` (writes and recoveries then need a majority of BOTH sets),
+//! the shard leader's driver catches every grain's records, snapshot, and blobs up
+//! on the target, and only then does the map flip — so a committed write's
+//! durability never rests on replicas that left (G14).
 //!
 //! The following remain **deferred** and are documented where their surface
 //! appears:
