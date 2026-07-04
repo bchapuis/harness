@@ -60,6 +60,20 @@ impl BlobId {
         BlobId(bytes)
     }
 
+    /// Parse the hex form produced by [`Display`](fmt::Display) — 64 lowercase hex
+    /// chars — back into a [`BlobId`], or `None` if it is not that shape. Kept beside
+    /// the `Display` impl so the encoding lives in one place.
+    pub fn from_hex(hex: &str) -> Option<BlobId> {
+        if hex.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+        }
+        Some(BlobId(bytes))
+    }
+
     /// Whether `bytes` hash to this id — the read-path integrity check (B1/G17),
     /// named once so every fetch site re-hashes the same way and none can forget it.
     pub fn verifies(&self, bytes: &[u8]) -> bool {

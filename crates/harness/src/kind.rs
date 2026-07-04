@@ -162,7 +162,13 @@ impl Kind {
             frame(&decl.input_schema.to_string());
             frame(&format!("{:?}", decl.tier));
             frame(&format!("{:?}", decl.on_dangling));
-            frame(&format!("{:?}", decl.timeout));
+            // Frame durations by their nanosecond count, not `Debug`: `Duration`'s
+            // Debug format is a std detail, but this digest is journaled and compared
+            // cluster-wide (§7.1), so it must not shift under a std upgrade.
+            frame(&decl.timeout.map_or_else(
+                || "none".to_string(),
+                |d| d.as_nanos().to_string(),
+            ));
         }
         frame(&self.profile.image);
         let cap = self.tier_cap();
@@ -181,7 +187,7 @@ impl Kind {
         frame(&self.config.shards.to_string());
         frame(&self.config.replication_factor.to_string());
         frame(&self.config.snapshot_every.to_string());
-        frame(&format!("{:?}", self.config.idle_after));
+        frame(&self.config.idle_after.as_nanos().to_string());
         frame(&format!("delegates={}", self.delegates.len()));
         for kind in &self.delegates {
             frame(kind.as_str());

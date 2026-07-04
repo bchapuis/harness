@@ -136,11 +136,6 @@ impl<G: Grain> Gateway<G> {
         }
     }
 
-    /// The number of shards this gateway routes over.
-    fn shards(&self) -> usize {
-        self.shards
-    }
-
     /// Get-or-activate the host for `name` on **this** node (its shard's leader),
     /// returning a live handle. The serial actor makes this exactly-once per node
     /// (**G6**): a concurrent caller for the same name finds the host the first one
@@ -218,7 +213,7 @@ impl<G: Grain> Handler<Activate<G>> for Gateway<G> {
         msg: Activate<G>,
         ctx: &Ctx<Gateway<G>>,
     ) -> Result<ActorRef<Host<G>>, GrainError> {
-        let shard = shard_for(self.grain_type, msg.name.key(), self.shards());
+        let shard = shard_for(self.grain_type, msg.name.key(), self.shards);
         if self.shard_map.journal(shard.index).is_some() && ctx.system().leads_shard(shard) {
             Ok(self.get_or_activate(msg.name, shard, ctx))
         } else {

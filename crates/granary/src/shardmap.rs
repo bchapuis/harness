@@ -71,6 +71,12 @@ fn map_group_id_for(grain_type: &'static str) -> GroupId {
     })
 }
 
+/// The consensus group id for a data shard — the counterpart of
+/// [`map_group_id_for`] for `index` in `0..shards`.
+fn shard_group_id(grain_type: &'static str, index: u32) -> GroupId {
+    group_id_for(ShardId { grain_type, index })
+}
+
 /// One committed allocation command in the map group's log (spec §7.6, §7.7).
 #[derive(Serialize, Deserialize)]
 enum ShardMapCommand {
@@ -329,10 +335,7 @@ async fn apply_loop<R: RaftConsensus>(
 ) {
     // Build this node's journal + live sets for `shard` and register them.
     let build = |shard: u32, sets: ReplicaSets| {
-        let shard_group = group_id_for(ShardId {
-            grain_type,
-            index: shard,
-        });
+        let shard_group = shard_group_id(grain_type, shard);
         let sets = Arc::new(std::sync::Mutex::new(sets));
         let journal = QuorumGrainJournal::new(
             consensus.clone(),
@@ -399,10 +402,7 @@ async fn apply_loop<R: RaftConsensus>(
                         }
                     }
                 };
-                let shard_group = group_id_for(ShardId {
-                    grain_type,
-                    index: shard,
-                });
+                let shard_group = shard_group_id(grain_type, shard);
                 match change {
                     Change::Noop => {}
                     Change::Founding => {
@@ -520,15 +520,7 @@ async fn allocator_loop<R: RaftConsensus>(
             continue; // control plane not settled yet; nothing to allocate over
         }
         for shard in 0..shards as u32 {
-            let desired = select_replicas(
-                &voters,
-                group_id_for(ShardId {
-                    grain_type,
-                    index: shard,
-                }),
-                replicas,
-            )
-            .0;
+            let desired = select_replicas(&voters, shard_group_id(grain_type, shard), replicas).0;
             // Propose the founding allocation, or — when the desired set has
             // drifted from the committed one — start a migration toward it
             // (§7.7). Never re-propose while a migration is already in flight:
@@ -604,10 +596,7 @@ async fn reconcile_loop<R: RaftConsensus>(
                 .collect()
         };
         for (shard, voters) in allocation {
-            let shard_group = group_id_for(ShardId {
-                grain_type,
-                index: shard,
-            });
+            let shard_group = shard_group_id(grain_type, shard);
             if consensus.group_is_leader(shard_group) {
                 consensus.reconfigure_group(shard_group, voters);
             }
@@ -645,10 +634,7 @@ async fn migrate_loop<R: RaftConsensus>(
                 .collect()
         };
         for shard in migrating {
-            let shard_group = group_id_for(ShardId {
-                grain_type,
-                index: shard,
-            });
+            let shard_group = shard_group_id(grain_type, shard);
             if !consensus.group_is_leader(shard_group) {
                 continue; // another (leading) node drives this shard's migration
             }

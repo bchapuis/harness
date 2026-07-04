@@ -390,7 +390,7 @@ fn record_lines(record: &Record) -> Vec<Line<'static>> {
                 Err(_) => ("error", ERR),
             };
             let detail = match outcome {
-                Ok(c) => format!("— turn {turn} {mark} · {} tokens", c.tokens),
+                Ok(c) => format!("— turn {turn} {mark} · {} tokens", c.tokens()),
                 Err(e) => format!("— turn {turn} {mark} · {e}"),
             };
             vec![Line::styled(detail, Style::default().fg(color))]

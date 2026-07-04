@@ -36,9 +36,11 @@ use crate::blobs::BlobId;
 use crate::grain::Grain;
 use crate::grain::GrainName;
 use crate::journal::Seq;
+use crate::journal::Term;
 use crate::store::GrainStore;
 use crate::store::ReadOutcome;
 use crate::store::StoreAck;
+use crate::store::WriteKind;
 use crate::system::GranarySystem;
 
 /// Per-grain-type interned key strings for the replica store. The receptionist keys
@@ -74,11 +76,11 @@ pub(crate) struct StoreRecord {
     pub(crate) shard: u32,
     pub(crate) grain: GrainName,
     pub(crate) after: Seq,
-    pub(crate) term: u64,
+    pub(crate) term: Term,
     pub(crate) records: Vec<Vec<u8>>,
     /// A recovery write-back (read-repair, §8) versus a normal append: a normal
     /// append onto a stale head is rejected with `Stale`; a write-back is not.
-    pub(crate) repair: bool,
+    pub(crate) kind: WriteKind,
 }
 
 impl Message for StoreRecord {
@@ -93,7 +95,7 @@ impl Message for StoreRecord {
 pub(crate) struct ReadGrain {
     pub(crate) shard: u32,
     pub(crate) grain: GrainName,
-    pub(crate) term: u64,
+    pub(crate) term: Term,
 }
 
 impl Message for ReadGrain {
@@ -108,7 +110,7 @@ pub(crate) struct StoreSnapshot {
     pub(crate) shard: u32,
     pub(crate) grain: GrainName,
     pub(crate) at: Seq,
-    pub(crate) term: u64,
+    pub(crate) term: Term,
     pub(crate) state: Vec<u8>,
 }
 
@@ -247,7 +249,7 @@ impl<G: Grain> Handler<StoreRecord> for ReplicaStore<G> {
             msg.after,
             msg.term,
             msg.records,
-            msg.repair,
+            msg.kind,
         )
     }
 }
@@ -319,9 +321,9 @@ pub trait ReplicaTransport: Send + Sync + 'static {
         shard: u32,
         grain: GrainName,
         after: Seq,
-        term: u64,
+        term: Term,
         records: Vec<Vec<u8>>,
-        repair: bool,
+        kind: WriteKind,
         within: Duration,
     ) -> BoxFuture<'static, Result<StoreAck, CallError>>;
 
@@ -330,7 +332,7 @@ pub trait ReplicaTransport: Send + Sync + 'static {
         node: NodeId,
         shard: u32,
         grain: GrainName,
-        term: u64,
+        term: Term,
         within: Duration,
     ) -> BoxFuture<'static, Result<ReadOutcome, CallError>>;
 
@@ -341,7 +343,7 @@ pub trait ReplicaTransport: Send + Sync + 'static {
         shard: u32,
         grain: GrainName,
         at: Seq,
-        term: u64,
+        term: Term,
         state: Vec<u8>,
         within: Duration,
     ) -> BoxFuture<'static, Result<StoreAck, CallError>>;
@@ -439,6 +441,24 @@ impl<G: Grain> ActorReplicaTransport<G> {
             .into_iter()
             .find(|store| store.id().node() == node)
     }
+
+    /// Resolve `node`'s replica store and `ask` it, or `Unreachable` if it is not
+    /// discovered — the one shape every [`ReplicaTransport`] method shares (§7.2).
+    fn ask<M>(
+        &self,
+        node: NodeId,
+        msg: M,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<M::Reply, CallError>>
+    where
+        M: Message,
+        ReplicaStore<G>: Handler<M>,
+    {
+        let store = self.resolve(node);
+        Box::pin(async move {
+            store.ok_or(CallError::Unreachable)?.ask_timeout(msg, within).await
+        })
+    }
 }
 
 impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
@@ -449,28 +469,23 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         shard: u32,
         grain: GrainName,
         after: Seq,
-        term: u64,
+        term: Term,
         records: Vec<Vec<u8>>,
-        repair: bool,
+        kind: WriteKind,
         within: Duration,
     ) -> BoxFuture<'static, Result<StoreAck, CallError>> {
-        let store = self.resolve(node);
-        Box::pin(async move {
-            let store = store.ok_or(CallError::Unreachable)?;
-            store
-                .ask_timeout(
-                    StoreRecord {
-                        shard,
-                        grain,
-                        after,
-                        term,
-                        records,
-                        repair,
-                    },
-                    within,
-                )
-                .await
-        })
+        self.ask(
+            node,
+            StoreRecord {
+                shard,
+                grain,
+                after,
+                term,
+                records,
+                kind,
+            },
+            within,
+        )
     }
 
     fn read_grain(
@@ -478,16 +493,10 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         node: NodeId,
         shard: u32,
         grain: GrainName,
-        term: u64,
+        term: Term,
         within: Duration,
     ) -> BoxFuture<'static, Result<ReadOutcome, CallError>> {
-        let store = self.resolve(node);
-        Box::pin(async move {
-            let store = store.ok_or(CallError::Unreachable)?;
-            store
-                .ask_timeout(ReadGrain { shard, grain, term }, within)
-                .await
-        })
+        self.ask(node, ReadGrain { shard, grain, term }, within)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -497,26 +506,21 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         shard: u32,
         grain: GrainName,
         at: Seq,
-        term: u64,
+        term: Term,
         state: Vec<u8>,
         within: Duration,
     ) -> BoxFuture<'static, Result<StoreAck, CallError>> {
-        let store = self.resolve(node);
-        Box::pin(async move {
-            let store = store.ok_or(CallError::Unreachable)?;
-            store
-                .ask_timeout(
-                    StoreSnapshot {
-                        shard,
-                        grain,
-                        at,
-                        term,
-                        state,
-                    },
-                    within,
-                )
-                .await
-        })
+        self.ask(
+            node,
+            StoreSnapshot {
+                shard,
+                grain,
+                at,
+                term,
+                state,
+            },
+            within,
+        )
     }
 
     fn store_blob(
@@ -528,21 +532,16 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         bytes: Vec<u8>,
         within: Duration,
     ) -> BoxFuture<'static, Result<(), CallError>> {
-        let store = self.resolve(node);
-        Box::pin(async move {
-            let store = store.ok_or(CallError::Unreachable)?;
-            store
-                .ask_timeout(
-                    StoreBlob {
-                        shard,
-                        grain,
-                        id,
-                        bytes,
-                    },
-                    within,
-                )
-                .await
-        })
+        self.ask(
+            node,
+            StoreBlob {
+                shard,
+                grain,
+                id,
+                bytes,
+            },
+            within,
+        )
     }
 
     fn fetch_blob(
@@ -553,13 +552,7 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         id: BlobId,
         within: Duration,
     ) -> BoxFuture<'static, Result<Option<Vec<u8>>, CallError>> {
-        let store = self.resolve(node);
-        Box::pin(async move {
-            let store = store.ok_or(CallError::Unreachable)?;
-            store
-                .ask_timeout(FetchBlob { shard, grain, id }, within)
-                .await
-        })
+        self.ask(node, FetchBlob { shard, grain, id }, within)
     }
 
     fn has_blob(
@@ -570,13 +563,7 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         id: BlobId,
         within: Duration,
     ) -> BoxFuture<'static, Result<bool, CallError>> {
-        let store = self.resolve(node);
-        Box::pin(async move {
-            let store = store.ok_or(CallError::Unreachable)?;
-            store
-                .ask_timeout(HasBlob { shard, grain, id }, within)
-                .await
-        })
+        self.ask(node, HasBlob { shard, grain, id }, within)
     }
 
     fn sweep_blobs(
@@ -587,20 +574,15 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         retain: Option<Vec<BlobId>>,
         within: Duration,
     ) -> BoxFuture<'static, Result<(), CallError>> {
-        let store = self.resolve(node);
-        Box::pin(async move {
-            let store = store.ok_or(CallError::Unreachable)?;
-            store
-                .ask_timeout(
-                    SweepBlobs {
-                        shard,
-                        grain,
-                        retain,
-                    },
-                    within,
-                )
-                .await
-        })
+        self.ask(
+            node,
+            SweepBlobs {
+                shard,
+                grain,
+                retain,
+            },
+            within,
+        )
     }
 
     fn list_grains(
@@ -609,11 +591,7 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         shard: u32,
         within: Duration,
     ) -> BoxFuture<'static, Result<Vec<GrainName>, CallError>> {
-        let store = self.resolve(node);
-        Box::pin(async move {
-            let store = store.ok_or(CallError::Unreachable)?;
-            store.ask_timeout(ListGrains { shard }, within).await
-        })
+        self.ask(node, ListGrains { shard }, within)
     }
 
     fn list_blobs(
@@ -623,11 +601,7 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         grain: GrainName,
         within: Duration,
     ) -> BoxFuture<'static, Result<Vec<BlobId>, CallError>> {
-        let store = self.resolve(node);
-        Box::pin(async move {
-            let store = store.ok_or(CallError::Unreachable)?;
-            store.ask_timeout(ListBlobs { shard, grain }, within).await
-        })
+        self.ask(node, ListBlobs { shard, grain }, within)
     }
 
     fn launch(&self, task: BoxFuture<'static, ()>) {

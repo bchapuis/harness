@@ -127,6 +127,17 @@ impl<S: GranarySystem> Grain for Fs<S> {
     }
 }
 
+/// Adapt a `?`-using decide to the `(ops, reply)` [`GrainHandler`] shape (§4.2): a
+/// handler computes `Result<(ops, T), FsError>` so its path resolution reads with `?`,
+/// and this maps it to the returned tuple. On `Err` **no ops are journaled** — a
+/// rejected command commits nothing (§7.5), matching an explicit `(vec![], Err(e))`.
+fn decided<T>(outcome: Result<(Vec<FsOp>, T), FsError>) -> (Vec<FsOp>, Result<T, FsError>) {
+    match outcome {
+        Ok((ops, reply)) => (ops, Ok(reply)),
+        Err(e) => (Vec::new(), Err(e)),
+    }
+}
+
 /// Schedule a post-commit [`Sweep`] for a command being decided that may orphan
 /// blocks. A detached self-tell, so it lands in the host's serial mailbox AFTER the
 /// current command's commit: the sweep then reads the *committed* tree — the new one
@@ -219,48 +230,49 @@ impl<S: GranarySystem> GrainHandler<WriteFile> for Fs<S> {
         msg: WriteFile,
         ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<u64, FsError>) {
-        let mut ops = Vec::new();
-        let mut next_ino = state.next_ino;
-        let mut pending = HashMap::new();
-        let (parent, name) =
-            match ensure_parents(state, &msg.path, &mut ops, &mut next_ino, &mut pending) {
-                Ok(parent) => parent,
-                Err(e) => return (vec![], Err(e)),
-            };
-        // Reuse an existing file (overwrite), or mint a new one. A directory in the
-        // way is an error.
-        let (ino, seq) = match lookup(state, &pending, parent, &name) {
-            Some((_, true)) => return (vec![], Err(FsError::IsADirectory)),
-            Some((ino, false)) => {
-                ops.push(FsOp::Truncate { ino, size: 0 }); // replace whole file
-                // Overwriting a non-empty file orphans its old blocks: reclaim
-                // them once this command's ops have committed.
-                if state.file(ino).is_some_and(|f| f.size > 0) {
-                    sweep_later(ctx);
-                }
-                (ino, state.file(ino).map_or(0, |f| f.next_seq))
+        decided(
+            async {
+                let mut ops = Vec::new();
+                let mut next_ino = state.next_ino;
+                let mut pending = HashMap::new();
+                let (parent, name) =
+                    ensure_parents(state, &msg.path, &mut ops, &mut next_ino, &mut pending)?;
+                // Reuse an existing file (overwrite), or mint a new one. A directory in
+                // the way is an error.
+                let (ino, seq) = match lookup(state, &pending, parent, &name) {
+                    Some((_, true)) => return Err(FsError::IsADirectory),
+                    Some((ino, false)) => {
+                        ops.push(FsOp::Truncate { ino, size: 0 }); // replace whole file
+                        // Overwriting a non-empty file orphans its old blocks: reclaim
+                        // them once this command's ops have committed.
+                        if state.file(ino).is_some_and(|f| f.size > 0) {
+                            sweep_later(ctx);
+                        }
+                        (ino, state.file(ino).map_or(0, |f| f.next_seq))
+                    }
+                    None => {
+                        let ino = next_ino;
+                        ops.push(FsOp::Create {
+                            parent,
+                            name,
+                            ino,
+                            dir: false,
+                        });
+                        (ino, 0)
+                    }
+                };
+                // Chunk + store the blocks (durable before the metadata, §7.10). A
+                // blob-area failure aborts the write with no ops journaled (any stored
+                // block is an orphan reclaimed by GC).
+                let slice = chunk::write_slice(&ctx.blobs(), seq, 0, &msg.content)
+                    .await
+                    .map_err(|e| FsError::Storage(e.to_string()))?;
+                let written = msg.content.len() as u64;
+                ops.push(FsOp::Write { ino, slice });
+                Ok((ops, written))
             }
-            None => {
-                let ino = next_ino;
-                ops.push(FsOp::Create {
-                    parent,
-                    name,
-                    ino,
-                    dir: false,
-                });
-                (ino, 0)
-            }
-        };
-        // Chunk + store the blocks (durable before the metadata, §7.10). A blob-area
-        // failure aborts the write with no ops journaled (any stored block is an
-        // orphan reclaimed by GC).
-        let slice = match chunk::write_slice(&ctx.blobs(), seq, 0, &msg.content).await {
-            Ok(slice) => slice,
-            Err(e) => return (vec![], Err(FsError::Storage(e.to_string()))),
-        };
-        let written = msg.content.len() as u64;
-        ops.push(FsOp::Write { ino, slice });
-        (ops, Ok(written))
+            .await,
+        )
     }
 }
 
@@ -281,18 +293,18 @@ impl<S: GranarySystem> GrainHandler<ReadFile> for Fs<S> {
         msg: ReadFile,
         ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<Vec<u8>, FsError>) {
-        let ino = match state.resolve(&msg.path) {
-            Ok(ino) => ino,
-            Err(e) => return (vec![], Err(e)),
-        };
-        let Some(file) = state.file(ino) else {
-            return (vec![], Err(FsError::IsADirectory));
-        };
-        let (start, end) = msg.range.unwrap_or((0, file.size));
-        let read = chunk::read_file(&ctx.blobs(), file, start, end)
-            .await
-            .map_err(|e| FsError::Storage(e.to_string()));
-        (vec![], read)
+        decided(
+            async {
+                let ino = state.resolve(&msg.path)?;
+                let file = state.file(ino).ok_or(FsError::IsADirectory)?;
+                let (start, end) = msg.range.unwrap_or((0, file.size));
+                let bytes = chunk::read_file(&ctx.blobs(), file, start, end)
+                    .await
+                    .map_err(|e| FsError::Storage(e.to_string()))?;
+                Ok((vec![], bytes))
+            }
+            .await,
+        )
     }
 }
 
@@ -312,29 +324,30 @@ impl<S: GranarySystem> GrainHandler<ListDir> for Fs<S> {
         msg: ListDir,
         _ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<Vec<DirEntry>, FsError>) {
-        let ino = match state.resolve(&msg.path) {
-            Ok(ino) => ino,
-            Err(e) => return (vec![], Err(e)),
-        };
-        let Some(entries) = state.dir(ino) else {
-            return (vec![], Err(FsError::NotADirectory));
-        };
-        let list = entries
-            .iter()
-            .map(|(name, &child)| {
-                let (dir, size) = match state.inodes.get(&child) {
-                    Some(Inode::Dir(_)) => (true, 0),
-                    Some(Inode::File(f)) => (false, f.size),
-                    None => (false, 0),
-                };
-                DirEntry {
-                    name: name.clone(),
-                    dir,
-                    size,
-                }
-            })
-            .collect();
-        (vec![], Ok(list))
+        decided(
+            async {
+                let ino = state.resolve(&msg.path)?;
+                let entries = state.dir(ino).ok_or(FsError::NotADirectory)?;
+                let list = entries
+                    .iter()
+                    .map(|(name, &child)| {
+                        // A dangling child is impossible in a committed tree; treat it as
+                        // an empty file rather than panic in the read path.
+                        let (dir, size) = state
+                            .inodes
+                            .get(&child)
+                            .map_or((false, 0), Inode::entry_meta);
+                        DirEntry {
+                            name: name.clone(),
+                            dir,
+                            size,
+                        }
+                    })
+                    .collect();
+                Ok((vec![], list))
+            }
+            .await,
+        )
     }
 }
 
@@ -355,27 +368,31 @@ impl<S: GranarySystem> GrainHandler<Remove> for Fs<S> {
         msg: Remove,
         ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<(), FsError>) {
-        let (parent, name) = match state.resolve_parent(&msg.path) {
-            Ok(parent) => parent,
-            Err(e) => return (vec![], Err(e)),
-        };
-        let Some(&child) = state.dir(parent).and_then(|d| d.get(&name)) else {
-            return (vec![], Err(FsError::NotFound));
-        };
-        if let Some(entries) = state.dir(child)
-            && !entries.is_empty()
-            && !msg.recursive
-        {
-            return (vec![], Err(FsError::NotEmpty));
-        }
-        // Unlinking a non-empty file (or a subtree that may hold files) orphans
-        // its blocks: reclaim them once the unlink has committed.
-        if state.file(child).is_some_and(|f| f.size > 0)
-            || state.dir(child).is_some_and(|d| !d.is_empty())
-        {
-            sweep_later(ctx);
-        }
-        (vec![FsOp::Unlink { parent, name }], Ok(()))
+        decided(
+            async {
+                let (parent, name) = state.resolve_parent(&msg.path)?;
+                let child = state
+                    .dir(parent)
+                    .and_then(|d| d.get(&name))
+                    .copied()
+                    .ok_or(FsError::NotFound)?;
+                if let Some(entries) = state.dir(child)
+                    && !entries.is_empty()
+                    && !msg.recursive
+                {
+                    return Err(FsError::NotEmpty);
+                }
+                // Unlinking a non-empty file (or a subtree that may hold files) orphans
+                // its blocks: reclaim them once the unlink has committed.
+                if state.file(child).is_some_and(|f| f.size > 0)
+                    || state.dir(child).is_some_and(|d| !d.is_empty())
+                {
+                    sweep_later(ctx);
+                }
+                Ok((vec![FsOp::Unlink { parent, name }], ()))
+            }
+            .await,
+        )
     }
 }
 
@@ -396,30 +413,29 @@ impl<S: GranarySystem> GrainHandler<Rename> for Fs<S> {
         msg: Rename,
         ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<(), FsError>) {
-        let (from_parent, from) = match state.resolve_parent(&msg.from) {
-            Ok(parent) => parent,
-            Err(e) => return (vec![], Err(e)),
-        };
-        if state.dir(from_parent).and_then(|d| d.get(&from)).is_none() {
-            return (vec![], Err(FsError::NotFound));
-        }
-        let (to_parent, to) = match state.resolve_parent(&msg.to) {
-            Ok(parent) => parent,
-            Err(e) => return (vec![], Err(e)),
-        };
-        // Renaming over an existing target replaces it, orphaning its blocks:
-        // reclaim them once the rename has committed.
-        if state.dir(to_parent).and_then(|d| d.get(&to)).is_some() {
-            sweep_later(ctx);
-        }
-        (
-            vec![FsOp::Rename {
-                from_parent,
-                from,
-                to_parent,
-                to,
-            }],
-            Ok(()),
+        decided(
+            async {
+                let (from_parent, from) = state.resolve_parent(&msg.from)?;
+                if state.dir(from_parent).and_then(|d| d.get(&from)).is_none() {
+                    return Err(FsError::NotFound);
+                }
+                let (to_parent, to) = state.resolve_parent(&msg.to)?;
+                // Renaming over an existing target replaces it, orphaning its blocks:
+                // reclaim them once the rename has committed.
+                if state.dir(to_parent).and_then(|d| d.get(&to)).is_some() {
+                    sweep_later(ctx);
+                }
+                Ok((
+                    vec![FsOp::Rename {
+                        from_parent,
+                        from,
+                        to_parent,
+                        to,
+                    }],
+                    (),
+                ))
+            }
+            .await,
         )
     }
 }
@@ -441,24 +457,24 @@ impl<S: GranarySystem> GrainHandler<Truncate> for Fs<S> {
         msg: Truncate,
         ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<(), FsError>) {
-        let ino = match state.resolve(&msg.path) {
-            Ok(ino) => ino,
-            Err(e) => return (vec![], Err(e)),
-        };
-        let Some(file) = state.file(ino) else {
-            return (vec![], Err(FsError::IsADirectory));
-        };
-        // Shrinking may clip whole blocks off the tail: reclaim them once the
-        // truncate has committed. (Growing zero-fills and orphans nothing.)
-        if msg.size < file.size {
-            sweep_later(ctx);
-        }
-        (
-            vec![FsOp::Truncate {
-                ino,
-                size: msg.size,
-            }],
-            Ok(()),
+        decided(
+            async {
+                let ino = state.resolve(&msg.path)?;
+                let file = state.file(ino).ok_or(FsError::IsADirectory)?;
+                // Shrinking may clip whole blocks off the tail: reclaim them once the
+                // truncate has committed. (Growing zero-fills and orphans nothing.)
+                if msg.size < file.size {
+                    sweep_later(ctx);
+                }
+                Ok((
+                    vec![FsOp::Truncate {
+                        ino,
+                        size: msg.size,
+                    }],
+                    (),
+                ))
+            }
+            .await,
         )
     }
 }
@@ -479,19 +495,15 @@ impl<S: GranarySystem> GrainHandler<Stat> for Fs<S> {
         msg: Stat,
         _ctx: &GrainCtx<Self>,
     ) -> (Vec<FsOp>, Result<Metadata, FsError>) {
-        let ino = match state.resolve(&msg.path) {
-            Ok(ino) => ino,
-            Err(e) => return (vec![], Err(e)),
-        };
-        let meta = match state.inodes.get(&ino) {
-            Some(Inode::Dir(_)) => Metadata { dir: true, size: 0 },
-            Some(Inode::File(f)) => Metadata {
-                dir: false,
-                size: f.size,
-            },
-            None => return (vec![], Err(FsError::NotFound)),
-        };
-        (vec![], Ok(meta))
+        decided(
+            async {
+                let ino = state.resolve(&msg.path)?;
+                let inode = state.inodes.get(&ino).ok_or(FsError::NotFound)?;
+                let (dir, size) = inode.entry_meta();
+                Ok((vec![], Metadata { dir, size }))
+            }
+            .await,
+        )
     }
 }
 

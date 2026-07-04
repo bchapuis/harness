@@ -29,10 +29,12 @@ use crate::grain::GrainName;
 use crate::journal::AppendOutcome;
 use crate::journal::GrainJournalError;
 use crate::journal::Seq;
+use crate::journal::Term;
 use crate::replica_store::ReplicaTransport;
 use crate::store::GrainStore;
 use crate::store::ReadOutcome;
 use crate::store::StoreAck;
+use crate::store::WriteKind;
 
 /// A pending per-replica store ack from the [`ReplicaTransport`] fan-out, tagged
 /// with the replica it came from so a joint quorum can attribute it to the right
@@ -50,7 +52,7 @@ type BlobAckFuture =
 /// The result of [`merge`]: the contiguous record prefix, its head, the best
 /// snapshot `(seq, term, state)`, and whether any kept record's term is below the
 /// recovering leader's term (so a write-back is needed).
-type Merged = (Vec<Vec<u8>>, Seq, Option<(Seq, u64, Vec<u8>)>, bool);
+type Merged = (Vec<Vec<u8>>, Seq, Option<(Seq, Term, Vec<u8>)>, bool);
 
 /// How long a quorum append/snapshot waits before reporting `Unavailable` (§11).
 /// Comfortably above a healthy quorum round-trip (milliseconds) yet short enough
@@ -69,6 +71,11 @@ const RECOVER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The single-node `Local` replicator (spec §7.4): one [`GrainStore`], no term, no
 /// quorum. An append commits on the local store; recovery is a local head read.
+///
+/// It deliberately mirrors [`QuorumReplicator`]'s shape so both journal tiers wrap a
+/// replicator behind the same seam, even though the local body is thin — the symmetry
+/// keeps [`LocalGrainJournal`](crate::LocalGrainJournal) and
+/// [`QuorumGrainJournal`](crate::QuorumGrainJournal) structurally identical.
 pub(crate) struct LocalReplicator {
     store: Arc<dyn GrainStore>,
     shard: u32,
@@ -89,7 +96,7 @@ impl LocalReplicator {
         // `after` always equals the head behind the input gate, §6).
         match self
             .store
-            .store_record(self.shard, grain, after, 0, events, false)
+            .store_record(self.shard, grain, after, Term::ZERO, events, WriteKind::Append)
         {
             StoreAck::Stored(head) => AppendOutcome::Committed(head),
             other => {
@@ -117,7 +124,7 @@ impl LocalReplicator {
         at: Seq,
         state: Vec<u8>,
     ) -> AppendOutcome {
-        match self.store.store_snapshot(self.shard, grain, at, 0, state) {
+        match self.store.store_snapshot(self.shard, grain, at, Term::ZERO, state) {
             StoreAck::Stored(seq) => AppendOutcome::Committed(seq),
             other => {
                 AppendOutcome::Unavailable(format!("local store rejected the snapshot: {other:?}"))
@@ -359,7 +366,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                     after,
                     term,
                     events.clone(),
-                    false,
+                    WriteKind::Append,
                     QUORUM_TIMEOUT,
                 );
                 Box::pin(async move { (node, ack.await) }) as StoreAckFuture
@@ -367,7 +374,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             .collect();
         let local = self
             .local
-            .store_record(self.shard, grain, after, term, events, false);
+            .store_record(self.shard, grain, after, term, events, WriteKind::Append);
         let (outcome, pending) = self.collect_store_quorum(&sets, local, peers).await;
         if matches!(outcome, QuorumOutcome::Committed) {
             // Committed on a quorum: return now and drain the slower replicas off the
@@ -493,7 +500,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             {
                 let local =
                     self.local
-                        .store_record(self.shard, grain, base, term, records.clone(), true);
+                        .store_record(self.shard, grain, base, term, records.clone(), WriteKind::Repair);
                 let peers = self
                     .peers_of(&sets)
                     .into_iter()
@@ -505,7 +512,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                             base,
                             term,
                             records.clone(),
-                            true,
+                            WriteKind::Repair,
                             RECOVER_TIMEOUT,
                         );
                         Box::pin(async move { (node, ack.await) }) as StoreAckFuture
@@ -570,7 +577,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let sets = self.sets();
         // Local copy first (the leader is a replica, §5.2): move the bytes into peers'
         // wire messages by clone, but the local write needs no copy beyond the fan-out.
-        let mut pending: FuturesUnordered<BlobAckFuture> = self
+        let pending: FuturesUnordered<BlobAckFuture> = self
             .peers_of(&sets)
             .into_iter()
             .map(|node| {
@@ -585,25 +592,20 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 Box::pin(async move { (node, ack.await) }) as BlobAckFuture
             })
             .collect();
+        // The local write always succeeds (the leader is a replica), so it always acks;
+        // a blob has no fence or order, so any `Ok` from a peer counts.
         self.local.put_blob(self.shard, grain, id, bytes);
-        let mut count = JointCount::new(&sets);
-        count.ack(self.self_node);
-        if count.satisfied() {
+        let (satisfied, pending) = self
+            .accumulate_quorum(&sets, true, pending, |result| result.is_ok())
+            .await;
+        if satisfied {
             self.drain(pending);
-            return Ok(());
+            Ok(())
+        } else {
+            Err(GrainJournalError::Unavailable(
+                "blob did not reach a write quorum".into(),
+            ))
         }
-        while let Some((node, result)) = pending.next().await {
-            if result.is_ok() {
-                count.ack(node);
-            }
-            if count.satisfied() {
-                self.drain(pending);
-                return Ok(());
-            }
-        }
-        Err(GrainJournalError::Unavailable(
-            "blob did not reach a write quorum".into(),
-        ))
     }
 
     /// Fetch a verified blob (B1): the local copy if present and verifying, else the
@@ -864,47 +866,87 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         Ok(())
     }
 
-    /// Count a local ack plus the peers' acks toward a quorum (spec §7.2), returning as
-    /// soon as a quorum has stored — the commit waits on the quorum, never on the
-    /// slowest replica. The not-yet-resolved peer asks come back with the outcome for
-    /// the caller to [`drain`](Self::drain): each still runs
-    /// to completion off the hot path, so its `AskIssued`/`AskOutcome` bracket closes
-    /// (no-silent-loss, §14). A single `Fenced` short of a quorum means we are deposed;
-    /// running out of replies short of a quorum is `Unavailable`. On any non-committed
-    /// outcome the loop has drained every peer, so the returned set is empty.
+    /// Seed the local ack, then poll `pending` until a joint quorum has acked (spec
+    /// §7.2), returning as soon as it is reached — the commit waits on the quorum, not
+    /// the slowest replica. `is_ack` decides whether a peer's reply counts: a `Stored`
+    /// [`StoreAck`] on the record path, an `Ok(())` on the blob path. During a
+    /// migration the quorum is JOINT (§7.7): a majority of `current` AND of `target`.
+    /// The unresolved stragglers come back for [`drain`](Self::drain), so each still
+    /// closes its `AskIssued`/`AskOutcome` bracket off the hot path (no-silent-loss,
+    /// §14). When the quorum is not reached the loop has drained every peer, so the
+    /// returned set is empty.
+    async fn accumulate_quorum<Reply>(
+        &self,
+        sets: &ReplicaSets,
+        local_acked: bool,
+        mut pending: FuturesUnordered<actor_core::BoxFuture<'static, (NodeId, Reply)>>,
+        mut is_ack: impl FnMut(&Reply) -> bool,
+    ) -> (
+        bool,
+        FuturesUnordered<actor_core::BoxFuture<'static, (NodeId, Reply)>>,
+    ) {
+        let mut count = JointCount::new(sets);
+        if local_acked {
+            count.ack(self.self_node);
+        }
+        if count.satisfied() {
+            return (true, pending);
+        }
+        while let Some((node, reply)) = pending.next().await {
+            if is_ack(&reply) {
+                count.ack(node);
+            }
+            if count.satisfied() {
+                return (true, pending);
+            }
+        }
+        (false, pending)
+    }
+
+    /// Count a local ack plus the peers' acks toward a quorum (spec §7.2) on the
+    /// record path, over [`accumulate_quorum`](Self::accumulate_quorum). A `Stored`
+    /// counts; a `Fenced`/`Stale` reply does not but is remembered, so short of a
+    /// quorum a single `Fenced` means we are deposed and a `Stale` means the head was
+    /// stale — running out of replies with neither is `Unavailable`. A quorum that
+    /// stored wins even if a lagging replica also reported a higher term: had a
+    /// higher-term leader prepared a quorum, the intersection would have fenced this
+    /// store (§8).
     async fn collect_store_quorum(
         &self,
         sets: &ReplicaSets,
         local: StoreAck,
         peers: Vec<StoreAckFuture>,
     ) -> (QuorumOutcome, FuturesUnordered<StoreAckFuture>) {
-        let mut count = JointCount::new(sets);
         let mut fenced = false;
         let mut stale = false;
-        match local {
-            StoreAck::Stored(_) => count.ack(self.self_node),
-            StoreAck::Fenced(_) => fenced = true,
-            StoreAck::Stale(_) => stale = true,
-        }
-        let mut pending: FuturesUnordered<StoreAckFuture> = peers.into_iter().collect();
-        // A quorum that stored wins even if a lagging replica also reported a higher
-        // term: had a higher-term leader prepared a quorum, the intersection would
-        // have fenced this store (§8). The local write alone may already satisfy a
-        // single-replica quorum. During a migration the quorum is JOINT (§7.7): a
-        // majority of `current` AND a majority of `target` must have stored.
-        if count.satisfied() {
+        let local_acked = match local {
+            StoreAck::Stored(_) => true,
+            StoreAck::Fenced(_) => {
+                fenced = true;
+                false
+            }
+            StoreAck::Stale(_) => {
+                stale = true;
+                false
+            }
+        };
+        let pending: FuturesUnordered<StoreAckFuture> = peers.into_iter().collect();
+        let (satisfied, pending) = self
+            .accumulate_quorum(sets, local_acked, pending, |reply| match reply {
+                Ok(StoreAck::Stored(_)) => true,
+                Ok(StoreAck::Fenced(_)) => {
+                    fenced = true;
+                    false
+                }
+                Ok(StoreAck::Stale(_)) => {
+                    stale = true;
+                    false
+                }
+                Err(_) => false,
+            })
+            .await;
+        if satisfied {
             return (QuorumOutcome::Committed, pending);
-        }
-        while let Some((node, result)) = pending.next().await {
-            match result {
-                Ok(StoreAck::Stored(_)) => count.ack(node),
-                Ok(StoreAck::Fenced(_)) => fenced = true,
-                Ok(StoreAck::Stale(_)) => stale = true,
-                Err(_) => {}
-            }
-            if count.satisfied() {
-                return (QuorumOutcome::Committed, pending);
-            }
         }
         let outcome = if fenced {
             QuorumOutcome::Fenced
@@ -948,10 +990,10 @@ enum QuorumOutcome {
 /// Returns the contiguous record prefix (ascending bytes), its head, the best
 /// snapshot, and whether any kept record's term is below `our_term` (so a write-back
 /// under our term is needed). A gap ends the prefix — an uncommitted tail, dropped.
-fn merge(replies: Vec<crate::store::ReadReply>, our_term: u64) -> Merged {
+fn merge(replies: Vec<crate::store::ReadReply>, our_term: Term) -> Merged {
     use std::collections::BTreeMap;
-    let mut best: BTreeMap<u64, (u64, Vec<u8>)> = BTreeMap::new();
-    let mut snapshot: Option<(Seq, u64, Vec<u8>)> = None;
+    let mut best: BTreeMap<u64, (Term, Vec<u8>)> = BTreeMap::new();
+    let mut snapshot: Option<(Seq, Term, Vec<u8>)> = None;
     // The replies are owned and used only here, so the record and snapshot bytes are
     // moved into the merge, never cloned (recovery runs on every activation).
     for reply in replies {

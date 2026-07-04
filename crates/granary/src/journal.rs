@@ -48,6 +48,39 @@ impl std::fmt::Display for Seq {
     }
 }
 
+/// The **shard term**: the single-writer fencing token every per-grain append
+/// carries (spec §8). It is the shard leader-election group's Raft term, so it only
+/// ever advances; the store refuses any write stamped below the highest term it has
+/// acknowledged. A newtype (not a bare `u64`) so it can never be confused with a
+/// [`Seq`], a shard index, or a count in the wide store signatures it travels
+/// through. `Ord` is the fence comparison. `Term::ZERO` is the single-node `Local`
+/// tier, which never elects and so never fences.
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
+)]
+pub struct Term(u64);
+
+impl Term {
+    /// The `Local` tier's constant term: it never elects, so it never fences (§7.4).
+    pub const ZERO: Term = Term(0);
+
+    /// Wrap a raw term value (e.g. a leader-election group's Raft term).
+    pub const fn new(value: u64) -> Term {
+        Term(value)
+    }
+
+    /// The raw term value.
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Term {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "term-{}", self.0)
+    }
+}
+
 /// The outcome of an [`append`](GrainJournal::append) or
 /// [`save_snapshot`](GrainJournal::save_snapshot) (spec §7.3).
 #[derive(Clone, Debug, PartialEq, Eq)]

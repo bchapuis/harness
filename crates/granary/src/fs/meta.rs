@@ -69,6 +69,17 @@ pub enum Inode {
     Dir(BTreeMap<String, Ino>),
 }
 
+impl Inode {
+    /// The `(is_dir, size)` pair reported to clients — the one place the outward
+    /// `Metadata`/`DirEntry` view of an inode is derived. A directory has size 0.
+    pub fn entry_meta(&self) -> (bool, u64) {
+        match self {
+            Inode::Dir(_) => (true, 0),
+            Inode::File(f) => (false, f.size),
+        }
+    }
+}
+
 /// The whole durable metadata image: the inode table and the next inode to mint.
 /// Small and foldable (structure + 32-byte block ids), so it snapshots as a single
 /// buffer however large the files are — their bytes live in the blob area (§7.10).

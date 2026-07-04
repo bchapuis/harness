@@ -334,6 +334,8 @@ use granary::ReadOutcome;
 use granary::ReadReply;
 use granary::Seq;
 use granary::StoreAck;
+use granary::Term;
+use granary::WriteKind;
 use granary::shard_for;
 
 /// A workspace over a shared, inspectable store: the granary plus the handles the
@@ -438,15 +440,15 @@ impl GrainStore for FailNextAppend {
         shard: u32,
         grain: &GrainName,
         after: Seq,
-        term: u64,
+        term: Term,
         records: Vec<Vec<u8>>,
-        repair: bool,
+        kind: WriteKind,
     ) -> StoreAck {
         if self.fail.swap(false, Ordering::SeqCst) {
-            return StoreAck::Fenced(u64::MAX);
+            return StoreAck::Fenced(Term::new(u64::MAX));
         }
         self.inner
-            .store_record(shard, grain, after, term, records, repair)
+            .store_record(shard, grain, after, term, records, kind)
     }
 
     fn read(&self, shard: u32, grain: &GrainName) -> ReadReply {
@@ -457,15 +459,15 @@ impl GrainStore for FailNextAppend {
         self.inner.read_from(shard, grain, from, limit)
     }
 
-    fn prepare(&self, shard: u32, grain: &GrainName, term: u64) -> ReadOutcome {
+    fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> ReadOutcome {
         self.inner.prepare(shard, grain, term)
     }
 
-    fn store_snapshot(&self, shard: u32, grain: &GrainName, at: Seq, term: u64, state: Vec<u8>) -> StoreAck {
+    fn store_snapshot(&self, shard: u32, grain: &GrainName, at: Seq, term: Term, state: Vec<u8>) -> StoreAck {
         self.inner.store_snapshot(shard, grain, at, term, state)
     }
 
-    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: u64) {
+    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: Term) {
         self.inner.truncate(shard, grain, after, term)
     }
 

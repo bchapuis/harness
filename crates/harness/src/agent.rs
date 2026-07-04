@@ -30,7 +30,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -379,6 +378,16 @@ struct Activation<S: HarnessSystem> {
     cancel_children: Vec<ChildRef>,
 }
 
+impl<S: HarnessSystem> Activation<S> {
+    /// Register `reply_to` (if any) for `turn`'s outcome (§7.4). A no-op when the
+    /// submit carried no mailbox — the one place a subscriber is added to the list.
+    fn subscribe(&mut self, turn: &TurnId, reply_to: Option<ActorRef<ReplyMailbox<S>>>) {
+        if let Some(reply_to) = reply_to {
+            self.subscribers.entry(turn.clone()).or_default().push(reply_to);
+        }
+    }
+}
+
 // Hand-written rather than `#[derive(Default)]`: deriving would impose a
 // spurious `S: Default` bound on the type parameter, which never needs it.
 impl<S: HarnessSystem> Default for Activation<S> {
@@ -411,7 +420,6 @@ pub struct Agent<S: HarnessSystem> {
     /// always present — no `Option`, no host-only runtime check.
     seams: Seams,
     act: Arc<Mutex<Activation<S>>>,
-    _marker: PhantomData<S>,
 }
 
 impl<S: HarnessSystem> Agent<S> {
@@ -424,7 +432,6 @@ impl<S: HarnessSystem> Agent<S> {
             kind,
             seams,
             act: Arc::new(Mutex::new(Activation::default())),
-            _marker: PhantomData,
         }
     }
 
@@ -529,12 +536,7 @@ impl<S: HarnessSystem> Agent<S> {
                     )
                 }
                 None => {
-                    if let Some(reply_to) = msg.reply_to {
-                        act.subscribers
-                            .entry(turn_id.clone())
-                            .or_default()
-                            .push(reply_to);
-                    }
+                    act.subscribe(&turn_id, msg.reply_to);
                     // A live run with a fresh attachment may be resuming on this
                     // activation: nudge it forward.
                     drop(act);
@@ -552,12 +554,7 @@ impl<S: HarnessSystem> Agent<S> {
 
         // Dedup against a queued-but-unstarted turn (ephemeral, §7.4).
         if act.queue.iter().any(|(t, _)| t.id == turn_id) {
-            if let Some(reply_to) = msg.reply_to {
-                act.subscribers
-                    .entry(turn_id.clone())
-                    .or_default()
-                    .push(reply_to);
-            }
+            act.subscribe(&turn_id, msg.reply_to);
             return (
                 Vec::new(),
                 Ok(Accepted {
@@ -568,12 +565,7 @@ impl<S: HarnessSystem> Agent<S> {
         }
 
         // A new turn.
-        if let Some(reply_to) = msg.reply_to {
-            act.subscribers
-                .entry(turn_id.clone())
-                .or_default()
-                .push(reply_to);
-        }
+        act.subscribe(&turn_id, msg.reply_to);
         if state.live.is_none() && act.queue.is_empty() {
             // Start now: journal SessionCreated (if first) + TurnSubmitted.
             // This submit may be processed between the previous run's terminal
@@ -862,7 +854,7 @@ impl<S: HarnessSystem> Agent<S> {
         //     the captured children (§9.2).
         self.emit_run_events(&mut act, state, ctx, &session);
         self.notify_finished(&mut act, state, ctx, &session);
-        self.propagate_cancels(&mut act, ctx, kind);
+        self.propagate_cancels(&mut act, ctx);
 
         // (b) No live run: reset per-run flags and start the next queued turn.
         let Some(live) = state.live.as_ref() else {
@@ -1037,7 +1029,7 @@ impl<S: HarnessSystem> Agent<S> {
                 if pending.child.is_some() {
                     ready.push((call.clone(), pending.clone()));
                 } else {
-                    match self.plan_delegation(state, ctx, kind, turn, call, pending, live) {
+                    match self.plan_delegation(ctx, kind, turn, call, pending, live) {
                         Ok(child_run) => events.push(child_run),
                         Err(tool_err) => {
                             events.push(self.fail_call(act, ctx, turn, call, tool_err));
@@ -1122,7 +1114,6 @@ impl<S: HarnessSystem> Agent<S> {
     #[allow(clippy::too_many_arguments)]
     fn plan_delegation(
         &self,
-        _state: &SessionState,
         ctx: &GrainCtx<Agent<S>>,
         kind: &Kind,
         turn: &TurnId,
@@ -1435,7 +1426,7 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// Propagate a committed cancel to every recorded child (§9.2 item 2).
-    fn propagate_cancels(&self, act: &mut Activation<S>, ctx: &GrainCtx<Agent<S>>, _kind: &Kind) {
+    fn propagate_cancels(&self, act: &mut Activation<S>, ctx: &GrainCtx<Agent<S>>) {
         let children = std::mem::take(&mut act.cancel_children);
         for child in children {
             let Some(granary) = self.shared.granaries().get(&child.kind).cloned() else {
@@ -1468,6 +1459,19 @@ impl<S: HarnessSystem> Agent<S> {
 
     // -- sandbox lifecycle ---------------------------------------------------
 
+    /// Emit `SandboxReleased` for this session (H8) — the one place the event is
+    /// built, so [`release_sandbox`](Self::release_sandbox) and the passivation
+    /// teardown announce a release the same way.
+    fn emit_sandbox_released(&self, ctx: &GrainCtx<Agent<S>>) {
+        ctx.system().emit_app(
+            HarnessEvent::SandboxReleased {
+                session: Self::session(ctx),
+                node: ctx.system().node(),
+            }
+            .into(),
+        );
+    }
+
     /// Drop and release the bound sandbox, emitting `SandboxReleased` (H8).
     /// Synchronous teardown is launched off the command path.
     fn release_sandbox(&self, act: &mut Activation<S>, ctx: &GrainCtx<Agent<S>>) {
@@ -1480,13 +1484,7 @@ impl<S: HarnessSystem> Agent<S> {
         }
         if act.env.bound {
             act.env.bound = false;
-            ctx.system().emit_app(
-                HarnessEvent::SandboxReleased {
-                    session: Self::session(ctx),
-                    node: ctx.system().node(),
-                }
-                .into(),
-            );
+            self.emit_sandbox_released(ctx);
         }
     }
 
@@ -1567,13 +1565,7 @@ impl<S: HarnessSystem> Grain for Agent<S> {
         if let Some((sandbox, bound)) = to_release {
             sandbox.release().await;
             if bound {
-                ctx.system().emit_app(
-                    HarnessEvent::SandboxReleased {
-                        session: Self::session(ctx),
-                        node: ctx.system().node(),
-                    }
-                    .into(),
-                );
+                self.emit_sandbox_released(ctx);
             }
         }
     }

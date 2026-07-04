@@ -16,6 +16,8 @@ use actor_cluster::GroupId;
 use actor_cluster::RaftConsensus;
 use actor_core::NodeId;
 
+use crate::journal::Term;
+
 /// The leadership and term of one shard's leader-election group (spec §8). Cheap to
 /// clone — it holds only the consensus handle and the group id.
 pub(crate) struct LeaderElection<R: RaftConsensus> {
@@ -54,8 +56,8 @@ impl<R: RaftConsensus> LeaderElection<R> {
 
     /// The shard's current term, the fencing token stamped on every per-grain
     /// append (§8). `None` on a node with no engine or not in the group.
-    pub(crate) fn term(&self) -> Option<u64> {
-        self.consensus.group_term(self.group)
+    pub(crate) fn term(&self) -> Option<Term> {
+        self.consensus.group_term(self.group).map(Term::new)
     }
 
     /// The best `NotLeader` redirect hint: the believed leader, or this node when

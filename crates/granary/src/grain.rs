@@ -233,7 +233,7 @@ where
 /// [`Host`] to accept `RunTyped<M>` over the network ([`Host::register`] replays
 /// these). The over-the-wire dispatch is therefore the actor framework's own
 /// registry — granary adds no transport. A name-addressed command whose manifest
-/// is unregistered is `GrainError::Unhandled`.
+/// is unregistered surfaces from the transport as `GrainError::Call(CallError::Unhandled)`.
 pub struct GrainRegistry<G: Grain> {
     accepted: BTreeSet<&'static str>,
     host_entries: Vec<fn(&mut HandlerRegistry<Host<G>>)>,

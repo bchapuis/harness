@@ -75,7 +75,7 @@ fn a_final_message_completes_the_run() {
                     .expect("call")
                     .expect("run");
                 assert_eq!(outcome.text(), "the answer");
-                assert_eq!(outcome.tokens, 120);
+                assert_eq!(outcome.tokens(), 120);
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;
             })

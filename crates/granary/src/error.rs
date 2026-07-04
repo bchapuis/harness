@@ -32,8 +32,6 @@ pub enum GrainError {
     /// (§11). CP, not AP: the caller retries or fails over rather than forking.
     /// Unreachable in the `Local` single-node journal, kept for API stability.
     Unavailable(String),
-    /// No registered handler for the command's manifest (§5.5).
-    Unhandled,
 }
 
 impl From<CallError> for GrainError {
@@ -48,7 +46,6 @@ impl std::fmt::Display for GrainError {
             GrainError::Call(e) => write!(f, "grain call failed: {e}"),
             GrainError::NotLeader(node) => write!(f, "grain shard leadership moved to {node}"),
             GrainError::Unavailable(why) => write!(f, "grain shard unavailable: {why}"),
-            GrainError::Unhandled => f.write_str("grain has no handler for this command"),
         }
     }
 }

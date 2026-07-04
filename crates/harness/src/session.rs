@@ -126,7 +126,7 @@ pub struct Lineage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Completion {
     content: String,
-    pub tokens: u64,
+    tokens: u64,
 }
 
 impl Completion {
@@ -137,8 +137,14 @@ impl Completion {
         }
     }
 
+    /// The final assistant message.
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// The run's journaled token spend — own usage plus carve-outs (§9.1).
+    pub fn tokens(&self) -> u64 {
+        self.tokens
     }
 }
 
@@ -314,10 +320,12 @@ pub(crate) mod arc_transcript {
     }
 }
 
-/// FNV-1a 64 over a turn's content: the digest dedup compares re-submissions
-/// against (§7.4) without holding a second copy of the content. Fold-local —
-/// rebuilt on every replay and never journaled — so its exact value need not
-/// stay stable across versions, unlike [`Kind::digest`](crate::Kind::digest).
+/// FNV-1a 64 over a string. Used for two things: the turn-content dedup, which
+/// compares re-submissions (§7.4) without holding a second copy of the content and
+/// is fold-local (rebuilt on every replay, never journaled); and
+/// [`Kind::digest`](crate::Kind::digest), which **is** journaled and compared
+/// cluster-wide. Because of that second use the algorithm must stay stable across
+/// versions — do not swap it for a different hash without re-versioning kind digests.
 pub fn content_digest(content: &str) -> u64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;

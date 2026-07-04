@@ -74,12 +74,17 @@ impl Spend {
         budget.tokens.saturating_sub(self.tokens())
     }
 
+    /// Steps still spendable under `budget`, saturating at zero.
+    pub fn remaining_steps(&self, budget: &Budget) -> u32 {
+        budget.steps.saturating_sub(self.steps())
+    }
+
     /// Whether another model call may be issued (harness spec §9.1 item 2):
     /// tokens remain above the configured `floor` and a step remains. The
     /// floor keeps the loop from paying a full input for a near-zero
     /// `max_tokens` call.
     pub fn allows_call(&self, budget: &Budget, floor: u64) -> bool {
-        self.remaining_tokens(budget) > floor && self.steps() < budget.steps
+        self.remaining_tokens(budget) > floor && self.remaining_steps(budget) > 0
     }
 
     /// Clamp a child's requested carve-out to this run's remainder (harness
@@ -88,9 +93,7 @@ impl Spend {
     pub fn carve(&self, budget: &Budget, requested: Budget) -> Budget {
         Budget {
             tokens: requested.tokens.min(self.remaining_tokens(budget)),
-            steps: requested
-                .steps
-                .min(budget.steps.saturating_sub(self.steps())),
+            steps: requested.steps.min(self.remaining_steps(budget)),
         }
     }
 }

@@ -443,7 +443,7 @@ impl App {
             }
             Update::Outcome(outcome) => {
                 self.status = match &outcome {
-                    Ok(c) => format!("done — {} tokens", c.tokens),
+                    Ok(c) => format!("done — {} tokens", c.tokens()),
                     Err(RunError::BudgetExhausted) => "budget exhausted".to_string(),
                     Err(RunError::Cancelled) => "cancelled".to_string(),
                     Err(RunError::Model(e)) => format!("model error: {e}"),

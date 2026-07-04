@@ -50,7 +50,7 @@ fn grain_error_round_trips_every_variant() {
         GrainError::Call(CallError::Serialization("boom".into())),
         GrainError::NotLeader(NodeId::new(7)),
         GrainError::Unavailable("quorum lost".into()),
-        GrainError::Unhandled,
+        GrainError::Call(CallError::Unhandled),
     ];
     for case in cases {
         assert_eq!(roundtrip(&case), case, "{case:?} survives a round trip");
