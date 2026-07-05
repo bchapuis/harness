@@ -14,10 +14,11 @@
 //! absorbs all three, so correctness rests on the journal, not on delivery.
 //!
 //! This module is grain-type-agnostic: the wire batch ([`RecordBatch`]) carries
-//! opaque, codec-encoded record bytes — exactly what the host already encoded
-//! for the append (§7.3) — so the always-on subscribe path imposes no `Clone`
-//! bound on a grain's `Event`. The sink ([`RecordSink`]) decodes them to the
-//! grain's typed `Event` for its subscriber.
+//! opaque **tagged** record bytes — exactly what the host appended (§7.12) — so
+//! the always-on subscribe path imposes no `Clone` bound on a grain's `Event`.
+//! The sink ([`RecordSink`]) is the grain's **event projection**: it decodes
+//! facet-0 records to the typed `Event` and skips other facets' records, whose
+//! seqs appear as gaps the subscriber's seq-reconciliation already absorbs.
 
 use actor_core::Actor;
 use actor_core::ActorRef;
@@ -39,13 +40,14 @@ use crate::journal::Seq;
 pub(crate) const SUB_BUFFER: usize = 128;
 
 /// One pushed batch on the wire (spec §7.9): the seqs just committed, as opaque
-/// codec-encoded record bytes, beginning after `from`. The bytes are the grain's
-/// `Event`s as the journal stores them (§7.3); [`RecordSink`] decodes them.
+/// tagged record bytes, beginning after `from`. The bytes are the records as
+/// the journal stores them (§7.12); [`RecordSink`] decodes the event-tagged
+/// ones and skips the rest.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RecordBatch {
     /// The exclusive lower bound: these records are the slots after `from`.
     pub from: u64,
-    /// `(seq, encoded event)` for each committed record in the batch.
+    /// `(seq, tagged record bytes)` for each committed record in the batch.
     pub records: Vec<(u64, Vec<u8>)>,
 }
 
@@ -151,7 +153,17 @@ impl<G: Grain> Handler<RecordBatch> for RecordSink<G> {
         let codec = ctx.system().codec();
         let mut records = Vec::with_capacity(msg.records.len());
         for (seq, bytes) in &msg.records {
-            match actor_serialization::decode::<G::Event>(&*codec, bytes) {
+            // Every record wears its facet tag (spec §7.12). The typed sink is
+            // the grain's *event projection*: it decodes facet 0 and skips other
+            // facets' records — their seqs appear as gaps the subscriber's
+            // seq-reconciliation already absorbs (§7.9, G16).
+            let Ok((tag, payload)) = crate::facet::split_record(bytes) else {
+                return;
+            };
+            if tag != crate::facet::EVENT_TAG {
+                continue;
+            }
+            match actor_serialization::decode::<G::Event>(&*codec, payload) {
                 Ok(event) => records.push((Seq::new(*seq), event)),
                 // A record that will not decode: drop the whole batch. The
                 // subscriber sees a gap and backfills by `load` (§7.9) — the

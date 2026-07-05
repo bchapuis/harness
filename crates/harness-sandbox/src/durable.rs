@@ -4,7 +4,7 @@
 //! cap-std directory released on every hibernation and migration, with the loss put on
 //! the record as a `WorkspaceReset` (harness §5.5). This provider reverses that for the
 //! durable subtree: it backs the tier with a **durable filesystem grain**
-//! ([`granary::fs::Fs`]) — metadata journaled, file blocks in the grain's colocated
+//! ([`granary::fs::Workspace`]) — metadata journaled, file blocks in the grain's colocated
 //! content-addressed blob area — so a workspace survives hibernation, migration, and
 //! node loss. Only the **non-durable** subtree (regenerable trees like `node_modules`,
 //! `target`, chosen by [`DurabilityRules`]) stays ephemeral, in a per-activation
@@ -31,7 +31,7 @@ use granary::GrainError;
 use granary::GrainRef;
 use granary::Granary;
 use granary::GranarySystem;
-use granary::fs::Fs;
+use granary::fs::Workspace;
 use granary::fs::FsError;
 use granary::fs::ListDir;
 use granary::fs::ReadFile;
@@ -94,20 +94,20 @@ impl DurabilityRules {
 /// that hosts the [`Fs`] grain type and the cap-std root under which each session's
 /// ephemeral overlay lives.
 pub struct DurableWorkspaces<S: GranarySystem> {
-    granary: Granary<Fs<S>>,
+    granary: Granary<Workspace<S>>,
     overlay_root: Arc<Dir>,
     rules: Arc<DurabilityRules>,
 }
 
 impl<S: GranarySystem> DurableWorkspaces<S> {
-    /// Build the provider over a `Granary<Fs<S>>` (host it with
-    /// `system.granary::<Fs<_>>(config)`) and an `overlay_root` directory for the
+    /// Build the provider over a `Granary<Workspace<S>>` (host it with
+    /// `system.granary::<Workspace<_>>(config)`) and an `overlay_root` directory for the
     /// non-durable scratch, with the default [`DurabilityRules`].
     ///
     /// # Errors
     /// If the overlay root cannot be created or opened as a capability handle.
     pub fn new(
-        granary: Granary<Fs<S>>,
+        granary: Granary<Workspace<S>>,
         overlay_root: impl AsRef<Path>,
     ) -> std::io::Result<DurableWorkspaces<S>> {
         Self::with_rules(granary, overlay_root, DurabilityRules::default())
@@ -115,7 +115,7 @@ impl<S: GranarySystem> DurableWorkspaces<S> {
 
     /// As [`new`](Self::new), with explicit durability rules.
     pub fn with_rules(
-        granary: Granary<Fs<S>>,
+        granary: Granary<Workspace<S>>,
         overlay_root: impl AsRef<Path>,
         rules: DurabilityRules,
     ) -> std::io::Result<DurableWorkspaces<S>> {
@@ -169,7 +169,7 @@ impl<S: GranarySystem> SandboxProvider for DurableWorkspaces<S> {
 /// One session's durable workspace binding: the grain ref (durable subtree) and the
 /// cap-std overlay (non-durable subtree).
 struct DurableSandbox<S: GranarySystem> {
-    grain: GrainRef<Fs<S>>,
+    grain: GrainRef<Workspace<S>>,
     overlay: Arc<Dir>,
     overlay_root: Arc<Dir>,
     overlay_name: String,
@@ -211,7 +211,7 @@ impl<S: GranarySystem> Sandbox for DurableSandbox<S> {
 
 /// Route one workspace tool by path durability, preserving the tier's JSON contract.
 async fn dispatch<S: GranarySystem>(
-    grain: &GrainRef<Fs<S>>,
+    grain: &GrainRef<Workspace<S>>,
     overlay: &Dir,
     overlay_root: &Dir,
     overlay_name: &str,
@@ -274,7 +274,7 @@ async fn dispatch<S: GranarySystem>(
 }
 
 async fn read_durable<S: GranarySystem>(
-    grain: &GrainRef<Fs<S>>,
+    grain: &GrainRef<Workspace<S>>,
     path: &str,
     offset: Option<u64>,
     limit: Option<u64>,
@@ -288,7 +288,7 @@ async fn read_durable<S: GranarySystem>(
 }
 
 async fn edit_durable<S: GranarySystem>(
-    grain: &GrainRef<Fs<S>>,
+    grain: &GrainRef<Workspace<S>>,
     path: &str,
     input: &Value,
 ) -> Result<Value, ToolError> {
@@ -312,7 +312,7 @@ async fn edit_durable<S: GranarySystem>(
 }
 
 async fn write_durable<S: GranarySystem>(
-    grain: &GrainRef<Fs<S>>,
+    grain: &GrainRef<Workspace<S>>,
     path: &str,
     content: &str,
 ) -> Result<Value, ToolError> {
@@ -327,7 +327,7 @@ async fn write_durable<S: GranarySystem>(
 }
 
 async fn remove_durable<S: GranarySystem>(
-    grain: &GrainRef<Fs<S>>,
+    grain: &GrainRef<Workspace<S>>,
     path: &str,
     recursive: bool,
 ) -> Result<Value, ToolError> {
@@ -340,7 +340,7 @@ async fn remove_durable<S: GranarySystem>(
 }
 
 async fn list_merged<S: GranarySystem>(
-    grain: &GrainRef<Fs<S>>,
+    grain: &GrainRef<Workspace<S>>,
     overlay: &Dir,
     overlay_root: &Dir,
     overlay_name: &str,

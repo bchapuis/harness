@@ -15,6 +15,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::blobs::GrainBlobs;
+use crate::facet::FacetCell;
+use crate::facet::FacetSet;
 use crate::gateway::Gateway;
 use crate::grainref::GrainRef;
 use crate::host::Host;
@@ -58,6 +60,21 @@ impl std::fmt::Display for GrainName {
     }
 }
 
+/// The uninhabited event type for a grain whose durable state lives entirely in
+/// its facets (spec §7.12): `type Event = NoEvent` declares that facet 0 journals
+/// nothing, and `apply` is the empty match. The workspace grain (§7.11) is the
+/// canonical user.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum NoEvent {}
+
+impl NoEvent {
+    /// The `apply` body for a facet-only grain: a `NoEvent` cannot exist, so
+    /// there is nothing to fold.
+    pub fn unreachable(&self) -> ! {
+        match *self {}
+    }
+}
+
 /// A virtual, durable, single-activation object (spec §4.1).
 ///
 /// The author implements the **behavior** (immutable configuration) as a type,
@@ -79,6 +96,13 @@ pub trait Grain: Sized + Send + 'static {
 
     /// The journal record type: the unit of durable change.
     type Event: SerializationRequirement;
+
+    /// The grain's declared facet set (spec §7.12): `()` for none, or a tuple of
+    /// built-in facets — e.g. `(Kv,)`, `(Kv, Fs)`. Each declared facet
+    /// surfaces a compile-time-gated [`GrainCtx`] accessor, contributes tagged
+    /// records to the same atomic per-command batch (G19), joins the composite
+    /// snapshot, and adds its blob roots to the grain's unioned live set.
+    type Facets: FacetSet;
 
     /// The grain type's stable identity — the namespace tag in every
     /// [`GrainName`] of this type and the key the gateway is discovered under
@@ -158,6 +182,11 @@ pub struct GrainCtx<G: Grain> {
     /// area ([`blobs`](GrainCtx::blobs)). The journal routes to the grain's shard
     /// replicas, the same ones its records live on.
     journal: Arc<dyn DynGrainJournal>,
+    /// The host's facet cell (spec §7.12): committed forms plus the per-command
+    /// stage, shared so the facet accessors (`kv()`, `fs()`, …) read and stage
+    /// through it. Also the source of the facet blob roots
+    /// [`blobs`](GrainCtx::blobs) unions into every sweep.
+    facets: Arc<FacetCell<G::Facets>>,
 }
 
 impl<G: Grain> GrainCtx<G> {
@@ -167,6 +196,7 @@ impl<G: Grain> GrainCtx<G> {
         system: G::System,
         gateway: ActorRef<Gateway<G>>,
         journal: Arc<dyn DynGrainJournal>,
+        facets: Arc<FacetCell<G::Facets>>,
     ) -> GrainCtx<G> {
         GrainCtx {
             grain_type,
@@ -174,7 +204,13 @@ impl<G: Grain> GrainCtx<G> {
             system,
             gateway,
             journal,
+            facets,
         }
+    }
+
+    /// The facet cell, for the facet accessor modules (`kv`, `fs`, `sql`).
+    pub(crate) fn facet_cell(&self) -> &Arc<FacetCell<G::Facets>> {
+        &self.facets
     }
 
     /// This grain's name.
@@ -190,7 +226,12 @@ impl<G: Grain> GrainCtx<G> {
     /// ([`GrainBlobs::gc`](crate::GrainBlobs::gc)). This is the grain analogue of a
     /// Durable Object's colocated storage (DO §2.3) — beside, not in, the journal.
     pub fn blobs(&self) -> GrainBlobs {
+        // Every sweep through this handle unions the facets' live roots (spec
+        // §7.12): the grain supplies its own roots, the host supplies the
+        // facets', and neither can drop the other's bytes.
+        let cell = Arc::clone(&self.facets);
         GrainBlobs::new(Arc::clone(&self.journal), self.name.clone())
+            .with_facet_roots(Arc::new(move || cell.roots()))
     }
 
     /// A shareable self-reference (spec §4.3). It resolves through the gateway each

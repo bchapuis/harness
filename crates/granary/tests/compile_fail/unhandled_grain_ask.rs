@@ -33,6 +33,7 @@ impl Grain for Switch {
     >;
     type State = State;
     type Event = Event;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "test.Switch";
 
     fn apply(state: &mut State, _event: &Event) {

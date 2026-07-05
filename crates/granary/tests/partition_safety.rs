@@ -78,6 +78,7 @@ impl Grain for Account {
     type System = SimCluster;
     type State = Balance;
     type Event = Ledger;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "bank.Account";
 
     fn apply(state: &mut Balance, event: &Ledger) {
@@ -575,6 +576,7 @@ impl Grain for CounterGrain {
     type System = SimCluster;
     type State = CounterState;
     type Event = CounterEvent;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "test.Counter";
 
     fn apply(state: &mut CounterState, event: &CounterEvent) {

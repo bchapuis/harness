@@ -1,7 +1,7 @@
-//! The grain-native content-addressed facet under the cluster fault swarm
+//! The grain-native content-addressed blob store under the cluster fault swarm
 //! (durable-workspace design; granary §7.10, V&V checklist #2, #4, #7, #8).
 //!
-//! `tests/blobs.rs` drives the blob facet through *scripted* faults (one crash,
+//! `tests/blobs.rs` drives the blob store through *scripted* faults (one crash,
 //! one tampered copy). This file applies the V&V doctrine the other way round: a
 //! [`ClusterWorkload`] of blob put/get/has/gc traffic is swept across many seeds
 //! while a seeded nemesis injects partitions, crashes, heals, loss, duplication,
@@ -82,6 +82,7 @@ impl Grain for BlobGrain {
     type System = SimCluster;
     type State = Stored;
     type Event = Recorded;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "test.BlobGrain";
 
     fn apply(state: &mut Stored, event: &Recorded) {

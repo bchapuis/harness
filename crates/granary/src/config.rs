@@ -42,6 +42,22 @@ pub struct GranaryConfig {
     /// supplies a factory that caches per node and outlives a restart — the grain
     /// analogue of the Raft WAL storage seam (actor §9.4.3).
     pub grain_store: Option<GrainStoreFactory>,
+    /// The node-local scratch directory a **physical facet** materializes under
+    /// (spec §7.12/§7.14): the SQL facet's database files live here, keyed by
+    /// grain. Rebuildable caches only, never a source of truth (§1); safe to
+    /// wipe between runs. `None` (the default) uses the system temp directory.
+    pub data_dir: Option<std::path::PathBuf>,
+}
+
+impl GranaryConfig {
+    /// The resolved physical-facet scratch directory:
+    /// [`data_dir`](GranaryConfig::data_dir), or its documented system-temp
+    /// default.
+    pub(crate) fn scratch_dir(&self) -> std::path::PathBuf {
+        self.data_dir
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("granary"))
+    }
 }
 
 impl Default for GranaryConfig {
@@ -53,6 +69,7 @@ impl Default for GranaryConfig {
             idle_after: Duration::from_secs(10),
             snapshot_every: 256,
             grain_store: None,
+            data_dir: None,
         }
     }
 }
@@ -69,6 +86,7 @@ impl std::fmt::Debug for GranaryConfig {
                 "grain_store",
                 &self.grain_store.as_ref().map(|_| "<factory>"),
             )
+            .field("data_dir", &self.data_dir)
             .finish()
     }
 }

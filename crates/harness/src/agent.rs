@@ -1518,6 +1518,7 @@ impl<S: HarnessSystem> Grain for Agent<S> {
     type System = S;
     type State = SessionState;
     type Event = Record;
+    type Facets = ();
     // The fallback type name; the harness hosts each kind under its own name via
     // `granary_named`, so a session's grain type is its `KindId` (§2.2).
     const GRAIN_TYPE: &'static str = "harness.Agent";

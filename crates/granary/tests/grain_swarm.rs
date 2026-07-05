@@ -70,6 +70,7 @@ impl Grain for Account {
     type System = SimCluster;
     type State = Balance;
     type Event = Ledger;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "bank.Account";
 
     fn apply(state: &mut Balance, event: &Ledger) {

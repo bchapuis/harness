@@ -1,4 +1,4 @@
-//! The grain-native content-addressed facet, end-to-end under deterministic
+//! The grain-native content-addressed blob store, end-to-end under deterministic
 //! simulation (durable-workspace design; granary §14).
 //!
 //! A grain reaches its colocated, immutable blob area through
@@ -73,6 +73,7 @@ impl<S: GranarySystem> Grain for BlobGrain<S> {
     type System = S;
     type State = Stored;
     type Event = Recorded;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "test.BlobGrain";
 
     fn apply(state: &mut Stored, event: &Recorded) {

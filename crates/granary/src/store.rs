@@ -184,7 +184,7 @@ pub trait GrainStore: Send + Sync + 'static {
     /// silently shrink a committed write's durability below a quorum.
     fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: Term);
 
-    // --- The grain-native content-addressed facet (durable-workspace design) ----
+    // --- The grain-native content-addressed blob store (durable-workspace design) ----
     //
     // A grain's immutable blobs live beside its records in the same per-node store
     // but **off** the ordered, term-fenced record path: content addressing needs no
@@ -1000,7 +1000,7 @@ mod tests {
         );
     }
 
-    // --- The grain-native blob facet (durable-workspace design) --------------
+    // --- The grain-native blob store (durable-workspace design) --------------
 
     #[test]
     fn blobs_round_trip_and_dedup_within_a_grain() {

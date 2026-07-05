@@ -43,11 +43,11 @@ use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_cluster_swarm_coverage;
 use granary::GranaryConfig;
 use granary::GranaryExt;
-use granary::fs::Fs;
+use granary::fs::Workspace;
 use granary::fs::ReadFile;
 use granary::fs::WriteFile;
 
-type Ws = Fs<SimCluster>;
+type Ws = Workspace<SimCluster>;
 
 fn config() -> GranaryConfig {
     GranaryConfig {

@@ -139,7 +139,7 @@ impl LocalReplicator {
         Ok(snapshot_of(self.store.read(self.shard, grain)))
     }
 
-    // --- The grain-native content-addressed facet (single-node) --------------
+    // --- The grain-native content-addressed blob store (single-node) --------------
 
     pub(crate) async fn put_blob(
         &self,
@@ -554,7 +554,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         Ok(snapshot_of(self.local.read(self.shard, grain)))
     }
 
-    // --- The grain-native content-addressed facet (clustered) ----------------
+    // --- The grain-native content-addressed blob store (clustered) ----------------
     //
     // A grain's immutable blobs ride the *same* shard replica set as its records,
     // but with no term and no order: a content hash names exactly one byte sequence,

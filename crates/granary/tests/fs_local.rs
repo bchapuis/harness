@@ -20,7 +20,7 @@ use granary::GranaryExt;
 use granary::fs::BLOCK_BYTES;
 use granary::fs::Destroy;
 use granary::fs::DirEntry;
-use granary::fs::Fs;
+use granary::fs::Workspace;
 use granary::fs::FsError;
 use granary::fs::ListDir;
 use granary::fs::Metadata;
@@ -31,7 +31,7 @@ use granary::fs::Stat;
 use granary::fs::Truncate;
 use granary::fs::WriteFile;
 
-type Ws = Fs<SimSystem>;
+type Ws = Workspace<SimSystem>;
 
 fn local() -> (Simulation, SimSystem) {
     let sim = Simulation::new(7);

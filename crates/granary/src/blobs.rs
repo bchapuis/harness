@@ -1,4 +1,4 @@
-//! The grain-native content-addressed facet (durable-workspace design).
+//! The grain-native content-addressed blob store (durable-workspace design).
 //!
 //! Beside its ordered, term-fenced journal (§7.2), a grain node owns an
 //! **immutable content-addressed store** — a per-grain blob area replicated to the
@@ -107,11 +107,36 @@ impl fmt::Debug for BlobId {
 pub struct GrainBlobs {
     journal: Arc<dyn DynGrainJournal>,
     grain: GrainName,
+    /// The facets' live blob roots (spec §7.12), unioned into every
+    /// [`gc`](GrainBlobs::gc) sweep by the handle itself — so an application's
+    /// mark-from-roots sweep can never drop a facet's bytes (F3). Empty for a
+    /// grain with no facets.
+    facet_roots: Arc<dyn Fn() -> BTreeSet<BlobId> + Send + Sync>,
 }
 
 impl GrainBlobs {
     pub(crate) fn new(journal: Arc<dyn DynGrainJournal>, grain: GrainName) -> GrainBlobs {
-        GrainBlobs { journal, grain }
+        GrainBlobs {
+            journal,
+            grain,
+            facet_roots: Arc::new(BTreeSet::new),
+        }
+    }
+
+    /// The grain this handle is scoped to.
+    pub(crate) fn grain(&self) -> &GrainName {
+        &self.grain
+    }
+
+    /// Attach the facet root supplier (spec §7.12). Built by
+    /// [`GrainCtx::blobs`](crate::GrainCtx::blobs); the roots are computed at
+    /// sweep time, so they always reflect the *committed* forms.
+    pub(crate) fn with_facet_roots(
+        mut self,
+        roots: Arc<dyn Fn() -> BTreeSet<BlobId> + Send + Sync>,
+    ) -> GrainBlobs {
+        self.facet_roots = roots;
+        self
     }
 
     /// Store `bytes` and return their content id. Idempotent and dedup'd: storing
@@ -171,9 +196,12 @@ impl GrainBlobs {
     /// without any cluster-wide reference tracking. Best-effort and idempotent (so
     /// it cannot fail — a missed replica keeps its garbage until the next sweep).
     pub async fn gc(&self, live: &BTreeSet<BlobId>) {
-        self.journal
-            .retain_blobs(&self.grain, live.iter().copied().collect())
-            .await;
+        // The retained set is the caller's roots ∪ the facets' roots (spec
+        // §7.12): only the host-built handle knows the facets, so the union
+        // lives here, not in any one facet or in application code.
+        let mut retain: Vec<BlobId> = live.iter().copied().collect();
+        retain.extend((self.facet_roots)());
+        self.journal.retain_blobs(&self.grain, retain).await;
     }
 
     /// Drop **all** of this grain's blobs — the grain-scoped reclamation on destroy

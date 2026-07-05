@@ -31,9 +31,17 @@ use actor_core::Message;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::blobs::GrainBlobs;
 use crate::config::GranaryConfig;
 use crate::error::GrainError;
 use crate::event::GrainEvent;
+use crate::facet::CompositeSnapshot;
+use crate::facet::EVENT_TAG;
+use crate::facet::FacetCell;
+use crate::facet::FacetEnv;
+use crate::facet::FacetSet;
+use crate::facet::split_record;
+use crate::facet::tag_record;
 use crate::gateway::Gateway;
 use crate::grain::Grain;
 use crate::grain::GrainCtx;
@@ -105,6 +113,11 @@ pub struct Host<G: Grain> {
     /// activation state (§1, §10) — dropped when the host stops, so a move or
     /// hibernation ends every subscription and subscribers re-subscribe (**G3**).
     sinks: Vec<async_channel::Sender<Arc<RecordBatch>>>,
+    /// The facet cell (spec §7.12): the declared facets' committed forms and the
+    /// per-command stage, shared with the [`GrainCtx`] accessors. Rebuilt from the
+    /// composite snapshot plus tagged records on rehydration (**G3**), exactly as
+    /// `state` is.
+    facets: Arc<FacetCell<G::Facets>>,
 }
 
 impl<G: Grain> Host<G> {
@@ -131,6 +144,7 @@ impl<G: Grain> Host<G> {
             gateway,
             last_active: actor_core::Instant::ZERO,
             sinks: Vec::new(),
+            facets: Arc::new(FacetCell::new()),
         }
     }
 
@@ -142,6 +156,17 @@ impl<G: Grain> Host<G> {
             ctx.system().clone(),
             self.gateway.clone(),
             Arc::clone(&self.journal),
+            Arc::clone(&self.facets),
+        )
+    }
+
+    /// The facet environment (spec §7.12): a bare blob handle (no facet-root
+    /// union — the host retains roots explicitly where it sweeps) and the
+    /// node-local scratch directory a physical facet materializes under (§7.14).
+    fn facet_env(&self) -> FacetEnv {
+        FacetEnv::new(
+            GrainBlobs::new(Arc::clone(&self.journal), self.name.clone()),
+            self.config.scratch_dir(),
         )
     }
 
@@ -166,14 +191,30 @@ impl<G: Grain> Host<G> {
             .map_err(boxed)?
         {
             Some((s_seq, bytes)) if s_seq <= head => {
-                self.state = actor_serialization::decode(&*codec, &bytes).map_err(boxed)?;
+                // The snapshot is a composite (spec §7.12): facet 0's `State`
+                // plus one contribution per declared facet, all at `s_seq`. G4
+                // applies to it as a whole; a part that will not restore aborts
+                // the activation rather than serving a half-rebuilt grain.
+                let composite = CompositeSnapshot::decode(&bytes).map_err(boxed)?;
+                self.state =
+                    actor_serialization::decode(&*codec, &composite.state).map_err(boxed)?;
+                let forms = G::Facets::restore(&composite.facets, &self.facet_env())
+                    .await
+                    .map_err(boxed)?;
+                self.facets.install(forms);
                 self.last_snapshot = s_seq;
                 (s_seq, true)
             }
             // No snapshot, or one beyond the committed head (**G4**): the journal
             // is the authority, so replay the whole log from the empty head.
+            // Restore runs with no contributions all the same — a physical facet
+            // materializes its empty form here (§7.14).
             _ => {
                 self.state = G::State::default();
+                let forms = G::Facets::restore(&[], &self.facet_env())
+                    .await
+                    .map_err(boxed)?;
+                self.facets.install(forms);
                 self.last_snapshot = Seq::ZERO;
                 (Seq::ZERO, false)
             }
@@ -190,9 +231,18 @@ impl<G: Grain> Host<G> {
                 break;
             }
             for (s, bytes) in batch {
-                let event: G::Event =
-                    actor_serialization::decode(&*codec, &bytes).map_err(boxed)?;
-                G::apply(&mut self.state, &event);
+                // Dispatch each record by its facet tag (spec §7.12). A tag no
+                // declared facet claims aborts the activation (**G19**): the
+                // grain's history must never be silently misread by a runtime
+                // missing one of its facets.
+                let (tag, payload) = split_record(&bytes).map_err(boxed)?;
+                if tag == EVENT_TAG {
+                    let event: G::Event =
+                        actor_serialization::decode(&*codec, payload).map_err(boxed)?;
+                    G::apply(&mut self.state, &event);
+                } else {
+                    self.facets.fold_replay(tag, payload).map_err(boxed)?;
+                }
                 seq = s;
                 replayed += 1;
             }
@@ -237,31 +287,63 @@ impl<G: Grain> Host<G> {
     {
         self.last_active = ctx.system().now();
 
-        // 1. Decide: inspect state, produce events + reply. No mutation, no I/O.
+        // 1. Decide: inspect state, produce events + reply. The handler stages
+        //    facet operations through the ctx accessors (spec §7.12): a logical
+        //    facet's overlay, a physical facet's local transaction — neither
+        //    observable before the commit (§4.2).
+        if let Err(e) = self.facets.begin() {
+            // A physical facet could not open its per-command work: its
+            // materialization can no longer be trusted (G20).
+            self.forced_step_down(ctx).await;
+            return Err(GrainError::Unavailable(format!("facet begin: {e}")));
+        }
         let gctx = self.grain_ctx(ctx);
         let (events, reply) = self.grain.handle(&self.state, msg, &gctx).await;
 
-        // 2. Read path: no events, nothing to commit (§7.5). Serve from the
-        //    in-memory activation — a local, replication-free read. This is the
-        //    relaxed, **read-your-leader** contract (§7.5): a deposed-but-unfenced
-        //    minority leader can serve a stale read until its activation stops.
-        //    Writes never fork (Raft fences the commit, §8); only reads can be
-        //    stale, and only on the minority side of a partition. Linearizable
-        //    reads via a check-quorum leader lease are a deferred upgrade (§16) —
-        //    not a per-read consensus round, which would defeat read scaling (§7.8).
-        if events.is_empty() {
-            return Ok(reply);
-        }
-
-        // 3. Encode the batch and append it as one atomic entry (§7.3).
+        // 2. Encode the events (facet 0) under their record tag (§7.12). Encoded
+        //    BEFORE the facet seal, so a serialization failure abandons the
+        //    stage with no physical local commit to unwind.
         let codec = ctx.system().codec();
         let mut encoded = Vec::with_capacity(events.len());
         for event in &events {
             match actor_serialization::encode(&*codec, event) {
-                Ok(bytes) => encoded.push(bytes),
-                Err(e) => return Err(GrainError::Call(CallError::Serialization(e.to_string()))),
+                Ok(bytes) => encoded.push(tag_record(EVENT_TAG, &bytes)),
+                Err(e) => {
+                    self.facets.abandon();
+                    return Err(GrainError::Call(CallError::Serialization(e.to_string())));
+                }
             }
         }
+
+        // 3. Seal and drain the facet stages into tagged records (§7.12): a
+        //    physical facet commits its local transaction and captures the delta
+        //    here (§7.14). All records join one atomic batch (**G19**).
+        let facet_records = match self.facets.seal_and_drain() {
+            Ok(records) => records,
+            Err(e) => {
+                // A physical local commit failed: the materialization is tainted;
+                // discard it and step down (G20). The next activation rebuilds.
+                self.forced_step_down(ctx).await;
+                return Err(GrainError::Unavailable(format!("facet seal: {e}")));
+            }
+        };
+        for (tag, payload) in &facet_records {
+            encoded.push(tag_record(*tag, payload));
+        }
+
+        // 4. Read path: an empty batch after the drain commits nothing (§7.5).
+        //    Serve from the in-memory activation — a local, replication-free
+        //    read. This is the relaxed, **read-your-leader** contract (§7.5): a
+        //    deposed-but-unfenced minority leader can serve a stale read until
+        //    its activation stops. Writes never fork (Raft fences the commit,
+        //    §8); only reads can be stale, and only on the minority side of a
+        //    partition. Linearizable reads via a check-quorum leader lease are a
+        //    deferred upgrade (§16) — not a per-read consensus round, which
+        //    would defeat read scaling (§7.8).
+        if encoded.is_empty() {
+            return Ok(reply);
+        }
+        let batch_len = encoded.len() as u64;
 
         // Keep the encoded bytes for subscription delivery (§7.9) only when a
         // sink is attached, so an unsubscribed grain pays nothing; `append`
@@ -270,7 +352,7 @@ impl<G: Grain> Host<G> {
         let to_deliver = (!self.sinks.is_empty()).then(|| encoded.clone());
 
         match self.journal.append(&self.name, self.head, encoded).await {
-            // 4. Durable on a quorum: fold AFTER durability, advance head, reply.
+            // 5. Durable on a quorum: fold AFTER durability, advance head, reply.
             AppendOutcome::Committed(new_head) => {
                 // The grain is its shard's single writer (§8), so its head MUST
                 // advance by exactly this batch. A jump past that means the head we
@@ -279,13 +361,25 @@ impl<G: Grain> Host<G> {
                 // intervening committed events were never folded into our state. The
                 // journal is the authority (G3): step down rather than fold onto a
                 // state that is missing them; the next access rehydrates cleanly.
-                let expected = Seq::new(self.head.value() + events.len() as u64);
+                let expected = Seq::new(self.head.value() + batch_len);
                 if new_head != expected {
                     self.forced_step_down(ctx).await;
                     return Err(GrainError::Unavailable("stale head; reactivating".into()));
                 }
                 for event in &events {
                     G::apply(&mut self.state, event);
+                }
+                // Fold the facets' records on the live path (§7.12): logical
+                // facets fold exactly as replay will (F1); a physical facet's
+                // form already mutated at its local commit and is skipped. A
+                // facet that cannot fold its own just-drained record is a bug;
+                // the in-memory forms can no longer be trusted, so step down and
+                // let rehydration rebuild from the journal authority (G3).
+                for (tag, payload) in &facet_records {
+                    if let Err(e) = self.facets.fold_live(*tag, payload) {
+                        self.forced_step_down(ctx).await;
+                        return Err(GrainError::Unavailable(format!("facet fold: {e}")));
+                    }
                 }
                 self.head = new_head;
                 ctx.system().emit_grain_event(GrainEvent::Committed {
@@ -302,13 +396,16 @@ impl<G: Grain> Host<G> {
                 self.maybe_snapshot(ctx).await;
                 Ok(reply) // OUTPUT GATE releases here.
             }
-            // 5. Leadership moved off this node (§8): step down, redirect. The
-            //    state is untouched; no fold, no success reply (**G5**).
+            // 6. Leadership moved off this node (§8): step down, redirect. The
+            //    state is untouched; no fold, no success reply (**G5**). Physical
+            //    facet materializations mutated at their local commit and are
+            //    discarded (**G20**, §7.14); the next activation rebuilds them
+            //    from the composite snapshot plus committed records.
             AppendOutcome::NotLeader(hint) => {
                 self.forced_step_down(ctx).await;
                 Err(GrainError::NotLeader(hint))
             }
-            // 6. Shard quorum lost or the commit timed out (§11): the append's fate
+            // 7. Shard quorum lost or the commit timed out (§11): the append's fate
             //    is ambiguous (it may yet commit, §7.2), so the in-memory head can
             //    no longer be trusted. Step down; the caller retries/fails over and
             //    the next access rehydrates from the journal authority (G3).
@@ -331,13 +428,17 @@ impl<G: Grain> Host<G> {
     }
 
     /// Deactivate on an involuntary stop — leadership moved (§8), the shard went
-    /// unavailable (§11), or the head desynced. Runs `on_passivate` so the grain
-    /// can release non-durable activation resources even on a forced step-down (a
-    /// layered runtime's per-activation handles — e.g. the agentic harness's
-    /// sandbox), then emits `Passivated` and stops. Safe when the journal is
-    /// unwritable: `on_passivate` has no journal access (the [`GrainCtx`] exposes
-    /// no `persist`). Unlike idle hibernation (§10) it takes **no snapshot**.
+    /// unavailable (§11), or the head desynced. The in-memory forms can no longer
+    /// be trusted, so every physical facet materialization is discarded (**G20**,
+    /// §7.14); the next activation rebuilds from the composite snapshot plus
+    /// committed records. Runs `on_passivate` so the grain can release
+    /// non-durable activation resources even on a forced step-down (a layered
+    /// runtime's per-activation handles — e.g. the agentic harness's sandbox),
+    /// then emits `Passivated` and stops. Safe when the journal is unwritable:
+    /// `on_passivate` has no journal access (the [`GrainCtx`] exposes no
+    /// `persist`). Unlike idle hibernation (§10) it takes **no snapshot**.
     async fn forced_step_down(&mut self, ctx: &Ctx<Host<G>>) {
+        self.facets.discard();
         let gctx = self.grain_ctx(ctx);
         self.grain.on_passivate(&gctx).await;
         self.step_down(ctx);
@@ -359,12 +460,24 @@ impl<G: Grain> Host<G> {
     /// Persist a snapshot at the current head if any events are uncovered by the
     /// last one (spec §9). A snapshot is only an optimization; an encode or
     /// persist failure is swallowed, leaving the journal as the authority.
+    ///
+    /// The payload is the **composite** (spec §7.12): facet 0's `State` plus one
+    /// contribution per declared facet, all at this head. Facet contributions
+    /// run against a forms *clone*, so no lock spans the (possibly blob-putting,
+    /// §7.14) await.
     async fn snapshot_now(&mut self, ctx: &Ctx<Host<G>>) {
         if self.head <= self.last_snapshot {
             return;
         }
         let codec = ctx.system().codec();
-        let Ok(bytes) = actor_serialization::encode(&*codec, &self.state) else {
+        let Ok(state) = actor_serialization::encode(&*codec, &self.state) else {
+            return;
+        };
+        let forms = self.facets.forms();
+        let Ok(facets) = G::Facets::snapshot(&forms, &self.facet_env()).await else {
+            return;
+        };
+        let Ok(bytes) = (CompositeSnapshot { state, facets }).encode() else {
             return;
         };
         if let AppendOutcome::Committed(at) = self

@@ -26,7 +26,7 @@ use granary::Granary;
 use granary::GranaryConfig;
 use granary::GranaryExt;
 use granary::GranarySystem;
-use granary::fs::Fs;
+use granary::fs::Workspace;
 use granary::fs::ReadFile;
 use granary::fs::Stat;
 use granary::fs::WriteFile;
@@ -35,7 +35,7 @@ const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
 
-type Ws = Fs<SimCluster>;
+type Ws = Workspace<SimCluster>;
 
 fn swim() -> SwimConfig {
     SwimConfig {

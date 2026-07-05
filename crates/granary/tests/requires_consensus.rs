@@ -39,6 +39,7 @@ impl Grain for Probe {
     type System = SimCluster;
     type State = Empty;
     type Event = Never;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "test.Probe";
 
     fn apply(_state: &mut Empty, _event: &Never) {}

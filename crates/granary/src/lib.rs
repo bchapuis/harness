@@ -13,6 +13,18 @@
 //! with [`Granary::grain`]. A command's reply is held until its events are
 //! durable (the §6 output gate); a crash loses no acknowledged write.
 //!
+//! # Facets: one grain, many storage features
+//!
+//! Beyond the event fold, a grain composes **facets** (spec §7.12) by declaring
+//! `type Facets`: the [`Kv`] map (§7.13), the [`fs::Fs`] workspace filesystem
+//! (§7.11), and the SQL database (§7.14, behind the `sql` cargo feature). A
+//! handler writes through the compile-time-gated `ctx` accessors —
+//! [`kv()`](GrainCtx::kv), [`fs()`](GrainCtx::fs), `sql()` — and all of a
+//! command's records, events and facet operations alike, commit as **one
+//! atomic tagged batch** in the grain's single journal, snapshot as one
+//! composite, and share one unioned blob root set. One grain, one consistency
+//! boundary, however many storage features it declares.
+//!
 //! # Scope: two durability tiers, one model
 //!
 //! The full grain programming model runs on either durability tier, selected by
@@ -62,6 +74,7 @@ mod config;
 mod election;
 mod error;
 mod event;
+mod facet;
 mod file_store;
 pub mod fs;
 mod gateway;
@@ -69,11 +82,14 @@ mod grain;
 mod grainref;
 mod host;
 mod journal;
+mod kv;
 mod memory;
 mod replica_store;
 mod replicator;
 mod shard;
 mod shardmap;
+#[cfg(feature = "sql")]
+mod sql;
 mod store;
 mod subscription;
 mod system;
@@ -83,12 +99,20 @@ pub use blobs::GrainBlobs;
 pub use config::GranaryConfig;
 pub use error::GrainError;
 pub use event::GrainEvent;
+pub use facet::Facet;
+pub use facet::FacetError;
+pub use facet::FacetSet;
+pub use facet::HasFacet;
+pub use facet::Here;
+pub use facet::There;
 pub use file_store::FileGrainStore;
+pub use fs::Fs;
 pub use grain::Grain;
 pub use grain::GrainCtx;
 pub use grain::GrainHandler;
 pub use grain::GrainName;
 pub use grain::GrainRegistry;
+pub use grain::NoEvent;
 pub use grain::accepted_manifests;
 pub use grainref::GrainRef;
 pub use grainref::Granary;
@@ -99,10 +123,23 @@ pub use journal::GrainJournal;
 pub use journal::GrainJournalError;
 pub use journal::Seq;
 pub use journal::Term;
+pub use kv::INLINE_MAX;
+pub use kv::Kv;
+pub use kv::KvHandle;
 pub use memory::LocalGrainJournal;
 pub use replica_store::ReplicaTransport;
 pub use shard::QuorumGrainJournal;
 pub use shardmap::ShardMapSource;
+#[cfg(feature = "sql")]
+pub use sql::Sql;
+#[cfg(feature = "sql")]
+pub use sql::SqlError;
+#[cfg(feature = "sql")]
+pub use sql::SqlHandle;
+#[cfg(feature = "sql")]
+pub use sql::SqlRow;
+#[cfg(feature = "sql")]
+pub use sql::SqlValue;
 pub use store::GrainStore;
 pub use store::GrainStoreFactory;
 pub use store::MemoryGrainStore;

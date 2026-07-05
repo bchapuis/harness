@@ -53,7 +53,7 @@ pub struct Slice {
 }
 
 /// A regular file: its logical size, the next slice birth-order to mint, and its
-/// shadowing slice map (kept bounded by slice GC, see [`crate::op`]).
+/// shadowing slice map (kept bounded by slice GC, see [`super::op`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileData {
     pub size: u64,

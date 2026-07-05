@@ -171,7 +171,7 @@ pub trait GrainJournal: Clone + Send + Sync + 'static {
         grain: &GrainName,
     ) -> impl Future<Output = Result<Option<(Seq, Vec<u8>)>, GrainJournalError>> + Send;
 
-    // --- The grain-native content-addressed facet (durable-workspace design) ---
+    // --- The grain-native content-addressed blob store (durable-workspace design) ---
     //
     // A grain's immutable blobs, replicated to the *same* shard replicas as its
     // records but off the ordered/fenced path (no `Seq`, no term). Surfaced on the

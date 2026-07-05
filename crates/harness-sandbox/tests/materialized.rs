@@ -14,7 +14,7 @@ use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
 use granary::GranaryConfig;
 use granary::GranaryExt;
-use granary::fs::Fs;
+use granary::fs::Workspace;
 use harness::SandboxProfile;
 use harness::SandboxProvider;
 use harness::SessionId;
@@ -28,7 +28,7 @@ use serde_json::json;
 fn provider() -> (Simulation, MaterializedSandboxes<SimSystem>, tempfile::TempDir) {
     let sim = Simulation::new(1);
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
-    let granary = system.granary::<Fs<SimSystem>>(GranaryConfig::default());
+    let granary = system.granary::<Workspace<SimSystem>>(GranaryConfig::default());
     let root = tempfile::tempdir().expect("workspaces tempdir");
     let inner = TieredSandboxes::new(root.path()).expect("inner provider");
     let provider =

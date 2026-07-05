@@ -215,6 +215,7 @@ impl<S: GranarySystem> Grain for Directory<S> {
     type System = S;
     type State = Ownership;
     type Event = Change;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "tenancy.Directory";
 
     fn apply(state: &mut Ownership, event: &Change) {

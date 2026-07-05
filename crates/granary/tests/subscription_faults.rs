@@ -61,6 +61,7 @@ impl Grain for LogGrain {
     type System = SimCluster;
     type State = Log;
     type Event = Val;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "test.Log";
 
     fn apply(state: &mut Log, event: &Val) {

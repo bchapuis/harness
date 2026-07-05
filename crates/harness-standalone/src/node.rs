@@ -44,7 +44,7 @@ use actor_runtime::TokioSpawner;
 use actor_serialization::JsonCodec;
 use granary::Granary;
 use granary::GranaryExt;
-use granary::fs::Fs;
+use granary::fs::Workspace;
 use harness::Budget;
 use harness::FileGrainStore;
 use harness::GrainStoreFactory;
@@ -323,7 +323,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // directory the container/VM runs against on open, and syncs it back on release, so
     // the workspace survives hibernation, migration, and node loss. The grain is hosted
     // on this node's system over the shared grain store, keyed by session id.
-    let workspaces_granary = || -> Granary<Fs<TcpCluster>> {
+    let workspaces_granary = || -> Granary<Workspace<TcpCluster>> {
         system.granary(GranaryConfig {
             grain_store: Some(grain_store.clone()),
             ..GranaryConfig::default()
@@ -382,7 +382,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
             // `Fs` on this node's system over the shared grain store, then back the
             // provider with it. A workspace survives hibernation, migration, and node
             // loss; the harness re-binds the same grain by session id each activation.
-            let workspaces: Granary<Fs<TcpCluster>> = system.granary(GranaryConfig {
+            let workspaces: Granary<Workspace<TcpCluster>> = system.granary(GranaryConfig {
                 grain_store: Some(grain_store.clone()),
                 ..GranaryConfig::default()
             });

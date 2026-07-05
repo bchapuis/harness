@@ -53,6 +53,7 @@ impl Grain for Counter {
     type System = SimCluster;
     type State = CounterState;
     type Event = CounterEvent;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "client.Counter";
 
     fn apply(state: &mut CounterState, event: &CounterEvent) {

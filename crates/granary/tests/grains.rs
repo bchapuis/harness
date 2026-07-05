@@ -64,6 +64,7 @@ impl Grain for CounterGrain {
     type System = SimSystem;
     type State = CounterState;
     type Event = CounterEvent;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "test.Counter";
 
     fn apply(state: &mut CounterState, event: &CounterEvent) {
@@ -389,6 +390,7 @@ impl Grain for BuggyCounter {
     type System = SimSystem;
     type State = CounterState;
     type Event = CounterEvent;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "test.BuggyCounter";
 
     fn apply(state: &mut CounterState, event: &CounterEvent) {
@@ -525,6 +527,7 @@ impl Grain for PinnedGrain {
     type System = SimSystem;
     type State = CounterState;
     type Event = CounterEvent;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "test.Pinned";
 
     fn apply(state: &mut CounterState, event: &CounterEvent) {
@@ -616,6 +619,7 @@ impl Grain for Account {
     type System = SimSystem;
     type State = Balance;
     type Event = Ledger;
+    type Facets = ();
     const GRAIN_TYPE: &'static str = "bank.Account";
 
     fn apply(state: &mut Balance, event: &Ledger) {

@@ -25,7 +25,7 @@ use actor_core::BoxFuture;
 use cap_std::fs::Dir;
 use granary::GrainRef;
 use granary::GranarySystem;
-use granary::fs::Fs;
+use granary::fs::Workspace;
 use granary::fs::ListDir;
 use granary::fs::ReadFile;
 use granary::fs::Remove;
@@ -100,7 +100,7 @@ fn child_path(base: &str, name: &str) -> String {
 /// (S1). The dir is assumed freshly created/empty; existing durable content is
 /// overwritten, matching a clean rehydration.
 pub(crate) async fn hydrate<S: GranarySystem>(
-    grain: &GrainRef<Fs<S>>,
+    grain: &GrainRef<Workspace<S>>,
     dir: &Dir,
     rules: &DurabilityRules,
 ) -> Result<(), MaterializeError> {
@@ -109,7 +109,7 @@ pub(crate) async fn hydrate<S: GranarySystem>(
 }
 
 fn hydrate_dir<'a, S: GranarySystem>(
-    grain: &'a GrainRef<Fs<S>>,
+    grain: &'a GrainRef<Workspace<S>>,
     dir: &'a Dir,
     base: &'a str,
     rules: &'a DurabilityRules,
@@ -158,7 +158,7 @@ fn hydrate_dir<'a, S: GranarySystem>(
 /// unchanged bytes ~free), and durable files the grain holds but the dir no longer
 /// has are removed — so a delete on disk propagates. Excluded trees are skipped.
 pub(crate) async fn sync_back<S: GranarySystem>(
-    grain: &GrainRef<Fs<S>>,
+    grain: &GrainRef<Workspace<S>>,
     dir: &Dir,
     rules: &DurabilityRules,
 ) -> Result<(), MaterializeError> {
@@ -170,7 +170,7 @@ pub(crate) async fn sync_back<S: GranarySystem>(
 }
 
 fn write_dir<'a, S: GranarySystem>(
-    grain: &'a GrainRef<Fs<S>>,
+    grain: &'a GrainRef<Workspace<S>>,
     dir: &'a Dir,
     base: &'a str,
     rules: &'a DurabilityRules,
@@ -234,7 +234,7 @@ fn write_dir<'a, S: GranarySystem>(
 /// propagation). Walks the grain tree; an excluded path can never be in the grain, but
 /// it is filtered defensively all the same.
 fn prune<'a, S: GranarySystem>(
-    grain: &'a GrainRef<Fs<S>>,
+    grain: &'a GrainRef<Workspace<S>>,
     base: &'a str,
     rules: &'a DurabilityRules,
     on_disk: &'a std::collections::BTreeSet<String>,

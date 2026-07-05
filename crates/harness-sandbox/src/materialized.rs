@@ -31,7 +31,7 @@ use cap_std::fs::Dir;
 use granary::GrainRef;
 use granary::Granary;
 use granary::GranarySystem;
-use granary::fs::Fs;
+use granary::fs::Workspace;
 use harness::Sandbox;
 use harness::SandboxError;
 use harness::SandboxProfile;
@@ -52,7 +52,7 @@ use crate::provider::TieredSandboxes;
 /// workspaces root the inner provider uses.
 pub struct MaterializedSandboxes<S: GranarySystem> {
     inner: TieredSandboxes,
-    granary: Granary<Fs<S>>,
+    granary: Granary<Workspace<S>>,
     /// A capability handle to the workspaces root, used to materialize and sync each
     /// session's `<root>/<session>` directory. The inner provider holds its own handle
     /// to the same root; two handles to one tree is fine (each re-resolves per path).
@@ -66,7 +66,7 @@ impl<S: GranarySystem> MaterializedSandboxes<S> {
     /// `rules` to decide which paths are durable.
     pub fn new(
         inner: TieredSandboxes,
-        granary: Granary<Fs<S>>,
+        granary: Granary<Workspace<S>>,
         root: impl AsRef<Path>,
         rules: DurabilityRules,
     ) -> std::io::Result<MaterializedSandboxes<S>> {
@@ -121,7 +121,7 @@ impl<S: GranarySystem> SandboxProvider for MaterializedSandboxes<S> {
 /// grain and directory handle that make it durable.
 struct MaterializedSandbox<S: GranarySystem> {
     inner: Arc<dyn Sandbox>,
-    grain: GrainRef<Fs<S>>,
+    grain: GrainRef<Workspace<S>>,
     dir: Arc<Dir>,
     rules: Arc<DurabilityRules>,
 }
