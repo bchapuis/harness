@@ -247,17 +247,16 @@ pub enum RecordBody {
         child_turn: TurnId,
         budget: Budget,
     },
-    /// The workspace the transcript asserts is gone (§5.5): journaled before
-    /// the next model call of an activation that will open a fresh sandbox
-    /// for a session whose journal records sandboxed activity, and surfaced
-    /// to the model with that request.
+    /// The environment the transcript asserts is gone (§5.5): journaled before
+    /// the next model call after a mid-activation `EnvironmentLost`, and
+    /// surfaced to the model with that request.
     ///
-    /// Under a **durable** workspace provider (`harness-sandbox`'s
-    /// `DurableWorkspaces`, granary §7.10) this narrows to the non-durable
-    /// *overlay* only: durable content survives across activations, so the
-    /// provider never reports `EnvironmentLost` for it, and this record is
-    /// emitted solely when the regenerable scratch (excluded trees) is lost —
-    /// which the model rebuilds rather than re-deriving the whole workspace.
+    /// The workspace's durable subtree is the agent's own facet (granary
+    /// §7.11) and always survives — a routine reactivation never resets. What
+    /// this record narrows to is the activation's working state: regenerable
+    /// excluded trees (`target/`, `node_modules/`), running processes, and
+    /// held tiers — which the model rebuilds rather than re-deriving the
+    /// whole workspace.
     WorkspaceReset,
     /// The activation's first call at `tier` is about to execute (§5.6):
     /// the write-ahead discipline (§6.4) applied to capability acquisition,

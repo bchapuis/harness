@@ -48,9 +48,13 @@ macro_rules! require_docker {
     };
 }
 
-async fn open(provider: &TieredSandboxes, session: &str) -> Arc<dyn Sandbox> {
+async fn open(
+    provider: &TieredSandboxes,
+    session: &str,
+    workspace: &std::path::Path,
+) -> Arc<dyn Sandbox> {
     provider
-        .open(&SessionId::new(session), &SandboxProfile::image(IMAGE))
+        .open(&SessionId::new(session), &SandboxProfile::image(IMAGE), workspace)
         .await
         .expect("open")
 }
@@ -98,8 +102,8 @@ fn containers(name_prefix: &str) -> Vec<String> {
 async fn shell_round_trips_through_the_bind_mounted_workspace() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "rt").await;
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "rt", &dir.path().join("rt")).await;
 
     // Container → host: a file the shell writes is visible to the
     // Workspace-tier tools over the same directory.
@@ -136,8 +140,8 @@ async fn confinement_smoke() {
     // grade).
     let sentinel = dir.path().join("sentinel");
     std::fs::write(&sentinel, "outside").expect("sentinel");
-    let provider = TieredSandboxes::new(dir.path().join("workspaces")).expect("provider");
-    let sandbox = open(&provider, "conf").await;
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "conf", &dir.path().join("workspaces/conf")).await;
 
     for escape in [
         "cat /workspace/../sentinel",
@@ -164,8 +168,8 @@ async fn confinement_smoke() {
 async fn failures_are_outcomes_not_errors() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "fail").await;
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "fail", &dir.path().join("fail")).await;
 
     // A nonzero exit is an outcome the model reacts to, never a ToolError.
     let out = shell(&sandbox, "exit 3").await.expect("outcome");
@@ -184,8 +188,8 @@ async fn failures_are_outcomes_not_errors() {
 async fn output_is_capped() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "cap").await;
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "cap", &dir.path().join("cap")).await;
 
     let out = shell(&sandbox, "head -c 100000 /dev/zero | tr '\\0' 'a'")
         .await
@@ -207,9 +211,13 @@ async fn output_is_capped() {
 async fn an_empty_image_fails_the_call_as_a_sandbox_outcome() {
     // No docker required: the check fires before any docker invocation.
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
+    let provider = TieredSandboxes::new();
     let sandbox = provider
-        .open(&SessionId::new("noimg"), &SandboxProfile::default())
+        .open(
+            &SessionId::new("noimg"),
+            &SandboxProfile::default(),
+            &dir.path().join("noimg"),
+        )
         .await
         .expect("open");
 
@@ -228,17 +236,21 @@ async fn an_empty_image_fails_the_call_as_a_sandbox_outcome() {
 async fn a_named_egress_allowlist_fails_open() {
     // No docker required: the validation is provider-side, at open.
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
+    let provider = TieredSandboxes::new();
 
     // §2.2: holding Native implies Network's grants; --network none delivers
     // an empty allowlist only, so a profile naming egress must fail loudly.
     let mut egress = SandboxProfile::image(IMAGE);
     egress.egress = vec!["api.example.com".to_string()];
-    let denied = provider.open(&SessionId::new("net"), &egress).await;
+    let denied = provider
+        .open(&SessionId::new("net"), &egress, &dir.path().join("net"))
+        .await;
     assert!(denied.is_err(), "a named egress allowlist must fail open");
 
     let capped = SandboxProfile::image(IMAGE).cap([Tier::Workspace, Tier::Network]);
-    let denied = provider.open(&SessionId::new("net2"), &capped).await;
+    let denied = provider
+        .open(&SessionId::new("net2"), &capped, &dir.path().join("net2"))
+        .await;
     assert!(denied.is_err(), "a Network-bearing cap must fail open");
 }
 
@@ -250,8 +262,8 @@ async fn a_named_egress_allowlist_fails_open() {
 async fn provisioning_is_lazy_and_counted() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "lazy").await;
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "lazy", &dir.path().join("lazy")).await;
 
     // A Workspace call provisions nothing (sandbox spec §2.3 item 2).
     workspace(&sandbox, "write_file", json!({"path": "f", "content": "x"}))
@@ -271,8 +283,8 @@ async fn provisioning_is_lazy_and_counted() {
 async fn release_removes_the_container_and_is_idempotent() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "rel").await;
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "rel", &dir.path().join("rel")).await;
 
     shell(&sandbox, "true").await.expect("shell");
     assert_eq!(containers("harness-sb-rel").len(), 1, "container exists");
@@ -283,10 +295,9 @@ async fn release_removes_the_container_and_is_idempotent() {
         0,
         "release removes the container (S5)"
     );
-    assert_eq!(
-        std::fs::read_dir(dir.path()).expect("root").count(),
-        0,
-        "the workspace directory is gone too"
+    assert!(
+        dir.path().join("rel").is_dir(),
+        "release never deletes the caller-owned workspace directory"
     );
     // Idempotent: a second release is a no-op, not an error.
     sandbox.release().await;
@@ -300,8 +311,8 @@ async fn release_removes_the_container_and_is_idempotent() {
 async fn an_externally_killed_container_is_single_tier_loss() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "stl").await;
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "stl", &dir.path().join("stl")).await;
 
     shell(&sandbox, "true").await.expect("first");
     let names = containers("harness-sb-stl");
@@ -333,8 +344,8 @@ async fn an_externally_killed_container_is_single_tier_loss() {
 async fn a_vanished_workspace_escalates_to_environment_lost() {
     require_docker!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "lost").await;
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "lost", &dir.path().join("lost")).await;
 
     shell(&sandbox, "true").await.expect("first");
     // Remove the container first (a live bind mount can keep the directory
@@ -347,13 +358,7 @@ async fn a_vanished_workspace_escalates_to_environment_lost() {
         .output()
         .expect("docker rm");
     assert!(killed.status.success());
-    let session_dir = std::fs::read_dir(dir.path())
-        .expect("root")
-        .next()
-        .expect("session dir")
-        .expect("entry")
-        .path();
-    std::fs::remove_dir_all(&session_dir).expect("external loss");
+    std::fs::remove_dir_all(dir.path().join("lost")).expect("external loss");
 
     // Only EnvironmentLost engages the harness's reset protocol (§5.5).
     let lost = shell(&sandbox, "true").await;

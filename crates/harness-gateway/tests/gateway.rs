@@ -71,6 +71,7 @@ impl SandboxProvider for NoSandbox {
         &self,
         _session: &SessionId,
         _profile: &SandboxProfile,
+        _workspace: &std::path::Path,
     ) -> BoxFuture<'static, Result<Arc<dyn Sandbox>, SandboxError>> {
         Box::pin(async { unreachable!("no sandboxed tool is called in this test") })
     }

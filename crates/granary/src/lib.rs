@@ -16,10 +16,10 @@
 //! # Facets: one grain, many storage features
 //!
 //! Beyond the event fold, a grain composes **facets** (spec §7.12) by declaring
-//! `type Facets`: the [`Kv`] map (§7.13), the [`fs::Fs`] workspace filesystem
+//! `type Facets`: the [`Kv`] map (§7.13), the [`Ws`] workspace directory
 //! (§7.11), and the SQL database (§7.14, behind the `sql` cargo feature). A
 //! handler writes through the compile-time-gated `ctx` accessors —
-//! [`kv()`](GrainCtx::kv), [`fs()`](GrainCtx::fs), `sql()` — and all of a
+//! [`kv()`](GrainCtx::kv), [`ws()`](GrainCtx::ws), `sql()` — and all of a
 //! command's records, events and facet operations alike, commit as **one
 //! atomic tagged batch** in the grain's single journal, snapshot as one
 //! composite, and share one unioned blob root set. One grain, one consistency
@@ -76,7 +76,6 @@ mod error;
 mod event;
 mod facet;
 mod file_store;
-pub mod fs;
 mod gateway;
 mod grain;
 mod grainref;
@@ -93,6 +92,7 @@ mod sql;
 mod store;
 mod subscription;
 mod system;
+mod ws;
 
 pub use blobs::BlobId;
 pub use blobs::GrainBlobs;
@@ -106,7 +106,6 @@ pub use facet::HasFacet;
 pub use facet::Here;
 pub use facet::There;
 pub use file_store::FileGrainStore;
-pub use fs::Fs;
 pub use grain::Grain;
 pub use grain::GrainCtx;
 pub use grain::GrainHandler;
@@ -157,3 +156,8 @@ pub use subscription::Subscription;
 pub use system::GranarySystem;
 pub use system::ShardId;
 pub use system::shard_for;
+pub use ws::MAX_TREE_BYTES;
+pub use ws::Ws;
+pub use ws::WsCapture;
+pub use ws::WsError;
+pub use ws::WsHandle;

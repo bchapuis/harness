@@ -66,15 +66,17 @@ macro_rules! require_assets {
     };
 }
 
-fn provider(root: &Path, config: FirecrackerConfig) -> TieredSandboxes {
-    TieredSandboxes::new(root)
-        .expect("provider")
-        .with_firecracker(config)
+fn provider(config: FirecrackerConfig) -> TieredSandboxes {
+    TieredSandboxes::new().with_firecracker(config)
 }
 
-async fn open(provider: &TieredSandboxes, session: &str) -> Arc<dyn Sandbox> {
+async fn open(
+    provider: &TieredSandboxes,
+    session: &str,
+    workspace: &Path,
+) -> Arc<dyn Sandbox> {
     provider
-        .open(&SessionId::new(session), &SandboxProfile::default())
+        .open(&SessionId::new(session), &SandboxProfile::default(), workspace)
         .await
         .expect("open")
 }
@@ -95,9 +97,13 @@ async fn workspace(
 
 /// The VM's host-side footprint: the firecracker process whose command line
 /// names this session's control directory (the same digest the tier
-/// derives), and the directory itself.
-fn control_dir(root: &Path, session_dir_name: &str) -> PathBuf {
-    let workspace = root.join(session_dir_name).display().to_string();
+/// derives), and the directory itself. The tier canonicalizes the workspace
+/// path before digesting; match it.
+fn control_dir(workspace: &Path) -> PathBuf {
+    let workspace = std::fs::canonicalize(workspace)
+        .expect("workspace exists")
+        .display()
+        .to_string();
     let digest = harness::session::content_digest(&workspace);
     std::env::temp_dir().join(format!("harness-fc-{digest:016x}"))
 }
@@ -113,17 +119,6 @@ fn vm_pids(control: &Path) -> Vec<String> {
         .collect()
 }
 
-fn session_dir_name(root: &Path) -> String {
-    std::fs::read_dir(root)
-        .expect("root")
-        .next()
-        .expect("session dir")
-        .expect("entry")
-        .file_name()
-        .to_string_lossy()
-        .into_owned()
-}
-
 // ---------------------------------------------------------------------------
 // The shell tool over the synced workspace
 // ---------------------------------------------------------------------------
@@ -132,8 +127,9 @@ fn session_dir_name(root: &Path) -> String {
 async fn shell_round_trips_through_the_synced_workspace() {
     let config = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = provider(dir.path(), config);
-    let sandbox = open(&provider, "rt").await;
+    let ws = dir.path().join("rt");
+    let provider = provider(config);
+    let sandbox = open(&provider, "rt", &ws).await;
 
     // Guest → host: a file the shell writes is pulled back to the workspace
     // the Workspace-tier tools see.
@@ -177,8 +173,9 @@ async fn confinement_smoke() {
     // sentinel is not even on the guest's filesystem).
     let sentinel = dir.path().join("sentinel");
     std::fs::write(&sentinel, "outside").expect("sentinel");
-    let provider = provider(&dir.path().join("workspaces"), config);
-    let sandbox = open(&provider, "conf").await;
+    let ws = dir.path().join("workspaces/conf");
+    let provider = provider(config);
+    let sandbox = open(&provider, "conf", &ws).await;
 
     for escape in [
         "cat /workspace/../sentinel",
@@ -217,8 +214,9 @@ async fn confinement_smoke() {
 async fn failures_are_outcomes_not_errors() {
     let config = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = provider(dir.path(), config);
-    let sandbox = open(&provider, "fail").await;
+    let ws = dir.path().join("fail");
+    let provider = provider(config);
+    let sandbox = open(&provider, "fail", &ws).await;
 
     // A nonzero exit is an outcome the model reacts to, never a ToolError.
     let out = shell(&sandbox, "exit 3").await.expect("outcome");
@@ -237,8 +235,9 @@ async fn failures_are_outcomes_not_errors() {
 async fn output_is_capped() {
     let config = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = provider(dir.path(), config);
-    let sandbox = open(&provider, "cap").await;
+    let ws = dir.path().join("cap");
+    let provider = provider(config);
+    let sandbox = open(&provider, "cap", &ws).await;
 
     let out = shell(&sandbox, "head -c 100000 /dev/zero | tr '\\0' 'a'")
         .await
@@ -260,8 +259,9 @@ async fn output_is_capped() {
 async fn provisioning_is_lazy_and_counted() {
     let config = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = provider(dir.path(), config);
-    let sandbox = open(&provider, "lazy").await;
+    let ws = dir.path().join("lazy");
+    let provider = provider(config);
+    let sandbox = open(&provider, "lazy", &ws).await;
 
     // A Workspace call provisions nothing (sandbox spec §2.3 item 2).
     workspace(&sandbox, "write_file", json!({"path": "f", "content": "x"}))
@@ -281,20 +281,20 @@ async fn provisioning_is_lazy_and_counted() {
 async fn release_kills_the_vm_and_is_idempotent() {
     let config = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = provider(dir.path(), config);
-    let sandbox = open(&provider, "rel").await;
+    let ws = dir.path().join("rel");
+    let provider = provider(config);
+    let sandbox = open(&provider, "rel", &ws).await;
 
     shell(&sandbox, "true").await.expect("shell");
-    let control = control_dir(dir.path(), &session_dir_name(dir.path()));
+    let control = control_dir(&ws);
     assert_eq!(vm_pids(&control).len(), 1, "one VM runs");
 
     sandbox.release().await;
     assert!(vm_pids(&control).is_empty(), "release kills the VM (S5)");
     assert!(!control.exists(), "the control directory is gone");
-    assert_eq!(
-        std::fs::read_dir(dir.path()).expect("root").count(),
-        0,
-        "the workspace directory is gone too"
+    assert!(
+        ws.is_dir(),
+        "release never deletes the caller-owned workspace directory"
     );
     // Idempotent: a second release is a no-op, not an error.
     sandbox.release().await;
@@ -308,11 +308,12 @@ async fn release_kills_the_vm_and_is_idempotent() {
 async fn an_externally_killed_vm_is_single_tier_loss() {
     let config = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = provider(dir.path(), config);
-    let sandbox = open(&provider, "stl").await;
+    let ws = dir.path().join("stl");
+    let provider = provider(config);
+    let sandbox = open(&provider, "stl", &ws).await;
 
     shell(&sandbox, "true").await.expect("first");
-    let control = control_dir(dir.path(), &session_dir_name(dir.path()));
+    let control = control_dir(&ws);
     let pids = vm_pids(&control);
     assert_eq!(pids.len(), 1);
     // The world kills the VMM behind the provider's back, while the
@@ -342,12 +343,12 @@ async fn an_externally_killed_vm_is_single_tier_loss() {
 async fn a_vanished_workspace_escalates_to_environment_lost() {
     let config = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = provider(dir.path(), config);
-    let sandbox = open(&provider, "lost").await;
+    let ws = dir.path().join("lost");
+    let provider = provider(config);
+    let sandbox = open(&provider, "lost", &ws).await;
 
     shell(&sandbox, "true").await.expect("first");
-    let session_dir = dir.path().join(session_dir_name(dir.path()));
-    std::fs::remove_dir_all(&session_dir).expect("external loss");
+    std::fs::remove_dir_all(&ws).expect("external loss");
 
     // Only EnvironmentLost engages the harness's reset protocol (§5.5).
     let lost = shell(&sandbox, "true").await;
@@ -365,11 +366,12 @@ async fn a_vanished_workspace_escalates_to_environment_lost() {
 #[tokio::test]
 async fn a_missing_binary_fails_the_call_as_a_sandbox_outcome() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = provider(
-        dir.path(),
-        FirecrackerConfig::new("/no/such/firecracker", "/no/vmlinux", "/no/rootfs.ext4"),
-    );
-    let sandbox = open(&provider, "nobin").await;
+    let provider = provider(FirecrackerConfig::new(
+        "/no/such/firecracker",
+        "/no/vmlinux",
+        "/no/rootfs.ext4",
+    ));
+    let sandbox = open(&provider, "nobin", &dir.path().join("nobin")).await;
 
     // Provisioning fails as a per-call outcome (harness spec §5.4) — and
     // lazily: the Workspace tier still works without firecracker anywhere.
@@ -391,10 +393,7 @@ async fn a_missing_binary_fails_the_call_as_a_sandbox_outcome() {
 #[tokio::test]
 async fn a_named_egress_allowlist_fails_open() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = provider(
-        dir.path(),
-        FirecrackerConfig::new("/usr/bin/firecracker", "/k", "/r"),
-    );
+    let provider = provider(FirecrackerConfig::new("/usr/bin/firecracker", "/k", "/r"));
 
     // §2.2: holding Native implies Network's grants; a VM with no network
     // device delivers an empty allowlist only, so a profile naming egress
@@ -403,10 +402,14 @@ async fn a_named_egress_allowlist_fails_open() {
         egress: vec!["api.example.com".to_string()],
         ..SandboxProfile::default()
     };
-    let denied = provider.open(&SessionId::new("net"), &egress).await;
+    let denied = provider
+        .open(&SessionId::new("net"), &egress, &dir.path().join("net"))
+        .await;
     assert!(denied.is_err(), "a named egress allowlist must fail open");
 
     let capped = SandboxProfile::default().cap([Tier::Workspace, Tier::Network]);
-    let denied = provider.open(&SessionId::new("net2"), &capped).await;
+    let denied = provider
+        .open(&SessionId::new("net2"), &capped, &dir.path().join("net2"))
+        .await;
     assert!(denied.is_err(), "a Network-bearing cap must fail open");
 }

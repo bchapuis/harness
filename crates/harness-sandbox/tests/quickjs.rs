@@ -32,17 +32,9 @@ struct Bench {
 
 fn bench(seed: u64, profile: &SandboxProfile) -> Bench {
     let root = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(root.path())
-        .expect("provider")
-        .with_seed(seed)
-        .with_quickjs();
-    let sandbox = block_on(provider.open(&SessionId::new("s"), profile)).expect("open");
-    let dir = std::fs::read_dir(root.path())
-        .expect("root")
-        .next()
-        .expect("session dir")
-        .expect("entry")
-        .path();
+    let provider = TieredSandboxes::new().with_seed(seed).with_quickjs();
+    let dir = root.path().join("s");
+    let sandbox = block_on(provider.open(&SessionId::new("s"), profile, &dir)).expect("open");
     Bench {
         sandbox,
         dir,

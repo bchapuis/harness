@@ -198,7 +198,7 @@ impl GrainHandler<SweepNow> for Prefs {
     }
 }
 
-// --- A grain composing BOTH facets: events + kv + fs, one boundary (§7.12) ----
+// --- A grain composing BOTH facets: events + kv + ws, one boundary (§7.12) ----
 
 #[derive(Default)]
 struct Project;
@@ -207,7 +207,7 @@ impl Grain for Project {
     type System = SimSystem;
     type State = PrefsState;
     type Event = PrefsEvent;
-    type Facets = (Kv, granary::Fs);
+    type Facets = (Kv, granary::Ws);
     const GRAIN_TYPE: &'static str = "test.Project";
 
     fn apply(state: &mut PrefsState, event: &PrefsEvent) {
@@ -218,16 +218,16 @@ impl Grain for Project {
 }
 
 /// One command, three facets, one atomic batch (G19): write the document into
-/// the fs facet, point `last` at it in the kv facet, and count the save as a
-/// facet-0 event. This is the composition a `GrainRef` to a separate workspace
-/// grain cannot give (§7.11).
+/// the workspace directory and capture it, point `last` at it in the kv facet,
+/// and count the save as a facet-0 event — one grain, one consistency
+/// boundary (§7.11).
 #[derive(Clone, Serialize, Deserialize)]
 struct SaveDoc {
     path: String,
     content: Vec<u8>,
 }
 impl Message for SaveDoc {
-    type Reply = Result<u64, granary::fs::FsError>;
+    type Reply = Result<u64, granary::WsError>;
     const MANIFEST: Manifest = Manifest::new("test.SaveDoc");
 }
 impl GrainHandler<SaveDoc> for Project {
@@ -236,20 +236,28 @@ impl GrainHandler<SaveDoc> for Project {
         _state: &PrefsState,
         msg: SaveDoc,
         ctx: &GrainCtx<Self>,
-    ) -> (Vec<PrefsEvent>, Result<u64, granary::fs::FsError>) {
-        if let Err(e) = ctx.fs().write_file(&msg.path, &msg.content).await {
+    ) -> (Vec<PrefsEvent>, Result<u64, granary::WsError>) {
+        let dir = match ctx.ws().dir_path() {
+            Ok(dir) => dir,
+            Err(e) => return (vec![], Err(e)),
+        };
+        let disk = dir.join(&msg.path);
+        if let Some(parent) = disk.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(&disk, &msg.content).expect("write");
+        if let Err(e) = ctx.ws().capture() {
             return (vec![], Err(e));
         }
-        let written = msg.content.len() as u64;
         ctx.kv()
             .put("last", msg.path.into_bytes())
             .await
             .expect("inline kv put");
-        (vec![PrefsEvent::Wrote], Ok(written))
+        (vec![PrefsEvent::Wrote], Ok(msg.content.len() as u64))
     }
 }
 
-/// The kv-side pointer and the fs-side bytes it names, read in one command
+/// The kv-side pointer and the workspace bytes it names, read in one command
 /// through both accessors.
 #[derive(Clone, Serialize, Deserialize)]
 struct LastDoc;
@@ -268,7 +276,8 @@ impl GrainHandler<LastDoc> for Project {
             return (vec![], None);
         };
         let path = String::from_utf8(path).expect("utf8 path");
-        let bytes = ctx.fs().read_file(&path, None).await.expect("read");
+        let dir = ctx.ws().dir_path().expect("dir");
+        let bytes = std::fs::read(dir.join(&path)).expect("read");
         (vec![], Some((path, bytes)))
     }
 }
@@ -292,13 +301,15 @@ impl GrainHandler<Saves> for Project {
 }
 
 #[test]
-fn kv_fs_and_events_compose_in_one_grain() {
+fn kv_ws_and_events_compose_in_one_grain() {
+    let scratch = tempfile::tempdir().expect("tempdir");
     let sim = Simulation::new(19);
     let recorder = Recorder::new();
     let system = sim_system(&sim, &recorder);
     let projects = system.granary::<Project>(GranaryConfig {
         idle_after: Duration::from_millis(10),
         snapshot_every: 3,
+        data_dir: Some(scratch.path().to_path_buf()),
         ..GranaryConfig::default()
     });
 
@@ -330,7 +341,7 @@ fn kv_fs_and_events_compose_in_one_grain() {
         );
     });
 
-    // Hibernate: the composite snapshot carries state + kv + fs together.
+    // Hibernate: the composite snapshot carries state + kv + ws together.
     sim.run();
     assert!(
         recorder.events().iter().any(|e| matches!(

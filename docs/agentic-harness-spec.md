@@ -5,7 +5,7 @@
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
 
-Sections of the granary specification are cited as **grain §N** (its invariants as **G1–G15**); the actor framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)) as **core §N**, the cluster utilities ([`cluster-utilities-spec.md`](cluster-utilities-spec.md)) as **util §N**, and the sandbox specification ([`sandbox-spec.md`](sandbox-spec.md)) as **sandbox §N**. Sections of this document are plain **§N**. Invariants defined here are numbered **H1, H3, …** (H2 is retired, §11), kept apart from the granary catalogue (G1–G15), the core catalogue (core §18.5), and the sandbox catalogue (S1–S5).
+Sections of the granary specification are cited as **grain §N** (its invariants as **G1–G20**); the actor framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)) as **core §N**, the cluster utilities ([`cluster-utilities-spec.md`](cluster-utilities-spec.md)) as **util §N**, and the sandbox specification ([`sandbox-spec.md`](sandbox-spec.md)) as **sandbox §N**. Sections of this document are plain **§N**. Invariants defined here are numbered **H1, H3, …** (H2 is retired, §11), kept apart from the granary catalogue (G1–G20, plus the facet contract F1–F4), the core catalogue (core §18.5), and the sandbox catalogue (S1–S5).
 
 > **Design stance.** The runtime is one idea applied twice. Granary's idea is that **an object is an actor plus three things**: a name-based virtual identity, a durable event-sourced journal, and a durability barrier on the reply. Everything else (mailboxes, serial execution, location-transparent `ask`/`tell`, membership, supervision) is inherited from the actor model unchanged (grain §1). The harness's idea is the next layer up. **An agent is a grain plus three things**: a self-driving loop, a model seam, and a sandbox. Everything else (identity, the journal, the single-writer fence, placement, activation, hibernation, failover) is inherited from the grain unchanged.
 >
@@ -189,7 +189,7 @@ A run splits across one deliberately placed boundary:
 | In the grain's activation: the **loop** | In the sandbox: the **effects** |
 |---|---|
 | control flow: steps, budgets, delegation | tool execution: shell, files, processes, network |
-| model calls, through the `Model` seam (§4) | working state: a workspace that is *not* session state (§5.5) |
+| model calls, through the `Model` seam (§4) | working state: processes and regenerable caches — the workspace's durable subtree is the session's own facet (grain §7.11, §5.5) |
 | the fold and the journal, through the grain (grain §6, §7) | everything a tool's side effects touch |
 
 Above the boundary, the loop touches the world only through the three seams; it is serial, journaled, and cheap: the mutualization premise (§1), and the grain's premise too (grain §7.8, where activation is a local, consensus-free operation). Below it, a tool may do anything *inside* its session's sandbox and nothing outside it. Grain/actor isolation (core §3.5) protects sessions' state from one another; sandbox isolation protects the node, and every other session's effects, from tools.
@@ -200,7 +200,7 @@ Above the boundary, the loop touches the world only through the three seams; it 
 - **Loop inside the sandbox.** Ship the whole session into the box, one box per session. That is today's architecture relocated, not replaced: every session pays for an isolated environment to host control flow that is mostly waiting, and the grain's discipline (the journal, the output gate, the deterministic fold) becomes as opaque to the runtime as the tools are.
 - **A sandbox per tool call.** Maximal isolation, but consecutive calls share nothing, and the checkout, build cache, or running server one step produced is exactly what the next step needs. The workspace is the unit of tool-to-tool continuity.
 
-Hence one sandbox **per session**, opened lazily per activation (§5.3) and colocated with the shard leader where the activation already runs (grain §5.2): coarse enough to keep working state across calls, fine enough that no effect escapes the session that made it. What this placement deliberately gives up is workspace durability: the workspace is working state, not session state, and when it is lost (including on every migration, since in-memory and on-leader state never moves with the grain, grain §10), §5.5 puts the loss on the record rather than papering over it.
+Hence one sandbox **per session**, opened lazily per activation (§5.3) and colocated with the shard leader where the activation already runs (grain §5.2): coarse enough to keep working state across calls, fine enough that no effect escapes the session that made it. The workspace directory the sandbox runs over is the session grain's own **workspace facet** (grain §7.11): each tool call's file delta commits atomically with its `ToolOutcome` record, and every activation — including one on a new leader after a migration — rematerializes the directory from the journal. What remains genuinely working state is the *environment*: running processes, containers, held tiers, and regenerable excluded trees; when that is lost mid-activation, §5.5 puts the loss on the record rather than papering over it.
 
 ### 5.2 Declarations and the registry
 
@@ -208,7 +208,7 @@ Every tool is **declared** to the harness; the model and the loop need its inter
 
 ```rust
 pub struct ToolDecl {
-    pub name: &'static str,     // stable, author-chosen; the model selects by it (cf. manifests, core §4.4)
+    pub name: String,           // stable, author-chosen; the model selects by it (cf. manifests, core §4.4)
     pub description: String,
     pub input_schema: Schema,
     pub tier: Tier,              // the capability set the call requires (§5.6); part of the kind's digest (§7.1)
@@ -243,10 +243,12 @@ Every declared tool is **sandboxed**: its call dispatches through the `Sandbox` 
 
 ```rust
 /// Provisioning of isolated execution environments. The third harness seam.
+/// `workspace` is the session's workspace-facet directory (grain §7.11),
+/// rematerialized by the grain before the open: the sandbox runs over it and
+/// never owns its durability.
 pub trait SandboxProvider: Send + Sync + 'static {
-    type Sandbox: Sandbox;
-    async fn open(&self, session: &SessionId, profile: &SandboxProfile)
-        -> Result<Self::Sandbox, SandboxError>;
+    async fn open(&self, session: &SessionId, profile: &SandboxProfile, workspace: &Path)
+        -> Result<Arc<dyn Sandbox>, SandboxError>;
 }
 
 /// One environment, bound to one activation, colocated with the shard leader.
@@ -278,9 +280,9 @@ A tool call's **intent** is journaled before execution and its **outcome** after
 
 A dangling call is not always dead. The grain's single-writer fence guarantees one *transcript* (grain §8), but it cannot recall a launched effect. A leader deposed but not yet aware of it (the read-your-leader window, grain §7.5) may still be *executing* a slow call when the new leader resolves it: a `Reexecute` re-execution may then run concurrently with the original, and a model answering `ToolError::Interrupted` with a retry may duplicate a side effect the old leader is still producing. The window is the duration of the in-flight call, not a message round-trip. This is the cost granary itemizes for a deposed leader (grain §11) made concrete for effects; the fence guards the record, not the world, and this specification does not pretend otherwise. (`delegate` is the one call the architecture itself rescues: its re-execution is a child `Submit` carrying the same `TurnId`, which dedups into an attach rather than a second run, §7.4, §8.1.)
 
-The sandbox itself is **not session state**: the fold (§6, grain §1) never reads it, no record depends on its contents, and a lost workspace is never reconstructed by the harness. Anything that must outlive the sandbox leaves it through a tool: push a branch, upload an artifact, return a result the loop journals. This is core §1.2's "retries are the caller's decision" applied to effects: the harness never re-fires a non-idempotent side effect on its own authority, and never pretends a lost workspace still exists.
+The sandbox itself is **not session state**: the fold (§6, grain §1) never reads it, and a lost *environment* — processes, containers, tier grants — is never reconstructed by the harness. The workspace's **durable subtree** is different: it is the session grain's workspace facet (grain §7.11), captured into the journal after each tool call and rematerialized on every activation, so hibernation, migration, and crash-failover preserve it by construction. What lives outside that capture discipline (excluded trees like `target/`, running servers, anything a tool left in memory) must outlive the sandbox through a tool: push a branch, upload an artifact, return a result the loop journals. This is core §1.2's "retries are the caller's decision" applied to effects: the harness never re-fires a non-idempotent side effect on its own authority, and never pretends a lost environment still exists.
 
-Nor may the *model* be left pretending. The transcript asserts a workspace the world may no longer hold (files written, servers left running), and a model resumed into a fresh sandbox would otherwise discover the loss only through a confusing downstream failure. When an activation opens a fresh sandbox for a session whose journal already records sandboxed activity (after a hibernation §7.2, a migration §3.3, an environment loss, or a crash), it MUST journal a **`WorkspaceReset`** record before the next model call and surface it to the model with that request. The record answers no `CallId`, so it cannot ride a tool result: it enters the request as input content the harness authors. The loss thus enters the record, and the model re-derives what it needs instead of acting on state that is gone.
+Nor may the *model* be left pretending. A routine reactivation (hibernation §7.2, migration §3.3, crash-failover) journals **no reset**: the durable subtree the transcript asserts is rematerialized before the sandbox opens, so the model's picture of its files stays true. What the model must hear about is a **mid-activation environment loss**: the provider returned `EnvironmentLost`, so running processes, excluded trees, and held tiers are gone even though the durable files survive in the journal. The activation MUST then journal a **`WorkspaceReset`** record before the next model call and surface it to the model with that request. The record answers no `CallId`, so it cannot ride a tool result: it enters the request as input content the harness authors. The loss thus enters the record, and the model re-derives its working state instead of acting on an environment that is gone.
 
 Tier loss follows the same rule at two grains: surfaced, never silently repaired. A fresh sandbox resets **every** tier the lost activation held: `WorkspaceReset` covers the whole environment, the new activation's held set restarts at `Workspace` (§5.6), and re-acquisition is re-journaled, never silently inherited. Loss of a single tier's environment while the sandbox survives surfaces as `ToolError` outcomes on the calls that needed it (§5.4); the provider MAY re-provision that tier lazily under the acquisition this activation already journaled, and MUST NOT grant a tier the activation never journaled (sandbox §4).
 
@@ -342,7 +344,7 @@ A session's placement is the grain's: its name hashes to a shard, the shard map 
 
 The leader activates a session lazily, on the first message that reaches it: rehydrate (snapshot + replay, grain §9) → fold → run the loop. Activation takes no consensus and no network (grain §5.2, §7.8): the leader holds the shard log locally.
 
-**Hibernation (idle stop).** After a configurable idle interval the leader MAY hibernate a session (grain §10): run nothing that mutates state, snapshot to bound the next replay, release the sandbox (H8), and drop the activation. It MUST NOT hibernate a session whose run is live. Hibernation needs no flush (anything worth keeping is already a record, §6.2), but it releases the sandbox, and the workspace with it (§5.5). `idle_after` SHOULD default to about **10 seconds**, matching the grain default (grain §10) and the Durable Objects eviction window, because reactivation is a cheap local replay. The idle timeout is therefore not a tuning detail: it is the knob trading sandbox cost, the expensive resource mutualization actually shares, against workspace continuity.
+**Hibernation (idle stop).** After a configurable idle interval the leader MAY hibernate a session (grain §10): run nothing that mutates state, snapshot to bound the next replay, release the sandbox (H8), and drop the activation. It MUST NOT hibernate a session whose run is live. Hibernation needs no flush (anything worth keeping is already a record, §6.2), and it releases the sandbox — the environment's processes and containers; the workspace's durable subtree survives in the journal and rematerializes on reactivation (grain §7.11, §5.5). `idle_after` SHOULD default to about **10 seconds**, matching the grain default (grain §10) and the Durable Objects eviction window, because reactivation is a cheap local replay. The idle timeout is therefore not a tuning detail: it is the knob trading sandbox cost, the expensive resource mutualization actually shares, against environment continuity (warm containers, regenerable build caches).
 
 **Stale-leader redirect.** A command arriving at a node that no longer leads the shard receives `NotLeader(hint)` (grain §5.4, grain §8); the runtime refreshes its shard-map cache and retries against the hint, bounded to avoid a loop. It is ordinary Raft client redirection, and the `TurnId` (§7.4) keeps the eventual retry safe.
 
@@ -352,11 +354,13 @@ A session is addressed as a grain, and its commands are grain commands (grain §
 
 | Command | Reply (`M::Reply`) | Manifest |
 |---|---|---|
-| `Submit { session, kind, turn, reply_to: Option<ActorRef<RunCompleted>> }` | `Accepted`† | `harness.Submit` |
-| `Cancel { session, turn }` | `()` | `harness.Cancel` |
-| `Tail { session, from, limit }` | `Vec<(Seq, Record)>` | `harness.Tail` |
+| `Submit { kind, turn, parent?, reply_to: Option<ActorRef<RunCompleted>> }` | `Accepted`† | `harness.Submit` |
+| `Cancel { turn }` | `()` | `harness.Cancel` |
+| `Tail { from, limit }` | `Vec<(Seq, Record)>` | `harness.Tail` |
 
-†`Submit` replies with an **ack, not the run's outcome**: `Accepted { run: TurnId, status: Started | Attached | Ended }`, released by the output gate the moment the `TurnSubmitted` record commits, an ordinary output-gated grain reply (grain §6). Each command is delivered through `GrainRef::ask` (grain §4.3), so the call surfaces `GrainError` (transport, `NotLeader`, `Unavailable`, `Unhandled`, grain §12) outside the reply. `Cancel` likewise commits one `RunEnded { Cancelled }` record and acks; `Tail` emits no record and reads (grain §6, §7.5).
+The session names no payload field: it is the grain name the command is addressed to (grain §5.4). `parent` carries a delegating parent's lineage (§8.1, §10.3) and is absent on a root submit.
+
+†`Submit` replies with an **ack, not the run's outcome**: `Accepted { turn: TurnId, status: Started | Attached | Ended }`, released by the output gate the moment the `TurnSubmitted` record commits, an ordinary output-gated grain reply (grain §6). Each command is delivered through `GrainRef::ask` (grain §4.3), so the call surfaces `GrainError` (transport — including an unregistered manifest — `NotLeader`, `Unavailable`, grain §12) outside the reply. `Cancel` likewise commits one `RunEnded { Cancelled }` record and acks; `Tail` emits no record and reads (grain §6, §7.5).
 
 The run's outcome travels separately, as an **outbound notification** the activation `tell`s when the run's `RunEnded` commits:
 
@@ -377,7 +381,7 @@ A read-only command (`Tail`, and any future query that emits no record) commits 
 ### 7.4 The client view (`SessionRef`) and idempotent submission
 
 ```rust
-let h = Harness::new(system, kinds, model, sandboxes);
+let h = Harness::cluster(system, kinds, model, sandboxes);
 //   per node: registers each kind's gateway and injects the model and sandbox seams (§4, §5.3);
 //   the journal is the grain's, configured per kind (§7.1), not a harness seam.
 let s = h.session("researcher", SESSION_ID);       // a GrainRef<Agent>; name→shard is a pure local hash,
@@ -399,7 +403,7 @@ The **subscriber set** (the reply-tos registered for a live run) is ephemeral ac
 
 ### 7.5 Resume after node failure
 
-When a session's shard leader fails or is partitioned away, the shard's replicas elect a new leader by ordinary Raft (grain §8.3); the new leader already holds every committed record (leader completeness, G14). The next message routed to the shard activates the session there: rehydrate (grain §9), fold (§6.2), dangling-call resolution (§5.5), `WorkspaceReset` if the journal records prior sandbox activity (§5.5), and continuation of any unfinished run. No coordinator hands the session over: placement is the shard map, the journal is the state, and Raft is the fence (§6.2). No acknowledged record is lost (G14, H1).
+When a session's shard leader fails or is partitioned away, the shard's replicas elect a new leader by ordinary Raft (grain §8.3); the new leader already holds every committed record (leader completeness, G14). The next message routed to the shard activates the session there: rehydrate (grain §9, rematerializing the workspace facet's directory), fold (§6.2), dangling-call resolution (§5.5), and continuation of any unfinished run. No coordinator hands the session over: placement is the shard map, the journal is the state, and Raft is the fence (§6.2). No acknowledged record is lost (G14, H1).
 
 Resumption is **caller-driven**: the grain does not scan for orphaned work (grain has no cross-grain enumeration), so a run interrupted by a crash resumes only when a message next reaches the session: the re-submitted `TurnId` of a caller that wants its answer, a parent's re-executed delegation (§8.1), a `Cancel`. A run nobody asks after stays interrupted, and its budget bounds what it can ever cost (§9.1). H3's liveness is conditional on exactly this contact.
 
@@ -441,7 +445,7 @@ pub struct Budget { pub tokens: u64, pub steps: u32 }
 ### 9.2 Cancellation
 
 1. `Cancel` is a message (§7.3); because handlers never block on I/O (§3.2) and the input gate admits it between appends (grain §6), it takes effect at the next message boundary, not after the current model call returns. It names the run it cancels (`turn`): a `Cancel` naming an ended or unknown run is an idempotent no-op, so one delayed in flight never kills the named run's successor.
-2. On cancel, the session journals `RunEnded { Cancelled }`, notifies every registered reply-to with `RunCompleted { outcome: Err(RunError::Cancelled) }` (§7.3), discards subsequent outcome messages of that run (§3.2), and **propagates**: it sends `Cancel { session, turn }` to every live child recorded in the journal (the `ChildRun` record names the child's session and turn, §8.1), each of which cancels its own subtree.
+2. On cancel, the session journals `RunEnded { Cancelled }`, notifies every registered reply-to with `RunCompleted { outcome: Err(RunError::Cancelled) }` (§7.3), discards subsequent outcome messages of that run (§3.2), and **propagates**: it sends `Cancel { turn }` to every live child session recorded in the journal (the `ChildRun` record names the child's session and turn, §8.1), each of which cancels its own subtree.
 3. Propagation is at-most-once per attempt (core §7.2, grain §2.2); a lost `Cancel` is not retried transparently. The guarantee is two-layered: once faults cease, propagation completes within bounded logical time (H5); under unhealed faults, the child's **budget is the backstop**, since every run is bounded with or without the cancel arriving (§9.1).
 4. In-flight side effects of a cancelled run (a tool mid-execution, a model call mid-flight) are not undone and MAY complete externally; their outcomes are discarded. The harness reports what it stopped; it does not pretend to have un-run it.
 
@@ -481,10 +485,11 @@ These events deliberately restate information the journal already holds (a `RunS
 | `RunStarted` | `session`, `turn`, `parent?` | A run began for a newly journaled turn. |
 | `ModelCompleted` | `session`, `turn`, `node`, `usage` | One model call finished; `usage` feeds the H4 checker, scoped to journaled spend (below). |
 | `RunEnded` | `session`, `turn`, `outcome` | The run's exactly-one terminal outcome was journaled. |
+| `ToolCompleted` | `session`, `turn`, `node` | One sandboxed tool call resolved on `node` (§5.3). |
 | `SandboxBound` | `session`, `node` | The activation opened its sandbox (first sandboxed call, §5.3). |
 | `SandboxReleased` | `session`, `node` | That sandbox was torn down (hibernation, migration, loss, or step-down). |
 
-The sandbox pair is the load-bearing addition: it is *not* derivable from records, because the sandbox is not session state (§5.5). Run boundaries (`RunStarted`/`RunEnded`) and per-call `usage` (`ModelCompleted`) are the minimum needed to check H3/H4/H7 on the stream; everything else about a session's lifecycle is read from the grain's events.
+The sandbox pair is the load-bearing addition: it is *not* derivable from records, because the sandbox is not session state (§5.5). Run boundaries (`RunStarted`/`RunEnded`) and per-call `usage` (`ModelCompleted`) are the minimum needed to check H3/H4/H7 on the stream; `ToolCompleted` carries the node a sandboxed call resolved on, which is what lets the H8 checker place each call inside a `SandboxBound`/`SandboxReleased` window; everything else about a session's lifecycle is read from the grain's events.
 
 Session activation, deactivation, and the single-writer fence are observed through the **grain's** events, not duplicated here: `Activated`/`Passivated` mark the activation lifecycle (grain §13), `LeaderChanged` marks a migration, and the absence of a forked log is G1, checked over the grain stream (grain §14). The harness's `SandboxBound`/`SandboxReleased` MUST alternate within the grain's `Activated`/`Passivated` window for that session and node (the H8 effect-containment check), and `SandboxReleased` MUST follow any `Passivated` with no intervening sandboxed call.
 
@@ -548,7 +553,7 @@ A run with no faults is the simplest case and MUST still pass.
 - **Durable alarms for the agent.** A stored timer that re-activates a session to advance a run with no caller present (grain §16, durable alarms): the basis for scheduled runs, server-side timeouts, and proactive agents. v1's resumption is strictly caller-driven (§7.5); alarms would lift that.
 - **Scheduler singleton.** Queued and recurring agent runs feeding ordinary `Submit`s; deliberately out of v1, and a natural client of durable alarms above.
 - **Linearizable and follower reads.** A `Tail` (or a future query) that reflects committed state on the minority side of a partition, via the grain's deferred leader-lease upgrade (grain §7.5, §16); follower reads for read scale likewise ride the grain's extension.
-- **Sandbox providers, snapshots, and pooling.** The first per-tier provider ships as `harness-sandbox` (sandbox §3.1–§3.5). Still open: a network dataplane behind the profile's allowlist (sandbox §3.3), workspace snapshot/restore across migration (the one piece of working state the grain's hibernation does *not* preserve, §5.5), and warm pools to cut open latency.
+- **Sandbox providers, snapshots, and pooling.** The first per-tier provider ships as `harness-sandbox` (sandbox §3.1–§3.5). Still open: a network dataplane behind the profile's allowlist (sandbox §3.3) and warm pools to cut open latency. (Workspace durability across migration, once listed here, is closed: the workspace is the session grain's own facet, grain §7.11.)
 - **Multi-tenant scheduling.** Quotas, fair-share scheduling, and accounting across tenants sharing the cluster: the economics of mutualization (§1.1).
 - **Context compaction.** Summarizing the transcript into a journaled checkpoint record so the fold, and the model request, start from it; must preserve H1. The grain's snapshot (grain §9) bounds *replay* cost; compaction bounds *context* cost, a separate concern.
 - **Streaming.** Token streaming from `Model`, and push-based run observation: a subscription complement to `Tail` (§10.2).
@@ -582,8 +587,8 @@ let researcher = Kind::new("You are a research agent.")
 
 // --- Per node: one Harness over the clustered actor system + granary; the model and
 // --- sandbox seams injected here, the journal supplied by granary per kind (§7.4, §12.1).
-let h = Harness::new(system, Kinds::new().register("researcher", researcher),
-                     model, sandboxes);
+let h = Harness::cluster(system, Kinds::new().register("researcher", researcher),
+                         model, sandboxes);
 
 // --- Any node: address the session by name; the shard leader hosts it (§7.2) ---
 let s = h.session("researcher", SessionId::new("report-42"));   // GrainRef<Agent>

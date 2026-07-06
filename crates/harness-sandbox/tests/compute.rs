@@ -158,18 +158,10 @@ fn bench_custom(
     customize: impl FnOnce(TieredSandboxes) -> TieredSandboxes,
 ) -> (TieredSandboxes, Bench) {
     let root = tempfile::tempdir().expect("tempdir");
-    let provider = customize(
-        TieredSandboxes::new(root.path())
-            .expect("provider")
-            .with_seed(seed),
-    );
-    let sandbox = block_on(provider.open(&SessionId::new("s"), profile)).expect("workspace open");
-    let dir = std::fs::read_dir(root.path())
-        .expect("root")
-        .next()
-        .expect("session dir")
-        .expect("entry")
-        .path();
+    let provider = customize(TieredSandboxes::new().with_seed(seed));
+    let dir = root.path().join("s");
+    let sandbox =
+        block_on(provider.open(&SessionId::new("s"), profile, &dir)).expect("workspace open");
     (
         provider,
         Bench {

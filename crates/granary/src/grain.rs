@@ -98,7 +98,7 @@ pub trait Grain: Sized + Send + 'static {
     type Event: SerializationRequirement;
 
     /// The grain's declared facet set (spec §7.12): `()` for none, or a tuple of
-    /// built-in facets — e.g. `(Kv,)`, `(Kv, Fs)`. Each declared facet
+    /// built-in facets — e.g. `(Kv,)`, `(Kv, Ws)`. Each declared facet
     /// surfaces a compile-time-gated [`GrainCtx`] accessor, contributes tagged
     /// records to the same atomic per-command batch (G19), joins the composite
     /// snapshot, and adds its blob roots to the grain's unioned live set.
@@ -183,7 +183,7 @@ pub struct GrainCtx<G: Grain> {
     /// replicas, the same ones its records live on.
     journal: Arc<dyn DynGrainJournal>,
     /// The host's facet cell (spec §7.12): committed forms plus the per-command
-    /// stage, shared so the facet accessors (`kv()`, `fs()`, …) read and stage
+    /// stage, shared so the facet accessors (`kv()`, `ws()`, …) read and stage
     /// through it. Also the source of the facet blob roots
     /// [`blobs`](GrainCtx::blobs) unions into every sweep.
     facets: Arc<FacetCell<G::Facets>>,

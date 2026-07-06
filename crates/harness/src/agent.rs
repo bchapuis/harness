@@ -47,6 +47,8 @@ use granary::GrainError;
 use granary::GrainHandler;
 use granary::GrainRegistry;
 use granary::Seq;
+use granary::Ws;
+use granary::WsError;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -814,11 +816,45 @@ impl<S: HarnessSystem> Agent<S> {
             return Vec::new();
         }
         act.run.resolved.insert(call.clone());
+        // Capture the workspace delta this tool left on disk (granary §7.11):
+        // the staged records join this command's batch, so the tool outcome
+        // and the files it wrote commit atomically (G19). Every sandboxed call
+        // captures, success or failure (a failed shell can still have
+        // written); a delegation never touched the directory, and a reported
+        // environment loss must not capture — the root may be gone, and a
+        // vanished root is never a mass deletion.
+        let sandboxed = state
+            .live
+            .as_ref()
+            .and_then(|l| l.pending.get(&call))
+            .is_some_and(|p| p.name != DELEGATE);
+        let lost_already = matches!(&outcome, Err(ToolError::EnvironmentLost(_)));
+        let outcome = if sandboxed && !lost_already {
+            match ctx.ws().capture() {
+                Ok(_) => outcome,
+                // Over the durable cap: an application outcome the model fixes
+                // (nothing was staged; the next successful capture diffs
+                // against the last committed index, so nothing is skipped).
+                Err(WsError::TooLarge { bytes, cap }) => Err(ToolError::Sandbox(format!(
+                    "durable workspace is {bytes} bytes, over the {cap}-byte cap; \
+                     remove or exclude large files (this call's changes are not yet persisted)"
+                ))),
+                // The materialization root vanished: the environment is gone
+                // (§5.5); the durable content is safe in the journal and the
+                // next activation rematerializes it.
+                Err(WsError::RootLost) => {
+                    Err(ToolError::EnvironmentLost("workspace root lost".into()))
+                }
+                Err(e) => Err(ToolError::Sandbox(format!("workspace capture: {e}"))),
+            }
+        } else {
+            outcome
+        };
         if let Err(ToolError::EnvironmentLost(_)) = &outcome {
-            // The provider lost the workspace (§5.5): drop the binding, release
-            // it, and require a `WorkspaceReset` before the next model call.
-            // Mark the loss so the reset fires even under a durable provider —
-            // this loss happened mid-activation, not a routine reactivation.
+            // The environment is lost (§5.5): drop the binding, release it, and
+            // require a `WorkspaceReset` before the next model call. The
+            // durable subtree survives in the journal; what is gone is the
+            // activation's working state (excluded trees, running processes).
             self.release_sandbox(&mut act, ctx);
             act.env.reconciled = false;
             act.env.lost_this_activation = true;
@@ -947,15 +983,15 @@ impl<S: HarnessSystem> Agent<S> {
             )];
         }
         // Surface a lost workspace before the model acts on state that is gone
-        // (§5.5). A fresh environment resets every held tier to `Workspace`;
-        // later acquisitions re-journal, never silently inherited. A durable
-        // provider re-binds the same workspace on reactivation, so the routine
-        // reactivation reset is a lie for it — suppress it there. A loss that
-        // happened *this* activation (`lost_this_activation`) still resets,
-        // durable or not: that workspace really is gone.
-        let durable_survives =
-            self.seams.sandbox.workspace_durable() && !act.env.lost_this_activation;
-        if !act.env.reconciled && state.sandbox_activity && !durable_survives {
+        // (§5.5). The workspace itself is durable — the agent's facet
+        // rematerializes it on every activation (granary §7.11) — so a routine
+        // reactivation is never a loss. Only a loss observed *this* activation
+        // (the provider returned `EnvironmentLost`) resets: the durable subtree
+        // survives in the journal, but the activation's working state (excluded
+        // trees, running processes, held tiers) is gone. A fresh environment
+        // resets every held tier to `Workspace`; later acquisitions re-journal,
+        // never silently inherited.
+        if !act.env.reconciled && act.env.lost_this_activation {
             act.env.reconciled = true;
             act.env.tiers_held = BTreeSet::from([Tier::Workspace]);
             return vec![self.rec(ctx, RecordBody::WorkspaceReset)];
@@ -1217,8 +1253,18 @@ impl<S: HarnessSystem> Agent<S> {
             SandboxSlot::Closed => {
                 // Lazy open on the first sandboxed call (§5.3 item 1); the call
                 // stays pending and is re-driven when the environment is ready.
-                act.env.slot = SandboxSlot::Opening;
-                self.launch_open(ctx, kind.profile.clone());
+                // The provider runs over the facet's materialized workspace
+                // directory (granary §7.11), which rehydration built before any
+                // command could reach here.
+                match ctx.ws().dir_path() {
+                    Ok(workspace) => {
+                        act.env.slot = SandboxSlot::Opening;
+                        self.launch_open(ctx, kind.profile.clone(), workspace);
+                    }
+                    Err(e) => {
+                        act.env.slot = SandboxSlot::Failed(format!("workspace: {e}"));
+                    }
+                }
             }
         }
     }
@@ -1226,7 +1272,12 @@ impl<S: HarnessSystem> Agent<S> {
     /// Open the sandbox off the command path (§5.3). The opened handle is not
     /// serializable, so the task fills the slot under the mutex and nudges
     /// [`Advance`]; success emits `SandboxBound` (H8).
-    fn launch_open(&self, ctx: &GrainCtx<Agent<S>>, profile: crate::sandbox::SandboxProfile) {
+    fn launch_open(
+        &self,
+        ctx: &GrainCtx<Agent<S>>,
+        profile: crate::sandbox::SandboxProfile,
+        workspace: std::path::PathBuf,
+    ) {
         let this = ctx.this();
         let system = ctx.system().clone();
         let provider = self.seams.sandbox.clone();
@@ -1234,7 +1285,7 @@ impl<S: HarnessSystem> Agent<S> {
         let session = Self::session(ctx);
         let node = ctx.system().node();
         system.clone().launch(Box::pin(async move {
-            let result = provider.open(&session, &profile).await;
+            let result = provider.open(&session, &profile, &workspace).await;
             let bound = {
                 let mut a = act.lock().expect("agent activation mutex poisoned");
                 match result {
@@ -1518,7 +1569,10 @@ impl<S: HarnessSystem> Grain for Agent<S> {
     type System = S;
     type State = SessionState;
     type Event = Record;
-    type Facets = ();
+    // The session's durable workspace (granary §7.11): a real directory the
+    // sandbox tiers run over, captured after each tool call so the delta
+    // commits atomically with the `ToolOutcome` record (G19).
+    type Facets = (Ws,);
     // The fallback type name; the harness hosts each kind under its own name via
     // `granary_named`, so a session's grain type is its `KindId` (§2.2).
     const GRAIN_TYPE: &'static str = "harness.Agent";
@@ -1545,6 +1599,16 @@ impl<S: HarnessSystem> Grain for Agent<S> {
         act.env.reconciled = false;
         act.env.lost_this_activation = false;
         act.run.dangling_resolved = false;
+        drop(act);
+        // Off the activation latency path: sweep checkpoint chunks a prior
+        // activation orphaned (the blob handle unions the facet roots, so the
+        // restored manifest's chunks always survive, granary §7.12/F3) and
+        // re-fan the live ones to the current replicas (§7.10 B6).
+        let blobs = ctx.blobs();
+        ctx.system().launch(Box::pin(async move {
+            let _ = blobs.gc(&BTreeSet::new()).await;
+            blobs.repair_facets().await;
+        }));
         Ok(())
     }
 

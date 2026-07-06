@@ -1,8 +1,11 @@
 //! Workspace-tier conformance: S1 (confinement by capability handle —
-//! adversarial traversal) and S5 (per-tier release) of sandbox spec §6.
+//! adversarial traversal) and S5 (per-tier release) of sandbox spec §6. The
+//! workspace directory is supplied by the caller (the agent's workspace facet,
+//! granary §7.11); the provider opens over it and never deletes it.
 
 mod support;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use futures::executor::block_on;
@@ -16,9 +19,13 @@ use harness_sandbox::TieredSandboxes;
 use serde_json::Value;
 use serde_json::json;
 
-fn open(provider: &TieredSandboxes, session: &str) -> Arc<dyn Sandbox> {
-    block_on(provider.open(&SessionId::new(session), &SandboxProfile::default()))
-        .expect("workspace open")
+fn open(provider: &TieredSandboxes, session: &str, workspace: &Path) -> Arc<dyn Sandbox> {
+    block_on(provider.open(
+        &SessionId::new(session),
+        &SandboxProfile::default(),
+        workspace,
+    ))
+    .expect("workspace open")
 }
 
 fn call(sandbox: &Arc<dyn Sandbox>, name: &str, input: Value) -> Result<Value, ToolError> {
@@ -36,8 +43,8 @@ fn paths_outside_the_workspace_are_unrepresentable() {
     // invocation can read or touch it.
     let sentinel = dir.path().join("sentinel");
     std::fs::write(&sentinel, "outside").expect("sentinel");
-    let provider = TieredSandboxes::new(dir.path().join("workspaces")).expect("provider");
-    let sandbox = open(&provider, "s");
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "s", &dir.path().join("workspaces/s"));
 
     for escape in [
         "../sentinel",
@@ -78,20 +85,14 @@ fn an_out_pointing_symlink_is_not_followed() {
     let dir = tempfile::tempdir().expect("tempdir");
     let sentinel = dir.path().join("sentinel");
     std::fs::write(&sentinel, "outside").expect("sentinel");
-    let workspaces = dir.path().join("workspaces");
-    let provider = TieredSandboxes::new(&workspaces).expect("provider");
-    let sandbox = open(&provider, "s");
+    let workspace = dir.path().join("workspaces/s");
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "s", &workspace);
 
     // Plant the symlink with ambient authority, as an attacker who once had
     // a foothold would: the handle, not the directory's cleanliness, is the
     // boundary.
-    let session_dir = std::fs::read_dir(&workspaces)
-        .expect("workspaces")
-        .next()
-        .expect("session dir")
-        .expect("entry")
-        .path();
-    std::os::unix::fs::symlink(&sentinel, session_dir.join("link")).expect("symlink");
+    std::os::unix::fs::symlink(&sentinel, workspace.join("link")).expect("symlink");
 
     let read = call(&sandbox, "read_file", json!({"path": "link"}));
     assert!(
@@ -120,8 +121,8 @@ fn an_out_pointing_symlink_is_not_followed() {
 #[test]
 fn the_typed_tools_round_trip() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "s");
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "s", dir.path());
 
     let written = call(
         &sandbox,
@@ -166,8 +167,8 @@ fn the_typed_tools_round_trip() {
 #[test]
 fn malformed_arguments_are_invalid_not_sandbox_failures() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "s");
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "s", dir.path());
 
     let bad = call(&sandbox, "read_file", json!({"path": 42}));
     assert!(matches!(bad, Err(ToolError::InvalidArguments(_))));
@@ -180,8 +181,8 @@ fn malformed_arguments_are_invalid_not_sandbox_failures() {
 #[test]
 fn tiers_not_offered_fail_as_outcomes() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "s");
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "s", dir.path());
 
     // Network: unoffered in every feature combination of this provider.
     let outcome = block_on(sandbox.call(Tier::Network, "anything", json!({})));
@@ -192,23 +193,24 @@ fn tiers_not_offered_fail_as_outcomes() {
 }
 
 // ---------------------------------------------------------------------------
-// S5: per-tier release, idempotent
+// S5: per-tier release, idempotent — and the workspace is not the provider's
+// to delete (its durable content is the caller's, granary §7.11)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn release_removes_the_workspace_and_is_idempotent() {
+fn release_keeps_the_workspace_and_is_idempotent() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "s");
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "s", dir.path());
     call(&sandbox, "write_file", json!({"path": "f", "content": "x"})).expect("write");
     assert_eq!(provider.stats.opened(), 1);
 
     block_on(sandbox.release());
     assert_eq!(provider.stats.released(), 1);
     assert_eq!(
-        std::fs::read_dir(dir.path()).expect("root").count(),
-        0,
-        "the session's workspace directory is gone"
+        std::fs::read_to_string(dir.path().join("f")).expect("survives"),
+        "x",
+        "release tears down tier environments, never the caller-owned workspace"
     );
     // Idempotent: a second release is a no-op, not an error.
     block_on(sandbox.release());
@@ -217,9 +219,9 @@ fn release_removes_the_workspace_and_is_idempotent() {
 #[test]
 fn sessions_are_scoped_apart() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let a = open(&provider, "session-a");
-    let b = open(&provider, "session-b");
+    let provider = TieredSandboxes::new();
+    let a = open(&provider, "session-a", &dir.path().join("a"));
+    let b = open(&provider, "session-b", &dir.path().join("b"));
 
     call(&a, "write_file", json!({"path": "f", "content": "a's"})).expect("write");
     let missing = call(&b, "read_file", json!({"path": "f"}));
@@ -241,18 +243,13 @@ fn sessions_are_scoped_apart() {
 #[test]
 fn a_vanished_workspace_surfaces_as_environment_loss() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "s");
+    let workspace = dir.path().join("s");
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "s", &workspace);
     call(&sandbox, "write_file", json!({"path": "f", "content": "x"})).expect("write");
 
     // The world loses the workspace behind the provider's back.
-    let session_dir = std::fs::read_dir(dir.path())
-        .expect("root")
-        .next()
-        .expect("session dir")
-        .expect("entry")
-        .path();
-    std::fs::remove_dir_all(&session_dir).expect("external loss");
+    std::fs::remove_dir_all(&workspace).expect("external loss");
 
     // Not an ordinary tool failure: only EnvironmentLost engages the
     // harness's reset protocol (§5.5) — a Sandbox error here would leave the
@@ -263,7 +260,7 @@ fn a_vanished_workspace_surfaces_as_environment_loss() {
         "a vanished workspace is environment loss, got {lost:?}"
     );
     // A merely missing file in a live workspace stays an ordinary failure.
-    let sandbox = open(&provider, "s2");
+    let sandbox = open(&provider, "s2", &dir.path().join("s2"));
     let missing = call(&sandbox, "read_file", json!({"path": "absent"}));
     assert!(
         matches!(missing, Err(ToolError::Sandbox(_))),
@@ -274,8 +271,8 @@ fn a_vanished_workspace_surfaces_as_environment_loss() {
 #[test]
 fn truncation_never_splits_a_character() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = TieredSandboxes::new(dir.path()).expect("provider");
-    let sandbox = open(&provider, "s");
+    let provider = TieredSandboxes::new();
+    let sandbox = open(&provider, "s", dir.path());
 
     // 256 KiB - 1 of ASCII, then a 3-byte character straddling the cap.
     let content = format!("{}€tail", "a".repeat(256 * 1024 - 1));

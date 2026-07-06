@@ -149,8 +149,8 @@ fn edit_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
 }
 
 /// The result of one `edit_file` string replacement: the new content and how many
-/// occurrences were replaced. Shared by the cap-std and durable edit tools so both
-/// enforce identical match/uniqueness semantics.
+/// occurrences were replaced. Factored out so every edit tool enforces identical
+/// match/uniqueness semantics.
 pub(crate) struct Edit {
     pub text: String,
     pub replaced: usize,
@@ -199,8 +199,8 @@ pub(crate) fn edit_text(text: &str, input: &Value, path: &str) -> Result<Edit, T
 
 /// Decode `bytes` as UTF-8, optionally to a 1-based line window (`offset`/`limit`,
 /// for paging past the cap), then apply the 256 KiB cap with clean truncation —
-/// the tier's `{content, truncated}` shape. Shared by the cap-std and durable read
-/// tools, so both page identically. Pure: a function of the bytes and the window.
+/// the tier's `{content, truncated}` shape. Factored out so every read tool pages
+/// identically. Pure: a function of the bytes and the window.
 pub(crate) fn cap_and_decode(bytes: &[u8], offset: Option<u64>, limit: Option<u64>) -> Value {
     let text = String::from_utf8_lossy(bytes);
     // The requested line window, if any. `split_inclusive` keeps each line's

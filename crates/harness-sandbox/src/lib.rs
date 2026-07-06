@@ -66,16 +66,10 @@
 
 #[cfg(feature = "compute")]
 mod compute;
-#[cfg(feature = "durable")]
-mod durable;
 #[cfg(feature = "firecracker")]
 mod firecracker;
 #[cfg(feature = "workspace")]
 mod ids;
-#[cfg(feature = "durable")]
-mod materialize;
-#[cfg(feature = "durable")]
-mod materialized;
 #[cfg(feature = "native")]
 mod native;
 #[cfg(feature = "workspace")]
@@ -85,12 +79,6 @@ mod workspace;
 
 #[cfg(feature = "compute")]
 pub use compute::run_js_tool;
-#[cfg(feature = "durable")]
-pub use durable::DurabilityRules;
-#[cfg(feature = "durable")]
-pub use durable::DurableWorkspaces;
-#[cfg(feature = "durable")]
-pub use materialized::MaterializedSandboxes;
 #[cfg(feature = "compute")]
 pub use compute::run_module_tool;
 #[cfg(feature = "firecracker")]

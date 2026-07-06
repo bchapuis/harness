@@ -3,7 +3,7 @@
 //!
 //! A session is a grain, so addressing is granary's: [`SessionRef`] wraps a
 //! [`GrainRef<Agent>`](granary::GrainRef) and `ask`s it the §7.3 commands,
-//! location-transparently (granary §4.3). [`Harness::new`] hosts one `Agent`
+//! location-transparently (granary §4.3). [`Harness::cluster`] hosts one `Agent`
 //! grain per kind via `granary_named` (each `KindId` is its own grain type,
 //! §2.2), injecting the node's model and sandbox seams into every activation
 //! through the factory.

@@ -145,21 +145,16 @@ pub trait Sandbox: Send + Sync + 'static {
 /// Provisioning of isolated execution environments (harness spec §5.3). One
 /// sandbox per session activation, opened lazily on the first sandboxed call.
 pub trait SandboxProvider: Send + Sync + 'static {
+    /// Open the session's environment over `workspace` — the session's durable
+    /// workspace directory, owned by the caller (the agent's workspace facet,
+    /// granary §7.11). It exists (with its durable content materialized) before
+    /// this call; the provider runs every tier over it and MUST NOT delete it
+    /// on `release` — durability is the caller's property, captured after each
+    /// tool call, never the provider's.
     fn open(
         &self,
         session: &SessionId,
         profile: &SandboxProfile,
+        workspace: &std::path::Path,
     ) -> BoxFuture<'static, Result<Arc<dyn Sandbox>, SandboxError>>;
-
-    /// Whether a workspace survives across activations (§5.5): `true` when the
-    /// provider re-binds the same durable workspace on the next `open` for a
-    /// session (e.g. a grain-backed filesystem), so a fresh activation is *not*
-    /// a workspace loss. The default is the conservative one — a provider that
-    /// tears its workspace down on `release` leaves this `false`, and the
-    /// harness journals a `WorkspaceReset` on reactivation. Durable providers
-    /// override to suppress that spurious reset; a genuine mid-activation loss
-    /// (the provider returns `EnvironmentLost`) still resets regardless.
-    fn workspace_durable(&self) -> bool {
-        false
-    }
 }

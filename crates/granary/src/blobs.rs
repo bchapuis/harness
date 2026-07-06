@@ -128,6 +128,21 @@ impl GrainBlobs {
         &self.grain
     }
 
+    /// Re-replicate every facet-root blob to the grain's current shard replicas
+    /// (spec §7.10 B6): source a verifying copy of each (G17) and re-`put` it,
+    /// re-fanning the bytes to the current replica set — holders dedup (a
+    /// no-op), a replica that lacked it receives it. Root-driven, additive, and
+    /// idempotent; best-effort (a blob no reachable replica holds is skipped —
+    /// loss repair cannot undo). Kick it as a background task off the
+    /// activation latency path, like [`gc`](GrainBlobs::gc).
+    pub async fn repair_facets(&self) {
+        for id in (self.facet_roots)() {
+            if let Ok(bytes) = self.get(id, None).await {
+                let _ = self.put(bytes).await;
+            }
+        }
+    }
+
     /// Attach the facet root supplier (spec §7.12). Built by
     /// [`GrainCtx::blobs`](crate::GrainCtx::blobs); the roots are computed at
     /// sweep time, so they always reflect the *committed* forms.

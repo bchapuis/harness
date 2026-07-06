@@ -163,10 +163,16 @@ impl<G: Grain> Host<G> {
     /// The facet environment (spec §7.12): a bare blob handle (no facet-root
     /// union — the host retains roots explicitly where it sweeps) and the
     /// node-local scratch directory a physical facet materializes under (§7.14).
-    fn facet_env(&self) -> FacetEnv {
+    /// The directory is keyed by node as well as grain: a materialization is
+    /// activation-local state, and under the simulator many nodes share one
+    /// process (and one scratch root), so a failover must never land two nodes'
+    /// materializations of the same grain on one path.
+    fn facet_env(&self, ctx: &Ctx<Host<G>>) -> FacetEnv {
         FacetEnv::new(
             GrainBlobs::new(Arc::clone(&self.journal), self.name.clone()),
-            self.config.scratch_dir(),
+            self.config
+                .scratch_dir()
+                .join(ctx.system().node().to_string()),
         )
     }
 
@@ -198,7 +204,7 @@ impl<G: Grain> Host<G> {
                 let composite = CompositeSnapshot::decode(&bytes).map_err(boxed)?;
                 self.state =
                     actor_serialization::decode(&*codec, &composite.state).map_err(boxed)?;
-                let forms = G::Facets::restore(&composite.facets, &self.facet_env())
+                let forms = G::Facets::restore(&composite.facets, &self.facet_env(ctx))
                     .await
                     .map_err(boxed)?;
                 self.facets.install(forms);
@@ -211,7 +217,7 @@ impl<G: Grain> Host<G> {
             // materializes its empty form here (§7.14).
             _ => {
                 self.state = G::State::default();
-                let forms = G::Facets::restore(&[], &self.facet_env())
+                let forms = G::Facets::restore(&[], &self.facet_env(ctx))
                     .await
                     .map_err(boxed)?;
                 self.facets.install(forms);
@@ -474,7 +480,7 @@ impl<G: Grain> Host<G> {
             return;
         };
         let forms = self.facets.forms();
-        let Ok(facets) = G::Facets::snapshot(&forms, &self.facet_env()).await else {
+        let Ok(facets) = G::Facets::snapshot(&forms, &self.facet_env(ctx)).await else {
             return;
         };
         let Ok(bytes) = (CompositeSnapshot { state, facets }).encode() else {

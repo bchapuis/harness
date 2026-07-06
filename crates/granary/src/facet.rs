@@ -35,7 +35,7 @@
 //!
 //! The seam is **internal** (§7.12): [`Facet`], [`FacetSet`], and [`HasFacet`]
 //! are sealed. A grain composes the built-in facets by declaring
-//! `type Facets = (Kv, Fs);` — a tuple, giving each accessor a compile-time
+//! `type Facets = (Kv, Ws);` — a tuple, giving each accessor a compile-time
 //! containment proof (the G10 discipline applied to storage).
 
 use std::collections::BTreeSet;
@@ -243,7 +243,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
 }
 
 /// A grain's declared facet set (spec §7.12): the unit tuple `()` (no facets) or
-/// a tuple of distinct [`Facet`]s, e.g. `(Kv, Fs)`. **Sealed**: implemented
+/// a tuple of distinct [`Facet`]s, e.g. `(Kv, Ws)`. **Sealed**: implemented
 /// for tuples up to arity 3, in-crate only.
 ///
 /// The set statically fixes the grain type's record-tag registry — which is what

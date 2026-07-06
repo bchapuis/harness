@@ -181,17 +181,17 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
 
 #[test]
 fn a_durable_workspace_still_resets_on_a_genuine_mid_run_loss() {
-    // A durable provider suppresses the *routine* reactivation reset, but a real
-    // `EnvironmentLost` during the run is not routine — that workspace is gone, so
-    // the reset must still be journaled (the `lost_this_activation` gate).
+    // The routine reactivation reset is gone (the workspace is the agent's own
+    // durable facet), but a real `EnvironmentLost` during the run is not
+    // routine — that environment's working state is gone, so the reset must
+    // still be journaled (the `lost_this_activation` gate).
     let sandboxes = ScriptedSandboxes::new(|_, input| {
         if input.get("lose").is_some() {
             Err(ToolError::EnvironmentLost("scripted loss".to_string()))
         } else {
             Ok(json!("ok"))
         }
-    })
-    .durable();
+    });
     let model = ScriptedModel::steps(vec![
         Ok(tool_call("c1", "shell", json!({ "lose": true }))),
         Ok(tool_call("c2", "shell", json!({}))),

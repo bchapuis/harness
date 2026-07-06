@@ -44,7 +44,6 @@ use actor_runtime::TokioSpawner;
 use actor_serialization::JsonCodec;
 use granary::Granary;
 use granary::GranaryExt;
-use granary::fs::Workspace;
 use harness::Budget;
 use harness::FileGrainStore;
 use harness::GrainStoreFactory;
@@ -63,27 +62,24 @@ use tenancy::Directory;
 
 use crate::http::HttpsPost;
 
-/// Which sandbox provider the node runs.
+/// Which sandbox provider the node runs. Every mode's workspace is the agent
+/// grain's own facet directory (granary §7.11): tool-call deltas are captured
+/// into the session journal, so the workspace survives hibernation, migration,
+/// and node loss in every mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxMode {
-    /// `harness-sandbox`'s container-backed `Native` tier wrapped in
-    /// `MaterializedSandboxes`: `shell` runs inside a per-session OCI container
-    /// (workspace bind-mounted, no network — shared-kernel confinement, sandbox
-    /// spec §3.5's development fallback), and the workspace is backed by a durable
-    /// filesystem grain (granary §7.10) so it survives hibernation, migration, and
-    /// node loss.
+    /// `harness-sandbox`'s container-backed `Native` tier: `shell` runs inside
+    /// a per-session OCI container (the facet's workspace directory
+    /// bind-mounted, no network — shared-kernel confinement, sandbox spec
+    /// §3.5's development fallback).
     Docker,
-    /// `harness-sandbox`'s microVM-backed `Native` tier wrapped in
-    /// `MaterializedSandboxes`: `shell` runs inside a per-session Firecracker VM
-    /// (workspace synced over vsock, no network device — hardware-virtualization
-    /// confinement, sandbox spec §3.4's stronger grade; Linux with `/dev/kvm`
-    /// only), with the same grain-backed durable workspace as `Docker`.
+    /// `harness-sandbox`'s microVM-backed `Native` tier: `shell` runs inside a
+    /// per-session Firecracker VM (the workspace synced over vsock, no network
+    /// device — hardware-virtualization confinement, sandbox spec §3.4's
+    /// stronger grade; Linux with `/dev/kvm` only).
     Firecracker,
-    /// `harness-sandbox`'s `DurableWorkspaces`: the `Workspace` tier backed by a
-    /// durable filesystem grain (granary §7.10), so a session's workspace survives
-    /// hibernation, migration, and node loss. Offers the typed file tools
-    /// (read/write/list/remove), no guest shell; excluded trees stay in an ephemeral
-    /// overlay (harness §5.5 reversal).
+    /// The typed file tools alone over the facet's workspace directory — no
+    /// guest shell or compute.
     Durable,
 }
 
@@ -312,42 +308,26 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         TokioClock::new(),
         Arc::new(OsEntropy::new()),
     ));
-    // One durable grain store under --data (§7.4), shared by the session kinds, the
-    // tenancy directory, and the workspace filesystem grain (every shell-capable mode is
-    // now grain-backed, plus `--sandbox durable`). Its factory caches per node, so every
-    // grain type shares one on-disk store keyed by (shard, grain), the grain analogue of
-    // the Raft WAL.
+    // One durable grain store under --data (§7.4), shared by the session kinds and
+    // the tenancy directory. Its factory caches per node, so every grain type shares
+    // one on-disk store keyed by (shard, grain), the grain analogue of the Raft WAL.
     let grain_store = FileGrainStore::factory(opts.data.join("grains"));
-    // Both shell-capable modes back their workspace with a durable filesystem grain
-    // (granary §7.10): `MaterializedSandboxes` hydrates the grain into the real
-    // directory the container/VM runs against on open, and syncs it back on release, so
-    // the workspace survives hibernation, migration, and node loss. The grain is hosted
-    // on this node's system over the shared grain store, keyed by session id.
-    let workspaces_granary = || -> Granary<Workspace<TcpCluster>> {
-        system.granary(GranaryConfig {
-            grain_store: Some(grain_store.clone()),
-            ..GranaryConfig::default()
-        })
-    };
+    // Every mode runs over the agent grain's own workspace facet (granary §7.11):
+    // the facet materializes each session's directory under the kinds' `data_dir`
+    // (see `kinds` below) and captures tool-call deltas into the session journal, so
+    // the workspace survives hibernation, migration, and node loss with no separate
+    // workspace grain. The provider just opens the supplied directory.
     let sandboxes: Arc<dyn SandboxProvider> = match sandbox_mode {
         SandboxMode::Docker => {
             if opts.sandbox_image.is_empty() {
                 return Err("--sandbox docker requires --sandbox-image".to_string());
             }
-            let inner = harness_sandbox::TieredSandboxes::new(opts.data.join("workspaces"))
-                .map_err(|e| format!("workspaces root: {e}"))?
-                .with_container_cli(opts.container_cli.clone())
-                // The hermetic JS surface, so `run_js` runs without any
-                // language runtime in the container (sandbox spec §3.2).
-                .with_quickjs();
             Arc::new(
-                harness_sandbox::MaterializedSandboxes::new(
-                    inner,
-                    workspaces_granary(),
-                    opts.data.join("workspaces"),
-                    harness_sandbox::DurabilityRules::default(),
-                )
-                .map_err(|e| format!("durable workspace root: {e}"))?,
+                harness_sandbox::TieredSandboxes::new()
+                    .with_container_cli(opts.container_cli.clone())
+                    // The hermetic JS surface, so `run_js` runs without any
+                    // language runtime in the container (sandbox spec §3.2).
+                    .with_quickjs(),
             )
         }
         SandboxMode::Firecracker => {
@@ -358,42 +338,20 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
                         .to_string(),
                 );
             }
-            let inner = harness_sandbox::TieredSandboxes::new(opts.data.join("workspaces"))
-                .map_err(|e| format!("workspaces root: {e}"))?
-                .with_firecracker(harness_sandbox::FirecrackerConfig::new(
-                    &opts.fc_binary,
-                    &opts.fc_kernel,
-                    &opts.fc_rootfs,
-                ))
-                // The hermetic JS surface, alongside the microVM shell.
-                .with_quickjs();
             Arc::new(
-                harness_sandbox::MaterializedSandboxes::new(
-                    inner,
-                    workspaces_granary(),
-                    opts.data.join("workspaces"),
-                    harness_sandbox::DurabilityRules::default(),
-                )
-                .map_err(|e| format!("durable workspace root: {e}"))?,
+                harness_sandbox::TieredSandboxes::new()
+                    .with_firecracker(harness_sandbox::FirecrackerConfig::new(
+                        &opts.fc_binary,
+                        &opts.fc_kernel,
+                        &opts.fc_rootfs,
+                    ))
+                    // The hermetic JS surface, alongside the microVM shell.
+                    .with_quickjs(),
             )
         }
-        SandboxMode::Durable => {
-            // The Workspace tier is a durable filesystem grain (granary §7.10): host
-            // `Fs` on this node's system over the shared grain store, then back the
-            // provider with it. A workspace survives hibernation, migration, and node
-            // loss; the harness re-binds the same grain by session id each activation.
-            let workspaces: Granary<Workspace<TcpCluster>> = system.granary(GranaryConfig {
-                grain_store: Some(grain_store.clone()),
-                ..GranaryConfig::default()
-            });
-            Arc::new(
-                harness_sandbox::DurableWorkspaces::new(
-                    workspaces,
-                    opts.data.join("durable-overlay"),
-                )
-                .map_err(|e| format!("durable overlay root: {e}"))?,
-            )
-        }
+        // No guest shell or compute: the typed file tools alone, over the
+        // facet-owned workspace directory.
+        SandboxMode::Durable => Arc::new(harness_sandbox::TieredSandboxes::new()),
     };
     // Hosting the kinds is the point; the handle is bound for the node's life (it
     // never returns) to keep the gateway actors alive, like `_directory` below.
@@ -493,10 +451,13 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
     // only carries leader election and the shard map, §7.1). The factory is built by
     // the caller and shared with the tenancy directory: it caches per node, so every
     // grain type shares one on-disk store keyed by (shard, grain) — the grain analogue
-    // of the Raft WAL one line up.
-    let grain = |kind: Kind| -> Kind {
+    // of the Raft WAL one line up. `data_dir` places the workspace facet's per-session
+    // directory materializations (granary §7.11) under --data as well.
+    let data_dir = opts.data.join("workspaces");
+    let grain = move |kind: Kind| -> Kind {
         kind.grain(GranaryConfig {
             grain_store: Some(grain_store.clone()),
+            data_dir: Some(data_dir.clone()),
             ..GranaryConfig::default()
         })
     };

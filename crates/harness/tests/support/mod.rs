@@ -194,6 +194,15 @@ impl actor_simulation::Workload for Scenario {
 pub fn brisk_idle() -> granary::GranaryConfig {
     granary::GranaryConfig {
         idle_after: Duration::from_secs(1),
+        // The agent's workspace facet materializes a real directory per grain
+        // (granary §7.11); a fresh tempdir per kind map keeps parallel tests
+        // from sharing scratch paths. Kept (not dropped) so it outlives the
+        // config; the OS reaps the temp tree.
+        data_dir: Some(
+            tempfile::tempdir()
+                .expect("workspace scratch tempdir")
+                .keep(),
+        ),
         ..granary::GranaryConfig::default()
     }
 }
@@ -430,14 +439,6 @@ impl ScriptedSandboxes {
         self
     }
 
-    /// Report a durable workspace, like the grain-backed providers: a fresh
-    /// activation re-binds the same workspace, so the harness must not journal a
-    /// routine `WorkspaceReset` on reactivation (§5.5).
-    pub fn durable(mut self) -> ScriptedSandboxes {
-        self.durable = true;
-        self
-    }
-
     /// Echo every call back as `"{name}: ok"` — the do-nothing workspace.
     pub fn echo() -> ScriptedSandboxes {
         ScriptedSandboxes::new(|name, _| Ok(Value::String(format!("{name}: ok"))))
@@ -487,6 +488,7 @@ impl SandboxProvider for ScriptedSandboxes {
         &self,
         _session: &SessionId,
         _profile: &SandboxProfile,
+        _workspace: &std::path::Path,
     ) -> BoxFuture<'static, Result<Arc<dyn Sandbox>, SandboxError>> {
         let result: Result<Arc<dyn Sandbox>, SandboxError> =
             if self.fail_open.load(Ordering::SeqCst) {
@@ -500,10 +502,6 @@ impl SandboxProvider for ScriptedSandboxes {
                 }))
             };
         Box::pin(async move { result })
-    }
-
-    fn workspace_durable(&self) -> bool {
-        self.durable
     }
 }
 

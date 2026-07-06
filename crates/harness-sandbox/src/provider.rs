@@ -20,6 +20,7 @@ use harness::ToolError;
 use harness::session::content_digest;
 use serde_json::Value;
 
+#[cfg(feature = "native")]
 use crate::ids::sanitize;
 
 /// Observable provider activity, for the S5 accounting tests: every
@@ -77,10 +78,6 @@ impl TierStats {
 /// `firecracker`), by a Firecracker microVM — and nothing else; see the
 /// crate docs for the offered set.
 pub struct TieredSandboxes {
-    /// The root, held as a capability handle from construction: even
-    /// provisioning and teardown go through cap-std, never through an
-    /// ambient path (S1).
-    root: Arc<Dir>,
     /// Base seed for compute determinism (S2). The per-session seed is a
     /// digest of base and session id, so fixing the base fixes every guest.
     seed: u64,
@@ -90,13 +87,6 @@ pub struct TieredSandboxes {
     /// sandbox spec §2.3 item 2 permits: a module is code, not working
     /// state — every call still gets a fresh store.
     modules: BTreeMap<String, Arc<[u8]>>,
-    /// The root as a host path, retained solely to compose the bind-mount
-    /// argument handed to docker (see native.rs: configuration for an
-    /// external confinement mechanism, not ambient authority used here).
-    /// Canonicalized, so docker's `-v` gets an absolute, symlink-free path
-    /// (macOS `/tmp` is a symlink into `/private`).
-    #[cfg(feature = "native")]
-    root_path: std::path::PathBuf,
     /// The container CLI binary for the native tier; `docker` by default.
     #[cfg(feature = "native")]
     container_cli: String,
@@ -108,27 +98,27 @@ pub struct TieredSandboxes {
     pub stats: TierStats,
 }
 
+impl Default for TieredSandboxes {
+    fn default() -> TieredSandboxes {
+        TieredSandboxes::new()
+    }
+}
+
 impl TieredSandboxes {
-    /// Open the provider over `root`, creating it if absent. This is the
-    /// crate's only use of ambient authority: everything after this call
-    /// reaches the filesystem through the returned handle.
-    pub fn new(root: impl AsRef<std::path::Path>) -> std::io::Result<TieredSandboxes> {
-        std::fs::create_dir_all(root.as_ref())?;
-        #[cfg(feature = "native")]
-        let root_path = std::fs::canonicalize(root.as_ref())?;
-        let root = Dir::open_ambient_dir(root.as_ref(), cap_std::ambient_authority())?;
-        Ok(TieredSandboxes {
-            root: Arc::new(root),
+    /// Build the provider. Each session's workspace directory arrives at
+    /// [`open`](SandboxProvider::open) — owned by the caller (the agent's
+    /// workspace facet), opened here as a capability handle so every tier
+    /// after the open reaches the filesystem through that handle (S1).
+    pub fn new() -> TieredSandboxes {
+        TieredSandboxes {
             seed: 0,
             modules: BTreeMap::new(),
-            #[cfg(feature = "native")]
-            root_path,
             #[cfg(feature = "native")]
             container_cli: "docker".to_string(),
             #[cfg(feature = "firecracker")]
             firecracker: None,
             stats: TierStats::default(),
-        })
+        }
     }
 
     /// Fix the base seed (S2): a deployment that pins it makes every guest's
@@ -196,9 +186,11 @@ impl SandboxProvider for TieredSandboxes {
         &self,
         session: &SessionId,
         profile: &SandboxProfile,
+        workspace: &std::path::Path,
     ) -> BoxFuture<'static, Result<Arc<dyn Sandbox>, SandboxError>> {
+        #[cfg(feature = "native")]
         let name = sanitize(session.as_str());
-        let root = Arc::clone(&self.root);
+        let workspace = workspace.to_path_buf();
         let seed = content_digest(&format!("{:016x}|{}", self.seed, session.as_str()));
         let limits = profile.compute;
         #[cfg(feature = "compute")]
@@ -227,84 +219,81 @@ impl SandboxProvider for TieredSandboxes {
                 ))
             });
         }
-        // The tier struct is cheap and eager; the *environment* (container
-        // or microVM) is what stays lazy (sandbox spec §2.3 item 2). Only
-        // the realization this provider was configured for is constructed.
         #[cfg(feature = "native")]
-        let docker = {
-            #[cfg(feature = "firecracker")]
-            let wanted = self.firecracker.is_none();
-            #[cfg(not(feature = "firecracker"))]
-            let wanted = true;
-            wanted.then(|| {
-                Arc::new(crate::native::NativeTier::new(
-                    self.container_cli.clone(),
-                    profile.image.clone(),
-                    self.root_path.join(&name),
-                    &name,
-                    self.stats.clone(),
-                ))
-            })
-        };
-        // The microVM tier needs the workspace *handle*, which exists only
-        // inside the future below; carry its other inputs in.
+        let container_cli = self.container_cli.clone();
+        #[cfg(feature = "native")]
+        let image = profile.image.clone();
         #[cfg(feature = "firecracker")]
-        let firecracker = self.firecracker.as_ref().map(|config| {
-            (
-                Arc::clone(config),
-                profile.image.clone(),
-                self.root_path.join(&name),
-            )
-        });
+        let firecracker = self.firecracker.clone();
         let stats = self.stats.clone();
         Box::pin(async move {
-            root.create_dir_all(&name)
-                .and_then(|()| root.open_dir(&name))
-                .map(|dir| {
-                    stats.opened.fetch_add(1, Ordering::SeqCst);
-                    let dir = Arc::new(dir);
-                    #[cfg(feature = "native")]
-                    let native = {
-                        #[cfg(feature = "firecracker")]
-                        let native = match firecracker {
-                            Some((config, image, workspace)) => NativeEnv::MicroVm(Arc::new(
-                                crate::firecracker::FirecrackerTier::new(
-                                    config,
-                                    image,
-                                    Arc::clone(&dir),
-                                    &workspace,
-                                    stats.clone(),
-                                ),
-                            )),
-                            None => NativeEnv::Docker(
-                                docker.expect("constructed above when firecracker is unset"),
-                            ),
-                        };
-                        #[cfg(not(feature = "firecracker"))]
-                        let native = NativeEnv::Docker(
-                            docker.expect("always constructed without feature firecracker"),
-                        );
-                        native
-                    };
-                    // Opening grants `Workspace` and nothing else (harness
-                    // spec §5.6 item 1): no other tier environment exists
-                    // until a call carries its tier.
-                    Arc::new(TieredSandbox {
-                        name,
-                        root,
-                        dir,
-                        seed,
-                        limits,
-                        #[cfg(feature = "compute")]
-                        modules,
-                        #[cfg(feature = "compute")]
-                        compute: std::sync::Mutex::new(None),
-                        #[cfg(feature = "native")]
-                        native,
-                        stats,
-                    }) as Arc<dyn Sandbox>
-                })
-                .map_err(|e| SandboxError(format!("workspace open: {e}")))
+            // The caller (the agent's workspace facet) owns and materialized
+            // the directory; opening it as a capability handle is this crate's
+            // only use of ambient authority — every tier after this reaches
+            // the filesystem through the handle (S1). `create_dir_all` is a
+            // defensive no-op on the normal path.
+            std::fs::create_dir_all(&workspace)
+                .map_err(|e| SandboxError(format!("workspace open: {e}")))?;
+            // Canonicalized so docker's `-v` (and the microVM's tar source)
+            // gets an absolute, symlink-free host path (macOS `/tmp` is a
+            // symlink into `/private`).
+            #[cfg(feature = "native")]
+            let host_path = std::fs::canonicalize(&workspace)
+                .map_err(|e| SandboxError(format!("workspace open: {e}")))?;
+            let dir = Dir::open_ambient_dir(&workspace, cap_std::ambient_authority())
+                .map_err(|e| SandboxError(format!("workspace open: {e}")))?;
+            stats.opened.fetch_add(1, Ordering::SeqCst);
+            let dir = Arc::new(dir);
+            // The tier struct is cheap and eager; the *environment*
+            // (container or microVM) is what stays lazy (sandbox spec §2.3
+            // item 2). Only the configured realization is constructed.
+            #[cfg(feature = "native")]
+            let native = {
+                #[cfg(feature = "firecracker")]
+                let native = match firecracker {
+                    Some(config) => {
+                        NativeEnv::MicroVm(Arc::new(crate::firecracker::FirecrackerTier::new(
+                            config,
+                            image,
+                            Arc::clone(&dir),
+                            &host_path,
+                            stats.clone(),
+                        )))
+                    }
+                    None => NativeEnv::Docker(Arc::new(crate::native::NativeTier::new(
+                        container_cli,
+                        image,
+                        host_path.clone(),
+                        &name,
+                        stats.clone(),
+                    ))),
+                };
+                #[cfg(not(feature = "firecracker"))]
+                let native = NativeEnv::Docker(Arc::new(crate::native::NativeTier::new(
+                    container_cli,
+                    image,
+                    host_path.clone(),
+                    &name,
+                    stats.clone(),
+                )));
+                native
+            };
+            // Opening grants `Workspace` and nothing else (harness spec §5.6
+            // item 1): no other tier environment exists until a call carries
+            // its tier.
+            Ok(Arc::new(TieredSandbox {
+                path: workspace,
+                dir,
+                seed,
+                limits,
+                #[cfg(feature = "compute")]
+                modules,
+                #[cfg(feature = "compute")]
+                compute: std::sync::Mutex::new(None),
+                #[cfg(feature = "native")]
+                native,
+                stats,
+            }) as Arc<dyn Sandbox>)
         })
     }
 }
@@ -312,9 +301,10 @@ impl SandboxProvider for TieredSandboxes {
 /// One session's environments: the workspace handle always, the compute
 /// engine once a call needs it.
 struct TieredSandbox {
-    /// The workspace's directory name under the root, for teardown.
-    name: String,
-    root: Arc<Dir>,
+    /// The workspace's host path, retained solely to detect a vanished
+    /// directory (see [`escalate_loss`]). The directory itself is owned by
+    /// the caller; this sandbox never deletes it.
+    path: std::path::PathBuf,
     /// The capability handle (S1): the only filesystem any tier sees.
     dir: Arc<Dir>,
     /// The session's injected seed (S2). Consumed by the compute tier only.
@@ -368,19 +358,16 @@ impl NativeEnv {
 
 /// Distinguish a lost environment from an ordinary failure (harness spec
 /// §5.5): when a call failed and the session's workspace directory no longer
-/// exists under the root — an external deletion, or a concurrent activation
-/// of the same session releasing it — the environment itself is gone.
-/// `EnvironmentLost` is the outcome that engages the harness's reset
-/// protocol (drop the binding, journal `WorkspaceReset`); reporting the same
-/// condition as `ToolError::Sandbox` would have the model retrying against
-/// state that no longer exists.
-fn escalate_loss(
-    result: Result<Value, ToolError>,
-    root: &Dir,
-    workspace: &str,
-) -> Result<Value, ToolError> {
+/// exists on disk — an external deletion, or a wiped scratch dir — the
+/// environment itself is gone. `EnvironmentLost` is the outcome that engages
+/// the harness's reset protocol (drop the binding, journal `WorkspaceReset`);
+/// reporting the same condition as `ToolError::Sandbox` would have the model
+/// retrying against state that no longer exists. An ambient stat, not a
+/// handle read: the open handle keeps a deleted directory's fd alive, so only
+/// the path can witness the deletion.
+fn escalate_loss(result: Result<Value, ToolError>, path: &std::path::Path) -> Result<Value, ToolError> {
     match result {
-        Err(ToolError::Sandbox(e)) if root.metadata(workspace).is_err() => Err(
+        Err(ToolError::Sandbox(e)) if std::fs::metadata(path).is_err() => Err(
             ToolError::EnvironmentLost(format!("workspace directory is gone: {e}")),
         ),
         other => other,
@@ -394,18 +381,13 @@ impl Sandbox for TieredSandbox {
         name: &str,
         input: Value,
     ) -> BoxFuture<'static, Result<Value, ToolError>> {
-        let root = Arc::clone(&self.root);
-        let workspace = self.name.clone();
+        let path = self.path.clone();
         match tier {
             Tier::Workspace => {
                 let dir = Arc::clone(&self.dir);
                 let name = name.to_string();
                 Box::pin(async move {
-                    escalate_loss(
-                        crate::workspace::call(&dir, &name, &input),
-                        &root,
-                        &workspace,
-                    )
+                    escalate_loss(crate::workspace::call(&dir, &name, &input), &path)
                 })
             }
             #[cfg(feature = "compute")]
@@ -440,9 +422,9 @@ impl Sandbox for TieredSandbox {
                 let dir = Arc::clone(&self.dir);
                 let seed = self.seed;
                 let name = name.to_string();
-                Box::pin(async move {
-                    escalate_loss(engine?.run(&dir, seed, &name, &input), &root, &workspace)
-                })
+                Box::pin(
+                    async move { escalate_loss(engine?.run(&dir, seed, &name, &input), &path) },
+                )
             }
             #[cfg(feature = "native")]
             Tier::Native => {
@@ -452,7 +434,7 @@ impl Sandbox for TieredSandbox {
                     // escalate_loss gives §4's asymmetry: container gone but
                     // workspace intact stays a Sandbox outcome (single-tier
                     // loss); workspace gone is EnvironmentLost.
-                    escalate_loss(native.call(&name, &input).await, &root, &workspace)
+                    escalate_loss(native.call(&name, &input).await, &path)
                 })
             }
             other => {
@@ -470,8 +452,9 @@ impl Sandbox for TieredSandbox {
         // engine drops here; the native container is removed (a no-op
         // touching no tokio API when none was ever provisioned, so this
         // future stays pollable outside a tokio runtime for workspace-only
-        // sessions); the workspace directory is removed through the root
-        // handle. Idempotent — NotFound is success.
+        // sessions). The workspace directory is NOT removed — the caller owns
+        // it (the agent's workspace facet), and its durable content survives
+        // the activation by design.
         #[cfg(feature = "compute")]
         {
             self.compute
@@ -481,13 +464,10 @@ impl Sandbox for TieredSandbox {
         }
         #[cfg(feature = "native")]
         let native = self.native.clone();
-        let root = Arc::clone(&self.root);
-        let name = self.name.clone();
         let stats = self.stats.clone();
         Box::pin(async move {
             #[cfg(feature = "native")]
             native.release().await;
-            let _ = root.remove_dir_all(&name);
             stats.released.fetch_add(1, Ordering::SeqCst);
         })
     }

@@ -32,12 +32,6 @@ native = ["workspace", "dep:tokio", "dep:rustix"]
 # only at runtime; the code builds everywhere. Implies `native` (the docker
 # fallback shares the provider's Native routing and refusal conduct).
 firecracker = ["native", "dep:tar", "tokio/fs"]
-# The durable workspace (granary §7.10): the `Workspace` tier backed by a
-# durable filesystem grain (metadata journaled, file blocks in the grain's
-# content-addressed blob area), so a workspace survives hibernation, migration,
-# and node loss. Non-durable (excluded) paths route to a per-activation overlay.
-# Implies `workspace` (it reuses the cap-std overlay and the tier's tools).
-durable = ["workspace", "dep:granary"]
 
 [dependencies]
 actor-core.workspace = true
@@ -45,7 +39,6 @@ harness.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 cap-std = { workspace = true, optional = true }
-granary = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["process"] }
 tar = { workspace = true, optional = true }
