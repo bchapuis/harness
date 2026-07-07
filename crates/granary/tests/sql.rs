@@ -144,12 +144,69 @@ impl GrainHandler<Total> for Ledger {
     }
 }
 
+/// Probe the handler-surface guards (spec §7.14): a `select` returns its column
+/// names alongside the rows, and the connection authorizer denies `ATTACH` and
+/// `PRAGMA` on a handler statement while the facet's own machinery (the schema
+/// DDL and the insert above it) runs unrestricted.
+#[derive(Clone, Serialize, Deserialize)]
+struct Probe;
+impl Message for Probe {
+    type Reply = (Vec<String>, usize, bool, bool);
+    const MANIFEST: Manifest = Manifest::new("test.SqlProbe");
+}
+impl GrainHandler<Probe> for Ledger {
+    async fn handle(
+        &self,
+        _state: &(),
+        _msg: Probe,
+        ctx: &GrainCtx<Self>,
+    ) -> (Vec<NoEvent>, (Vec<String>, usize, bool, bool)) {
+        ensure_schema(ctx);
+        let sql = ctx.sql();
+        sql.execute(
+            "INSERT INTO entries (name, cents) VALUES ('probe', 7)",
+            &[],
+        )
+        .expect("insert");
+        let result = sql
+            .select("SELECT name, cents FROM entries", &[])
+            .expect("select");
+        let attach_denied = sql
+            .execute("ATTACH DATABASE 'side.db' AS side", &[])
+            .is_err();
+        let pragma_denied = sql.execute("PRAGMA journal_mode=DELETE", &[]).is_err();
+        (
+            vec![],
+            (result.columns, result.rows.len(), attach_denied, pragma_denied),
+        )
+    }
+}
+
 fn committed_count(recorder: &Recorder) -> usize {
     recorder
         .events()
         .iter()
         .filter(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Committed { .. })))
         .count()
+}
+
+#[test]
+fn select_names_columns_and_the_authorizer_denies_dangerous_statements() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sim = Simulation::new(41);
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
+    let ledgers = system.granary::<Ledger>(GranaryConfig {
+        idle_after: Duration::from_millis(10),
+        data_dir: Some(dir.path().to_path_buf()),
+        ..GranaryConfig::default()
+    });
+    let grain = ledgers.grain("probe/0");
+    let (columns, rows, attach_denied, pragma_denied) =
+        sim.block_on(async move { grain.ask(Probe).await.expect("probe") });
+    assert_eq!(columns, vec!["name".to_string(), "cents".to_string()], "select carries column names");
+    assert!(rows >= 1, "select returns the inserted row");
+    assert!(attach_denied, "the authorizer denies ATTACH on a handler statement (§7.14)");
+    assert!(pragma_denied, "the authorizer denies PRAGMA on a handler statement (§7.14)");
 }
 
 #[test]

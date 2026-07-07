@@ -9,13 +9,16 @@
 //! (`random()`, `datetime('now')`, autoincrement) is fine (F1 holds
 //! byte-for-byte on the frames).
 //!
-//! **One command, one transaction, one record.** [`Facet::begin`] opens
-//! `BEGIN IMMEDIATE`; the handler's statements run inside it; [`Facet::seal`]
-//! commits locally and captures the transaction's frames by **WAL tailing**
-//! (autocheckpoint is off; the host owns checkpoint timing — the
+//! **One command, one transaction, one record.** The command's first statement
+//! opens `BEGIN IMMEDIATE` **lazily**; the handler's statements run inside it;
+//! [`Facet::seal`] commits locally and captures the transaction's frames by
+//! **WAL tailing** (autocheckpoint is off; the host owns checkpoint timing — the
 //! Litestream-proven mechanism; a capture VFS is the deferred upgrade, §16). A
 //! read-only transaction appends nothing to the WAL, so it produces no record
-//! and rides the §7.5 read path.
+//! and rides the §7.5 read path. A command that runs **no** SQL opens no
+//! transaction and no connection at all — the common case for an agent whose
+//! step invoked no SQL tool pays nothing, even though every grain carries the
+//! facet (§7.12).
 //!
 //! **The physical discipline (G20/F4).** The database file mutates at local
 //! commit, before durability. On `Committed` the host keeps the
@@ -127,6 +130,23 @@ impl From<rusqlite::types::ValueRef<'_>> for SqlValue {
 /// One row of a query result.
 pub type SqlRow = Vec<SqlValue>;
 
+/// A query result carrying its column names alongside the rows (spec §7.14),
+/// mirroring the Durable Objects SQL API's row-object shape: a caller can render
+/// `[{ "col": value, … }]` rather than positional arrays. Column order matches
+/// each row's value order.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<SqlRow>,
+}
+
+/// The most rows a single query returns through the handler/tool surface
+/// (spec §7.14): a memory bound on a statement whose predicate matches far more
+/// than a caller expects. The SQL runs synchronously on the shard leader, so an
+/// unbounded result set is a local-resource hazard; a query that needs more
+/// paginates.
+pub const MAX_QUERY_ROWS: usize = 10_000;
+
 /// The captured physical delta of one committed transaction (spec §7.14): the
 /// WAL frames — page number and page bytes — plus the database size after the
 /// commit. The facet's record payload, applied byte-deterministically on
@@ -150,6 +170,19 @@ struct SqlManifest {
     chunks: Vec<BlobId>,
 }
 
+/// The transaction state of a [`SqlDb`] within one command (spec §7.14): a
+/// strict progression that makes the illegal "open transaction outside a
+/// command" state unrepresentable. `Idle` between commands; `Active` while a
+/// command runs but has touched no SQL; `Open` once the command's first
+/// statement opened `BEGIN IMMEDIATE`. SQL access through the handle is valid
+/// only when not `Idle`, and `seal` commits only from `Open`.
+#[derive(Clone, Copy, PartialEq)]
+enum TxnState {
+    Idle,
+    Active,
+    Open,
+}
+
 /// The materialization handle: the database file path, the lazily-opened
 /// connection, the WAL capture cursor, and the live checkpoint-chunk roots.
 /// Shared by `Arc` so a forms clone (the host's snapshot path) sees the same
@@ -157,13 +190,23 @@ struct SqlManifest {
 struct SqlDb {
     path: PathBuf,
     conn: Mutex<Option<Connection>>,
-    /// Whether a facet-opened transaction is active — SQL access through the
-    /// handle is valid only inside one (spec §7.14: one command, one
-    /// transaction; a write outside a command would produce frames no record
-    /// captures).
-    in_txn: Mutex<bool>,
+    /// This command's transaction state (spec §7.14). The transaction opens
+    /// lazily: a command that touches no SQL stays `Active` and pays nothing —
+    /// no connection, no transaction, no empty commit — the common case for an
+    /// agent whose step ran no SQL. See [`TxnState`].
+    txn: Mutex<TxnState>,
     /// Bytes of the WAL already captured into records.
     tail: Mutex<u64>,
+    /// Gates the connection authorizer (spec §7.14). Clear for the facet's own
+    /// machinery — the setup pragmas, `BEGIN IMMEDIATE`/`COMMIT`, and the
+    /// checkpoint pragma, all trusted. Set around every statement a handler runs
+    /// through [`SqlHandle`], where it denies `ATTACH`, `DETACH`, `PRAGMA`, and
+    /// explicit transaction control: the file-write and pragma vectors that would
+    /// let a statement reach outside the grain's own database, and the
+    /// transaction verbs that would corrupt WAL tailing. Defense in depth on top
+    /// of the seal that the facet, not the statement, owns the transaction
+    /// boundary.
+    restrict: Arc<std::sync::atomic::AtomicBool>,
     /// The checkpoint-chunk ids this activation must keep alive (F3): the
     /// restored manifest's plus every later checkpoint's. The union is kept —
     /// never pruned mid-activation — so a failed `save_snapshot` can never
@@ -210,8 +253,50 @@ impl SqlDb {
         let _autockpt: i64 = opened
             .query_row("PRAGMA wal_autocheckpoint=0", [], |row| row.get(0))
             .map_err(sql_facet_err)?;
+        // The authorizer (spec §7.14): installed after the setup pragmas so they
+        // run unrestricted, then live for the connection's life. It restricts
+        // only when `restrict` is set — around the handler/tool surface — and
+        // waves the facet's own machinery through.
+        let restrict = Arc::clone(&self.restrict);
+        opened
+            .authorizer(Some(move |ctx: rusqlite::hooks::AuthContext<'_>| {
+                authorize(&restrict, &ctx.action)
+            }))
+            .map_err(sql_facet_err)?;
         *conn = Some(opened);
         Ok(())
+    }
+
+    /// Open this command's transaction if it is not open yet (spec §7.14): the
+    /// lazy `BEGIN IMMEDIATE` a statement triggers on first use, opening the
+    /// connection too. Runs before the per-statement authorizer restriction, so
+    /// the facet's own `BEGIN` is not caught by the transaction-control denial.
+    fn ensure_txn(&self) -> Result<(), FacetError> {
+        let mut txn = self.txn.lock().expect("sql txn lock");
+        if *txn == TxnState::Open {
+            return Ok(());
+        }
+        self.ensure_conn()?;
+        let conn = self.conn.lock().expect("sql conn lock");
+        conn.as_ref()
+            .expect("ensure_conn opened")
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sql_facet_err)?;
+        *txn = TxnState::Open;
+        Ok(())
+    }
+
+    /// Roll back a transaction a prior command left open and return to `Idle` —
+    /// the clean-slate guard `begin` runs (an abandoned command never seals,
+    /// §7.14). A no-op when nothing is open or no connection exists.
+    fn rollback_if_open(&self) {
+        let mut txn = self.txn.lock().expect("sql txn lock");
+        if *txn == TxnState::Open {
+            if let Some(conn) = self.conn.lock().expect("sql conn lock").as_ref() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+            *txn = TxnState::Idle;
+        }
     }
 
     /// Parse the WAL frames appended since the capture cursor — everything the
@@ -325,6 +410,8 @@ impl SqlDb {
         let _ = fs::remove_file(self.shm_path());
         let _ = fs::remove_file(&self.path);
         *self.tail.lock().expect("sql tail lock") = 0;
+        // The connection is gone, so any transaction it held is gone with it.
+        *self.txn.lock().expect("sql txn lock") = TxnState::Idle;
     }
 }
 
@@ -356,28 +443,39 @@ impl Facet for Sql {
 
     fn begin(form: &mut SqlForm, _stage: &mut SqlStage) -> Result<(), FacetError> {
         let db = form.db()?;
-        db.ensure_conn()?;
-        let conn = db.conn.lock().expect("sql conn lock");
-        conn.as_ref()
-            .expect("ensure_conn opened")
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(sql_facet_err)?;
-        *db.in_txn.lock().expect("sql txn lock") = true;
+        // Open nothing here (§7.14): the transaction opens lazily on the first
+        // statement, so a command that runs no SQL touches neither the
+        // connection nor a transaction. Defensively roll back any transaction a
+        // prior command left open (an abandoned command never reaches `seal`),
+        // so every command starts from a clean slate.
+        db.rollback_if_open();
+        *db.txn.lock().expect("sql txn lock") = TxnState::Active;
         Ok(())
     }
 
     fn seal(form: &mut SqlForm, stage: &mut SqlStage) -> Result<(), FacetError> {
         let db = form.db()?;
-        {
-            let conn = db.conn.lock().expect("sql conn lock");
-            let conn = conn
-                .as_ref()
-                .ok_or_else(|| FacetError("sql: connection closed mid-command".into()))?;
-            conn.execute_batch("COMMIT").map_err(sql_facet_err)?;
-        }
-        *db.in_txn.lock().expect("sql txn lock") = false;
-        if let Some(delta) = db.capture()? {
-            stage.delta = Some(crate::facet::encode_payload(&delta));
+        // Commit and capture only if this command actually opened a transaction;
+        // a command that ran no SQL has nothing to commit and produces no record.
+        // The command is ending, so return to `Idle` either way (the COMMIT below
+        // closes the transaction, so `Idle` is accurate).
+        let opened = {
+            let mut txn = db.txn.lock().expect("sql txn lock");
+            let opened = *txn == TxnState::Open;
+            *txn = TxnState::Idle;
+            opened
+        };
+        if opened {
+            {
+                let conn = db.conn.lock().expect("sql conn lock");
+                let conn = conn
+                    .as_ref()
+                    .ok_or_else(|| FacetError("sql: connection closed mid-command".into()))?;
+                conn.execute_batch("COMMIT").map_err(sql_facet_err)?;
+            }
+            if let Some(delta) = db.capture()? {
+                stage.delta = Some(crate::facet::encode_payload(&delta));
+            }
         }
         Ok(())
     }
@@ -459,8 +557,9 @@ impl Facet for Sql {
         let db = SqlDb {
             path,
             conn: Mutex::new(None),
-            in_txn: Mutex::new(false),
+            txn: Mutex::new(TxnState::Idle),
             tail: Mutex::new(0),
+            restrict: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             roots: Mutex::new(Vec::new()),
         };
         // Drop any stale local cache before materializing: the manifest +
@@ -547,15 +646,22 @@ where
                 .0
                 .as_ref()
                 .ok_or_else(|| SqlError("database not materialized".into()))?;
-            if !*db.in_txn.lock().expect("sql txn lock") {
+            if *db.txn.lock().expect("sql txn lock") == TxnState::Idle {
                 return Err(SqlError(
                     "sql statements are only valid inside a command handler (spec §7.14)".into(),
                 ));
             }
+            // Open the command's transaction on first use (§7.14): the lazy
+            // `BEGIN IMMEDIATE`, so a command that never reaches here opened
+            // nothing to commit.
+            db.ensure_txn().map_err(|e| SqlError(e.to_string()))?;
             let conn = db.conn.lock().expect("sql conn lock");
             let conn = conn
                 .as_ref()
                 .ok_or_else(|| SqlError("connection closed".into()))?;
+            // Restrict the authorizer for this one statement (§7.14): the facet's
+            // own machinery runs outside `with_conn` and is never restricted.
+            let _restricted = Restricted::new(&db.restrict);
             run(conn)
         })
     }
@@ -572,23 +678,7 @@ where
 
     /// Run a query, returning all rows. Sees the transaction's own writes.
     pub fn query(&self, sql: &str, params: &[SqlValue]) -> Result<Vec<SqlRow>, SqlError> {
-        self.with_conn(|conn| {
-            let mut stmt = conn.prepare(sql).map_err(|e| SqlError(e.to_string()))?;
-            let columns = stmt.column_count();
-            let mut rows = stmt
-                .query(rusqlite::params_from_iter(params.iter()))
-                .map_err(|e| SqlError(e.to_string()))?;
-            let mut out = Vec::new();
-            while let Some(row) = rows.next().map_err(|e| SqlError(e.to_string()))? {
-                let mut values = Vec::with_capacity(columns);
-                for i in 0..columns {
-                    let value = row.get_ref(i).map_err(|e| SqlError(e.to_string()))?;
-                    values.push(SqlValue::from(value));
-                }
-                out.push(values);
-            }
-            Ok(out)
-        })
+        Ok(self.collect(sql, params, None)?.rows)
     }
 
     /// Run a query expected to return exactly one row.
@@ -598,6 +688,103 @@ where
             (1, Some(row)) => Ok(row),
             (n, _) => Err(SqlError(format!("expected one row, got {n}"))),
         }
+    }
+
+    /// Run a query, returning the rows **with their column names** (spec §7.14),
+    /// capped at [`MAX_QUERY_ROWS`]: a row-object shape a caller can serialize
+    /// directly. Over the cap is an error, not a truncation — a silently clipped
+    /// result would read as complete.
+    pub fn select(&self, sql: &str, params: &[SqlValue]) -> Result<QueryResult, SqlError> {
+        self.collect(sql, params, Some(MAX_QUERY_ROWS))
+    }
+
+    /// Prepare `sql`, bind `params`, and collect every row with its column names
+    /// — the shared body of [`query`](Self::query) and [`select`](Self::select).
+    /// `cap` bounds the row count with an error past it (never a silent
+    /// truncation); `None` is unbounded.
+    fn collect(
+        &self,
+        sql: &str,
+        params: &[SqlValue],
+        cap: Option<usize>,
+    ) -> Result<QueryResult, SqlError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(sql).map_err(|e| SqlError(e.to_string()))?;
+            let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+            let width = columns.len();
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(params.iter()))
+                .map_err(|e| SqlError(e.to_string()))?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().map_err(|e| SqlError(e.to_string()))? {
+                if cap == Some(out.len()) {
+                    return Err(SqlError(format!(
+                        "query returned more than {} rows; narrow it or paginate",
+                        out.len()
+                    )));
+                }
+                let mut values = Vec::with_capacity(width);
+                for i in 0..width {
+                    let value = row.get_ref(i).map_err(|e| SqlError(e.to_string()))?;
+                    values.push(SqlValue::from(value));
+                }
+                out.push(values);
+            }
+            Ok(QueryResult { columns, rows: out })
+        })
+    }
+}
+
+/// The connection authorizer's decision (spec §7.14). When `restrict` is clear
+/// the facet's own trusted machinery is running: allow everything. When set, a
+/// handler/tool statement is running: deny the operations that would breach the
+/// unsandboxed execution model or the facet's transaction ownership — `ATTACH`
+/// and `DETACH` (arbitrary file open/create), any `PRAGMA` (journal mode,
+/// checkpointing, and the rest the facet fixes), and explicit transaction or
+/// savepoint control (the facet owns one implicit transaction per command).
+/// Everything else — the CRUD and DDL a handler statement performs — is
+/// allowed. `load_extension` is not an authorizer action: it is disabled at the
+/// C API (the build enables no extension loading), so no SQL reaches it.
+///
+/// This is a denylist, so it fails *open*: a future `AuthAction` variant is
+/// allowed until named here. That is acceptable because the file-write and
+/// pragma vectors that breach the grain's own database are enumerated and
+/// extension loading is off at the C API; a fail-closed allowlist over the
+/// (`#[non_exhaustive]`) action set is the upgrade if the trust boundary tightens.
+fn authorize(
+    restrict: &std::sync::atomic::AtomicBool,
+    action: &rusqlite::hooks::AuthAction<'_>,
+) -> rusqlite::hooks::Authorization {
+    use rusqlite::hooks::AuthAction;
+    use rusqlite::hooks::Authorization;
+    if !restrict.load(std::sync::atomic::Ordering::Relaxed) {
+        return Authorization::Allow;
+    }
+    match action {
+        AuthAction::Attach { .. }
+        | AuthAction::Detach { .. }
+        | AuthAction::Pragma { .. }
+        | AuthAction::Transaction { .. }
+        | AuthAction::Savepoint { .. } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }
+}
+
+/// Restrict the connection authorizer for the duration of one handler/tool
+/// statement, restoring the prior state on drop (including on an early `?` or a
+/// panic): the facet's machinery must always run unrestricted afterwards.
+struct Restricted<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> Restricted<'a> {
+    fn new(flag: &'a std::sync::atomic::AtomicBool) -> Restricted<'a> {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        Restricted(flag)
+    }
+}
+
+impl Drop for Restricted<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

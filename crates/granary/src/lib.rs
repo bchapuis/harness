@@ -130,6 +130,10 @@ pub use replica_store::ReplicaTransport;
 pub use shard::QuorumGrainJournal;
 pub use shardmap::ShardMapSource;
 #[cfg(feature = "sql")]
+pub use sql::MAX_QUERY_ROWS;
+#[cfg(feature = "sql")]
+pub use sql::QueryResult;
+#[cfg(feature = "sql")]
 pub use sql::Sql;
 #[cfg(feature = "sql")]
 pub use sql::SqlError;
