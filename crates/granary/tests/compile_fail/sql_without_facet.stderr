@@ -1,0 +1,21 @@
+error[E0277]: the trait bound `(): HasFacet<Sql, _>` is not satisfied
+  --> tests/compile_fail/sql_without_facet.rs:48:21
+   |
+48 |         let _ = ctx.sql(); // ERROR: `()` does not contain the Sql facet
+   |                     ^^^ the trait `HasFacet<Sql, _>` is not implemented for `()`
+   |
+   = help: the following other types implement trait `HasFacet<F, I>`:
+             `(A, B)` implements `HasFacet<A, Here>`
+             `(A, B)` implements `HasFacet<B, There<Here>>`
+             `(A, B, C)` implements `HasFacet<A, Here>`
+             `(A, B, C)` implements `HasFacet<B, There<Here>>`
+             `(A, B, C)` implements `HasFacet<C, There<There<Here>>>`
+             `(A,)` implements `HasFacet<A, Here>`
+note: required by a bound in `granary::sql::<impl GrainCtx<G>>::sql`
+  --> src/sql.rs
+   |
+   |     pub fn sql<I>(&self) -> SqlHandle<'_, G, I>
+   |            --- required by a bound in this associated function
+   |     where
+   |         G::Facets: HasFacet<Sql, I>,
+   |                    ^^^^^^^^^^^^^^^^ required by this bound in `granary::sql::<impl GrainCtx<G>>::sql`

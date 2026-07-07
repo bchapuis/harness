@@ -9,4 +9,6 @@ fn invalid_grain_calls_do_not_compile() {
     // §7.12: a facet accessor on a grain that does not declare the facet must
     // not compile (the G10 discipline applied to storage).
     t.compile_fail("tests/compile_fail/kv_without_facet.rs");
+    #[cfg(feature = "sql")]
+    t.compile_fail("tests/compile_fail/sql_without_facet.rs");
 }
