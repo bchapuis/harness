@@ -6,13 +6,14 @@
 //! chat transcript. The gateway does the cluster work; this is just the edge UI.
 //!
 //! ```text
-//! harness-tui [--url http://127.0.0.1:8080] [--token alice]
+//! harness-tui [--url http://127.0.0.1:8080] [--token anonymous]
 //!             [--kind assistant] [--session demo]
 //! ```
 //!
 //! Defaults match the loopback demo (`demo.sh`): the insecure gateway takes the
-//! bearer token as the tenant, so `--token alice` simply acts as tenant "alice".
-//! Against an authenticated gateway, pass the opaque API token instead.
+//! bearer token as the tenant, so the default `--token anonymous` simply acts as
+//! tenant "anonymous". Against an authenticated gateway, pass the opaque API
+//! token instead.
 
 mod app;
 mod client;
@@ -43,7 +44,7 @@ usage:
 
 options (defaults in parentheses):
   --url <base>       gateway base url, http(s)://host[:port]  (http://127.0.0.1:8080)
-  --token <t>        tenant bearer token; $HARNESS_TOKEN, else (alice)
+  --token <t>        tenant bearer token; $HARNESS_TOKEN, else (anonymous)
   --kind <k>         agent kind to address                    (assistant)
   --session <s>      session to open on start                 (demo)
 
@@ -66,7 +67,7 @@ async fn main() {
 
 async fn run(args: Vec<String>) -> Result<(), String> {
     let mut url = "http://127.0.0.1:8080".to_string();
-    let mut token = std::env::var("HARNESS_TOKEN").unwrap_or_else(|_| "alice".to_string());
+    let mut token = std::env::var("HARNESS_TOKEN").unwrap_or_else(|_| "anonymous".to_string());
     let mut kind = "assistant".to_string();
     let mut session = "demo".to_string();
 
