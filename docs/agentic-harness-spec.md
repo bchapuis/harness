@@ -105,7 +105,7 @@ The loop reaches the world through two harness seams, **model** (§4) and **sand
 | **`RunCompleted`** | The outbound notification carrying a run's outcome (`Result<Completion, RunError>`) to each reply-to registered for it; a `tell` delivered when `RunEnded` commits (§7.3). The journal's `RunEnded` record is the source of truth; the notification is delivery. |
 | **Step** | One loop iteration within a run: one model call plus the resolution of every tool call and delegation it requested. |
 | **Activation** | The grain's live, in-memory instance on its shard leader (grain §5), running the loop; the unit the single-activation guarantee (G6, H6) counts. |
-| **Model** | The inference seam (§4): one trait, implemented by `harness-anthropic` in production and by a scripted model in simulation. |
+| **Model** | The inference seam (§4): one trait, implemented in production by `harness-anthropic` (Anthropic Messages API) and `harness-openai` (OpenAI-compatible Chat Completions), and by a scripted model in simulation. |
 | **Tool** | A capability the model may invoke, declared to the harness (§5.2). Every declared tool executes inside the session's sandbox; the single built-in exception, `delegate`, executes in the loop (§8). |
 | **Sandbox** | The isolated execution environment bound to one activation, behind the third seam (§5.3), colocated with the shard leader: where sandboxed tools run, and the only place their effects land. |
 | **Tier** | A named capability set a tool call requires and an activation acquires, journaled before first use (§5.6); semantics in sandbox §2. |
@@ -167,7 +167,7 @@ pub trait Model: Send + Sync + 'static {
 
 `ModelRequest` carries the kind's system prompt, model parameters, the tool declarations (name, description, input schema) of the kind's toolset, the folded transcript, and `max_tokens`. `ModelResponse` carries the assistant content, zero or more requested tool calls, and the **reported usage** (input and output tokens) that feeds budget accounting (§9.1).
 
-The model is a seam exactly like `Transport` (core §7) and the `GrainJournal` (grain §7.3): the harness core depends only on the trait. `harness-anthropic` implements it over the Anthropic Messages API for production; the simulator supplies a **scripted model**, a deterministic function of the request and the run's seed (§12.2).
+The model is a seam exactly like `Transport` (core §7) and the `GrainJournal` (grain §7.3): the harness core depends only on the trait. In production `harness-anthropic` implements it over the Anthropic Messages API and `harness-openai` over the OpenAI-compatible Chat Completions API; the simulator supplies a **scripted model**, a deterministic function of the request and the run's seed (§12.2).
 
 ### 4.2 Determinism rules
 
@@ -529,11 +529,11 @@ The harness adds **two** rows to the table the grain already virtualizes (grain 
 
 | Seam | Production | Simulation |
 |---|---|---|
-| `Model` (§4) | `harness-anthropic`: Anthropic Messages API over HTTPS; retry backoff from `Clock`/`Entropy` | **scripted model**: a deterministic function of the request and the seed; emits final messages, tool calls, malformed calls, and faults under seed control |
+| `Model` (§4) | `harness-anthropic` (Anthropic Messages API) or `harness-openai` (OpenAI-compatible Chat Completions), over HTTPS; retry backoff from `Clock`/`Entropy` | **scripted model**: a deterministic function of the request and the seed; emits final messages, tool calls, malformed calls, and faults under seed control |
 | `Sandbox` (§5.3) | a deployment-supplied `SandboxProvider` (process, container, or microVM; §13) | **scripted sandbox**: deterministic outcomes per call and seed; seeded open failures, latency, crashes, environment loss, and tier-provisioning failure |
 | *(journal)* | *the `GrainJournal` (grain §7.3, §7.4): single-node or sharded-Raft* | *the grain's simulation seam (grain §14); the harness drives the real consensus code, not a model of it* |
 
-The `harness` crate itself MUST satisfy core §18.1: no wall clock, no OS threads, no unseeded randomness; all I/O launched through `Spawner` (§3.2). `harness-anthropic` is production-only and the single place HTTP exists; production sandbox providers are likewise separate crates. Because the journal, the fence, placement, and resume are the grain's, simulating the harness *runs the real granary host, gateway, shard, and rehydration code* (grain §14) under the same seed. The agent's loop is the only new code on the simulated path, joined to consensus that is already exercised by granary's own suite.
+The `harness` crate itself MUST satisfy core §18.1: no wall clock, no OS threads, no unseeded randomness; all I/O launched through `Spawner` (§3.2). The production `Model` crates (`harness-anthropic`, `harness-openai`) are production-only and the only place HTTP exists — each the single home of its own wire protocol; production sandbox providers are likewise separate crates. Because the journal, the fence, placement, and resume are the grain's, simulating the harness *runs the real granary host, gateway, shard, and rehydration code* (grain §14) under the same seed. The agent's loop is the only new code on the simulated path, joined to consensus that is already exercised by granary's own suite.
 
 ### 12.2 Fault injection
 
@@ -623,8 +623,12 @@ harness/                # the agentic harness (this spec): an agent is a grain (
   budget.rs             #   Budget, spend accounting, carve-outs, cancellation (§9)
   event.rs              #   the harness's checker-facing Event vocabulary (§10.4)
 
-harness-anthropic/      # production Model only: Anthropic Messages API client;
-                        #   backoff via Clock/Entropy; the single place HTTP exists (§12.1)
+harness-anthropic/      # production Model: Anthropic Messages API client;
+                        #   backoff via Clock/Entropy; HTTP kept out of core (§12.1)
+
+harness-openai/         # production Model: OpenAI-compatible Chat Completions client
+                        #   (OpenAI, OpenRouter, vLLM, llama.cpp, …); backoff via
+                        #   Clock/Entropy; HTTP kept out of core (§12.1)
 
 harness-sandbox/        # tiered SandboxProvider (sandbox §3): Workspace by cap-std capability
                         #   handle, Compute by hermetic wasmtime guests (raw modules, or
