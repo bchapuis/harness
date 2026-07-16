@@ -11,9 +11,13 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use harness::GranaryConfig;
+use harness::HarnessSystem;
+use harness_gateway::Gateway;
+use harness_gateway::Limits;
 use harness_gateway::auth::InsecureTokens;
 use harness_gateway::auth::StaticTokens;
 use harness_gateway::auth::TokenVerifier;
@@ -40,9 +44,12 @@ options (defaults in parentheses):
   --port-base <p>       node/client i's transport port = p+i-1     (7401)
   --auth-tokens <path>  tenants file (`<principal> <token>` per line). Without it
                         the gateway runs INSECURE: the bearer token IS the tenant.
+                        Reloaded on SIGHUP (rotate tokens without a restart).
+  --max-within-secs <n> ceiling on a prompt's within_secs                 (3600)
+  --max-body-bytes <n>  max request body size in bytes                 (1048576)
 
 Each request carries `Authorization: Bearer <tenant-token>`. The public side is
-plaintext; terminate TLS at an ingress/LB.";
+plaintext; terminate TLS at an ingress/LB. SIGTERM/SIGINT drains gracefully.";
 
 #[tokio::main]
 async fn main() {
@@ -70,6 +77,7 @@ async fn run(args: &[String]) -> Result<(), String> {
     let mut advertise_host: Option<String> = None;
     let mut port_base: u16 = 7401;
     let mut auth_tokens: Option<PathBuf> = None;
+    let mut limits = Limits::default();
 
     let mut i = 0;
     while i < args.len() {
@@ -92,16 +100,18 @@ async fn run(args: &[String]) -> Result<(), String> {
             "--advertise-host" => advertise_host = Some(value.clone()),
             "--port-base" => port_base = parse(flag, value)?,
             "--auth-tokens" => auth_tokens = Some(PathBuf::from(value)),
+            "--max-within-secs" => limits.max_within_secs = parse(flag, value)?,
+            "--max-body-bytes" => limits.max_body_bytes = parse(flag, value)?,
             other => return Err(format!("unknown flag: {other}")),
         }
         i += 2;
     }
 
-    let tokens: Box<dyn TokenVerifier> = match &auth_tokens {
+    let tokens: Arc<dyn TokenVerifier> = match &auth_tokens {
         Some(path) => {
             let text = std::fs::read_to_string(path)
                 .map_err(|e| format!("read --auth-tokens {}: {e}", path.display()))?;
-            Box::new(
+            Arc::new(
                 StaticTokens::parse(&text)
                     .map_err(|e| format!("--auth-tokens {}: {e}", path.display()))?,
             )
@@ -121,7 +131,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                 "WARNING: no --auth-tokens: the gateway is INSECURE — the bearer token is taken \
                  as the tenant, unverified. Loopback only; provide --auth-tokens to authenticate."
             );
-            Box::new(InsecureTokens)
+            Arc::new(InsecureTokens)
         }
     };
 
@@ -143,18 +153,95 @@ async fn run(args: &[String]) -> Result<(), String> {
         harness_gateway::client_kinds(),
         GranaryConfig::default().shards,
         tokens,
+        limits,
         Duration::from_secs(30),
     )
     .await?;
+
+    // Rotate tenant tokens on SIGHUP without a restart (only in the file-backed
+    // secure mode; the insecure loopback mode has no file to reload).
+    if let Some(path) = auth_tokens.clone() {
+        spawn_token_reload(gateway.clone(), path);
+    }
 
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .map_err(|e| format!("bind {bind}: {e}"))?;
     eprintln!("gateway listening on {bind}");
-    axum::serve(listener, harness_gateway::http::router(gateway))
+    axum::serve(listener, harness_gateway::http::router(gateway.clone()))
+        .with_graceful_shutdown(shutdown_signal(gateway))
         .await
         .map_err(|e| format!("serve: {e}"))
 }
+
+/// Resolve once a shutdown signal (SIGTERM or SIGINT) arrives, then flip the
+/// gateway to *not ready* and pause briefly so a load balancer deregisters the
+/// pod (via `/readyz`) before axum drains the in-flight requests. In-flight
+/// prompts are durable in the journal, so dropping their background tasks is
+/// safe — a client reconnects and folds the session back out of the journal.
+async fn shutdown_signal<S: HarnessSystem>(gateway: Arc<Gateway<S>>) {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::SignalKind;
+        use tokio::signal::unix::signal;
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                term.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    eprintln!("[gateway] shutdown signal received; draining");
+    gateway.set_ready(false);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+}
+
+/// Spawn a task that re-reads and hot-swaps the `--auth-tokens` file on each
+/// SIGHUP. A parse failure keeps the current tokens (a bad edit never locks the
+/// tenants out); success swaps atomically behind the gateway's lock.
+#[cfg(unix)]
+fn spawn_token_reload<S: HarnessSystem>(gateway: Arc<Gateway<S>>, path: PathBuf) {
+    tokio::spawn(async move {
+        use tokio::signal::unix::SignalKind;
+        use tokio::signal::unix::signal;
+        let mut hup = match signal(SignalKind::hangup()) {
+            Ok(hup) => hup,
+            Err(e) => {
+                eprintln!("[gateway] cannot install SIGHUP handler; token reload disabled: {e}");
+                return;
+            }
+        };
+        while hup.recv().await.is_some() {
+            match std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| StaticTokens::parse(&text))
+            {
+                Ok(parsed) => {
+                    gateway.reload_tokens(Arc::new(parsed));
+                    eprintln!("[gateway] reloaded --auth-tokens {}", path.display());
+                }
+                Err(e) => eprintln!(
+                    "[gateway] reload of --auth-tokens {} failed, keeping current: {e}",
+                    path.display()
+                ),
+            }
+        }
+    });
+}
+
+/// On non-unix targets there is no SIGHUP; token reload is a no-op.
+#[cfg(not(unix))]
+fn spawn_token_reload<S: HarnessSystem>(_gateway: Arc<Gateway<S>>, _path: PathBuf) {}
 
 fn parse<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, String>
 where

@@ -234,6 +234,20 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          # Liveness: the process is up. Readiness: serving and not draining — on
+          # SIGTERM the gateway flips /readyz to 503 so this pod leaves the Service
+          # endpoints before axum drains the in-flight requests.
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            # Poll often with a threshold of 1 so a draining pod (readyz -> 503 on
+            # SIGTERM) leaves the Service endpoints well within the gateway's
+            # pre-drain grace, before axum stops accepting.
+            periodSeconds: 2
+            failureThreshold: 1
           resources:
             requests:
               cpu: "100m"

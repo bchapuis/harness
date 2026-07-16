@@ -115,7 +115,8 @@ async fn gateway() -> Arc<harness_gateway::Gateway<Sys>> {
         system,
         harness_gateway::client_kinds(),
         GranaryConfig::default().shards,
-        Box::new(InsecureTokens),
+        Arc::new(InsecureTokens),
+        harness_gateway::Limits::default(),
         Duration::from_secs(5),
     )
     .await
@@ -137,6 +138,21 @@ fn prompt_req(token: Option<&str>, session: &str) -> Request<Body> {
         .unwrap()
 }
 
+/// A streaming prompt request (`Accept: text/event-stream`), which drives the SSE
+/// path: record events plus a terminal `outcome`.
+fn sse_prompt_req(token: &str, session: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/v1/assistant/{session}/prompt"))
+        .header("content-type", "application/json")
+        .header("accept", "text/event-stream")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(
+            r#"{"turn":"t-1","content":"hi","within_secs":30}"#,
+        ))
+        .unwrap()
+}
+
 fn list_req(token: &str) -> Request<Body> {
     Request::builder()
         .method("GET")
@@ -144,6 +160,19 @@ fn list_req(token: &str) -> Request<Body> {
         .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap()
+}
+
+fn get_req(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn body_text(resp: axum::response::Response) -> String {
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
 }
 
 async fn body_json(resp: axum::response::Response) -> Value {
@@ -204,4 +233,72 @@ async fn a_missing_token_is_unauthorized() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    // A `401` carries the `WWW-Authenticate: Bearer` challenge and the structured
+    // error envelope (a stable machine `code`, not a `Debug` string).
+    assert_eq!(
+        resp.headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer")
+    );
+    let body = body_json(resp).await;
+    assert_eq!(body["error"]["code"], "unauthorized", "{body}");
+    assert!(body["error"]["message"].as_str().is_some(), "{body}");
+}
+
+#[tokio::test]
+async fn a_malformed_body_is_a_structured_bad_request() {
+    let gw = gateway().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/assistant/demo/prompt")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer alice")
+        .body(Body::from(r#"{"turn":"t-1""#)) // truncated JSON
+        .unwrap();
+    let resp = harness_gateway::http::router(gw).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"]["code"], "bad_request", "{body}");
+}
+
+#[tokio::test]
+async fn health_is_live_and_readiness_reflects_draining() {
+    let gw = gateway().await;
+
+    let resp = harness_gateway::http::router(gw.clone())
+        .oneshot(get_req("/healthz"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = harness_gateway::http::router(gw.clone())
+        .oneshot(get_req("/readyz"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Once draining, readiness fails so a load balancer deregisters the pod.
+    gw.set_ready(false);
+    let resp = harness_gateway::http::router(gw)
+        .oneshot(get_req("/readyz"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn streaming_prompt_carries_seq_ids_and_a_terminal_outcome() {
+    let gw = gateway().await;
+    let resp = harness_gateway::http::router(gw)
+        .oneshot(sse_prompt_req("alice", "streamed"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stream = body_text(resp).await;
+    // Record events carry an SSE `id:` (the seq) for `Last-Event-ID` resumption,
+    // and the run ends with a terminal `outcome` event.
+    assert!(stream.contains("event: records"), "{stream}");
+    assert!(stream.contains("\nid: "), "{stream}");
+    assert!(stream.contains("event: outcome"), "{stream}");
 }

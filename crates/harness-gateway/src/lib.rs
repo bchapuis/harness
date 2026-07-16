@@ -23,9 +23,13 @@
 
 pub mod auth;
 pub mod cluster;
+pub mod error;
 pub mod http;
 
 use std::sync::Arc;
+use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use granary::Grain;
@@ -57,13 +61,43 @@ pub fn client_kinds() -> Kinds {
         .register("worker", grain(Kind::new("")))
 }
 
+/// The operational limits the edge enforces, so a client cannot exhaust the
+/// gateway. Defaults are generous; the CLI (`--max-within-secs`,
+/// `--max-body-bytes`) tightens them for a deployment.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Ceiling on a prompt's `within_secs`: a client cannot park a run — and the
+    /// resources behind it — indefinitely. A larger request is clamped to this.
+    pub max_within_secs: u64,
+    /// Max request-body bytes (the prompt JSON). Enforced as an axum
+    /// `DefaultBodyLimit` layer.
+    pub max_body_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits {
+            max_within_secs: 3600,
+            max_body_bytes: 1 << 20,
+        }
+    }
+}
+
 /// The running gateway's shared state: a routing-only client [`Harness`], a
-/// client [`Granary`] for the tenancy ownership index, and the tenant-token
-/// verifier. Shared behind an `Arc` across all requests; cheap, stateless.
+/// client [`Granary`] for the tenancy ownership index, the tenant-token verifier,
+/// the edge [`Limits`], and a readiness flag. Shared behind an `Arc` across all
+/// requests; cheap, stateless (holds no durable state).
+///
+/// The verifier is behind an `RwLock` so it can be hot-swapped (`SIGHUP` token
+/// reload) without a restart; the read is a cheap uncontended lock on the auth
+/// path. The readiness flag flips to `false` on a shutdown signal so `/readyz`
+/// deregisters the pod from a load balancer before the drain.
 pub struct Gateway<S: HarnessSystem> {
     harness: Harness<S>,
     directory: Granary<Directory<S>>,
-    tokens: Box<dyn TokenVerifier>,
+    tokens: RwLock<Arc<dyn TokenVerifier>>,
+    limits: Limits,
+    ready: AtomicBool,
 }
 
 impl<S: HarnessSystem> Gateway<S> {
@@ -73,18 +107,49 @@ impl<S: HarnessSystem> Gateway<S> {
     pub fn new(
         harness: Harness<S>,
         directory: Granary<Directory<S>>,
-        tokens: Box<dyn TokenVerifier>,
+        tokens: Arc<dyn TokenVerifier>,
+        limits: Limits,
     ) -> Arc<Gateway<S>> {
         Arc::new(Gateway {
             harness,
             directory,
-            tokens,
+            tokens: RwLock::new(tokens),
+            limits,
+            ready: AtomicBool::new(true),
         })
     }
 
     /// Verify an incoming bearer token to the principal it names, or `None`.
     pub fn principal(&self, token: &str) -> Option<PrincipalId> {
-        self.tokens.verify(token)
+        self.tokens
+            .read()
+            .expect("token verifier lock is never poisoned")
+            .verify(token)
+    }
+
+    /// Hot-swap the token verifier (a `SIGHUP` reload of `--auth-tokens`), so a
+    /// deployment rotates tenant tokens without a restart or a dropped connection.
+    pub fn reload_tokens(&self, tokens: Arc<dyn TokenVerifier>) {
+        *self
+            .tokens
+            .write()
+            .expect("token verifier lock is never poisoned") = tokens;
+    }
+
+    /// The edge limits this gateway enforces.
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    /// Whether the gateway is ready to serve traffic (`false` once draining).
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
+    }
+
+    /// Flip the readiness flag — `false` on a shutdown signal so `/readyz` fails
+    /// and the load balancer stops routing new requests before the drain.
+    pub fn set_ready(&self, ready: bool) {
+        self.ready.store(ready, Ordering::Relaxed);
     }
 
     /// The routing-only client harness (no model/sandbox seams, never activates).
@@ -140,7 +205,8 @@ pub async fn connect<S: HarnessSystem>(
     system: S,
     kinds: Kinds,
     directory_shards: usize,
-    tokens: Box<dyn TokenVerifier>,
+    tokens: Arc<dyn TokenVerifier>,
+    limits: Limits,
     timeout: Duration,
 ) -> Result<Arc<Gateway<S>>, String> {
     let directory_type = <Directory<S> as Grain>::GRAIN_TYPE;
@@ -149,7 +215,7 @@ pub async fn connect<S: HarnessSystem>(
         let harness = Harness::client(system.clone(), &kinds);
         let directory = system.granary_client::<Directory<S>>(directory_type, directory_shards);
         if let (Some(harness), Some(directory)) = (harness, directory) {
-            return Ok(Gateway::new(harness, directory, tokens));
+            return Ok(Gateway::new(harness, directory, tokens, limits));
         }
         if system.now() >= deadline {
             return Err(

@@ -17,7 +17,9 @@ granary.workspace = true
 tenancy.workspace = true
 harness.workspace = true
 axum.workspace = true
-tokio.workspace = true
+# `signal` (added on top of the workspace feature set) for graceful shutdown on
+# SIGTERM/SIGINT and the SIGHUP token-file reload.
+tokio = { workspace = true, features = ["signal"] }
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true

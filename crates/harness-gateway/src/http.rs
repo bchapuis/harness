@@ -19,13 +19,17 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::Path;
 use axum::extract::Query;
+use axum::extract::Request;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header::ACCEPT;
 use axum::http::header::AUTHORIZATION;
+use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::response::Sse;
@@ -50,16 +54,57 @@ use harness::TurnId;
 use crate::Gateway;
 use crate::auth::PrincipalId;
 use crate::auth::unscope_session;
+use crate::error::GatewayError;
 
-/// Build the router over the shared gateway state.
+/// Build the router over the shared gateway state. `/healthz` and `/readyz` are
+/// unauthenticated liveness/readiness probes outside the `/v1` tree. A
+/// `DefaultBodyLimit` caps the request body and a request-log layer records one
+/// concise line per non-probe request.
 pub fn router<S: HarnessSystem>(gateway: Arc<Gateway<S>>) -> Router {
+    let max_body = gateway.limits().max_body_bytes;
     Router::new()
         .route("/v1/sessions", get(list_sessions::<S>))
         .route("/v1/{kind}/{session}/prompt", post(prompt::<S>))
         .route("/v1/{kind}/{session}/records", get(records::<S>))
         .route("/v1/{kind}/{session}/stream", get(stream::<S>))
         .route("/v1/{kind}/{session}/cancel", post(cancel::<S>))
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz::<S>))
+        .layer(DefaultBodyLimit::max(max_body))
+        .layer(axum::middleware::from_fn(log_request))
         .with_state(gateway)
+}
+
+/// Liveness: the process is up and serving. Unauthenticated, always `200`.
+async fn healthz() -> Response {
+    (StatusCode::OK, "ok").into_response()
+}
+
+/// Readiness: `200` while serving, `503` once a shutdown signal has flipped the
+/// gateway to draining — so a load balancer stops routing new traffic before the
+/// in-flight requests drain. Unauthenticated.
+async fn readyz<S: HarnessSystem>(State(gw): State<Arc<Gateway<S>>>) -> Response {
+    if gw.is_ready() {
+        (StatusCode::OK, "ready").into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response()
+    }
+}
+
+/// One concise line per request (method, path, status) to stderr. Skips the
+/// health probes so k8s liveness/readiness polling stays quiet. The path never
+/// carries the bearer token (it rides the `Authorization` header), so this cannot
+/// leak a secret. Request latency is deliberately omitted: timing must route
+/// through the `Clock` seam (§18.1, never the wall clock), so per-request latency
+/// belongs to a future metrics layer, not this edge log line.
+async fn log_request(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let resp = next.run(req).await;
+    if path != "/healthz" && path != "/readyz" {
+        eprintln!("[gateway] {method} {path} -> {}", resp.status().as_u16());
+    }
+    resp
 }
 
 fn default_within() -> u64 {
@@ -117,27 +162,30 @@ async fn prompt<S: HarnessSystem>(
     Path((kind, session)): Path<(String, String)>,
     Query(q): Query<FromQuery>,
     headers: HeaderMap,
-    Json(body): Json<PromptBody>,
-) -> Response {
-    let principal = match principal(&gw, &headers) {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
+    body: Result<Json<PromptBody>, JsonRejection>,
+) -> Result<Response, GatewayError> {
+    let principal = principal(&gw, &headers)?;
+    // A malformed body is the edge's own `400`, in the structured envelope (not
+    // axum's default plain-text rejection).
+    let Json(body) = body.map_err(|e| GatewayError::bad_request(e.body_text()))?;
     // Record ownership before the run (best-effort and idempotent — see
     // `Gateway::record_ownership`); the run proceeds regardless.
     gw.record_ownership(&principal, &kind, &session).await;
     let session_ref = gw.session(&principal, &kind, &session);
     if wants_sse(&headers) {
-        return prompt_stream(session_ref, body, q.from);
+        // A reconnect resumes at `Last-Event-ID` (the last seq the client saw);
+        // re-submitting the same turn id reattaches the run (idempotent, §7.4).
+        return Ok(prompt_stream(session_ref, body, resume_from(&headers, q.from)));
     }
+    // Clamp the caller's timeout to the edge ceiling so a run cannot be parked
+    // indefinitely; a run that *ran* and failed is a `200` outcome below, only a
+    // transport failure becomes a non-2xx status.
+    let within = body.within_secs.min(gw.limits().max_within_secs);
     let turn = Turn::new(TurnId::new(body.turn), body.content);
-    match session_ref
-        .prompt_within(turn, Duration::from_secs(body.within_secs))
-        .await
-    {
-        Ok(outcome) => Json(json!({ "outcome": outcome })).into_response(),
-        Err(e) => bad_gateway(format!("{e:?}")),
-    }
+    let outcome = session_ref
+        .prompt_within(turn, Duration::from_secs(within))
+        .await?;
+    Ok(Json(json!({ "outcome": outcome })).into_response())
 }
 
 /// Read a page of committed records.
@@ -146,16 +194,11 @@ async fn records<S: HarnessSystem>(
     Path((kind, session)): Path<(String, String)>,
     Query(q): Query<RecordsQuery>,
     headers: HeaderMap,
-) -> Response {
-    let principal = match principal(&gw, &headers) {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
+) -> Result<Response, GatewayError> {
+    let principal = principal(&gw, &headers)?;
     let session_ref = gw.session(&principal, &kind, &session);
-    match session_ref.tail(Seq::new(q.from), q.limit).await {
-        Ok(records) => Json(json!({ "records": records })).into_response(),
-        Err(e) => bad_gateway(format!("{e:?}")),
-    }
+    let records = session_ref.tail(Seq::new(q.from), q.limit).await?;
+    Ok(Json(json!({ "records": records })).into_response())
 }
 
 /// Cancel a run (idempotent).
@@ -164,16 +207,11 @@ async fn cancel<S: HarnessSystem>(
     Path((kind, session)): Path<(String, String)>,
     Query(q): Query<CancelQuery>,
     headers: HeaderMap,
-) -> Response {
-    let principal = match principal(&gw, &headers) {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
+) -> Result<Response, GatewayError> {
+    let principal = principal(&gw, &headers)?;
     let session_ref = gw.session(&principal, &kind, &session);
-    match session_ref.cancel(&TurnId::new(q.turn)).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => bad_gateway(format!("{e:?}")),
-    }
+    session_ref.cancel(&TurnId::new(q.turn)).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// List the tenant's sessions of a kind, from its directory. The entries' keys
@@ -184,29 +222,21 @@ async fn list_sessions<S: HarnessSystem>(
     State(gw): State<Arc<Gateway<S>>>,
     Query(q): Query<ListQuery>,
     headers: HeaderMap,
-) -> Response {
-    let principal = match principal(&gw, &headers) {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
-    match gw
+) -> Result<Response, GatewayError> {
+    let principal = principal(&gw, &headers)?;
+    let entries = gw
         .directory()
         .grain(principal.as_str())
         .ask(tenancy::ListByType { grain_type: q.kind })
-        .await
-    {
-        Ok(entries) => {
-            let sessions: Vec<_> = entries
-                .into_iter()
-                .filter_map(|entry| {
-                    unscope_session(&principal, entry.name.key())
-                        .map(|session| json!({ "session": session, "label": entry.meta.label }))
-                })
-                .collect();
-            Json(json!({ "sessions": sessions })).into_response()
-        }
-        Err(e) => bad_gateway(format!("{e:?}")),
-    }
+        .await?;
+    let sessions: Vec<_> = entries
+        .into_iter()
+        .filter_map(|entry| {
+            unscope_session(&principal, entry.name.key())
+                .map(|session| json!({ "session": session, "label": entry.meta.label }))
+        })
+        .collect();
+    Ok(Json(json!({ "sessions": sessions })).into_response())
 }
 
 /// Stream a run's records live as SSE (no prompt; observe an in-flight or past
@@ -216,13 +246,10 @@ async fn stream<S: HarnessSystem>(
     Path((kind, session)): Path<(String, String)>,
     Query(q): Query<StreamQuery>,
     headers: HeaderMap,
-) -> Response {
-    let principal = match principal(&gw, &headers) {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
+) -> Result<Response, GatewayError> {
+    let principal = principal(&gw, &headers)?;
     let session_ref = gw.session(&principal, &kind, &session);
-    let follower = session_ref.follow(Seq::new(q.from));
+    let follower = session_ref.follow(Seq::new(resume_from(&headers, q.from)));
     let body = futures::stream::unfold(
         SessionStream::Streaming {
             follower,
@@ -231,9 +258,9 @@ async fn stream<S: HarnessSystem>(
         },
         next_event,
     );
-    Sse::new(body)
+    Ok(Sse::new(body)
         .keep_alive(KeepAlive::default())
-        .into_response()
+        .into_response())
 }
 
 /// The streaming `prompt`: submit the turn as a background task, stream the run's
@@ -321,10 +348,19 @@ async fn next_event<S: HarnessSystem>(
                 Ok(Ok(outcome)) => Event::default()
                     .event("outcome")
                     .data(serde_json::to_string(&outcome).unwrap_or_default()),
-                Ok(Err(e)) => Event::default().event("error").data(format!("{e:?}")),
-                Err(e) => Event::default()
+                // Transport failure reaching/committing the run — the structured
+                // error envelope, same code taxonomy as the HTTP body.
+                Ok(Err(e)) => Event::default()
                     .event("error")
-                    .data(format!("prompt task failed: {e}")),
+                    .data(GatewayError::from(e).to_event_data()),
+                Err(e) => Event::default().event("error").data(
+                    GatewayError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal",
+                        format!("prompt task failed: {e}"),
+                    )
+                    .to_event_data(),
+                ),
             };
             Some((Ok(event), SessionStream::Done))
         }
@@ -339,29 +375,37 @@ fn ends_turn(records: &[(Seq, Record)], turn: &str) -> bool {
         .any(|(_, r)| matches!(&r.body, RecordBody::RunEnded { turn: t, .. } if t.as_str() == turn))
 }
 
-/// A record batch as an SSE `records` event.
+/// A record batch as an SSE `records` event. The event `id:` is the last seq in
+/// the batch, so a client that drops mid-stream reconnects with `Last-Event-ID`
+/// (or `?from=`) and resumes exactly after it — the follower's cursor is
+/// exclusive, so no record is delivered twice.
 fn records_event(records: &[(Seq, Record)]) -> Event {
-    Event::default()
+    let event = Event::default()
         .event("records")
-        .data(serde_json::to_string(records).unwrap_or_default())
+        .data(serde_json::to_string(records).unwrap_or_default());
+    match records.last() {
+        Some((seq, _)) => event.id(seq.value().to_string()),
+        None => event,
+    }
 }
 
-/// A durability error as an SSE `error` event.
+/// A transport/durability error as an SSE `error` event, in the structured
+/// `{ code, message }` envelope (the same taxonomy as the HTTP error body).
 fn error_event(e: GrainError) -> Event {
-    Event::default().event("error").data(format!("{e:?}"))
+    Event::default()
+        .event("error")
+        .data(GatewayError::from(e).to_event_data())
 }
 
-/// Verify the request's bearer token to the principal it names. The error is the
-/// ready-to-return `401` response; an `axum::Response` is a large enum, but it is
-/// the natural error here and is returned straight to the client.
-#[allow(clippy::result_large_err)]
+/// Verify the request's bearer token to the principal it names, or a `401`
+/// [`GatewayError`] (carrying a `WWW-Authenticate: Bearer` challenge).
 fn principal<S: HarnessSystem>(
     gw: &Gateway<S>,
     headers: &HeaderMap,
-) -> Result<PrincipalId, Response> {
-    let token = bearer(headers).ok_or_else(|| unauthorized("missing bearer token"))?;
+) -> Result<PrincipalId, GatewayError> {
+    let token = bearer(headers).ok_or_else(|| GatewayError::unauthorized("missing bearer token"))?;
     gw.principal(token)
-        .ok_or_else(|| unauthorized("invalid token"))
+        .ok_or_else(|| GatewayError::unauthorized("invalid token"))
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -380,14 +424,14 @@ fn wants_sse(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-fn unauthorized(message: &str) -> Response {
-    (StatusCode::UNAUTHORIZED, Json(json!({ "error": message }))).into_response()
-}
-
-fn bad_gateway(message: impl Into<String>) -> Response {
-    (
-        StatusCode::BAD_GATEWAY,
-        Json(json!({ "error": message.into() })),
-    )
-        .into_response()
+/// The seq to resume an SSE stream from: the standard `Last-Event-ID` header (the
+/// last event id the client received) if present and numeric, else the `?from=`
+/// query value. Both are the follower's *exclusive* cursor, so resuming yields
+/// only records strictly after it.
+fn resume_from(headers: &HeaderMap, query_from: u64) -> u64 {
+    headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(query_from)
 }
