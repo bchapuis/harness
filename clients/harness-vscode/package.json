@@ -1,0 +1,87 @@
+{
+  "name": "harness-vscode",
+  "displayName": "Harness",
+  "description": "Drive a harness session from the VS Code Agents window, over the gateway's HTTP/SSE edge.",
+  "version": "0.1.0",
+  "publisher": "harness",
+  "private": true,
+  "license": "SEE LICENSE IN ../../README.md",
+  "engines": {
+    "vscode": "^1.120.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "main": "./dist/extension.js",
+  "enabledApiProposals": [
+    "chatSessionsProvider"
+  ],
+  "activationEvents": [
+    "onChatSession:harness"
+  ],
+  "contributes": {
+    "chatSessions": [
+      {
+        "type": "harness",
+        "name": "harness",
+        "displayName": "Harness",
+        "description": "A harness session, streamed live from the gateway.",
+        "capabilities": {
+          "supportsInterruptions": true
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "harness.newSession",
+        "title": "Harness: New Session",
+        "category": "Harness"
+      },
+      {
+        "command": "harness.setToken",
+        "title": "Harness: Set Gateway Token",
+        "category": "Harness"
+      }
+    ],
+    "configuration": {
+      "title": "Harness",
+      "properties": {
+        "harness.gatewayUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8080",
+          "description": "Base URL of the harness gateway (http(s)://host:port)."
+        },
+        "harness.token": {
+          "type": "string",
+          "default": "anonymous",
+          "markdownDescription": "Bearer token sent to the gateway. In the loopback dev gateway (`demo.sh`) the token IS the tenant, so any value names a fresh tenant. Prefer the `Harness: Set Gateway Token` command, which stores the token in VS Code SecretStorage instead of settings."
+        },
+        "harness.kind": {
+          "type": "string",
+          "default": "assistant",
+          "description": "Session kind (grain type) to list and address, e.g. \"assistant\"."
+        },
+        "harness.withinSecs": {
+          "type": "number",
+          "default": 600,
+          "description": "Per-prompt wait ceiling in seconds sent as within_secs; the gateway clamps it to its own maximum."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --import tsx test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.120.0",
+    "esbuild": "^0.23.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
