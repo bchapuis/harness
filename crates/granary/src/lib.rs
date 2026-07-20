@@ -17,13 +17,29 @@
 //!
 //! Beyond the event fold, a grain composes **facets** (spec §7.12) by declaring
 //! `type Facets`: the [`Kv`] map (§7.13), the [`Ws`] workspace directory
-//! (§7.11), and the SQL database (§7.14, behind the `sql` cargo feature). A
+//! (§7.11), the SQL database (§7.14, behind the `sql` cargo feature), the
+//! [`Alarm`] durable timer (§16), and the [`Workflow`] step memo (§16). A
 //! handler writes through the compile-time-gated `ctx` accessors —
-//! [`kv()`](GrainCtx::kv), [`ws()`](GrainCtx::ws), `sql()` — and all of a
+//! [`kv()`](GrainCtx::kv), [`ws()`](GrainCtx::ws), `sql()`,
+//! [`alarm()`](GrainCtx::alarm), [`workflow()`](GrainCtx::workflow) — and all of a
 //! command's records, events and facet operations alike, commit as **one
 //! atomic tagged batch** in the grain's single journal, snapshot as one
 //! composite, and share one unioned blob root set. One grain, one consistency
 //! boundary, however many storage features it declares.
+//!
+//! # Durable alarms and workflows
+//!
+//! The [`Alarm`] facet stores a single per-grain deadline; when it passes the
+//! runtime fires [`Grain::on_alarm`] with **no caller present** (spec §16), the
+//! basis for retries, timeouts, and the [`Workflow`] step memo — a
+//! Cloudflare-Workflows-style `step`/`sleep`/`retry` where each step's effect runs
+//! at most once across crashes because its result is journaled and memoized. An
+//! alarm fires while its grain is resident (and vetoes idle hibernation until it
+//! does) and re-arms on re-activation. To fire with **no access after a node
+//! failover**, host a type with
+//! [`granary_with_alarms`](GranaryExt::granary_with_alarms): each host registers its
+//! deadline in a per-shard [`AlarmIndex`], and a driver re-activates due grains on
+//! the shards this node leads.
 //!
 //! # Scope: two durability tiers, one model
 //!
@@ -66,9 +82,10 @@
 //!   leader can serve a stale read (writes never fork, §8). The DO-faithful
 //!   upgrade is a check-quorum **leader lease** that self-fences the activation
 //!   (§16), not a per-read Raft read-index (which would defeat read scaling, §7.8).
-//! - Durable alarms, hibernatable connections, follower reads, and cross-grain
-//!   sagas (§16).
+//! - Hibernatable connections, follower reads, and cross-grain sagas (§16).
 
+mod alarm;
+mod alarm_index;
 mod blobs;
 mod config;
 mod election;
@@ -92,8 +109,18 @@ mod sql;
 mod store;
 mod subscription;
 mod system;
+mod workflow;
 mod ws;
 
+pub use alarm::Alarm;
+pub use alarm::AlarmHandle;
+pub use alarm_index::ALARM_INDEX_TYPE;
+pub use alarm_index::AlarmIndex;
+pub use alarm_index::AllPending;
+pub use alarm_index::DueBefore;
+pub use alarm_index::Pending;
+pub use alarm_index::Sync as AlarmSync;
+pub use alarm_index::index_key;
 pub use blobs::BlobId;
 pub use blobs::GrainBlobs;
 pub use config::GranaryConfig;
@@ -160,6 +187,12 @@ pub use subscription::Subscription;
 pub use system::GranarySystem;
 pub use system::ShardId;
 pub use system::shard_for;
+pub use workflow::LaunchGuard;
+pub use workflow::StepDone;
+pub use workflow::StepId;
+pub use workflow::Workflow;
+pub use workflow::WorkflowHandle;
+pub use workflow::complete_step;
 pub use ws::MAX_TREE_BYTES;
 pub use ws::Ws;
 pub use ws::WsCapture;

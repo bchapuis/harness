@@ -149,6 +149,24 @@ pub trait Grain: Sized + Send + 'static {
     fn can_passivate(&self, _state: &Self::State) -> bool {
         true
     }
+
+    /// Called when the grain's durable alarm fires (spec §16), with no caller
+    /// present. Like a [`GrainHandler`] minus the reply: a **decision** returning
+    /// the events to journal, and it MAY re-arm or cancel the alarm through
+    /// [`ctx.alarm()`](GrainCtx::alarm) (staged into the same atomic batch). The
+    /// runtime delivers it only while a deadline armed through the [`Alarm`]
+    /// facet is due; a grain without that facet never sees it, so the default is a
+    /// no-op. Same durability barrier as a command (§6): its events and staged
+    /// alarm change commit before any effect they imply.
+    ///
+    /// [`Alarm`]: crate::Alarm
+    fn on_alarm(
+        &self,
+        _state: &Self::State,
+        _ctx: &GrainCtx<Self>,
+    ) -> impl Future<Output = Vec<Self::Event>> + Send {
+        async { Vec::new() }
+    }
 }
 
 /// A grain's handler for one command type (spec §4.2): the **decide** half of the

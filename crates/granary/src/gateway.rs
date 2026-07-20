@@ -39,10 +39,12 @@ use actor_core::receptionist::Key;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::alarm_index::AlarmIndex;
 use crate::config::GranaryConfig;
 use crate::error::GrainError;
 use crate::grain::Grain;
 use crate::grain::GrainName;
+use crate::grainref::Granary;
 use crate::host::Host;
 use crate::shardmap::ShardMapSource;
 use crate::system::GranarySystem;
@@ -116,6 +118,9 @@ pub(crate) struct Gateway<G: Grain> {
     /// How a fresh activation's behavior value is built (the runtime instantiates
     /// the grain; the user supplies no value per `GrainName`).
     factory: Arc<dyn Fn() -> G + Send + Sync>,
+    /// The per-shard alarm index handed to each host it activates (spec §16), or
+    /// `None` when alarm-index wiring is off. Set by `granary_with_alarms`.
+    alarm_index: Option<Granary<AlarmIndex<G::System>>>,
 }
 
 impl<G: Grain> Gateway<G> {
@@ -125,6 +130,7 @@ impl<G: Grain> Gateway<G> {
         shards: usize,
         config: GranaryConfig,
         factory: Arc<dyn Fn() -> G + Send + Sync>,
+        alarm_index: Option<Granary<AlarmIndex<G::System>>>,
     ) -> Gateway<G> {
         Gateway {
             table: HashMap::new(),
@@ -133,6 +139,7 @@ impl<G: Grain> Gateway<G> {
             shards,
             config,
             factory,
+            alarm_index,
         }
     }
 
@@ -171,6 +178,7 @@ impl<G: Grain> Gateway<G> {
         let gateway = ctx.this();
         let activated = name.clone();
         let grain_type = self.grain_type;
+        let alarm_index = self.alarm_index.clone();
         let host = ctx.spawn_with(move || {
             Host::new(
                 grain_type,
@@ -179,6 +187,7 @@ impl<G: Grain> Gateway<G> {
                 journal.clone(),
                 config.clone(),
                 gateway.clone(),
+                alarm_index.clone(),
             )
         });
         // Prune the table when the host stops — idle hibernation or fault (§10).

@@ -50,6 +50,10 @@ use crate::grain::GrainName;
 use crate::grain::GrainRegistry;
 use std::sync::Arc;
 
+use crate::alarm_index::AlarmIndex;
+use crate::alarm_index::Sync as AlarmSync;
+use crate::alarm_index::index_key;
+use crate::grainref::Granary;
 use crate::journal::AppendOutcome;
 use crate::journal::DynGrainJournal;
 use crate::journal::Seq;
@@ -58,6 +62,7 @@ use crate::subscription::SUB_BUFFER;
 use crate::subscription::Subscribe;
 use crate::subscription::Subscribed;
 use crate::system::GranarySystem;
+use crate::system::shard_for;
 
 /// How many events a single rehydration read pulls from the journal at a time.
 const REPLAY_BATCH: usize = 256;
@@ -85,6 +90,22 @@ pub(crate) struct CheckIdle;
 impl Message for CheckIdle {
     type Reply = ();
     const MANIFEST: Manifest = Manifest::new("granary.CheckIdle");
+}
+
+/// An internal self-tick that fires a durable alarm (spec §16): when the armed
+/// deadline passes, the timer task delivers this, and the host runs the grain's
+/// [`on_alarm`](crate::Grain::on_alarm) with no caller present. `epoch` is the arm
+/// generation this timer was launched for; a re-arm bumps it, so a superseded
+/// timer's tick is ignored — a cancellation without a channel. Like [`CheckIdle`]
+/// it travels only by a local self-`tell`, never the network `register` list.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AlarmDue {
+    epoch: u64,
+}
+
+impl Message for AlarmDue {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("granary.AlarmDue");
 }
 
 /// A grain's live activation (spec §10): state folded from the journal, plus the
@@ -118,6 +139,21 @@ pub struct Host<G: Grain> {
     /// composite snapshot plus tagged records on rehydration (**G3**), exactly as
     /// `state` is.
     facets: Arc<FacetCell<G::Facets>>,
+    /// The durable-alarm arm generation (spec §16). Bumped on every (re)arm so a
+    /// stale timer task's [`AlarmDue`] is ignored — a cancellation without a
+    /// channel. Ephemeral activation state, reset per activation (**G3**).
+    alarm_epoch: u64,
+    /// The per-shard alarm index this host registers its pending deadline with
+    /// (spec §16), so a new leader can re-activate this grain after a failover
+    /// (`granary_with_alarms`). `None` when alarm-index wiring is off (the
+    /// resident-only Phase-1 behaviour). A grain without the [`Alarm`](crate::Alarm)
+    /// facet never changes an alarm form, so this stays dormant even when set.
+    alarm_index: Option<Granary<AlarmIndex<G::System>>>,
+    /// The deadline last synced to the index (nanoseconds), so a commit re-syncs
+    /// only on an actual change. `None` at activation, so the first arm after
+    /// rehydration always re-registers — the reconciliation that self-heals a lost
+    /// register (§16). Ephemeral.
+    last_registered_due: Option<Option<u64>>,
 }
 
 impl<G: Grain> Host<G> {
@@ -131,6 +167,7 @@ impl<G: Grain> Host<G> {
         journal: Arc<dyn DynGrainJournal>,
         config: GranaryConfig,
         gateway: ActorRef<Gateway<G>>,
+        alarm_index: Option<Granary<AlarmIndex<G::System>>>,
     ) -> Host<G> {
         Host {
             grain,
@@ -145,6 +182,9 @@ impl<G: Grain> Host<G> {
             last_active: actor_core::Instant::ZERO,
             sinks: Vec::new(),
             facets: Arc::new(FacetCell::new()),
+            alarm_epoch: 0,
+            alarm_index,
+            last_registered_due: None,
         }
     }
 
@@ -278,10 +318,16 @@ impl<G: Grain> Host<G> {
             name: self.name.clone(),
         });
         self.schedule_idle_check(ctx);
+        // Re-arm the durable alarm from the rehydrated form (spec §16): a grain
+        // that armed an alarm and then hibernated or failed over resumes its timer
+        // here, so firing survives deactivation (**G3**).
+        self.arm_alarm(ctx);
         Ok(())
     }
 
     /// The §6 per-command protocol, the one place the durability barrier lives.
+    /// Decide (arm the facet stage, run the handler), then [`commit`](Host::commit)
+    /// the produced events and staged facet operations as one atomic batch.
     pub(crate) async fn run_protocol<M>(
         &mut self,
         msg: M,
@@ -305,7 +351,38 @@ impl<G: Grain> Host<G> {
         }
         let gctx = self.grain_ctx(ctx);
         let (events, reply) = self.grain.handle(&self.state, msg, &gctx).await;
+        self.commit(events, ctx).await?;
+        Ok(reply)
+    }
 
+    /// The callerless alarm protocol (spec §16): fire the grain's
+    /// [`on_alarm`](Grain::on_alarm) through the same §6 durability barrier, with
+    /// no message and no reply. Before the handler runs, stage a cancel of the
+    /// fired alarm, so the deadline clears atomically unless `on_alarm` re-arms it
+    /// (last write wins in the shared stage — the DO consume-on-fire semantic).
+    async fn run_alarm(&mut self, ctx: &Ctx<Host<G>>) -> Result<(), GrainError> {
+        self.last_active = ctx.system().now();
+        if let Err(e) = self.facets.begin() {
+            self.forced_step_down(ctx).await;
+            return Err(GrainError::Unavailable(format!("facet begin: {e}")));
+        }
+        self.facets.clear_alarm_stage();
+        let gctx = self.grain_ctx(ctx);
+        let events = self.grain.on_alarm(&self.state, &gctx).await;
+        self.commit(events, ctx).await
+    }
+
+    /// The commit half of the §6 protocol (steps 2–7): encode the decided events
+    /// and drained facet records into one atomic batch, append, and — on a durable
+    /// quorum commit — fold, deliver, snapshot, and re-arm the alarm. Shared by the
+    /// command path ([`run_protocol`](Host::run_protocol)) and the alarm path
+    /// ([`run_alarm`](Host::run_alarm)); the facet stage MUST already be armed
+    /// ([`FacetCell::begin`]).
+    async fn commit(
+        &mut self,
+        events: Vec<G::Event>,
+        ctx: &Ctx<Host<G>>,
+    ) -> Result<(), GrainError> {
         // 2. Encode the events (facet 0) under their record tag (§7.12). Encoded
         //    BEFORE the facet seal, so a serialization failure abandons the
         //    stage with no physical local commit to unwind.
@@ -347,7 +424,7 @@ impl<G: Grain> Host<G> {
         //    deferred upgrade (§16) — not a per-read consensus round, which
         //    would defeat read scaling (§7.8).
         if encoded.is_empty() {
-            return Ok(reply);
+            return Ok(());
         }
         let batch_len = encoded.len() as u64;
 
@@ -400,7 +477,12 @@ impl<G: Grain> Host<G> {
                     self.deliver_records(from, new_head, bytes);
                 }
                 self.maybe_snapshot(ctx).await;
-                Ok(reply) // OUTPUT GATE releases here.
+                // Re-arm the durable alarm from the just-folded form (spec §16):
+                // an alarm this batch set, moved, cleared, or consumed-on-fire is
+                // now reflected in the facet, so a fresh timer supersedes any prior
+                // one (the epoch bump inside `arm_alarm` cancels it).
+                self.arm_alarm(ctx);
+                Ok(()) // OUTPUT GATE releases here.
             }
             // 6. Leadership moved off this node (§8): step down, redirect. The
             //    state is untouched; no fold, no success reply (**G5**). Physical
@@ -527,6 +609,60 @@ impl<G: Grain> Host<G> {
         }));
     }
 
+    /// Arm the durable-alarm timer (spec §16) from the folded [`Alarm`](crate::Alarm)
+    /// form. Every call supersedes any prior timer: it bumps [`alarm_epoch`], so a
+    /// still-sleeping earlier timer's [`AlarmDue`] is ignored — a cancellation
+    /// without a channel, the alarm analogue of `schedule_idle_check`'s
+    /// `last_active` guard. When the form carries a deadline, `launch` a task that
+    /// sleeps until it (zero if already past) and self-`tell`s `AlarmDue`; when it
+    /// carries none, the epoch bump alone disarms. Called after every commit and at
+    /// the end of rehydration, so the timer always reflects the durable form
+    /// (**G3**) — a grain that armed an alarm before a failover re-arms on the next
+    /// activation.
+    fn arm_alarm(&mut self, ctx: &Ctx<Host<G>>) {
+        // Keep the per-shard index current before (re)arming the local timer, so a
+        // new leader can re-activate this grain after a failover (spec §16).
+        self.sync_alarm_index(ctx);
+        self.alarm_epoch = self.alarm_epoch.wrapping_add(1);
+        let Some(due_nanos) = self.facets.alarm_due() else {
+            return;
+        };
+        let epoch = self.alarm_epoch;
+        let at = actor_core::Instant::from_nanos(due_nanos);
+        let delay = at.duration_since(ctx.system().now()); // saturates to zero if past
+        let me: ActorRef<Host<G>> = ctx.this();
+        let sleep = ctx.system().sleep(delay);
+        ctx.system().launch(Box::pin(async move {
+            sleep.await;
+            let _ = me.tell(AlarmDue { epoch }).await;
+        }));
+    }
+
+    /// Register (or clear) this grain's pending deadline in its shard's alarm index
+    /// (spec §16), so a node that later leads the shard can re-activate this grain
+    /// with no caller. A no-op unless `granary_with_alarms` wired an index. Fire-and-
+    /// forget (`tell`): a lost register is reconciled on the next activation, since
+    /// `last_registered_due` resets to `None` and the first arm re-registers; the
+    /// grain's own alarm facet, not the index, is the source of truth. Re-syncs only
+    /// on an actual change, so a stream of non-alarm commits costs nothing.
+    fn sync_alarm_index(&mut self, ctx: &Ctx<Host<G>>) {
+        let Some(index) = self.alarm_index.clone() else {
+            return;
+        };
+        let due = self.facets.alarm_due();
+        if self.last_registered_due == Some(due) {
+            return;
+        }
+        self.last_registered_due = Some(due);
+        let shard = shard_for(self.grain_type, self.name.key(), self.config.shards.max(1));
+        let key = index_key(self.grain_type, shard.index as usize);
+        let name = self.name.clone();
+        let head = self.head.value();
+        ctx.system().launch(Box::pin(async move {
+            let _ = index.grain(key).tell(AlarmSync { grain: name, due, head }).await;
+        }));
+    }
+
     /// Push one committed batch to every live sink (spec §7.9). `try_send`, never
     /// `send`: a sink whose buffer is full is dropped — its forwarder ends when
     /// the channel closes, the subscriber re-subscribes and backfills by `load` —
@@ -604,6 +740,31 @@ impl<G: Grain> Handler<Subscribe<G>> for Host<G> {
     }
 }
 
+impl<G: Grain> Handler<AlarmDue> for Host<G> {
+    async fn handle(&mut self, msg: AlarmDue, ctx: &Ctx<Host<G>>) {
+        // Ignore a superseded timer: a re-arm (a later commit, or a re-activation)
+        // bumped the epoch, so this tick is from a cancelled deadline (spec §16).
+        if msg.epoch != self.alarm_epoch {
+            return;
+        }
+        let now = ctx.system().now();
+        match self.facets.alarm_due() {
+            // Due: fire `on_alarm` through the durability barrier. A failed commit
+            // steps the activation down (the journal is the authority, G3); the
+            // next activation re-arms from the folded due. `run_alarm` re-arms on
+            // success, so a re-arming handler chains and a consumed alarm stops.
+            Some(nanos) if actor_core::Instant::from_nanos(nanos) <= now => {
+                let _ = self.run_alarm(ctx).await;
+            }
+            // Armed for a later time than this timer expected (the form moved
+            // forward since; the timer fired on the stale deadline): re-arm.
+            Some(_) => self.arm_alarm(ctx),
+            // Cancelled between arming and firing: nothing to do.
+            None => {}
+        }
+    }
+}
+
 impl<G: Grain> Handler<CheckIdle> for Host<G> {
     async fn handle(&mut self, _msg: CheckIdle, ctx: &Ctx<Host<G>>) {
         let now = ctx.system().now();
@@ -611,8 +772,16 @@ impl<G: Grain> Handler<CheckIdle> for Host<G> {
         // autonomous, not-yet-journaled work vetoes hibernation until it settles
         // (`can_passivate`), so the host reschedules rather than evicting it
         // mid-flight. Activity arriving after the timer was armed also reschedules.
+        //
+        // A pending durable alarm also vetoes idle hibernation (spec §16): the
+        // in-activation timer dies with the host, so evicting a grain that owes a
+        // callerless wake would silently defer it to the next access. The per-shard
+        // alarm index ([`AlarmIndex`]) is what will later let such a grain hibernate
+        // and still be re-activated at its deadline; until it drives this grain,
+        // staying resident is the safe default.
         if now.duration_since(self.last_active) >= self.config.idle_after
             && self.grain.can_passivate(&self.state)
+            && self.facets.alarm_due().is_none()
         {
             self.passivate(ctx).await;
         } else {

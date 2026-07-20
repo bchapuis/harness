@@ -240,6 +240,22 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     /// grain's unioned live set (§7.12). Only the host sweeps; a facet never
     /// issues `retain_blobs` itself, so one facet's GC can never drop another's.
     fn roots(form: &Self::Form) -> BTreeSet<BlobId>;
+
+    /// The runtime hook for durable alarms (spec §16): the pending deadline this
+    /// facet holds, in nanoseconds since the clock epoch, or `None`. Only the
+    /// [`Alarm`](crate::Alarm) facet returns a deadline; every other facet keeps
+    /// the default. The host reads it through [`FacetSet::alarm_due`] to arm the
+    /// callerless timer without a compile-time [`HasFacet`] bound.
+    fn alarm_due(_form: &Self::Form) -> Option<u64> {
+        None
+    }
+
+    /// Stage the consumption of a fired alarm (spec §16): before invoking
+    /// `on_alarm`, the host stages a cancel so a fired alarm clears atomically
+    /// unless the handler re-arms it (last write wins in the shared stage, the DO
+    /// consume-on-fire semantic). Only the [`Alarm`](crate::Alarm) facet acts;
+    /// every other facet keeps the no-op default.
+    fn stage_clear_alarm(_stage: &mut Self::Stage) {}
 }
 
 /// A grain's declared facet set (spec §7.12): the unit tuple `()` (no facets) or
@@ -295,6 +311,15 @@ pub trait FacetSet: sealed::Sealed + Send + Sync + 'static {
 
     /// The union of every facet's blob roots (§7.12).
     fn roots(forms: &Self::Forms) -> BTreeSet<BlobId>;
+
+    /// The pending alarm deadline of whichever facet holds one (spec §16), or
+    /// `None`. At most one facet in a set is the [`Alarm`](crate::Alarm) facet, so
+    /// the first non-`None` is the grain's single alarm.
+    fn alarm_due(forms: &Self::Forms) -> Option<u64>;
+
+    /// Stage the consumption of a fired alarm across the set (spec §16). Only the
+    /// [`Alarm`](crate::Alarm) facet's stage is touched.
+    fn stage_clear_alarm(stages: &mut Self::Stages);
 }
 
 impl sealed::Sealed for () {}
@@ -336,6 +361,12 @@ impl FacetSet for () {
     fn roots(_forms: &()) -> BTreeSet<BlobId> {
         BTreeSet::new()
     }
+
+    fn alarm_due(_forms: &()) -> Option<u64> {
+        None
+    }
+
+    fn stage_clear_alarm(_stages: &mut ()) {}
 }
 
 /// Implement [`FacetSet`] for a facet tuple. Hand-listed per arity because tuple
@@ -423,6 +454,19 @@ macro_rules! facet_set_tuple {
                 $(roots.extend($T::roots(&forms.$i));)+
                 roots
             }
+
+            fn alarm_due(forms: &Self::Forms) -> Option<u64> {
+                // At most one facet is the Alarm facet, so the first non-`None`
+                // is the grain's single alarm (spec §16).
+                $(if let Some(due) = $T::alarm_due(&forms.$i) {
+                    return Some(due);
+                })+
+                None
+            }
+
+            fn stage_clear_alarm(stages: &mut Self::Stages) {
+                $($T::stage_clear_alarm(&mut stages.$i);)+
+            }
         }
     };
 }
@@ -430,6 +474,7 @@ macro_rules! facet_set_tuple {
 facet_set_tuple!((A, 0));
 facet_set_tuple!((A, 0), (B, 1));
 facet_set_tuple!((A, 0), (B, 1), (C, 2));
+facet_set_tuple!((A, 0), (B, 1), (C, 2), (D, 3));
 
 /// Type-level index of the first tuple position (see [`HasFacet`]).
 pub struct Here(());
@@ -468,6 +513,10 @@ has_facet!((A, B), B, 1, There<Here>);
 has_facet!((A, B, C), A, 0, Here);
 has_facet!((A, B, C), B, 1, There<Here>);
 has_facet!((A, B, C), C, 2, There<There<Here>>);
+has_facet!((A, B, C, D), A, 0, Here);
+has_facet!((A, B, C, D), B, 1, There<Here>);
+has_facet!((A, B, C, D), C, 2, There<There<Here>>);
+has_facet!((A, B, C, D), D, 3, There<There<There<Here>>>);
 
 /// The host-owned facet cell: the committed forms and the per-command stages,
 /// shared with [`GrainCtx`](crate::GrainCtx) accessors through an `Arc`.
@@ -562,6 +611,25 @@ impl<FS: FacetSet> FacetCell<FS> {
     /// [`GrainBlobs::gc`](crate::GrainBlobs::gc) sweep.
     pub(crate) fn roots(&self) -> BTreeSet<BlobId> {
         FS::roots(&self.forms.lock().expect("facet forms lock"))
+    }
+
+    /// The grain's pending alarm deadline (spec §16), in nanoseconds since the
+    /// clock epoch, or `None`. Read by the host after each commit and on
+    /// activation to arm the callerless timer.
+    pub(crate) fn alarm_due(&self) -> Option<u64> {
+        FS::alarm_due(&self.forms.lock().expect("facet forms lock"))
+    }
+
+    /// Stage the consumption of a fired alarm into the armed command (spec §16).
+    /// Called by the host before `on_alarm`, so the deadline clears atomically
+    /// unless the handler re-arms it. Panics outside a command, exactly as the
+    /// other stage writers — the host only calls it inside the alarm protocol.
+    pub(crate) fn clear_alarm_stage(&self) {
+        let mut stages = self.stages.lock().expect("facet stages lock");
+        let stage = stages
+            .as_mut()
+            .expect("clear_alarm_stage is only valid inside the alarm protocol");
+        FS::stage_clear_alarm(stage);
     }
 
     /// Run `read` against `F`'s committed form (a facet accessor's read path).

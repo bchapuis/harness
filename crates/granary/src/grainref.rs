@@ -13,6 +13,9 @@ use actor_core::NodeId;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::alarm_index::AlarmIndex;
+use crate::alarm_index::DueBefore;
+use crate::alarm_index::index_key;
 use crate::config::GranaryConfig;
 use crate::error::GrainError;
 use crate::gateway::Activate;
@@ -30,6 +33,7 @@ use crate::replica_store::ReplicaTransport;
 use crate::replica_store::replica_store_key;
 use crate::shardmap::EmptyShardMap;
 use crate::shardmap::ShardMapSource;
+use crate::system::ShardId;
 use crate::store::GrainStore;
 use crate::store::MemoryGrainStore;
 use crate::subscription::CloseSink;
@@ -652,6 +656,39 @@ pub trait GranaryExt: GranarySystem {
     ) -> Granary<G>
     where
         G: Grain<System = Self>;
+
+    /// Host grains of type `G` **with durable-alarm firing across hibernation and
+    /// failover** (spec §16). Like [`granary_named`](GranaryExt::granary_named), but
+    /// each host registers its pending [`Alarm`](crate::Alarm) deadline with the
+    /// per-shard `index`, and a background driver re-activates due grains on the
+    /// shards this node leads — so an alarm fires even with no caller after the
+    /// grain's leader changed. The caller starts **one** shared `AlarmIndex` granary
+    /// (`system.granary::<AlarmIndex<_>>(..)`) and passes its handle to every
+    /// alarm-bearing type; a type without the [`Alarm`](crate::Alarm) facet gains
+    /// nothing from wiring it and should use [`granary_named`](GranaryExt::granary_named).
+    fn granary_named_with_alarms<G>(
+        &self,
+        grain_type: &'static str,
+        config: GranaryConfig,
+        factory: Arc<dyn Fn() -> G + Send + Sync>,
+        index: Granary<AlarmIndex<Self>>,
+    ) -> Granary<G>
+    where
+        G: Grain<System = Self>;
+
+    /// [`granary_named_with_alarms`](GranaryExt::granary_named_with_alarms) under the
+    /// type's own `G::GRAIN_TYPE`, building each activation with `G::default` — the
+    /// common case, mirroring [`granary`](GranaryExt::granary).
+    fn granary_with_alarms<G>(
+        &self,
+        config: GranaryConfig,
+        index: Granary<AlarmIndex<Self>>,
+    ) -> Granary<G>
+    where
+        G: Grain<System = Self> + Default,
+    {
+        self.granary_named_with_alarms(G::GRAIN_TYPE, config, Arc::new(G::default), index)
+    }
 }
 
 impl<T: GranarySystem> GranaryExt for T {
@@ -664,50 +701,148 @@ impl<T: GranarySystem> GranaryExt for T {
     where
         G: Grain<System = Self>,
     {
+        build_granary::<Self, G>(self, grain_type, config, factory, None)
+    }
+
+    fn granary_named_with_alarms<G>(
+        &self,
+        grain_type: &'static str,
+        config: GranaryConfig,
+        factory: Arc<dyn Fn() -> G + Send + Sync>,
+        index: Granary<AlarmIndex<Self>>,
+    ) -> Granary<G>
+    where
+        G: Grain<System = Self>,
+    {
         let shards = config.shards.max(1);
-        let replicas = config.replication_factor.max(1);
-        // This node's durable grain store (§7.4): the injected factory if a
-        // deployment supplied one (so records survive a restart), else a fresh
-        // ephemeral in-memory store. The replica-store actor makes it reachable from
-        // a shard leader's replicator (§7.2), registered under one key per type like
-        // the gateway (§5.3); the transport reaches the peers' stores by `ask`.
-        let store: Arc<dyn GrainStore> = match &config.grain_store {
-            Some(factory) => factory(self.node()),
-            None => Arc::new(MemoryGrainStore::new()),
-        };
-        let replica_store = self.spawn(ReplicaStore::<G>::new(Arc::clone(&store)));
-        self.receptionist()
-            .register(replica_store_key::<G>(grain_type), &replica_store);
-        let transport: Arc<dyn ReplicaTransport> =
-            Arc::new(ActorReplicaTransport::<G>::new(self.clone(), grain_type));
-        // Build the consensus-agreed shard map (§7.6): a per-type Raft group whose
-        // committed log is the allocation, so every node agrees on each shard's
-        // replica set and only the replicas store it. The `Local` tier is a trivial
-        // single-node map. The map creates each assigned shard's leader-election
-        // group + per-grain quorum journal as the allocation commits; routing reads
-        // the map live and the gateway's bounded redirect absorbs the brief bootstrap
-        // window. Keyed by the runtime `grain_type`, so two type names get separate
-        // maps and groups.
-        let shard_map = self.shard_map(grain_type, shards, replicas, store, transport);
-        let gateway = self.spawn(Gateway::new(
+        let handle = build_granary::<Self, G>(self, grain_type, config, factory, Some(index.clone()));
+        // Start this type's alarm driver (spec §16): the callerless-activation seam.
+        // A background loop that, for each shard this node leads, reads the shard's
+        // alarm index and re-activates every due grain — so an alarm survives its
+        // grain's hibernation and a node failover, not just a resident activation.
+        self.launch(Box::pin(alarm_driver_loop::<Self, G>(
+            self.clone(),
+            handle.clone(),
+            index,
             grain_type,
-            Arc::clone(&shard_map),
             shards,
-            config,
-            factory,
-        ));
-        // Register this node's gateway under the type's well-known key so other
-        // nodes route activations to it (§5.3). Each node hosting the type does
-        // this, giving one gateway entry per node.
-        self.receptionist()
-            .register(gateway_key::<G>(grain_type), &gateway);
-        Granary {
-            system: self.clone(),
-            grain_type,
-            gateway,
-            shards,
-            shard_map,
-            cache: HostCache::new(self.clone(), grain_type, shards),
+        )));
+        handle
+    }
+}
+
+/// How often the alarm driver sweeps the shards it leads (spec §16). The exact
+/// deadline is honoured by the grain's own in-activation timer once re-activated;
+/// this cadence bounds only the *re-activation* latency after a failover, so it
+/// trades a little post-failover slack for a quiet steady state.
+const ALARM_DRIVE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Build the node-local hosting for a grain type (spec §7.4, Appendix A): the
+/// durable store, replica store, shard map, and gateway, returning the [`Granary`]
+/// handle. Shared by [`granary_named`](GranaryExt::granary_named) (no alarm index)
+/// and [`granary_named_with_alarms`](GranaryExt::granary_named_with_alarms) (which
+/// threads one in), so the two differ only by the `alarm_index` a host receives.
+fn build_granary<S, G>(
+    system: &S,
+    grain_type: &'static str,
+    config: GranaryConfig,
+    factory: Arc<dyn Fn() -> G + Send + Sync>,
+    alarm_index: Option<Granary<AlarmIndex<S>>>,
+) -> Granary<G>
+where
+    S: GranarySystem,
+    G: Grain<System = S>,
+{
+    let shards = config.shards.max(1);
+    let replicas = config.replication_factor.max(1);
+    // This node's durable grain store (§7.4): the injected factory if a deployment
+    // supplied one (so records survive a restart), else a fresh ephemeral in-memory
+    // store. The replica-store actor makes it reachable from a shard leader's
+    // replicator (§7.2), registered under one key per type like the gateway (§5.3);
+    // the transport reaches the peers' stores by `ask`.
+    let store: Arc<dyn GrainStore> = match &config.grain_store {
+        Some(factory) => factory(system.node()),
+        None => Arc::new(MemoryGrainStore::new()),
+    };
+    let replica_store = system.spawn(ReplicaStore::<G>::new(Arc::clone(&store)));
+    system
+        .receptionist()
+        .register(replica_store_key::<G>(grain_type), &replica_store);
+    let transport: Arc<dyn ReplicaTransport> =
+        Arc::new(ActorReplicaTransport::<G>::new(system.clone(), grain_type));
+    // Build the consensus-agreed shard map (§7.6): a per-type Raft group whose
+    // committed log is the allocation, so every node agrees on each shard's replica
+    // set and only the replicas store it. The `Local` tier is a trivial single-node
+    // map. Keyed by the runtime `grain_type`, so two type names get separate maps.
+    let shard_map = system.shard_map(grain_type, shards, replicas, store, transport);
+    let gateway = system.spawn(Gateway::new(
+        grain_type,
+        Arc::clone(&shard_map),
+        shards,
+        config,
+        factory,
+        alarm_index,
+    ));
+    // Register this node's gateway under the type's well-known key so other nodes
+    // route activations to it (§5.3), giving one gateway entry per node.
+    system
+        .receptionist()
+        .register(gateway_key::<G>(grain_type), &gateway);
+    Granary {
+        system: system.clone(),
+        grain_type,
+        gateway,
+        shards,
+        shard_map,
+        cache: HostCache::new(system.clone(), grain_type, shards),
+    }
+}
+
+/// The per-type alarm driver (spec §16): the callerless-activation seam that makes a
+/// durable alarm fire across a grain's hibernation and a node failover, not only
+/// while it is resident.
+///
+/// It sweeps on a fixed cadence: for every shard **this node leads**, it reads that
+/// shard's alarm index for grains whose deadline has passed, and re-activates each by
+/// `subscribe` (a framework built-in every grain accepts, so the driver stays generic
+/// over `G`). A re-activated grain runs `on_activate`, which re-arms its own timer
+/// and fires immediately for a past deadline (**G3**). The index is a hint — the
+/// grain's alarm facet is the source of truth — so re-activating a grain whose alarm
+/// already cleared is harmless: it simply re-registers the correct state and the
+/// index entry is dropped. Only the leader activates (§5.4), so sweeping led shards
+/// is exactly the set this node may act on.
+async fn alarm_driver_loop<S, G>(
+    system: S,
+    granary: Granary<G>,
+    index: Granary<AlarmIndex<S>>,
+    grain_type: &'static str,
+    shards: usize,
+) where
+    S: GranarySystem,
+    G: Grain<System = S>,
+{
+    loop {
+        system.sleep(ALARM_DRIVE_INTERVAL).await;
+        let now = system.now().as_nanos();
+        for shard in 0..shards {
+            let id = ShardId {
+                grain_type,
+                index: shard as u32,
+            };
+            if !system.leads_shard(id) {
+                continue;
+            }
+            let key = index_key(grain_type, shard);
+            let due = match index.grain(key).ask(DueBefore { before: now }).await {
+                Ok(names) => names,
+                Err(_) => continue, // index shard unavailable this tick; retry next sweep
+            };
+            for name in due {
+                // Re-activate the grain on this leader; its own timer then fires the
+                // due alarm. Drop the subscription immediately — activation is the
+                // only effect we want.
+                let _ = granary.grain(name.key().to_string()).subscribe(Seq::ZERO).await;
+            }
         }
     }
 }
