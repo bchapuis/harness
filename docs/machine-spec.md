@@ -1,0 +1,148 @@
+# Persistent Machines: A Durable Lightweight VM as a Grain
+
+**Status:** Draft v2: specified, not yet in the crate.
+**Scope:** A persistent, name-addressed lightweight virtual machine, a **machine**, that a user reaches over SSH, whose entire rootfs survives disconnection, idle hibernation, migration, and node loss. A machine is a grain ([`granary-spec.md`](granary-spec.md)) whose durable state is a raw disk (the disk facet, grain §7.15) and whose one added seam is the **network seam** (§5): ingress through a front door, egress through a policy-bound gateway. It is the sibling of the agentic harness ([`agentic-harness-spec.md`](agentic-harness-spec.md)): both are consumers of granary, and both reuse the sandbox's Firecracker `Native` microVM and vsock transport ([`sandbox-spec.md`](sandbox-spec.md) §3.5), but a machine is not an agent: it has no run loop, no model seam, and no autonomy.
+
+The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
+
+Sections of the granary specification are cited as **grain §N** (its invariants as **G1–G20**, the facet contract as **F1–F4**); the actor framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)) as **core §N** or **actor §N**; the sandbox specification as **sandbox §N** (its invariants as **S1–S5**); the agentic harness as **harness §N**. Sections of this document are plain **§N**. Invariants defined here are numbered **M1, M2, …**, kept apart from every sibling catalogue.
+
+> **Design stance.** The runtime's one idea, applied a third time. Granary's idea is that **an object is an actor plus three things**: a name-based virtual identity, a durable event-sourced journal, and a durability barrier on the reply. The harness's idea is that **an agent is a grain plus three things**: a self-driving loop, a model seam, and a sandbox. The machine's idea is the smallest of the three: **a machine is a grain plus two things**: a durable disk (grain §7.15) and a network seam (§5). Everything else is inherited from the grain unchanged, as it is for the agent: identity (`GrainName`), the journal, the single-writer fence, placement on a shard leader, virtual activation, idle hibernation, and lossless failover.
+>
+> A machine inverts the agent's principal. The agent is autonomous: its activation drives itself forward, and the sandbox is a subordinate effect environment the loop reaches through a seam. The machine is **reactive**, and the principal is a human at the other end of an SSH connection: the grain's activation *is* a running microVM, the grain's journal *is* that VM's disk write-log, and the grain does nothing until someone attaches. Where the agent sandbox persists only a workspace, defaults egress to deny, and forbids ingress (sandbox §1.1), the machine persists the *whole* rootfs (grain §7.15) and exists to be connected to and to reach out from: its network posture is a person's development machine, not a confined tool call, and §5 states what that changes and what it does not.
+>
+> The one place the inheritance is not literal is the durability barrier, and the departure is deliberate and bounded (§4). An agent holds its reply until the events it produced are durable (the output gate, grain §6). A machine cannot gate an interactive terminal's every keystroke on a quorum append, so its **command unit is a whole session**, not a message: the disk is captured at quiescent points, each capture an ordinary command through the §6 barrier (grain §7.15), and a crash mid-session rewinds the disk to its last capture. This is the ordinary crash-consistency of a snapshotted machine, never a fork and never corruption (the fence still holds, §6), stated as an invariant (M3) rather than smuggled in. The same relaxation obliges the machine to *prove* the fence it is not exercising: a session with no captures appends nothing, an activation that appends nothing never learns it was deposed, so a live session must carry a **session lease**, a periodic fenced append, and self-fence when it cannot (§4, M5).
+
+---
+
+## 1. What a machine is
+
+A **machine** is a virtual, durable, single-activation lightweight VM addressed by a `GrainName`. It is the grain model (grain §1) specialized like the agent (harness §2), but along one axis instead of three:
+
+| | Grain (grain spec) | Machine (this spec) |
+|---|---|---|
+| Identity | a stable `GrainName` | `MachineId` **is** a `GrainName`: `(GrainType = "machine", key = the machine's name)` |
+| State | event-sourced journal + snapshots | the **disk facet** (grain §7.15): the guest's whole rootfs as a raw block image |
+| Activation | fold of the journal on the shard leader | a **running microVM** on the shard leader, its image rehydrated from the disk facet |
+| Reply | held until events are durable (output gate) | **relaxed to session-grained** (§4): the terminal is live; the disk is durable to the last capture |
+| The world reaches it by | `ask`/`tell` (grain §4.3) | an **inbound SSH connection**, through the front door (§5.1) |
+
+A machine is one durable thing and two disposable ones. The durable thing is the grain: its journal and disk-facet blocks are the only state whose loss loses the machine. The disposable ones are the live microVM (the activation) and the front-door connection. Stopping the activation loses no committed disk block; the next activation, on whichever node leads the shard, boots a fresh microVM against the rehydrated image (grain §7.15, §9).
+
+---
+
+## 2. Goals and non-goals
+
+### 2.1 Goals
+
+- **A machine by name.** Address a machine by a stable name from any node; the runtime guarantees at most one *committing* live microVM, routes each connection to it (grain §5), and bounds how long a deposed one can linger (M5).
+- **Whole-rootfs persistence.** Installed packages, home directory, and working files survive disconnection, hibernation, migration, and node loss, as one disk facet over the two storage primitives (grain §7.15), with no new replication mechanism.
+- **Costs nothing while idle.** A machine with no connection hibernates (grain §10): the microVM is torn down after a final capture commits, and the grain holds no thread and no memory until the next attach.
+- **Single-writer safety.** A machine's disk never forks: the shard leader is its only writer, term-fenced (grain §8, G1), so two nodes never both commit disk blocks.
+- **Authenticated, attributable, isolated ingress; policy-bound, attributable, isolated egress.** A connection reaches a machine only with a key the machine authorizes; each attachment is journaled; a connection reaches only its own machine's guest (§5.1, M4). The guest reaches out to package mirrors, git remotes, and the internet through an egress path its journaled policy grants, attributed to the machine and never lateral into the cluster or a neighbor (§5.2, M6).
+- **Reuse, not reinvention, stated honestly.** The microVM and the vsock transport are the sandbox's Firecracker `Native` mechanics (sandbox §3.5); the durability is granary; the disk is a granary facet. The reuse is partial, and the differences are the point: the disk facet replaces the sandbox's per-call tar path (blocks, not file archives), and the guest half is inverted. The sandbox boots a host-owned `fc-agent` as init over a host-owned image; a machine boots the *user's own rootfs*, which ships the guest agent (§5.1). The vsock peer is therefore untrusted user code, and a compromise of the guest is durable by design: it persists in the rootfs as the user's own files do (recovery is restore-from-checkpoint, §8). This spec adds only the network seam and the session-grained capture policy.
+
+### 2.2 Non-goals
+
+- **An agent.** No run loop, no model seam, no tool declarations, no budget. A machine that *runs* an agent does so as an ordinary guest process the user starts; the harness (harness spec) is the separate consumer for agents-as-infrastructure.
+- **Per-keystroke durability.** The disk is durable to the last capture, not to the last write (§4). A machine gives snapshot crash-consistency, the same guarantee a real VM gives across power loss, never exactly-once of an interactive session's tail.
+- **Live process migration.** A microVM's running processes are activation-local. A planned migration captures the disk and reboots the guest on the new leader; a crash drops the connection and the guest's live process state (§4, §6). Memory-snapshot warm resume that would preserve running processes is future work (§8).
+- **A new consensus mechanism, a new isolation technology.** As in the harness (harness §1.1): durability and the fence are the grain's; confinement is the provider's (sandbox §3.4). This document mandates neither.
+- **Ingress or default egress for the agent sandbox.** The agent sandbox still withholds all ingress and defaults egress to deny (sandbox §1.1). The network seam here is the machine's, defined outside the sandbox tier model; it grants the agent sandbox nothing.
+
+---
+
+## 3. The disk is the grain's
+
+A machine declares `Facets = (Disk, Alarm)` and adds no storage of its own. The disk facet (grain §7.15) owns capture, checkpoint, discard, and rehydration; the alarm facet (grain §7.16) supplies the checkpoint timer of §4. This section states only what the machine contributes.
+
+- **Facet-0 state is metadata.** The grain's own folded `State` holds the machine's shape and policy, and nothing bulk: the authorized public keys, the machine's SSH **host key** (§5.1), the egress policy (§5.2), the vCPU and memory sizing, the base image reference, the idle window, and the checkpoint and lease intervals. The rootfs is the disk facet; the journal never holds image bytes outside the facet's blobs and manifests.
+- **Provisioning is a journaled event.** A machine's first activation folds a `Provisioned` event (owner, sizing, base image, a freshly generated host key); its disk begins as the base image's checkpoint manifest, so a fresh machine boots against shared, content-addressed base blocks and diverges by dirty blocks as the guest writes (grain §7.15, incremental by dedup). The host key's private half lives in facet-0 state, inside the cluster's own trust boundary, which already holds the journal it travels in.
+- **Access policy is journaled too.** Adding or revoking an authorized key is an ordinary event; the front door (§5.1) reads the current folded set. A revoked key stops authorizing the next attach; it does not tear down a live connection (that is a separate, explicit administrative action). The egress policy (§5.2) changes the same way, effective from the next activation or applied live where the provider can.
+
+---
+
+## 4. The session is the command; the capture cadence is the durability grain
+
+The agent's output gate holds a reply until its events are durable (grain §6, harness §6.3). A machine cannot: an interactive terminal echoes faster than any quorum append, and no human would tolerate a shell gated on replication. So the machine widens the command unit.
+
+- **A command is a session, bracketed by attach and detach.** The unit of durability is not a keystroke and not a message; it is the whole interval from a connection attaching (§5.1) to the machine next reaching a **quiescent point**. The guest runs freely between those points, over vsock, with the grain out of the data path, which is why the disk facet captures at a quiescent point and never mid-write (grain §7.15).
+- **A capture is a command.** Every capture is the disk facet's **capture command** (grain §7.15): a host-delivered command that pauses or stops the guest, drains the dirty set into blobs, stages one capture manifest, and commits through the ordinary §6 barrier: input gate, one atomic batch, output gate. Nothing is staged from `on_passivate` (grain §7.12's rule holds unchanged); a lifecycle boundary that needs a capture runs the capture command to completion first, and the machine's `can_passivate` refuses eviction while the image holds uncaptured writes, so the idle path cannot strand a dirty disk.
+- **Quiescent points, where the capture command runs.** Three:
+  1. **Idle hibernation** (grain §10). After the idle window with no connection, the machine runs a final capture command (stopping the guest), and only then permits passivation. Always durable.
+  2. **Planned migration** (grain §10, §8.3). A cooperative handoff runs the capture command before the activation moves; the new leader boots against the committed image.
+  3. **The checkpoint alarm** (grain §7.16). A durable alarm that, mid-session, briefly pauses the guest, runs the capture command, and resumes. A machine SHOULD set it whenever a connection is attached, at a configured interval: with quiescent points (1) and (2) suppressed by a live attachment (§5.1), the alarm is the **only** capture cadence a long session has, and without one the crash window of M3 grows to the whole session. It doubles as the session lease's fenced append (below).
+- **The session lease (self-fencing).** The relaxed barrier removes the very appends that would tell a deposed activation it is deposed: granary's own read contract lets an unfenced minority leader serve stale *reads* "until its activation stops" (grain §7.5), and a machine session is an interactive superset of that exposure: a terminal a user is typing into. So the machine MUST convert the exposure from unbounded to bounded: while any connection is attached, the activation MUST commit a fenced append at least once per configured **lease interval**. The checkpoint alarm's capture serves when it fires; otherwise a lightweight heartbeat record. An append outcome other than a contiguous commit (`NotLeader`, `Unavailable`) already ends the activation (grain §6); the lease adds the *time* bound: an activation without a committed append in the last lease interval MUST stop the microVM and sever its attachments, reporting the disconnect (§6). A partitioned machine thus dies within one lease interval rather than serving a doomed session indefinitely (**M5**).
+- **The relaxed barrier, stated exactly.** Committed disk state is durable to the **last capture**, not to the last write. The output gate still governs the *capture's* record: a capture manifest is not acknowledged, and the machine does not proceed as if captured, until it commits on a quorum (grain §6). What is relaxed is only the *frequency*, from per-message to per-quiescent-point. Between captures the guest's writes live only in the activation-local image, a rebuildable cache (grain §1) the fence renders unrecoverable-if-lost: a non-committed outcome discards it (grain §7.15, G20).
+- **Why this is sound, not lossy-by-accident.** The disk never forks: only capture commands append disk state, the term fence holds on them as on any grain's records (grain §8, M1), and a capture is one record in one atomic batch (grain §7.15), so a crash can never commit *part* of one. The image falls back to a consistent prior capture, never a torn composite (F4, G19). The exposure is bounded and named: the lost-write window is the capture cadence (M3), the doomed-session window is the lease interval (M5), and both are configuration, not accident.
+
+---
+
+## 5. The network seam
+
+The network seam is the one seam the grain does not supply, and it has two directions. Both are **properties, not products**, as in the sandbox (sandbox §1.1): a provider MAY realize them with other protocols and plumbing, but the properties bind.
+
+### 5.1 Ingress: the front door
+
+A **front door**, a cluster member analogous to the harness's gateway (harness §7.3–§7.4) holding a `GrainRef` per machine, terminates SSH and bridges authenticated sessions to the machine's activation.
+
+- **The front door terminates SSH.** It authenticates the connecting client by public key against the machine's journaled authorized-key set (§3), verifying possession itself: the GitHub-published-key model exe.dev uses. It presents the machine's own **host key** (§3) to the client, so a machine keeps one SSH identity across hibernation, migration, and failover, and the client's `known_hosts` pin survives all three. No session is bridged for a key the machine's current policy does not authorize (**M4**).
+- **Resolve, attach, bridge.** The front door resolves the machine's name → shard → current leader by the grain's ordinary routing (grain §5.4) and sends the leader an `Attach` command; the machine's activation lazily boots the microVM if not already running (rehydrating the disk, grain §7.15) and returns a handle. The front door then bridges the authenticated session's channels (PTY, exec, sftp) to the **guest agent** over the machine's vsock, through the leader node.
+- **The guest side is the guest agent over vsock, not a second authentication.** The machine's base image ships a guest agent listening on vsock: an `sshd` bound to vsock or an equivalent PTY/exec broker. vsock is reachable only from the host, so possession of the bridged channel *is* the host's authority: the user key set governs the front door, and no `authorized_keys` material enters the guest. The agent is part of the user's own rootfs (§2.1): a user who removes it severs their own front-door access (their machine keeps running and capturing; recovery is restore-from-checkpoint, §8), and nothing the guest does to the agent widens what the host will bridge.
+- **Attachment is journaled (attributable).** `Attach` and `Detach` fold events (`Attached { principal, at }`, `Detached { at, reason }`), so an operator answers "who reached this machine, and when" from the journal alone (**M4**), the ingress analogue of the egress attribution below.
+- **Attachment liveness.** The front door folds `Detached` when a connection closes, and the activation **death-watches the front-door member** holding each attachment (actor §12): if the front door dies without detaching, the watch folds `Detached { reason: FrontDoorLost }` for its attachments. An attachment can therefore pin an activation (below) only while something provably live holds it; a dead front door releases its pins within the death-watch's failure-detection bound, and the idle window then runs from that release.
+- **A live attachment pins the activation.** While any connection is attached, the machine does not hibernate and is not the target of a cooperative migration (§4's quiescent points (1) and (2) do not fire); this is why the checkpoint alarm and the session lease exist (§4). Routing is **migration-aware between connections**, not within one: each *new* connection re-resolves the current leader, so a machine that migrated while idle is reached at its new home; an *established* connection is pinned to the node it landed on, and a leadership change severs it (§6, M5) rather than silently rehoming it.
+- **Isolation.** A connection reaches only its own machine's guest, over that machine's own vsock, by single-activation and name routing (grain §1, §5): a machine can neither receive another machine's connection nor observe it. This is the ingress face of harness H8 and sandbox S1: one environment per identity, no cross-talk.
+
+Ingress obligations, collected: *authenticated* (possession of a key the machine's journaled policy authorizes, verified at the front door), *attributable* (every attachment journaled with its principal), *isolated* (a bridged session reaches only its own machine's guest). SSH terminated at the front door and bridged over vsock is the reference realization; a provider MAY bridge another protocol that meets the three (**M4**).
+
+### 5.2 Egress: the machine reaches out
+
+A development machine that cannot `git clone` or install a package is not a development machine, so a machine's guest gets an outbound network path, unlike the agent sandbox, whose egress is default-deny per tool call (sandbox §3.3). The inversion is deliberate and safe to state: the sandbox confines an *autonomous model's* effects; a machine's egress is a *person's*, authenticated at attach (M4) and attributed per machine. Three properties bind (**M6**):
+
+- **Policy-bound.** The machine's journaled egress policy (§3) grants egress; nothing is ambient. The policy's default for a fresh machine is **open internet** (the development-machine posture); an owner or operator MAY narrow it to an allowlist or to none, and the change is an ordinary journaled event.
+- **Attributable.** The provider MUST be able to attribute egress flows to the machine that originated them (a per-machine interface or address plus flow accounting is the reference realization), joining the attachment journal (§5.1) to answer *who was attached while this machine reached what*.
+- **Isolated: no lateral movement.** Whatever the policy grants toward the internet, the egress path MUST NOT reach: another machine's guest, any agent-sandbox environment, the host's own services, or the cluster's control plane and node-internal addresses (link-local and metadata endpoints included). A machine's network neighbor is the internet, never the infrastructure it runs on. The reference realization is a per-machine tap device NAT-ed through a node gateway that filters cluster-internal destinations; the obligation is the property.
+
+The agent sandbox's tier model is untouched by this section (§2.2): a sandboxed agent tool acquires egress by journaled tier acquisition under default-deny, as before (sandbox §3.3); a machine holds egress by standing policy because its principal is a human who authenticated to it.
+
+---
+
+## 6. Lifecycle and failure
+
+Everything here is a grain primitive; the machine adds only what the microVM and the connection require.
+
+- **Activation on attach.** The first `Attach` (§5.1) activates the grain on its shard leader and boots a microVM against the rehydrated disk (grain §7.15). Activation touches no consensus (grain §10, G8); it pays at most one quorum head-recovery (grain §9) plus the base/dirty blocks the boot reads (lazy hydration, grain §16, is what keeps this proportional to use rather than to image size).
+- **Hibernation on idle.** With no connection for the idle window, the machine runs the final capture command (§4), tears the microVM down, and permits passivation (grain §10). The grain sleeps holding no thread and no memory; its disk is durable. Re-activation is identical-state by rehydrate-then-replay (grain §7.15, G12).
+- **Planned migration.** A cooperative handoff runs the capture command, then the activation moves and reboots the guest on the new leader (grain §8.3, §10). Lossless for the disk (G14); the guest's live processes restart from the captured image (§2.2).
+- **Crash and failover.** On ungraceful node loss, the shard's new leader recovers each grain's committed disk head from a write quorum (grain §8, G14) and, on the next attach, boots against the **last captured** image. Writes since that capture are lost, the connection dropped; the disk never forks and never corrupts (CP, grain §11, G11). The lost window is bounded by the capture cadence (§4, **M3**).
+- **The deposed side, bounded.** Between a partition and the lease expiry, two live microVMs can transiently exist for one name: the new leader's, able to commit, and the deposed leader's, unable to and not yet aware. The deposed activation's session is doomed: its captures cannot commit and its image will be discarded (G20). The session lease (§4) bounds how long it can keep serving a user: within one lease interval it MUST stop the guest and sever its attachments (**M5**). This is granary's stale-read window (grain §7.5) made explicit for the one consumer whose "read" is an interactive terminal.
+- **Reporting loss.** A severed connection is reported to the client as a disconnect, never masked; the client reconnects through the front door and lands on the current leader (the ingress analogue of the sandbox's "loss is reported, never absorbed", sandbox §4). A reconnect after a crash MAY observe the disk rewound to the last capture (M3); it never observes a mixture of two histories (M1).
+
+---
+
+## 7. Invariant catalogue and conformance
+
+These invariants appear as MUSTs above; collected here, they are the machine's contract, each holding under the faults of grain §14. They ride the grain's own catalogue (G1–G20) and the facet contract (F1–F4); the M-invariants add only what is the machine's own.
+
+| | Invariant | Defined in |
+|---|---|---|
+| **M1** | **Single disk, never forked.** A machine's disk is the grain's journal plus the disk facet; only the shard leader appends, term-fenced (G1), and each capture is one atomic record (G19), so two activations never both commit disk state and the rootfs never forks and never mixes histories. | §4, §6; grain §8, §7.15 |
+| **M2** | **Lossless across graceful boundaries.** A machine hibernated when idle, or migrated cooperatively, re-activates with the disk as of its final capture command, which the graceful path runs to completion before the boundary; no write preceding a graceful boundary is lost (G12/G14 applied to the disk facet). | §4, §6 |
+| **M3** | **Bounded crash window.** On ungraceful node loss during a live session, the disk rewinds to the last durable capture, never a fork and never a torn image (G19, F4, G11), and writes since are lost. The window is the capture cadence: the checkpoint-alarm interval while attached (SHOULD, §4), the session boundary otherwise. | §4, §6 |
+| **M4** | **Authenticated, attributable, isolated ingress.** A session is bridged only on possession of a key the machine's current journaled policy authorizes, verified at the front door; each attachment and detachment is journaled with its principal; a bridged session reaches only its own machine's guest. | §5.1 |
+| **M5** | **A deposed activation self-fences within the lease.** While any connection is attached, the activation commits a fenced append at least once per lease interval; failing that, it stops the microVM and severs its attachments. Two live guests for one name can coexist only within one lease interval, and the deposed one can never commit (M1). | §4, §6 |
+| **M6** | **Policy-bound, attributable, isolated egress.** A guest's outbound path is exactly what the machine's journaled policy grants, attributable per machine, and can never reach another machine's guest, an agent-sandbox environment, the host's services, or the cluster's internal addresses. | §5.2 |
+
+A machine implementation conforms iff M1–M6 hold and its declared facets meet F1–F4 (grain §7.12), verified under the same deterministic simulation the grain and the disk facet use (grain §14): the fence, the capture cadence, the lease, and the crash rewind are seed-driven, so one seed reproduces an attach, a mid-session crash, a partition with a doomed session, a failover, and a reconnect.
+
+---
+
+## 8. Future work
+
+- **Memory-snapshot warm resume.** Snapshotting the microVM's *memory* alongside its disk (Firecracker's full snapshot), so a hibernated or migrated machine resumes with its running processes intact rather than rebooting the guest (§2.2). The disk facet gives crash-consistent rootfs persistence today; this adds process continuity, at the cost of storing memory snapshots as blobs and a heavier capture. Paired with warm pools (sandbox §7) it also cuts first-attach boot latency.
+- **Disk lazy block hydration.** The disk facet's deferred refinement (grain §16): faulting image blocks in from checkpoint blobs on first guest access, so a many-gigabyte machine attaches and migrates by touching only the blocks its next session reads. Load-bearing for large machines: without it a migration or cold attach materializes the whole image, and first-attach latency grows with image size rather than use. It is first in this list's priority order.
+- **Point-in-time restore and forking.** A machine's checkpoints are content-addressed manifests (grain §7.15), so restoring a machine to an earlier checkpoint, or provisioning a *new* machine from another's checkpoint (fork), is a metadata operation over existing blobs. Restore is also the recovery path for a compromised or self-bricked rootfs (§2.1, §5.1); fork is the exe.dev-style "clone my machine" feature. Neither needs new replication; both need policy (who may fork whose image) before they need mechanism.
+- **Within-connection migration.** Live-migrating an established SSH connection across a leadership change, rather than severing it (§5.1, §6). Requires connection-state handoff at the front door and a memory snapshot; today a live attachment pins the activation and a leadership change severs the connection within the lease (M5).
+- **Richer ingress.** Port forwarding and non-SSH protocols (HTTP preview endpoints, TCP) over the same authenticated, attributable, isolated seam (§5.1), the machine's version of the sandbox's deferred ingress (sandbox §7).
+- **Quotas and multi-tenant economics.** Per-owner machine counts, disk, CPU, and egress budgets, and idle-reap policy, the same tenant-level economics the harness defers (harness §1.1, §13).

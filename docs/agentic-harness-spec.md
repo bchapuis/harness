@@ -33,6 +33,8 @@ Everything in this document is built **on top of** the grain and modifies neithe
 
 The core non-goals (core §1.2) hold unchanged and are reinforced by the grain: the harness never transparently retries a message with side effects, never places a quorum on the message path (the grain's quorum is on the *durability* path, not the message path, grain §7.2), and never masks a failure. Where the harness *does* make a retry safe, it does so the way core §7.2 prescribes and the grain requires (grain §2.2, at-most-once): an explicit idempotency key (the `TurnId`, §7.4), not transparent retransmission.
 
+The harness is one consumer of the grain, not the only one. The **persistent machine** ([`machine-spec.md`](machine-spec.md)) is a sibling kind over the same substrate: it too is a grain (identity, journal, fence, activation, hibernation, failover), and it too reuses the sandbox's Firecracker `Native` mechanics (sandbox §3.5), but it is *not* an agent: no run loop, no model seam, no sandbox seam. It is the same "an object is a grain plus a few things" move applied to a durable VM instead of an agent: a grain plus a durable disk (grain §7.15) and a network seam (machine §5, ingress through a front door and egress under a journaled policy), reached over SSH rather than driven by a loop. Where the two touch (the shared `Native` microVM and vsock transport, the disk facet versus the workspace facet, the machine's network seam versus the sandbox's withheld ingress and default-deny egress), the machine spec owns the difference; nothing in this document changes.
+
 ### 1.1 Non-goals
 
 - **A model gateway.** The harness calls one configured model implementation per request; routing across providers, A/B serving, and quota brokering are not its concern.
@@ -550,7 +552,7 @@ A run with no faults is the simplest case and MUST still pass.
 
 ## 13. Future work
 
-- **Durable alarms for the agent.** A stored timer that re-activates a session to advance a run with no caller present (grain §16, durable alarms): the basis for scheduled runs, server-side timeouts, and proactive agents. v1's resumption is strictly caller-driven (§7.5); alarms would lift that.
+- **Durable alarms for the agent.** A stored timer that re-activates a session to advance a run with no caller present: the basis for scheduled runs, server-side timeouts, and proactive agents. The grain half now exists (the alarm facet and its per-shard index, grain §7.16); what remains is the harness-side integration: v1's resumption is strictly caller-driven (§7.5), and alarms would lift that.
 - **Scheduler singleton.** Queued and recurring agent runs feeding ordinary `Submit`s; deliberately out of v1, and a natural client of durable alarms above.
 - **Linearizable and follower reads.** A `Tail` (or a future query) that reflects committed state on the minority side of a partition, via the grain's deferred leader-lease upgrade (grain §7.5, §16); follower reads for read scale likewise ride the grain's extension.
 - **Sandbox providers, snapshots, and pooling.** The first per-tier provider ships as `harness-sandbox` (sandbox §3.1–§3.5). Still open: a network dataplane behind the profile's allowlist (sandbox §3.3) and warm pools to cut open latency.
