@@ -245,8 +245,8 @@ mod tests {
     fn pack_charges_the_budget() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = open(&tmp);
-        dir.write("a.bin", &[0u8; 512]).expect("write");
-        dir.write("b.bin", &[0u8; 512]).expect("write");
+        dir.write("a.bin", [0u8; 512]).expect("write");
+        dir.write("b.bin", [0u8; 512]).expect("write");
         // Two entries cost 2 * TAR_ENTRY_OVERHEAD + 1024 content bytes; a
         // budget covering one entry but not both must refuse mid-walk.
         let mut builder = tar::Builder::new(Vec::new());
