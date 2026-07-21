@@ -71,7 +71,9 @@ static GRAIN_TYPE_IDS: LazyLock<Mutex<HashMap<String, &'static str>>> =
 /// bounded deployment-time set, so interning one leaked `&'static str` per distinct
 /// kind name is sound (the same bounded-leak the runtime type name already permits).
 fn leak_grain_type(kind_id: &KindId) -> &'static str {
-    let mut ids = GRAIN_TYPE_IDS.lock().expect("grain-type name cache poisoned");
+    let mut ids = GRAIN_TYPE_IDS
+        .lock()
+        .expect("grain-type name cache poisoned");
     if let Some(id) = ids.get(kind_id.as_str()) {
         return id;
     }
@@ -221,7 +223,9 @@ impl<S: HarnessSystem> Harness<S> {
         model: Arc<dyn Model>,
         sandbox: Arc<dyn SandboxProvider>,
     ) -> Harness<S> {
-        Harness::builder(system, kinds).host_all(model, sandbox).build()
+        Harness::builder(system, kinds)
+            .host_all(model, sandbox)
+            .build()
     }
 
     /// Build a routing-only **client** harness (the Orleans cluster-client): it
@@ -376,7 +380,9 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
         let mut granaries: BTreeMap<KindId, Granary<Agent<S>>> = BTreeMap::new();
         for (id, shards) in &self.routed {
             let grain_type = leak_grain_type(id);
-            let granary = self.system.granary_client::<Agent<S>>(grain_type, *shards)?;
+            let granary = self
+                .system
+                .granary_client::<Agent<S>>(grain_type, *shards)?;
             granaries.insert(id.clone(), granary);
         }
         let shared = Arc::new(Shared {

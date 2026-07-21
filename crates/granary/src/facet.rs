@@ -163,8 +163,8 @@ pub(crate) mod sealed {
 
 /// One durable storage feature of a grain (spec §7.12). **Sealed**: the built-in
 /// facets — the KV map (§7.13), the workspace filesystem (§7.11), the SQL
-/// database (§7.14) — are the only implementations; third-party facets are a
-/// deferred policy decision (§16).
+/// database (§7.14), the disk image (§7.15) — are the only implementations;
+/// third-party facets are a deferred policy decision (§16).
 ///
 /// The obligations are the facet contract (§7.12): [`fold`](Facet::fold) is
 /// deterministic (**F1**), [`restore`](Facet::restore)-then-replay equals the full
@@ -214,6 +214,21 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     /// (**F1**): it runs on replay and — for a logical facet — after a live
     /// commit, and the two MUST agree.
     fn fold(form: &mut Self::Form, payload: &[u8]) -> Result<(), FacetError>;
+
+    /// Resolve blob-referencing replayed records into the materialization
+    /// (spec §7.15). Called once by the host after restore + replay, before the
+    /// first command: a facet whose records carry blob ids rather than bytes —
+    /// the disk facet's capture manifests — fetches and applies them here, so
+    /// [`fold`](Facet::fold) stays synchronous and pure (**F1** holds on the
+    /// recorded bytes) while the blob fetches ride the async [`FacetEnv`] path.
+    /// Every other facet keeps the no-op default. Mutation goes through the
+    /// form's own interior mutability (a physical form is an `Arc`d handle).
+    fn rehydrate(
+        _form: &Self::Form,
+        _env: &FacetEnv,
+    ) -> impl Future<Output = Result<(), FacetError>> + Send {
+        async { Ok(()) }
+    }
 
     /// Drop the materialization on a non-committed outcome (G20). Logical facets
     /// need nothing (their stage was never folded); a physical facet deletes its
@@ -293,6 +308,13 @@ pub trait FacetSet: sealed::Sealed + Send + Sync + 'static {
     fn fold(forms: &mut Self::Forms, tag: u8, payload: &[u8], live: bool)
     -> Result<(), FacetError>;
 
+    /// Resolve each facet's replayed blob-referencing records
+    /// ([`Facet::rehydrate`]), in facet-set order.
+    fn rehydrate(
+        forms: &Self::Forms,
+        env: &FacetEnv,
+    ) -> impl Future<Output = Result<(), FacetError>> + Send;
+
     /// Discard every physical materialization (G20).
     fn discard(forms: &mut Self::Forms);
 
@@ -346,6 +368,10 @@ impl FacetSet for () {
 
     fn fold(_forms: &mut (), tag: u8, _payload: &[u8], _live: bool) -> Result<(), FacetError> {
         Err(FacetError(format!("unrecognized facet tag {tag}")))
+    }
+
+    async fn rehydrate(_forms: &(), _env: &FacetEnv) -> Result<(), FacetError> {
+        Ok(())
     }
 
     fn discard(_forms: &mut ()) {}
@@ -415,6 +441,16 @@ macro_rules! facet_set_tuple {
                     return $T::fold(&mut forms.$i, payload);
                 })+
                 Err(FacetError(format!("unrecognized facet tag {tag}")))
+            }
+
+            fn rehydrate(
+                forms: &Self::Forms,
+                env: &FacetEnv,
+            ) -> impl Future<Output = Result<(), FacetError>> + Send {
+                async move {
+                    $($T::rehydrate(&forms.$i, env).await?;)+
+                    Ok(())
+                }
             }
 
             fn discard(forms: &mut Self::Forms) {
@@ -594,6 +630,15 @@ impl<FS: FacetSet> FacetCell<FS> {
     /// Replace the forms wholesale (snapshot restore, §9).
     pub(crate) fn install(&self, forms: FS::Forms) {
         *self.forms.lock().expect("facet forms lock") = forms;
+    }
+
+    /// Resolve blob-referencing replayed records after restore + replay
+    /// ([`Facet::rehydrate`], spec §7.15). Runs against a forms clone — cheap
+    /// `Arc`d handles sharing the same materializations — so no lock spans the
+    /// blob fetches.
+    pub(crate) async fn rehydrate(&self, env: &FacetEnv) -> Result<(), FacetError> {
+        let forms = self.forms();
+        FS::rehydrate(&forms, env).await
     }
 
     /// A clone of the committed forms, for lock-free async work (snapshot).

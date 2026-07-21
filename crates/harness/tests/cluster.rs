@@ -117,7 +117,14 @@ fn cluster(
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
     let harnesses: Vec<Harness<SimCluster>> = systems
         .iter()
-        .map(|s| Harness::cluster(s.clone(), &kinds(), Arc::new(model()), Arc::new(ScriptedSandboxes::echo())))
+        .map(|s| {
+            Harness::cluster(
+                s.clone(),
+                &kinds(),
+                Arc::new(model()),
+                Arc::new(ScriptedSandboxes::echo()),
+            )
+        })
         .collect();
     sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
     (net, harnesses)
@@ -253,5 +260,10 @@ fn building_a_harness_without_consensus_panics() {
     let sim = Simulation::new(1);
     // No `.with_leader(...)`: the cluster has no Raft engine.
     let system = SimNetwork::new(&sim).join(A);
-    let _ = Harness::cluster(system, &kinds(), Arc::new(model()), Arc::new(ScriptedSandboxes::echo()));
+    let _ = Harness::cluster(
+        system,
+        &kinds(),
+        Arc::new(model()),
+        Arc::new(ScriptedSandboxes::echo()),
+    );
 }

@@ -93,7 +93,10 @@ impl Pending {
 
     /// Every registered grain and its deadline, in stable order.
     pub fn all(&self) -> Vec<(GrainName, u64)> {
-        self.slots.iter().map(|(n, slot)| (n.clone(), slot.due)).collect()
+        self.slots
+            .iter()
+            .map(|(n, slot)| (n.clone(), slot.due))
+            .collect()
     }
 
     /// The registered deadline of one grain, if any.
@@ -141,7 +144,13 @@ impl<S: GranarySystem> Grain for AlarmIndex<S> {
     fn apply(state: &mut Pending, event: &Change) {
         match event {
             Change::Set(name, due, head) => {
-                state.slots.insert(name.clone(), Slot { due: *due, head: *head });
+                state.slots.insert(
+                    name.clone(),
+                    Slot {
+                        due: *due,
+                        head: *head,
+                    },
+                );
             }
             Change::Cleared(name) => {
                 state.slots.remove(name);
@@ -206,7 +215,12 @@ impl Message for DueBefore {
     const MANIFEST: Manifest = Manifest::new("granary.AlarmIndex.DueBefore");
 }
 impl<S: GranarySystem> GrainHandler<DueBefore> for AlarmIndex<S> {
-    async fn handle(&self, state: &Pending, msg: DueBefore, _ctx: &GrainCtx<Self>) -> (Vec<Change>, Vec<GrainName>) {
+    async fn handle(
+        &self,
+        state: &Pending,
+        msg: DueBefore,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<Change>, Vec<GrainName>) {
         (vec![], state.due_before(msg.before))
     }
 }
@@ -219,7 +233,12 @@ impl Message for AllPending {
     const MANIFEST: Manifest = Manifest::new("granary.AlarmIndex.AllPending");
 }
 impl<S: GranarySystem> GrainHandler<AllPending> for AlarmIndex<S> {
-    async fn handle(&self, state: &Pending, _msg: AllPending, _ctx: &GrainCtx<Self>) -> (Vec<Change>, Vec<(GrainName, u64)>) {
+    async fn handle(
+        &self,
+        state: &Pending,
+        _msg: AllPending,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<Change>, Vec<(GrainName, u64)>) {
         (vec![], state.all())
     }
 }

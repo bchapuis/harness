@@ -165,10 +165,11 @@ impl Kind {
             // Frame durations by their nanosecond count, not `Debug`: `Duration`'s
             // Debug format is a std detail, but this digest is journaled and compared
             // cluster-wide (§7.1), so it must not shift under a std upgrade.
-            frame(&decl.timeout.map_or_else(
-                || "none".to_string(),
-                |d| d.as_nanos().to_string(),
-            ));
+            frame(
+                &decl
+                    .timeout
+                    .map_or_else(|| "none".to_string(), |d| d.as_nanos().to_string()),
+            );
         }
         frame(&self.profile.image);
         let cap = self.tier_cap();

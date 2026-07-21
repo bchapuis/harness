@@ -954,9 +954,7 @@ impl RaftGroup {
         }
         let up_to_date = last_term > state.term_at(state.last_index())
             || (last_term == state.term_at(state.last_index()) && last_index >= state.last_index());
-        let granted = term == state.term
-            && state.voted_for.is_none_or(|v| v == from)
-            && up_to_date;
+        let granted = term == state.term && state.voted_for.is_none_or(|v| v == from) && up_to_date;
         if granted {
             state.voted_for = Some(from);
             self.persist_term(&state);

@@ -256,7 +256,10 @@ async fn a_malformed_body_is_a_structured_bad_request() {
         .header("authorization", "Bearer alice")
         .body(Body::from(r#"{"turn":"t-1""#)) // truncated JSON
         .unwrap();
-    let resp = harness_gateway::http::router(gw).oneshot(req).await.unwrap();
+    let resp = harness_gateway::http::router(gw)
+        .oneshot(req)
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = body_json(resp).await;
     assert_eq!(body["error"]["code"], "bad_request", "{body}");

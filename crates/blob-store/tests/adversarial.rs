@@ -103,7 +103,12 @@ fn a_rejoining_unaware_holder_does_not_resurrect_a_deleted_namespace() {
     // on rejoin, before it resumes accepting StoreBlobs or reconciling ns").
     let sim = Simulation::new(7);
     let (net, stores, _dirs) = cluster(&sim);
-    let store_of = |n: NodeId| stores.iter().find(|(id, _)| *id == n).map(|(_, s)| s.clone());
+    let store_of = |n: NodeId| {
+        stores
+            .iter()
+            .find(|(id, _)| *id == n)
+            .map(|(_, s)| s.clone())
+    };
 
     let ns = Namespace::new(b"doomed-workspace".to_vec());
     let bytes = b"a block that outlives its namespace".to_vec();
@@ -152,7 +157,11 @@ fn a_rejoining_unaware_holder_does_not_resurrect_a_deleted_namespace() {
         let (s, ns) = (store_of(C).unwrap(), ns.clone());
         async move { s.has(&ns, &id).await }
     });
-    assert_eq!(present, Ok(false), "has() on the healed node still reports the swept blob");
+    assert_eq!(
+        present,
+        Ok(false),
+        "has() on the healed node still reports the swept blob"
+    );
 }
 
 #[test]

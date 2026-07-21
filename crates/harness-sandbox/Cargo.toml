@@ -30,8 +30,10 @@ native = ["workspace", "dep:tokio", "dep:rustix"]
 # §3.5's reference choice): OS processes inside a Firecracker microVM, the
 # workspace carried in and out as a tar stream over vsock. Linux + /dev/kvm
 # only at runtime; the code builds everywhere. Implies `native` (the docker
-# fallback shares the provider's Native routing and refusal conduct).
-firecracker = ["native", "dep:tar", "tokio/fs"]
+# fallback shares the provider's Native routing and refusal conduct). The VM
+# lifecycle, vsock transport, and workspace tar codec live in the shared
+# `microvm` crate.
+firecracker = ["native", "dep:microvm", "microvm/ws", "tokio/fs"]
 
 [dependencies]
 actor-core.workspace = true
@@ -41,7 +43,7 @@ serde_json.workspace = true
 cap-std = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["process"] }
-tar = { workspace = true, optional = true }
+microvm = { workspace = true, optional = true }
 
 # uid/gid for the container's `--user` (unix-only API; the call site is
 # `#[cfg(unix)]`).
@@ -55,6 +57,9 @@ futures.workspace = true
 tempfile.workspace = true
 wat.workspace = true
 tokio = { workspace = true, features = ["process"] }
+# The firecracker suite's fake guest packs and unpacks tars itself, as the
+# real guest agent does — deliberately independent of the host-side codec.
+tar.workspace = true
 
 [lints]
 workspace = true

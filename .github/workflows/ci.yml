@@ -43,14 +43,24 @@ jobs:
       - name: Test (conformance suite + swarm regression corpus)
         run: cargo test --workspace
 
-  # The microVM-grade Native tier (sandbox spec §3.5): boots real Firecracker
-  # VMs, so it needs /dev/kvm — available on GitHub's Linux runners once the
-  # udev rule below widens the device's permissions. The assets (kernel,
-  # rootfs with the guest agent, VMM binary) are built by guest/fc-rootfs;
-  # that script also runs the agent's own test suite inside rust:alpine.
+  # The microVM-grade suites (sandbox spec §3.5, machine spec §2.1): boot real
+  # Firecracker VMs, so they need /dev/kvm — available on GitHub's x86_64
+  # Linux runners once the udev rule below widens the device's permissions.
+  # The assets (kernel, rootfs with each guest agent, VMM binary) are built by
+  # the guest build scripts, which also run each agent's own test suite inside
+  # rust:alpine; asset builds are cached on the script plus agent sources, so
+  # an agent change rebuilds (and re-tests) while everything else reuses.
+  # E2E_REQUIRE turns the KVM-gated tests' skip-on-missing-prerequisite
+  # conduct into a failure here: this job exists to run them, so a broken
+  # environment must not read as green.
   firecracker:
     name: firecracker microVM conformance
     runs-on: ubuntu-latest
+    env:
+      E2E_REQUIRE: 1
+      # The e2e machine boots a small alpine guest; a smaller image keeps the
+      # asset cache light.
+      MACHINE_MB: 512
     steps:
       - uses: actions/checkout@v4
 
@@ -70,11 +80,35 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
 
-      - name: Build the microVM assets (agent, rootfs, kernel, VMM)
+      - name: Cache the sandbox microVM assets
+        id: fc-assets
+        uses: actions/cache@v4
+        with:
+          path: guest/fc-rootfs/out
+          key: fc-assets-${{ runner.os }}-${{ hashFiles('guest/fc-rootfs/build.sh', 'guest/fc-agent/**') }}
+
+      - name: Cache the machine microVM assets
+        id: machine-assets
+        uses: actions/cache@v4
+        with:
+          path: guest/machine-rootfs/out
+          key: machine-assets-${{ runner.os }}-${{ env.MACHINE_MB }}-${{ hashFiles('guest/machine-rootfs/build.sh', 'guest/machine-agent/**') }}
+
+      - name: Build the sandbox assets (agent, rootfs, kernel, VMM)
+        if: steps.fc-assets.outputs.cache-hit != 'true'
         run: guest/fc-rootfs/build.sh
 
-      - name: Clippy (feature firecracker)
-        run: cargo clippy -p harness-sandbox --features firecracker --all-targets -- -D warnings
+      - name: Build the machine assets (agent, rootfs, kernel, VMM)
+        if: steps.machine-assets.outputs.cache-hit != 'true'
+        run: guest/machine-rootfs/build.sh
 
-      - name: Test (protocol suite + KVM-gated microVM conformance)
+      - name: Clippy (feature firecracker)
+        run: |
+          cargo clippy -p harness-sandbox --features firecracker --all-targets -- -D warnings
+          cargo clippy -p machine --features firecracker --all-targets -- -D warnings
+
+      - name: Test the sandbox tier (protocol suite + KVM-gated conformance)
         run: cargo test -p harness-sandbox --features firecracker
+
+      - name: Test the machine binding (ws sync suite + KVM-gated e2e)
+        run: cargo test -p machine --features firecracker --lib --test firecracker_e2e

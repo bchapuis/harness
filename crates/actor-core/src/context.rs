@@ -85,6 +85,17 @@ impl<A: Actor> Ctx<A> {
     where
         A: Handler<Terminated>,
     {
+        self.watch_id(target.id().clone());
+    }
+
+    /// Begin watching the actor identified by `target` (spec §12), when only
+    /// its id is known — an identity carried in a message or folded from
+    /// durable state rather than held as a typed ref. Identical to
+    /// [`watch`](Ctx::watch) otherwise.
+    pub fn watch_id(&self, target: ActorId)
+    where
+        A: Handler<Terminated>,
+    {
         // Deliver onto this actor's own mailbox; it is local and live (we are
         // running inside one of its handlers or `started`).
         let Some(mailbox) = self.system.resolve_local::<A>(&self.id) else {
@@ -94,8 +105,7 @@ impl<A: Actor> Ctx<A> {
             let mailbox = mailbox.clone();
             Box::pin(async move { mailbox.enqueue_signal(signal).await })
         });
-        self.system
-            .watch(target.id().clone(), self.id.clone(), deliver);
+        self.system.watch(target, self.id.clone(), deliver);
     }
 
     /// Stop watching `target` (spec §12).

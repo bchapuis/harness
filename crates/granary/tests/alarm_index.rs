@@ -98,7 +98,12 @@ impl Message for ReadFired {
     const MANIFEST: Manifest = Manifest::new("test.timer.ReadFired");
 }
 impl GrainHandler<ReadFired> for Timer {
-    async fn handle(&self, s: &TimerState, _m: ReadFired, _ctx: &GrainCtx<Self>) -> (Vec<TimerEvent>, u64) {
+    async fn handle(
+        &self,
+        s: &TimerState,
+        _m: ReadFired,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<TimerEvent>, u64) {
         (vec![], s.fired)
     }
 }
@@ -129,7 +134,12 @@ impl Message for Touch {
     const MANIFEST: Manifest = Manifest::new("test.poke.Touch");
 }
 impl GrainHandler<Touch> for Poke {
-    async fn handle(&self, _s: &TimerState, _m: Touch, _ctx: &GrainCtx<Self>) -> (Vec<TimerEvent>, ()) {
+    async fn handle(
+        &self,
+        _s: &TimerState,
+        _m: Touch,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<TimerEvent>, ()) {
         (vec![], ())
     }
 }
@@ -183,16 +193,44 @@ fn alarm_index_registers_clears_and_queries() {
         let idx = index.grain("test.Timer/0");
         let (a, b) = (a.clone(), b.clone());
         async move {
-            idx.ask(AlarmSync { grain: a.clone(), due: Some(100), head: 1 }).await.unwrap();
-            idx.ask(AlarmSync { grain: b.clone(), due: Some(300), head: 1 }).await.unwrap();
+            idx.ask(AlarmSync {
+                grain: a.clone(),
+                due: Some(100),
+                head: 1,
+            })
+            .await
+            .unwrap();
+            idx.ask(AlarmSync {
+                grain: b.clone(),
+                due: Some(300),
+                head: 1,
+            })
+            .await
+            .unwrap();
             // A stale lower-head clear must NOT drop a live entry.
-            idx.ask(AlarmSync { grain: a.clone(), due: None, head: 0 }).await.unwrap();
+            idx.ask(AlarmSync {
+                grain: a.clone(),
+                due: None,
+                head: 0,
+            })
+            .await
+            .unwrap();
             // A current clear removes b.
-            idx.ask(AlarmSync { grain: b, due: None, head: 2 }).await.unwrap();
+            idx.ask(AlarmSync {
+                grain: b,
+                due: None,
+                head: 2,
+            })
+            .await
+            .unwrap();
             idx.ask(AllPending).await.unwrap()
         }
     });
-    assert_eq!(all, vec![(a, 100)], "b cleared at a higher head; a survived a stale clear");
+    assert_eq!(
+        all,
+        vec![(a, 100)],
+        "b cleared at a higher head; a survived a stale clear"
+    );
 }
 
 #[test]
@@ -204,7 +242,10 @@ fn host_registers_pending_alarm_in_the_index() {
         ..GranaryConfig::default()
     });
     let timers = system.granary_with_alarms::<Timer>(
-        GranaryConfig { shards: SHARDS, ..GranaryConfig::default() },
+        GranaryConfig {
+            shards: SHARDS,
+            ..GranaryConfig::default()
+        },
         index.clone(),
     );
 
@@ -212,7 +253,11 @@ fn host_registers_pending_alarm_in_the_index() {
     ask(&sim, timers.grain("t/0"), Arm { after_ms: 10_000 });
 
     let shard = shard_for("test.Timer", "t/0", SHARDS).index as usize;
-    let pending = ask(&sim, index.grain(index_key("test.Timer", shard)), AllPending);
+    let pending = ask(
+        &sim,
+        index.grain(index_key("test.Timer", shard)),
+        AllPending,
+    );
     assert_eq!(
         pending,
         vec![(GrainName::new("test.Timer", "t/0"), 10_000_000_000)],
@@ -235,14 +280,22 @@ fn driver_reactivates_an_indexed_grain() {
     // A short idle window so the grain hibernates once touched — standing in for the
     // passivation a failover forces. The driver must bring it back from the index.
     let pokes = system.granary_with_alarms::<Poke>(
-        GranaryConfig { shards: SHARDS, idle_after: Duration::from_millis(10), ..GranaryConfig::default() },
+        GranaryConfig {
+            shards: SHARDS,
+            idle_after: Duration::from_millis(10),
+            ..GranaryConfig::default()
+        },
         index.clone(),
     );
 
     // Activate then let it hibernate.
     ask(&sim, pokes.grain("p/0"), Touch);
     sim.run_for(Duration::from_millis(100));
-    assert_eq!(activations_of(&recorder, "p/0"), 1, "activated once, then hibernated");
+    assert_eq!(
+        activations_of(&recorder, "p/0"),
+        1,
+        "activated once, then hibernated"
+    );
 
     // Register it as due (deadline 0, already past) in its shard's index, as a host
     // would have before its leader died.
@@ -250,7 +303,11 @@ fn driver_reactivates_an_indexed_grain() {
     ask(
         &sim,
         index.grain(index_key("test.Poke", shard)),
-        AlarmSync { grain: GrainName::new("test.Poke", "p/0"), due: Some(0), head: 1 },
+        AlarmSync {
+            grain: GrainName::new("test.Poke", "p/0"),
+            due: Some(0),
+            head: 1,
+        },
     );
 
     // Let the driver sweep (its cadence is 500ms): it reads the index and re-activates.

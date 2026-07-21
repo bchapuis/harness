@@ -54,7 +54,11 @@ async fn open(
     workspace: &std::path::Path,
 ) -> Arc<dyn Sandbox> {
     provider
-        .open(&SessionId::new(session), &SandboxProfile::image(IMAGE), workspace)
+        .open(
+            &SessionId::new(session),
+            &SandboxProfile::image(IMAGE),
+            workspace,
+        )
         .await
         .expect("open")
 }

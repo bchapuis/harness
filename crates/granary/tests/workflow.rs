@@ -198,7 +198,12 @@ impl Message for Start {
     const MANIFEST: Manifest = Manifest::new("test.Start");
 }
 impl GrainHandler<Start> for Pipeline {
-    async fn handle(&self, _s: &PipelineState, _m: Start, ctx: &GrainCtx<Self>) -> (Vec<PipelineEvent>, ()) {
+    async fn handle(
+        &self,
+        _s: &PipelineState,
+        _m: Start,
+        ctx: &GrainCtx<Self>,
+    ) -> (Vec<PipelineEvent>, ()) {
         self.schedule_drive(ctx);
         (vec![], ())
     }
@@ -211,7 +216,12 @@ impl Message for Drive {
     const MANIFEST: Manifest = Manifest::new("test.Drive");
 }
 impl GrainHandler<Drive> for Pipeline {
-    async fn handle(&self, state: &PipelineState, _m: Drive, ctx: &GrainCtx<Self>) -> (Vec<PipelineEvent>, ()) {
+    async fn handle(
+        &self,
+        state: &PipelineState,
+        _m: Drive,
+        ctx: &GrainCtx<Self>,
+    ) -> (Vec<PipelineEvent>, ()) {
         let events = self.drive(state, ctx);
         // If the workflow made progress that unblocks the next step, re-drive.
         if !events.is_empty() {
@@ -222,7 +232,12 @@ impl GrainHandler<Drive> for Pipeline {
 }
 
 impl GrainHandler<StepDone> for Pipeline {
-    async fn handle(&self, _s: &PipelineState, msg: StepDone, ctx: &GrainCtx<Self>) -> (Vec<PipelineEvent>, ()) {
+    async fn handle(
+        &self,
+        _s: &PipelineState,
+        msg: StepDone,
+        ctx: &GrainCtx<Self>,
+    ) -> (Vec<PipelineEvent>, ()) {
         let events = complete_step(ctx, msg);
         self.schedule_drive(ctx); // a committed step result unblocks the next drive
         (events, ())
@@ -240,7 +255,12 @@ impl Message for Retry {
     const MANIFEST: Manifest = Manifest::new("test.Retry");
 }
 impl GrainHandler<Retry> for Pipeline {
-    async fn handle(&self, _s: &PipelineState, msg: Retry, ctx: &GrainCtx<Self>) -> (Vec<PipelineEvent>, ()) {
+    async fn handle(
+        &self,
+        _s: &PipelineState,
+        msg: Retry,
+        ctx: &GrainCtx<Self>,
+    ) -> (Vec<PipelineEvent>, ()) {
         self.eph.lock().unwrap().guard.release(msg.id);
         self.schedule_drive(ctx);
         (vec![], ())
@@ -254,7 +274,12 @@ impl Message for Read {
     const MANIFEST: Manifest = Manifest::new("test.Read");
 }
 impl GrainHandler<Read> for Pipeline {
-    async fn handle(&self, state: &PipelineState, _m: Read, _ctx: &GrainCtx<Self>) -> (Vec<PipelineEvent>, Option<u32>) {
+    async fn handle(
+        &self,
+        state: &PipelineState,
+        _m: Read,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<PipelineEvent>, Option<u32>) {
         (vec![], state.finished)
     }
 }
@@ -288,10 +313,12 @@ fn rig(
 }
 
 fn passivated(recorder: &Recorder) -> bool {
-    recorder
-        .events()
-        .iter()
-        .any(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Passivated { .. })))
+    recorder.events().iter().any(|e| {
+        matches!(
+            e.as_app::<GrainEvent>(),
+            Some(GrainEvent::Passivated { .. })
+        )
+    })
 }
 
 // --- Tests --------------------------------------------------------------------
@@ -360,6 +387,14 @@ fn retry_relaunches_after_a_failed_step() {
 
     let g = grains.grain("p/0");
     let result = sim.block_on(async move { g.ask(Read).await.expect("read") });
-    assert_eq!(result, Some(42), "a failed step re-launches and the workflow completes");
-    assert_eq!(fx.fetch_runs.load(Ordering::SeqCst), 1, "one successful fetch after the failed attempt");
+    assert_eq!(
+        result,
+        Some(42),
+        "a failed step re-launches and the workflow completes"
+    );
+    assert_eq!(
+        fx.fetch_runs.load(Ordering::SeqCst),
+        1,
+        "one successful fetch after the failed attempt"
+    );
 }

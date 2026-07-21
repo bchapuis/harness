@@ -1,0 +1,41 @@
+[package]
+name = "machine"
+description = "Persistent machines: a durable, name-addressed lightweight VM as a grain (machine spec)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The real VM binding (machine §2.1): Firecracker through the shared `microvm`
+# plumbing, the machine's drive being the disk facet's image (grain §7.15) and
+# its /workspace synced through microvm's shared tar codec (machine §4).
+# Linux + /dev/kvm at runtime; builds everywhere.
+firecracker = ["dep:microvm", "microvm/ws", "dep:tokio", "dep:serde_json"]
+# Egress plumbing (machine §5.2): the per-machine tap device and node NAT that
+# realize the journaled policy. Linux + CAP_NET_ADMIN; shells out to `ip`/`nft`.
+# The pure rule generator (`nft_ruleset`) is available without the feature.
+net = []
+
+[dependencies]
+actor-core.workspace = true
+granary.workspace = true
+serde = { workspace = true }
+# The workspace file commands (machine §3) confine paths by capability
+# handle, as the sandbox's Workspace tier does (sandbox §3.1, S1).
+cap-std.workspace = true
+microvm = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+actor-cluster.workspace = true
+actor-simulation.workspace = true
+futures.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros"] }

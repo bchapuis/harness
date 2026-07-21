@@ -46,8 +46,7 @@ type StoreAckFuture =
 /// resolves `Ok(())` once that peer has durably stored the blob (no ack variants —
 /// an immutable blob has nothing to fence or order). Tagged with the replica for
 /// joint-quorum attribution (§7.7).
-type BlobAckFuture =
-    actor_core::BoxFuture<'static, (NodeId, Result<(), actor_core::CallError>)>;
+type BlobAckFuture = actor_core::BoxFuture<'static, (NodeId, Result<(), actor_core::CallError>)>;
 
 /// The result of [`merge`]: the contiguous record prefix, its head, the best
 /// snapshot `(seq, term, state)`, and whether any kept record's term is below the
@@ -94,10 +93,14 @@ impl LocalReplicator {
     ) -> AppendOutcome {
         // A single writer at term 0 is never fenced or stale (its fence stays 0 and
         // `after` always equals the head behind the input gate, §6).
-        match self
-            .store
-            .store_record(self.shard, grain, after, Term::ZERO, events, WriteKind::Append)
-        {
+        match self.store.store_record(
+            self.shard,
+            grain,
+            after,
+            Term::ZERO,
+            events,
+            WriteKind::Append,
+        ) {
             StoreAck::Stored(head) => AppendOutcome::Committed(head),
             other => {
                 AppendOutcome::Unavailable(format!("local store rejected the append: {other:?}"))
@@ -124,7 +127,10 @@ impl LocalReplicator {
         at: Seq,
         state: Vec<u8>,
     ) -> AppendOutcome {
-        match self.store.store_snapshot(self.shard, grain, at, Term::ZERO, state) {
+        match self
+            .store
+            .store_snapshot(self.shard, grain, at, Term::ZERO, state)
+        {
             StoreAck::Stored(seq) => AppendOutcome::Committed(seq),
             other => {
                 AppendOutcome::Unavailable(format!("local store rejected the snapshot: {other:?}"))
@@ -315,7 +321,11 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
 
     /// The target set of an in-flight migration, if any (§7.7).
     pub(crate) fn migration_target(&self) -> Option<Vec<NodeId>> {
-        self.sets.lock().expect("replica sets poisoned").target.clone()
+        self.sets
+            .lock()
+            .expect("replica sets poisoned")
+            .target
+            .clone()
     }
 
     fn not_leader(&self) -> AppendOutcome {
@@ -372,9 +382,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 Box::pin(async move { (node, ack.await) }) as StoreAckFuture
             })
             .collect();
-        let local = self
-            .local
-            .store_record(self.shard, grain, after, term, events, WriteKind::Append);
+        let local =
+            self.local
+                .store_record(self.shard, grain, after, term, events, WriteKind::Append);
         let (outcome, pending) = self.collect_store_quorum(&sets, local, peers).await;
         if matches!(outcome, QuorumOutcome::Committed) {
             // Committed on a quorum: return now and drain the slower replicas off the
@@ -498,9 +508,14 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             if head.value() > base.value()
                 && (any_below || local_head.value() < head.value() || migrating)
             {
-                let local =
-                    self.local
-                        .store_record(self.shard, grain, base, term, records.clone(), WriteKind::Repair);
+                let local = self.local.store_record(
+                    self.shard,
+                    grain,
+                    base,
+                    term,
+                    records.clone(),
+                    WriteKind::Repair,
+                );
                 let peers = self
                     .peers_of(&sets)
                     .into_iter()
@@ -843,9 +858,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 .transport
                 .list_blobs(node, self.shard, grain.clone(), QUORUM_TIMEOUT)
                 .await
-                .map_err(|_| {
-                    GrainJournalError::Unavailable("target replica unreachable".into())
-                })?
+                .map_err(|_| GrainJournalError::Unavailable("target replica unreachable".into()))?
                 .into_iter()
                 .collect();
             for &id in ids.difference(&held) {

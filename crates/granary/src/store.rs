@@ -787,10 +787,24 @@ mod tests {
     fn a_lower_term_write_is_fenced() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        store.store_record(0, &n, Seq::ZERO, Term::new(5), vec![b"e1".to_vec()], WriteKind::Append);
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::new(5),
+            vec![b"e1".to_vec()],
+            WriteKind::Append,
+        );
         // A write stamped with a term below the acknowledged shard term is refused.
         assert_eq!(
-            store.store_record(0, &n, Seq::ZERO, Term::new(4), vec![b"stale".to_vec()], WriteKind::Repair),
+            store.store_record(
+                0,
+                &n,
+                Seq::ZERO,
+                Term::new(4),
+                vec![b"stale".to_vec()],
+                WriteKind::Repair
+            ),
             StoreAck::Fenced(Term::new(5))
         );
     }
@@ -805,12 +819,26 @@ mod tests {
             ReadOutcome::Prepared(_)
         ));
         assert_eq!(
-            store.store_record(0, &name("b"), Seq::ZERO, Term::new(4), vec![b"stale".to_vec()], WriteKind::Append),
+            store.store_record(
+                0,
+                &name("b"),
+                Seq::ZERO,
+                Term::new(4),
+                vec![b"stale".to_vec()],
+                WriteKind::Append
+            ),
             StoreAck::Fenced(Term::new(5))
         );
         // A different shard keeps its own fence.
         assert_eq!(
-            store.store_record(1, &name("b"), Seq::ZERO, Term::new(4), vec![b"ok".to_vec()], WriteKind::Append),
+            store.store_record(
+                1,
+                &name("b"),
+                Seq::ZERO,
+                Term::new(4),
+                vec![b"ok".to_vec()],
+                WriteKind::Append
+            ),
             StoreAck::Stored(Seq::new(1))
         );
     }
@@ -819,11 +847,25 @@ mod tests {
     fn a_stale_head_append_is_rejected_but_repair_overwrites_by_term() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        store.store_record(0, &n, Seq::ZERO, Term::new(1), vec![b"e1".to_vec()], WriteKind::Append);
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"e1".to_vec()],
+            WriteKind::Append,
+        );
         // A normal append at a stale head (slot 1 already holds a different record)
         // is rejected, so a stale leader cannot overwrite a committed record.
         assert_eq!(
-            store.store_record(0, &n, Seq::ZERO, Term::new(3), vec![b"other".to_vec()], WriteKind::Append),
+            store.store_record(
+                0,
+                &n,
+                Seq::ZERO,
+                Term::new(3),
+                vec![b"other".to_vec()],
+                WriteKind::Append
+            ),
             StoreAck::Stale(Seq::new(1))
         );
         assert_eq!(
@@ -831,7 +873,14 @@ mod tests {
             vec![(Seq::new(1), Term::new(1), b"e1".to_vec())]
         );
         // A recovery write-back (repair) read-repairs the slot to the higher term.
-        store.store_record(0, &n, Seq::ZERO, Term::new(3), vec![b"repaired".to_vec()], WriteKind::Repair);
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::new(3),
+            vec![b"repaired".to_vec()],
+            WriteKind::Repair,
+        );
         assert_eq!(
             store.read(0, &n).slots,
             vec![(Seq::new(1), Term::new(3), b"repaired".to_vec())]
@@ -852,7 +901,14 @@ mod tests {
         );
         // A write that skips a slot (an uncommitted tail) does not advance the head.
         assert_eq!(
-            store.store_record(0, &n, Seq::new(3), Term::new(1), vec![b"e4".to_vec()], WriteKind::Append),
+            store.store_record(
+                0,
+                &n,
+                Seq::new(3),
+                Term::new(1),
+                vec![b"e4".to_vec()],
+                WriteKind::Append
+            ),
             StoreAck::Stored(Seq::new(2))
         );
     }
@@ -876,12 +932,25 @@ mod tests {
             StoreAck::Stored(Seq::new(2))
         );
         let reply = store.read(0, &n);
-        assert_eq!(reply.slots, vec![(Seq::new(3), Term::new(1), b"e3".to_vec())]);
-        assert_eq!(reply.snapshot, Some((Seq::new(2), Term::new(1), b"snap@2".to_vec())));
+        assert_eq!(
+            reply.slots,
+            vec![(Seq::new(3), Term::new(1), b"e3".to_vec())]
+        );
+        assert_eq!(
+            reply.snapshot,
+            Some((Seq::new(2), Term::new(1), b"snap@2".to_vec()))
+        );
         // The head still reads 3 (base 2 + the one retained record) — compaction
         // never regresses it. The next append lands contiguously at seq 4.
         assert_eq!(
-            store.store_record(0, &n, Seq::new(3), Term::new(1), vec![b"e4".to_vec()], WriteKind::Append),
+            store.store_record(
+                0,
+                &n,
+                Seq::new(3),
+                Term::new(1),
+                vec![b"e4".to_vec()],
+                WriteKind::Append
+            ),
             StoreAck::Stored(Seq::new(4))
         );
     }
@@ -890,14 +959,28 @@ mod tests {
     fn a_far_ahead_snapshot_carries_a_lagging_replica_to_its_seq() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        store.store_record(0, &n, Seq::ZERO, Term::new(1), vec![b"e1".to_vec()], WriteKind::Append);
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"e1".to_vec()],
+            WriteKind::Append,
+        );
         // A snapshot well past this replica's records (an InstallSnapshot analogue):
         // all slots drop, the base jumps to 5, and the head follows.
         store.store_snapshot(0, &n, Seq::new(5), Term::new(2), b"snap@5".to_vec());
         assert!(store.read(0, &n).slots.is_empty());
         // A write-back of the recovered tail lands cleanly after the new base.
         assert_eq!(
-            store.store_record(0, &n, Seq::new(5), Term::new(2), vec![b"e6".to_vec()], WriteKind::Repair),
+            store.store_record(
+                0,
+                &n,
+                Seq::new(5),
+                Term::new(2),
+                vec![b"e6".to_vec()],
+                WriteKind::Repair
+            ),
             StoreAck::Stored(Seq::new(6))
         );
     }
@@ -928,9 +1011,23 @@ mod tests {
     fn truncate_drops_own_term_tentative_records() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        store.store_record(0, &n, Seq::ZERO, Term::new(5), vec![b"e1".to_vec()], WriteKind::Append);
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::new(5),
+            vec![b"e1".to_vec()],
+            WriteKind::Append,
+        );
         // A tentative append at head 1 that failed its quorum rolls back.
-        store.store_record(0, &n, Seq::new(1), Term::new(5), vec![b"e2".to_vec()], WriteKind::Append);
+        store.store_record(
+            0,
+            &n,
+            Seq::new(1),
+            Term::new(5),
+            vec![b"e2".to_vec()],
+            WriteKind::Append,
+        );
         store.truncate(0, &n, Seq::new(1), Term::new(5));
         assert_eq!(
             store.read(0, &n).slots,
@@ -950,7 +1047,14 @@ mod tests {
         // leader's records.
         let store = MemoryGrainStore::new();
         let n = name("a");
-        store.store_record(0, &n, Seq::ZERO, Term::new(5), vec![b"e1".to_vec()], WriteKind::Append);
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::new(5),
+            vec![b"e1".to_vec()],
+            WriteKind::Append,
+        );
         // The new leader (term 6) repairs slot 2 and appends slot 3 to this replica.
         store.store_record(
             0,
@@ -981,10 +1085,31 @@ mod tests {
         // and the surviving record is re-merged by the next recovery).
         let store = MemoryGrainStore::new();
         let n = name("a");
-        store.store_record(0, &n, Seq::ZERO, Term::new(5), vec![b"e1".to_vec()], WriteKind::Append);
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::new(5),
+            vec![b"e1".to_vec()],
+            WriteKind::Append,
+        );
         // Own-term tentative at slot 2; a newer leader's record at slot 3.
-        store.store_record(0, &n, Seq::new(1), Term::new(5), vec![b"mine".to_vec()], WriteKind::Append);
-        store.store_record(0, &n, Seq::new(2), Term::new(6), vec![b"theirs".to_vec()], WriteKind::Repair);
+        store.store_record(
+            0,
+            &n,
+            Seq::new(1),
+            Term::new(5),
+            vec![b"mine".to_vec()],
+            WriteKind::Append,
+        );
+        store.store_record(
+            0,
+            &n,
+            Seq::new(2),
+            Term::new(6),
+            vec![b"theirs".to_vec()],
+            WriteKind::Repair,
+        );
         store.truncate(0, &n, Seq::new(1), Term::new(5));
         assert_eq!(
             store.read(0, &n).slots,
@@ -995,7 +1120,14 @@ mod tests {
         );
         // The head stops at the gap: slot 3 is above an uncommitted hole.
         assert_eq!(
-            store.store_record(0, &n, Seq::new(1), Term::new(6), vec![b"x".to_vec()], WriteKind::Repair),
+            store.store_record(
+                0,
+                &n,
+                Seq::new(1),
+                Term::new(6),
+                vec![b"x".to_vec()],
+                WriteKind::Repair
+            ),
             StoreAck::Stored(Seq::new(3))
         );
     }

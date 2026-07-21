@@ -29,17 +29,17 @@ use std::io;
 use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
-use crate::blob::slice;
-use crate::blob::verify;
 use crate::blob::BlobError;
 use crate::blob::BlobId;
 use crate::blob::BlobStore;
 use crate::blob::Namespace;
+use crate::blob::slice;
+use crate::blob::verify;
 
 /// Bytes of a tombstone record on disk: `deleted_at` (u64 LE) followed by its
 /// checksum (u64 LE), mirroring the grain store's fence file (granary
@@ -251,7 +251,10 @@ impl LocalBlobStore {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.inner.write.lock().expect("blob store write lock poisoned")
+        self.inner
+            .write
+            .lock()
+            .expect("blob store write lock poisoned")
     }
 
     fn next_deleted_at(&self) -> u64 {
@@ -425,7 +428,10 @@ mod tests {
         let path = store.blob_path(&ns, &id);
         fs::write(&path, b"tampered contents of a different length").expect("tamper");
 
-        assert_eq!(block_on(store.get(&ns, &id, None)), Err(BlobError::Corrupt(id)));
+        assert_eq!(
+            block_on(store.get(&ns, &id, None)),
+            Err(BlobError::Corrupt(id))
+        );
     }
 
     #[test]
@@ -435,9 +441,15 @@ mod tests {
         let bytes = b"0123456789".to_vec();
         let id = block_on(store.put(&ns, bytes)).expect("put");
 
-        assert_eq!(block_on(store.get(&ns, &id, Some(2..5))), Ok(b"234".to_vec()));
+        assert_eq!(
+            block_on(store.get(&ns, &id, Some(2..5))),
+            Ok(b"234".to_vec())
+        );
         // An out-of-range slice clamps to the blob rather than panicking.
-        assert_eq!(block_on(store.get(&ns, &id, Some(8..100))), Ok(b"89".to_vec()));
+        assert_eq!(
+            block_on(store.get(&ns, &id, Some(8..100))),
+            Ok(b"89".to_vec())
+        );
     }
 
     #[test]
@@ -461,7 +473,10 @@ mod tests {
 
         block_on(store.delete_namespace(&ns)).expect("delete");
 
-        assert_eq!(block_on(store.get(&ns, &id, None)), Err(BlobError::Deleted(ns.clone())));
+        assert_eq!(
+            block_on(store.get(&ns, &id, None)),
+            Err(BlobError::Deleted(ns.clone()))
+        );
         assert_eq!(block_on(store.has(&ns, &id)), Ok(false));
         assert!(!store.blob_path(&ns, &id).exists(), "bytes must be swept");
         assert_eq!(
@@ -495,7 +510,14 @@ mod tests {
         assert_eq!(id_a, id_b, "the id is namespace-independent");
 
         block_on(store.delete_namespace(&a)).expect("delete a");
-        assert_eq!(block_on(store.get(&a, &id_a, None)), Err(BlobError::Deleted(a)));
-        assert_eq!(block_on(store.get(&b, &id_b, None)), Ok(bytes), "b is untouched");
+        assert_eq!(
+            block_on(store.get(&a, &id_a, None)),
+            Err(BlobError::Deleted(a))
+        );
+        assert_eq!(
+            block_on(store.get(&b, &id_b, None)),
+            Ok(bytes),
+            "b is untouched"
+        );
     }
 }

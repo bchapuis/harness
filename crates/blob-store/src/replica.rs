@@ -20,7 +20,6 @@ use std::marker::PhantomData;
 use std::ops::Range;
 use std::time::Duration;
 
-use actor_core::receptionist::Key;
 use actor_core::Actor;
 use actor_core::ActorRef;
 use actor_core::BoxFuture;
@@ -31,6 +30,7 @@ use actor_core::HandlerRegistry;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
+use actor_core::receptionist::Key;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -355,7 +355,9 @@ impl<S: BlobSystem> BlobTransport for ActorBlobTransport<S> {
         let replica = self.resolve(node);
         Box::pin(async move {
             let replica = replica.ok_or(CallError::Unreachable)?;
-            replica.ask_timeout(StoreBlob { ns, id, bytes }, within).await
+            replica
+                .ask_timeout(StoreBlob { ns, id, bytes }, within)
+                .await
         })
     }
 
@@ -370,7 +372,9 @@ impl<S: BlobSystem> BlobTransport for ActorBlobTransport<S> {
         let replica = self.resolve(node);
         Box::pin(async move {
             let replica = replica.ok_or(CallError::Unreachable)?;
-            replica.ask_timeout(FetchBlob { ns, id, range }, within).await
+            replica
+                .ask_timeout(FetchBlob { ns, id, range }, within)
+                .await
         })
     }
 
@@ -444,15 +448,32 @@ mod tests {
         let ns = Namespace::new(b"ns".to_vec());
         let id = BlobId::of(b"block");
         assert_eq!(
-            round_trip(&StoreBlob { ns: ns.clone(), id, bytes: b"block".to_vec() }).bytes,
+            round_trip(&StoreBlob {
+                ns: ns.clone(),
+                id,
+                bytes: b"block".to_vec()
+            })
+            .bytes,
             b"block",
         );
         assert_eq!(
-            round_trip(&FetchBlob { ns: ns.clone(), id, range: Some(1..4) }).range,
+            round_trip(&FetchBlob {
+                ns: ns.clone(),
+                id,
+                range: Some(1..4)
+            })
+            .range,
             Some(1..4),
         );
         assert_eq!(round_trip(&HasBlob { ns: ns.clone(), id }).id, id);
-        assert_eq!(round_trip(&DeleteNamespace { ns: ns.clone(), deleted_at: 7 }).deleted_at, 7);
+        assert_eq!(
+            round_trip(&DeleteNamespace {
+                ns: ns.clone(),
+                deleted_at: 7
+            })
+            .deleted_at,
+            7
+        );
         assert_eq!(round_trip(&StoreAck::Stored), StoreAck::Stored);
         assert_eq!(round_trip(&StoreAck::Deleted), StoreAck::Deleted);
         assert_eq!(round_trip(&DeleteAck::Acked), DeleteAck::Acked);
@@ -490,18 +511,34 @@ mod tests {
             // Store, then read it back raw and probe presence.
             assert_eq!(
                 replica
-                    .ask_timeout(StoreBlob { ns: ns.clone(), id, bytes: bytes.clone() }, within)
+                    .ask_timeout(
+                        StoreBlob {
+                            ns: ns.clone(),
+                            id,
+                            bytes: bytes.clone()
+                        },
+                        within
+                    )
                     .await,
                 Ok(StoreAck::Stored),
             );
             assert_eq!(
                 replica
-                    .ask_timeout(FetchBlob { ns: ns.clone(), id, range: None }, within)
+                    .ask_timeout(
+                        FetchBlob {
+                            ns: ns.clone(),
+                            id,
+                            range: None
+                        },
+                        within
+                    )
                     .await,
                 Ok(Some(bytes)),
             );
             assert_eq!(
-                replica.ask_timeout(HasBlob { ns: ns.clone(), id }, within).await,
+                replica
+                    .ask_timeout(HasBlob { ns: ns.clone(), id }, within)
+                    .await,
                 Ok(true),
             );
 
@@ -509,23 +546,45 @@ mod tests {
             // back into it is refused (spec §5.3, B7).
             assert_eq!(
                 replica
-                    .ask_timeout(DeleteNamespace { ns: ns.clone(), deleted_at: 1 }, within)
+                    .ask_timeout(
+                        DeleteNamespace {
+                            ns: ns.clone(),
+                            deleted_at: 1
+                        },
+                        within
+                    )
                     .await,
                 Ok(DeleteAck::Acked),
             );
             assert_eq!(
                 replica
-                    .ask_timeout(FetchBlob { ns: ns.clone(), id, range: None }, within)
+                    .ask_timeout(
+                        FetchBlob {
+                            ns: ns.clone(),
+                            id,
+                            range: None
+                        },
+                        within
+                    )
                     .await,
                 Ok(None),
             );
             assert_eq!(
-                replica.ask_timeout(HasBlob { ns: ns.clone(), id }, within).await,
+                replica
+                    .ask_timeout(HasBlob { ns: ns.clone(), id }, within)
+                    .await,
                 Ok(false),
             );
             assert_eq!(
                 replica
-                    .ask_timeout(StoreBlob { ns, id, bytes: b"a stored block".to_vec() }, within)
+                    .ask_timeout(
+                        StoreBlob {
+                            ns,
+                            id,
+                            bytes: b"a stored block".to_vec()
+                        },
+                        within
+                    )
                     .await,
                 Ok(StoreAck::Deleted),
             );
@@ -561,10 +620,15 @@ mod tests {
                 Ok(StoreAck::Stored),
             );
             assert_eq!(
-                transport.fetch_blob(node, ns.clone(), id, None, within).await,
+                transport
+                    .fetch_blob(node, ns.clone(), id, None, within)
+                    .await,
                 Ok(Some(bytes)),
             );
-            assert_eq!(transport.has_blob(node, ns.clone(), id, within).await, Ok(true));
+            assert_eq!(
+                transport.has_blob(node, ns.clone(), id, within).await,
+                Ok(true)
+            );
 
             // A node with no registered replica is Unreachable, not a panic.
             let absent = NodeId::new(999);

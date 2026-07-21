@@ -24,25 +24,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use actor_core::NodeId;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 
-use crate::blob::slice;
-use crate::blob::verify;
 use crate::blob::BlobConfig;
 use crate::blob::BlobError;
 use crate::blob::BlobId;
 use crate::blob::BlobStore;
 use crate::blob::Namespace;
+use crate::blob::slice;
+use crate::blob::verify;
 use crate::event::BlobEvent;
 use crate::local::LocalBlobStore;
 use crate::placement;
-use crate::replica::blob_replica_key;
 use crate::replica::ActorBlobTransport;
 use crate::replica::BlobReplica;
 use crate::replica::BlobTransport;
 use crate::replica::StoreAck;
 use crate::replica::StoreAckFuture;
+use crate::replica::blob_replica_key;
 use crate::system::BlobSystem;
 use crate::tombstone::AnchorTracker;
 use crate::tombstone::TombstoneSet;
@@ -201,10 +201,9 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
                 Ok(StoreAck::Stored) => {
                     stored += 1;
                     if stored >= need {
-                        self.inner.system.emit_blob_event(BlobEvent::PutAcked {
-                            ns: ns.clone(),
-                            id,
-                        });
+                        self.inner
+                            .system
+                            .emit_blob_event(BlobEvent::PutAcked { ns: ns.clone(), id });
                         self.drain(acks);
                         return Ok(id);
                     }
@@ -330,10 +329,10 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
         for node in &members {
             let node = *node;
             let is_anchor = anchor_owners.contains(&node);
-            let fut = self
-                .inner
-                .transport
-                .delete_namespace(node, ns.clone(), deleted_at, DELETE_TIMEOUT);
+            let fut =
+                self.inner
+                    .transport
+                    .delete_namespace(node, ns.clone(), deleted_at, DELETE_TIMEOUT);
             acks.push(async move { (node, is_anchor, fut.await) });
         }
 
@@ -374,9 +373,9 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
         if pending.is_empty() {
             return;
         }
-        self.inner.transport.launch(Box::pin(async move {
-            while pending.next().await.is_some() {}
-        }));
+        self.inner.transport.launch(Box::pin(
+            async move { while pending.next().await.is_some() {} },
+        ));
     }
 }
 

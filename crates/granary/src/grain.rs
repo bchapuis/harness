@@ -6,10 +6,12 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use actor_core::ActorId;
 use actor_core::ActorRef;
 use actor_core::BoxError;
 use actor_core::HandlerRegistry;
 use actor_core::Message;
+use actor_core::TerminationReason;
 use actor_serialization::SerializationRequirement;
 use serde::Deserialize;
 use serde::Serialize;
@@ -167,6 +169,24 @@ pub trait Grain: Sized + Send + 'static {
     ) -> impl Future<Output = Vec<Self::Event>> + Send {
         async { Vec::new() }
     }
+
+    /// Called when an actor this grain watched through
+    /// [`GrainCtx::watch`] terminates (actor §12) — including its node going
+    /// down. Like [`on_alarm`](Grain::on_alarm), a callerless **decision**
+    /// through the same §6 barrier: return the events to journal (an empty
+    /// result commits nothing, §7.5). The basis for liveness-coupled durable
+    /// state — the machine folding `Detached` when the front-door member
+    /// holding an attachment dies (machine §5.1). The default ignores the
+    /// signal; a grain that never watches never sees one.
+    fn on_peer_terminated(
+        &self,
+        _state: &Self::State,
+        _ctx: &GrainCtx<Self>,
+        _peer: &ActorId,
+        _reason: TerminationReason,
+    ) -> impl Future<Output = Vec<Self::Event>> + Send {
+        async { Vec::new() }
+    }
 }
 
 /// A grain's handler for one command type (spec §4.2): the **decide** half of the
@@ -205,6 +225,9 @@ pub struct GrainCtx<G: Grain> {
     /// through it. Also the source of the facet blob roots
     /// [`blobs`](GrainCtx::blobs) unions into every sweep.
     facets: Arc<FacetCell<G::Facets>>,
+    /// Death-watch requests queued by [`watch`](GrainCtx::watch), drained and
+    /// registered by the host after the current handler completes.
+    watches: Arc<std::sync::Mutex<Vec<ActorId>>>,
 }
 
 impl<G: Grain> GrainCtx<G> {
@@ -215,6 +238,7 @@ impl<G: Grain> GrainCtx<G> {
         gateway: ActorRef<Gateway<G>>,
         journal: Arc<dyn DynGrainJournal>,
         facets: Arc<FacetCell<G::Facets>>,
+        watches: Arc<std::sync::Mutex<Vec<ActorId>>>,
     ) -> GrainCtx<G> {
         GrainCtx {
             grain_type,
@@ -223,7 +247,19 @@ impl<G: Grain> GrainCtx<G> {
             gateway,
             journal,
             facets,
+            watches,
         }
+    }
+
+    /// Death-watch `target` (actor §12): when it terminates for any reason —
+    /// including its node going down — the grain's
+    /// [`on_peer_terminated`](Grain::on_peer_terminated) runs through the
+    /// ordinary §6 barrier. The registration is queued here and installed by the
+    /// host after the current handler (or lifecycle hook) completes; it lives
+    /// with the activation, so a rehydrated grain re-watches from its folded
+    /// state in `on_activate` (watch-after-death fires immediately, actor §12).
+    pub fn watch(&self, target: ActorId) {
+        self.watches.lock().expect("watch queue lock").push(target);
     }
 
     /// The facet cell, for the facet accessor modules (`kv`, `fs`, `sql`).

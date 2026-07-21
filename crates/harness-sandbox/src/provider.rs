@@ -365,7 +365,10 @@ impl NativeEnv {
 /// retrying against state that no longer exists. An ambient stat, not a
 /// handle read: the open handle keeps a deleted directory's fd alive, so only
 /// the path can witness the deletion.
-fn escalate_loss(result: Result<Value, ToolError>, path: &std::path::Path) -> Result<Value, ToolError> {
+fn escalate_loss(
+    result: Result<Value, ToolError>,
+    path: &std::path::Path,
+) -> Result<Value, ToolError> {
     match result {
         Err(ToolError::Sandbox(e)) if std::fs::metadata(path).is_err() => Err(
             ToolError::EnvironmentLost(format!("workspace directory is gone: {e}")),

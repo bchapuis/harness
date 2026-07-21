@@ -107,7 +107,12 @@ impl Message for ReadFired {
     const MANIFEST: Manifest = Manifest::new("test.timer.ReadFired");
 }
 impl GrainHandler<ReadFired> for Timer {
-    async fn handle(&self, s: &TimerState, _m: ReadFired, _ctx: &GrainCtx<Self>) -> (Vec<TimerEvent>, u64) {
+    async fn handle(
+        &self,
+        s: &TimerState,
+        _m: ReadFired,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<TimerEvent>, u64) {
         (vec![], s.fired)
     }
 }
@@ -152,7 +157,10 @@ fn drive<T: Send + 'static>(
         *out.lock().unwrap() = Some(future.await);
     }));
     sim.run_for(settle);
-    cell.lock().unwrap().take().expect("future did not complete")
+    cell.lock()
+        .unwrap()
+        .take()
+        .expect("future did not complete")
 }
 
 type Indexes = Vec<Granary<AlarmIndex<SimCluster>>>;
@@ -164,8 +172,10 @@ fn cluster(sim: &Simulation) -> (SimNetwork, Vec<Granary<Timer>>, Indexes) {
     let net = SimNetwork::new(sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
     let systems = [net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
-    let indexes: Vec<Granary<AlarmIndex<SimCluster>>> =
-        systems.iter().map(|s| s.granary::<AlarmIndex<SimCluster>>(config())).collect();
+    let indexes: Vec<Granary<AlarmIndex<SimCluster>>> = systems
+        .iter()
+        .map(|s| s.granary::<AlarmIndex<SimCluster>>(config()))
+        .collect();
     let timers: Vec<Granary<Timer>> = systems
         .iter()
         .zip(&indexes)
@@ -221,7 +231,10 @@ fn run_failover(seed: u64) {
 
     // Crash the grain's shard leader before the deadline; a survivor re-elects.
     let leader = timers[0].leader(key).expect("the shard elected a leader");
-    let survivor = [A, B, C].iter().position(|&n| n != leader).expect("a survivor");
+    let survivor = [A, B, C]
+        .iter()
+        .position(|&n| n != leader)
+        .expect("a survivor");
     net.crash(leader);
 
     // Advance well past re-election AND past the 30s deadline — with NO caller ever
@@ -233,7 +246,11 @@ fn run_failover(seed: u64) {
     // the new leader.
     let after = drive(&sim, Duration::from_secs(3), {
         let idx = index_for(&indexes, survivor, key);
-        async move { idx.ask(DueBefore { before: u64::MAX }).await.expect("index read") }
+        async move {
+            idx.ask(DueBefore { before: u64::MAX })
+                .await
+                .expect("index read")
+        }
     });
     assert!(
         !after.contains(&target),
@@ -243,7 +260,14 @@ fn run_failover(seed: u64) {
     // Corroboration: a read (the first caller since the crash) sees the durable fire.
     let fired = drive(&sim, Duration::from_secs(6), {
         let g = timers[survivor].grain(key);
-        async move { g.ask_timeout(ReadFired, Duration::from_secs(5)).await.expect("read") }
+        async move {
+            g.ask_timeout(ReadFired, Duration::from_secs(5))
+                .await
+                .expect("read")
+        }
     });
-    assert_eq!(fired, 1, "the alarm fired exactly once, callerlessly, after failover");
+    assert_eq!(
+        fired, 1,
+        "the alarm fired exactly once, callerlessly, after failover"
+    );
 }

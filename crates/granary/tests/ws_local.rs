@@ -262,7 +262,12 @@ fn deletions_are_captured_and_survive_rehydration() {
             .expect("put")
             .expect("staged");
         assert_eq!(
-            grain.ask(Drop_ { path: "a.txt".into() }).await.expect("drop"),
+            grain
+                .ask(Drop_ {
+                    path: "a.txt".into()
+                })
+                .await
+                .expect("drop"),
             Ok(1),
             "one removal staged",
         );
@@ -273,12 +278,22 @@ fn deletions_are_captured_and_survive_rehydration() {
     let reread = studios.grain("studio/1");
     sim.block_on(async move {
         assert_eq!(
-            reread.ask(Get { path: "a.txt".into() }).await.expect("get"),
+            reread
+                .ask(Get {
+                    path: "a.txt".into()
+                })
+                .await
+                .expect("get"),
             None,
             "a captured deletion survives rehydration",
         );
         assert_eq!(
-            reread.ask(Get { path: "b.txt".into() }).await.expect("get"),
+            reread
+                .ask(Get {
+                    path: "b.txt".into()
+                })
+                .await
+                .expect("get"),
             Some(b"b".to_vec()),
         );
     });

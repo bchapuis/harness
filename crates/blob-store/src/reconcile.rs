@@ -132,8 +132,11 @@ async fn reconcile_pass<S: BlobSystem>(inner: &Inner<S>) {
 /// visited in a stable (sorted) order, and only genuinely new tombstones mutate
 /// state, so the pass is idempotent and seed-reproducible.
 async fn sync_tombstones<S: BlobSystem>(inner: &Inner<S>, members: &[actor_core::NodeId]) {
-    let mut peers: Vec<actor_core::NodeId> =
-        members.iter().copied().filter(|n| *n != inner.self_node).collect();
+    let mut peers: Vec<actor_core::NodeId> = members
+        .iter()
+        .copied()
+        .filter(|n| *n != inner.self_node)
+        .collect();
     peers.sort();
 
     // Pull every peer concurrently, so a single slow or dead peer (whose ask runs to

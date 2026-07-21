@@ -310,41 +310,15 @@ async fn a_dead_socket_is_transport_loss() {
     ));
 }
 
-// ---------------------------------------------------------------------------
-// The pack itself
-// ---------------------------------------------------------------------------
-
-#[test]
-fn the_pack_is_deterministic_and_budgeted() {
-    let (_tmp, dir) = workspace();
-    dir.create_dir_all("z/nested").expect("dirs");
-    dir.write("z/nested/c", b"3").expect("c");
-    dir.write("a", b"1").expect("a");
-    dir.write("m", b"2").expect("m");
-
-    let first = tar_workspace(&dir).expect("pack");
-    let second = tar_workspace(&dir).expect("pack");
-    assert_eq!(first, second, "same workspace, same bytes");
-
-    // Round-trip through the module's own unpack into a fresh workspace.
-    let (_tmp2, other) = workspace();
-    untar_workspace(&other, &first).expect("unpack");
-    let mut content = String::new();
-    other
-        .open("z/nested/c")
-        .expect("nested file")
-        .read_to_string(&mut content)
-        .expect("read");
-    assert_eq!(content, "3");
-}
+// The codec itself (pack determinism, budgeting, round trips) is tested where
+// it lives: `microvm::ws_sync`. This suite covers the protocol around it.
 
 #[test]
 fn the_config_document_pins_the_shape_firecracker_boots_from() {
     let config = FirecrackerConfig::new("/usr/bin/firecracker", "/k/vmlinux", "/r/base.ext4");
-    let document = config_json(
-        &config,
-        std::path::Path::new("/ctl/rootfs.ext4"),
-        std::path::Path::new("/ctl/v.sock"),
+    let document = microvm::config_json(
+        &vm_config(&config, std::path::Path::new("/ctl/rootfs.ext4")),
+        std::path::Path::new("/ctl"),
     );
     assert_eq!(document["boot-source"]["kernel_image_path"], "/k/vmlinux");
     assert!(
@@ -359,4 +333,8 @@ fn the_config_document_pins_the_shape_firecracker_boots_from() {
     assert_eq!(document["machine-config"]["smt"], false);
     assert_eq!(document["vsock"]["guest_cid"], 3);
     assert_eq!(document["vsock"]["uds_path"], "/ctl/v.sock");
+    assert!(
+        document.get("network-interfaces").is_none(),
+        "a sandboxed guest has no NIC by construction (sandbox spec §1.1)"
+    );
 }

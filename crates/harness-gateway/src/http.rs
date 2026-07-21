@@ -175,7 +175,11 @@ async fn prompt<S: HarnessSystem>(
     if wants_sse(&headers) {
         // A reconnect resumes at `Last-Event-ID` (the last seq the client saw);
         // re-submitting the same turn id reattaches the run (idempotent, §7.4).
-        return Ok(prompt_stream(session_ref, body, resume_from(&headers, q.from)));
+        return Ok(prompt_stream(
+            session_ref,
+            body,
+            resume_from(&headers, q.from),
+        ));
     }
     // Clamp the caller's timeout to the edge ceiling so a run cannot be parked
     // indefinitely; a run that *ran* and failed is a `200` outcome below, only a
@@ -403,7 +407,8 @@ fn principal<S: HarnessSystem>(
     gw: &Gateway<S>,
     headers: &HeaderMap,
 ) -> Result<PrincipalId, GatewayError> {
-    let token = bearer(headers).ok_or_else(|| GatewayError::unauthorized("missing bearer token"))?;
+    let token =
+        bearer(headers).ok_or_else(|| GatewayError::unauthorized("missing bearer token"))?;
     gw.principal(token)
         .ok_or_else(|| GatewayError::unauthorized("invalid token"))
 }

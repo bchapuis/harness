@@ -38,6 +38,17 @@ blob-store = { path = "crates/blob-store", version = "0.1.0" }
 # enumerate their grains without granary itself becoming tenant-aware.
 tenancy = { path = "crates/tenancy", version = "0.1.0" }
 
+# Persistent machines: a durable lightweight VM as a grain (machine spec).
+machine = { path = "crates/machine", version = "0.1.0" }
+
+# Shared Firecracker microVM plumbing (config document, process lifecycle,
+# vsock transport, API-socket pause/resume), used by harness-sandbox's
+# firecracker tier and the machine's VM binding.
+microvm = { path = "crates/microvm", version = "0.1.0" }
+
+# The persistent machine's SSH front door (machine spec §5.1).
+machine-frontdoor = { path = "crates/machine-frontdoor", version = "0.1.0" }
+
 # The agentic harness (Appendix B layout of the agentic harness spec).
 harness = { path = "crates/harness", version = "0.1.0" }
 harness-anthropic = { path = "crates/harness-anthropic", version = "0.1.0" }
@@ -73,6 +84,10 @@ tokio-rustls = "0.26"
 rcgen = "0.13"
 # The HTTP/SSE gateway (`harness-gateway`) only: the public multi-tenant edge.
 axum = "0.8"
+# The machine front door (`machine-frontdoor`) only: a pure-Rust SSH server, so
+# the front door terminates SSH in-process against journaled keys and presents
+# each machine's own host key (machine spec §5.1).
+russh = "0.62"
 # The terminal client (`harness-tui`) only: a full-screen ratatui frontend over
 # crossterm, with crossterm's async `EventStream` so input multiplexes with the
 # gateway's SSE record stream in one `tokio::select!`.

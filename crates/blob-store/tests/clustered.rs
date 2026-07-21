@@ -23,7 +23,9 @@ use actor_cluster::DowningPolicy;
 use actor_cluster::SwimConfig;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use blob_store::placement;
+use actor_simulation::SimCluster;
+use actor_simulation::SimNetwork;
+use actor_simulation::Simulation;
 use blob_store::BlobConfig;
 use blob_store::BlobError;
 use blob_store::BlobId;
@@ -31,9 +33,7 @@ use blob_store::BlobStore;
 use blob_store::ClusteredBlobStore;
 use blob_store::LocalBlobStore;
 use blob_store::Namespace;
-use actor_simulation::SimCluster;
-use actor_simulation::SimNetwork;
-use actor_simulation::Simulation;
+use blob_store::placement;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -129,7 +129,11 @@ fn a_blob_put_on_one_node_is_gettable_from_every_node() {
             let ns = ns.clone();
             async move { store.get(&ns, &id, None).await }
         });
-        assert_eq!(got, Ok(bytes.clone()), "node {index} reads the verified blob");
+        assert_eq!(
+            got,
+            Ok(bytes.clone()),
+            "node {index} reads the verified blob"
+        );
 
         let present = drive(&sim, Duration::from_secs(5), {
             let store = store.clone();
@@ -159,7 +163,10 @@ fn equal_content_converges_to_one_id_across_nodes() {
         async move { store.put(&ns, bytes).await }
     })
     .expect("put on B");
-    assert_eq!(from_a, from_b, "equal content is one id regardless of writer");
+    assert_eq!(
+        from_a, from_b,
+        "equal content is one id regardless of writer"
+    );
 }
 
 #[test]
@@ -201,7 +208,11 @@ fn a_tampered_copy_falls_through_to_a_good_owner() {
             let (s, ns) = (store.clone(), ns.clone());
             async move { s.get(&ns, &id, None).await }
         });
-        assert_eq!(got, Ok(bytes.clone()), "the get fell through to a good owner (B1)");
+        assert_eq!(
+            got,
+            Ok(bytes.clone()),
+            "the get fell through to a good owner (B1)"
+        );
     }
 }
 

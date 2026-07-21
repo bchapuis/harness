@@ -16,13 +16,13 @@ use actor_core::Spawner;
 use actor_simulation::SimCluster;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
-use blob_store::placement;
 use blob_store::BlobConfig;
 use blob_store::BlobId;
 use blob_store::BlobStore;
 use blob_store::ClusteredBlobStore;
 use blob_store::LocalBlobStore;
 use blob_store::Namespace;
+use blob_store::placement;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -100,7 +100,12 @@ fn a_departed_owner_is_re_replicated() {
     let sim = Simulation::new(1);
     let nodes = [A, B, C, D];
     let (net, stores, _dirs) = cluster(&sim, &nodes);
-    let store_of = |n: NodeId| stores.iter().find(|(id, _)| *id == n).map(|(_, s)| s.clone());
+    let store_of = |n: NodeId| {
+        stores
+            .iter()
+            .find(|(id, _)| *id == n)
+            .map(|(_, s)| s.clone())
+    };
 
     let ns = Namespace::new(b"workspace".to_vec());
     let bytes = b"a replicated block".to_vec();
@@ -113,7 +118,10 @@ fn a_departed_owner_is_re_replicated() {
     // Compute the owners the same way every node does (B5), then crash one and
     // identify the node that was excluded (and so lacks the blob).
     let owners = placement::owners(&nodes, &ns, &id, 3);
-    let excluded = *nodes.iter().find(|n| !owners.contains(n)).expect("one node is excluded");
+    let excluded = *nodes
+        .iter()
+        .find(|n| !owners.contains(n))
+        .expect("one node is excluded");
     assert!(
         !store_of(excluded).unwrap().local().present(&ns, &id),
         "the non-owner starts without the blob",
@@ -135,7 +143,11 @@ fn a_departed_owner_is_re_replicated() {
             let (s, ns) = (store_of(*node).unwrap(), ns.clone());
             async move { s.get(&ns, &id, None).await }
         });
-        assert_eq!(got, Ok(bytes), "node {node} serves the verified blob after repair");
+        assert_eq!(
+            got,
+            Ok(bytes),
+            "node {node} serves the verified blob after repair"
+        );
     }
 }
 
@@ -147,7 +159,12 @@ fn rebalancing_never_deletes() {
     let sim = Simulation::new(2);
     let nodes = [A, B, C, D];
     let (_net, stores, _dirs) = cluster(&sim, &nodes);
-    let store_of = |n: NodeId| stores.iter().find(|(id, _)| *id == n).map(|(_, s)| s.clone());
+    let store_of = |n: NodeId| {
+        stores
+            .iter()
+            .find(|(id, _)| *id == n)
+            .map(|(_, s)| s.clone())
+    };
 
     let ns = Namespace::new(b"stable".to_vec());
     let bytes = b"untouched by rebalancing".to_vec();
@@ -209,5 +226,8 @@ fn a_delete_with_all_nodes_swept_releases_the_anchor() {
         let (s, ns) = (anchor.clone(), ns.clone());
         async move { s.get(&ns, &BlobId::of(b"x"), None).await }
     });
-    assert!(got.is_err(), "a reclaimed-bookkeeping namespace still resolves nowhere");
+    assert!(
+        got.is_err(),
+        "a reclaimed-bookkeeping namespace still resolves nowhere"
+    );
 }

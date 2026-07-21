@@ -690,8 +690,14 @@ mod tests {
         // snapshot at seq 1), its term, and the snapshot from disk.
         let reopened = FileGrainStore::open(dir.path()).unwrap();
         let reply = reopened.read(0, &n);
-        assert_eq!(reply.slots, vec![(Seq::new(2), Term::new(1), b"e2".to_vec())]);
-        assert_eq!(reply.snapshot, Some((Seq::new(1), Term::new(1), b"snap".to_vec())));
+        assert_eq!(
+            reply.slots,
+            vec![(Seq::new(2), Term::new(1), b"e2".to_vec())]
+        );
+        assert_eq!(
+            reply.snapshot,
+            Some((Seq::new(1), Term::new(1), b"snap".to_vec()))
+        );
     }
 
     #[test]
@@ -701,7 +707,14 @@ mod tests {
         let store = FileGrainStore::open(dir.path()).unwrap();
         // Grow the grain's segment with many sizeable records.
         for i in 0..50u64 {
-            store.store_record(0, &n, Seq::new(i), Term::new(1), vec![vec![b'x'; 1000]], WriteKind::Append);
+            store.store_record(
+                0,
+                &n,
+                Seq::new(i),
+                Term::new(1),
+                vec![vec![b'x'; 1000]],
+                WriteKind::Append,
+            );
         }
         let id = *store
             .manifest
@@ -727,10 +740,20 @@ mod tests {
         let reopened = FileGrainStore::open(dir.path()).unwrap();
         let reply = reopened.read(0, &n);
         assert!(reply.slots.is_empty());
-        assert_eq!(reply.snapshot, Some((Seq::new(50), Term::new(1), b"snap@50".to_vec())));
+        assert_eq!(
+            reply.snapshot,
+            Some((Seq::new(50), Term::new(1), b"snap@50".to_vec()))
+        );
         // The next append continues contiguously from the recovered head.
         assert_eq!(
-            reopened.store_record(0, &n, Seq::new(50), Term::new(1), vec![b"e51".to_vec()], WriteKind::Append),
+            reopened.store_record(
+                0,
+                &n,
+                Seq::new(50),
+                Term::new(1),
+                vec![b"e51".to_vec()],
+                WriteKind::Append
+            ),
             StoreAck::Stored(Seq::new(51))
         );
     }
@@ -740,7 +763,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = (name("a"), name("b"));
         let store = FileGrainStore::open(dir.path()).unwrap();
-        store.store_record(0, &a, Seq::ZERO, Term::new(1), vec![b"a1".to_vec()], WriteKind::Append);
+        store.store_record(
+            0,
+            &a,
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"a1".to_vec()],
+            WriteKind::Append,
+        );
         store.store_record(
             0,
             &b,
@@ -820,12 +850,22 @@ mod tests {
         {
             let store = FileGrainStore::open(dir.path()).unwrap();
             // A recovery prepare at term 5 promises not to accept a lower term.
-            assert!(matches!(store.prepare(0, &n, Term::new(5)), ReadOutcome::Prepared(_)));
+            assert!(matches!(
+                store.prepare(0, &n, Term::new(5)),
+                ReadOutcome::Prepared(_)
+            ));
         }
         // The promise is durable: after reopen, a term-4 write is still fenced.
         let reopened = FileGrainStore::open(dir.path()).unwrap();
         assert_eq!(
-            reopened.store_record(0, &n, Seq::ZERO, Term::new(4), vec![b"stale".to_vec()], WriteKind::Append),
+            reopened.store_record(
+                0,
+                &n,
+                Seq::ZERO,
+                Term::new(4),
+                vec![b"stale".to_vec()],
+                WriteKind::Append
+            ),
             StoreAck::Fenced(Term::new(5))
         );
     }
@@ -840,12 +880,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let n = name("fresh");
         let store = FileGrainStore::open(dir.path()).unwrap();
-        assert!(matches!(store.prepare(0, &n, Term::new(2)), ReadOutcome::Prepared(_)));
+        assert!(matches!(
+            store.prepare(0, &n, Term::new(2)),
+            ReadOutcome::Prepared(_)
+        ));
         // The segment now exists in the manifest: the prepare serialized on it.
-        assert!(store.manifest.lock().unwrap().ids.contains_key(&(0, n.clone())));
+        assert!(
+            store
+                .manifest
+                .lock()
+                .unwrap()
+                .ids
+                .contains_key(&(0, n.clone()))
+        );
         // And the promise still fences a later lower-term append.
         assert_eq!(
-            store.store_record(0, &n, Seq::ZERO, Term::new(1), vec![b"late".to_vec()], WriteKind::Append),
+            store.store_record(
+                0,
+                &n,
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"late".to_vec()],
+                WriteKind::Append
+            ),
             StoreAck::Fenced(Term::new(2))
         );
     }
@@ -869,7 +926,14 @@ mod tests {
             let (s1, n1, b1) = (store.clone(), n.clone(), barrier.clone());
             let append = std::thread::spawn(move || {
                 b1.wait();
-                s1.store_record(0, &n1, Seq::ZERO, Term::new(1), vec![b"e1".to_vec()], WriteKind::Append)
+                s1.store_record(
+                    0,
+                    &n1,
+                    Seq::ZERO,
+                    Term::new(1),
+                    vec![b"e1".to_vec()],
+                    WriteKind::Append,
+                )
             });
             let (s2, n2, b2) = (store.clone(), n.clone(), barrier.clone());
             let prepare = std::thread::spawn(move || {
@@ -902,7 +966,14 @@ mod tests {
         let reopened = FileGrainStore::open(dir.path()).unwrap();
         // A different grain in the same shard is fenced by the recovered promise.
         assert_eq!(
-            reopened.store_record(0, &name("other"), Seq::ZERO, Term::new(6), vec![b"x".to_vec()], WriteKind::Append),
+            reopened.store_record(
+                0,
+                &name("other"),
+                Seq::ZERO,
+                Term::new(6),
+                vec![b"x".to_vec()],
+                WriteKind::Append
+            ),
             StoreAck::Fenced(Term::new(7))
         );
     }
@@ -913,7 +984,14 @@ mod tests {
         let n = name("a");
         {
             let store = FileGrainStore::open(dir.path()).unwrap();
-            store.store_record(0, &n, Seq::ZERO, Term::new(1), vec![b"e1".to_vec()], WriteKind::Append);
+            store.store_record(
+                0,
+                &n,
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"e1".to_vec()],
+                WriteKind::Append,
+            );
         }
         // A torn write: garbage lands after the valid record in the grain's segment.
         let id = {
@@ -938,7 +1016,14 @@ mod tests {
         );
         // The recovery truncated the garbage; appends land cleanly after it.
         assert_eq!(
-            reopened.store_record(0, &n, Seq::new(1), Term::new(1), vec![b"e2".to_vec()], WriteKind::Append),
+            reopened.store_record(
+                0,
+                &n,
+                Seq::new(1),
+                Term::new(1),
+                vec![b"e2".to_vec()],
+                WriteKind::Append
+            ),
             StoreAck::Stored(Seq::new(2))
         );
         drop(reopened);
@@ -959,13 +1044,33 @@ mod tests {
         }
         let n = name("acct");
         let ops = [
-            Op::Record(Seq::ZERO, Term::new(1), vec![b"a".to_vec(), b"b".to_vec()], WriteKind::Append),
+            Op::Record(
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"a".to_vec(), b"b".to_vec()],
+                WriteKind::Append,
+            ),
             Op::Prepare(Term::new(2)),
-            Op::Record(Seq::new(2), Term::new(2), vec![b"c".to_vec()], WriteKind::Append),
+            Op::Record(
+                Seq::new(2),
+                Term::new(2),
+                vec![b"c".to_vec()],
+                WriteKind::Append,
+            ),
             Op::Snapshot(Seq::new(2), Term::new(2), b"snap@2".to_vec()),
-            Op::Record(Seq::new(3), Term::new(2), vec![b"d".to_vec()], WriteKind::Append),
+            Op::Record(
+                Seq::new(3),
+                Term::new(2),
+                vec![b"d".to_vec()],
+                WriteKind::Append,
+            ),
             Op::Truncate(Seq::new(3), Term::new(2)),
-            Op::Record(Seq::new(3), Term::new(2), vec![b"d2".to_vec()], WriteKind::Append),
+            Op::Record(
+                Seq::new(3),
+                Term::new(2),
+                vec![b"d2".to_vec()],
+                WriteKind::Append,
+            ),
         ];
 
         let dir = tempfile::tempdir().unwrap();

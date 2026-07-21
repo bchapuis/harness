@@ -172,10 +172,12 @@ impl AnchorTracker {
     /// anchor's membership snapshot. The `deleted_at` stamp lives in the
     /// [`TombstoneSet`]; the retention decision needs only the membership snapshot.
     pub fn anchor(&self, ns: &Namespace, members_at_anchor: impl IntoIterator<Item = NodeId>) {
-        self.lock().entry(ns.clone()).or_insert_with(|| AnchorState {
-            members_at_anchor: members_at_anchor.into_iter().collect(),
-            swept: BTreeSet::new(),
-        });
+        self.lock()
+            .entry(ns.clone())
+            .or_insert_with(|| AnchorState {
+                members_at_anchor: members_at_anchor.into_iter().collect(),
+                swept: BTreeSet::new(),
+            });
     }
 
     /// Record that `node` has acked its sweep of `ns`. A no-op if `ns` is not
@@ -193,11 +195,7 @@ impl AnchorTracker {
     /// whether `node` is `down`/`removed` (or otherwise gone for good) — the
     /// caller supplies it from membership, so this stays free of that dependency.
     /// An **empty** result for a tracked namespace means it is reclaimable.
-    pub fn pending(
-        &self,
-        ns: &Namespace,
-        is_terminal: impl Fn(NodeId) -> bool,
-    ) -> Vec<NodeId> {
+    pub fn pending(&self, ns: &Namespace, is_terminal: impl Fn(NodeId) -> bool) -> Vec<NodeId> {
         // Collect the not-yet-swept members under the lock, then apply the caller's
         // predicate without holding it (the predicate may take a membership lock).
         let waiting: Vec<NodeId> = match self.lock().get(ns) {
@@ -257,7 +255,10 @@ mod tests {
         assert!(!set.contains(&a));
         assert!(set.insert(&a, 5), "first insert is new");
         assert!(set.contains(&a));
-        assert!(!set.insert(&a, 9), "re-inserting an existing namespace is not new");
+        assert!(
+            !set.insert(&a, 9),
+            "re-inserting an existing namespace is not new"
+        );
         assert_eq!(set.len(), 1);
     }
 
@@ -284,9 +285,18 @@ mod tests {
         assert_eq!(
             l,
             vec![
-                Tombstone { ns: ns("a"), deleted_at: 10 },
-                Tombstone { ns: ns("b"), deleted_at: 15 }, // min(20, 15)
-                Tombstone { ns: ns("c"), deleted_at: 30 },
+                Tombstone {
+                    ns: ns("a"),
+                    deleted_at: 10
+                },
+                Tombstone {
+                    ns: ns("b"),
+                    deleted_at: 15
+                }, // min(20, 15)
+                Tombstone {
+                    ns: ns("c"),
+                    deleted_at: 30
+                },
             ],
         );
     }
@@ -304,10 +314,16 @@ mod tests {
         tracker.record_sweep(&a, node(1));
         tracker.record_sweep(&a, node(2));
         assert_eq!(tracker.pending(&a, none_terminal), vec![node(3)]);
-        assert!(!tracker.reclaimable(&a, none_terminal), "one member still holds blobs");
+        assert!(
+            !tracker.reclaimable(&a, none_terminal),
+            "one member still holds blobs"
+        );
 
         tracker.record_sweep(&a, node(3));
-        assert!(tracker.reclaimable(&a, none_terminal), "all swept → reclaimable");
+        assert!(
+            tracker.reclaimable(&a, none_terminal),
+            "all swept → reclaimable"
+        );
     }
 
     #[test]
@@ -327,11 +343,17 @@ mod tests {
         // forgetting it now is the one move that could resurrect a blob.
         let unreachable_2 = |_n: NodeId| false; // nobody terminal
         assert_eq!(tracker.pending(&a, unreachable_2), vec![node(2)]);
-        assert!(!tracker.reclaimable(&a, unreachable_2), "an unreachable node holds it");
+        assert!(
+            !tracker.reclaimable(&a, unreachable_2),
+            "an unreachable node holds it"
+        );
 
         // Once node(2) is downed (terminal), no node can carry a stale copy: release.
         let downed_2 = |n: NodeId| n == node(2);
-        assert!(tracker.reclaimable(&a, downed_2), "a terminal member releases the tombstone");
+        assert!(
+            tracker.reclaimable(&a, downed_2),
+            "a terminal member releases the tombstone"
+        );
     }
 
     #[test]
@@ -344,7 +366,10 @@ mod tests {
         tracker.record_sweep(&a, node(1));
         let held = |_n: NodeId| false;
         for _ in 0..1_000 {
-            assert!(!tracker.reclaimable(&a, held), "no timer can expire the tombstone");
+            assert!(
+                !tracker.reclaimable(&a, held),
+                "no timer can expire the tombstone"
+            );
         }
     }
 

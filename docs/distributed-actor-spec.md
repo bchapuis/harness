@@ -192,6 +192,7 @@ impl<A: Actor> Ctx<A> {
     fn spawn_with<C, F>(&self, factory: F) -> ActorRef<C>                             // restartable child (§11.2)
         where C: Actor<System = A::System>, F: FnMut() -> C + Send + 'static;
     fn watch<B: Actor>(&self, target: &ActorRef<B>) where A: Handler<Terminated>;     // death watch (§12)
+    fn watch_id(&self, target: ActorId) where A: Handler<Terminated>;                  // watch by bare id — an identity carried in a message or folded from durable state
     fn unwatch<B: Actor>(&self, target: &ActorRef<B>);
     fn stop(&self);                                                                   // stop self after current message
 }

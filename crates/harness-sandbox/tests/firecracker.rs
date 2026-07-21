@@ -6,10 +6,12 @@
 //!
 //! Tests that boot a VM need Linux, `/dev/kvm`, and the assets
 //! `guest/fc-rootfs/build.sh` produces (vmlinux, rootfs.ext4, firecracker);
-//! they skip (eprintln + return) where any is missing, so macOS and
-//! KVM-less CI stay green. Point `HARNESS_FC_ASSETS` at an assets directory
-//! to override the default `guest/fc-rootfs/out`. The conduct tests at the
-//! bottom run everywhere.
+//! they skip (eprintln + return) where any is missing, so macOS and KVM-less
+//! machines stay green. With `E2E_REQUIRE` set, a missing prerequisite
+//! panics instead: the CI job that exists to run this suite must not read a
+//! broken environment as a pass. Point `HARNESS_FC_ASSETS` at an assets
+//! directory to override the default `guest/fc-rootfs/out`. The conduct
+//! tests at the bottom run everywhere.
 
 #![cfg(feature = "firecracker")]
 
@@ -28,14 +30,23 @@ use harness_sandbox::TieredSandboxes;
 use serde_json::Value;
 use serde_json::json;
 
+/// Skip (`None`) on a missing prerequisite — or panic under `E2E_REQUIRE`
+/// (module docs).
+fn missing<T>(reason: String) -> Option<T> {
+    assert!(
+        std::env::var_os("E2E_REQUIRE").is_none(),
+        "E2E_REQUIRE is set but {reason}"
+    );
+    eprintln!("skipping: {reason}");
+    None
+}
+
 fn assets() -> Option<FirecrackerConfig> {
     if !cfg!(target_os = "linux") {
-        eprintln!("skipping: firecracker runs on linux only");
-        return None;
+        return missing("firecracker runs on linux only".to_string());
     }
     if !Path::new("/dev/kvm").exists() {
-        eprintln!("skipping: /dev/kvm is absent");
-        return None;
+        return missing("/dev/kvm is absent".to_string());
     }
     let dir = std::env::var("HARNESS_FC_ASSETS")
         .map(PathBuf::from)
@@ -48,11 +59,10 @@ fn assets() -> Option<FirecrackerConfig> {
         dir.join("rootfs.ext4"),
     );
     if !(binary.exists() && kernel.exists() && rootfs.exists()) {
-        eprintln!(
-            "skipping: assets missing under {} (run guest/fc-rootfs/build.sh)",
+        return missing(format!(
+            "assets missing under {} (run guest/fc-rootfs/build.sh)",
             dir.display()
-        );
-        return None;
+        ));
     }
     Some(FirecrackerConfig::new(binary, kernel, rootfs))
 }
@@ -70,13 +80,13 @@ fn provider(config: FirecrackerConfig) -> TieredSandboxes {
     TieredSandboxes::new().with_firecracker(config)
 }
 
-async fn open(
-    provider: &TieredSandboxes,
-    session: &str,
-    workspace: &Path,
-) -> Arc<dyn Sandbox> {
+async fn open(provider: &TieredSandboxes, session: &str, workspace: &Path) -> Arc<dyn Sandbox> {
     provider
-        .open(&SessionId::new(session), &SandboxProfile::default(), workspace)
+        .open(
+            &SessionId::new(session),
+            &SandboxProfile::default(),
+            workspace,
+        )
         .await
         .expect("open")
 }

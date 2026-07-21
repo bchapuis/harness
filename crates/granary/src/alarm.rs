@@ -165,11 +165,12 @@ where
     /// The pending deadline, resolving a staged arm/cancel over the committed
     /// form (read-your-staged-writes, §7.12).
     pub fn pending(&self) -> Option<Instant> {
-        self.cell.with_form_and_stage::<Alarm, I, _>(|form, stage| match &stage.op {
-            Some(AlarmOp::Set(nanos)) => Some(Instant::from_nanos(*nanos)),
-            Some(AlarmOp::Clear) => None,
-            None => form.due(),
-        })
+        self.cell
+            .with_form_and_stage::<Alarm, I, _>(|form, stage| match &stage.op {
+                Some(AlarmOp::Set(nanos)) => Some(Instant::from_nanos(*nanos)),
+                Some(AlarmOp::Clear) => None,
+                None => form.due(),
+            })
     }
 
     /// Arm the alarm to fire at `at`. A deadline already past fires on the next

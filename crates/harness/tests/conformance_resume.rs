@@ -147,9 +147,8 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
     // H1 with no exception: the rehydrated journal equals the uninterrupted
     // control's, record for record. Same session id, so even `SessionCreated`
     // matches.
-    let bodies = |records: Vec<Record>| -> Vec<RecordBody> {
-        records.into_iter().map(|r| r.body).collect()
-    };
+    let bodies =
+        |records: Vec<Record>| -> Vec<RecordBody> { records.into_iter().map(|r| r.body).collect() };
     assert_eq!(
         bodies(resumed),
         bodies(control),

@@ -77,8 +77,15 @@ mod tests {
         let id = BlobId::of(b"a block");
         let forward = owners(&nodes(&[1, 2, 3, 4, 5]), &ns(), &id, 3);
         let shuffled = owners(&nodes(&[4, 1, 5, 3, 2]), &ns(), &id, 3);
-        assert_eq!(forward, shuffled, "owner list must not depend on input order");
-        assert_eq!(forward.len(), 3, "R owners selected from a larger candidate set");
+        assert_eq!(
+            forward, shuffled,
+            "owner list must not depend on input order"
+        );
+        assert_eq!(
+            forward.len(),
+            3,
+            "R owners selected from a larger candidate set"
+        );
     }
 
     #[test]
@@ -142,6 +149,9 @@ mod tests {
         // Some keys moved (the change took effect) but far from all of them
         // (movement is ~1/N, not a reshuffle).
         assert!(moved > 0, "adding a node must capture some keys");
-        assert!(moved < 256, "movement must be a minority of keys, not a reshuffle");
+        assert!(
+            moved < 256,
+            "movement must be a minority of keys, not a reshuffle"
+        );
     }
 }

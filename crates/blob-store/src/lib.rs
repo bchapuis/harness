@@ -32,13 +32,13 @@ pub mod replica;
 pub mod system;
 pub mod tombstone;
 
-pub use blob::{verify, BlobConfig, BlobError, BlobId, BlobStore, DynBlobStore, Namespace};
+pub use blob::{BlobConfig, BlobError, BlobId, BlobStore, DynBlobStore, Namespace, verify};
 pub use cluster::ClusteredBlobStore;
 pub use event::BlobEvent;
 pub use local::LocalBlobStore;
 pub use replica::{
-    blob_replica_key, ActorBlobTransport, BlobReplica, BlobTransport, DeleteAck, DeleteNamespace,
-    FetchBlob, HasBlob, StoreAck, StoreBlob,
+    ActorBlobTransport, BlobReplica, BlobTransport, DeleteAck, DeleteNamespace, FetchBlob, HasBlob,
+    StoreAck, StoreBlob, blob_replica_key,
 };
 pub use system::BlobSystem;
 pub use tombstone::{AnchorTracker, Tombstone, TombstoneSet};

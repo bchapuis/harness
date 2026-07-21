@@ -1,0 +1,27 @@
+# The persistent machine's guest agent (machine spec §5.1): a channel broker
+# inside the microVM, part of the *user's own rootfs* rather than pid 1. Like
+# guest/fc-agent it is its own workspace, targets static musl Linux, and is
+# built by guest/machine-rootfs/build.sh, never by the repository workspace.
+[package]
+name = "machine-agent"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Same major as the host codec (crates/microvm) and guest/fc-agent: the tar
+# streams must stay mutually intelligible.
+tar = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+opt-level = "s"
+lto = true

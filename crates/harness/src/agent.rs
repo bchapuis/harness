@@ -385,7 +385,10 @@ impl<S: HarnessSystem> Activation<S> {
     /// submit carried no mailbox — the one place a subscriber is added to the list.
     fn subscribe(&mut self, turn: &TurnId, reply_to: Option<ActorRef<ReplyMailbox<S>>>) {
         if let Some(reply_to) = reply_to {
-            self.subscribers.entry(turn.clone()).or_default().push(reply_to);
+            self.subscribers
+                .entry(turn.clone())
+                .or_default()
+                .push(reply_to);
         }
     }
 }

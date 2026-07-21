@@ -193,13 +193,8 @@ struct Inner {
 /// replica sets — the apply loop mutates them in place as `Assign`/`Migrated`
 /// commit, and the shard's replicator reads them per operation (§7.7) — and its
 /// replicator, the migration driver's handle.
-type ShardHandles<R> = BTreeMap<
-    u32,
-    (
-        Arc<std::sync::Mutex<ReplicaSets>>,
-        Arc<QuorumReplicator<R>>,
-    ),
->;
+type ShardHandles<R> =
+    BTreeMap<u32, (Arc<std::sync::Mutex<ReplicaSets>>, Arc<QuorumReplicator<R>>)>;
 
 /// A [`ShardMapSource`] backed by a per-type Raft group (the `Quorum` tier). The group's
 /// committed log is the allocation. The consensus handle lives only in the
@@ -471,8 +466,7 @@ async fn apply_loop<R: RaftConsensus>(
                         .expect("shard handles mutex poisoned")
                         .get(&shard)
                     {
-                        *sets.lock().expect("replica sets poisoned") =
-                            ReplicaSets::new(current);
+                        *sets.lock().expect("replica sets poisoned") = ReplicaSets::new(current);
                     }
                 } else {
                     // Leaving the set: drop the journal and handles (the reconcile

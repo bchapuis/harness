@@ -383,8 +383,10 @@ mod tests {
             BlobError::Corrupt(id).to_string(),
             format!("no verifying copy of blob {id}"),
         );
-        assert!(BlobError::Deleted(Namespace::new(b"ns".to_vec()))
-            .to_string()
-            .contains("has been deleted"));
+        assert!(
+            BlobError::Deleted(Namespace::new(b"ns".to_vec()))
+                .to_string()
+                .contains("has been deleted")
+        );
     }
 }

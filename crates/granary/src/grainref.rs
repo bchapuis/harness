@@ -33,7 +33,6 @@ use crate::replica_store::ReplicaTransport;
 use crate::replica_store::replica_store_key;
 use crate::shardmap::EmptyShardMap;
 use crate::shardmap::ShardMapSource;
-use crate::system::ShardId;
 use crate::store::GrainStore;
 use crate::store::MemoryGrainStore;
 use crate::subscription::CloseSink;
@@ -42,6 +41,7 @@ use crate::subscription::SUB_BUFFER;
 use crate::subscription::Subscribe;
 use crate::subscription::Subscription;
 use crate::system::GranarySystem;
+use crate::system::ShardId;
 use crate::system::shard_for;
 
 /// The default deadline applied to [`GrainRef::ask`] (mirrors the actor `ask`).
@@ -310,7 +310,9 @@ impl<G: Grain> GrainRef<G> {
         // shard, a redirect that runs out its deadline) must not leave an orphan
         // actor behind — the framework does not reap an actor merely because every
         // external ref to it was dropped.
-        let host = self.resolve(false, self.system.now() + DEFAULT_ASK_TIMEOUT).await?;
+        let host = self
+            .resolve(false, self.system.now() + DEFAULT_ASK_TIMEOUT)
+            .await?;
         let (tx, rx) = async_channel::bounded(SUB_BUFFER);
         let sink = self.system.spawn(RecordSink::<G>::new(tx));
         match host
@@ -715,7 +717,8 @@ impl<T: GranarySystem> GranaryExt for T {
         G: Grain<System = Self>,
     {
         let shards = config.shards.max(1);
-        let handle = build_granary::<Self, G>(self, grain_type, config, factory, Some(index.clone()));
+        let handle =
+            build_granary::<Self, G>(self, grain_type, config, factory, Some(index.clone()));
         // Start this type's alarm driver (spec §16): the callerless-activation seam.
         // A background loop that, for each shard this node leads, reads the shard's
         // alarm index and re-activates every due grain — so an alarm survives its
@@ -841,7 +844,10 @@ async fn alarm_driver_loop<S, G>(
                 // Re-activate the grain on this leader; its own timer then fires the
                 // due alarm. Drop the subscription immediately — activation is the
                 // only effect we want.
-                let _ = granary.grain(name.key().to_string()).subscribe(Seq::ZERO).await;
+                let _ = granary
+                    .grain(name.key().to_string())
+                    .subscribe(Seq::ZERO)
+                    .await;
             }
         }
     }

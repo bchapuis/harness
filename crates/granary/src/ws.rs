@@ -116,7 +116,10 @@ impl std::fmt::Display for WsError {
             WsError::NotMaterialized => write!(f, "workspace not materialized"),
             WsError::RootLost => write!(f, "workspace root lost"),
             WsError::TooLarge { bytes, cap } => {
-                write!(f, "durable workspace is {bytes} bytes, over the {cap}-byte cap")
+                write!(
+                    f,
+                    "durable workspace is {bytes} bytes, over the {cap}-byte cap"
+                )
             }
             WsError::Io(e) => write!(f, "workspace io: {e}"),
         }
@@ -530,11 +533,10 @@ where
     /// [`MAX_TREE_BYTES`]. An unchanged tree stages nothing (the read path,
     /// §7.5). Valid only inside a command handler.
     pub fn capture(&self) -> Result<WsCapture, WsError> {
-        self.cell
-            .with_form_and_stage::<Ws, I, _>(|form, stage| {
-                let dir = form.0.as_ref().ok_or(WsError::NotMaterialized)?;
-                capture_into(dir, stage)
-            })
+        self.cell.with_form_and_stage::<Ws, I, _>(|form, stage| {
+            let dir = form.0.as_ref().ok_or(WsError::NotMaterialized)?;
+            capture_into(dir, stage)
+        })
     }
 }
 

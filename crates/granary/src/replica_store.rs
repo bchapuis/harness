@@ -456,7 +456,10 @@ impl<G: Grain> ActorReplicaTransport<G> {
     {
         let store = self.resolve(node);
         Box::pin(async move {
-            store.ok_or(CallError::Unreachable)?.ask_timeout(msg, within).await
+            store
+                .ok_or(CallError::Unreachable)?
+                .ask_timeout(msg, within)
+                .await
         })
     }
 }

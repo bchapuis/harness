@@ -128,7 +128,10 @@ pub(crate) fn call(dir: &Dir, name: &str, input: &Value) -> Result<Value, ToolEr
 
 fn read_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
     let path = required_str(input, "path")?;
-    let (offset, limit) = (optional_u64(input, "offset")?, optional_u64(input, "limit")?);
+    let (offset, limit) = (
+        optional_u64(input, "offset")?,
+        optional_u64(input, "limit")?,
+    );
     let bytes = dir
         .read(path)
         .map_err(|e| ToolError::Sandbox(format!("read_file: {path}: {e}")))?;

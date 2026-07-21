@@ -77,7 +77,12 @@ impl Message for Arm {
     const MANIFEST: Manifest = Manifest::new("test.Arm");
 }
 impl GrainHandler<Arm> for AlarmGrain {
-    async fn handle(&self, _state: &AlarmState, msg: Arm, ctx: &GrainCtx<Self>) -> (Vec<AlarmEvent>, ()) {
+    async fn handle(
+        &self,
+        _state: &AlarmState,
+        msg: Arm,
+        ctx: &GrainCtx<Self>,
+    ) -> (Vec<AlarmEvent>, ()) {
         ctx.alarm().set_after(Duration::from_millis(msg.after_ms));
         (vec![], ())
     }
@@ -90,7 +95,12 @@ impl Message for Clear {
     const MANIFEST: Manifest = Manifest::new("test.Clear");
 }
 impl GrainHandler<Clear> for AlarmGrain {
-    async fn handle(&self, _state: &AlarmState, _msg: Clear, ctx: &GrainCtx<Self>) -> (Vec<AlarmEvent>, ()) {
+    async fn handle(
+        &self,
+        _state: &AlarmState,
+        _msg: Clear,
+        ctx: &GrainCtx<Self>,
+    ) -> (Vec<AlarmEvent>, ()) {
         ctx.alarm().clear();
         (vec![], ())
     }
@@ -103,7 +113,12 @@ impl Message for ReadFired {
     const MANIFEST: Manifest = Manifest::new("test.ReadFired");
 }
 impl GrainHandler<ReadFired> for AlarmGrain {
-    async fn handle(&self, state: &AlarmState, _msg: ReadFired, _ctx: &GrainCtx<Self>) -> (Vec<AlarmEvent>, u64) {
+    async fn handle(
+        &self,
+        state: &AlarmState,
+        _msg: ReadFired,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<AlarmEvent>, u64) {
         (vec![], state.fired)
     }
 }
@@ -115,7 +130,12 @@ impl Message for ReadPending {
     const MANIFEST: Manifest = Manifest::new("test.ReadPending");
 }
 impl GrainHandler<ReadPending> for AlarmGrain {
-    async fn handle(&self, _state: &AlarmState, _msg: ReadPending, ctx: &GrainCtx<Self>) -> (Vec<AlarmEvent>, bool) {
+    async fn handle(
+        &self,
+        _state: &AlarmState,
+        _msg: ReadPending,
+        ctx: &GrainCtx<Self>,
+    ) -> (Vec<AlarmEvent>, bool) {
         (vec![], ctx.alarm().pending().is_some())
     }
 }
@@ -137,10 +157,12 @@ fn rig(seed: u64, idle_after: Duration) -> (Simulation, Recorder, granary::Grana
 }
 
 fn passivated(recorder: &Recorder) -> bool {
-    recorder
-        .events()
-        .iter()
-        .any(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Passivated { .. })))
+    recorder.events().iter().any(|e| {
+        matches!(
+            e.as_app::<GrainEvent>(),
+            Some(GrainEvent::Passivated { .. })
+        )
+    })
 }
 
 fn activated(recorder: &Recorder) -> bool {
@@ -171,7 +193,10 @@ fn alarm_fires_once_past_due() {
         let pending = g.ask(ReadPending).await.expect("read");
         (fired, pending)
     });
-    assert_eq!(fired, 1, "the alarm fires exactly once with no caller present");
+    assert_eq!(
+        fired, 1,
+        "the alarm fires exactly once with no caller present"
+    );
     assert!(!pending, "firing consumes the alarm (spec §16)");
 }
 

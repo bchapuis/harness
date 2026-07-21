@@ -19,6 +19,7 @@
 //! the single-node `Local` journal and the clustered `Quorum` journal unchanged.
 
 use actor_core::Actor;
+use actor_core::ActorId;
 use actor_core::ActorRef;
 use actor_core::ActorSystem;
 use actor_core::BoxError;
@@ -28,6 +29,7 @@ use actor_core::Handler;
 use actor_core::HandlerRegistry;
 use actor_core::Manifest;
 use actor_core::Message;
+use actor_core::Terminated;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -154,6 +156,11 @@ pub struct Host<G: Grain> {
     /// rehydration always re-registers — the reconciliation that self-heals a lost
     /// register (§16). Ephemeral.
     last_registered_due: Option<Option<u64>>,
+    /// Death-watch requests the grain queued through [`GrainCtx::watch`],
+    /// installed after each handler/lifecycle hook completes. Ephemeral
+    /// activation state (**G3**): a rehydrated grain re-watches from its folded
+    /// state in `on_activate`.
+    pending_watches: Arc<std::sync::Mutex<Vec<ActorId>>>,
 }
 
 impl<G: Grain> Host<G> {
@@ -185,6 +192,7 @@ impl<G: Grain> Host<G> {
             alarm_epoch: 0,
             alarm_index,
             last_registered_due: None,
+            pending_watches: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -197,7 +205,21 @@ impl<G: Grain> Host<G> {
             self.gateway.clone(),
             Arc::clone(&self.journal),
             Arc::clone(&self.facets),
+            Arc::clone(&self.pending_watches),
         )
+    }
+
+    /// Install the death watches the grain queued through [`GrainCtx::watch`]
+    /// (actor §12), delivering each target's `Terminated` onto this host's own
+    /// mailbox, where [`Handler<Terminated>`] runs the grain's
+    /// [`on_peer_terminated`](Grain::on_peer_terminated) through the §6 barrier.
+    /// Called after each handler/lifecycle hook completes, so a watch requested
+    /// mid-command is live before the reply releases.
+    fn register_watches(&self, ctx: &Ctx<Host<G>>) {
+        let targets = std::mem::take(&mut *self.pending_watches.lock().expect("watch queue lock"));
+        for target in targets {
+            ctx.watch_id(target);
+        }
     }
 
     /// The facet environment (spec §7.12): a bare blob handle (no facet-root
@@ -297,12 +319,26 @@ impl<G: Grain> Host<G> {
         self.head = head;
         self.last_active = ctx.system().now();
 
+        // Resolve blob-referencing facet records into their materializations
+        // (spec §7.15): replay folded them into a pending set — F1 holds on the
+        // recorded bytes — and the fetch-and-apply runs here, once, before
+        // `on_activate` and the first command can touch the materialization.
+        self.facets
+            .rehydrate(&self.facet_env(ctx))
+            .await
+            .map_err(boxed)?;
+
         // Run `on_activate` BEFORE announcing the activation: if it fails, the
         // activation aborts (§10) and must leave no `Activated` on the stream — a
         // phantom `Activated` with no matching `Passivated` would both misreport
         // the lifecycle (§13) and corrupt a G6 activation checker.
         let gctx = self.grain_ctx(ctx);
         self.grain.on_activate(&gctx).await?;
+        // Install any death watches `on_activate` queued (actor §12): a grain
+        // whose folded state names live peers re-watches them here, and a
+        // watch-after-death fires immediately, reconciling what died while the
+        // grain slept.
+        self.register_watches(ctx);
 
         // Now the activation is real: `Rehydrated` describes the rebuild, then
         // `Activated` marks the grain ready to serve its first command (§13).
@@ -352,6 +388,7 @@ impl<G: Grain> Host<G> {
         let gctx = self.grain_ctx(ctx);
         let (events, reply) = self.grain.handle(&self.state, msg, &gctx).await;
         self.commit(events, ctx).await?;
+        self.register_watches(ctx);
         Ok(reply)
     }
 
@@ -369,7 +406,34 @@ impl<G: Grain> Host<G> {
         self.facets.clear_alarm_stage();
         let gctx = self.grain_ctx(ctx);
         let events = self.grain.on_alarm(&self.state, &gctx).await;
-        self.commit(events, ctx).await
+        self.commit(events, ctx).await?;
+        self.register_watches(ctx);
+        Ok(())
+    }
+
+    /// The callerless death-watch protocol (actor §12, the alarm protocol's
+    /// sibling): run the grain's
+    /// [`on_peer_terminated`](Grain::on_peer_terminated) through the same §6
+    /// durability barrier, with no message and no reply. An empty decision with
+    /// nothing staged commits nothing (§7.5), so a stale signal is free.
+    async fn run_peer_terminated(
+        &mut self,
+        msg: Terminated,
+        ctx: &Ctx<Host<G>>,
+    ) -> Result<(), GrainError> {
+        self.last_active = ctx.system().now();
+        if let Err(e) = self.facets.begin() {
+            self.forced_step_down(ctx).await;
+            return Err(GrainError::Unavailable(format!("facet begin: {e}")));
+        }
+        let gctx = self.grain_ctx(ctx);
+        let events = self
+            .grain
+            .on_peer_terminated(&self.state, &gctx, &msg.id, msg.reason)
+            .await;
+        self.commit(events, ctx).await?;
+        self.register_watches(ctx);
+        Ok(())
     }
 
     /// The commit half of the §6 protocol (steps 2–7): encode the decided events
@@ -659,7 +723,14 @@ impl<G: Grain> Host<G> {
         let name = self.name.clone();
         let head = self.head.value();
         ctx.system().launch(Box::pin(async move {
-            let _ = index.grain(key).tell(AlarmSync { grain: name, due, head }).await;
+            let _ = index
+                .grain(key)
+                .tell(AlarmSync {
+                    grain: name,
+                    due,
+                    head,
+                })
+                .await;
         }));
     }
 
@@ -762,6 +833,16 @@ impl<G: Grain> Handler<AlarmDue> for Host<G> {
             // Cancelled between arming and firing: nothing to do.
             None => {}
         }
+    }
+}
+
+impl<G: Grain> Handler<Terminated> for Host<G> {
+    async fn handle(&mut self, msg: Terminated, ctx: &Ctx<Host<G>>) {
+        // A watched peer terminated (actor §12): drive the grain's decision
+        // through the durability barrier. A failed commit steps the activation
+        // down (the journal is the authority, G3); the next activation
+        // re-watches from its folded state and a watch-after-death re-fires.
+        let _ = self.run_peer_terminated(msg, ctx).await;
     }
 }
 

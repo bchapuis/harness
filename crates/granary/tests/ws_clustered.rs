@@ -388,7 +388,12 @@ fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
         let g = granaries[0].clone();
         async move {
             g.grain(key)
-                .ask_timeout(Get { path: "data".into() }, Duration::from_secs(5))
+                .ask_timeout(
+                    Get {
+                        path: "data".into(),
+                    },
+                    Duration::from_secs(5),
+                )
                 .await
                 .unwrap()
         }

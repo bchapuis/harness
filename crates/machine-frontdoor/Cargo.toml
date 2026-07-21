@@ -1,0 +1,24 @@
+[package]
+name = "machine-frontdoor"
+description = "The persistent machine's SSH front door (machine spec §5.1): terminates SSH in-process against journaled keys, presents each machine's own host key, and bridges channels to the guest over vsock."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+actor-core.workspace = true
+granary.workspace = true
+machine.workspace = true
+russh.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "macros", "sync"] }
+serde_json.workspace = true
+bytes = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
