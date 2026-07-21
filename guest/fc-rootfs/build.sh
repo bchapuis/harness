@@ -72,7 +72,10 @@ echo "--- firecracker $FC_VERSION"
 docker run --rm --platform "$PLATFORM" -v "$(pwd)/out":/out alpine:"$ALPINE" sh -ec '
   wget -q "https://github.com/firecracker-microvm/firecracker/releases/download/'"$FC_VERSION"'/firecracker-'"$FC_VERSION"'-'"$ARCH"'.tgz" -O /tmp/fc.tgz
   tar -xzf /tmp/fc.tgz -C /tmp
-  install -m 0755 /tmp/release-*/firecracker-* /out/firecracker
+  # Exact name: the release ships firecracker-<ver>-<arch> AND its .debug
+  # sibling; a bare glob matches both and busybox install writes the last
+  # match — the dynamically linked debug artifact, which segfaults at exec.
+  install -m 0755 /tmp/release-*/firecracker-'"$FC_VERSION"'-'"$ARCH"' /out/firecracker
 '
 
 echo "--- done"
