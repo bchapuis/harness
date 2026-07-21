@@ -107,28 +107,6 @@ jobs:
           cargo clippy -p harness-sandbox --features firecracker --all-targets -- -D warnings
           cargo clippy -p machine --features firecracker --all-targets -- -D warnings
 
-      # Temporary diagnostics for the boot-time SIGSEGV seen on hosted
-      # runners: is it the binary, KVM, or the boot config? Every probe
-      # tolerates failure; the captured output is the point.
-      - name: Diagnose the VMM environment
-        run: |
-          uname -a
-          lscpu | grep -iE "model name|hypervisor|virtualization" || true
-          ls -l /dev/kvm || true
-          file guest/fc-rootfs/out/firecracker || true
-          sha256sum guest/fc-rootfs/out/firecracker || true
-          echo "--- firecracker --version:"
-          guest/fc-rootfs/out/firecracker --version || echo "version exit: $?"
-          echo "--- bare API-socket start (no boot):"
-          timeout 5 guest/fc-rootfs/out/firecracker --api-sock /tmp/fc-diag.sock &
-          FC_PID=$!
-          sleep 2
-          curl -s --unix-socket /tmp/fc-diag.sock http://localhost/ && echo || echo "api probe failed"
-          kill "$FC_PID" 2>/dev/null || true
-          wait "$FC_PID" || echo "bare start exit: $?"
-          echo "--- kernel log tail:"
-          sudo dmesg | tail -15 || true
-
       - name: Test the sandbox tier (protocol suite + KVM-gated conformance)
         run: cargo test -p harness-sandbox --features firecracker
 
