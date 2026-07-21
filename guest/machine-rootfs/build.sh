@@ -44,16 +44,20 @@ echo "building for $ARCH ($PLATFORM)"
 mkdir -p out
 
 echo "--- machine-agent: build + test (rust:alpine, static musl)"
+# An explicit --target keeps host artifacts (serde's proc-macro) off the
+# crt-static RUSTFLAGS — a proc-macro dylib cannot be built static-crt, and
+# cargo only separates host from target flags when a target is named.
 docker run --rm --platform "$PLATFORM" \
   -v "$(cd ../machine-agent && pwd)":/src -w /src \
   -e CARGO_TARGET_DIR=/src/target-linux-"$ARCH" \
   -e RUSTFLAGS="-C target-feature=+crt-static" \
   rust:alpine sh -ec '
     apk add -q musl-dev
-    cargo test --release
-    cargo build --release
+    TARGET="$(uname -m)-unknown-linux-musl"
+    cargo test --release --target "$TARGET"
+    cargo build --release --target "$TARGET"
   '
-cp ../machine-agent/target-linux-"$ARCH"/release/machine-agent out/machine-agent
+cp ../machine-agent/target-linux-"$ARCH"/"$ARCH"-unknown-linux-musl/release/machine-agent out/machine-agent
 
 echo "--- machine.ext4: alpine + openrc + the agent service + sftp + a user"
 docker run --rm --platform "$PLATFORM" \
