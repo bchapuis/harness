@@ -356,25 +356,29 @@ impl NativeEnv {
     }
 }
 
-/// Distinguish a lost environment from an ordinary failure (harness spec
-/// §5.5): when a call failed and the session's workspace directory no longer
-/// exists on disk — an external deletion, or a wiped scratch dir — the
-/// environment itself is gone. `EnvironmentLost` is the outcome that engages
-/// the harness's reset protocol (drop the binding, journal `WorkspaceReset`);
-/// reporting the same condition as `ToolError::Sandbox` would have the model
-/// retrying against state that no longer exists. An ambient stat, not a
-/// handle read: the open handle keeps a deleted directory's fd alive, so only
-/// the path can witness the deletion.
+/// Distinguish a lost environment from an ordinary outcome (harness spec
+/// §5.5): when the session's workspace directory no longer exists on disk —
+/// an external deletion, or a wiped scratch dir — the environment itself is
+/// gone, whatever the call reported. `EnvironmentLost` is the outcome that
+/// engages the harness's reset protocol (drop the binding, journal
+/// `WorkspaceReset`); anything else has the model retrying against state
+/// that no longer exists. The loss outranks even an `Ok`: the open handle
+/// keeps a deleted directory's fd alive, so a call can "succeed" against it
+/// (an empty listing, a tar sync of nothing) while its effects have no
+/// durable home — an ambient stat of the path, not a handle read, is the
+/// only witness of the deletion.
 fn escalate_loss(
     result: Result<Value, ToolError>,
     path: &std::path::Path,
 ) -> Result<Value, ToolError> {
-    match result {
-        Err(ToolError::Sandbox(e)) if std::fs::metadata(path).is_err() => Err(
-            ToolError::EnvironmentLost(format!("workspace directory is gone: {e}")),
-        ),
-        other => other,
+    if let Err(stat) = std::fs::metadata(path) {
+        let detail = match &result {
+            Err(e) => format!("workspace directory is gone: {e} ({stat})"),
+            Ok(_) => format!("workspace directory is gone: {stat}"),
+        };
+        return Err(ToolError::EnvironmentLost(detail));
     }
+    result
 }
 
 impl Sandbox for TieredSandbox {
