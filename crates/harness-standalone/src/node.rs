@@ -343,7 +343,6 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
                     .with_firecracker(harness_sandbox::FirecrackerConfig::new(
                         &opts.fc_binary,
                         &opts.fc_kernel,
-                        &opts.fc_rootfs,
                     ))
                     // The hermetic JS surface, alongside the microVM shell.
                     .with_quickjs(),

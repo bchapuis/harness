@@ -15,8 +15,9 @@ use machine_frontdoor::ChannelKind;
 use machine_frontdoor::Duplex;
 use machine_frontdoor::FrontDoorError;
 use machine_frontdoor::MachineAuthority;
-use machine_frontdoor::proto::Frame;
-use machine_frontdoor::proto::send_frame;
+use machine_frontdoor::host_key_from_seed;
+use machine_proto::Frame;
+use microvm::vsock::send_frame;
 use machine_frontdoor::serve_connection;
 use russh::keys::PrivateKey;
 use russh::keys::PrivateKeyWithHashAlg;
@@ -33,6 +34,10 @@ AAAEAVrEEWPp1lhv6G3mtHwBtk0BlYyjvb7fRAfrxjWL6L4UkzZYdEwvDR8o8ZY/aaZUFE
 PcNMBwYrqMK1YvTJerNoAAAAFm1hY2hpbmUtZnJvbnRkb29yLXRlc3QBAgMEBQYH
 -----END OPENSSH PRIVATE KEY-----
 ";
+
+/// The machine's journaled host-key material (machine §3): a raw 32-byte
+/// ed25519 seed, expanded exactly as a real authority does.
+const HOST_KEY_SEED: [u8; 32] = [7; 32];
 
 /// A key the machine's policy does not authorize.
 const UNAUTHORIZED_KEY: &str = "\
@@ -116,7 +121,7 @@ fn authority() -> Arc<FakeAuthority> {
         .expect("parse authorized key")
         .public_key()
         .clone();
-    let host_key = PrivateKey::from_openssh(UNAUTHORIZED_KEY).expect("host key");
+    let host_key = host_key_from_seed(&HOST_KEY_SEED).expect("host key from seed");
     Arc::new(FakeAuthority {
         authorized,
         host_key,
@@ -210,9 +215,17 @@ async fn an_authorized_key_attaches_and_bridges_an_exec_channel() {
         stdout.contains("guest ran: /bin/sh -c echo hi"),
         "the guest output must bridge to the client, got {stdout:?}"
     );
-    assert!(
-        host_key.is_some(),
-        "the front door must present a host key at KEX"
+    // The presented host key is the seed-expanded machine identity: the same
+    // journaled 32 bytes always yield this key, so the client's `known_hosts`
+    // pin survives hibernation, migration, and failover (machine §5.1).
+    let presented = host_key.expect("the front door must present a host key at KEX");
+    assert_eq!(
+        presented.key_data(),
+        host_key_from_seed(&HOST_KEY_SEED)
+            .expect("host key from seed")
+            .public_key()
+            .key_data(),
+        "the presented host key must be the machine's seed-expanded identity"
     );
 
     // The attachment was journaled with its principal, and detach fired on

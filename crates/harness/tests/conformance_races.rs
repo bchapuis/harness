@@ -7,9 +7,9 @@
 //!    `Advance` starts the next run directly — it must not inherit the ended
 //!    run's per-run flags (stale `launched`/`resolved` call ids suppress the
 //!    new run's calls: synthesized ids repeat across runs).
-//! 2. A straggler `ModelDone` of an ended run must not clear the successor
-//!    run's `model_inflight`, and a superseded call's response must never
-//!    journal a second `ModelResponse` for a step (§3.1 step 2, §9.1.4).
+//! 2. A straggler `ModelDone` of an ended run must not release the successor
+//!    run's model-call launch claim, and a superseded call's response must
+//!    never journal a second `ModelResponse` for a step (§3.1 step 2, §9.1.4).
 
 mod support;
 
@@ -125,9 +125,9 @@ fn a_straggler_model_done_never_unlocks_a_second_call() {
     //   t=2   run B starts; its own model call flies until t=12.
     //   t=9   the first wait on B lapses (7s deadline).
     //   t=10  run A's straggler `ModelDone` lands — after B's call launched,
-    //         before B's response: it must not clear B's `model_inflight`.
+    //         before B's response: it must not release B's launch claim.
     //   t=11  the re-attach nudges an `Advance`: a loop that let the straggler
-    //         clear the flag issues a second concurrent call for B here, and
+    //         release the claim issues a second concurrent call for B here, and
     //         its response would journal a second `ModelResponse` for the step.
     //   t=12  B's real response journals; the tool runs to t=42; B finishes.
     let records: Arc<Mutex<Vec<Record>>> = Arc::default();

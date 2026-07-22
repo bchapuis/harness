@@ -11,6 +11,8 @@ disallowed-methods = [
     { path = "std::time::Instant::now", reason = "§18.1: read time via Clock::now, not the wall clock" },
     { path = "std::time::SystemTime::now", reason = "§18.1: read time via Clock::now, not the wall clock" },
     { path = "std::thread::spawn", reason = "§18.1: spawn via Spawner::launch, not OS threads" },
-    { path = "rand::thread_rng", reason = "§18.1: randomness must come from the seeded Entropy, not a thread RNG" },
+    # allow-invalid: the path only resolves in crates that depend on rand; the
+    # ban must still hold there without warning everywhere else.
+    { path = "rand::thread_rng", reason = "§18.1: randomness must come from the seeded Entropy, not a thread RNG", allow-invalid = true },
     { path = "rand::random", reason = "§18.1: randomness must come from the seeded Entropy" },
 ]

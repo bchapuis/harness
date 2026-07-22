@@ -266,9 +266,7 @@ impl ComputeTier {
                 });
                 self.execute(dir, seed, &runner, &guest_input)
             }
-            other => Err(ToolError::Sandbox(format!(
-                "tool not provided by this sandbox: {other}"
-            ))),
+            other => Err(crate::provider::unknown_tool(other)),
         }
     }
 

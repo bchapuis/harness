@@ -47,9 +47,12 @@ echo "--- machine-agent: build + test (rust:alpine, static musl)"
 # An explicit --target keeps host artifacts (serde's proc-macro) off the
 # crt-static RUSTFLAGS — a proc-macro dylib cannot be built static-crt, and
 # cargo only separates host from target flags when a target is named.
+# The whole repository is mounted (read-write for the agent's own target
+# dir), because the agent path-depends on crates/machine-proto — the one
+# definition of the channel protocol it shares with the host.
 docker run --rm --platform "$PLATFORM" \
-  -v "$(cd ../machine-agent && pwd)":/src -w /src \
-  -e CARGO_TARGET_DIR=/src/target-linux-"$ARCH" \
+  -v "$(cd ../.. && pwd)":/repo -w /repo/guest/machine-agent \
+  -e CARGO_TARGET_DIR=/repo/guest/machine-agent/target-linux-"$ARCH" \
   -e RUSTFLAGS="-C target-feature=+crt-static" \
   rust:alpine sh -ec '
     apk add -q musl-dev

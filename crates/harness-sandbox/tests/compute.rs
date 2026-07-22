@@ -273,19 +273,19 @@ fn the_compute_engine_is_built_on_first_use_and_dropped_on_release() {
     let (provider, bench) = bench(7, &SandboxProfile::default());
     plant(&bench, "echo.wasm", ECHO);
     assert_eq!(
-        provider.stats.compute_built(),
+        provider.stats().compute_built(),
         0,
         "opening grants Workspace and nothing else (§5.6 item 1)"
     );
     run(&bench, json!({"module": "echo.wasm", "input": 1})).expect("run");
     run(&bench, json!({"module": "echo.wasm", "input": 2})).expect("run");
     assert_eq!(
-        provider.stats.compute_built(),
+        provider.stats().compute_built(),
         1,
         "one engine per sandbox, built lazily"
     );
     block_on(bench.sandbox.release());
-    assert_eq!(provider.stats.released(), 1);
+    assert_eq!(provider.stats().released(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -376,13 +376,13 @@ fn compiled_modules_are_cached_per_sandbox() {
     run(&bench, json!({"module": "echo.wasm", "input": 1})).expect("run");
     run(&bench, json!({"module": "echo.wasm", "input": 2})).expect("run");
     assert_eq!(
-        provider.stats.modules_compiled(),
+        provider.stats().modules_compiled(),
         1,
         "the second call hits the cache"
     );
     plant(&bench, "other.wasm", SEED_WRITER);
     run(&bench, json!({"module": "other.wasm"})).expect("run");
-    assert_eq!(provider.stats.modules_compiled(), 2);
+    assert_eq!(provider.stats().modules_compiled(), 2);
 }
 
 #[test]

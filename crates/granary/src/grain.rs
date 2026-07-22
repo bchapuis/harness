@@ -262,7 +262,8 @@ impl<G: Grain> GrainCtx<G> {
         self.watches.lock().expect("watch queue lock").push(target);
     }
 
-    /// The facet cell, for the facet accessor modules (`kv`, `fs`, `sql`).
+    /// The facet cell, for the facet accessor modules (`kv`, `sql`, `ws`,
+    /// `alarm`, `workflow`, `disk`).
     pub(crate) fn facet_cell(&self) -> &Arc<FacetCell<G::Facets>> {
         &self.facets
     }

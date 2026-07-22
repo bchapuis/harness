@@ -56,6 +56,10 @@ use crate::facet::HasFacet;
 use crate::facet::decode_payload;
 use crate::facet::encode_payload;
 use crate::facet::sealed::Sealed;
+use crate::facet_blobs::RootSet;
+use crate::facet_blobs::get_concat;
+use crate::facet_blobs::io_facet_err;
+use crate::facet_blobs::put_chunked;
 use crate::grain::Grain;
 use crate::grain::GrainCtx;
 
@@ -175,12 +179,8 @@ struct WsEntry {
 struct WsDir {
     root: PathBuf,
     index: Mutex<BTreeMap<String, WsEntry>>,
-    /// The checkpoint-chunk ids this activation must keep alive (F3): the
-    /// restored manifest's plus every later checkpoint's. Union-kept — never
-    /// pruned mid-activation — so a failed `save_snapshot` can never leave the
-    /// *current* durable manifest's chunks sweepable; the next activation
-    /// restores from the durable manifest and resets the set.
-    roots: Mutex<BTreeSet<BlobId>>,
+    /// The live checkpoint-chunk roots (union-kept for F3 — see [`RootSet`]).
+    roots: Mutex<RootSet>,
 }
 
 /// The committed form: `None` until [`Facet::restore`] materializes (the host
@@ -287,9 +287,9 @@ impl Facet for Ws {
             WsRecord::Write { path, bytes } => {
                 let disk = rel_to_disk(&dir.root, &path)?;
                 if let Some(parent) = disk.parent() {
-                    fs::create_dir_all(parent).map_err(io_facet_err)?;
+                    fs::create_dir_all(parent).map_err(io_facet_err("ws"))?;
                 }
-                fs::write(&disk, &bytes).map_err(io_facet_err)?;
+                fs::write(&disk, &bytes).map_err(io_facet_err("ws"))?;
                 dir.index.lock().expect("ws index lock").insert(
                     path,
                     WsEntry {
@@ -307,7 +307,7 @@ impl Facet for Ws {
                     match fs::remove_file(&disk) {
                         Ok(()) => {}
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(io_facet_err(e)),
+                        Err(e) => return Err(io_facet_err("ws")(e)),
                     }
                     index.remove(&path);
                 }
@@ -353,7 +353,8 @@ impl Facet for Ws {
                 // durable blobs; no read, no put.
                 Some(chunks) => chunks,
                 None => {
-                    let bytes = fs::read(rel_to_disk(&dir.root, &path)?).map_err(io_facet_err)?;
+                    let bytes =
+                        fs::read(rel_to_disk(&dir.root, &path)?).map_err(io_facet_err("ws"))?;
                     // The snapshot must be the COMMITTED image (G4). Bytes that
                     // do not hash to the committed entry are an in-flight tool's
                     // uncaptured dirt: fail — a snapshot is only an optimization
@@ -381,13 +382,11 @@ impl Facet for Ws {
         }
         // The chunk puts are independent; issue them concurrently. Dedup makes
         // a chunk already stored ~free (§7.10).
-        futures::future::try_join_all(to_put.into_iter().map(|chunk| env.blobs().put(chunk)))
-            .await
-            .map_err(|e| FacetError(format!("ws checkpoint put: {e:?}")))?;
+        put_chunked(env.blobs(), to_put, "ws checkpoint").await?;
         {
             // All chunks durable: keep them alive alongside the prior roots
-            // (see `WsDir::roots` — the composite may not commit), and cache
-            // the fresh ids so the next checkpoint skips unchanged files.
+            // ([`RootSet`] — the composite may not commit), and cache the
+            // fresh ids so the next checkpoint skips unchanged files.
             let mut roots = dir.roots.lock().expect("ws roots lock");
             for file in &files {
                 roots.extend(file.chunks.iter().copied());
@@ -411,28 +410,23 @@ impl Facet for Ws {
         // committed delta records are the truth (§1); the prior activation's
         // directory is not trusted.
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).map_err(io_facet_err)?;
+        fs::create_dir_all(&root).map_err(io_facet_err("ws"))?;
         let dir = WsDir {
             root,
             index: Mutex::new(BTreeMap::new()),
-            roots: Mutex::new(BTreeSet::new()),
+            roots: Mutex::new(RootSet::default()),
         };
         if let Some(bytes) = part {
             let manifest: WsManifest = decode_payload("ws restore", bytes)?;
             // Fetch every file's chunks concurrently; each get verifies by
             // content (G17).
-            let contents = futures::future::try_join_all(manifest.files.iter().map(|file| {
-                let blobs = env.blobs();
-                async move {
-                    let parts = futures::future::try_join_all(
-                        file.chunks.iter().map(|id| blobs.get(*id, None)),
-                    )
-                    .await?;
-                    Ok::<Vec<u8>, crate::error::GrainError>(parts.concat())
-                }
-            }))
-            .await
-            .map_err(|e| FacetError(format!("ws checkpoint get: {e:?}")))?;
+            let contents = futures::future::try_join_all(
+                manifest
+                    .files
+                    .iter()
+                    .map(|file| get_concat(env.blobs(), &file.chunks, "ws checkpoint")),
+            )
+            .await?;
             let mut index = dir.index.lock().expect("ws index lock");
             let mut roots = dir.roots.lock().expect("ws roots lock");
             for (file, content) in manifest.files.iter().zip(contents) {
@@ -446,9 +440,9 @@ impl Facet for Ws {
                 }
                 let disk = rel_to_disk(&dir.root, &file.path)?;
                 if let Some(parent) = disk.parent() {
-                    fs::create_dir_all(parent).map_err(io_facet_err)?;
+                    fs::create_dir_all(parent).map_err(io_facet_err("ws"))?;
                 }
-                fs::write(&disk, &content).map_err(io_facet_err)?;
+                fs::write(&disk, &content).map_err(io_facet_err("ws"))?;
                 index.insert(
                     file.path.clone(),
                     WsEntry {
@@ -468,7 +462,7 @@ impl Facet for Ws {
 
     fn roots(form: &WsForm) -> BTreeSet<BlobId> {
         match &form.0 {
-            Some(dir) => dir.roots.lock().expect("ws roots lock").clone(),
+            Some(dir) => dir.roots.lock().expect("ws roots lock").ids(),
             None => BTreeSet::new(),
         }
     }
@@ -662,10 +656,6 @@ fn rel_to_disk(root: &Path, rel: &str) -> Result<PathBuf, FacetError> {
     Ok(disk)
 }
 
-fn io_facet_err(e: std::io::Error) -> FacetError {
-    FacetError(format!("ws io: {e}"))
-}
-
 fn io_ws_err(e: std::io::Error) -> WsError {
     WsError::Io(e.to_string())
 }
@@ -705,7 +695,7 @@ mod tests {
         let mut form = WsForm(Some(Arc::new(WsDir {
             root: scratch.path().to_path_buf(),
             index: Mutex::new(BTreeMap::new()),
-            roots: Mutex::new(BTreeSet::new()),
+            roots: Mutex::new(RootSet::default()),
         })));
         let write = encode_payload(&WsRecord::Write {
             path: "src/main.rs".into(),
@@ -730,7 +720,7 @@ mod tests {
         let mut form = WsForm(Some(Arc::new(WsDir {
             root: scratch.path().to_path_buf(),
             index: Mutex::new(BTreeMap::new()),
-            roots: Mutex::new(BTreeSet::new()),
+            roots: Mutex::new(RootSet::default()),
         })));
         assert!(Ws::fold(&mut form, &[0xFF, 0xFF, 0xFF]).is_err());
     }

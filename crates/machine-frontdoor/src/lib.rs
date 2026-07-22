@@ -28,12 +28,11 @@
 //! flow control across the actor transport is future work (machine §8).
 
 mod bridge;
-pub mod proto;
 mod ssh;
 
 pub use bridge::VsockBackend;
-pub use proto::AGENT_PORT;
-pub use proto::ChannelKind;
+pub use machine_proto::AGENT_PORT;
+pub use machine_proto::ChannelKind;
 pub use ssh::serve_connection;
 
 use std::future::Future;
@@ -41,6 +40,8 @@ use std::future::Future;
 use granary::GrainName;
 use russh::keys::PrivateKey;
 use russh::keys::PublicKey;
+use russh::keys::ssh_key::private::Ed25519Keypair;
+use russh::keys::ssh_key::private::KeypairData;
 
 /// A front-door operation failed.
 #[derive(Debug, Clone)]
@@ -54,9 +55,27 @@ impl std::fmt::Display for FrontDoorError {
 
 impl std::error::Error for FrontDoorError {}
 
+/// Expand the machine's journaled host-key material into the SSH host key
+/// presented at KEX (machine §3, §5.1). The material — `MachineState::
+/// host_key`, carried on the attach reply — is the raw 32-byte ed25519 seed
+/// the machine drew from system entropy at provisioning; expanding it here,
+/// the one decoder of that encoding, keeps russh out of the machine crate.
+/// Pure: the same seed always yields the same key, so the client's
+/// `known_hosts` pin survives hibernation, migration, and failover.
+pub fn host_key_from_seed(seed: &[u8]) -> Result<PrivateKey, FrontDoorError> {
+    let seed: &[u8; 32] = seed.try_into().map_err(|_| {
+        FrontDoorError(format!(
+            "host-key material: expected a 32-byte ed25519 seed, got {} bytes",
+            seed.len()
+        ))
+    })?;
+    PrivateKey::new(KeypairData::Ed25519(Ed25519Keypair::from_seed(seed)), "")
+        .map_err(|e| FrontDoorError(format!("host key: {e}")))
+}
+
 /// A bidirectional byte stream to a guest agent for one channel (the header
 /// already sent by [`ChannelBackend::open`]). The front door writes and reads
-/// [`proto`] frames on it.
+/// [`machine_proto`] frames on it.
 pub trait Duplex: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Duplex for T {}
@@ -96,7 +115,7 @@ pub trait MachineAuthority: Send + Sync + 'static {
 /// The transport half of the front door (machine §5.1): open one byte stream
 /// per channel to the machine's guest agent, having already performed the
 /// vsock handshake and sent the channel [`ChannelKind`] header, so the caller
-/// exchanges [`proto`] frames directly.
+/// exchanges [`machine_proto`] frames directly.
 pub trait ChannelBackend: Send + Sync + 'static {
     fn open(
         &self,

@@ -3,8 +3,9 @@
 //! Drives the [`Alarm`] facet and the [`on_alarm`](Grain::on_alarm) seam through
 //! the public API on the single-node `Local` tier: an armed deadline fires exactly
 //! once with no caller present, is consumed on fire, honours cancel and re-arm, and
-//! keeps its grain resident until it fires (the Phase-1 hibernation veto, before the
-//! per-shard index drives callerless wake across eviction).
+//! keeps its grain resident until it fires (no alarm index is wired here, so the
+//! hibernation veto is unconditional; `alarm_index.rs` covers hibernation under an
+//! acked registration).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -239,8 +240,9 @@ fn re_arm_fires_latest_only() {
 fn pending_alarm_vetoes_hibernation() {
     use actor_core::Spawner;
 
-    // Aggressive idle window, far-future alarm: the grain must stay resident so the
-    // in-activation timer survives to fire it (the Phase-1 veto, spec §16). Drive
+    // Aggressive idle window, far-future alarm, and NO alarm index wired: with
+    // nothing to wake it, the grain must stay resident so the in-activation timer
+    // survives to fire it (the unconditional half of the veto, spec §7.16). Drive
     // with `launch` + `run_for`, not `block_on`: a vetoing grain never quiesces, so
     // `block_on` (which runs to quiescence) would advance all the way to the
     // deadline instead of stopping at the bound.

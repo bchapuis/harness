@@ -16,7 +16,7 @@ workspace = true
 # plumbing, the machine's drive being the disk facet's image (grain §7.15) and
 # its /workspace synced through microvm's shared tar codec (machine §4).
 # Linux + /dev/kvm at runtime; builds everywhere.
-firecracker = ["dep:microvm", "microvm/ws", "dep:tokio", "dep:serde_json"]
+firecracker = ["dep:microvm", "microvm/ws", "dep:machine-proto", "dep:tokio", "dep:serde_json"]
 # Egress plumbing (machine §5.2): the per-machine tap device and node NAT that
 # realize the journaled policy. Linux + CAP_NET_ADMIN; shells out to `ip`/`nft`.
 # The pure rule generator (`nft_ruleset`) is available without the feature.
@@ -30,6 +30,7 @@ serde = { workspace = true }
 # handle, as the sandbox's Workspace tier does (sandbox §3.1, S1).
 cap-std.workspace = true
 microvm = { workspace = true, optional = true }
+machine-proto = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 

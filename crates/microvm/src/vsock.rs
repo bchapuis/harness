@@ -7,7 +7,9 @@
 use std::path::Path;
 
 use serde_json::Value;
+use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
@@ -40,8 +42,12 @@ pub async fn connect(uds: &Path, port: u32) -> Result<UnixStream, std::io::Error
     Ok(stream)
 }
 
-/// Send one frame: a `u32` little-endian length, then the bytes.
-pub async fn send_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<(), std::io::Error> {
+/// Send one frame: a `u32` little-endian length, then the bytes. Generic over
+/// the stream, so a relayed or split half frames identically to the socket.
+pub async fn send_frame<W>(stream: &mut W, bytes: &[u8]) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
     stream
         .write_all(&(bytes.len() as u32).to_le_bytes())
         .await?;
@@ -51,7 +57,10 @@ pub async fn send_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<(), std
 
 /// Receive one frame of at most `cap` bytes, refusing an oversized header
 /// before allocating.
-pub async fn recv_frame(stream: &mut UnixStream, cap: usize) -> Result<Vec<u8>, std::io::Error> {
+pub async fn recv_frame<R>(stream: &mut R, cap: usize) -> Result<Vec<u8>, std::io::Error>
+where
+    R: AsyncRead + Unpin,
+{
     let mut len = [0u8; 4];
     stream.read_exact(&mut len).await?;
     let len = u32::from_le_bytes(len) as usize;
@@ -66,12 +75,18 @@ pub async fn recv_frame(stream: &mut UnixStream, cap: usize) -> Result<Vec<u8>, 
 }
 
 /// Send one JSON frame.
-pub async fn send_json(stream: &mut UnixStream, value: &Value) -> Result<(), std::io::Error> {
+pub async fn send_json<W>(stream: &mut W, value: &Value) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
     send_frame(stream, value.to_string().as_bytes()).await
 }
 
 /// Receive one JSON frame of at most `cap` bytes.
-pub async fn recv_json(stream: &mut UnixStream, cap: usize) -> Result<Value, std::io::Error> {
+pub async fn recv_json<R>(stream: &mut R, cap: usize) -> Result<Value, std::io::Error>
+where
+    R: AsyncRead + Unpin,
+{
     let bytes = recv_frame(stream, cap).await?;
     serde_json::from_slice(&bytes).map_err(|e| std::io::Error::other(format!("bad frame: {e}")))
 }

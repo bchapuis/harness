@@ -21,10 +21,6 @@ futures.workspace = true
 blake3.workspace = true
 
 [dev-dependencies]
-actor-core.workspace = true
-actor-cluster.workspace = true
 actor-simulation.workspace = true
-serde = { workspace = true }
 serde_json.workspace = true
-futures.workspace = true
 tempfile.workspace = true

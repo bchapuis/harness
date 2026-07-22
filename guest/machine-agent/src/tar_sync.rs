@@ -11,12 +11,20 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 
-use crate::proto::Frame;
-use crate::proto::MAX_FRAME;
-use crate::proto::MAX_TAR;
+use machine_proto::Frame;
+use machine_proto::MAX_FRAME;
+use machine_proto::MAX_TAR;
+use machine_proto::recv_frame;
+use machine_proto::send_frame;
 
 /// Replace the workspace's contents with a pushed tar stream. Children only:
 /// the directory itself is a tmpfs mount that must survive.
+///
+/// Unlike the host codec, the unpack applies no escape filtering: the only
+/// peer that can reach this vsock port is the host (main.rs docs), whose
+/// codec never emits absolute or `..`-bearing entries — and an attacker who
+/// could forge the stream is already on the host side of the trust boundary,
+/// where the workspace lives unprotected anyway.
 pub fn unpack(workspace: &Path, tar: &[u8]) -> std::io::Result<()> {
     for entry in std::fs::read_dir(workspace)? {
         let entry = entry?;
@@ -103,23 +111,22 @@ fn append_dir(
 const CHUNK: usize = 256 * 1024;
 
 /// Receive a tar as `Data` chunks terminated by `Eof`, accumulated under
-/// [`MAX_TAR`] before any of it is unpacked. Tags are matched on the raw
-/// body — no intermediate [`Frame`] allocation per chunk.
+/// [`MAX_TAR`] before any of it is unpacked.
 pub fn recv_tar(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
     let mut tar = Vec::new();
     loop {
-        let body = crate::recv_frame(stream, MAX_FRAME)?;
-        match body.split_first() {
-            Some((&Frame::DATA, rest)) => {
-                if tar.len() + rest.len() > MAX_TAR {
+        let body = recv_frame(stream, MAX_FRAME)?;
+        match Frame::decode(&body) {
+            Some(Frame::Data(bytes)) => {
+                if tar.len() + bytes.len() > MAX_TAR {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("pushed workspace exceeds the {MAX_TAR}-byte sync cap"),
                     ));
                 }
-                tar.extend_from_slice(rest);
+                tar.extend_from_slice(&bytes);
             }
-            Some((&Frame::EOF, _)) => return Ok(tar),
+            Some(Frame::Eof) => return Ok(tar),
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -130,14 +137,10 @@ pub fn recv_tar(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
     }
 }
 
-/// Send a tar as `Data` chunks terminated by `Eof`. Frame bodies are built
-/// in place — one copy per chunk, no intermediate [`Frame`].
+/// Send a tar as `Data` chunks terminated by `Eof`.
 pub fn send_tar(stream: &mut impl Write, tar: &[u8]) -> std::io::Result<()> {
     for chunk in tar.chunks(CHUNK) {
-        let mut body = Vec::with_capacity(1 + chunk.len());
-        body.push(Frame::DATA);
-        body.extend_from_slice(chunk);
-        crate::send_frame(stream, &body)?;
+        send_frame(stream, &Frame::Data(chunk.to_vec()).encode())?;
     }
-    crate::send_frame(stream, &[Frame::EOF])
+    send_frame(stream, &Frame::Eof.encode())
 }

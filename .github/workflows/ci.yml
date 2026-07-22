@@ -92,7 +92,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: guest/machine-rootfs/out
-          key: machine-assets-${{ runner.os }}-${{ env.MACHINE_MB }}-${{ hashFiles('guest/machine-rootfs/build.sh', 'guest/machine-agent/**') }}
+          key: machine-assets-${{ runner.os }}-${{ env.MACHINE_MB }}-${{ hashFiles('guest/machine-rootfs/build.sh', 'guest/machine-agent/src/**', 'guest/machine-agent/Cargo.*', 'crates/machine-proto/**') }}
 
       - name: Build the sandbox assets (agent, rootfs, kernel, VMM)
         if: steps.fc-assets.outputs.cache-hit != 'true'

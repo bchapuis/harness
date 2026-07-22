@@ -244,8 +244,9 @@ impl GrainHandler<StepDone> for Pipeline {
     }
 }
 
-/// A step's effect failed: release its launch claim so the next drive re-launches
-/// it (the alarm-free core of a `retry`; a real backoff arms an alarm first).
+/// A step's effect failed: forget the activation's launch claims so the next
+/// drive re-launches it (the alarm-free core of a `retry`; a real backoff arms
+/// an alarm first).
 #[derive(Clone, Serialize, Deserialize)]
 struct Retry {
     id: u32,
@@ -258,10 +259,12 @@ impl GrainHandler<Retry> for Pipeline {
     async fn handle(
         &self,
         _s: &PipelineState,
-        msg: Retry,
+        _msg: Retry,
         ctx: &GrainCtx<Self>,
     ) -> (Vec<PipelineEvent>, ()) {
-        self.eph.lock().unwrap().guard.release(msg.id);
+        // Only the failed step can be in flight here, so a full reset is a
+        // targeted un-claim: the next drive re-launches it.
+        self.eph.lock().unwrap().guard.reset();
         self.schedule_drive(ctx);
         (vec![], ())
     }
@@ -369,6 +372,26 @@ fn steps_memoize_across_passivation() {
         "memoization: the fetch effect runs once despite re-activations",
     );
     assert_eq!(fx.double_runs.load(Ordering::SeqCst), 1, "double runs once");
+}
+
+#[test]
+fn launch_guard_claims_by_arbitrary_key() {
+    // The guard is generic over the consumer's step key (the harness agent
+    // keys tool steps by the model's call id): claims are per-key, readable
+    // without claiming, and reset restores idleness.
+    let mut guard: LaunchGuard<String> = LaunchGuard::default();
+    assert!(guard.is_idle(), "a fresh guard holds no claims");
+    assert!(guard.claim("call-1-0".to_string()));
+    assert!(!guard.claim("call-1-0".to_string()), "claim-once per key");
+    assert!(guard.is_claimed(&"call-1-0".to_string()));
+    assert!(
+        !guard.is_claimed(&"call-2-0".to_string()),
+        "is_claimed reads without claiming"
+    );
+    assert!(!guard.is_idle(), "an outstanding claim vetoes idleness");
+    guard.reset();
+    assert!(guard.is_idle());
+    assert!(guard.claim("call-1-0".to_string()), "reset forgets claims");
 }
 
 #[test]

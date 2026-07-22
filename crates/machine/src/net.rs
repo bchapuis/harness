@@ -36,6 +36,12 @@ pub fn tap_name(machine: &GrainName) -> String {
     format!("hm-{}", &hash.to_string()[..8])
 }
 
+/// The nftables table (and chain-name prefix) for a machine's egress rules.
+/// Derived from [`tap_name`] so install and teardown cannot drift apart.
+fn egress_table(machine: &GrainName) -> String {
+    format!("egress_{}", tap_name(machine).replace('-', "_"))
+}
+
 /// The destination classes egress MUST NOT reach (M6's no-lateral-movement),
 /// beyond the cluster's own CIDRs the caller supplies: RFC1918 private ranges
 /// (other taps, host services, node-internal addresses all live here),
@@ -69,7 +75,7 @@ pub fn nft_ruleset(
     uplink: &str,
 ) -> String {
     let tap = tap_name(machine);
-    let chain = format!("egress_{}", tap.replace('-', "_"));
+    let chain = egress_table(machine);
     let mut out = String::new();
     out.push_str(&format!("table inet {chain} {{\n"));
     out.push_str("  chain forward {\n");
@@ -168,7 +174,7 @@ pub mod apply {
     /// Tear down a machine's tap and ruleset on deactivation.
     pub fn remove(machine: &GrainName) {
         let tap = tap_name(machine);
-        let chain = format!("egress_{}", tap.replace('-', "_"));
+        let chain = egress_table(machine);
         let _ = run(Command::new("nft").args(["delete", "table", "inet", &chain]));
         let _ = run(Command::new("ip").args(["link", "del", &tap]));
     }

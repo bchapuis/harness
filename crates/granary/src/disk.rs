@@ -55,6 +55,8 @@ use crate::facet::FacetEnv;
 use crate::facet::FacetError;
 use crate::facet::HasFacet;
 use crate::facet::sealed::Sealed;
+use crate::facet_blobs::RootSet;
+use crate::facet_blobs::io_facet_err;
 use crate::grain::Grain;
 use crate::grain::GrainCtx;
 
@@ -171,12 +173,8 @@ struct DiskState {
     /// sparse and only manifests write it — and a `None` always reads as
     /// dirty, the conservative side).
     index: Vec<Option<BlobId>>,
-    /// The blob ids this activation must keep alive (**F3**): the restored
-    /// checkpoint's, plus every capture's and later checkpoint's. The union is
-    /// kept — never pruned mid-activation — so a failed `save_snapshot` can
-    /// never leave the current durable manifest's blocks sweepable; the next
-    /// activation restores from the durable manifest and resets the set.
-    roots: BTreeSet<BlobId>,
+    /// The live blob roots (union-kept for F3 — see [`RootSet`]).
+    roots: RootSet,
     /// Replayed capture manifests awaiting [`Facet::rehydrate`]'s blob
     /// fetches, in journal order.
     pending: Vec<DiskManifest>,
@@ -247,8 +245,9 @@ impl DiskImage {
             .create(true)
             .truncate(false)
             .open(&self.path)
-            .map_err(io_facet_err)?;
-        file.set_len(manifest.image_bytes).map_err(io_facet_err)?;
+            .map_err(io_facet_err("disk"))?;
+        file.set_len(manifest.image_bytes)
+            .map_err(io_facet_err("disk"))?;
         for (idx, id) in &manifest.blocks {
             let bytes = blobs
                 .get(*id, None)
@@ -262,8 +261,8 @@ impl DiskImage {
                 )));
             }
             file.seek(SeekFrom::Start(*idx as u64 * BLOCK_BYTES as u64))
-                .map_err(io_facet_err)?;
-            file.write_all(&bytes).map_err(io_facet_err)?;
+                .map_err(io_facet_err("disk"))?;
+            file.write_all(&bytes).map_err(io_facet_err("disk"))?;
         }
         self.state().apply(manifest, false);
         Ok(())
@@ -366,7 +365,7 @@ impl Facet for Disk {
     async fn restore(part: Option<&[u8]>, env: &FacetEnv) -> Result<DiskForm, FacetError> {
         let path = env.scratch_path("img");
         if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).map_err(io_facet_err)?;
+            fs::create_dir_all(dir).map_err(io_facet_err("disk"))?;
         }
         let image = DiskImage {
             path,
@@ -385,7 +384,7 @@ impl Facet for Disk {
 
     fn roots(form: &DiskForm) -> BTreeSet<BlobId> {
         match &form.0 {
-            Some(image) => image.state().roots.clone(),
+            Some(image) => image.state().roots.ids(),
             None => BTreeSet::new(),
         }
     }
@@ -516,7 +515,7 @@ where
                 blocks,
             },
             true,
-        )?;
+        );
         Ok(stats)
     }
 
@@ -583,7 +582,7 @@ where
                 blocks,
             },
             false,
-        )?;
+        );
         Ok(stats)
     }
 
@@ -614,22 +613,12 @@ where
     /// `replace` resets the index first (an import covers the whole image; a
     /// capture is incremental), sharing [`DiskState::apply`] with the
     /// replay/restore path.
-    fn commit_staged_op(
-        &self,
-        image: &Arc<DiskImage>,
-        manifest: DiskManifest,
-        replace: bool,
-    ) -> Result<(), DiskError> {
+    fn commit_staged_op(&self, image: &Arc<DiskImage>, manifest: DiskManifest, replace: bool) {
         image.state().apply(&manifest, replace);
         self.ctx.facet_cell().with_stage::<Disk, I, _>(|stage| {
             stage.manifest = Some(crate::facet::encode_payload(&manifest));
         });
-        Ok(())
     }
-}
-
-fn io_facet_err(e: std::io::Error) -> FacetError {
-    FacetError(format!("disk io: {e}"))
 }
 
 fn io_disk_err(e: std::io::Error) -> DiskError {

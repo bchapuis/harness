@@ -56,7 +56,6 @@ use granary::GrainHandler;
 use granary::GrainRegistry;
 use granary::GranarySystem;
 use granary::Ws;
-use granary::WsError;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -144,10 +143,12 @@ pub struct MachineState {
     /// `fingerprint → public key` (machine §3): the front door authenticates
     /// against the current folded set (M4).
     pub authorized_keys: BTreeMap<String, String>,
-    /// The machine's SSH host-key material (machine §3): one identity across
-    /// hibernation, migration, and failover. Lives in folded state, inside the
-    /// cluster's own trust boundary, which already holds the journal it
-    /// travels in.
+    /// The machine's SSH host-key material (machine §3): the raw 32-byte
+    /// ed25519 seed drawn from system entropy at provisioning, which the
+    /// front door expands into the host key it presents at KEX (machine §5.1)
+    /// — one identity across hibernation, migration, and failover. Lives in
+    /// folded state, inside the cluster's own trust boundary, which already
+    /// holds the journal it travels in.
     pub host_key: Vec<u8>,
     pub egress: EgressPolicy,
     pub vcpus: u8,
@@ -166,6 +167,10 @@ pub struct MachineState {
     /// Committed workspace captures that staged a delta (observability; the
     /// ws facet holds the files themselves).
     pub ws_captures: u64,
+    /// Quiescent points whose workspace pull failed (observability): a
+    /// climbing counter with flat `ws_captures` reads as a broken guest
+    /// agent.
+    pub ws_capture_skips: u64,
 }
 
 impl MachineState {
@@ -223,6 +228,11 @@ pub enum MachineEvent {
         removed: u32,
         tree_bytes: u64,
     },
+    /// A workspace pull (or its staging) failed at a quiescent point, so the
+    /// disk capture proceeded without a ws delta — machine §5.1's blessed
+    /// degrade, journaled so "who lost workspace cadence, and since when" is
+    /// answerable from the journal alone (M4's stance).
+    WsCaptureSkipped { at_nanos: u64, reason: String },
 }
 
 /// Ephemeral activation state (machine §1: the live microVM is one of the two
@@ -357,10 +367,11 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
     /// can still answer — before pause or kill (machine §4).
     ///
     /// Degrades gracefully (machine §5.1: a broken agent severs access, not
-    /// the machine): a failed pull skips ws staging this cadence and the disk
-    /// capture proceeds — the ws delta simply waits for the next quiescent
-    /// point. A [`WsError::TooLarge`] likewise stages nothing and self-heals
-    /// at the next under-cap capture.
+    /// the machine): a failed pull skips ws staging this cadence — journaled
+    /// as [`MachineEvent::WsCaptureSkipped`] — and the disk capture proceeds;
+    /// the ws delta simply waits for the next quiescent point. A
+    /// [`granary::WsError::TooLarge`] likewise stages nothing and self-heals at the
+    /// next under-cap capture.
     ///
     /// Cost note: a pull rewrites every workspace file (fresh mtimes), so the
     /// capture's stat-prune never applies on this path — each checkpoint
@@ -372,12 +383,18 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
         now: Instant,
     ) -> Vec<MachineEvent> {
         let Some(vm) = vm else { return vec![] };
+        let skipped = |reason: String| {
+            vec![MachineEvent::WsCaptureSkipped {
+                at_nanos: now.as_nanos(),
+                reason,
+            }]
+        };
         let ws_dir = match ctx.ws().dir_path() {
             Ok(dir) => dir,
-            Err(_) => return vec![],
+            Err(e) => return skipped(format!("workspace facet: {e}")),
         };
-        if vm.pull_ws(ws_dir).await.is_err() {
-            return vec![];
+        if let Err(e) = vm.pull_ws(ws_dir).await {
+            return skipped(e.to_string());
         }
         match ctx.ws().capture() {
             Ok(stats) if stats.written > 0 || stats.removed > 0 => {
@@ -388,9 +405,63 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
                     tree_bytes: stats.tree_bytes,
                 }]
             }
-            _ => vec![],
+            Ok(_) => vec![],
+            Err(e) => skipped(format!("workspace capture: {e}")),
         }
     }
+
+    /// The capture spine shared by the final and mid-session paths (machine
+    /// §4): pull the workspace while the guest can still answer, quiesce,
+    /// capture the disk facet in the same command's batch (G19), un-quiesce.
+    /// Returns the batch and whether the disk capture committed.
+    async fn run_capture(
+        &self,
+        ctx: &GrainCtx<Self>,
+        now: Instant,
+        quiesce: Quiesce,
+    ) -> (Vec<MachineEvent>, bool) {
+        let vm = self.lock().vm.clone();
+        let mut events = self.pull_and_capture_ws(vm.as_ref(), ctx, now).await;
+        match quiesce {
+            Quiesce::Stop => self.kill_vm().await,
+            Quiesce::Pause => {
+                if let Some(vm) = &vm
+                    && vm.pause().await.is_err()
+                {
+                    // A guest that cannot pause cannot be captured
+                    // consistently (grain §7.15: never capture a running
+                    // guest's image). Treat the VM as lost; the image keeps
+                    // its writes and stays dirty until the next capture,
+                    // exactly the M3 window. The staged ws delta still
+                    // commits — it reflects real pulled bytes.
+                    self.kill_vm().await;
+                    return (events, false);
+                }
+            }
+        }
+        let out = ctx.disk().capture().await;
+        if quiesce == Quiesce::Pause
+            && let Some(vm) = &vm
+        {
+            let _ = vm.resume().await;
+        }
+        match out {
+            Ok(stats) => {
+                events.extend(self.capture_event(stats, now));
+                (events, true)
+            }
+            Err(_) => (events, false),
+        }
+    }
+}
+
+/// How [`Machine::run_capture`] quiesces the guest (machine §4): the final
+/// capture stops it for good; a mid-session checkpoint pauses and resumes
+/// around the disk scan.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quiesce {
+    Stop,
+    Pause,
 }
 
 impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
@@ -458,6 +529,9 @@ impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
             MachineEvent::WsCaptured { .. } => {
                 state.ws_captures += 1;
             }
+            MachineEvent::WsCaptureSkipped { .. } => {
+                state.ws_capture_skips += 1;
+            }
         }
     }
 
@@ -506,30 +580,21 @@ impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
         self.watch_attachments(state, ctx);
         let now = ctx.system().now();
         if state.attachments.is_empty() {
-            // Quiescent point 1 (machine §4): the final capture. Pull the
-            // workspace while the guest can still answer, stop the guest,
-            // capture the settled image, and leave the grain clean so idle
-            // hibernation can proceed (M2). The ws delta and the disk
-            // manifest ride this one command's batch (G19). No re-arm: the
+            // Quiescent point 1 (machine §4): the final capture. Stop the
+            // guest, capture the settled image, and leave the grain clean so
+            // idle hibernation can proceed (M2). No re-arm on success: the
             // alarm is consumed and `can_passivate` now permits eviction.
-            let vm = self.lock().vm.clone();
-            let mut ws_events = self.pull_and_capture_ws(vm.as_ref(), ctx, now).await;
-            self.kill_vm().await;
-            match ctx.disk().capture().await {
-                Ok(stats) => {
-                    self.lock().dirty = false;
-                    ws_events.extend(self.capture_event(stats, now));
-                    return ws_events;
-                }
-                Err(_) => {
-                    // The capture could not complete (blob quorum, IO). Keep
-                    // the dirty pin and retry on the next cadence tick. The
-                    // staged ws delta still commits with this batch — it
-                    // reflects real pulled bytes.
-                    ctx.alarm().set_after(state.alarm_cadence());
-                    return ws_events;
-                }
+            let (events, committed) = self.run_capture(ctx, now, Quiesce::Stop).await;
+            if committed {
+                self.lock().dirty = false;
+            } else {
+                // The capture could not complete (blob quorum, IO). Keep the
+                // dirty pin and retry on the next cadence tick. The staged ws
+                // delta still commits with this batch — it reflects real
+                // pulled bytes.
+                ctx.alarm().set_after(state.alarm_cadence());
             }
+            return events;
         }
 
         // Quiescent point 3 (machine §4): the mid-session checkpoint. Every
@@ -543,34 +608,11 @@ impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
         if !checkpoint_due {
             return vec![];
         }
-        // Pull before pause — a paused guest cannot answer vsock — then
-        // capture both facets in this command: one atomic batch (G19). The
-        // ws delta is as-of-pull, the disk as-of-pause; the skew is bounded
-        // by the pull duration (machine §4).
-        let vm = self.lock().vm.clone();
-        let mut ws_events = self.pull_and_capture_ws(vm.as_ref(), ctx, now).await;
-        if let Some(vm) = &vm
-            && vm.pause().await.is_err()
-        {
-            // A guest that cannot pause cannot be captured consistently
-            // (grain §7.15: never capture a running guest's image). Treat the
-            // VM as lost; the image keeps its writes and stays dirty until the
-            // next capture, exactly the M3 window. The staged ws delta still
-            // commits — it reflects real pulled bytes.
-            self.kill_vm().await;
-            return ws_events;
-        }
-        let out = ctx.disk().capture().await;
-        if let Some(vm) = &vm {
-            let _ = vm.resume().await;
-        }
-        match out {
-            Ok(stats) => {
-                ws_events.extend(self.capture_event(stats, now));
-                ws_events
-            }
-            Err(_) => ws_events,
-        }
+        // Pause-and-resume around the capture; the ws delta is as-of-pull,
+        // the disk as-of-pause, the skew bounded by the pull duration
+        // (machine §4). The guest stays dirty — it keeps running.
+        let (events, _committed) = self.run_capture(ctx, now, Quiesce::Pause).await;
+        events
     }
 
     async fn on_peer_terminated(
@@ -612,11 +654,10 @@ impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
 // --- Commands -----------------------------------------------------------------
 
 /// Provision the machine (machine §3): a journaled `Provisioned` event whose
-/// disk begins as the base image's full-coverage manifest (grain §7.15).
-///
-/// The host key here is a **placeholder** derived from the machine's name —
-/// deterministic, not secret — until the front door (machine §5.1) supplies
-/// real SSH keypair generation.
+/// disk begins as the base image's full-coverage manifest (grain §7.15), and
+/// which carries the machine's freshly generated host key — 32 bytes of
+/// system entropy, journaled as the ed25519 seed the front door expands
+/// (machine §5.1).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Provision {
     pub owner: String,
@@ -651,9 +692,17 @@ impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Provision> for Machine
         {
             return (vec![], Err(MachineError::Disk(e.to_string())));
         }
-        let host_key = BlobId::of(format!("machine-host-key:{}", ctx.name()).as_bytes()).as_bytes()
-            [..]
-            .to_vec();
+        // The host key is born here and nowhere else: 32 bytes drawn from the
+        // system's entropy stream, journaled as a raw ed25519 seed — any 32
+        // bytes are a valid seed (RFC 8032) — which the front door expands
+        // into the presented host key (machine §5.1). Drawing from the
+        // Entropy seam (actor §4.6) keeps both worlds right: production
+        // entropy is OS-seeded, so the key is fresh and secret (machine §3);
+        // the simulator's is run-seeded, so a replayed seed reproduces the
+        // same key (actor §18.1).
+        let host_key: Vec<u8> = (0..4)
+            .flat_map(|_| ctx.system().next_random().to_le_bytes())
+            .collect();
         (
             vec![MachineEvent::Provisioned {
                 owner: msg.owner,
@@ -731,14 +780,16 @@ impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Attach> for Machine<S,
 
 /// Detach a connection (machine §5.1): journaled; when the last attachment
 /// goes, the final capture is scheduled immediately (machine §4, quiescent
-/// point 1) so the idle path finds a clean disk.
+/// point 1) so the idle path finds a clean disk. Idempotent — detaching an
+/// unknown or already-detached id is a no-op, so there is no failure to
+/// report and the reply is `()`.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Detach {
     pub attachment: u64,
 }
 
 impl Message for Detach {
-    type Reply = bool;
+    type Reply = ();
     const MANIFEST: Manifest = Manifest::new("machine.Detach");
 }
 
@@ -748,9 +799,9 @@ impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Detach> for Machine<S,
         state: &MachineState,
         msg: Detach,
         ctx: &GrainCtx<Self>,
-    ) -> (Vec<MachineEvent>, bool) {
+    ) -> (Vec<MachineEvent>, ()) {
         if !state.attachments.contains_key(&msg.attachment) {
-            return (vec![], false);
+            return (vec![], ());
         }
         if state.attachments.len() == 1 {
             ctx.alarm().set_after(Duration::ZERO);
@@ -761,7 +812,7 @@ impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Detach> for Machine<S,
                 at_nanos: ctx.system().now().as_nanos(),
                 reason: DetachReason::Closed,
             }],
-            true,
+            (),
         )
     }
 }
@@ -859,6 +910,9 @@ pub struct StatusReply {
     pub attachments: Vec<(u64, String)>,
     pub captures: u64,
     pub ws_captures: u64,
+    /// Quiescent points whose workspace pull failed (see
+    /// [`MachineEvent::WsCaptureSkipped`]).
+    pub ws_capture_skips: u64,
     pub image_bytes: u64,
     pub vm_running: bool,
     /// BLAKE3 of the live image (verification surface for tests and
@@ -895,6 +949,7 @@ impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Status> for Machine<S,
                     .collect(),
                 captures: state.captures,
                 ws_captures: state.ws_captures,
+                ws_capture_skips: state.ws_capture_skips,
                 image_bytes,
                 vm_running: self.lock().vm.is_some(),
                 image_digest,
@@ -903,250 +958,11 @@ impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Status> for Machine<S,
     }
 }
 
-// --- Workspace file commands (machine §3) --------------------------------------
+mod ws_cmds;
 
-/// Cap on one file command's bytes, both directions: a [`WsWrite`]'s record
-/// and a [`WsRead`]'s reply must stay bounded (the ws facet's records carry
-/// bytes inline, grain §7.11).
-pub const MAX_WS_FILE: usize = 1024 * 1024;
-
-/// Validate a workspace-relative path: non-empty, normal components only.
-/// The subsequent operations go through a capability handle over the facet's
-/// directory, so an escape is unrepresentable even past this check (S1's
-/// belt-and-suspenders, as in the sandbox's Workspace tier).
-fn ws_rel_path(path: &str) -> Result<&std::path::Path, MachineError> {
-    let p = std::path::Path::new(path);
-    if p.as_os_str().is_empty()
-        || !p
-            .components()
-            .all(|c| matches!(c, std::path::Component::Normal(_)))
-    {
-        return Err(MachineError::Ws(format!(
-            "invalid workspace path: {path:?}"
-        )));
-    }
-    Ok(p)
-}
-
-/// Open the workspace facet's directory as a capability handle.
-fn ws_open<S: GranarySystem, P: MachineVmProvider>(
-    ctx: &GrainCtx<Machine<S, P>>,
-) -> Result<cap_std::fs::Dir, MachineError> {
-    let root = ctx
-        .ws()
-        .dir_path()
-        .map_err(|e| MachineError::Ws(e.to_string()))?;
-    cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())
-        .map_err(|e| MachineError::Ws(format!("open workspace: {e}")))
-}
-
-impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
-    /// The shared guard of every workspace file command: the machine must be
-    /// provisioned, and no microVM may be live — while one runs the guest
-    /// owns `/workspace` (machine §3) and a host mutation would be clobbered
-    /// by the next pull.
-    fn ws_command_guard(&self, state: &MachineState) -> Result<(), MachineError> {
-        if !state.provisioned {
-            return Err(MachineError::NotProvisioned);
-        }
-        if self.lock().vm.is_some() {
-            return Err(MachineError::VmLive);
-        }
-        Ok(())
-    }
-
-    /// Stage a mutating file command's delta into its own batch: the write
-    /// and its durability record are one commit. A capture failure fails the
-    /// command — the caller must not believe an unstaged write durable; the
-    /// materialized file is picked up by the next successful capture (the
-    /// facet diffs against the committed index, self-healing).
-    fn ws_stage(&self, ctx: &GrainCtx<Self>) -> Result<(), MachineError> {
-        match ctx.ws().capture() {
-            Ok(_) => Ok(()),
-            Err(WsError::TooLarge { bytes, cap }) => Err(MachineError::Ws(format!(
-                "durable workspace is {bytes} bytes, over the {cap}-byte cap"
-            ))),
-            Err(e) => Err(MachineError::Ws(e.to_string())),
-        }
-    }
-}
-
-/// Write one file into the machine's `/workspace` without booting it
-/// (machine §3): the bytes land in the workspace facet's directory and their
-/// delta commits in this command's batch. The next boot pushes them into the
-/// guest.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct WsWrite {
-    pub path: String,
-    pub bytes: Vec<u8>,
-}
-
-impl Message for WsWrite {
-    type Reply = Result<(), MachineError>;
-    const MANIFEST: Manifest = Manifest::new("machine.WsWrite");
-}
-
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<WsWrite> for Machine<S, P> {
-    async fn handle(
-        &self,
-        state: &MachineState,
-        msg: WsWrite,
-        ctx: &GrainCtx<Self>,
-    ) -> (Vec<MachineEvent>, Result<(), MachineError>) {
-        let outcome = (|| {
-            self.ws_command_guard(state)?;
-            if msg.bytes.len() > MAX_WS_FILE {
-                return Err(MachineError::Ws(format!(
-                    "file is {} bytes, over the {MAX_WS_FILE}-byte command cap",
-                    msg.bytes.len()
-                )));
-            }
-            let rel = ws_rel_path(&msg.path)?;
-            let dir = ws_open(ctx)?;
-            if let Some(parent) = rel.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                dir.create_dir_all(parent)
-                    .map_err(|e| MachineError::Ws(e.to_string()))?;
-            }
-            dir.write(rel, &msg.bytes)
-                .map_err(|e| MachineError::Ws(e.to_string()))?;
-            self.ws_stage(ctx)
-        })();
-        (vec![], outcome)
-    }
-}
-
-/// Read one file from the machine's `/workspace` without booting it: the last
-/// committed state while hibernated. Stages nothing (grain §7.5).
-#[derive(Clone, Serialize, Deserialize)]
-pub struct WsRead {
-    pub path: String,
-}
-
-impl Message for WsRead {
-    type Reply = Result<Vec<u8>, MachineError>;
-    const MANIFEST: Manifest = Manifest::new("machine.WsRead");
-}
-
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<WsRead> for Machine<S, P> {
-    async fn handle(
-        &self,
-        state: &MachineState,
-        msg: WsRead,
-        ctx: &GrainCtx<Self>,
-    ) -> (Vec<MachineEvent>, Result<Vec<u8>, MachineError>) {
-        let outcome = (|| {
-            self.ws_command_guard(state)?;
-            let rel = ws_rel_path(&msg.path)?;
-            let dir = ws_open(ctx)?;
-            let len = dir
-                .metadata(rel)
-                .map_err(|e| MachineError::Ws(e.to_string()))?
-                .len();
-            if len as usize > MAX_WS_FILE {
-                return Err(MachineError::Ws(format!(
-                    "file is {len} bytes, over the {MAX_WS_FILE}-byte command cap"
-                )));
-            }
-            dir.read(rel).map_err(|e| MachineError::Ws(e.to_string()))
-        })();
-        (vec![], outcome)
-    }
-}
-
-/// One [`WsList`] entry.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WsFileInfo {
-    pub name: String,
-    pub len: u64,
-    pub is_dir: bool,
-}
-
-/// List one level of the machine's `/workspace` without booting it. An empty
-/// `path` lists the root. Stages nothing (grain §7.5).
-#[derive(Clone, Serialize, Deserialize)]
-pub struct WsList {
-    pub path: String,
-}
-
-impl Message for WsList {
-    type Reply = Result<Vec<WsFileInfo>, MachineError>;
-    const MANIFEST: Manifest = Manifest::new("machine.WsList");
-}
-
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<WsList> for Machine<S, P> {
-    async fn handle(
-        &self,
-        state: &MachineState,
-        msg: WsList,
-        ctx: &GrainCtx<Self>,
-    ) -> (Vec<MachineEvent>, Result<Vec<WsFileInfo>, MachineError>) {
-        let outcome = (|| {
-            self.ws_command_guard(state)?;
-            let dir = ws_open(ctx)?;
-            let listed = if msg.path.is_empty() {
-                dir
-            } else {
-                dir.open_dir(ws_rel_path(&msg.path)?)
-                    .map_err(|e| MachineError::Ws(e.to_string()))?
-            };
-            let mut entries = Vec::new();
-            for entry in listed
-                .entries()
-                .map_err(|e| MachineError::Ws(e.to_string()))?
-            {
-                let entry = entry.map_err(|e| MachineError::Ws(e.to_string()))?;
-                let meta = entry
-                    .metadata()
-                    .map_err(|e| MachineError::Ws(e.to_string()))?;
-                entries.push(WsFileInfo {
-                    name: entry.file_name().to_string_lossy().into_owned(),
-                    len: meta.len(),
-                    is_dir: meta.is_dir(),
-                });
-            }
-            entries.sort_by(|a, b| a.name.cmp(&b.name));
-            Ok(entries)
-        })();
-        (vec![], outcome)
-    }
-}
-
-/// Remove a file or directory tree from the machine's `/workspace` without
-/// booting it; the deletion commits in this command's batch.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct WsRemove {
-    pub path: String,
-}
-
-impl Message for WsRemove {
-    type Reply = Result<(), MachineError>;
-    const MANIFEST: Manifest = Manifest::new("machine.WsRemove");
-}
-
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<WsRemove> for Machine<S, P> {
-    async fn handle(
-        &self,
-        state: &MachineState,
-        msg: WsRemove,
-        ctx: &GrainCtx<Self>,
-    ) -> (Vec<MachineEvent>, Result<(), MachineError>) {
-        let outcome = (|| {
-            self.ws_command_guard(state)?;
-            let rel = ws_rel_path(&msg.path)?;
-            let dir = ws_open(ctx)?;
-            let meta = dir
-                .metadata(rel)
-                .map_err(|e| MachineError::Ws(e.to_string()))?;
-            let removed = if meta.is_dir() {
-                dir.remove_dir_all(rel)
-            } else {
-                dir.remove_file(rel)
-            };
-            removed.map_err(|e| MachineError::Ws(e.to_string()))?;
-            self.ws_stage(ctx)
-        })();
-        (vec![], outcome)
-    }
-}
+pub use ws_cmds::MAX_WS_FILE;
+pub use ws_cmds::WsFileInfo;
+pub use ws_cmds::WsList;
+pub use ws_cmds::WsRead;
+pub use ws_cmds::WsRemove;
+pub use ws_cmds::WsWrite;

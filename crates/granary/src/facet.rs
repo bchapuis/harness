@@ -261,6 +261,12 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     /// [`Alarm`](crate::Alarm) facet returns a deadline; every other facet keeps
     /// the default. The host reads it through [`FacetSet::alarm_due`] to arm the
     /// callerless timer without a compile-time [`HasFacet`] bound.
+    ///
+    /// This pair — `alarm_due`/[`stage_clear_alarm`](Facet::stage_clear_alarm),
+    /// echoed on [`FacetSet`] and `FacetCell` — is a deliberate one-client
+    /// exception: the Alarm facet's runtime hook, and nothing else's. It MUST
+    /// NOT be extended per-facet; a second facet needing a runtime hook must
+    /// instead generalize the pair into a facet-agnostic deadline hook.
     fn alarm_due(_form: &Self::Form) -> Option<u64> {
         None
     }
@@ -275,7 +281,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
 
 /// A grain's declared facet set (spec §7.12): the unit tuple `()` (no facets) or
 /// a tuple of distinct [`Facet`]s, e.g. `(Kv, Ws)`. **Sealed**: implemented
-/// for tuples up to arity 3, in-crate only.
+/// for tuples up to arity 4, in-crate only.
 ///
 /// The set statically fixes the grain type's record-tag registry — which is what
 /// makes the unknown-tag rule (G19) checkable — and generates the composed

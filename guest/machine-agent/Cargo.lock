@@ -74,10 +74,19 @@ name = "machine-agent"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "machine-proto",
  "serde",
  "serde_json",
  "tar",
  "tempfile",
+]
+
+[[package]]
+name = "machine-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

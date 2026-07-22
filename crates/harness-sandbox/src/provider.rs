@@ -40,8 +40,20 @@ impl TierStats {
         self.opened.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn count_opened(&self) {
+        self.opened.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub fn released(&self) -> usize {
         self.released.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn count_released(&self) {
+        self.released.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn count_compute_built(&self) {
+        self.compute_built.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn compute_built(&self) -> usize {
@@ -95,7 +107,7 @@ pub struct TieredSandboxes {
     /// activation, workspace synced over vsock.
     #[cfg(feature = "firecracker")]
     firecracker: Option<Arc<crate::firecracker::FirecrackerConfig>>,
-    pub stats: TierStats,
+    stats: TierStats,
 }
 
 impl Default for TieredSandboxes {
@@ -160,8 +172,7 @@ impl TieredSandboxes {
     /// one Firecracker VM per activation instead of the docker fallback.
     /// Runtime needs Linux and `/dev/kvm`; where they are absent the first
     /// `Native` call fails as a `ToolError` outcome (harness spec §5.4). The
-    /// profile's `image`, when non-empty, selects a base rootfs path over
-    /// `config.rootfs`.
+    /// profile's `image` names the base rootfs a session boots.
     #[cfg(feature = "firecracker")]
     pub fn with_firecracker(
         mut self,
@@ -169,6 +180,12 @@ impl TieredSandboxes {
     ) -> TieredSandboxes {
         self.firecracker = Some(Arc::new(config));
         self
+    }
+
+    /// Observable provider activity ([`TierStats`]) — the S-catalogue
+    /// accounting tests are the intended reader.
+    pub fn stats(&self) -> &TierStats {
+        &self.stats
     }
 }
 
@@ -201,10 +218,9 @@ impl SandboxProvider for TieredSandboxes {
         // deliver exactly an *empty* egress allowlist and nothing more. A
         // profile that names egress (or explicitly caps in `Network`) asks
         // for a dataplane this provider does not have: fail the open loudly,
-        // never silently withhold a granted capability. Feature-gated
-        // because without `native` a Network-capped profile already fails
-        // per call as an unoffered tier — the established conduct.
-        #[cfg(feature = "native")]
+        // never silently withhold a granted capability. Unconditional — the
+        // rationale is true in every feature combination, and `open`'s
+        // contract must not vary with cargo features.
         if !profile.egress.is_empty()
             || profile
                 .tier_cap
@@ -220,18 +236,21 @@ impl SandboxProvider for TieredSandboxes {
             });
         }
         #[cfg(feature = "native")]
-        let container_cli = self.container_cli.clone();
-        #[cfg(feature = "native")]
-        let image = profile.image.clone();
-        #[cfg(feature = "firecracker")]
-        let firecracker = self.firecracker.clone();
+        let spec = NativeSpec {
+            cli: self.container_cli.clone(),
+            image: profile.image.clone(),
+            #[cfg(feature = "firecracker")]
+            firecracker: self.firecracker.clone(),
+        };
         let stats = self.stats.clone();
         Box::pin(async move {
-            // The caller (the agent's workspace facet) owns and materialized
-            // the directory; opening it as a capability handle is this crate's
-            // only use of ambient authority — every tier after this reaches
-            // the filesystem through the handle (S1). `create_dir_all` is a
-            // defensive no-op on the normal path.
+            // The caller (the agent's workspace facet) owns the directory and
+            // usually materialized it already; a bare test caller may not
+            // have, so open creates-if-missing rather than demanding it. The
+            // loss detector below is unaffected: it watches for the directory
+            // *vanishing after* this open. Opening it as a capability handle
+            // is this crate's only use of ambient authority — every tier
+            // after this reaches the filesystem through the handle (S1).
             std::fs::create_dir_all(&workspace)
                 .map_err(|e| SandboxError(format!("workspace open: {e}")))?;
             // Canonicalized so docker's `-v` (and the microVM's tar source)
@@ -242,42 +261,20 @@ impl SandboxProvider for TieredSandboxes {
                 .map_err(|e| SandboxError(format!("workspace open: {e}")))?;
             let dir = Dir::open_ambient_dir(&workspace, cap_std::ambient_authority())
                 .map_err(|e| SandboxError(format!("workspace open: {e}")))?;
-            stats.opened.fetch_add(1, Ordering::SeqCst);
+            stats.count_opened();
             let dir = Arc::new(dir);
             // The tier struct is cheap and eager; the *environment*
             // (container or microVM) is what stays lazy (sandbox spec §2.3
-            // item 2). Only the configured realization is constructed.
+            // item 2). Which realization — the cfg fork — is NativeEnv's
+            // secret, not this open path's.
             #[cfg(feature = "native")]
-            let native = {
-                #[cfg(feature = "firecracker")]
-                let native = match firecracker {
-                    Some(config) => {
-                        NativeEnv::MicroVm(Arc::new(crate::firecracker::FirecrackerTier::new(
-                            config,
-                            image,
-                            Arc::clone(&dir),
-                            &host_path,
-                            stats.clone(),
-                        )))
-                    }
-                    None => NativeEnv::Docker(Arc::new(crate::native::NativeTier::new(
-                        container_cli,
-                        image,
-                        host_path.clone(),
-                        &name,
-                        stats.clone(),
-                    ))),
-                };
-                #[cfg(not(feature = "firecracker"))]
-                let native = NativeEnv::Docker(Arc::new(crate::native::NativeTier::new(
-                    container_cli,
-                    image,
-                    host_path.clone(),
-                    &name,
-                    stats.clone(),
-                )));
-                native
-            };
+            let native = NativeEnv::build(
+                spec,
+                &dir,
+                &host_path,
+                &name,
+                stats.clone(),
+            );
             // Opening grants `Workspace` and nothing else (harness spec §5.6
             // item 1): no other tier environment exists until a call carries
             // its tier.
@@ -326,6 +323,16 @@ struct TieredSandbox {
     stats: TierStats,
 }
 
+/// The provider-level inputs the native tier's construction needs, cloned
+/// into `open`'s future in one piece.
+#[cfg(feature = "native")]
+struct NativeSpec {
+    cli: String,
+    image: String,
+    #[cfg(feature = "firecracker")]
+    firecracker: Option<Arc<crate::firecracker::FirecrackerConfig>>,
+}
+
 /// Which realization answers `Native` for this sandbox (sandbox spec §3.5):
 /// the docker fallback, or — when the provider was configured with
 /// [`TieredSandboxes::with_firecracker`] — the microVM grade.
@@ -339,6 +346,35 @@ enum NativeEnv {
 
 #[cfg(feature = "native")]
 impl NativeEnv {
+    /// Build the configured realization. The feature fork lives here — the
+    /// docker construction is written once, whatever else is compiled in.
+    fn build(
+        spec: NativeSpec,
+        dir: &Arc<Dir>,
+        host_path: &std::path::Path,
+        name: &str,
+        stats: TierStats,
+    ) -> NativeEnv {
+        #[cfg(feature = "firecracker")]
+        if let Some(config) = spec.firecracker {
+            return NativeEnv::MicroVm(Arc::new(crate::firecracker::FirecrackerTier::new(
+                config,
+                spec.image,
+                Arc::clone(dir),
+                host_path,
+                stats,
+            )));
+        }
+        #[cfg(not(feature = "firecracker"))]
+        let _ = dir;
+        NativeEnv::Docker(Arc::new(crate::native::NativeTier::new(
+            spec.cli,
+            spec.image,
+            host_path.to_path_buf(),
+            name,
+            stats,
+        )))
+    }
     async fn call(&self, name: &str, input: &Value) -> Result<Value, ToolError> {
         match self {
             NativeEnv::Docker(tier) => tier.call(name, input).await,
@@ -354,6 +390,31 @@ impl NativeEnv {
             NativeEnv::MicroVm(tier) => tier.release().await,
         }
     }
+}
+
+/// The shared refusal for a tool name no tier of this sandbox provides:
+/// one message, so identical failures read identically in the journal.
+pub(crate) fn unknown_tool(name: &str) -> ToolError {
+    ToolError::Sandbox(format!("tool not provided by this sandbox: {name}"))
+}
+
+/// Cap on a captured output stream in a tool reply (the journal carries it).
+#[cfg(feature = "native")]
+pub(crate) const OUTPUT_CAP: usize = 16 * 1024;
+
+/// UTF-8-safe truncation of a captured stream to [`OUTPUT_CAP`], shared by
+/// the native realizations (docker and microVM).
+#[cfg(feature = "native")]
+pub(crate) fn capped(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    if text.len() <= OUTPUT_CAP {
+        return text.into_owned();
+    }
+    let mut end = OUTPUT_CAP;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… [truncated {} bytes]", &text[..end], text.len() - end)
 }
 
 /// Distinguish a lost environment from an ordinary outcome (harness spec
@@ -418,7 +479,7 @@ impl Sandbox for TieredSandbox {
                                 self.stats.clone(),
                             )
                             .map(|engine| {
-                                self.stats.compute_built.fetch_add(1, Ordering::SeqCst);
+                                self.stats.count_compute_built();
                                 let engine = Arc::new(engine);
                                 *slot = Some(Arc::clone(&engine));
                                 engine
@@ -475,7 +536,7 @@ impl Sandbox for TieredSandbox {
         Box::pin(async move {
             #[cfg(feature = "native")]
             native.release().await;
-            stats.released.fetch_add(1, Ordering::SeqCst);
+            stats.count_released();
         })
     }
 }

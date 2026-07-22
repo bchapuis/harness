@@ -241,32 +241,55 @@ where
 }
 
 /// An ephemeral, per-activation guard tracking which steps this activation has
-/// already launched (spec §16): the workflow analogue of the agent's
-/// `RunScope::launched` set. Never journaled — a re-activation rebuilds it and
-/// re-launches any step still unresolved in the memo (at-most-once holds because the
-/// *result*, not the launch, is the durable fact). Kept beside the grain's other
-/// ephemeral activation state.
-#[derive(Default)]
-pub struct LaunchGuard {
-    launched: BTreeSet<StepId>,
+/// already launched (spec §16): the launch-once half of the workflow pattern,
+/// used directly by the harness agent's run loop (harness §3). Never journaled —
+/// a re-activation rebuilds it and re-launches any step still unresolved in the
+/// memo (at-most-once holds because the *result*, not the launch, is the durable
+/// fact). Kept beside the grain's other ephemeral activation state.
+///
+/// `K` is the consumer's step key. The default [`StepId`] fits an ordinal
+/// workflow; a grain whose steps carry richer identity substitutes its own
+/// `Ord` key (the agent keys tool steps by the model's call id).
+pub struct LaunchGuard<K: Ord = StepId> {
+    launched: BTreeSet<K>,
 }
 
-impl LaunchGuard {
+// Hand-written rather than `#[derive(Default)]`: deriving would impose a
+// spurious `K: Default` bound, which a claim key never needs.
+impl<K: Ord> Default for LaunchGuard<K> {
+    fn default() -> Self {
+        LaunchGuard {
+            launched: BTreeSet::new(),
+        }
+    }
+}
+
+impl<K: Ord> LaunchGuard<K> {
     /// Claim the right to launch step `id` this activation. Returns `true` the first
     /// time (the caller then spawns the effect), `false` if already launched — so an
     /// in-flight step is not launched twice while its `StepDone` is outstanding.
-    pub fn claim(&mut self, id: StepId) -> bool {
+    pub fn claim(&mut self, id: K) -> bool {
         self.launched.insert(id)
     }
 
-    /// Drop a step's launch claim — call when its result is journaled, so a later
-    /// re-drive of a *superseding* workflow can reuse the id if the design allows.
-    /// Most workflows never need this (ids are monotonic); it exists for symmetry.
-    pub fn release(&mut self, id: StepId) {
-        self.launched.remove(&id);
+    /// Whether step `id` is already claimed, without claiming it: the read for
+    /// a drive that scans its incomplete steps and must skip the in-flight ones
+    /// but may not launch the rest this round (e.g. when it journals intents
+    /// first and re-drives after the commit).
+    pub fn is_claimed(&self, id: &K) -> bool {
+        self.launched.contains(id)
     }
 
-    /// Forget every claim (a fresh activation starts clean).
+    /// Whether no claim is outstanding: nothing launched since the last
+    /// [`reset`](LaunchGuard::reset). The passivation veto reads this — an
+    /// activation holding an unswept claim may still receive its effect's
+    /// outcome and must not hibernate under it.
+    pub fn is_idle(&self) -> bool {
+        self.launched.is_empty()
+    }
+
+    /// Forget every claim: a fresh activation starts clean, and a failed step's
+    /// retry path resets so the next drive re-launches it.
     pub fn reset(&mut self) {
         self.launched.clear();
     }

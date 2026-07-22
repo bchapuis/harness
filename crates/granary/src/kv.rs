@@ -245,38 +245,12 @@ where
         });
     }
 
-    /// The keys with `prefix`, in order, through the overlay (§7.13).
-    pub fn keys(&self, prefix: &str) -> Vec<String> {
+    /// The committed entries with `prefix` overlaid with this command's staged
+    /// puts and deletes, in key order — the one prefix walk behind
+    /// [`keys`](Self::keys) and [`list`](Self::list) (read-your-staged-writes,
+    /// §7.12).
+    fn merged_range(&self, prefix: &str) -> BTreeMap<String, KvValue> {
         self.cell.with_overlay::<Kv, I, _>(|form, stage| {
-            let mut keys: BTreeSet<String> = form
-                .map
-                .range(prefix.to_string()..)
-                .take_while(|(k, _)| k.starts_with(prefix))
-                .map(|(k, _)| k.clone())
-                .collect();
-            if let Some(stage) = stage {
-                for (key, staged) in &stage.overlay {
-                    if !key.starts_with(prefix) {
-                        continue;
-                    }
-                    match staged {
-                        Some(_) => {
-                            keys.insert(key.clone());
-                        }
-                        None => {
-                            keys.remove(key);
-                        }
-                    }
-                }
-            }
-            keys.into_iter().collect()
-        })
-    }
-
-    /// The `(key, value)` pairs with `prefix`, in key order, through the overlay.
-    /// Spilled values are fetched concurrently and verified (G17).
-    pub async fn list(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, GrainError> {
-        let entries = self.cell.with_overlay::<Kv, I, _>(|form, stage| {
             let mut entries: BTreeMap<String, KvValue> = form
                 .map
                 .range(prefix.to_string()..)
@@ -299,7 +273,18 @@ where
                 }
             }
             entries
-        });
+        })
+    }
+
+    /// The keys with `prefix`, in order, through the overlay (§7.13).
+    pub fn keys(&self, prefix: &str) -> Vec<String> {
+        self.merged_range(prefix).into_keys().collect()
+    }
+
+    /// The `(key, value)` pairs with `prefix`, in key order, through the overlay.
+    /// Spilled values are fetched concurrently and verified (G17).
+    pub async fn list(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, GrainError> {
+        let entries = self.merged_range(prefix);
         futures::future::try_join_all(entries.into_iter().map(|(key, value)| async move {
             Ok(match value {
                 KvValue::Inline(bytes) => (key, bytes),

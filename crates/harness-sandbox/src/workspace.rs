@@ -120,9 +120,7 @@ pub(crate) fn call(dir: &Dir, name: &str, input: &Value) -> Result<Value, ToolEr
         "edit_file" => edit_file(dir, input),
         "list_dir" => list_dir(dir, input),
         "remove" => remove(dir, input),
-        other => Err(ToolError::Sandbox(format!(
-            "tool not provided by this sandbox: {other}"
-        ))),
+        other => Err(crate::provider::unknown_tool(other)),
     }
 }
 

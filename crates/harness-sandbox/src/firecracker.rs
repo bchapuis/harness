@@ -90,16 +90,19 @@ use microvm::MicroVm;
 use microvm::vsock;
 use microvm::ws_sync::MAX_TAR;
 use microvm::ws_sync::tar_workspace;
-use microvm::ws_sync::untar_workspace;
 use serde_json::Value;
 use serde_json::json;
 use tokio::net::UnixStream;
 
-use crate::native::capped;
+use crate::provider::capped;
 use crate::provider::TierStats;
 
 /// The vsock port the guest agent listens on; part of the protocol version.
 const VSOCK_PORT: u32 = 52;
+
+/// The control-directory prefix ([`microvm::control_path`]) for this tier's
+/// VMs, distinct from the machine's `harness-machine`.
+const CONTROL_PREFIX: &str = "harness-fc";
 
 /// Cap on any single non-tar (JSON) frame. The agent caps each captured
 /// stream guest-side; this bounds a malicious or corrupted frame header.
@@ -139,19 +142,17 @@ pub fn fc_shell_tool() -> ToolDecl {
 }
 
 /// Deployment-level Firecracker configuration, handed to
-/// [`crate::TieredSandboxes::with_firecracker`]. The per-kind half — which
-/// rootfs a session boots — remains the profile's `image` (harness spec §5.3
-/// item 4), interpreted here as a host path to a base rootfs; empty means
-/// this config's [`rootfs`](FirecrackerConfig::rootfs).
+/// [`crate::TieredSandboxes::with_firecracker`]: the node's VMM assets. The
+/// per-kind half — which base rootfs a session boots — is solely the
+/// profile's `image` (harness spec §5.3 item 4), a host path to an ext4
+/// containing `/sbin/fc-agent`; keeping it out of this config keeps the
+/// choice inside the digest the cluster agrees on.
 #[derive(Clone, Debug)]
 pub struct FirecrackerConfig {
     /// The `firecracker` executable.
     pub binary: PathBuf,
     /// An uncompressed kernel image (`vmlinux`).
     pub kernel: PathBuf,
-    /// The base rootfs (ext4) containing `/sbin/fc-agent`. Copied per VM —
-    /// the guest writes to its root — so the base is never mutated.
-    pub rootfs: PathBuf,
     /// vCPUs per VM.
     pub vcpus: u32,
     /// Guest memory in MiB.
@@ -162,15 +163,10 @@ pub struct FirecrackerConfig {
 }
 
 impl FirecrackerConfig {
-    pub fn new(
-        binary: impl Into<PathBuf>,
-        kernel: impl Into<PathBuf>,
-        rootfs: impl Into<PathBuf>,
-    ) -> FirecrackerConfig {
+    pub fn new(binary: impl Into<PathBuf>, kernel: impl Into<PathBuf>) -> FirecrackerConfig {
         FirecrackerConfig {
             binary: binary.into(),
             kernel: kernel.into(),
-            rootfs: rootfs.into(),
             vcpus: 1,
             mem_mib: 256,
             // `quiet`: the serial console is an emulated device, so kernel
@@ -186,21 +182,10 @@ impl FirecrackerConfig {
 /// tier: the agent as init over one root drive, vsock on, no network (a
 /// sandboxed guest has no NIC by construction, sandbox spec §1.1).
 fn vm_config(config: &FirecrackerConfig, rootfs: &Path) -> microvm::VmConfig {
-    microvm::VmConfig {
-        binary: config.binary.clone(),
-        kernel: config.kernel.clone(),
-        boot_args: config.boot_args.clone(),
-        drives: vec![microvm::Drive {
-            id: "rootfs".to_string(),
-            path_on_host: rootfs.to_path_buf(),
-            is_root_device: true,
-            is_read_only: false,
-        }],
-        vcpus: config.vcpus,
-        mem_mib: config.mem_mib,
-        vsock: true,
-        net: None,
-    }
+    let mut vm = microvm::VmConfig::rooted(&config.binary, &config.kernel, &config.boot_args, rootfs);
+    vm.vcpus = config.vcpus;
+    vm.mem_mib = config.mem_mib;
+    vm
 }
 
 /// One session's native tier at the microVM grade: a VM provisioned lazily
@@ -208,17 +193,21 @@ fn vm_config(config: &FirecrackerConfig, rootfs: &Path) -> microvm::VmConfig {
 /// (S5).
 pub(crate) struct FirecrackerTier {
     config: Arc<FirecrackerConfig>,
-    /// The profile's `image`, interpreted as a base-rootfs path; empty means
-    /// the config's default (struct docs on [`FirecrackerConfig`]).
+    /// The profile's `image`: the base-rootfs path a session boots (struct
+    /// docs on [`FirecrackerConfig`]).
     image: String,
-    /// The workspace's capability handle, for the tar sync of the module
-    /// docs: both directions are walked and written through it (S1).
+    /// The workspace's capability handle, for the pack half of the tar sync:
+    /// the walk goes through it (S1).
     dir: Arc<Dir>,
+    /// The workspace's host path, for the staged restore
+    /// ([`microvm::ws_sync::restore_workspace`]).
+    ws: PathBuf,
+    /// The digest key naming this VM's control directory
+    /// ([`microvm::control_path`]), so two providers holding the same
+    /// session id never contend.
+    control_key: String,
     /// Host-side control files (api socket, vsock socket, config, the per-VM
-    /// rootfs copy, console log). Under the OS temp directory rather than
-    /// beside the workspace: unix socket paths have a ~100-byte limit a deep
-    /// workspaces root would breach. Digest-named, so two providers holding
-    /// the same session id never contend.
+    /// rootfs copy, console log): `control_path(CONTROL_PREFIX, control_key)`.
     control: PathBuf,
     /// The VM slot. tokio's mutex, held across the whole call: provisioning
     /// awaits inside it, and one VM serves one push/exec/pull bracket at a
@@ -240,11 +229,14 @@ impl FirecrackerTier {
         stats: TierStats,
     ) -> FirecrackerTier {
         let digest = harness::session::content_digest(&host_workspace.display().to_string());
+        let control_key = format!("{digest:016x}");
         FirecrackerTier {
             config,
             image,
             dir,
-            control: std::env::temp_dir().join(format!("harness-fc-{digest:016x}")),
+            ws: host_workspace.to_path_buf(),
+            control: microvm::control_path(CONTROL_PREFIX, &control_key),
+            control_key,
             vm: tokio::sync::Mutex::new(None),
             attempted: AtomicBool::new(false),
             stats,
@@ -254,9 +246,7 @@ impl FirecrackerTier {
     /// Execute one Native call (`shell` only).
     pub(crate) async fn call(&self, name: &str, input: &Value) -> Result<Value, ToolError> {
         if name != "shell" {
-            return Err(ToolError::Sandbox(format!(
-                "tool not provided by this sandbox: {name}"
-            )));
+            return Err(crate::provider::unknown_tool(name));
         }
         let command = input
             .get("command")
@@ -275,7 +265,7 @@ impl FirecrackerTier {
             *slot = Some(self.provision().await?);
         }
         let vsock = slot.as_ref().expect("provisioned above").vsock_path();
-        match exec_bracket(&self.dir, &vsock, command).await {
+        match exec_bracket(&self.dir, &self.ws, &vsock, command).await {
             Ok(outcome) => Ok(outcome),
             Err(BracketError::Agent(e)) => {
                 // The transport works; the agent refused the op. An ordinary
@@ -300,17 +290,20 @@ impl FirecrackerTier {
     async fn provision(&self) -> Result<MicroVm, ToolError> {
         self.attempted.store(true, Ordering::SeqCst);
         let fail = |e: String| ToolError::Sandbox(format!("firecracker: provision: {e}"));
-        let _ = tokio::fs::remove_dir_all(&self.control).await;
-        tokio::fs::create_dir_all(&self.control)
+        microvm::control_dir(CONTROL_PREFIX, &self.control_key)
             .await
-            .map_err(|e| fail(format!("control dir {}: {e}", self.control.display())))?;
+            .map_err(|e| fail(e.to_string()))?;
         // Each VM boots a private copy of the base rootfs: the guest writes
-        // to its root, and the base must serve every later activation.
-        let base = if self.image.is_empty() {
-            self.config.rootfs.clone()
-        } else {
-            PathBuf::from(&self.image)
-        };
+        // to its root, and the base must serve every later activation. The
+        // profile's `image` is its only home (struct docs on
+        // [`FirecrackerConfig`]) — the docker realization refuses an empty
+        // image the same way.
+        if self.image.is_empty() {
+            return Err(fail(
+                "no base rootfs: the profile's `image` names it".to_string(),
+            ));
+        }
+        let base = PathBuf::from(&self.image);
         let rootfs = self.control.join("rootfs.ext4");
         tokio::fs::copy(&base, &rootfs)
             .await
@@ -367,21 +360,29 @@ impl From<std::io::Error> for BracketError {
 }
 
 /// One call's push → exec → pull bracket over one connection (module docs).
-async fn exec_bracket(dir: &Dir, vsock: &Path, command: &str) -> Result<Value, BracketError> {
+async fn exec_bracket(
+    dir: &Dir,
+    ws: &Path,
+    vsock: &Path,
+    command: &str,
+) -> Result<Value, BracketError> {
     let tar = tar_workspace(dir).map_err(|e| BracketError::Transport(format!("pack: {e}")))?;
     let mut stream = connect(vsock).await?;
-    send_json(&mut stream, &json!({"op": "push"})).await?;
+    vsock::send_json(&mut stream, &json!({"op": "push"})).await?;
     vsock::send_frame(&mut stream, &tar).await?;
     expect_ok(recv_json(&mut stream).await?)?;
-    send_json(&mut stream, &json!({"op": "exec", "command": command})).await?;
+    vsock::send_json(&mut stream, &json!({"op": "exec", "command": command})).await?;
     let outcome = recv_json(&mut stream).await?;
     if let Some(e) = outcome.get("error").and_then(Value::as_str) {
         return Err(BracketError::Agent(e.to_string()));
     }
-    send_json(&mut stream, &json!({"op": "pull"})).await?;
+    vsock::send_json(&mut stream, &json!({"op": "pull"})).await?;
     expect_ok(recv_json(&mut stream).await?)?;
     let tar = vsock::recv_frame(&mut stream, MAX_TAR).await?;
-    untar_workspace(dir, &tar).map_err(|e| BracketError::Transport(format!("unpack: {e}")))?;
+    // Staged, two-phase: the workspace is durably captured after every call,
+    // so a truncated guest tar must leave it untouched, never half-cleared.
+    microvm::ws_sync::restore_workspace(ws, &tar)
+        .map_err(|e| BracketError::Transport(format!("unpack: {e}")))?;
     // A nonzero exit is an outcome the model reacts to, not an error; the
     // agent caps the streams guest-side, the host re-caps for the journal.
     Ok(json!({
@@ -409,10 +410,6 @@ async fn connect(uds: &Path) -> Result<UnixStream, std::io::Error> {
     vsock::connect(uds, VSOCK_PORT).await
 }
 
-async fn send_json(stream: &mut UnixStream, value: &Value) -> Result<(), std::io::Error> {
-    vsock::send_json(stream, value).await
-}
-
 async fn recv_json(stream: &mut UnixStream) -> Result<Value, std::io::Error> {
     vsock::recv_json(stream, MAX_FRAME).await
 }
@@ -420,7 +417,7 @@ async fn recv_json(stream: &mut UnixStream) -> Result<Value, std::io::Error> {
 /// Probe the agent: connect, ping, expect `{"ok":true}`.
 async fn ping(uds: &Path) -> Result<(), std::io::Error> {
     let mut stream = connect(uds).await?;
-    send_json(&mut stream, &json!({"op": "ping"})).await?;
+    vsock::send_json(&mut stream, &json!({"op": "ping"})).await?;
     let reply = recv_json(&mut stream).await?;
     if reply.get("ok").and_then(Value::as_bool) == Some(true) {
         Ok(())

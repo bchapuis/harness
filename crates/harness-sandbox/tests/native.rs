@@ -232,7 +232,7 @@ async fn an_empty_image_fails_the_call_as_a_sandbox_outcome() {
         }
         other => panic!("an empty image is a Sandbox outcome, got {other:?}"),
     }
-    assert_eq!(provider.stats.native_built(), 0, "nothing was provisioned");
+    assert_eq!(provider.stats().native_built(), 0, "nothing was provisioned");
     sandbox.release().await;
 }
 
@@ -273,12 +273,12 @@ async fn provisioning_is_lazy_and_counted() {
     workspace(&sandbox, "write_file", json!({"path": "f", "content": "x"}))
         .await
         .expect("write");
-    assert_eq!(provider.stats.native_built(), 0);
+    assert_eq!(provider.stats().native_built(), 0);
 
     shell(&sandbox, "true").await.expect("first");
-    assert_eq!(provider.stats.native_built(), 1);
+    assert_eq!(provider.stats().native_built(), 1);
     shell(&sandbox, "true").await.expect("second");
-    assert_eq!(provider.stats.native_built(), 1, "the container is reused");
+    assert_eq!(provider.stats().native_built(), 1, "the container is reused");
 
     sandbox.release().await;
 }
@@ -339,7 +339,7 @@ async fn an_externally_killed_container_is_single_tier_loss() {
     // The next call MAY re-provision lazily under the acquisition this
     // activation already journaled.
     shell(&sandbox, "true").await.expect("re-provisioned");
-    assert_eq!(provider.stats.native_built(), 2);
+    assert_eq!(provider.stats().native_built(), 2);
 
     sandbox.release().await;
 }

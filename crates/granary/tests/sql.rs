@@ -297,11 +297,12 @@ impl GrainHandler<CountNamed> for Ledger {
 
 /// Probe the [`MAX_QUERY_ROWS`] cap (spec §7.14): bulk-insert one row past the
 /// cap, then reply with (the over-cap `select` error, the row count `select`
-/// returns at exactly the cap, the row count the uncapped `query` returns).
+/// returns at exactly the cap, the over-cap `query` error — `query` enforces
+/// the same cap).
 #[derive(Clone, Serialize, Deserialize)]
 struct BulkSelect;
 impl Message for BulkSelect {
-    type Reply = (String, usize, usize);
+    type Reply = (String, usize, String);
     const MANIFEST: Manifest = Manifest::new("test.SqlBulkSelect");
 }
 impl GrainHandler<BulkSelect> for Ledger {
@@ -310,7 +311,7 @@ impl GrainHandler<BulkSelect> for Ledger {
         _state: &(),
         _msg: BulkSelect,
         ctx: &GrainCtx<Self>,
-    ) -> (Vec<NoEvent>, (String, usize, usize)) {
+    ) -> (Vec<NoEvent>, (String, usize, String)) {
         ensure_schema(ctx);
         let sql = ctx.sql();
         sql.execute(
@@ -331,11 +332,11 @@ impl GrainHandler<BulkSelect> for Ledger {
             .expect("exactly the cap is fine")
             .rows
             .len();
-        let unbounded = sql
+        let over_query = sql
             .query("SELECT cents FROM entries WHERE name = 'bulk'", &[])
-            .expect("query is uncapped")
-            .len();
-        (vec![], (over, at_cap, unbounded))
+            .expect_err("query enforces the same cap as select")
+            .to_string();
+        (vec![], (over, at_cap, over_query))
     }
 }
 
@@ -591,17 +592,16 @@ fn select_errors_past_the_row_cap_instead_of_truncating() {
         ..GranaryConfig::default()
     });
     let grain = ledgers.grain("bulk/0");
-    let (over, at_cap, unbounded) =
+    let (over, at_cap, over_query) =
         sim.block_on(async move { grain.ask(BulkSelect).await.expect("bulk probe") });
     assert!(
         over.contains("more than"),
         "one row past the cap is an error, never a silent truncation (§7.14): {over}"
     );
     assert_eq!(at_cap, MAX_QUERY_ROWS, "exactly the cap succeeds");
-    assert_eq!(
-        unbounded,
-        MAX_QUERY_ROWS + 1,
-        "the internal `query` surface stays uncapped"
+    assert!(
+        over_query.contains("more than"),
+        "`query` enforces the same cap as `select` (§7.14): {over_query}"
     );
 }
 

@@ -1,7 +1,6 @@
 //! The persistent machine's guest agent (machine spec §5.1): a channel broker
-//! inside the microVM, serving the wire protocol in [`proto`] (the front-door
-//! side is `crates/machine-frontdoor/src/proto.rs`; the two must agree byte
-//! for byte).
+//! inside the microVM, serving the wire protocol in [`machine_proto`] — the
+//! same crate the front door compiles, so the two ends cannot drift.
 //!
 //! Unlike harness-sandbox's `fc-agent`, this is **not** pid 1: it is an
 //! ordinary service the *user's own rootfs* ships (machine §2.1), started by
@@ -19,7 +18,8 @@
 //! `OK <port>\n` muxer handshake Firecracker performs host-side, so the relay
 //! is exercised over an identical byte stream in tests without a VM.
 
-mod proto;
+use machine_proto as proto;
+
 mod tar_sync;
 
 use std::io::Read;
@@ -35,10 +35,12 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use proto::AGENT_PORT as PORT;
 use proto::ChannelKind;
 use proto::Frame;
 use proto::MAX_FRAME;
-use proto::PORT;
+use proto::recv_frame;
+use proto::send_frame;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -174,13 +176,8 @@ fn serve(
                 send_frame(&mut stream, &Frame::ExitStatus(1).encode())
             }
         },
-        ChannelKind::Exec { argv, env } => serve_piped(stream, argv, env, false),
-        ChannelKind::Sftp => serve_piped(
-            stream,
-            vec![sftp_server_path()],
-            Vec::new(),
-            false,
-        ),
+        ChannelKind::Exec { argv, env } => serve_piped(stream, argv, env),
+        ChannelKind::Sftp => serve_piped(stream, vec![sftp_server_path()], Vec::new()),
         ChannelKind::Pty {
             term,
             cols,
@@ -226,7 +223,6 @@ fn serve_piped<S: Read + Write + AsRawFd + Send + 'static>(
     stream: S,
     argv: Vec<String>,
     env: Vec<(String, String)>,
-    _pty: bool,
 ) -> std::io::Result<()> {
     if argv.is_empty() {
         return send_frame(&mut { stream }, &Frame::ExitStatus(255).encode());
@@ -237,6 +233,12 @@ fn serve_piped<S: Read + Write + AsRawFd + Send + 'static>(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Its own process group, so an SSH signal reaches a `sh -c` pipeline's
+    // members, not just the shell.
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     for (k, v) in &env {
         command.env(k, v);
     }
@@ -275,7 +277,7 @@ fn serve_piped<S: Read + Write + AsRawFd + Send + 'static>(
             Some(Frame::Eof) => {
                 stdin.take();
             }
-            Some(Frame::Signal(name)) => signal_child(Some(child.id()), &name),
+            Some(Frame::Signal(name)) => signal_group(child.id() as i32, &name),
             _ => {}
         }
     }
@@ -326,7 +328,13 @@ fn serve_pty<S: Read + Write + AsRawFd + Send + 'static>(
                 }
             }
             Some(Frame::WindowChange { cols, rows }) => set_winsize(master.as_raw_fd(), cols, rows),
-            Some(Frame::Signal(name)) => signal_child(Some(pid as u32), &name),
+            Some(Frame::Signal(name)) => {
+                // Signal the terminal's foreground job, as the line discipline
+                // would for an interrupt character; the session leader's group
+                // is the fallback when no job holds the terminal.
+                let fg = unsafe { libc::tcgetpgrp(master.as_raw_fd()) };
+                signal_group(if fg > 0 { fg } else { pid }, &name);
+            }
             Some(Frame::Eof) => {}
             _ => {}
         }
@@ -377,10 +385,11 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     status.code().unwrap_or(255)
 }
 
-/// Deliver a named signal to a process group (the SSH `signal` request).
-fn signal_child(pid: Option<u32>, name: &str) {
+/// Deliver a named signal (the SSH `signal` request) to the process group led
+/// by `pgid` — a piped child's own group, or the PTY's foreground job.
+fn signal_group(pgid: i32, name: &str) {
     #[cfg(target_os = "linux")]
-    if let Some(pid) = pid {
+    {
         let sig = match name {
             "TERM" => libc::SIGTERM,
             "INT" => libc::SIGINT,
@@ -390,11 +399,11 @@ fn signal_child(pid: Option<u32>, name: &str) {
             _ => return,
         };
         unsafe {
-            libc::kill(pid as libc::pid_t, sig);
+            libc::kill(-pgid, sig);
         }
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = (pid, name);
+    let _ = (pgid, name);
 }
 
 #[cfg(target_os = "linux")]
@@ -618,27 +627,4 @@ mod tests {
             "an over-cap push must not touch the workspace"
         );
     }
-}
-
-// --- Framing (u32 LE length prefix, mirrored from the sandbox transport) ------
-
-fn send_frame(stream: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
-    stream.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    stream.write_all(bytes)?;
-    stream.flush()
-}
-
-fn recv_frame(stream: &mut impl Read, cap: usize) -> std::io::Result<Vec<u8>> {
-    let mut len = [0u8; 4];
-    stream.read_exact(&mut len)?;
-    let len = u32::from_le_bytes(len) as usize;
-    if len > cap {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("frame of {len} bytes exceeds the {cap}-byte cap"),
-        ));
-    }
-    let mut bytes = vec![0u8; len];
-    stream.read_exact(&mut bytes)?;
-    Ok(bytes)
 }

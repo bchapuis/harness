@@ -99,10 +99,63 @@ pub struct VmConfig {
     pub net: Option<NetIf>,
 }
 
+impl VmConfig {
+    /// The shape both consumers boot: one writable root drive, vsock on, no
+    /// NIC. Sizing starts minimal; the caller sets `vcpus`/`mem_mib` (and
+    /// `net`) from its own policy.
+    pub fn rooted(
+        binary: impl Into<PathBuf>,
+        kernel: impl Into<PathBuf>,
+        boot_args: impl Into<String>,
+        rootfs: impl Into<PathBuf>,
+    ) -> VmConfig {
+        VmConfig {
+            binary: binary.into(),
+            kernel: kernel.into(),
+            boot_args: boot_args.into(),
+            drives: vec![Drive {
+                id: "rootfs".to_string(),
+                path_on_host: rootfs.into(),
+                is_root_device: true,
+                is_read_only: false,
+            }],
+            vcpus: 1,
+            mem_mib: 128,
+            vsock: true,
+            net: None,
+        }
+    }
+}
+
 /// The name of the vsock unix socket under the control directory.
 const VSOCK_SOCK: &str = "v.sock";
 /// The name of the Firecracker API socket under the control directory.
 const API_SOCK: &str = "api.sock";
+
+/// Where one VM's control directory lives: `<temp>/<prefix>-<key>`, under the
+/// OS temp directory because unix socket paths have a ~100-byte limit. The
+/// name is stable per VM (`key` is the consumer's digest of its identity) so
+/// a fresh launch finds — and sweeps — the previous activation's debris, and
+/// distinct across VMs so two on one node never contend.
+pub fn control_path(prefix: &str, key: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("{prefix}-{key}"))
+}
+
+/// Prepare the [`control_path`] directory for a launch: sweep the previous
+/// activation's contents and (re)create it empty.
+///
+/// The sweep kills a previous process death's orphan VMM *before* deleting
+/// the directory: the pid file inside is what identifies the orphan, so
+/// deleting first would leak it.
+pub async fn control_dir(prefix: &str, key: &str) -> Result<PathBuf, MicroVmError> {
+    let dir = control_path(prefix, key);
+    kill_stale_vm(&dir);
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| MicroVmError(format!("control dir {}: {e}", dir.display())))?;
+    Ok(dir)
+}
 
 /// The `--config-file` document Firecracker boots from: one PUT-free start.
 /// A pure function of its inputs, unit-tested as such. `control` locates the
@@ -227,6 +280,23 @@ impl MicroVm {
             }
             tokio::time::sleep(poll).await;
         }
+    }
+
+    /// [`wait_ready`](MicroVm::wait_ready) with the commonest probe: the
+    /// guest accepting a vsock connection on `port`. A consumer whose
+    /// readiness needs a protocol exchange keeps the closure form.
+    pub async fn wait_ready_vsock(
+        &mut self,
+        port: u32,
+        timeout: Duration,
+        poll: Duration,
+    ) -> Result<(), MicroVmError> {
+        let vsock = self.vsock_path();
+        self.wait_ready(timeout, poll, || {
+            let vsock = vsock.clone();
+            async move { vsock::connect(&vsock, port).await.is_ok() }
+        })
+        .await
     }
 
     /// Whether the VMM exited behind the caller's back (single-tier loss is

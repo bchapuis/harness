@@ -57,6 +57,10 @@ use crate::facet::FacetEnv;
 use crate::facet::FacetError;
 use crate::facet::HasFacet;
 use crate::facet::sealed::Sealed;
+use crate::facet_blobs::RootSet;
+use crate::facet_blobs::get_concat;
+use crate::facet_blobs::io_facet_err;
+use crate::facet_blobs::put_chunked;
 use crate::grain::Grain;
 use crate::grain::GrainCtx;
 
@@ -207,12 +211,8 @@ struct SqlDb {
     /// of the seal that the facet, not the statement, owns the transaction
     /// boundary.
     restrict: Arc<std::sync::atomic::AtomicBool>,
-    /// The checkpoint-chunk ids this activation must keep alive (F3): the
-    /// restored manifest's plus every later checkpoint's. The union is kept —
-    /// never pruned mid-activation — so a failed `save_snapshot` can never
-    /// leave the *current* durable manifest's chunks sweepable; the next
-    /// activation restores from the durable manifest and resets the set.
-    roots: Mutex<Vec<BlobId>>,
+    /// The live checkpoint-chunk roots (union-kept for F3 — see [`RootSet`]).
+    roots: Mutex<RootSet>,
 }
 
 impl SqlDb {
@@ -313,9 +313,9 @@ impl SqlDb {
         if len <= start {
             return Ok(None);
         }
-        let mut file = fs::File::open(&wal).map_err(io_facet_err)?;
+        let mut file = fs::File::open(&wal).map_err(io_facet_err("sql"))?;
         let mut header = [0u8; WAL_HEADER as usize];
-        file.read_exact(&mut header).map_err(io_facet_err)?;
+        file.read_exact(&mut header).map_err(io_facet_err("sql"))?;
         let raw_ps = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
         let page_size = if raw_ps == 1 { 65536 } else { raw_ps };
         if page_size != PAGE_SIZE {
@@ -331,8 +331,9 @@ impl SqlDb {
             return Ok(None);
         }
         let mut region = vec![0u8; (count * frame_len) as usize];
-        file.seek(SeekFrom::Start(start)).map_err(io_facet_err)?;
-        file.read_exact(&mut region).map_err(io_facet_err)?;
+        file.seek(SeekFrom::Start(start))
+            .map_err(io_facet_err("sql"))?;
+        file.read_exact(&mut region).map_err(io_facet_err("sql"))?;
         let mut frames = Vec::with_capacity(count as usize);
         let mut db_pages = 0u32;
         for frame in region.chunks_exact(frame_len as usize) {
@@ -370,17 +371,17 @@ impl SqlDb {
             .create(true)
             .truncate(false)
             .open(&self.path)
-            .map_err(io_facet_err)?;
+            .map_err(io_facet_err("sql"))?;
         for (pgno, page) in &delta.frames {
             if *pgno == 0 || page.len() != delta.page_size as usize {
                 return Err(FacetError("sql: malformed frame record".into()));
             }
             file.seek(SeekFrom::Start((*pgno as u64 - 1) * delta.page_size as u64))
-                .map_err(io_facet_err)?;
-            file.write_all(page).map_err(io_facet_err)?;
+                .map_err(io_facet_err("sql"))?;
+            file.write_all(page).map_err(io_facet_err("sql"))?;
         }
         file.set_len(delta.db_pages as u64 * delta.page_size as u64)
-            .map_err(io_facet_err)?;
+            .map_err(io_facet_err("sql"))?;
         Ok(())
     }
 
@@ -510,7 +511,9 @@ impl Facet for Sql {
                 let mut chunk = vec![0u8; CHUNK_BYTES];
                 let mut filled = 0;
                 while filled < CHUNK_BYTES {
-                    let n = file.read(&mut chunk[filled..]).map_err(io_facet_err)?;
+                    let n = file
+                        .read(&mut chunk[filled..])
+                        .map_err(io_facet_err("sql"))?;
                     if n == 0 {
                         break;
                     }
@@ -527,15 +530,11 @@ impl Facet for Sql {
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io_facet_err(e)),
+            Err(e) => return Err(io_facet_err("sql")(e)),
         }
-        // The chunk puts are independent; issue them concurrently.
-        let puts = parts.into_iter().map(|chunk| env.blobs().put(chunk));
-        let chunks = futures::future::try_join_all(puts)
-            .await
-            .map_err(|e| FacetError(format!("sql checkpoint put: {e:?}")))?;
-        // Keep the new checkpoint's chunks alive alongside the prior
-        // roots (see `SqlDb::roots`): the composite may not commit.
+        let chunks = put_chunked(env.blobs(), parts, "sql checkpoint").await?;
+        // Keep the new checkpoint's chunks alive alongside the prior roots
+        // ([`RootSet`]): the composite may not commit.
         db.roots
             .lock()
             .expect("sql roots lock")
@@ -552,7 +551,7 @@ impl Facet for Sql {
     async fn restore(part: Option<&[u8]>, env: &FacetEnv) -> Result<SqlForm, FacetError> {
         let path = env.scratch_path("db");
         if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).map_err(io_facet_err)?;
+            fs::create_dir_all(dir).map_err(io_facet_err("sql"))?;
         }
         let db = SqlDb {
             path,
@@ -560,7 +559,7 @@ impl Facet for Sql {
             txn: Mutex::new(TxnState::Idle),
             tail: Mutex::new(0),
             restrict: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            roots: Mutex::new(Vec::new()),
+            roots: Mutex::new(RootSet::default()),
         };
         // Drop any stale local cache before materializing: the manifest +
         // committed frame records are the truth (§1); the prior
@@ -574,16 +573,14 @@ impl Facet for Sql {
                     manifest.page_size
                 )));
             }
-            // The chunk fetches are independent; issue them concurrently.
-            let gets = manifest.chunks.iter().map(|id| env.blobs().get(*id, None));
-            let parts = futures::future::try_join_all(gets)
-                .await
-                .map_err(|e| FacetError(format!("sql checkpoint get: {e:?}")))?;
-            let mut image = parts.concat();
+            let mut image = get_concat(env.blobs(), &manifest.chunks, "sql checkpoint").await?;
             image.truncate(manifest.db_bytes as usize);
-            *db.roots.lock().expect("sql roots lock") = manifest.chunks;
+            db.roots
+                .lock()
+                .expect("sql roots lock")
+                .reset(manifest.chunks);
             if !image.is_empty() {
-                fs::write(&db.path, &image).map_err(io_facet_err)?;
+                fs::write(&db.path, &image).map_err(io_facet_err("sql"))?;
             }
         }
         Ok(SqlForm(Some(Arc::new(db))))
@@ -591,13 +588,7 @@ impl Facet for Sql {
 
     fn roots(form: &SqlForm) -> std::collections::BTreeSet<BlobId> {
         match &form.0 {
-            Some(db) => db
-                .roots
-                .lock()
-                .expect("sql roots lock")
-                .iter()
-                .copied()
-                .collect(),
+            Some(db) => db.roots.lock().expect("sql roots lock").ids(),
             None => std::collections::BTreeSet::new(),
         }
     }
@@ -676,9 +667,11 @@ where
         })
     }
 
-    /// Run a query, returning all rows. Sees the transaction's own writes.
+    /// Run a query, returning all rows, capped at [`MAX_QUERY_ROWS`] exactly as
+    /// [`select`](Self::select) is (over the cap is an error, not a truncation).
+    /// Sees the transaction's own writes.
     pub fn query(&self, sql: &str, params: &[SqlValue]) -> Result<Vec<SqlRow>, SqlError> {
-        Ok(self.collect(sql, params, None)?.rows)
+        Ok(self.collect(sql, params)?.rows)
     }
 
     /// Run a query expected to return exactly one row.
@@ -695,19 +688,14 @@ where
     /// directly. Over the cap is an error, not a truncation — a silently clipped
     /// result would read as complete.
     pub fn select(&self, sql: &str, params: &[SqlValue]) -> Result<QueryResult, SqlError> {
-        self.collect(sql, params, Some(MAX_QUERY_ROWS))
+        self.collect(sql, params)
     }
 
     /// Prepare `sql`, bind `params`, and collect every row with its column names
     /// — the shared body of [`query`](Self::query) and [`select`](Self::select).
-    /// `cap` bounds the row count with an error past it (never a silent
-    /// truncation); `None` is unbounded.
-    fn collect(
-        &self,
-        sql: &str,
-        params: &[SqlValue],
-        cap: Option<usize>,
-    ) -> Result<QueryResult, SqlError> {
+    /// Bounds the row count at [`MAX_QUERY_ROWS`] with an error past it (never a
+    /// silent truncation).
+    fn collect(&self, sql: &str, params: &[SqlValue]) -> Result<QueryResult, SqlError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(sql).map_err(|e| SqlError(e.to_string()))?;
             let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
@@ -717,7 +705,7 @@ where
                 .map_err(|e| SqlError(e.to_string()))?;
             let mut out = Vec::new();
             while let Some(row) = rows.next().map_err(|e| SqlError(e.to_string()))? {
-                if cap == Some(out.len()) {
+                if out.len() == MAX_QUERY_ROWS {
                     return Err(SqlError(format!(
                         "query returned more than {} rows; narrow it or paginate",
                         out.len()
@@ -771,8 +759,9 @@ fn authorize(
 }
 
 /// Restrict the connection authorizer for the duration of one handler/tool
-/// statement, restoring the prior state on drop (including on an early `?` or a
-/// panic): the facet's machinery must always run unrestricted afterwards.
+/// statement, clearing the restriction on drop (including on an early `?` or a
+/// panic) — correct because restriction never nests: the facet's machinery must
+/// always run unrestricted afterwards.
 struct Restricted<'a>(&'a std::sync::atomic::AtomicBool);
 
 impl<'a> Restricted<'a> {
@@ -790,8 +779,4 @@ impl Drop for Restricted<'_> {
 
 fn sql_facet_err(e: rusqlite::Error) -> FacetError {
     FacetError(format!("sql: {e}"))
-}
-
-fn io_facet_err(e: std::io::Error) -> FacetError {
-    FacetError(format!("sql io: {e}"))
 }

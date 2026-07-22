@@ -34,12 +34,12 @@
 //! basis for retries, timeouts, and the [`Workflow`] step memo — a
 //! Cloudflare-Workflows-style `step`/`sleep`/`retry` where each step's effect runs
 //! at most once across crashes because its result is journaled and memoized. An
-//! alarm fires while its grain is resident (and vetoes idle hibernation until it
-//! does) and re-arms on re-activation. To fire with **no access after a node
-//! failover**, host a type with
+//! alarm fires while its grain is resident and re-arms on re-activation. To fire
+//! with **no access after a node failover or hibernation**, host a type with
 //! [`granary_with_alarms`](GranaryExt::granary_with_alarms): each host registers its
-//! deadline in a per-shard [`AlarmIndex`], and a driver re-activates due grains on
-//! the shards this node leads.
+//! deadline in a per-shard [`AlarmIndex`] (an acknowledged registration, which is
+//! what lets an alarmed grain hibernate — an unacked one pins it resident), and a
+//! driver re-activates due grains on the shards this node leads.
 //!
 //! # Scope: two durability tiers, one model
 //!
@@ -93,6 +93,7 @@ mod election;
 mod error;
 mod event;
 mod facet;
+mod facet_blobs;
 mod file_store;
 mod gateway;
 mod grain;
@@ -115,12 +116,20 @@ mod ws;
 
 pub use alarm::Alarm;
 pub use alarm::AlarmHandle;
-pub use alarm_index::ALARM_INDEX_TYPE;
 pub use alarm_index::AlarmIndex;
+// The alarm-index runtime vocabulary: internal machinery published for the
+// crate's own integration tests, not part of the supported API.
+#[doc(hidden)]
+pub use alarm_index::ALARM_INDEX_TYPE;
+#[doc(hidden)]
 pub use alarm_index::AllPending;
+#[doc(hidden)]
 pub use alarm_index::DueBefore;
+#[doc(hidden)]
 pub use alarm_index::Pending;
+#[doc(hidden)]
 pub use alarm_index::Sync as AlarmSync;
+#[doc(hidden)]
 pub use alarm_index::index_key;
 pub use blobs::BlobId;
 pub use blobs::GrainBlobs;

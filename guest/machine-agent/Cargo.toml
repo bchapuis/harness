@@ -12,6 +12,9 @@ publish = false
 
 [dependencies]
 libc = "0.2"
+# The channel protocol, shared with the host by path — one definition, no
+# byte-for-byte mirror to maintain (machine spec §5.1).
+machine-proto = { path = "../../crates/machine-proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Same major as the host codec (crates/microvm) and guest/fc-agent: the tar

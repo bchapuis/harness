@@ -162,10 +162,10 @@ fn workspace() -> (tempfile::TempDir, Dir) {
 #[tokio::test]
 async fn the_bracket_round_trips_the_workspace() {
     let guest = FakeGuest::spawn();
-    let (_tmp, dir) = workspace();
+    let (tmp, dir) = workspace();
     dir.write("in.txt", b"forty-two").expect("seed");
 
-    let outcome = exec_bracket(&dir, &guest.sock, "cat in.txt > out.txt && echo done")
+    let outcome = exec_bracket(&dir, tmp.path(), &guest.sock, "cat in.txt > out.txt && echo done")
         .await
         .unwrap_or_else(|_| panic!("bracket failed"));
     assert_eq!(outcome["exit_code"], 0);
@@ -188,12 +188,13 @@ async fn the_bracket_round_trips_the_workspace() {
 #[tokio::test]
 async fn nested_directories_the_exec_bit_and_relative_symlinks_survive() {
     let guest = FakeGuest::spawn();
-    let (_tmp, dir) = workspace();
+    let (tmp, dir) = workspace();
     dir.create_dir_all("a/b").expect("dirs");
     dir.write("a/b/f.txt", b"deep").expect("seed");
 
     let outcome = exec_bracket(
         &dir,
+        tmp.path(),
         &guest.sock,
         "printf '#!/bin/sh\\necho ran' > run.sh && chmod +x run.sh && \
          ln -s a/b/f.txt rel && ln -s /etc/passwd abs",
@@ -204,7 +205,7 @@ async fn nested_directories_the_exec_bit_and_relative_symlinks_survive() {
 
     // The exec bit round-tripped: a second call runs the pulled script
     // (which the push carried back into the guest).
-    let ran = exec_bracket(&dir, &guest.sock, "./run.sh")
+    let ran = exec_bracket(&dir, tmp.path(), &guest.sock, "./run.sh")
         .await
         .unwrap_or_else(|_| panic!("bracket failed"));
     assert_eq!(ran["exit_code"], 0, "exec bit must survive: {ran}");
@@ -234,9 +235,9 @@ async fn nested_directories_the_exec_bit_and_relative_symlinks_survive() {
 #[tokio::test]
 async fn suid_bits_do_not_survive_the_pull() {
     let guest = FakeGuest::spawn();
-    let (_tmp, dir) = workspace();
+    let (tmp, dir) = workspace();
 
-    let outcome = exec_bracket(&dir, &guest.sock, "touch s.bin && chmod 4755 s.bin")
+    let outcome = exec_bracket(&dir, tmp.path(), &guest.sock, "touch s.bin && chmod 4755 s.bin")
         .await
         .unwrap_or_else(|_| panic!("bracket failed"));
     assert_eq!(outcome["exit_code"], 0);
@@ -255,10 +256,10 @@ async fn suid_bits_do_not_survive_the_pull() {
 #[tokio::test]
 async fn a_deleted_guest_file_stays_deleted_after_the_pull() {
     let guest = FakeGuest::spawn();
-    let (_tmp, dir) = workspace();
+    let (tmp, dir) = workspace();
     dir.write("stale.txt", b"x").expect("seed");
 
-    let outcome = exec_bracket(&dir, &guest.sock, "rm stale.txt")
+    let outcome = exec_bracket(&dir, tmp.path(), &guest.sock, "rm stale.txt")
         .await
         .unwrap_or_else(|_| panic!("bracket failed"));
     assert_eq!(outcome["exit_code"], 0);
@@ -275,8 +276,8 @@ async fn a_deleted_guest_file_stays_deleted_after_the_pull() {
 #[tokio::test]
 async fn an_agent_error_is_not_transport_loss() {
     let guest = FakeGuest::spawn();
-    let (_tmp, dir) = workspace();
-    match exec_bracket(&dir, &guest.sock, "@error").await {
+    let (tmp, dir) = workspace();
+    match exec_bracket(&dir, tmp.path(), &guest.sock, "@error").await {
         Err(BracketError::Agent(e)) => assert!(e.contains("refused"), "{e}"),
         other => panic!(
             "an error reply over a working transport is an agent error, got {:?}",
@@ -288,8 +289,8 @@ async fn an_agent_error_is_not_transport_loss() {
 #[tokio::test]
 async fn an_oversized_frame_header_is_refused_before_allocation() {
     let guest = FakeGuest::spawn();
-    let (_tmp, dir) = workspace();
-    match exec_bracket(&dir, &guest.sock, "@hugeframe").await {
+    let (tmp, dir) = workspace();
+    match exec_bracket(&dir, tmp.path(), &guest.sock, "@hugeframe").await {
         Err(BracketError::Transport(e)) => {
             assert!(e.contains("cap"), "the cap must be named: {e}")
         }
@@ -302,10 +303,10 @@ async fn an_oversized_frame_header_is_refused_before_allocation() {
 
 #[tokio::test]
 async fn a_dead_socket_is_transport_loss() {
-    let (_tmp, dir) = workspace();
-    let gone = _tmp.path().join("no-such.sock");
+    let (tmp, dir) = workspace();
+    let gone = tmp.path().join("no-such.sock");
     assert!(matches!(
-        exec_bracket(&dir, &gone, "true").await,
+        exec_bracket(&dir, tmp.path(), &gone, "true").await,
         Err(BracketError::Transport(_))
     ));
 }
@@ -315,7 +316,7 @@ async fn a_dead_socket_is_transport_loss() {
 
 #[test]
 fn the_config_document_pins_the_shape_firecracker_boots_from() {
-    let config = FirecrackerConfig::new("/usr/bin/firecracker", "/k/vmlinux", "/r/base.ext4");
+    let config = FirecrackerConfig::new("/usr/bin/firecracker", "/k/vmlinux");
     let document = microvm::config_json(
         &vm_config(&config, std::path::Path::new("/ctl/rootfs.ext4")),
         std::path::Path::new("/ctl"),

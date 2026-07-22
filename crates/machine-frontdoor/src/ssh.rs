@@ -23,14 +23,15 @@ use russh::server::Msg;
 use russh::server::Session;
 use tokio::sync::mpsc;
 
+use machine_proto::Frame;
+use machine_proto::MAX_FRAME;
+use microvm::vsock::recv_frame;
+use microvm::vsock::send_frame;
+
 use crate::ChannelBackend;
 use crate::ChannelKind;
 use crate::FrontDoorError;
 use crate::MachineAuthority;
-use crate::proto::Frame;
-use crate::proto::MAX_FRAME;
-use crate::proto::recv_frame;
-use crate::proto::send_frame;
 
 /// Terminate SSH on `stream` for `machine`, bridging channels to its guest
 /// agent (machine §5.1). Presents the machine's journaled host key at KEX and
@@ -64,6 +65,7 @@ where
         backend,
         attachment: Arc::clone(&attachment),
         pty: None,
+        env: Vec::new(),
         channels: HashMap::new(),
     };
     let session = russh::server::run_stream(config, stream, handler)
@@ -95,6 +97,8 @@ struct FrontDoorHandler<A, B> {
     backend: Arc<B>,
     attachment: Arc<std::sync::Mutex<Option<u64>>>,
     pty: Option<PtyParams>,
+    /// `env` requests accepted so far, consumed by the `exec` that follows.
+    env: Vec<(String, String)>,
     /// One host→guest frame queue per live channel.
     channels: HashMap<ChannelId, mpsc::Sender<Frame>>,
 }
@@ -161,7 +165,8 @@ impl<A: MachineAuthority, B: ChannelBackend> FrontDoorHandler<A, B> {
     }
 
     /// The [`ChannelKind`] a `shell`/`exec` request opens: a PTY when one was
-    /// requested (consuming the pending params), otherwise piped stdio.
+    /// requested (consuming the pending params), otherwise piped stdio with
+    /// the accepted `env` requests.
     fn channel_kind(&mut self, argv: Vec<String>) -> ChannelKind {
         match self.pty.take() {
             Some(p) => ChannelKind::Pty {
@@ -170,7 +175,10 @@ impl<A: MachineAuthority, B: ChannelBackend> FrontDoorHandler<A, B> {
                 rows: p.rows,
                 argv,
             },
-            None => ChannelKind::Exec { argv, env: vec![] },
+            None => ChannelKind::Exec {
+                argv,
+                env: std::mem::take(&mut self.env),
+            },
         }
     }
 
@@ -230,6 +238,21 @@ impl<A: MachineAuthority, B: ChannelBackend> Handler for FrontDoorHandler<A, B> 
             cols: col_width as u16,
             rows: row_height as u16,
         });
+        let _ = session.channel_success(channel);
+        Ok(())
+    }
+
+    async fn env_request(
+        &mut self,
+        channel: ChannelId,
+        variable_name: &str,
+        variable_value: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // Accepted unfiltered: the key holder already has arbitrary exec on
+        // this machine, so an env variable grants nothing it lacks.
+        self.env
+            .push((variable_name.to_string(), variable_value.to_string()));
         let _ = session.channel_success(channel);
         Ok(())
     }
@@ -296,6 +319,17 @@ impl<A: MachineAuthority, B: ChannelBackend> Handler for FrontDoorHandler<A, B> 
             },
         )
         .await;
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // The client closed stdin: forward it so the guest closes the child's
+        // stdin pipe — `echo x | ssh m wc -c` cannot finish without this.
+        self.push(channel, Frame::Eof).await;
         Ok(())
     }
 

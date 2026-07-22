@@ -5,17 +5,19 @@
 //!
 //! # Why it exists
 //!
-//! Phase-1 alarms fire from an in-activation timer and veto idle hibernation, so a
-//! resident grain always fires on time. The gap is **failover**: when a shard's
-//! leader dies, its grains passivate (a forced step-down, §13) and the new leader
-//! activates them only on access — so an alarm with no caller would sleep until the
-//! grain is next touched. This index closes that gap. Each [`Host`](crate::Host)
-//! registers its grain's pending deadline here on every alarm change; after a leader
-//! change, the alarm **driver** reads the index for the shards it now leads and
+//! An alarm fires from an in-activation timer, so a resident grain always fires on
+//! time. The gap is every **deactivation**: a failover passivates a shard's grains
+//! (a forced step-down, §13), and idle hibernation would otherwise pin an alarmed
+//! grain resident forever — in either case an alarm with no caller would sleep
+//! until the grain is next touched. This index closes that gap. Each
+//! [`Host`](crate::Host) registers its grain's pending deadline here on every alarm
+//! change; the alarm **driver** reads the index for the shards its node leads and
 //! re-activates each pending grain, whose [`on_activate`](crate::Grain::on_activate)
 //! re-arms its own timer (**G3**). The index is a *hint* — the grain's own alarm
-//! facet is the source of truth — so a stale or missing entry is reconciled on the
-//! next activation, never a lost or double fire.
+//! facet is the source of truth — so a stale entry is reconciled on the next
+//! activation, never a lost or double fire. The one place a *missing* entry would
+//! be unrecoverable is a voluntarily hibernated grain, which is why the host
+//! hibernates an alarmed grain only after its registration is **acked** (host.rs).
 //!
 //! # Shape
 //!
@@ -25,6 +27,9 @@
 //! fold, generic over the hosting system so it runs on either durability tier. Reads
 //! (`due_before`) serve locally from the activation (§7.5); registration is
 //! idempotent (§7.5), so a re-register of an unchanged deadline commits nothing.
+//! Registration is an **acknowledged** `ask`: the reply releases only after this
+//! grain's commit (the output gate, §6), which is what lets a host treat an acked
+//! deadline as durably indexed and hibernate with its alarm pending (host.rs).
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
@@ -55,8 +60,8 @@ pub fn index_key(target_type: &str, shard: usize) -> String {
 /// the target grain at the commit that last changed it. The head totally orders a
 /// grain's own alarm changes (it advances by every commit and never regresses, even
 /// across activations), so the index resolves an out-of-order pair of updates — the
-/// register and clear a single activation may emit as independent fire-and-forget
-/// tells — by keeping the higher head. A real clear always carries a higher head
+/// register and clear a single activation may emit as independently launched
+/// asks — by keeping the higher head. A real clear always carries a higher head
 /// than the register it supersedes, so it always wins.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct Slot {
@@ -169,7 +174,7 @@ impl<S: GranarySystem> Grain for AlarmIndex<S> {
 /// `Some(ns)` while an alarm is pending, `None` once it clears. Applied only if
 /// `head` is at least the entry's last head, so an out-of-order pair from one
 /// activation resolves to the higher head (see [`Slot`]) — the register and clear a
-/// grain emits as independent tells never race to the wrong result. Idempotent: an
+/// grain launches independently never race to the wrong result. Idempotent: an
 /// unchanged `(due, head)` commits nothing (§7.5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Sync {

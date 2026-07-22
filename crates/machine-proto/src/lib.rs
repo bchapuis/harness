@@ -1,13 +1,21 @@
-//! The machine guest agent's wire protocol (machine spec §5.1), mirrored by
-//! the front door's channel relay (`crates/machine-frontdoor/src/proto.rs`).
-//! The two ends MUST agree byte for byte.
+//! The machine guest-agent wire protocol (machine spec §5.1) — the **single
+//! definition** all three peers consume: the front door's channel relay
+//! (`machine-frontdoor`), the machine's workspace-sync driver
+//! (`machine::vm`), and the guest agent (`guest/machine-agent`, which path-
+//! depends on this crate from its own workspace). A tag renumbering or a new
+//! frame kind is one edit here, checked by the compiler at every peer.
 //!
 //! One vsock stream carries one SSH channel. After the muxer handshake the
-//! host sends a single **header** frame naming the channel kind, then the two
-//! ends exchange **frames**: a `u32` little-endian length, then a one-byte
-//! tag, then the payload. Data and control (window change, signal, exit
-//! status) share the stream through the tag, so one channel's PTY resize
+//! host sends a single **header** frame naming the [`ChannelKind`], then the
+//! two ends exchange [`Frame`]s: a `u32` little-endian length, then a
+//! one-byte tag, then the payload. Data and control (window change, signal,
+//! exit status) share the stream through the tag, so one channel's PTY resize
 //! never blocks another's bytes.
+//!
+//! The async (tokio) realization of the same length-prefixed framing lives
+//! with the host's vsock transport (`microvm::vsock`), which also serves the
+//! sandbox agent's distinct port-52 protocol; this crate carries the sync
+//! (std) realization for the guest, so it stays free of an async runtime.
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -15,19 +23,22 @@ use serde::Serialize;
 /// The vsock port the agent listens on. Distinct from the sandbox agent's 52
 /// (machine spec §5.1): the protocols differ, and a machine image running the
 /// wrong agent must not read as ready.
-pub const PORT: u32 = 62;
+pub const AGENT_PORT: u32 = 62;
 
 /// Cap on any single frame payload, mirroring the sandbox transport's 1 MiB
-/// (sandbox §3.2): a frame header's claim never becomes an unbounded guest
-/// allocation.
+/// (sandbox §3.2): a frame header's claim never becomes an unbounded
+/// allocation on either end.
 pub const MAX_FRAME: usize = 1024 * 1024;
 
 /// Cap on one workspace tar stream, either direction, accumulated across its
-/// [`Frame::Data`] chunks (machine §4; the workspace facet's own 64 MiB cap).
+/// [`Frame::Data`] chunks (machine §4). Pinned to the workspace codec's
+/// budget (`microvm::ws_sync::MAX_TAR`) and the ws facet's durable-tree cap
+/// (`granary::MAX_TREE_BYTES`) by a test in the `machine` crate, the one
+/// consumer that sees all three.
 pub const MAX_TAR: usize = 64 * 1024 * 1024;
 
 /// What one channel does. The header frame, sent once by the host before any
-/// data flows.
+/// data flows, as this type's JSON encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChannelKind {
     /// An interactive session on a pseudo-terminal. `argv` empty means the
@@ -39,7 +50,10 @@ pub enum ChannelKind {
         argv: Vec<String>,
     },
     /// A non-interactive command with piped stdio.
-    Exec { argv: Vec<String>, env: Vec<(String, String)> },
+    Exec {
+        argv: Vec<String>,
+        env: Vec<(String, String)>,
+    },
     /// The SFTP subsystem: exec the rootfs's `sftp-server`, relay its stdio.
     Sftp,
     /// Flush the guest's page cache to its block device (`sync(2)`). The host
@@ -58,6 +72,19 @@ pub enum ChannelKind {
     /// `0`, the pack budgeted under [`MAX_TAR`] — or [`Frame::Stderr`] then
     /// `ExitStatus` 1 with no data.
     WsPull,
+}
+
+impl ChannelKind {
+    /// The header frame's bytes: this kind's JSON encoding.
+    pub fn header(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("a ChannelKind always encodes")
+    }
+
+    /// Parse a header frame's bytes.
+    pub fn parse(bytes: &[u8]) -> Result<ChannelKind, std::io::Error> {
+        serde_json::from_slice(bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
 }
 
 /// One framed message after the header. The tag byte discriminates; the
@@ -85,11 +112,11 @@ pub enum Frame {
 }
 
 impl Frame {
-    pub(crate) const DATA: u8 = 0;
+    const DATA: u8 = 0;
     const STDERR: u8 = 1;
     const WINDOW_CHANGE: u8 = 2;
     const SIGNAL: u8 = 3;
-    pub(crate) const EOF: u8 = 4;
+    const EOF: u8 = 4;
     const EXIT_STATUS: u8 = 5;
 
     /// The tag byte plus payload of this frame (without the length prefix).
@@ -135,12 +162,36 @@ impl Frame {
             }
             Frame::SIGNAL => Some(Frame::Signal(String::from_utf8_lossy(rest).into_owned())),
             Frame::EOF => Some(Frame::Eof),
-            Frame::EXIT_STATUS => {
-                Some(Frame::ExitStatus(i32::from_le_bytes(rest.get(0..4)?.try_into().ok()?)))
-            }
+            Frame::EXIT_STATUS => Some(Frame::ExitStatus(i32::from_le_bytes(
+                rest.get(0..4)?.try_into().ok()?,
+            ))),
             _ => None,
         }
     }
+}
+
+/// Write one length-prefixed frame body (sync; the guest side and test
+/// fixtures — the host's async twin is `microvm::vsock::send_frame`).
+pub fn send_frame(stream: &mut impl std::io::Write, body: &[u8]) -> std::io::Result<()> {
+    stream.write_all(&(body.len() as u32).to_le_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+/// Read one length-prefixed frame body of at most `cap` bytes, refusing an
+/// oversized header before allocating.
+pub fn recv_frame(stream: &mut impl std::io::Read, cap: usize) -> std::io::Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len)?;
+    let len = u32::from_le_bytes(len) as usize;
+    if len > cap {
+        return Err(std::io::Error::other(format!(
+            "frame of {len} bytes exceeds the {cap}-byte cap"
+        )));
+    }
+    let mut bytes = vec![0u8; len];
+    stream.read_exact(&mut bytes)?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -159,7 +210,11 @@ mod tests {
             Frame::ExitStatus(0),
         ];
         for frame in cases {
-            assert_eq!(Frame::decode(&frame.encode()), Some(frame.clone()), "{frame:?}");
+            assert_eq!(
+                Frame::decode(&frame.encode()),
+                Some(frame.clone()),
+                "{frame:?}"
+            );
         }
     }
 
@@ -171,14 +226,33 @@ mod tests {
 
     #[test]
     fn the_header_round_trips_as_json() {
-        let header = ChannelKind::Pty {
-            term: "xterm-256color".to_string(),
-            cols: 80,
-            rows: 24,
-            argv: vec![],
-        };
-        let bytes = serde_json::to_vec(&header).expect("encode");
-        let back: ChannelKind = serde_json::from_slice(&bytes).expect("decode");
-        assert_eq!(back, header);
+        for kind in [
+            ChannelKind::Pty {
+                term: "xterm-256color".to_string(),
+                cols: 80,
+                rows: 24,
+                argv: vec![],
+            },
+            ChannelKind::Exec {
+                argv: vec!["ls".to_string()],
+                env: vec![("K".to_string(), "v".to_string())],
+            },
+            ChannelKind::Sftp,
+            ChannelKind::Sync,
+            ChannelKind::WsPush,
+            ChannelKind::WsPull,
+        ] {
+            assert_eq!(ChannelKind::parse(&kind.header()).expect("parse"), kind);
+        }
+    }
+
+    #[test]
+    fn framing_round_trips_and_caps_before_allocating() {
+        let mut wire = Vec::new();
+        send_frame(&mut wire, b"payload").expect("send");
+        let mut reader = &wire[..];
+        assert_eq!(recv_frame(&mut reader, 1024).expect("recv"), b"payload");
+        let mut reader = &wire[..];
+        assert!(recv_frame(&mut reader, 3).is_err(), "cap refused");
     }
 }

@@ -24,7 +24,8 @@
 //! Everything else — the journal, the single-writer fence, placement,
 //! activation, hibernation, lossless failover — is the grain's, consumed
 //! unchanged (§2.1). Ephemeral activation state (the sandbox handle, held tiers,
-//! the subscriber set, in-flight flags) lives behind a [`Mutex`] on the grain
+//! the subscriber set, the launch-once guard — granary's workflow
+//! [`LaunchGuard`], granary §7.17) lives behind a [`Mutex`] on the grain
 //! behavior, rebuilt per activation and never journaled (§5.5, §5.6, §7.4).
 
 use std::collections::BTreeMap;
@@ -46,6 +47,7 @@ use granary::GrainCtx;
 use granary::GrainError;
 use granary::GrainHandler;
 use granary::GrainRegistry;
+use granary::LaunchGuard;
 use granary::Seq;
 use granary::Ws;
 use granary::WsError;
@@ -313,17 +315,35 @@ struct SandboxState {
     lost_this_activation: bool,
 }
 
-/// The progress flags of the one live run (§3.1, §5.5): cleared between runs by
+/// One launched effect of the live run (§3.1): the claim key of the run's
+/// [`LaunchGuard`]. A model call is claimed under the step it answers
+/// (`own_steps` at issue, §3.1 step 2); a tool call or delegation under its
+/// `CallId` (§3.1 step 4). Claims are never released — supersession is
+/// structural: a committed response advances `own_steps`, so the next model
+/// claim is a fresh key, and a committed `ToolOutcome` removes the call from
+/// the pending set the dispatcher scans. A straggler therefore has nothing to
+/// "unlock" into a duplicate launch (§9.1.4, §9.2 item 4).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum StepKey {
+    /// The model call answering step `own_steps` (§3.1 step 2).
+    Model(u32),
+    /// The tool call (or delegation) `CallId` names (§3.1 step 4).
+    Call(CallId),
+}
+
+/// The progress state of the one live run (§3.1, §5.5): cleared between runs by
 /// [`reset`](RunScope::reset), since runs are serialized one at a time.
 #[derive(Default)]
 struct RunScope {
-    /// Calls this activation has launched: a fold-external flag, so `Advance`
-    /// does not relaunch a call whose outcome has not yet committed.
-    launched: BTreeSet<CallId>,
+    /// Effects this activation has launched: granary's workflow launch-once
+    /// guard (granary §7.17), fold-external, so `Advance` does not relaunch an
+    /// effect whose outcome has not yet committed. A resume starts a fresh
+    /// guard and re-launches whatever the journal still shows unresolved
+    /// (§5.5) — the *outcome record*, not the launch, is the durable fact.
+    launched: LaunchGuard<StepKey>,
     /// Calls whose outcome is journaled or synthesized: dedups a straggler
     /// (a timeout racing the real outcome, §9.2 item 4).
     resolved: BTreeSet<CallId>,
-    model_inflight: bool,
     /// Whether dangling calls have been resolved for the resumed run (§5.5).
     dangling_resolved: bool,
 }
@@ -331,9 +351,8 @@ struct RunScope {
 impl RunScope {
     /// Clear every flag for the next run (§3.1): a new turn starts blank.
     fn reset(&mut self) {
-        self.launched.clear();
+        self.launched.reset();
         self.resolved.clear();
-        self.model_inflight = false;
         self.dangling_resolved = false;
     }
 }
@@ -575,10 +594,10 @@ impl<S: HarnessSystem> Agent<S> {
             // Start now: journal SessionCreated (if first) + TurnSubmitted.
             // This submit may be processed between the previous run's terminal
             // commit and the post-end `Advance` that would have swept the
-            // per-run flags (`start_next_turn`), so sweep them here too: stale
-            // `launched`/`resolved` ids from the ended run must not suppress
-            // this run's calls — synthesized `call-{step}-{i}` ids repeat
-            // across runs.
+            // per-run state (`start_next_turn`), so sweep it here too: stale
+            // `launched` claims / `resolved` ids from the ended run must not
+            // suppress this run's calls — synthesized `call-{step}-{i}` ids
+            // repeat across runs, and so do the step-keyed model claims.
             act.run.reset();
             act.events.started.push(turn_id.clone());
             drop(act);
@@ -711,21 +730,22 @@ impl<S: HarnessSystem> Agent<S> {
         let mut act = self.lock();
         let Some(live) = state.live.as_ref().filter(|l| l.turn == turn) else {
             // The run ended while the call was in flight (a cancel, §9.2):
-            // discard, do not journal, emit nothing (§3.2, §10.4). Leave
-            // `model_inflight` alone: the flag now guards the *successor*
-            // run's own call, which this straggler must not unlock into a
-            // duplicate.
+            // discard, do not journal, emit nothing (§3.2, §10.4). The launch
+            // guard needs no touch-up: claims are never released, so this
+            // straggler cannot unlock a duplicate of the successor run's own
+            // call — the successor reset the guard and holds its own claims.
             return Vec::new();
         };
         if live.spend.own_steps != step {
             // A response for a step the journal has already answered: an old
             // activation's straggler racing the reissued call after a
             // same-node resume. Exactly one response per step commits (§3.1
-            // step 2); this one lost, and `model_inflight` still belongs to
-            // the call answering the current step.
+            // step 2); this one lost, and the claim on the current step still
+            // belongs to the call answering it.
             return Vec::new();
         }
-        act.run.model_inflight = false;
+        // No claim to release: this response's commit advances `own_steps`, so
+        // the next model call claims a fresh [`StepKey::Model`].
         match result {
             Ok(mut response) => {
                 // Assign ids the provider omitted (§5.2): deterministic in the
@@ -971,7 +991,12 @@ impl<S: HarnessSystem> Agent<S> {
         live: &LiveRun,
         turn: TurnId,
     ) -> Vec<Record> {
-        if act.run.model_inflight {
+        // The step this call answers, tagged on the call and matched again on
+        // receipt (§3.1 step 2) — and the launch-once claim key: an in-flight
+        // step is claimed, and only its committed response advances
+        // `own_steps` to a fresh key.
+        let step = live.spend.own_steps;
+        if act.run.launched.is_claimed(&StepKey::Model(step)) {
             return Vec::new();
         }
         let floor = self.shared.config.budget_floor;
@@ -1000,9 +1025,7 @@ impl<S: HarnessSystem> Agent<S> {
             return vec![self.rec(ctx, RecordBody::WorkspaceReset)];
         }
         act.env.reconciled = true;
-        act.run.model_inflight = true;
-        // Tag the call with the step it answers, matched again on receipt.
-        let step = live.spend.own_steps;
+        act.run.launched.claim(StepKey::Model(step));
         let request = self.build_request(state, kind, live);
         let this = act.this.clone().expect("self-ref set in on_activate");
         let model = self.seams.model.clone();
@@ -1036,7 +1059,7 @@ impl<S: HarnessSystem> Agent<S> {
             };
             let mut events = Vec::new();
             for (call, pending) in &live.pending {
-                if act.run.launched.contains(call)
+                if act.run.launched.is_claimed(&StepKey::Call(call.clone()))
                     || act.run.resolved.contains(call)
                     || pending.name == DELEGATE
                 {
@@ -1061,7 +1084,12 @@ impl<S: HarnessSystem> Agent<S> {
         let mut events = Vec::new();
         let mut ready: Vec<(CallId, PendingCall)> = Vec::new();
         for (call, pending) in &live.pending {
-            if act.run.launched.contains(call) || act.run.resolved.contains(call) {
+            // A non-claiming read: calls skipped here may still be listed as
+            // `ready` intents this round, and an intent batch returns without
+            // launching them (§6.4) — only `launch_call` claims.
+            if act.run.launched.is_claimed(&StepKey::Call(call.clone()))
+                || act.run.resolved.contains(call)
+            {
                 continue;
             }
             if pending.name == DELEGATE {
@@ -1204,7 +1232,9 @@ impl<S: HarnessSystem> Agent<S> {
         pending: PendingCall,
     ) {
         if pending.name == DELEGATE {
-            act.run.launched.insert(call.clone());
+            if !act.run.launched.claim(StepKey::Call(call.clone())) {
+                return; // already in flight this activation
+            }
             let Some(child) = pending.child.clone() else {
                 return;
             };
@@ -1227,8 +1257,10 @@ impl<S: HarnessSystem> Agent<S> {
         let timeout = decl.timeout.unwrap_or(self.shared.config.tool_timeout);
         match &act.env.slot {
             SandboxSlot::Open(sandbox) => {
+                if !act.run.launched.claim(StepKey::Call(call.clone())) {
+                    return; // already in flight this activation
+                }
                 let sandbox = Arc::clone(sandbox);
-                act.run.launched.insert(call.clone());
                 let this = act.this.clone().expect("self-ref set in on_activate");
                 let system = ctx.system().clone();
                 let name = pending.name.clone();
@@ -1640,14 +1672,14 @@ impl<S: HarnessSystem> Grain for Agent<S> {
 
     fn can_passivate(&self, state: &SessionState) -> bool {
         // Never hibernate a session whose run is live (§7.2): no live run, no
-        // queued turn, and nothing in flight.
+        // queued turn, and no launched effect whose outcome could still arrive
+        // (the guard's claims are swept by the post-end `Advance`).
         if state.live.is_some() {
             return false;
         }
         let act = self.lock();
         act.queue.is_empty()
-            && !act.run.model_inflight
-            && act.run.launched.is_empty()
+            && act.run.launched.is_idle()
             && !matches!(act.env.slot, SandboxSlot::Opening)
     }
 }

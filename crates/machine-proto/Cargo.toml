@@ -1,0 +1,16 @@
+[package]
+name = "machine-proto"
+description = "The machine guest-agent channel protocol (machine spec §5.1): the one definition of the channel kinds, frame grammar, and caps shared by the front door, the machine's workspace-sync driver, and guest/machine-agent (a path dependency)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true

@@ -147,10 +147,11 @@ pub trait Sandbox: Send + Sync + 'static {
 pub trait SandboxProvider: Send + Sync + 'static {
     /// Open the session's environment over `workspace` — the session's durable
     /// workspace directory, owned by the caller (the agent's workspace facet,
-    /// granary §7.11). It exists (with its durable content materialized) before
-    /// this call; the provider runs every tier over it and MUST NOT delete it
-    /// on `release` — durability is the caller's property, captured after each
-    /// tool call, never the provider's.
+    /// granary §7.11). The caller normally materializes it (durable content
+    /// and all) before this call; a provider creates a missing directory
+    /// rather than failing, and MUST NOT delete it on `release` — durability
+    /// is the caller's property, captured after each tool call, never the
+    /// provider's.
     fn open(
         &self,
         session: &SessionId,

@@ -990,7 +990,6 @@ if let Some(greeter) = listing.first() {
 ## Appendix B: Suggested crate layout
 
 ```
-actor/                  # umbrella re-export
 actor-core/             # Actor, Message, Handler, ActorRef, Ctx, ActorSystem,
                          #   HandlerRegistry, Manifest, CallError (§3, §4, §14)
 actor-serialization/    # SerializationRequirement, dispatch registry, codecs (§5, §4.4)

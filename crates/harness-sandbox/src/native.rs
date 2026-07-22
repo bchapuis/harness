@@ -49,11 +49,7 @@ use serde_json::Value;
 use serde_json::json;
 
 use crate::provider::TierStats;
-
-/// Cap on each captured stream, so one chatty command cannot blow up the
-/// journal and the model context it feeds. Shared with the firecracker
-/// realization, which answers the same `shell` shape.
-pub(crate) const OUTPUT_CAP: usize = 16 * 1024;
+use crate::provider::capped;
 
 /// Fork-bomb guard on the container (`--pids-limit`).
 const PIDS_LIMIT: &str = "512";
@@ -139,9 +135,7 @@ impl NativeTier {
     /// Execute one Native call (`shell` only).
     pub(crate) async fn call(&self, name: &str, input: &Value) -> Result<Value, ToolError> {
         if name != "shell" {
-            return Err(ToolError::Sandbox(format!(
-                "tool not provided by this sandbox: {name}"
-            )));
+            return Err(crate::provider::unknown_tool(name));
         }
         let command = input
             .get("command")
@@ -322,16 +316,4 @@ fn daemon_error(code: Option<i32>, stderr: &str) -> bool {
             || stderr.contains("Cannot connect to the Docker daemon")
             || stderr.contains("No such container")
             || stderr.contains("is not running"))
-}
-
-pub(crate) fn capped(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    if text.len() <= OUTPUT_CAP {
-        return text.into_owned();
-    }
-    let mut end = OUTPUT_CAP;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}… [truncated {} bytes]", &text[..end], text.len() - end)
 }

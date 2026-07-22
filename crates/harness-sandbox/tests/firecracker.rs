@@ -41,7 +41,7 @@ fn missing<T>(reason: String) -> Option<T> {
     None
 }
 
-fn assets() -> Option<FirecrackerConfig> {
+fn assets() -> Option<(FirecrackerConfig, String)> {
     if !cfg!(target_os = "linux") {
         return missing("firecracker runs on linux only".to_string());
     }
@@ -64,7 +64,10 @@ fn assets() -> Option<FirecrackerConfig> {
             dir.display()
         ));
     }
-    Some(FirecrackerConfig::new(binary, kernel, rootfs))
+    Some((
+        FirecrackerConfig::new(binary, kernel),
+        rootfs.display().to_string(),
+    ))
 }
 
 macro_rules! require_assets {
@@ -80,11 +83,16 @@ fn provider(config: FirecrackerConfig) -> TieredSandboxes {
     TieredSandboxes::new().with_firecracker(config)
 }
 
-async fn open(provider: &TieredSandboxes, session: &str, workspace: &Path) -> Arc<dyn Sandbox> {
+async fn open(
+    provider: &TieredSandboxes,
+    session: &str,
+    image: &str,
+    workspace: &Path,
+) -> Arc<dyn Sandbox> {
     provider
         .open(
             &SessionId::new(session),
-            &SandboxProfile::default(),
+            &SandboxProfile::image(image),
             workspace,
         )
         .await
@@ -135,11 +143,11 @@ fn vm_pids(control: &Path) -> Vec<String> {
 
 #[tokio::test]
 async fn shell_round_trips_through_the_synced_workspace() {
-    let config = require_assets!();
+    let (config, image) = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
     let ws = dir.path().join("rt");
     let provider = provider(config);
-    let sandbox = open(&provider, "rt", &ws).await;
+    let sandbox = open(&provider, "rt", &image, &ws).await;
 
     // Guest → host: a file the shell writes is pulled back to the workspace
     // the Workspace-tier tools see.
@@ -176,7 +184,7 @@ async fn shell_round_trips_through_the_synced_workspace() {
 
 #[tokio::test]
 async fn confinement_smoke() {
-    let config = require_assets!();
+    let (config, image) = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
     // A sentinel beside the workspaces root: only the workspace is synced,
     // so no path the guest can spell reaches it (S1, microVM grade — the
@@ -185,7 +193,7 @@ async fn confinement_smoke() {
     std::fs::write(&sentinel, "outside").expect("sentinel");
     let ws = dir.path().join("workspaces/conf");
     let provider = provider(config);
-    let sandbox = open(&provider, "conf", &ws).await;
+    let sandbox = open(&provider, "conf", &image, &ws).await;
 
     for escape in [
         "cat /workspace/../sentinel",
@@ -222,11 +230,11 @@ async fn confinement_smoke() {
 
 #[tokio::test]
 async fn failures_are_outcomes_not_errors() {
-    let config = require_assets!();
+    let (config, image) = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
     let ws = dir.path().join("fail");
     let provider = provider(config);
-    let sandbox = open(&provider, "fail", &ws).await;
+    let sandbox = open(&provider, "fail", &image, &ws).await;
 
     // A nonzero exit is an outcome the model reacts to, never a ToolError.
     let out = shell(&sandbox, "exit 3").await.expect("outcome");
@@ -243,11 +251,11 @@ async fn failures_are_outcomes_not_errors() {
 
 #[tokio::test]
 async fn output_is_capped() {
-    let config = require_assets!();
+    let (config, image) = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
     let ws = dir.path().join("cap");
     let provider = provider(config);
-    let sandbox = open(&provider, "cap", &ws).await;
+    let sandbox = open(&provider, "cap", &image, &ws).await;
 
     let out = shell(&sandbox, "head -c 100000 /dev/zero | tr '\\0' 'a'")
         .await
@@ -267,33 +275,33 @@ async fn output_is_capped() {
 
 #[tokio::test]
 async fn provisioning_is_lazy_and_counted() {
-    let config = require_assets!();
+    let (config, image) = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
     let ws = dir.path().join("lazy");
     let provider = provider(config);
-    let sandbox = open(&provider, "lazy", &ws).await;
+    let sandbox = open(&provider, "lazy", &image, &ws).await;
 
     // A Workspace call provisions nothing (sandbox spec §2.3 item 2).
     workspace(&sandbox, "write_file", json!({"path": "f", "content": "x"}))
         .await
         .expect("write");
-    assert_eq!(provider.stats.native_built(), 0);
+    assert_eq!(provider.stats().native_built(), 0);
 
     shell(&sandbox, "true").await.expect("first");
-    assert_eq!(provider.stats.native_built(), 1);
+    assert_eq!(provider.stats().native_built(), 1);
     shell(&sandbox, "true").await.expect("second");
-    assert_eq!(provider.stats.native_built(), 1, "the VM is reused");
+    assert_eq!(provider.stats().native_built(), 1, "the VM is reused");
 
     sandbox.release().await;
 }
 
 #[tokio::test]
 async fn release_kills_the_vm_and_is_idempotent() {
-    let config = require_assets!();
+    let (config, image) = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
     let ws = dir.path().join("rel");
     let provider = provider(config);
-    let sandbox = open(&provider, "rel", &ws).await;
+    let sandbox = open(&provider, "rel", &image, &ws).await;
 
     shell(&sandbox, "true").await.expect("shell");
     let control = control_dir(&ws);
@@ -316,11 +324,11 @@ async fn release_kills_the_vm_and_is_idempotent() {
 
 #[tokio::test]
 async fn an_externally_killed_vm_is_single_tier_loss() {
-    let config = require_assets!();
+    let (config, image) = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
     let ws = dir.path().join("stl");
     let provider = provider(config);
-    let sandbox = open(&provider, "stl", &ws).await;
+    let sandbox = open(&provider, "stl", &image, &ws).await;
 
     shell(&sandbox, "true").await.expect("first");
     let control = control_dir(&ws);
@@ -344,18 +352,18 @@ async fn an_externally_killed_vm_is_single_tier_loss() {
     // The next call MAY re-provision lazily under the acquisition this
     // activation already journaled.
     shell(&sandbox, "true").await.expect("re-provisioned");
-    assert_eq!(provider.stats.native_built(), 2);
+    assert_eq!(provider.stats().native_built(), 2);
 
     sandbox.release().await;
 }
 
 #[tokio::test]
 async fn a_vanished_workspace_escalates_to_environment_lost() {
-    let config = require_assets!();
+    let (config, image) = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
     let ws = dir.path().join("lost");
     let provider = provider(config);
-    let sandbox = open(&provider, "lost", &ws).await;
+    let sandbox = open(&provider, "lost", &image, &ws).await;
 
     shell(&sandbox, "true").await.expect("first");
     std::fs::remove_dir_all(&ws).expect("external loss");
@@ -379,9 +387,8 @@ async fn a_missing_binary_fails_the_call_as_a_sandbox_outcome() {
     let provider = provider(FirecrackerConfig::new(
         "/no/such/firecracker",
         "/no/vmlinux",
-        "/no/rootfs.ext4",
     ));
-    let sandbox = open(&provider, "nobin", &dir.path().join("nobin")).await;
+    let sandbox = open(&provider, "nobin", "/no/rootfs.ext4", &dir.path().join("nobin")).await;
 
     // Provisioning fails as a per-call outcome (harness spec §5.4) — and
     // lazily: the Workspace tier still works without firecracker anywhere.
@@ -396,14 +403,14 @@ async fn a_missing_binary_fails_the_call_as_a_sandbox_outcome() {
         ),
         other => panic!("a missing binary is a Sandbox outcome, got {other:?}"),
     }
-    assert_eq!(provider.stats.native_built(), 0, "nothing was provisioned");
+    assert_eq!(provider.stats().native_built(), 0, "nothing was provisioned");
     sandbox.release().await;
 }
 
 #[tokio::test]
 async fn a_named_egress_allowlist_fails_open() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let provider = provider(FirecrackerConfig::new("/usr/bin/firecracker", "/k", "/r"));
+    let provider = provider(FirecrackerConfig::new("/usr/bin/firecracker", "/k"));
 
     // §2.2: holding Native implies Network's grants; a VM with no network
     // device delivers an empty allowlist only, so a profile naming egress

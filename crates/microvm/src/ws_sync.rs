@@ -102,10 +102,32 @@ fn append_dir(
     Ok(())
 }
 
+/// Restore the workspace at `ws` from a guest-produced tar, **two-phase**:
+/// unpack into a sibling `<ws>.incoming` staging directory — the same
+/// filesystem as the workspace, so the swap's renames never fail with
+/// `EXDEV` — then swap whole trees. A corrupt or truncated tar leaves the
+/// workspace untouched; that matters because both consumers durably capture
+/// the workspace (the sandbox after every tool call, the machine at every
+/// quiescent point), and a partial directory would be captured as deletions.
+/// The staging dance is this codec's secret; callers hold only the path.
+pub fn restore_workspace(ws: &Path, tar: &[u8]) -> Result<(), std::io::Error> {
+    let mut name = ws.as_os_str().to_owned();
+    name.push(".incoming");
+    let incoming = std::path::PathBuf::from(name);
+    let _ = std::fs::remove_dir_all(&incoming);
+    std::fs::create_dir_all(&incoming)?;
+    let staged = Dir::open_ambient_dir(&incoming, cap_std::ambient_authority())?;
+    untar_workspace(&staged, tar)?;
+    let ws_dir = Dir::open_ambient_dir(ws, cap_std::ambient_authority())?;
+    replace_workspace(&ws_dir, &staged)?;
+    let _ = std::fs::remove_dir_all(&incoming);
+    Ok(())
+}
+
 /// Remove every child of the workspace, leaving the directory itself in
 /// place (it may be a mount point that must survive). The clear half of the
 /// replace-never-merge discipline every consumer shares.
-pub fn clear_workspace(dir: &Dir) -> Result<(), std::io::Error> {
+fn clear_workspace(dir: &Dir) -> Result<(), std::io::Error> {
     for entry in dir.entries()? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
@@ -117,14 +139,9 @@ pub fn clear_workspace(dir: &Dir) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-/// Replace `ws`'s contents with `staged`'s, by rename — the commit half of a
-/// **two-phase** unpack: [`untar_workspace`] into a staging directory first,
-/// then swap, so a corrupt or truncated tar can never leave `ws` partial (a
-/// consumer that durably captures `ws` would otherwise capture the damage as
-/// deletions). The staging directory must live on the same filesystem as
-/// `ws` — a sibling path, never the system temp directory — or the renames
-/// fail with `EXDEV`.
-pub fn replace_workspace(ws: &Dir, staged: &Dir) -> Result<(), std::io::Error> {
+/// Replace `ws`'s contents with `staged`'s, by rename — the commit half of
+/// [`restore_workspace`]'s two-phase unpack.
+fn replace_workspace(ws: &Dir, staged: &Dir) -> Result<(), std::io::Error> {
     clear_workspace(ws)?;
     for entry in staged.entries()? {
         let entry = entry?;
@@ -133,14 +150,11 @@ pub fn replace_workspace(ws: &Dir, staged: &Dir) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-/// Replace the workspace's contents with a tar stream the guest produced.
-/// Every write goes through the handle: an absolute or `..`-bearing entry
-/// path is skipped here and unrepresentable below (S1, twice over).
-pub fn untar_workspace(dir: &Dir, bytes: &[u8]) -> Result<(), std::io::Error> {
-    // Clear first — the tar is already fully received and capped, so the
-    // worst a failure past this point leaves is a partial workspace the
-    // model can read back, never a half-merged one. A consumer that cannot
-    // afford even that runs the two-phase form ([`replace_workspace`]).
+/// Unpack a guest-produced tar into `dir` (the staging half of
+/// [`restore_workspace`]). Every write goes through the handle: an absolute
+/// or `..`-bearing entry path is skipped here and unrepresentable below (S1,
+/// twice over).
+fn untar_workspace(dir: &Dir, bytes: &[u8]) -> Result<(), std::io::Error> {
     clear_workspace(dir)?;
     let mut archive = tar::Archive::new(bytes);
     for entry in archive.entries()? {

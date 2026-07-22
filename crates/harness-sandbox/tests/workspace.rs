@@ -203,10 +203,10 @@ fn release_keeps_the_workspace_and_is_idempotent() {
     let provider = TieredSandboxes::new();
     let sandbox = open(&provider, "s", dir.path());
     call(&sandbox, "write_file", json!({"path": "f", "content": "x"})).expect("write");
-    assert_eq!(provider.stats.opened(), 1);
+    assert_eq!(provider.stats().opened(), 1);
 
     block_on(sandbox.release());
-    assert_eq!(provider.stats.released(), 1);
+    assert_eq!(provider.stats().released(), 1);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("f")).expect("survives"),
         "x",
