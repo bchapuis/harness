@@ -880,19 +880,28 @@ impl RaftGroup {
     }
 
     /// The quorum commit rule: only entries of the current term commit by
-    /// counting (Raft §5.4.2), and the leader itself always matches its log.
+    /// counting (Raft §5.4.2). The leader's own log always matches, but it counts
+    /// toward the quorum **only while it is still a voter**: once a leader has
+    /// committed its own `RemoveVoter` it must not vote itself over the commit
+    /// line, or a non-voter leader could advance commit on a phantom self-vote
+    /// with sub-quorum real replication — a minority evicting the majority (spec
+    /// §18.5 #22: a side lacking a quorum of voters commits none). The `tick`
+    /// non-voter early-return already keeps such a leader dormant, so this is a
+    /// defense-in-depth guard that makes the property local rather than emergent.
     fn advance_commit(&self, state: &mut RaftState) {
         for index in (state.commit + 1..=state.last_index()).rev() {
             if state.term_at(index) != state.term {
                 continue;
             }
-            let replicated = 1 + state
-                .voters
-                .iter()
-                .filter(|&&v| {
-                    v != self.node && state.matched.get(&v).copied().unwrap_or(0) >= index
-                })
-                .count();
+            let self_vote = usize::from(state.voters.contains(&self.node));
+            let replicated = self_vote
+                + state
+                    .voters
+                    .iter()
+                    .filter(|&&v| {
+                        v != self.node && state.matched.get(&v).copied().unwrap_or(0) >= index
+                    })
+                    .count();
             if replicated >= state.quorum() {
                 state.commit = index;
                 break;
@@ -1562,6 +1571,60 @@ mod tests {
                 .unwrap_or_default(),
             expected,
             "a voter has the same committed log as the learner",
+        );
+    }
+
+    /// Guard for spec §18.5 #22: once a leader commits its own `RemoveVoter` it is
+    /// no longer a voter and MUST NOT count itself toward the commit quorum —
+    /// otherwise a non-voter leader could advance commit on a phantom self-vote
+    /// with only sub-quorum real replication, a minority evicting the majority.
+    /// In the full engine the `tick` non-voter early-return keeps such a leader
+    /// dormant, so this drives `advance_commit` directly to pin the property to
+    /// the commit arithmetic itself rather than to that outer guard.
+    #[test]
+    fn a_self_removed_leader_does_not_count_its_own_phantom_vote() {
+        let node = NodeId::new(1);
+        let (v2, v3) = (NodeId::new(2), NodeId::new(3));
+        let group = RaftGroup::new(
+            GroupId(1),
+            node,
+            vec![node, v2, v3],
+            Vec::new(),
+            Duration::from_millis(100),
+            Arc::new(InMemoryRaftWAL::new()),
+            Instant::ZERO,
+        );
+
+        let mut state = group.lock();
+        state.role = Role::Leader;
+        state.term = 5;
+        // This leader has committed its own removal: the voter set is now {2, 3}
+        // (quorum 2) and node 1 is no longer among them.
+        state.voters = vec![v2, v3];
+        // A fresh current-term entry sits uncommitted at index 1, replicated to
+        // exactly one real voter (node 2) — one short of the 2-voter quorum.
+        state.log = vec![RaftEntry {
+            term: 5,
+            payload: EntryPayload::App(b"evict".to_vec()),
+        }];
+        state.matched.insert(v2, 1);
+        state.matched.insert(v3, 0);
+
+        group.advance_commit(&mut state);
+        assert_eq!(
+            state.commit, 0,
+            "a non-voter leader must not commit on its own phantom self-vote",
+        );
+
+        // Restore node 1 to the voter set (quorum 2 of {1, 2, 3}); now the same
+        // single follower plus the leader's own legitimate vote reaches quorum, so
+        // the entry commits. Proves the guard blocks only the phantom vote, not a
+        // real one — it is not a blanket refusal to commit.
+        state.voters = vec![node, v2, v3];
+        group.advance_commit(&mut state);
+        assert_eq!(
+            state.commit, 1,
+            "a voter leader commits on its own vote plus one follower (quorum 2 of 3)",
         );
     }
 
