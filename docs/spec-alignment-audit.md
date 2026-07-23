@@ -170,14 +170,15 @@ the code and then adversarially re-checked. All five are **ALIGNED**:
 
 Two latent smells surfaced, neither reachable as a violating execution today:
 
-- `advance_commit` counts `self` unconditionally with no `state.voters` membership
-  check, and `drain_committed` applies `RemoveVoter(self)` without a leader step-down
-  (`raft.rs:889, 922-926`). In principle a self-removed leader could commit on a
-  phantom self-vote; in practice the `tick()` non-voter early-return (`raft.rs:704`)
+- `advance_commit` counted `self` toward the quorum unconditionally, with no
+  `state.voters` membership check. In principle a self-removed leader could commit on
+  a phantom self-vote; in practice the `tick()` non-voter early-return (`raft.rs:704`)
   makes it dormant — it never replicates, so it never receives the append-replies that
-  are `advance_commit`'s only remaining call site — so the path is dead. A defensive
-  guard (skip the self-count when `self` is not a voter, or step down on
-  `RemoveVoter(self)`) would make the safety local rather than emergent.
+  are `advance_commit`'s only remaining call site — so the path was already dead.
+  **RESOLVED (2026-07-23):** `advance_commit` now counts the leader's own log only
+  while it remains in the voter set (`raft.rs`), making the safety local to the commit
+  arithmetic rather than emergent from the dormancy guard, with a regression test that
+  drives `advance_commit` directly and fails on the old code.
 - A downed CONTROL voter lingers in `state.voters` until an operator calls
   `remove_voter`; this is spec-conformant (removal is the administrative half of a
   fresh-NodeId replace) and carries no fault-tolerance regression, but the phantom
