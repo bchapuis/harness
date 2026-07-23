@@ -10,18 +10,20 @@
 //! `Debug + Clone + PartialEq + Send + Sync + 'static`); no hand-written impl is
 //! needed.
 //!
-//! This enum is the grain-lifecycle subset. The shard events of §13
-//! (`LeaderChanged`, `ShardSplit`, `ShardMerged`) remain **deferred**: leadership
-//! is observed through the system seam rather than emitted, and split/merge (§7.7)
-//! is not yet implemented.
+//! This enum carries the grain-lifecycle events and the shard events of §13:
+//! `LeaderChanged` (emitted by the node that wins a shard's election, once per
+//! term it observes), and `ShardSplit`/`ShardMerged` (emitted by each node as it
+//! applies the committed partition change, §7.7). The split/merge events plus
+//! the `shard` on `Committed` are what let the simulator's checkers verify G15
+//! — a grain writable in exactly one shard — over the ordered stream.
 
 use actor_core::NodeId;
 
 use crate::grain::GrainName;
 
-/// A grain-lifecycle event on the framework's `Event` stream (spec §13).
+/// A grain-lifecycle or shard event on the framework's `Event` stream (spec §13).
 ///
-/// Every variant carries the `node` that hosts the activation (its shard's
+/// Every grain variant carries the `node` that hosts the activation (its shard's
 /// leader, §5.2). The node is what makes the per-node activation guarantee
 /// (**G6**, "exactly-once activation *per node*") expressible as a continuous
 /// checker over the stream: without it, an activation that migrates on failover
@@ -40,10 +42,14 @@ pub enum GrainEvent {
         replayed: u64,
     },
     /// A command's events committed at the grain's new head (§6, §7). The reply
-    /// is released only after this (the output gate, invariant **G5**).
+    /// is released only after this (the output gate, invariant **G5**). Carries
+    /// the `shard` the activation serves under: the G15 checker's hook — across
+    /// a split, a moved grain's `shard` transitions parent→child exactly once,
+    /// with `seq` still strictly increasing.
     Committed {
         node: NodeId,
         name: GrainName,
+        shard: u32,
         seq: u64,
     },
     /// A snapshot was persisted at a committed seq (§9).
@@ -55,4 +61,34 @@ pub enum GrainEvent {
     /// An activation hibernated on idle and dropped its in-memory state (§10);
     /// the journal survives, so the next message rehydrates it (invariant **G12**).
     Passivated { node: NodeId, name: GrainName },
+    /// This node won a shard's leader election at `term` (§8, §13). Emitted by
+    /// the new leader itself, once per term it observes, so the stream carries
+    /// at most one per (shard, term) from the node that actually serves.
+    LeaderChanged {
+        node: NodeId,
+        grain_type: &'static str,
+        shard: u32,
+        term: u64,
+    },
+    /// A committed shard split was applied on `node` (§7.7): the parent's range
+    /// now ends just below `boundary` and the fresh `child` owns `[boundary, ..]`
+    /// with its own leader-election group. Emitted by every node as it applies
+    /// the commit (dedup by `(parent, child)` when counting splits).
+    ShardSplit {
+        node: NodeId,
+        grain_type: &'static str,
+        parent: u32,
+        child: u32,
+        boundary: u64,
+    },
+    /// A committed shard merge was applied on `node` (§7.7): `left` absorbed the
+    /// adjacent `right` shard's range and grains; `right` is retired and its
+    /// leader-election group reclaimed (G7). Emitted by every node as it applies
+    /// the commit.
+    ShardMerged {
+        node: NodeId,
+        grain_type: &'static str,
+        left: u32,
+        right: u32,
+    },
 }

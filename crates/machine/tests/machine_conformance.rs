@@ -204,6 +204,35 @@ impl ClusterWorkload for Narrative {
                 .and_then(|r| r.ok())
                 .map(|reply| reply.attachment);
 
+            // Establish the narrative's precondition: the machine is durably
+            // provisioned before the fault sequence. A name→shard partition
+            // places "story" on some shard whose leader must be settled for the
+            // provision commit to land; re-issue until Status confirms it (the
+            // Provision handler rejects a second provision, so re-issue only
+            // while unprovisioned), so the story tests failover of a *committed*
+            // machine rather than racing the cluster's settling.
+            for _ in 0..20 {
+                if let Ok(status) = grain.ask_timeout(Status, Duration::from_secs(2)).await
+                    && status.provisioned
+                {
+                    break;
+                }
+                let _ = grain
+                    .ask_timeout(
+                        Provision {
+                            owner: "alice".into(),
+                            base_image: base.clone(),
+                            vcpus: 1,
+                            mem_mib: 128,
+                            checkpoint: Duration::from_millis(400),
+                            lease: Duration::from_millis(400),
+                            authorized_keys: BTreeMap::new(),
+                        },
+                        Duration::from_secs(2),
+                    )
+                    .await;
+            }
+
             // 2. Mid-session: dwell so the checkpoint alarm captures (M3's
             //    cadence), then a partition creates a doomed minority (M5).
             clock.sleep(Duration::from_millis(600)).await;

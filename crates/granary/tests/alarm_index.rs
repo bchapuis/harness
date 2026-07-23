@@ -251,6 +251,7 @@ impl GrainStore for RefusingStore {
         _at: Seq,
         _term: Term,
         _state: Vec<u8>,
+        _kind: WriteKind,
     ) -> StoreAck {
         RefusingStore::refuse()
     }
@@ -279,6 +280,16 @@ impl GrainStore for RefusingStore {
 
     fn blob_ids(&self, _shard: u32, _grain: &GrainName) -> Vec<BlobId> {
         vec![]
+    }
+
+    fn seal_range(&self, _shard: u32, _from: u64) {}
+
+    fn unseal(&self, _shard: u32) {}
+
+    fn remove_grain(&self, _shard: u32, _grain: &GrainName) {}
+
+    fn shard_bytes(&self, _shard: u32) -> u64 {
+        0
     }
 }
 

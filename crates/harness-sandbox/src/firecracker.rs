@@ -94,8 +94,8 @@ use serde_json::Value;
 use serde_json::json;
 use tokio::net::UnixStream;
 
-use crate::provider::capped;
 use crate::provider::TierStats;
+use crate::provider::capped;
 
 /// The vsock port the guest agent listens on; part of the protocol version.
 const VSOCK_PORT: u32 = 52;
@@ -182,7 +182,8 @@ impl FirecrackerConfig {
 /// tier: the agent as init over one root drive, vsock on, no network (a
 /// sandboxed guest has no NIC by construction, sandbox spec §1.1).
 fn vm_config(config: &FirecrackerConfig, rootfs: &Path) -> microvm::VmConfig {
-    let mut vm = microvm::VmConfig::rooted(&config.binary, &config.kernel, &config.boot_args, rootfs);
+    let mut vm =
+        microvm::VmConfig::rooted(&config.binary, &config.kernel, &config.boot_args, rootfs);
     vm.vcpus = config.vcpus;
     vm.mem_mib = config.mem_mib;
     vm
@@ -204,11 +205,9 @@ pub(crate) struct FirecrackerTier {
     ws: PathBuf,
     /// The digest key naming this VM's control directory
     /// ([`microvm::control_path`]), so two providers holding the same
-    /// session id never contend.
+    /// session id never contend. The directory holds the api socket, vsock
+    /// socket, config, the per-VM rootfs copy, and the console log.
     control_key: String,
-    /// Host-side control files (api socket, vsock socket, config, the per-VM
-    /// rootfs copy, console log): `control_path(CONTROL_PREFIX, control_key)`.
-    control: PathBuf,
     /// The VM slot. tokio's mutex, held across the whole call: provisioning
     /// awaits inside it, and one VM serves one push/exec/pull bracket at a
     /// time — the sync pair must not interleave between concurrent calls.
@@ -235,7 +234,6 @@ impl FirecrackerTier {
             image,
             dir,
             ws: host_workspace.to_path_buf(),
-            control: microvm::control_path(CONTROL_PREFIX, &control_key),
             control_key,
             vm: tokio::sync::Mutex::new(None),
             attempted: AtomicBool::new(false),
@@ -290,7 +288,7 @@ impl FirecrackerTier {
     async fn provision(&self) -> Result<MicroVm, ToolError> {
         self.attempted.store(true, Ordering::SeqCst);
         let fail = |e: String| ToolError::Sandbox(format!("firecracker: provision: {e}"));
-        microvm::control_dir(CONTROL_PREFIX, &self.control_key)
+        let control = microvm::control_dir(CONTROL_PREFIX, &self.control_key)
             .await
             .map_err(|e| fail(e.to_string()))?;
         // Each VM boots a private copy of the base rootfs: the guest writes
@@ -304,11 +302,11 @@ impl FirecrackerTier {
             ));
         }
         let base = PathBuf::from(&self.image);
-        let rootfs = self.control.join("rootfs.ext4");
+        let rootfs = control.join("rootfs.ext4");
         tokio::fs::copy(&base, &rootfs)
             .await
             .map_err(|e| fail(format!("rootfs {}: {e}", base.display())))?;
-        let mut vm = MicroVm::launch(&vm_config(&self.config, &rootfs), &self.control)
+        let mut vm = MicroVm::launch(&vm_config(&self.config, &rootfs), &control)
             .await
             .map_err(|e| fail(e.to_string()))?;
         // Readiness: the agent answers a ping. A VMM that exited early fails
@@ -340,7 +338,8 @@ impl FirecrackerTier {
         }
         let mut slot = self.vm.lock().await;
         self.teardown(&mut slot).await;
-        let _ = tokio::fs::remove_dir_all(&self.control).await;
+        let _ = tokio::fs::remove_dir_all(microvm::control_path(CONTROL_PREFIX, &self.control_key))
+            .await;
     }
 }
 

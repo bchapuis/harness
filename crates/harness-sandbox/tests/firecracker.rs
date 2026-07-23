@@ -388,7 +388,13 @@ async fn a_missing_binary_fails_the_call_as_a_sandbox_outcome() {
         "/no/such/firecracker",
         "/no/vmlinux",
     ));
-    let sandbox = open(&provider, "nobin", "/no/rootfs.ext4", &dir.path().join("nobin")).await;
+    let sandbox = open(
+        &provider,
+        "nobin",
+        "/no/rootfs.ext4",
+        &dir.path().join("nobin"),
+    )
+    .await;
 
     // Provisioning fails as a per-call outcome (harness spec §5.4) — and
     // lazily: the Workspace tier still works without firecracker anywhere.
@@ -403,7 +409,11 @@ async fn a_missing_binary_fails_the_call_as_a_sandbox_outcome() {
         ),
         other => panic!("a missing binary is a Sandbox outcome, got {other:?}"),
     }
-    assert_eq!(provider.stats().native_built(), 0, "nothing was provisioned");
+    assert_eq!(
+        provider.stats().native_built(),
+        0,
+        "nothing was provisioned"
+    );
     sandbox.release().await;
 }
 

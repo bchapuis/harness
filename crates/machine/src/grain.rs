@@ -232,7 +232,10 @@ pub enum MachineEvent {
     /// disk capture proceeded without a ws delta — machine §5.1's blessed
     /// degrade, journaled so "who lost workspace cadence, and since when" is
     /// answerable from the journal alone (M4's stance).
-    WsCaptureSkipped { at_nanos: u64, reason: String },
+    WsCaptureSkipped {
+        at_nanos: u64,
+        reason: String,
+    },
 }
 
 /// Ephemeral activation state (machine §1: the live microVM is one of the two

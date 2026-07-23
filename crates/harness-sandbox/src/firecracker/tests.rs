@@ -165,9 +165,14 @@ async fn the_bracket_round_trips_the_workspace() {
     let (tmp, dir) = workspace();
     dir.write("in.txt", b"forty-two").expect("seed");
 
-    let outcome = exec_bracket(&dir, tmp.path(), &guest.sock, "cat in.txt > out.txt && echo done")
-        .await
-        .unwrap_or_else(|_| panic!("bracket failed"));
+    let outcome = exec_bracket(
+        &dir,
+        tmp.path(),
+        &guest.sock,
+        "cat in.txt > out.txt && echo done",
+    )
+    .await
+    .unwrap_or_else(|_| panic!("bracket failed"));
     assert_eq!(outcome["exit_code"], 0);
     assert_eq!(outcome["stdout"], "done\n");
 
@@ -237,9 +242,14 @@ async fn suid_bits_do_not_survive_the_pull() {
     let guest = FakeGuest::spawn();
     let (tmp, dir) = workspace();
 
-    let outcome = exec_bracket(&dir, tmp.path(), &guest.sock, "touch s.bin && chmod 4755 s.bin")
-        .await
-        .unwrap_or_else(|_| panic!("bracket failed"));
+    let outcome = exec_bracket(
+        &dir,
+        tmp.path(),
+        &guest.sock,
+        "touch s.bin && chmod 4755 s.bin",
+    )
+    .await
+    .unwrap_or_else(|_| panic!("bracket failed"));
     assert_eq!(outcome["exit_code"], 0);
 
     let mode = cap_std::fs::PermissionsExt::mode(

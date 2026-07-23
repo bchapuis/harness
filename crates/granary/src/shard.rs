@@ -29,7 +29,7 @@ use crate::journal::GrainJournalError;
 use crate::journal::Seq;
 use crate::replica_store::ReplicaTransport;
 use crate::replicator::QuorumReplicator;
-use crate::replicator::ReplicaSets;
+use crate::replicator::ShardControl;
 use crate::store::GrainStore;
 
 /// A [`GrainJournal`] over a shard's leader-election group and per-grain
@@ -48,21 +48,23 @@ impl<R: RaftConsensus> Clone for QuorumGrainJournal<R> {
 
 impl<R: RaftConsensus> QuorumGrainJournal<R> {
     /// Build the journal for one shard. `group` is the shard's leader-election group
-    /// (already created by [`shardmap`](crate::shardmap)); `sets` is the shard's
-    /// **live** replica sets, shared with the shard map's apply loop so a committed
-    /// reallocation reaches in-flight journals (§7.7); `local` is this node's
-    /// [`GrainStore`]; `transport` reaches the peer replicas' stores (spec §7.2, §8).
+    /// (already created by [`shardmap`](crate::shardmap)); `control` is the shard's
+    /// **live** control state — replica sets, owned range, split freeze — shared
+    /// with the shard map's apply loop so a committed reallocation or split
+    /// reaches in-flight journals (§7.7); `local` is this node's [`GrainStore`];
+    /// `transport` reaches the peer replicas' stores (spec §7.2, §8).
     pub(crate) fn new(
         consensus: R,
         group: GroupId,
         shard: u32,
-        sets: Arc<std::sync::Mutex<ReplicaSets>>,
+        control: Arc<std::sync::Mutex<ShardControl>>,
         local: Arc<dyn GrainStore>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> QuorumGrainJournal<R> {
         let self_node = consensus.node();
         let election = LeaderElection::new(consensus, group);
-        let replicator = QuorumReplicator::new(election, local, transport, sets, shard, self_node);
+        let replicator =
+            QuorumReplicator::new(election, local, transport, control, shard, self_node);
         QuorumGrainJournal {
             replicator: Arc::new(replicator),
         }

@@ -1273,6 +1273,12 @@ where
         }
     }
 
+    fn remove_group(&self, group: GroupId) {
+        if let Some(raft) = self.inner.raft.as_ref() {
+            raft.remove_group(group);
+        }
+    }
+
     fn subscribe_commits(&self, group: GroupId) -> Receiver<Committed> {
         let (tx, rx) = async_channel::unbounded();
         // Seed a subscriber that came up over a reloaded, compacted log with the

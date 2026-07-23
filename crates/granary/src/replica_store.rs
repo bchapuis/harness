@@ -104,7 +104,9 @@ impl Message for ReadGrain {
 }
 
 /// Quorum-store a grain snapshot to one replica, fenced by the shard `term`
-/// (spec §9). The reply is the replica's [`StoreAck`].
+/// (spec §9). The reply is the replica's [`StoreAck`]. A
+/// [`WriteKind::Transfer`] skips the fence — the split/merge driver landing a
+/// moved grain's snapshot under the destination shard's keys (§7.7).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct StoreSnapshot {
     pub(crate) shard: u32,
@@ -112,11 +114,29 @@ pub(crate) struct StoreSnapshot {
     pub(crate) at: Seq,
     pub(crate) term: Term,
     pub(crate) state: Vec<u8>,
+    pub(crate) kind: WriteKind,
 }
 
 impl Message for StoreSnapshot {
     type Reply = StoreAck;
     const MANIFEST: Manifest = Manifest::new("granary.StoreSnapshot");
+}
+
+/// Tighten one replica's per-shard **append bound** (spec §7.7): durably refuse
+/// every future append whose grain hash is `>= from`, at any term. The split
+/// (or merge) driver fans this to the shard's replicas and proceeds only once a
+/// majority has acked — from then on no append to the moved range can assemble
+/// a write quorum, the store half of G15. Idempotent and monotone (the bound
+/// only tightens). The ask resolving is the durable acknowledgement.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SealRange {
+    pub(crate) shard: u32,
+    pub(crate) from: u64,
+}
+
+impl Message for SealRange {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("granary.SealRange");
 }
 
 /// Store one immutable, content-addressed blob on a replica (durable-workspace
@@ -232,6 +252,7 @@ impl<G: Grain> Actor for ReplicaStore<G> {
         registry.accept::<StoreRecord>();
         registry.accept::<ReadGrain>();
         registry.accept::<StoreSnapshot>();
+        registry.accept::<SealRange>();
         registry.accept::<StoreBlob>();
         registry.accept::<FetchBlob>();
         registry.accept::<HasBlob>();
@@ -263,7 +284,13 @@ impl<G: Grain> Handler<ReadGrain> for ReplicaStore<G> {
 impl<G: Grain> Handler<StoreSnapshot> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreSnapshot, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
         self.store
-            .store_snapshot(msg.shard, &msg.grain, msg.at, msg.term, msg.state)
+            .store_snapshot(msg.shard, &msg.grain, msg.at, msg.term, msg.state, msg.kind)
+    }
+}
+
+impl<G: Grain> Handler<SealRange> for ReplicaStore<G> {
+    async fn handle(&mut self, msg: SealRange, _ctx: &Ctx<ReplicaStore<G>>) {
+        self.store.seal_range(msg.shard, msg.from);
     }
 }
 
@@ -345,8 +372,19 @@ pub trait ReplicaTransport: Send + Sync + 'static {
         at: Seq,
         term: Term,
         state: Vec<u8>,
+        kind: WriteKind,
         within: Duration,
     ) -> BoxFuture<'static, Result<StoreAck, CallError>>;
+
+    /// Tighten a replica's per-shard append bound (split/merge seal, §7.7): the
+    /// ask resolving means the bound is durable there.
+    fn seal_range(
+        &self,
+        node: NodeId,
+        shard: u32,
+        from: u64,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<(), CallError>>;
 
     /// Store one immutable blob on a replica (durable-workspace design): unfenced,
     /// unordered — the immutable subset of [`store_record`](ReplicaTransport::store_record).
@@ -511,6 +549,7 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         at: Seq,
         term: Term,
         state: Vec<u8>,
+        kind: WriteKind,
         within: Duration,
     ) -> BoxFuture<'static, Result<StoreAck, CallError>> {
         self.ask(
@@ -521,9 +560,20 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
                 at,
                 term,
                 state,
+                kind,
             },
             within,
         )
+    }
+
+    fn seal_range(
+        &self,
+        node: NodeId,
+        shard: u32,
+        from: u64,
+        within: Duration,
+    ) -> BoxFuture<'static, Result<(), CallError>> {
+        self.ask(node, SealRange { shard, from }, within)
     }
 
     fn store_blob(

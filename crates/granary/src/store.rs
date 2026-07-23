@@ -66,6 +66,13 @@ pub enum StoreAck {
     /// concurrency on the head: it keeps a stale leader from overwriting a committed
     /// record even though its term is current (§8).
     Stale(Seq),
+    /// Refused: the append targets a key at or above the shard's **append bound**
+    /// (spec §7.7) — a range this shard no longer owns because a split moved it to
+    /// a child (or a merge is retiring the whole shard). Refused at ANY term: the
+    /// bound is what stops a leader that has not yet applied the split from
+    /// assembling a majority for a moved key. The caller surfaces `NotLeader`, so
+    /// the client re-resolves against the committed map (G15).
+    Sealed,
 }
 
 /// The reply to a read: every occupied slot with its committing term, and the
@@ -107,6 +114,15 @@ pub enum WriteKind {
     /// A recovery write-back (read-repair, §8): fills/repairs slots by highest term
     /// and never reports `Stale`.
     Repair,
+    /// A split/merge transfer copy (spec §7.7): the driver landing a moved grain's
+    /// committed prefix under the **destination** shard's keys. Skips the fence —
+    /// the copy is stamped `Term::ZERO` and its destination keys belong to a range
+    /// no leader serves yet (a split's child) or to grains the destination cannot
+    /// hold (a merge's disjoint moved range), so there is no term to contest, and
+    /// a merge destination's live fence must not refuse it. Never reports `Stale`.
+    /// Safe only from the transfer driver: the source is a completed quorum
+    /// recovery, so re-driven copies agree per slot (G14).
+    Transfer,
 }
 
 /// A node's durable store of grain records and snapshots (spec §7.2, §7.4).
@@ -160,7 +176,10 @@ pub trait GrainStore: Send + Sync + 'static {
     fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> ReadOutcome;
 
     /// Persist a snapshot at `at` fenced by `term` (§9). Kept only if it advances
-    /// the stored snapshot. Returns `Stored(at)` or `Fenced(higher)`.
+    /// the stored snapshot. Returns `Stored(at)` or `Fenced(higher)`. A
+    /// [`WriteKind::Transfer`] skips the fence (the split/merge driver landing a
+    /// moved grain's snapshot under the destination shard's keys, §7.7); `Append`
+    /// and `Repair` are fenced identically.
     fn store_snapshot(
         &self,
         shard: u32,
@@ -168,6 +187,7 @@ pub trait GrainStore: Send + Sync + 'static {
         at: Seq,
         term: Term,
         state: Vec<u8>,
+        kind: WriteKind,
     ) -> StoreAck;
 
     /// Drop records past slot `after` whose term is at most `term` — the leader
@@ -230,6 +250,38 @@ pub trait GrainStore: Send + Sync + 'static {
     /// Every blob id this store holds for one grain — the migration driver's
     /// source list when copying a grain's blob area to a new replica.
     fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId>;
+
+    // --- Shard split/merge (§7.7) --------------------------------------------
+
+    /// Tighten the shard's **append bound**: refuse every future
+    /// [`WriteKind::Append`] whose grain's name hash is `>= from` (`Sealed`),
+    /// monotonically (`min` with any existing bound) and durably. This is the
+    /// store half of G15: once a majority of the shard's replicas are bounded, no
+    /// append to the moved range can assemble a write quorum at ANY term — even
+    /// from a leader that has not yet applied the split — by the same
+    /// intersection argument as the term fence. The bound is permanent for the
+    /// shard (the moved range never returns to it) except through
+    /// [`unseal`](GrainStore::unseal) on a committed merge. Recovery reads,
+    /// repairs, and transfers are not bounded — the split driver itself must
+    /// recover and copy the moved grains after sealing.
+    fn seal_range(&self, shard: u32, from: u64);
+
+    /// Clear the shard's append bound — only on applying a committed merge
+    /// (§7.7), where the shard re-absorbs the very range its earlier split moved
+    /// out and the merged data is already durable under this shard's keys.
+    fn unseal(&self, shard: u32);
+
+    /// Drop every trace of one grain under `shard` — records, snapshot, and
+    /// blobs. The split driver's local GC of a moved grain's parent-keyed data
+    /// after the child's copy is quorum-durable and the mapping has committed.
+    /// Idempotent; never touches other shards' keys for the same grain.
+    fn remove_grain(&self, shard: u32, grain: &GrainName);
+
+    /// An estimate of the bytes this store holds under `shard` — records,
+    /// snapshots, and blobs. The split trigger's size signal (§7.7,
+    /// `shard_target_bytes`); an estimate is enough, so implementations may
+    /// ignore framing overhead.
+    fn shard_bytes(&self, shard: u32) -> u64;
 }
 
 /// How the runtime obtains a node's [`GrainStore`] (spec §7.4). Supplied on
@@ -431,6 +483,22 @@ impl GrainRecords {
         (StoreAck::Stored(at), false)
     }
 
+    /// An estimate of this segment's stored bytes — record payloads plus the
+    /// snapshot state, ignoring framing. Feeds the shard-size split signal (§7.7).
+    pub(crate) fn approximate_bytes(&self) -> u64 {
+        let records: usize = self
+            .slots
+            .iter()
+            .flatten()
+            .map(|slot| slot.bytes.len())
+            .sum();
+        let snapshot = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |(_, _, state)| state.len());
+        (records + snapshot) as u64
+    }
+
     /// Drop records past slot `after` whose term is at most `term` (the rollback of
     /// an uncommitted tail, §7.2). Term-aware, per slot: a record above `after`
     /// written under a **higher** term is a newer leader's — possibly committed —
@@ -468,6 +536,10 @@ struct Inner {
     /// The fence: the highest shard term this store has acknowledged (§8), behind its
     /// own leaf lock so cross-grain bumps never block a grain's data ops.
     fences: Mutex<HashMap<u32, Term>>,
+    /// The per-shard **append bound** (§7.7): refuse appends at or above this name
+    /// hash — the store half of split/merge safety (G15). A leaf lock like the
+    /// fence, checked inside the grain's segment lock.
+    seals: Mutex<HashMap<u32, u64>>,
     /// One independent segment per `(shard, grain)`, each behind its own lock.
     segments: Mutex<HashMap<(u32, GrainName), Segment>>,
     /// The grain-native content-addressed blob area (durable-workspace design): one
@@ -535,6 +607,19 @@ impl MemoryGrainStore {
         }
         Ok(())
     }
+
+    /// Whether the shard's append bound refuses this grain's appends (§7.7).
+    /// Taken *inside* the held segment lock, like the fence, so an append that
+    /// passed the check is durably applied before any observer can act on the
+    /// bound being set.
+    fn sealed(&self, shard: u32, grain: &GrainName) -> bool {
+        self.inner
+            .seals
+            .lock()
+            .expect("grain store seals poisoned")
+            .get(&shard)
+            .is_some_and(|&from| crate::system::name_at_or_above(grain, from))
+    }
 }
 
 impl GrainStore for MemoryGrainStore {
@@ -551,7 +636,21 @@ impl GrainStore for MemoryGrainStore {
         // Hold the segment lock across the fence check and the apply, so a concurrent
         // `prepare` for *this* grain cannot slip between them (the fencing race, §8).
         let mut records_guard = segment.lock().expect("grain segment poisoned");
-        if let Err(fence) = self.check_and_bump_fence(shard, term) {
+        // The append bound (§7.7) is checked FIRST, before the fence can bump: a
+        // moved range accepts no new appends here at any term, and a refused
+        // append must not advance the shard fence as a side effect (that would
+        // fence the legitimate leader's own writes to the retained range).
+        // Repairs and transfers pass — the split driver recovers and copies the
+        // moved grains after sealing.
+        if kind == WriteKind::Append && self.sealed(shard, grain) {
+            return StoreAck::Sealed;
+        }
+        // A `Transfer` skips the fence: its destination keys have no contesting
+        // leader (see `WriteKind::Transfer`), and a merge destination's live fence
+        // must not refuse the copy.
+        if kind != WriteKind::Transfer
+            && let Err(fence) = self.check_and_bump_fence(shard, term)
+        {
             return StoreAck::Fenced(fence);
         }
         records_guard.store_record(after, term, records, kind)
@@ -601,10 +700,13 @@ impl GrainStore for MemoryGrainStore {
         at: Seq,
         term: Term,
         state: Vec<u8>,
+        kind: WriteKind,
     ) -> StoreAck {
         let segment = self.segment(shard, grain);
         let mut records_guard = segment.lock().expect("grain segment poisoned");
-        if let Err(fence) = self.check_and_bump_fence(shard, term) {
+        if kind != WriteKind::Transfer
+            && let Err(fence) = self.check_and_bump_fence(shard, term)
+        {
             return StoreAck::Fenced(fence);
         }
         records_guard.store_snapshot(at, term, state).0
@@ -714,6 +816,62 @@ impl GrainStore for MemoryGrainStore {
             .map(|area| area.keys().copied().collect())
             .unwrap_or_default()
     }
+
+    fn seal_range(&self, shard: u32, from: u64) {
+        let mut seals = self.inner.seals.lock().expect("grain store seals poisoned");
+        // Monotone: a bound only ever tightens (a re-driven seal, or a second
+        // split at a lower boundary); only `unseal` (a committed merge) lifts it.
+        let bound = seals.get(&shard).map_or(from, |&cur| cur.min(from));
+        seals.insert(shard, bound);
+    }
+
+    fn unseal(&self, shard: u32) {
+        self.inner
+            .seals
+            .lock()
+            .expect("grain store seals poisoned")
+            .remove(&shard);
+    }
+
+    fn remove_grain(&self, shard: u32, grain: &GrainName) {
+        self.inner
+            .segments
+            .lock()
+            .expect("grain store segments poisoned")
+            .remove(&(shard, grain.clone()));
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .remove(&(shard, grain.clone()));
+    }
+
+    fn shard_bytes(&self, shard: u32) -> u64 {
+        let records: u64 = self
+            .inner
+            .segments
+            .lock()
+            .expect("grain store segments poisoned")
+            .iter()
+            .filter(|((s, _), _)| *s == shard)
+            .map(|(_, segment)| {
+                segment
+                    .lock()
+                    .expect("grain segment poisoned")
+                    .approximate_bytes()
+            })
+            .sum();
+        let blobs: u64 = self
+            .inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .iter()
+            .filter(|((s, _), _)| *s == shard)
+            .map(|(_, area)| area.values().map(|bytes| bytes.len() as u64).sum::<u64>())
+            .sum();
+        records + blobs
+    }
 }
 
 #[cfg(test)]
@@ -722,6 +880,200 @@ mod tests {
 
     fn name(key: &str) -> GrainName {
         GrainName::new("test.Grain", key)
+    }
+
+    #[test]
+    fn a_sealed_range_refuses_appends_at_any_term_but_not_repairs_or_transfers() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        let hash = crate::system::name_hash(n.grain_type(), n.key());
+        // A bound above the grain's hash leaves its appends unaffected.
+        store.seal_range(0, hash.saturating_add(1));
+        assert!(matches!(
+            store.store_record(
+                0,
+                &n,
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"e1".to_vec()],
+                WriteKind::Append
+            ),
+            StoreAck::Stored(_)
+        ));
+        // Tighten the bound to cover the grain: appends refused at ANY term —
+        // including one above the fence — that is what stops a leader that has
+        // not yet applied the split (G15).
+        store.seal_range(0, hash);
+        assert_eq!(
+            store.store_record(
+                0,
+                &n,
+                Seq::new(1),
+                Term::new(99),
+                vec![b"e2".to_vec()],
+                WriteKind::Append
+            ),
+            StoreAck::Sealed
+        );
+        // Monotone: a later, looser seal does not lift the bound.
+        store.seal_range(0, hash.saturating_add(1));
+        assert_eq!(
+            store.store_record(
+                0,
+                &n,
+                Seq::new(1),
+                Term::new(99),
+                vec![b"e2".to_vec()],
+                WriteKind::Append
+            ),
+            StoreAck::Sealed
+        );
+        // The split driver's recovery write-back (`Repair`) still lands.
+        assert!(matches!(
+            store.store_record(
+                0,
+                &n,
+                Seq::new(1),
+                Term::new(2),
+                vec![b"e2".to_vec()],
+                WriteKind::Repair
+            ),
+            StoreAck::Stored(_)
+        ));
+        // Another shard's bound is independent.
+        assert!(matches!(
+            store.store_record(
+                1,
+                &n,
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"x".to_vec()],
+                WriteKind::Append
+            ),
+            StoreAck::Stored(_)
+        ));
+        // Only a committed merge lifts the bound.
+        store.unseal(0);
+        assert!(matches!(
+            store.store_record(
+                0,
+                &n,
+                Seq::new(2),
+                Term::new(99),
+                vec![b"e3".to_vec()],
+                WriteKind::Append
+            ),
+            StoreAck::Stored(_)
+        ));
+    }
+
+    #[test]
+    fn a_transfer_bypasses_the_fence_for_records_and_snapshot() {
+        // The split/merge driver lands a moved grain's committed prefix under the
+        // destination shard's keys at `Term::ZERO`; a merge destination's live
+        // fence must not refuse it (§7.7).
+        let store = MemoryGrainStore::new();
+        let n = name("moved");
+        assert!(matches!(
+            store.prepare(0, &name("resident"), Term::new(7)),
+            ReadOutcome::Prepared(_)
+        ));
+        // A normal zero-term write is fenced...
+        assert_eq!(
+            store.store_record(
+                0,
+                &n,
+                Seq::ZERO,
+                Term::ZERO,
+                vec![b"e1".to_vec()],
+                WriteKind::Repair
+            ),
+            StoreAck::Fenced(Term::new(7))
+        );
+        // ...but the transfer copy lands, records and snapshot both.
+        assert!(matches!(
+            store.store_record(
+                0,
+                &n,
+                Seq::ZERO,
+                Term::ZERO,
+                vec![b"e1".to_vec()],
+                WriteKind::Transfer
+            ),
+            StoreAck::Stored(_)
+        ));
+        assert!(matches!(
+            store.store_snapshot(
+                0,
+                &n,
+                Seq::new(1),
+                Term::ZERO,
+                b"snap@1".to_vec(),
+                WriteKind::Transfer
+            ),
+            StoreAck::Stored(_)
+        ));
+        // And the transfer did not poison the fence: the live term still writes.
+        assert!(matches!(
+            store.store_record(
+                0,
+                &name("resident"),
+                Seq::ZERO,
+                Term::new(7),
+                vec![b"r1".to_vec()],
+                WriteKind::Append
+            ),
+            StoreAck::Stored(_)
+        ));
+    }
+
+    #[test]
+    fn remove_grain_drops_records_snapshot_and_blobs_for_one_shard_only() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"e1".to_vec()],
+            WriteKind::Append,
+        );
+        store.store_record(
+            1,
+            &n,
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"other-shard".to_vec()],
+            WriteKind::Append,
+        );
+        let id = BlobId::of(b"blob");
+        store.put_blob(0, &n, id, b"blob".to_vec());
+        store.remove_grain(0, &n);
+        assert!(store.read(0, &n).slots.is_empty());
+        assert!(!store.has_blob(0, &n, id));
+        // The same grain under another shard index is untouched.
+        assert_eq!(store.read(1, &n).slots.len(), 1);
+        // Idempotent.
+        store.remove_grain(0, &n);
+    }
+
+    #[test]
+    fn shard_bytes_estimates_records_snapshots_and_blobs() {
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        assert_eq!(store.shard_bytes(0), 0);
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::new(1),
+            vec![vec![b'x'; 100]],
+            WriteKind::Append,
+        );
+        store.put_blob(0, &n, BlobId::of(b"b"), vec![b'y'; 50]);
+        assert_eq!(store.shard_bytes(0), 150);
+        assert_eq!(store.shard_bytes(1), 0);
     }
 
     #[test]
@@ -776,7 +1128,14 @@ mod tests {
         );
         assert_eq!(store.read_from(0, &n, Seq::new(3), 10), Vec::new());
         // A read past a compacted base returns the live tail only.
-        store.store_snapshot(0, &n, Seq::new(2), Term::new(1), b"snap@2".to_vec());
+        store.store_snapshot(
+            0,
+            &n,
+            Seq::new(2),
+            Term::new(1),
+            b"snap@2".to_vec(),
+            WriteKind::Append,
+        );
         assert_eq!(
             store.read_from(0, &n, Seq::ZERO, 10),
             vec![(Seq::new(3), b"e3".to_vec())]
@@ -928,7 +1287,14 @@ mod tests {
         // A snapshot at seq 2 subsumes e1, e2: they drop, the base advances to 2, and
         // only e3 remains as a live record.
         assert_eq!(
-            store.store_snapshot(0, &n, Seq::new(2), Term::new(1), b"snap@2".to_vec()),
+            store.store_snapshot(
+                0,
+                &n,
+                Seq::new(2),
+                Term::new(1),
+                b"snap@2".to_vec(),
+                WriteKind::Append
+            ),
             StoreAck::Stored(Seq::new(2))
         );
         let reply = store.read(0, &n);
@@ -969,7 +1335,14 @@ mod tests {
         );
         // A snapshot well past this replica's records (an InstallSnapshot analogue):
         // all slots drop, the base jumps to 5, and the head follows.
-        store.store_snapshot(0, &n, Seq::new(5), Term::new(2), b"snap@5".to_vec());
+        store.store_snapshot(
+            0,
+            &n,
+            Seq::new(5),
+            Term::new(2),
+            b"snap@5".to_vec(),
+            WriteKind::Append,
+        );
         assert!(store.read(0, &n).slots.is_empty());
         // A write-back of the recovered tail lands cleanly after the new base.
         assert_eq!(
@@ -990,7 +1363,14 @@ mod tests {
         let store = MemoryGrainStore::new();
         let n = name("a");
         // This replica compacted through seq 3.
-        store.store_snapshot(0, &n, Seq::new(3), Term::new(2), b"snap@3".to_vec());
+        store.store_snapshot(
+            0,
+            &n,
+            Seq::new(3),
+            Term::new(2),
+            b"snap@3".to_vec(),
+            WriteKind::Append,
+        );
         // A recovery write-back from base 1 re-offers seqs 2..=4; seqs 2,3 are already
         // subsumed by the snapshot, so only seq 4 is stored — no gap, no regression.
         store.store_record(

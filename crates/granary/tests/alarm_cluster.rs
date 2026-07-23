@@ -271,3 +271,98 @@ fn run_failover(seed: u64) {
         "the alarm fired exactly once, callerlessly, after failover"
     );
 }
+
+// --- Alarm reconciliation across a shard split (§7.7, §7.16) ------------------
+
+#[test]
+fn an_alarm_fires_after_a_split_moves_its_grain() {
+    // §7.16 across §7.7: arm alarms on many grains of one shard, split it so
+    // roughly half move to a fresh child, then advance past the deadline with NO
+    // caller touching any timer. Each moved grain's alarm must still fire — the
+    // child's driver picks it up from the child's index (the grain re-registered
+    // there on the split's re-activation) — and the parent's driver must clear
+    // the stale entries it inherited rather than churn on them forever. A
+    // recorder observes the committed `ShardSplit` so the test proves the split
+    // actually happened (else the alarms would fire trivially from shard 0).
+    use actor_core::EventSink;
+    use actor_simulation::Recorder;
+    use granary::GrainEvent;
+
+    let sim = Simulation::new(7);
+    let recorder = Recorder::new();
+    let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());
+    let net = SimNetwork::new(&sim)
+        .with_leader(swim(), raft(), DowningPolicy::Conservative)
+        .with_events(sink);
+    let systems = [net.join(A), net.join(B), net.join(C)];
+    sim.run_for(Duration::from_secs(2));
+    let cfg = GranaryConfig {
+        shards: 1,
+        idle_after: Duration::from_secs(600),
+        snapshot_every: 8,
+        ..GranaryConfig::default()
+    };
+    let indexes: Vec<Granary<AlarmIndex<SimCluster>>> = systems
+        .iter()
+        .map(|s| s.granary::<AlarmIndex<SimCluster>>(cfg.clone()))
+        .collect();
+    let timers: Vec<Granary<Timer>> = systems
+        .iter()
+        .zip(&indexes)
+        .map(|(s, idx)| s.granary_with_alarms::<Timer>(cfg.clone(), idx.clone()))
+        .collect();
+    sim.run_for(Duration::from_secs(3));
+
+    let keys: Vec<String> = (0..16).map(|i| format!("t/{i}")).collect();
+
+    // Arm a far-future alarm on each grain (registers it in shard 0's index).
+    for key in &keys {
+        drive(&sim, Duration::from_secs(5), {
+            let g = timers[0].grain(key.clone());
+            async move { g.ask(Arm { after_ms: 30_000 }).await.expect("arm commits") }
+        });
+    }
+
+    // Split shard 0; wait for the committed `ShardSplit` on the stream.
+    timers[0].split_shard(0);
+    let split = |recorder: &Recorder| {
+        recorder.events().iter().any(|e| {
+            matches!(
+                e.as_app::<GrainEvent>(),
+                Some(GrainEvent::ShardSplit { .. })
+            )
+        })
+    };
+    let mut moved = false;
+    for _ in 0..60 {
+        sim.run_for(Duration::from_millis(500));
+        if split(&recorder) {
+            moved = true;
+            break;
+        }
+    }
+    assert!(
+        moved,
+        "the split committed and moved some grains off shard 0"
+    );
+
+    // Advance past the 30s deadline with no caller ever touching a timer: only
+    // the drivers (parent and child) can re-activate them.
+    sim.run_for(Duration::from_secs(45));
+
+    // Every grain fired exactly once, callerlessly — whichever shard owns it now.
+    for key in &keys {
+        let fired = drive(&sim, Duration::from_secs(8), {
+            let g = timers[1].grain(key.clone());
+            async move {
+                g.ask_timeout(ReadFired, Duration::from_secs(6))
+                    .await
+                    .expect("read")
+            }
+        });
+        assert_eq!(
+            fired, 1,
+            "{key}: alarm fired once callerlessly across the split"
+        );
+    }
+}

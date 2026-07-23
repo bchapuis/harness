@@ -10,7 +10,9 @@
 //! **exactly-once per node by construction**, with no lock (invariant **G6**).
 //!
 //! The gateway is also the **router** (§5.4), but **single-shot**: resolving a
-//! name is two levels — name→shard by a stable hash ([`shard_for`]), shard→leader
+//! name is two levels — name→shard by the committed key-range partition (the
+//! shard map, §5.1; the founding [`shard_for`](crate::shard_for) while it
+//! bootstraps), shard→leader
 //! from the system (`leads_shard`/`shard_leader`). When this node leads the shard
 //! it activates the host locally and returns the handle; otherwise it returns
 //! `NotLeader(hint)` *immediately* (ordinary Raft client redirection, §5.4 step
@@ -47,9 +49,9 @@ use crate::grain::GrainName;
 use crate::grainref::Granary;
 use crate::host::Host;
 use crate::shardmap::ShardMapSource;
+use crate::shardmap::resolve_shard;
 use crate::system::GranarySystem;
 use crate::system::ShardId;
-use crate::system::shard_for;
 
 /// The receptionist key the gateway for a grain type registers under (spec
 /// §5.3): one well-known key per type, one entry per node. Routing looks the
@@ -100,9 +102,12 @@ impl<G: Grain> Message for Activate<G> {
 
 /// The node-local gateway for grain type `G` (spec §5.3).
 pub(crate) struct Gateway<G: Grain> {
-    /// Names this node currently hosts. The serial actor is the only writer, so
-    /// no lock guards it (**G6**).
-    table: HashMap<GrainName, ActorRef<Host<G>>>,
+    /// Names this node currently hosts, each with the shard index it activated
+    /// under. The serial actor is the only writer, so no lock guards it (**G6**).
+    /// The stored index guards against a stale entry after a split/merge (§7.7):
+    /// a name that now resolves to a different shard must re-activate over the
+    /// new shard's journal, never reuse the old shard's host.
+    table: HashMap<GrainName, (u32, ActorRef<Host<G>>)>,
     /// The runtime type name (spec §5.1), `G::GRAIN_TYPE` by default; a
     /// caller-supplied name when one Rust grain is hosted under several type
     /// names ([`granary_named`](crate::GranaryExt::granary_named)). Used to map a
@@ -154,12 +159,19 @@ impl<G: Grain> Gateway<G> {
         shard: ShardId,
         ctx: &Ctx<Gateway<G>>,
     ) -> ActorRef<Host<G>> {
-        // Get: return the live host if the cached entry is still alive. The
-        // liveness check closes the eviction race (§10): a host that hibernated
-        // but whose `Terminated` has not yet pruned the table is dropped here and
-        // re-activated afresh, rather than handing back a dead reference.
-        if let Some(host) = self.table.get(&name) {
-            if ctx.system().resolve_local::<Host<G>>(host.id()).is_some() {
+        // Get: return the live host if the cached entry is still alive AND still
+        // activated under the shard the name currently resolves to. The liveness
+        // check closes the eviction race (§10): a host that hibernated but whose
+        // `Terminated` has not yet pruned the table is dropped here and
+        // re-activated afresh, rather than handing back a dead reference. The
+        // shard check closes the split/merge race (§7.7): a host activated over
+        // the old shard's journal must not serve the name once the partition
+        // moved it — it is dropped and the name re-activates over the new
+        // shard's journal (the old host steps down on its next fenced append).
+        if let Some((activated_shard, host)) = self.table.get(&name) {
+            if *activated_shard == shard.index
+                && ctx.system().resolve_local::<Host<G>>(host.id()).is_some()
+            {
                 return host.clone();
             }
             self.table.remove(&name);
@@ -179,11 +191,13 @@ impl<G: Grain> Gateway<G> {
         let activated = name.clone();
         let grain_type = self.grain_type;
         let alarm_index = self.alarm_index.clone();
+        let shard_index = shard.index;
         let host = ctx.spawn_with(move || {
             Host::new(
                 grain_type,
                 (factory)(),
                 activated.clone(),
+                shard_index,
                 journal.clone(),
                 config.clone(),
                 gateway.clone(),
@@ -192,8 +206,15 @@ impl<G: Grain> Gateway<G> {
         });
         // Prune the table when the host stops — idle hibernation or fault (§10).
         ctx.watch(&host);
-        self.table.insert(name, host.clone());
+        self.table.insert(name, (shard.index, host.clone()));
         host
+    }
+
+    /// The shard a name resolves to right now (spec §5.1): the committed shard
+    /// map's key-range lookup, with the founding-partition fallback while the
+    /// map bootstraps ([`resolve_shard`]).
+    fn shard_of(&self, key: &str) -> ShardId {
+        resolve_shard(self.shard_map.as_ref(), self.grain_type, key, self.shards)
     }
 }
 
@@ -222,7 +243,7 @@ impl<G: Grain> Handler<Activate<G>> for Gateway<G> {
         msg: Activate<G>,
         ctx: &Ctx<Gateway<G>>,
     ) -> Result<ActorRef<Host<G>>, GrainError> {
-        let shard = shard_for(self.grain_type, msg.name.key(), self.shards);
+        let shard = self.shard_of(msg.name.key());
         if self.shard_map.journal(shard.index).is_some() && ctx.system().leads_shard(shard) {
             Ok(self.get_or_activate(msg.name, shard, ctx))
         } else {
@@ -266,6 +287,6 @@ impl<G: Grain> Handler<Terminated> for Gateway<G> {
     async fn handle(&mut self, signal: Terminated, _ctx: &Ctx<Gateway<G>>) {
         // Drop the stopped host from the activation table; the next message for
         // that name re-activates it (§10).
-        self.table.retain(|_, host| *host.id() != signal.id);
+        self.table.retain(|_, (_, host)| *host.id() != signal.id);
     }
 }

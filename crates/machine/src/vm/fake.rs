@@ -44,8 +44,8 @@ impl<S: GranarySystem> MachineVmProvider for FakeVmProvider<S> {
             });
             // Seed the write stream from the machine's name, so each
             // machine's guest activity is distinct but seed-stable.
-            let mut lcg: u64 = granary::BlobId::of(spec.machine.to_string().as_bytes())
-                .as_bytes()[..8]
+            let mut lcg: u64 = granary::BlobId::of(spec.machine.to_string().as_bytes()).as_bytes()
+                [..8]
                 .try_into()
                 .map(u64::from_le_bytes)
                 .expect("eight bytes");
@@ -122,9 +122,7 @@ impl FakeVm {
         self.lock_ws().insert("guest.log".to_string(), bytes);
     }
 
-    fn lock_ws(
-        &self,
-    ) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<String, Vec<u8>>> {
+    fn lock_ws(&self) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<String, Vec<u8>>> {
         self.guest_ws.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -177,10 +175,7 @@ impl MachineVm for FakeVm {
         Box::pin(async {})
     }
 
-    fn push_ws(
-        &self,
-        ws: std::path::PathBuf,
-    ) -> actor_core::BoxFuture<'_, Result<(), VmError>> {
+    fn push_ws(&self, ws: std::path::PathBuf) -> actor_core::BoxFuture<'_, Result<(), VmError>> {
         Box::pin(async move {
             if self.killed.load(Ordering::Relaxed) {
                 return Err(VmError::Transport("fake vm killed".to_string()));
@@ -191,10 +186,7 @@ impl MachineVm for FakeVm {
         })
     }
 
-    fn pull_ws(
-        &self,
-        ws: std::path::PathBuf,
-    ) -> actor_core::BoxFuture<'_, Result<(), VmError>> {
+    fn pull_ws(&self, ws: std::path::PathBuf) -> actor_core::BoxFuture<'_, Result<(), VmError>> {
         Box::pin(async move {
             if self.killed.load(Ordering::Relaxed) {
                 return Err(VmError::Transport("fake vm killed".to_string()));
@@ -206,7 +198,9 @@ impl MachineVm for FakeVm {
             // across a pull, as for the real agent.
             for entry in std::fs::read_dir(&ws).map_err(|e| VmError::Transport(e.to_string()))? {
                 let entry = entry.map_err(|e| VmError::Transport(e.to_string()))?;
-                let kind = entry.file_type().map_err(|e| VmError::Transport(e.to_string()))?;
+                let kind = entry
+                    .file_type()
+                    .map_err(|e| VmError::Transport(e.to_string()))?;
                 let result = if kind.is_dir() {
                     std::fs::remove_dir_all(entry.path())
                 } else {
@@ -217,7 +211,8 @@ impl MachineVm for FakeVm {
             for (rel, bytes) in map.iter() {
                 let path = ws.join(rel);
                 if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| VmError::Transport(e.to_string()))?;
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| VmError::Transport(e.to_string()))?;
                 }
                 std::fs::write(&path, bytes).map_err(|e| VmError::Transport(e.to_string()))?;
             }

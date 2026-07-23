@@ -6,29 +6,39 @@ use crate::store::GrainStoreFactory;
 
 /// Per-grain-type runtime configuration (spec Appendix A).
 ///
-/// `shards` partitions the type's namespace into a fixed number of consensus
+/// `shards` sets the type's namespace's **initial** partition into consensus
 /// groups (§7.1); `idle_after` drives hibernation (§10) and `snapshot_every`
 /// drives snapshotting (§9). `replication_factor` bounds a clustered shard's voter
 /// set (§7.6): the allocator selects this many replicas per shard by rendezvous
 /// hashing and the reconcile loop reconfigures the group as membership changes —
-/// a no-op on the `Local` tier (one local store). One field describes elasticity
-/// the runtime does not yet perform, kept so a deployment need not change shape
-/// later:
-/// - `shard_target_bytes` — the split threshold (§7.7); split/merge is deferred,
-///   so `shards` is fixed at `granary()` time.
+/// a no-op on the `Local` tier (one local store). `shard_target_bytes` is the
+/// opt-in auto-split threshold (§7.7), `0` (the default) leaving elasticity to
+/// explicit [`Granary::split_shard`](crate::Granary::split_shard) /
+/// [`merge_shards`](crate::Granary::merge_shards).
 #[derive(Clone)]
 pub struct GranaryConfig {
-    /// The number of shards this grain type's namespace is partitioned into
-    /// (§7.1). Each shard is one consensus group; a name maps to a shard by a
-    /// stable hash. Fixed at `granary()` time (dynamic split/merge is deferred,
-    /// §7.7).
+    /// The number of shards this grain type's namespace is **initially**
+    /// partitioned into (§7.1): `granary()` founds this many equal key ranges.
+    /// Each shard is one consensus group; a name maps to a shard by a stable
+    /// hash onto the range partition. The partition then grows and shrinks with
+    /// load through split/merge (§7.7), so this is the starting point, not a
+    /// fixed count.
     pub shards: usize,
     /// Replicas per shard (§7.1): the allocator bounds each shard's voter set to
     /// this many nodes by rendezvous hashing (§7.6). **No-op on the `Local` tier**
     /// (one local store).
     pub replication_factor: usize,
-    /// Split a shard once it grows past this size (§7.7). **Deferred** — shards
-    /// are fixed; **no-op on the `Local` tier.**
+    /// Auto-split a shard once its durable footprint grows past this many bytes
+    /// (§7.7): the shard leader measures its local store and requests a split,
+    /// which divides the shard's key range in two. **`0` (the default) disables
+    /// the size trigger** — the elasticity mechanism is opt-in, since a type
+    /// whose grains are individually large (a VM image, a big database) wants a
+    /// higher threshold than a type of many small grains, and a shard leader
+    /// splitting on a workload's own inherent size is rarely what a deployment
+    /// wants without saying so. Split and merge are always available explicitly
+    /// ([`Granary::split_shard`](crate::Granary::split_shard) /
+    /// [`Granary::merge_shards`](crate::Granary::merge_shards)). **No-op on the
+    /// `Local` tier** (split/merge is `Quorum` elasticity).
     pub shard_target_bytes: u64,
     /// Hibernate a grain after this idle interval (§10). Matches the Durable
     /// Objects eviction window by default (DO §5).
@@ -65,7 +75,7 @@ impl Default for GranaryConfig {
         GranaryConfig {
             shards: 4,
             replication_factor: 3,
-            shard_target_bytes: 256 << 20,
+            shard_target_bytes: 0, // auto-split off by default; opt in per type
             idle_after: Duration::from_secs(10),
             snapshot_every: 256,
             grain_store: None,

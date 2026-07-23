@@ -246,9 +246,8 @@ where
     }
 
     /// The committed entries with `prefix` overlaid with this command's staged
-    /// puts and deletes, in key order — the one prefix walk behind
-    /// [`keys`](Self::keys) and [`list`](Self::list) (read-your-staged-writes,
-    /// §7.12).
+    /// puts and deletes, in key order — the prefix walk behind
+    /// [`list`](Self::list) (read-your-staged-writes, §7.12).
     fn merged_range(&self, prefix: &str) -> BTreeMap<String, KvValue> {
         self.cell.with_overlay::<Kv, I, _>(|form, stage| {
             let mut entries: BTreeMap<String, KvValue> = form
@@ -276,9 +275,34 @@ where
         })
     }
 
-    /// The keys with `prefix`, in order, through the overlay (§7.13).
+    /// The keys with `prefix`, in order, through the overlay (§7.13). Walks keys
+    /// only — it never touches the values, so a large inline payload under the
+    /// prefix costs nothing here (unlike [`list`](Self::list)).
     pub fn keys(&self, prefix: &str) -> Vec<String> {
-        self.merged_range(prefix).into_keys().collect()
+        self.cell.with_overlay::<Kv, I, _>(|form, stage| {
+            let mut keys: BTreeSet<String> = form
+                .map
+                .range(prefix.to_string()..)
+                .take_while(|(k, _)| k.starts_with(prefix))
+                .map(|(k, _)| k.clone())
+                .collect();
+            if let Some(stage) = stage {
+                for (key, staged) in &stage.overlay {
+                    if !key.starts_with(prefix) {
+                        continue;
+                    }
+                    match staged {
+                        Some(_) => {
+                            keys.insert(key.clone());
+                        }
+                        None => {
+                            keys.remove(key);
+                        }
+                    }
+                }
+            }
+            keys.into_iter().collect()
+        })
     }
 
     /// The `(key, value)` pairs with `prefix`, in key order, through the overlay.

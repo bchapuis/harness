@@ -63,17 +63,19 @@ async fn read_to_status(
     let mut stderr = Vec::new();
     loop {
         let body = vsock::recv_frame(stream, MAX_FRAME).await?;
-        match Frame::decode(&body) {
-            Some(Frame::Data(bytes)) => {
-                if let Some(tar) = tar.as_deref_mut() {
-                    if tar.len() + bytes.len() > MAX_TAR {
-                        return Err(SyncError::Transport(std::io::Error::other(format!(
-                            "pulled workspace exceeds the {MAX_TAR}-byte sync cap"
-                        ))));
-                    }
-                    tar.extend_from_slice(&bytes);
+        // Bulk `Data` appends straight from the frame body — no decode copy.
+        if let Some(bytes) = Frame::data_payload(&body) {
+            if let Some(tar) = tar.as_deref_mut() {
+                if tar.len() + bytes.len() > MAX_TAR {
+                    return Err(SyncError::Transport(std::io::Error::other(format!(
+                        "pulled workspace exceeds the {MAX_TAR}-byte sync cap"
+                    ))));
                 }
+                tar.extend_from_slice(bytes);
             }
+            continue;
+        }
+        match Frame::decode(&body) {
             Some(Frame::Stderr(bytes)) => stderr.extend_from_slice(&bytes),
             Some(Frame::Eof) => {}
             Some(Frame::ExitStatus(code)) => {
@@ -98,7 +100,7 @@ async fn read_to_status(
 pub async fn push(uds: &Path, port: u32, tar: &[u8]) -> Result<(), SyncError> {
     let mut stream = open(uds, port, &ChannelKind::WsPush).await?;
     for chunk in tar.chunks(CHUNK) {
-        vsock::send_frame(&mut stream, &Frame::Data(chunk.to_vec()).encode()).await?;
+        vsock::send_frame(&mut stream, &Frame::encode_data(chunk)).await?;
     }
     vsock::send_frame(&mut stream, &Frame::Eof.encode()).await?;
     read_to_status(&mut stream, None).await

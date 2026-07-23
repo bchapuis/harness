@@ -86,9 +86,10 @@ impl MachineVmProvider for FirecrackerMachineProvider {
         Box::pin(async move {
             let fail = |e: String| VmError::Transport(format!("firecracker boot: {e}"));
             let digest = BlobId::of(spec.machine.to_string().as_bytes());
-            let control = microvm::control_dir("harness-machine", &format!("{:.16}", digest.to_string()))
-                .await
-                .map_err(|e| fail(e.to_string()))?;
+            let control =
+                microvm::control_dir("harness-machine", &format!("{:.16}", digest.to_string()))
+                    .await
+                    .map_err(|e| fail(e.to_string()))?;
             // The disk facet's image, in place (module docs): the guest's
             // writes land in the materialization the capture command scans
             // (grain §7.15).
@@ -133,14 +134,18 @@ impl MachineVm for FirecrackerMachineVm {
     fn pause(&self) -> BoxFuture<'_, Result<(), VmError>> {
         Box::pin(async move {
             let vm = self.vm.lock().await;
-            vm.pause().await.map_err(|e| VmError::Transport(e.to_string()))
+            vm.pause()
+                .await
+                .map_err(|e| VmError::Transport(e.to_string()))
         })
     }
 
     fn resume(&self) -> BoxFuture<'_, Result<(), VmError>> {
         Box::pin(async move {
             let vm = self.vm.lock().await;
-            vm.resume().await.map_err(|e| VmError::Transport(e.to_string()))
+            vm.resume()
+                .await
+                .map_err(|e| VmError::Transport(e.to_string()))
         })
     }
 

@@ -66,7 +66,6 @@ use crate::subscription::SUB_BUFFER;
 use crate::subscription::Subscribe;
 use crate::subscription::Subscribed;
 use crate::system::GranarySystem;
-use crate::system::shard_for;
 
 /// How many events a single rehydration read pulls from the journal at a time.
 const REPLAY_BATCH: usize = 256;
@@ -165,6 +164,11 @@ pub struct Host<G: Grain> {
     /// Threaded into [`GrainCtx`] so a self-reference resolves under the right type.
     grain_type: &'static str,
     name: GrainName,
+    /// The shard this activation serves under — resolved by the gateway from the
+    /// committed partition (§5.1) at activation, fixed for the activation's
+    /// lifetime. Keys the per-shard alarm index (§7.16); after a split/merge
+    /// moves the name, the next activation carries the new shard.
+    shard: u32,
     journal: Arc<dyn DynGrainJournal>,
     config: GranaryConfig,
     gateway: ActorRef<Gateway<G>>,
@@ -212,10 +216,12 @@ impl<G: Grain> Host<G> {
     /// Build a fresh, un-rehydrated activation. Rehydration happens in
     /// [`Actor::started`], where the system (and thus the journal's authoritative
     /// head) is reachable.
+    #[allow(clippy::too_many_arguments)] // one private call site, the gateway's activation
     pub(crate) fn new(
         grain_type: &'static str,
         grain: G,
         name: GrainName,
+        shard: u32,
         journal: Arc<dyn DynGrainJournal>,
         config: GranaryConfig,
         gateway: ActorRef<Gateway<G>>,
@@ -228,6 +234,7 @@ impl<G: Grain> Host<G> {
             last_snapshot: Seq::ZERO,
             grain_type,
             name,
+            shard,
             journal,
             config,
             gateway,
@@ -591,6 +598,7 @@ impl<G: Grain> Host<G> {
                 ctx.system().emit_grain_event(GrainEvent::Committed {
                     node: ctx.system().node(),
                     name: self.name.clone(),
+                    shard: self.shard,
                     seq: new_head.value(),
                 });
                 // Push the batch to subscribers (§7.9), at the same point as the
@@ -788,8 +796,7 @@ impl<G: Grain> Host<G> {
         self.sync_epoch = self.sync_epoch.wrapping_add(1);
         self.index_sync = IndexSync::Pending { due };
         let epoch = self.sync_epoch;
-        let shard = shard_for(self.grain_type, self.name.key(), self.config.shards.max(1));
-        let key = index_key(self.grain_type, shard.index as usize);
+        let key = index_key(self.grain_type, self.shard as usize);
         let name = self.name.clone();
         let head = self.head.value();
         let me: ActorRef<Host<G>> = ctx.this();

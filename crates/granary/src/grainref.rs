@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::alarm_index::AlarmIndex;
 use crate::alarm_index::DueBefore;
+use crate::alarm_index::Sync as AlarmSync;
 use crate::alarm_index::index_key;
 use crate::config::GranaryConfig;
 use crate::error::GrainError;
@@ -33,6 +34,7 @@ use crate::replica_store::ReplicaTransport;
 use crate::replica_store::replica_store_key;
 use crate::shardmap::EmptyShardMap;
 use crate::shardmap::ShardMapSource;
+use crate::shardmap::resolve_shard;
 use crate::store::GrainStore;
 use crate::store::MemoryGrainStore;
 use crate::subscription::CloseSink;
@@ -42,7 +44,6 @@ use crate::subscription::Subscribe;
 use crate::subscription::Subscription;
 use crate::system::GranarySystem;
 use crate::system::ShardId;
-use crate::system::shard_for;
 
 /// The default deadline applied to [`GrainRef::ask`] (mirrors the actor `ask`).
 const DEFAULT_ASK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -83,16 +84,27 @@ pub(crate) struct HostCache<G: Grain> {
     /// The runtime type name (spec §5.1) this cache routes for, `G::GRAIN_TYPE`
     /// by default but a caller-supplied name under [`granary_named`](GranaryExt::granary_named).
     grain_type: &'static str,
+    /// The founding shard count — the [`resolve_shard`] fallback while the map
+    /// bootstraps (and the only resolution a routing-only client ever has).
     shards: usize,
+    /// The committed partition (§5.1), the authority on name→shard once ranges
+    /// have committed (a split/merge moves names between shards).
+    shard_map: Arc<dyn ShardMapSource>,
     hosts: Mutex<HashMap<GrainName, ActorRef<Host<G>>>>,
 }
 
 impl<G: Grain> HostCache<G> {
-    fn new(system: G::System, grain_type: &'static str, shards: usize) -> Arc<HostCache<G>> {
+    fn new(
+        system: G::System,
+        grain_type: &'static str,
+        shards: usize,
+        shard_map: Arc<dyn ShardMapSource>,
+    ) -> Arc<HostCache<G>> {
         Arc::new(HostCache {
             system,
             grain_type,
             shards,
+            shard_map,
             hosts: Mutex::new(HashMap::new()),
         })
     }
@@ -108,10 +120,12 @@ impl<G: Grain> HostCache<G> {
     fn get(&self, name: &GrainName) -> Option<ActorRef<Host<G>>> {
         let mut hosts = self.hosts.lock().expect("host cache mutex poisoned");
         let host = hosts.get(name)?.clone();
-        match self
-            .system
-            .shard_leader(shard_for(self.grain_type, name.key(), self.shards))
-        {
+        match self.system.shard_leader(resolve_shard(
+            self.shard_map.as_ref(),
+            self.grain_type,
+            name.key(),
+            self.shards,
+        )) {
             // Replica node, leader moved: drop the stale handle before it is used.
             Some(leader) if host.id().node() != leader => {
                 hosts.remove(name);
@@ -559,8 +573,12 @@ impl<G: Grain> Granary<G> {
     /// observation, not a guarantee: leadership can move immediately after.
     pub fn leader(&self, key: impl Into<String>) -> Option<NodeId> {
         let name = GrainName::new(self.grain_type, key);
-        self.system
-            .shard_leader(shard_for(self.grain_type, name.key(), self.shards))
+        self.system.shard_leader(resolve_shard(
+            self.shard_map.as_ref(),
+            self.grain_type,
+            name.key(),
+            self.shards,
+        ))
     }
 
     /// Whether a live host handle is currently cached for `key` (spec §5.4). An
@@ -568,6 +586,32 @@ impl<G: Grain> Granary<G> {
     /// statement about the grain's activation on its leader.
     pub fn is_cached(&self, key: impl Into<String>) -> bool {
         self.cache.contains(&GrainName::new(self.grain_type, key))
+    }
+
+    /// Request a split of shard `index` at its range midpoint (spec §7.7) — the
+    /// admin/test seam over [`ShardMapSource::request_split`]. Best-effort and
+    /// asynchronous: the split proposer validates against committed state (a
+    /// shard that is unknown, mid-migration, mid-split, or a single-point range
+    /// is silently skipped), the parent leader's driver transfers the moved
+    /// grains, and the committed flip is observable as a
+    /// [`ShardSplit`](crate::GrainEvent::ShardSplit) event and a changed
+    /// [`replicas`](Granary::replicas)/routing. A no-op on the `Local` tier and
+    /// on a routing-only client.
+    pub fn split_shard(&self, index: u32) {
+        self.shard_map.request_split(index);
+    }
+
+    /// Request a merge of shard `left` with its right neighbour (spec §7.7) —
+    /// the mirror of [`split_shard`](Granary::split_shard), reclaiming a
+    /// leader-election group (G7) when two adjacent ranges are cold. Best-effort
+    /// and asynchronous: the merge proposer validates against committed state
+    /// (unknown, non-adjacent, or busy shards are skipped), the right leader's
+    /// driver folds every grain into `left`'s keys, and the committed flip is
+    /// observable as a [`ShardMerged`](crate::GrainEvent::ShardMerged) event and
+    /// `left`'s extended [`replicas`](Granary::replicas)/routing. A no-op on the
+    /// `Local` tier and on a routing-only client.
+    pub fn merge_shards(&self, left: u32) {
+        self.shard_map.request_merge(left);
     }
 
     /// The nodes that replicate the shard a grain key maps to (spec §7.6) — the
@@ -578,7 +622,13 @@ impl<G: Grain> Granary<G> {
     /// and tests.
     pub fn replicas(&self, key: impl Into<String>) -> Vec<NodeId> {
         let name = GrainName::new(self.grain_type, key);
-        let index = shard_for(self.grain_type, name.key(), self.shards).index;
+        let index = resolve_shard(
+            self.shard_map.as_ref(),
+            self.grain_type,
+            name.key(),
+            self.shards,
+        )
+        .index;
         self.shard_map.replicas(index).unwrap_or_default()
     }
 }
@@ -622,13 +672,14 @@ pub trait GranaryExt: GranarySystem {
             .into_vec()
             .into_iter()
             .next()?;
+        let shard_map: Arc<dyn ShardMapSource> = Arc::new(EmptyShardMap);
         Some(Granary {
             system: self.clone(),
             grain_type,
             gateway,
             shards,
-            shard_map: Arc::new(EmptyShardMap),
-            cache: HostCache::new(self.clone(), grain_type, shards),
+            shard_map: Arc::clone(&shard_map),
+            cache: HostCache::new(self.clone(), grain_type, shards, shard_map),
         })
     }
 
@@ -777,7 +828,14 @@ where
     // committed log is the allocation, so every node agrees on each shard's replica
     // set and only the replicas store it. The `Local` tier is a trivial single-node
     // map. Keyed by the runtime `grain_type`, so two type names get separate maps.
-    let shard_map = system.shard_map(grain_type, shards, replicas, store, transport);
+    let shard_map = system.shard_map(
+        grain_type,
+        shards,
+        replicas,
+        config.shard_target_bytes,
+        store,
+        transport,
+    );
     let gateway = system.spawn(Gateway::new(
         grain_type,
         Arc::clone(&shard_map),
@@ -796,8 +854,8 @@ where
         grain_type,
         gateway,
         shards,
-        shard_map,
-        cache: HostCache::new(system.clone(), grain_type, shards),
+        shard_map: Arc::clone(&shard_map),
+        cache: HostCache::new(system.clone(), grain_type, shards, shard_map),
     }
 }
 
@@ -814,6 +872,15 @@ where
 /// already cleared is harmless: it simply re-registers the correct state and the
 /// index entry is dropped. Only the leader activates (§5.4), so sweeping led shards
 /// is exactly the set this node may act on.
+///
+/// A split or merge (§7.7) moves a grain's key range to another shard, leaving a
+/// stale entry in the old shard's index. Re-activating a due grain routes to its
+/// **live** owner (the child of a split, the left of a merge), so the alarm
+/// still fires and the grain re-registers into its new shard's index there — the
+/// data transfer moves records and blobs, not activations, so the new index is
+/// empty until this re-activation seeds it. Only *after* that successful
+/// re-activation does the driver clear the stale entry in the old index, so it
+/// stops re-activating the moved grain every sweep without ever orphaning a wake.
 async fn alarm_driver_loop<S, G>(
     system: S,
     granary: Granary<G>,
@@ -827,27 +894,64 @@ async fn alarm_driver_loop<S, G>(
     loop {
         system.sleep(ALARM_DRIVE_INTERVAL).await;
         let now = system.now().as_nanos();
-        for shard in 0..shards {
+        // Sweep the committed partition's shards — a split/merge (§7.7) changes
+        // the shard set, and each shard has its own index grain. While the map
+        // is still bootstrapping (no committed allocation yet), fall back to the
+        // founding indices; nothing is led before the allocation commits anyway.
+        let mut indices = granary.shard_map.shard_indices();
+        if indices.is_empty() {
+            indices = (0..shards as u32).collect();
+        }
+        for shard in indices {
             let id = ShardId {
                 grain_type,
-                index: shard as u32,
+                index: shard,
             };
             if !system.leads_shard(id) {
                 continue;
             }
-            let key = index_key(grain_type, shard);
-            let due = match index.grain(key).ask(DueBefore { before: now }).await {
+            let key = index_key(grain_type, shard as usize);
+            let due = match index
+                .grain(key.clone())
+                .ask(DueBefore { before: now })
+                .await
+            {
                 Ok(names) => names,
                 Err(_) => continue, // index shard unavailable this tick; retry next sweep
             };
             for name in due {
-                // Re-activate the grain on this leader; its own timer then fires the
-                // due alarm. Drop the subscription immediately — activation is the
-                // only effect we want.
-                let _ = granary
+                // Re-activate the grain: routing sends it to its live owner —
+                // this leader for a resident grain, or the child/left shard for
+                // one a split/merge moved — where `on_activate` re-arms and fires
+                // the due alarm. Drop the subscription immediately; activation is
+                // the only effect we want.
+                let reactivated = granary
                     .grain(name.key().to_string())
                     .subscribe(Seq::ZERO)
-                    .await;
+                    .await
+                    .is_ok();
+                // If the grain has moved off this shard (§7.7), the re-activation
+                // above seeded its new shard's index and fired it there, so clear
+                // the stale entry here — with a max head, so the clear always
+                // wins — to stop re-driving it every sweep. Only after a
+                // successful re-activation, so a transient failure never orphans
+                // the wake. `shard_of` resolves the live committed partition.
+                let live = resolve_shard(
+                    granary.shard_map.as_ref(),
+                    grain_type,
+                    name.key(),
+                    granary.shards,
+                );
+                if reactivated && live.index != shard {
+                    let _ = index
+                        .grain(key.clone())
+                        .ask(AlarmSync {
+                            grain: name.clone(),
+                            due: None,
+                            head: u64::MAX,
+                        })
+                        .await;
+                }
             }
         }
     }

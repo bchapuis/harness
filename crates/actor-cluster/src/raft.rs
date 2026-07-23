@@ -303,6 +303,21 @@ impl MultiRaft {
             .map(Arc::clone)
     }
 
+    /// Stop running `group`: drop it from the tick map so it no longer elects,
+    /// heartbeats, or commits (spec §7.7, G7 reclamation on a shard merge). The
+    /// group carries no data — a granary leader-election group is placement only
+    /// (§7.1) — so a merged-away shard's group is retired with no in-group
+    /// consensus, each node dropping it as it applies the committed `Merged`.
+    /// Idempotent; a group this node never ran is already gone. (Its on-disk
+    /// storage, if any, is left for a later sweep — an empty leader-election log
+    /// is a bounded residue, never grain data.)
+    pub(crate) fn remove_group(&self, group: GroupId) {
+        self.groups
+            .lock()
+            .expect("raft groups mutex poisoned")
+            .remove(&group);
+    }
+
     /// Drive every group one tick, in `GroupId` order (deterministic). Returns
     /// each group's output for the caller to apply (frames to send, committed
     /// app commands, the term won if it just became leader).

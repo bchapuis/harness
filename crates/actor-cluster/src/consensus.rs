@@ -63,6 +63,14 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     /// after this, before the engine next ticks.
     fn create_group(&self, group: GroupId, voters: Vec<NodeId>, learners: Vec<NodeId>);
 
+    /// Retire an application Raft group (spec §7.7, G7): stop running it so it no
+    /// longer elects, heartbeats, or commits. For a group that holds no data — a
+    /// granary shard's leader-election group is placement only (§7.1) — a merged-
+    /// away shard's group is reclaimed with no in-group consensus, each node
+    /// dropping it as it applies the committed merge. Idempotent; a no-op on a
+    /// group this node never ran and outside leader-based mode.
+    fn remove_group(&self, group: GroupId);
+
     /// Subscribe to `group`'s committed observation stream ([`Committed`]). The
     /// receiver observes every entry committed **after** this call (a late
     /// subscriber misses earlier commits — replay-from-index is a future

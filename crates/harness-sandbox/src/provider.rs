@@ -268,13 +268,7 @@ impl SandboxProvider for TieredSandboxes {
             // item 2). Which realization — the cfg fork — is NativeEnv's
             // secret, not this open path's.
             #[cfg(feature = "native")]
-            let native = NativeEnv::build(
-                spec,
-                &dir,
-                &host_path,
-                &name,
-                stats.clone(),
-            );
+            let native = NativeEnv::build(spec, &dir, &host_path, &name, stats.clone());
             // Opening grants `Workspace` and nothing else (harness spec §5.6
             // item 1): no other tier environment exists until a call carries
             // its tier.

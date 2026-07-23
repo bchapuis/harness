@@ -64,19 +64,29 @@
 //!   no transport.
 //!
 //! The control-plane-stored shard map (§7.6) is **built**: a per-type Raft group
-//! whose committed log is the allocation ([`ShardMapSource`]), so every node agrees
-//! on each shard's replica set regardless of join order. As cluster membership
-//! changes, a shard rebalances by **joint-quorum migration** (§7.7): the new set
-//! commits as a `target` (writes and recoveries then need a majority of BOTH sets),
-//! the shard leader's driver catches every grain's records, snapshot, and blobs up
-//! on the target, and only then does the map flip — so a committed write's
-//! durability never rests on replicas that left (G14).
+//! whose committed log is the allocation ([`ShardMapSource`]), storing each
+//! shard's **key range** and replica set, so every node agrees on the partition
+//! regardless of join order. As cluster membership changes, a shard rebalances by
+//! **joint-quorum migration** (§7.7): the new set commits as a `target` (writes
+//! and recoveries then need a majority of BOTH sets), the shard leader's driver
+//! catches every grain's records, snapshot, and blobs up on the target, and only
+//! then does the map flip — so a committed write's durability never rests on
+//! replicas that left (G14).
+//!
+//! The partition itself is **elastic** (§7.7): a shard **splits** — its key range
+//! divides in two, the parent keeping the low half and a fresh child taking the
+//! high half on the same replicas — when it grows past `shard_target_bytes` or on
+//! an explicit request, and two adjacent shards **merge** the reverse way,
+//! reclaiming a leader-election group (G7). A split (or merge) seals the moving
+//! range on a quorum of stores — from which no append to it can reach a write
+//! quorum at any term — transfers each moved grain's committed prefix, snapshot,
+//! and blobs to the destination keys, and only then commits the new mapping, so a
+//! grain is writable in exactly one shard at any time and no write is lost or
+//! duplicated across the boundary (G15).
 //!
 //! The following remain **deferred** and are documented where their surface
 //! appears:
 //!
-//! - Dynamic shard split & merge (§7.7): the shard count is fixed at `granary()`
-//!   time.
 //! - Linearizable reads (§7.5): reads are **read-your-leader** (relaxed) — served
 //!   locally from the leader's activation, so a deposed-but-unfenced minority
 //!   leader can serve a stale read (writes never fork, §8). The DO-faithful

@@ -149,6 +149,26 @@ impl Frame {
         out
     }
 
+    /// Encode a `Data` frame from a borrowed payload: the bulk path (workspace
+    /// sync, PTY output) copies a chunk once into an exact-sized frame buffer
+    /// instead of twice through an owning `Frame::Data(Vec)`.
+    pub fn encode_data(payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(1 + payload.len());
+        out.push(Frame::DATA);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// The payload of a `Data` frame body, borrowed and undecoded, or `None` for
+    /// any other frame — lets the bulk reader append straight to its sink rather
+    /// than copy through a `Frame::Data(Vec)`.
+    pub fn data_payload(body: &[u8]) -> Option<&[u8]> {
+        match body.split_first() {
+            Some((&Frame::DATA, rest)) => Some(rest),
+            _ => None,
+        }
+    }
+
     /// Parse a tag-plus-payload body (the length prefix already stripped).
     pub fn decode(body: &[u8]) -> Option<Frame> {
         let (&tag, rest) = body.split_first()?;
@@ -203,7 +223,10 @@ mod tests {
         let cases = [
             Frame::Data(b"hello".to_vec()),
             Frame::Stderr(b"oops".to_vec()),
-            Frame::WindowChange { cols: 120, rows: 40 },
+            Frame::WindowChange {
+                cols: 120,
+                rows: 40,
+            },
             Frame::Signal("TERM".to_string()),
             Frame::Eof,
             Frame::ExitStatus(-1),
