@@ -127,12 +127,13 @@ close this.
 Three audits flagged the same class of issue — prose that has drifted from the
 code — which matters given the project convention that specs describe current state:
 
-- **cluster-utilities:** §6 cites test filenames (`fault_coverage.rs`,
-  `reproducibility.rs`, `cluster_swarm.rs`) that were renamed to `conformance_*.rs`.
-  Coverage exists under the new names; only the references are stale.
-- **machine:** `crates/machine/src/lib.rs` docstrings still say
-  `Facets = (Disk, Alarm)`; the implementation is `(Disk, Alarm, Ws)`
-  (`grain.rs:471`).
+- **cluster-utilities:** RESOLVED (2026-07-23). §6 cited test filenames
+  (`fault_coverage.rs`, `reproducibility.rs`, `cluster_swarm.rs`) that were
+  renamed to `conformance_*.rs`. The references now point at the real files
+  (`conformance_faults.rs`, `conformance_determinism.rs`, `conformance_swarm.rs`).
+- **machine:** RESOLVED (2026-07-23). `crates/machine/src/lib.rs` docstrings
+  said `Facets = (Disk, Alarm)`; they now read `(Disk, Alarm, Ws)`, matching the
+  implementation (`grain.rs:471`) and the spec's disk-plus-workspace framing.
 - **distributed-actor:** the stale catalogue pointers (finding 4) are now
   corrected and machine-verified to exist by the drift gate.
 
@@ -141,10 +142,13 @@ code — which matters given the project convention that specs describe current 
 - **wal:** two `expect`/panic paths (serialization failure `lib.rs:121`, missing
   file name `lib.rs:326`) are outside the "return `io::Result`" rule but fall in
   the spec's own "caller bug, not I/O failure" carve-out.
-- **agentic-harness:** `budget_floor` defaults to 0 (`client.rs:130`) — compliant
-  to the letter of §9.1.2 (a configurable floor) but the default disables the
-  protection it exists for. Delegation to a kind not hosted on the node degrades
-  safely as a `ToolError`, unreachable under `cluster()`/`host_all`.
+- **agentic-harness:** `budget_floor` now defaults to the default per-call
+  `max_tokens` (`client.rs`, RESOLVED 2026-07-23) — previously 0, which was
+  compliant to the letter of §9.1.2 (a configurable floor) but disabled the
+  protection it exists for; the default now stops a run rather than issue a call
+  that cannot fit a full-size response (set to 0 to opt out). Delegation to a kind
+  not hosted on the node degrades safely as a `ToolError`, unreachable under
+  `cluster()`/`host_all`.
 - **sandbox:** S3/Network tier is unimplemented and unverified — consistent with
   §6's `(future)` marker; the *withholding* half (refusing egress-naming profiles
   at open) is enforced and tested. Native/microVM confinement smoke tests are

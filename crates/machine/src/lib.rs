@@ -1,12 +1,13 @@
 //! Persistent machines (machine spec): a durable lightweight VM as a grain.
 //!
-//! A **machine** is a grain plus two things: a durable disk (the disk facet,
-//! grain §7.15) and a network seam (machine §5). Everything else — identity,
-//! the journal, the single-writer fence, placement, virtual activation, idle
-//! hibernation, lossless failover — is inherited from the grain unchanged
-//! (machine §1). This crate supplies the grain half:
+//! A **machine** is a grain plus two things: durable storage (the rootfs as a
+//! disk facet, grain §7.15, and `/workspace` as a workspace facet, grain §7.11)
+//! and a network seam (machine §5). Everything else — identity, the journal,
+//! the single-writer fence, placement, virtual activation, idle hibernation,
+//! lossless failover — is inherited from the grain unchanged (machine §1). This
+//! crate supplies the grain half:
 //!
-//! - [`Machine`], the grain: `Facets = (Disk, Alarm)`, facet-0 state holding
+//! - [`Machine`], the grain: `Facets = (Disk, Alarm, Ws)`, facet-0 state holding
 //!   only metadata (keys, host key, egress policy, sizing, intervals — machine
 //!   §3), and the session-grained durability discipline of machine §4: capture
 //!   at quiescent points driven by the checkpoint alarm, `can_passivate`

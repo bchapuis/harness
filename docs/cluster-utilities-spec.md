@@ -96,14 +96,14 @@ The utilities catalogue mirrors the core catalogue's structure (core §17, §18.
 | # | Invariant | Defined in | Verified by |
 |---|---|---|---|
 | U1 | **Deterministic placement.** Rendezvous placement is a pure, version-stable function of the serving set and key: nodes with identical serving sets compute identical owners for every key, and a single-member change reassigns only the keys that member owned or now owns. | §2 | property + cluster tests (`conformance_placement.rs`); pinned known-answer hash vectors |
-| U2 | **Singleton activation discipline.** A node never runs two live activations of one singleton name concurrently; once views converge on a healed cluster, exactly one activation per name is live cluster-wide; an anchor failure re-activates the singleton within bounded logical time. | §4 | continuous checker (`singleton-at-most-one-per-node`, the per-node half); scenario + swarm tests (`conformance_singleton.rs`, `cluster_swarm.rs`) for the converged-exactly-one and re-activation halves |
+| U2 | **Singleton activation discipline.** A node never runs two live activations of one singleton name concurrently; once views converge on a healed cluster, exactly one activation per name is live cluster-wide; an anchor failure re-activates the singleton within bounded logical time. | §4 | continuous checker (`singleton-at-most-one-per-node`, the per-node half); scenario + swarm tests (`conformance_singleton.rs`, `conformance_swarm.rs`) for the converged-exactly-one and re-activation halves |
 
 Group routers (§3) define no numbered invariant: "selects only from the current serving listing, fails fast when empty" is a local function property, not an emergent one — it is pinned directly by `conformance_router.rs`.
 
 The utilities are additionally held to the core testing contract (core §18.1, §18.3):
 
-- **Seed-reproducibility.** The manager's tick loop, the `SingletonStarted`/`Stopped` event ordering, and the router's seeded random draws reproduce byte-identically from the seed — swept by a dedicated utilities workload in `reproducibility.rs`.
-- **Fault coverage.** A sweep whose traffic flows entirely through routers and singleton proxies proves that loss, duplication, reordering, and partition/crash actually fired while the utilities ran (`fault_coverage.rs`) — their conformance tests alone use only controlled faults.
+- **Seed-reproducibility.** The manager's tick loop, the `SingletonStarted`/`Stopped` event ordering, and the router's seeded random draws reproduce byte-identically from the seed — swept by a dedicated utilities workload in `conformance_determinism.rs`.
+- **Fault coverage.** A sweep whose traffic flows entirely through routers and singleton proxies proves that loss, duplication, reordering, and partition/crash actually fired while the utilities ran (`conformance_faults.rs`) — their conformance tests alone use only controlled faults.
 
 ---
 

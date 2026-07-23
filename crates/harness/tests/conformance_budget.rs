@@ -13,6 +13,7 @@ use actor_core::Clock;
 use actor_simulation::SimSystem;
 use actor_simulation::run_seed;
 use harness::Budget;
+use harness::HarnessConfig;
 use harness::Kind;
 use harness::Kinds;
 use harness::ModelError;
@@ -87,7 +88,13 @@ fn run_single(
                 flush(&system).await;
             })
         },
-    );
+    )
+    // These tests exercise exhaustion at the exact remainder with tiny budgets;
+    // pin the floor to 0 so the default floor doesn't stop the run first.
+    .with_config(HarnessConfig {
+        budget_floor: 0,
+        ..HarnessConfig::default()
+    });
     run_seed(&workload, seed).expect("invariants hold");
     let records = records.lock().unwrap();
     records.clone()
@@ -252,7 +259,13 @@ fn run_tree(
                 flush(&system).await;
             })
         },
-    );
+    )
+    // Small carved child budgets (500 tokens) test the carve mechanics, not the
+    // floor; pin it to 0 so the default floor doesn't stop the child first.
+    .with_config(HarnessConfig {
+        budget_floor: 0,
+        ..HarnessConfig::default()
+    });
     run_seed(&workload, seed).expect("invariants hold");
     let guard = out.lock().unwrap();
     (guard.0.clone(), guard.1.clone())

@@ -117,7 +117,10 @@ pub struct HarnessConfig {
     /// `Clock`, so the bound is deterministic under simulation.
     pub tool_timeout: Duration,
     /// The token floor below which no model call is issued (§9.1 item 2): a
-    /// near-zero `max_tokens` call still pays its full input.
+    /// near-zero `max_tokens` call still pays its full input. Defaults to the
+    /// default per-call `max_tokens` ([`ModelParams`](crate::ModelParams)), so a
+    /// run stops rather than issue a final call that cannot fit a full-size
+    /// response; set to 0 to disable the floor.
     pub budget_floor: u64,
 }
 
@@ -126,7 +129,9 @@ impl Default for HarnessConfig {
         HarnessConfig {
             submit_deadline: Duration::from_secs(30),
             tool_timeout: Duration::from_secs(300),
-            budget_floor: 0,
+            // Don't issue a call that can't fit a full-size response: floor at
+            // the default per-call `max_tokens` so the two never drift.
+            budget_floor: crate::ModelParams::default().max_tokens,
         }
     }
 }

@@ -12,6 +12,7 @@ use actor_core::Clock;
 use actor_simulation::SimSystem;
 use actor_simulation::run_seed;
 use harness::Budget;
+use harness::HarnessConfig;
 use harness::Kind;
 use harness::Kinds;
 use harness::Model;
@@ -222,7 +223,13 @@ fn a_cancel_propagates_down_the_delegation_tree() {
                 *sink.lock().unwrap() = tail_records(&child).await;
             })
         },
-    );
+    )
+    // The child (2_000-token budget) must reach its hour-long model call so
+    // cancellation is what ends it; pin the floor to 0 so it isn't stopped first.
+    .with_config(HarnessConfig {
+        budget_floor: 0,
+        ..HarnessConfig::default()
+    });
     run_seed(&workload, 53).expect("invariants hold");
 
     // The child's run ended Cancelled within bounded logical time (H5, §9.2 item 2).
