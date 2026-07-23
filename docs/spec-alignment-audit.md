@@ -48,7 +48,7 @@ inherited unchanged" — was the main claim under test.
 | agentic-harness | Strong | H1, H3–H8 all aligned |
 | granary | Strong | 24/24 aligned (G15 now implemented) |
 | machine | Strong | M1–M6 aligned (M6 egress now wired into boot/kill) |
-| distributed-actor | Strong (in-scope) | 22 invariants; realization of 5 lives in `actor-cluster` |
+| distributed-actor | Strong | 22 invariants; realization of 5 in `actor-cluster` now read (finding 5) |
 
 **Every audit came back "faithful implementation."** No agent found a silent or
 incorrect divergence from a MUST that the spec did not already acknowledge.
@@ -131,13 +131,57 @@ does not exist. A silently-deleted or renamed distributed-invariant test
 unnoticed.
 *(distributed-actor)*
 
-### 5. Scope note — membership realization outside audited crates
+### 5. Membership realization in `actor-cluster` — RESOLVED (2026-07-23)
 
-SWIM / membership modes / leader-Raft / node-down cascade live in `actor-cluster`,
-outside the four crates the actor-spec audit covered. Invariants #14, #16, #17 and
-the quorum-gating halves of #2 and #22 are therefore test-covered but their
-*realization* was not directly read. A follow-up pass over `actor-cluster` would
-close this.
+Previously the distributed-actor audit read only `actor-core`, `actor-runtime`,
+`actor-serialization`, and `actor-simulation`. SWIM / membership modes / leader-Raft
+/ node-down cascade live in `actor-cluster`, so invariants #14, #16, #17 and the
+quorum-gating halves of #2 and #22 were test-covered but their *realization* was
+never directly read. That read is now done — one verification pass per invariant over
+`membership.rs`, `raft.rs`, `consensus.rs`, and `system.rs`, each classified against
+the code and then adversarially re-checked. All five are **ALIGNED**:
+
+- **#14 (convergence):** both axes of the per-member lattice are order-independent
+  joins — `status_supersedes` / `reachability_supersedes` take the lexicographic max
+  on `(stamp, rank)` (`membership.rs:68-78`), terminal `down` is absorbing
+  (`membership.rs:704-710, 1056-1062`), first-sight is a roster union
+  (`1037-1050`); leader mode stamps by the monotonic Raft log index applied in order
+  (`raft.rs:929`). A post-heal reachability-poison loop self-terminates because every
+  digest carries the recipient's own entry and triggers a `merge_self` incarnation
+  bump (`membership.rs:957-977, 1111-1115`).
+- **#16 (partition tolerance):** the only detector→`down` path is gated on
+  `DowningPolicy::Timeout` (`membership.rs:858-870`); every non-gossip mode hard-codes
+  `Conservative` (`373-378`) and `RegistryMode` has no `downing` field at all
+  (`219-226`). A minority leader may propose `Down`, but `advance_commit` never reaches
+  quorum (`raft.rs:884-901`), so a partition alone downs nobody.
+- **#17 (SWIM refutation):** `merge_self` increments incarnation and re-broadcasts
+  `alive@inc+1`, which supersedes any equal-or-lower suspicion cluster-wide
+  (`membership.rs:1082-1094, 1111-1115`); bound by the seeded sim
+  `a_suspected_node_refutes_a_false_suspicion`
+  (`actor-simulation/tests/conformance_membership.rs:417`).
+- **#2 (quorum half):** every write to `state.voters` is a committed, log-ordered
+  entry (`raft.rs:551, 906-937, 1156`); no ad-hoc mutation path exists; `down` is
+  terminal. Removal of a downed voter is operator-driven, matching the spec sentence's
+  own "replacement joins with a fresh NodeId" administrative framing and §9.4.3's
+  discretionary "MAY down".
+- **#22 (quorum-gated control plane):** election safety rests on persisted
+  one-vote-per-term (`raft.rs:972-976`) plus the current-term commit rule (`886`);
+  membership transitions flow only through the committed log.
+
+Two latent smells surfaced, neither reachable as a violating execution today:
+
+- `advance_commit` counts `self` unconditionally with no `state.voters` membership
+  check, and `drain_committed` applies `RemoveVoter(self)` without a leader step-down
+  (`raft.rs:889, 922-926`). In principle a self-removed leader could commit on a
+  phantom self-vote; in practice the `tick()` non-voter early-return (`raft.rs:704`)
+  makes it dormant — it never replicates, so it never receives the append-replies that
+  are `advance_commit`'s only remaining call site — so the path is dead. A defensive
+  guard (skip the self-count when `self` is not a voter, or step down on
+  `RemoveVoter(self)`) would make the safety local rather than emergent.
+- A downed CONTROL voter lingers in `state.voters` until an operator calls
+  `remove_voter`; this is spec-conformant (removal is the administrative half of a
+  fresh-NodeId replace) and carries no fault-tolerance regression, but the phantom
+  voter inflates the quorum denominator until reconciled.
 *(distributed-actor)*
 
 ## Low-severity theme: documentation drift
