@@ -43,7 +43,7 @@ inherited unchanged" — was the main claim under test.
 |---|---|---|
 | wal | Strong | W1–W4 all aligned |
 | cluster-utilities | Strong | U1–U2 + all router/singleton reqs aligned |
-| blob-store | Strong | B1–B7 aligned (1 medium durability edge) |
+| blob-store | Strong | B1–B7 aligned (under-W ack now returns Unavailable) |
 | sandbox | Strong | S1–S5 aligned (S3/Network deliberately absent) |
 | agentic-harness | Strong | H1, H3–H8 all aligned |
 | granary | Strong | 24/24 aligned (G15 now implemented) |
@@ -67,13 +67,17 @@ claims the tap/NAT plumbing exists; it is present only as an orphaned `apply`
 module, never connected to the grain lifecycle.
 *(machine)*
 
-### 2. Blob-store puts can ack below the durability target — MEDIUM
+### 2. Blob-store puts can ack below the durability target — RESOLVED (2026-07-23)
 
-`run_put` computes `need = W.min(owners.len())` (`cluster.rs:182`), so when live
-owners < W the put returns `Ok` at fewer than W copies instead of `Unavailable`.
-This silently weakens the durability contract (B3 / §5.2) exactly when the
-cluster is under-provisioned. Only manifests when live owners < W; normal-path
-tests use 3 nodes ≥ W.
+Previously `run_put` computed `need = W.min(owners.len())`, so when live owners < W
+the put returned `Ok` at fewer than W copies instead of `Unavailable`, silently
+weakening the durability contract (B3 / §5.2) exactly when the cluster was
+under-provisioned. `run_put` now sets `need = W` and refuses early with
+`Unavailable` when the serving set holds fewer than W possible owners, so a put
+never acks below the target — the blob it confirms always survives losing any
+R − W owners. Covered by `a_put_below_write_quorum_is_refused`
+(`crates/blob-store/tests/clustered.rs`), which partitions a node down to a
+sub-W serving set and asserts the put is refused.
 *(blob-store)*
 
 ### 3. Granary shard split/merge (G15) — RESOLVED (2026-07-23)
@@ -176,5 +180,6 @@ Suggested priority order for action:
 
 1. **Machine egress wiring (M6)** — the one functional gap; the property holds
    only as a pure function, not an enforced runtime posture.
-2. **Blob-store under-W ack (B3)** — return `Unavailable` when live owners < W.
+2. **Blob-store under-W ack (B3)** — RESOLVED (2026-07-23): `run_put` returns
+   `Unavailable` when fewer than W owners could hold a copy.
 3. **Doc-drift cleanup** — cheap, and it is a stated project convention.

@@ -176,10 +176,19 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
         }
         let members = self.inner.system.serving_members();
         let owners = placement::owners(&members, ns, &id, self.r());
-        if owners.is_empty() {
-            return Err(BlobError::Unavailable("no serving members".to_string()));
+        // B3 / §5.2: a `put` acks only once at least W copies are stored, so the
+        // blob then survives the loss of any R − W owners. When the serving set is
+        // smaller than W there are fewer than W nodes that could ever hold a copy,
+        // so the durability target is unreachable — refuse now with `Unavailable`
+        // rather than ack at min(W, owners) copies, which would silently weaken the
+        // contract exactly when the cluster is under-provisioned.
+        let need = self.w();
+        if owners.len() < need {
+            return Err(BlobError::Unavailable(format!(
+                "{} serving owners, below write quorum W={need}",
+                owners.len()
+            )));
         }
-        let need = self.w().min(owners.len());
 
         // Fan a StoreBlob out to every owner; the local owner resolves to the
         // in-process replica (no serialization, spec §5.2). Acknowledge at `need`

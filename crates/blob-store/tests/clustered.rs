@@ -217,6 +217,30 @@ fn a_tampered_copy_falls_through_to_a_good_owner() {
 }
 
 #[test]
+fn a_put_below_write_quorum_is_refused() {
+    // B3 / §5.2: a put acks only once at least W copies are stored, so the blob
+    // survives losing any R − W owners. Partition A away from {B, C} so A's serving
+    // set shrinks to just itself — fewer than W=2 nodes could ever hold a copy. The
+    // put must fail with Unavailable rather than ack at one copy, which would
+    // silently weaken the durability target when the cluster is under-provisioned.
+    let sim = Simulation::new(9);
+    let (net, stores, _dirs) = cluster(&sim);
+
+    net.partition(&[A], &[B, C]);
+    sim.run_for(Duration::from_secs(2)); // SWIM marks B and C unreachable on A
+
+    let ns = Namespace::new(b"under-provisioned".to_vec());
+    let result = drive(&sim, Duration::from_secs(5), {
+        let (store, ns) = (stores[0].clone(), ns.clone());
+        async move { store.put(&ns, b"needs two copies".to_vec()).await }
+    });
+    assert!(
+        matches!(result, Err(BlobError::Unavailable(_))),
+        "a put below write quorum must be refused, got {result:?}",
+    );
+}
+
+#[test]
 fn a_deleted_namespace_resolves_nowhere_and_refuses_puts() {
     // B7: delete_namespace fans a tombstone cluster-wide; afterwards every node
     // returns Deleted for a get and refuses a put back into the namespace.
