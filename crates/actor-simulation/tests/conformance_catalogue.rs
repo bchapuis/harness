@@ -3,11 +3,13 @@
 //!
 //! This is the spec↔code drift gate. It fails the build if an invariant number
 //! is missing or duplicated, if a catalogue `Checker(name)` is not actually
-//! present in `default_invariants()`, or if a live checker is not recorded in
-//! the catalogue. Keeping it green is what makes the §17 "Verified by" column
-//! mechanically true rather than just documented.
+//! present in `default_invariants()`, if a live checker is not recorded in the
+//! catalogue, or if a `SimTest`/`Differential`/`CompileFail` file pointer names
+//! a test file that no longer exists. Keeping it green is what makes the §17
+//! "Verified by" column mechanically true rather than just documented.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use actor_simulation::Verify;
 use actor_simulation::catalogue;
@@ -102,6 +104,48 @@ fn every_live_checker_is_recorded_in_the_catalogue() {
             recorded.contains(name),
             "default_invariants() ships checker {name:?} that the catalogue does not record"
         );
+    }
+}
+
+/// Every `SimTest`/`Differential`/`CompileFail` file pointer must name a file
+/// that actually exists — otherwise a renamed or deleted conformance test drifts
+/// out from under the catalogue unnoticed, and the §17 "Verified by" column stops
+/// being mechanically true. `SimTest`/`Differential` pointers are comma-separated
+/// `*.rs` files under this crate's `tests/` directory; a `CompileFail` pointer is
+/// a path relative to the `crates/` directory (e.g. `actor-core/tests/compile_fail`).
+#[test]
+fn every_file_pointer_references_a_real_file() {
+    let tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crate dir has a parent");
+
+    for e in catalogue().iter().chain(utilities_catalogue()) {
+        for v in e.verify {
+            match v {
+                Verify::SimTest(files) | Verify::Differential(files) => {
+                    for file in files.split(',').map(str::trim) {
+                        assert!(
+                            tests_dir.join(file).exists(),
+                            "invariant #{} points at test file {file:?}, \
+                             which does not exist under {}",
+                            e.invariant,
+                            tests_dir.display(),
+                        );
+                    }
+                }
+                Verify::CompileFail(path) => {
+                    assert!(
+                        crates_dir.join(path).exists(),
+                        "invariant #{} points at compile-fail path {path:?}, \
+                         which does not exist under {}",
+                        e.invariant,
+                        crates_dir.display(),
+                    );
+                }
+                Verify::Checker(_) | Verify::CompileTime(_) => {}
+            }
+        }
     }
 }
 

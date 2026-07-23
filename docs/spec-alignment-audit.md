@@ -97,15 +97,20 @@ blob-bearing grains, the size trigger, and alarm-index reconciliation across a m
 (`crates/granary/tests/shard_split.rs`, `alarm_cluster.rs`).
 *(granary)*
 
-### 4. Actor-framework traceability is stale and unenforced — MEDIUM (doc integrity)
+### 4. Actor-framework traceability is stale and unenforced — RESOLVED (2026-07-23)
 
-`conformance_catalogue.rs` cross-checks only `Verify::Checker` names; it never
-verifies that `SimTest`/`Differential`/`CompileFail` file pointers reference real
-files, and many are wrong — the catalogue cites `cluster.rs`, `failure.rs`,
-`watch.rs`, `gossip.rs`, `actor.rs`, `escalation.rs`, none of which exist in
-`tests/` (the tests are `conformance_*.rs`). The tests themselves exist and pass,
-but a silently-deleted distributed-invariant test (#2/#14/#16/#17/#22 scenario
-halves) would go unnoticed.
+Previously `conformance_catalogue.rs` cross-checked only `Verify::Checker` names;
+it never verified that `SimTest`/`Differential`/`CompileFail` file pointers
+reference real files, and many were wrong — the catalogue cited `cluster.rs`,
+`failure.rs`, `watch.rs`, `gossip.rs`, `actor.rs`, `escalation.rs`, none of which
+existed in `tests/` (the tests are `conformance_*.rs`). Every stale pointer is now
+corrected to the real `conformance_*.rs` file it was consolidated into, and the
+drift gate is extended with an `every_file_pointer_references_a_real_file` test
+that resolves each `SimTest`/`Differential` pointer under `tests/` and the
+`CompileFail` pointer under `crates/`, failing the build if any names a file that
+does not exist. A silently-deleted or renamed distributed-invariant test
+(#2/#14/#16/#17/#22 scenario halves) now breaks the build rather than going
+unnoticed.
 *(distributed-actor)*
 
 ### 5. Scope note — membership realization outside audited crates
@@ -128,7 +133,8 @@ code — which matters given the project convention that specs describe current 
 - **machine:** `crates/machine/src/lib.rs` docstrings still say
   `Facets = (Disk, Alarm)`; the implementation is `(Disk, Alarm, Ws)`
   (`grain.rs:471`).
-- **distributed-actor:** the stale catalogue pointers above.
+- **distributed-actor:** the stale catalogue pointers (finding 4) are now
+  corrected and machine-verified to exist by the drift gate.
 
 ## Other low-severity notes (within spec intent or explicitly deferred)
 

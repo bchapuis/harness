@@ -16,8 +16,10 @@ pub enum Verify {
     /// [`Invariant::name`](crate::Invariant::name). Cross-checked against the
     /// live checker set.
     Checker(&'static str),
-    /// One or more example/conformance tests (a human-readable file pointer;
-    /// not machine-verified to exist).
+    /// One or more example/conformance tests, named as comma-separated files
+    /// under this crate's `tests/` directory. The `conformance_catalogue` test
+    /// machine-verifies each named file exists, so a renamed or deleted test
+    /// fails the build.
     SimTest(&'static str),
     /// A `trybuild` compile-fail case asserting invalid code is rejected (#20).
     CompileFail(&'static str),
@@ -62,22 +64,20 @@ const CATALOGUE: &[CatalogueEntry] = &[
         property: "No silent loss: every ask reaches exactly one outcome; none pending at quiescence",
         verify: &[
             Verify::Checker("no-silent-loss"),
-            Verify::SimTest("swarm.rs, conformance_messaging.rs"),
+            Verify::SimTest("conformance_swarm.rs, conformance_messaging.rs"),
         ],
     },
     CatalogueEntry {
         invariant: 2,
         spec: "§7.2, §10",
         property: "An ask to a downed node completes with Unreachable, never hangs",
-        verify: &[Verify::SimTest("failure.rs, conformance_faults.rs")],
+        verify: &[Verify::SimTest("conformance_faults.rs, conformance_membership.rs")],
     },
     CatalogueEntry {
         invariant: 3,
         spec: "§6",
         property: "Per-pair FIFO: messages from one sender to one recipient observed in send order",
-        verify: &[Verify::SimTest(
-            "actor.rs, cluster.rs, conformance_faults.rs",
-        )],
+        verify: &[Verify::SimTest("conformance_messaging.rs, conformance_faults.rs")],
     },
     CatalogueEntry {
         invariant: 4,
@@ -85,14 +85,14 @@ const CATALOGUE: &[CatalogueEntry] = &[
         property: "Serial, non-reentrant execution: an actor never dispatches two messages at once",
         verify: &[
             Verify::Checker("serial-execution"),
-            Verify::SimTest("actor.rs"),
+            Verify::SimTest("conformance_messaging.rs"),
         ],
     },
     CatalogueEntry {
         invariant: 5,
         spec: "§6",
         property: "Bounded, non-dropping mailbox: a full mailbox blocks or returns MailboxFull",
-        verify: &[Verify::SimTest("actor.rs, conformance_messaging.rs")],
+        verify: &[Verify::SimTest("conformance_messaging.rs")],
     },
     CatalogueEntry {
         invariant: 6,
@@ -113,13 +113,13 @@ const CATALOGUE: &[CatalogueEntry] = &[
         invariant: 8,
         spec: "§4.4, §5, §15",
         property: "Manifest dispatch and allowlist: unregistered (type, manifest) → Unhandled",
-        verify: &[Verify::SimTest("conformance_serialization.rs, wire.rs")],
+        verify: &[Verify::SimTest("conformance_serialization.rs")],
     },
     CatalogueEntry {
         invariant: 9,
         spec: "§4.3, §4.4",
         property: "Local sends skip serialization, with a result identical to the remote path",
-        verify: &[Verify::SimTest("cluster.rs")],
+        verify: &[Verify::SimTest("conformance_messaging.rs")],
     },
     CatalogueEntry {
         invariant: 10,
@@ -131,13 +131,13 @@ const CATALOGUE: &[CatalogueEntry] = &[
         invariant: 11,
         spec: "§12",
         property: "Death-watch exactly-once, including NodeDown",
-        verify: &[Verify::SimTest("conformance_deathwatch.rs, watch.rs")],
+        verify: &[Verify::SimTest("conformance_deathwatch.rs")],
     },
     CatalogueEntry {
         invariant: 12,
         spec: "§12",
         property: "Watching an already-terminated actor yields Terminated immediately",
-        verify: &[Verify::SimTest("watch.rs")],
+        verify: &[Verify::SimTest("conformance_deathwatch.rs")],
     },
     CatalogueEntry {
         invariant: 13,
@@ -153,7 +153,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         spec: "§9.2, §9.4",
         property: "Membership convergence once faults cease and partitions heal — by anti-entropy (gossip-based), registry sync (registry-based), or log replication (leader-based)",
         verify: &[Verify::SimTest(
-            "gossip.rs, conformance_registry.rs, conformance_leader.rs",
+            "conformance_membership.rs, conformance_registry.rs, conformance_leader.rs",
         )],
     },
     CatalogueEntry {
@@ -162,7 +162,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         property: "down is terminal: a node observed down never reappears up at the same incarnation",
         verify: &[
             Verify::Checker("down-is-terminal"),
-            Verify::SimTest("failure.rs, conformance_join.rs"),
+            Verify::SimTest("conformance_membership.rs, conformance_join.rs"),
         ],
     },
     CatalogueEntry {
@@ -170,28 +170,26 @@ const CATALOGUE: &[CatalogueEntry] = &[
         spec: "§9.4",
         property: "Partition tolerance: under the default policy a partition alone never downs a member — unconditionally in registry-based mode (observe-only detector), and on any quorum-less side in leader-based mode (#22)",
         verify: &[Verify::SimTest(
-            "failure.rs, conformance_membership.rs, conformance_registry.rs, conformance_leader.rs",
+            "conformance_membership.rs, conformance_registry.rs, conformance_leader.rs",
         )],
     },
     CatalogueEntry {
         invariant: 17,
         spec: "§10",
         property: "SWIM refutation: a suspected node refutes via a higher incarnation",
-        verify: &[Verify::SimTest("gossip.rs, conformance_membership.rs")],
+        verify: &[Verify::SimTest("conformance_membership.rs")],
     },
     CatalogueEntry {
         invariant: 18,
         spec: "§11",
         property: "Supervision containment: a panic never crashes the node; default Stop; restarts back off",
-        verify: &[Verify::SimTest("supervision.rs, escalation.rs")],
+        verify: &[Verify::SimTest("conformance_supervision.rs")],
     },
     CatalogueEntry {
         invariant: 19,
         spec: "§13",
         property: "Receptionist consistency: pruned on node down; subscribe delivers snapshot then changes",
-        verify: &[Verify::SimTest(
-            "receptionist.rs, conformance_receptionist.rs",
-        )],
+        verify: &[Verify::SimTest("conformance_receptionist.rs")],
     },
     CatalogueEntry {
         invariant: 20,
@@ -203,7 +201,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         invariant: 21,
         spec: "§3.3",
         property: "Location transparency: local vs remote target produce identical replies and ordering",
-        verify: &[Verify::Differential("cluster.rs")],
+        verify: &[Verify::Differential("conformance_messaging.rs")],
     },
     CatalogueEntry {
         invariant: 22,
@@ -211,7 +209,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         property: "Quorum-gated control plane: every transition is a quorum-committed log entry applied in log order; at most one leader per term; a minority never evicts the majority",
         verify: &[
             Verify::Checker("one-leader-per-term"),
-            Verify::SimTest("conformance_leader.rs, conformance_restart.rs, cluster_swarm.rs"),
+            Verify::SimTest("conformance_leader.rs, conformance_restart.rs, conformance_swarm.rs"),
         ],
     },
 ];
@@ -232,7 +230,7 @@ const UTILITIES_CATALOGUE: &[CatalogueEntry] = &[
         property: "Singleton activation discipline: a node never runs two live activations of one name concurrently; a healed, converged cluster runs exactly one per name; an anchor failure re-activates within bounded logical time",
         verify: &[
             Verify::Checker("singleton-at-most-one-per-node"),
-            Verify::SimTest("conformance_singleton.rs, cluster_swarm.rs"),
+            Verify::SimTest("conformance_singleton.rs, conformance_swarm.rs"),
         ],
     },
 ];
