@@ -176,9 +176,11 @@ Two latent smells surfaced, neither reachable as a violating execution today:
   makes it dormant — it never replicates, so it never receives the append-replies that
   are `advance_commit`'s only remaining call site — so the path was already dead.
   **RESOLVED (2026-07-23):** `advance_commit` now counts the leader's own log only
-  while it remains in the voter set (`raft.rs`), making the safety local to the commit
-  arithmetic rather than emergent from the dormancy guard, with a regression test that
-  drives `advance_commit` directly and fails on the old code.
+  while it remains in the voter set, making the safety local to the commit arithmetic
+  rather than emergent from the dormancy guard; and a leader that commits its own
+  `RemoveVoter` now steps down to follower in `drain_committed` (Raft dissertation
+  §4.2.2) instead of lingering as a `Role::Leader` non-voter (`raft.rs`). Both are
+  covered by direct-drive regression tests, and the quorum guard fails on the old code.
 - A downed CONTROL voter lingers in `state.voters` until an operator calls
   `remove_voter`; this is spec-conformant (removal is the administrative half of a
   fresh-NodeId replace) and carries no fault-tolerance regression, but the phantom

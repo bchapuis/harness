@@ -712,7 +712,7 @@ impl RaftGroup {
             }
             Role::Leader => self.replicate(&mut state, &mut out),
         }
-        self.drain_committed(&mut state, &mut out);
+        self.drain_committed(&mut state, &mut out, now, entropy);
         out
     }
 
@@ -912,7 +912,19 @@ impl RaftGroup {
     /// Hand newly committed application commands to the caller, applying
     /// voter-set changes internally (spec §9.4.3 item 2). `Noop` and the voter
     /// changes never reach the caller; only [`EntryPayload::App`] bytes do.
-    fn drain_committed(&self, state: &mut RaftState, out: &mut RaftOutput) {
+    ///
+    /// A leader that commits its own `RemoveVoter` steps down here (Raft
+    /// dissertation §4.2.2): it is no longer a voter, so it stops leading rather
+    /// than lingering as a `Role::Leader` non-voter that the commit quorum and the
+    /// `tick` guard both have to special-case. `now`/`entropy` re-arm its election
+    /// timer on the way down like any other step-down.
+    fn drain_committed<E: Entropy>(
+        &self,
+        state: &mut RaftState,
+        out: &mut RaftOutput,
+        now: Instant,
+        entropy: &E,
+    ) {
         while state.applied < state.commit {
             state.applied += 1;
             // Cloned out of the log (a `RaftEntry` is no longer `Copy`); the
@@ -932,6 +944,13 @@ impl RaftGroup {
                     state.voters.retain(|&v| v != node);
                     state.next.remove(&node);
                     state.matched.remove(&node);
+                    // A leader that just removed itself is no longer a voter and
+                    // must not keep leading (spec §9.4.3 item 2).
+                    if node == self.node && state.role == Role::Leader {
+                        let term = state.term;
+                        self.become_follower(state, term, now, entropy);
+                        state.leader = None;
+                    }
                 }
                 EntryPayload::App(bytes) => {
                     out.committed.push(Committed::Apply {
@@ -1018,7 +1037,7 @@ impl RaftGroup {
                 self.become_leader(&mut state, &mut out);
             }
         }
-        self.drain_committed(&mut state, &mut out);
+        self.drain_committed(&mut state, &mut out, now, entropy);
         out
     }
 
@@ -1112,7 +1131,7 @@ impl RaftGroup {
                 match_index,
             },
         ));
-        self.drain_committed(&mut state, &mut out);
+        self.drain_committed(&mut state, &mut out, now, entropy);
         out
     }
 
@@ -1214,7 +1233,7 @@ impl RaftGroup {
             let next = state.next.entry(from).or_insert(1);
             *next = (*next - 1).clamp(1, match_index + 1);
         }
-        self.drain_committed(&mut state, &mut out);
+        self.drain_committed(&mut state, &mut out, now, entropy);
         out
     }
 }
@@ -1626,6 +1645,47 @@ mod tests {
             state.commit, 1,
             "a voter leader commits on its own vote plus one follower (quorum 2 of 3)",
         );
+    }
+
+    /// A leader that commits its own `RemoveVoter` steps down to follower (Raft
+    /// dissertation §4.2.2) rather than lingering as a `Role::Leader` non-voter —
+    /// the cleaner counterpart to the commit-quorum guard above.
+    #[test]
+    fn a_leader_steps_down_when_it_commits_its_own_removal() {
+        let node = NodeId::new(1);
+        let v2 = NodeId::new(2);
+        let group = RaftGroup::new(
+            GroupId(1),
+            node,
+            vec![node, v2],
+            Vec::new(),
+            Duration::from_millis(100),
+            Arc::new(InMemoryRaftWAL::new()),
+            Instant::ZERO,
+        );
+
+        let mut state = group.lock();
+        state.role = Role::Leader;
+        state.leader = Some(node);
+        state.term = 4;
+        // A committed `RemoveVoter(self)` at index 1, ready to apply.
+        state.log = vec![RaftEntry {
+            term: 4,
+            payload: EntryPayload::RemoveVoter(node),
+        }];
+        state.commit = 1;
+
+        let entropy = TestEntropy::new(0x9e37_79b9);
+        let mut out = RaftOutput::default();
+        group.drain_committed(&mut state, &mut out, Instant::ZERO, &entropy);
+
+        assert_eq!(
+            state.role,
+            Role::Follower,
+            "a self-removed leader steps down instead of leading as a non-voter",
+        );
+        assert_eq!(state.leader, None, "and no longer believes itself the leader");
+        assert_eq!(state.voters, vec![v2], "and is gone from the voter set");
     }
 
     /// Compaction (spec §9): the voters commit a run of entries while a learner is
