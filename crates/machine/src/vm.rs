@@ -15,6 +15,8 @@ use std::sync::Arc;
 use actor_core::BoxFuture;
 use granary::GrainName;
 
+use crate::grain::EgressPolicy;
+
 #[cfg(feature = "firecracker")]
 pub mod firecracker;
 #[cfg(feature = "firecracker")]
@@ -58,6 +60,10 @@ pub struct VmSpec {
     pub mem_mib: u32,
     /// The machine this VM belongs to — the attribution key (machine §5.2).
     pub machine: GrainName,
+    /// The machine's journaled egress policy (machine §5.2, M6): what the guest
+    /// may reach out to. The provider realizes exactly what it grants; the fake
+    /// provider ignores it (M6 is verified against the pure rule generator).
+    pub egress: EgressPolicy,
 }
 
 /// One live guest. Held by the activation and by nothing durable; dropped or

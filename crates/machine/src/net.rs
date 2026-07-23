@@ -24,6 +24,9 @@
 //! `nft`) is the Linux-only, `CAP_NET_ADMIN` realization behind
 //! [`feature = "net"`](apply); the obligation is the property, not the plumbing.
 
+use std::collections::BTreeSet;
+use std::net::Ipv4Addr;
+
 use crate::grain::EgressPolicy;
 use granary::BlobId;
 use granary::GrainName;
@@ -130,6 +133,126 @@ pub fn nft_ruleset(
     out.push_str("  }\n");
     out.push_str("}\n");
     out
+}
+
+/// Deployment-level egress configuration for a node (machine §5.2): the ranges
+/// the ruleset must fence off, the uplink it masquerades out, and the address
+/// pool per-machine guest /30s are carved from. The per-machine half — which
+/// slot, which policy — is decided per boot; this is the node-wide half the
+/// provider is constructed with. Its presence is what turns egress on: a
+/// provider built without it boots machines with no NIC (the pre-M6 posture),
+/// so a deployment that has not provisioned an uplink stays functional.
+#[derive(Clone, Debug)]
+pub struct EgressConfig {
+    /// The cluster's own control-plane and node-internal CIDRs, dropped by the
+    /// ruleset in addition to the universal private/link-local/metadata classes
+    /// (M6 no lateral movement).
+    pub cluster_cidrs: Vec<String>,
+    /// The node's egress interface, the masquerade's `oifname` (M6 attribution).
+    pub uplink: String,
+    /// The base of the node-local pool guest /30s are carved from (e.g.
+    /// `172.31.0.0`). Each machine takes the next free /30: `.0` network,
+    /// `.1` the tap (the guest's gateway), `.2` the guest, `.3` broadcast.
+    pub guest_pool_base: Ipv4Addr,
+    /// How many machines the pool addresses concurrently; a boot past this
+    /// count degrades to no NIC rather than colliding addresses.
+    pub guest_pool_slots: u32,
+}
+
+/// One machine's realized guest addressing (machine §5.2), carved from the
+/// node's [`EgressConfig`] pool: the tap the guest's virtio-net binds to, the
+/// /30 the tap is addressed from, and the guest's own address, gateway, and MAC.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuestNet {
+    /// The tap device name — the stable per-machine attribution key ([`tap_name`]).
+    pub tap: String,
+    /// The tap's host-side address with prefix, e.g. `172.31.0.1/30`; what
+    /// [`apply::install`] assigns to the tap and the guest's default gateway.
+    pub host_cidr: String,
+    /// The guest's default gateway (the tap's host address), e.g. `172.31.0.1`.
+    pub gateway: String,
+    /// The guest's own address, e.g. `172.31.0.2`.
+    pub guest_ip: String,
+    /// A stable, locally-administered MAC for the guest NIC (derived from the
+    /// machine name, so it survives reboots — attribution stability, M6).
+    pub guest_mac: String,
+}
+
+/// A stable, locally-administered unicast MAC for a machine's guest NIC,
+/// derived from the grain-name hash (the `0x02` first octet marks it
+/// locally-administered). Stable per machine across reboots (M6 attribution).
+pub fn guest_mac(machine: &GrainName) -> String {
+    let hash = BlobId::of(machine.to_string().as_bytes());
+    let b = hash.as_bytes();
+    format!(
+        "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        b[0], b[1], b[2], b[3], b[4]
+    )
+}
+
+/// Carve the `index`-th guest /30 out of the pool based at `pool_base`
+/// (machine §5.2). Pure: the same machine + index always maps to the same
+/// addresses, so a crash-and-reboot that reallocates the same slot lands the
+/// same guest address.
+pub fn guest_net(machine: &GrainName, pool_base: Ipv4Addr, index: u32) -> GuestNet {
+    // Each /30 is four addresses; `index * 4` steps to this machine's block.
+    let network = u32::from(pool_base).wrapping_add(index.wrapping_mul(4));
+    let gateway = Ipv4Addr::from(network.wrapping_add(1));
+    let guest = Ipv4Addr::from(network.wrapping_add(2));
+    GuestNet {
+        tap: tap_name(machine),
+        host_cidr: format!("{gateway}/30"),
+        gateway: gateway.to_string(),
+        guest_ip: guest.to_string(),
+        guest_mac: guest_mac(machine),
+    }
+}
+
+/// The `ip=` kernel argument that brings the guest's `eth0` up before init via
+/// Linux IP autoconfiguration (`CONFIG_IP_PNP`), so the base image needs no
+/// DHCP client: `ip=<guest>::<gateway>:<netmask>::eth0:off`. Appended to the
+/// boot args when a machine boots with a NIC.
+pub fn guest_ip_boot_arg(net: &GuestNet) -> String {
+    format!("ip={}::{}:255.255.255.252::eth0:off", net.guest_ip, net.gateway)
+}
+
+/// A node-local allocator for per-machine guest /30 slots (machine §5.2's
+/// "a node-local pool allocates it"). One per node, held by the provider; a
+/// boot takes the lowest free slot and a kill returns it, so a machine that
+/// comes and goes never exhausts the pool.
+#[derive(Debug)]
+pub struct GuestPool {
+    base: Ipv4Addr,
+    slots: u32,
+    used: BTreeSet<u32>,
+}
+
+impl GuestPool {
+    pub fn new(base: Ipv4Addr, slots: u32) -> GuestPool {
+        GuestPool {
+            base,
+            slots,
+            used: BTreeSet::new(),
+        }
+    }
+
+    /// The pool base, so a caller can derive addresses via [`guest_net`].
+    pub fn base(&self) -> Ipv4Addr {
+        self.base
+    }
+
+    /// Take the lowest free slot's index, or `None` when the pool is full.
+    pub fn allocate(&mut self) -> Option<u32> {
+        let index = (0..self.slots).find(|i| !self.used.contains(i))?;
+        self.used.insert(index);
+        Some(index)
+    }
+
+    /// Return a slot to the pool. Idempotent: freeing an already-free slot is a
+    /// no-op, so a doubled teardown never disturbs a slot since reallocated.
+    pub fn free(&mut self, index: u32) {
+        self.used.remove(&index);
+    }
 }
 
 /// Apply a machine's egress plumbing (machine §5.2's reference realization):
@@ -262,6 +385,53 @@ mod tests {
         let rules = nft_ruleset(&machine(), &EgressPolicy::None, CLUSTER, "eth0");
         assert!(rules.contains("policy: none"));
         assert!(!rules.contains("accept comment \"policy"));
+    }
+
+    #[test]
+    fn guest_net_carves_a_distinct_thirty_from_the_pool_per_slot() {
+        let base: Ipv4Addr = "172.31.0.0".parse().unwrap();
+        let a = guest_net(&machine(), base, 0);
+        assert_eq!(a.host_cidr, "172.31.0.1/30");
+        assert_eq!(a.gateway, "172.31.0.1");
+        assert_eq!(a.guest_ip, "172.31.0.2");
+        assert_eq!(a.tap, tap_name(&machine()), "the tap is the attribution key");
+
+        // The next slot is the next /30 — four addresses on.
+        let b = guest_net(&machine(), base, 1);
+        assert_eq!(b.gateway, "172.31.0.5");
+        assert_eq!(b.guest_ip, "172.31.0.6");
+
+        // Same machine + slot is stable; the MAC is stable regardless of slot.
+        assert_eq!(a, guest_net(&machine(), base, 0));
+        assert_eq!(a.guest_mac, b.guest_mac, "MAC is per-machine, not per-slot");
+        assert!(a.guest_mac.starts_with("02:"), "locally administered");
+        assert_ne!(
+            a.guest_mac,
+            guest_mac(&GrainName::new("machine", "other")),
+            "distinct per machine",
+        );
+    }
+
+    #[test]
+    fn the_guest_boot_arg_configures_eth0_from_the_pool() {
+        let net = guest_net(&machine(), "172.31.0.0".parse().unwrap(), 0);
+        assert_eq!(
+            guest_ip_boot_arg(&net),
+            "ip=172.31.0.2::172.31.0.1:255.255.255.252::eth0:off",
+        );
+    }
+
+    #[test]
+    fn the_pool_hands_out_the_lowest_free_slot_and_reclaims_it() {
+        let mut pool = GuestPool::new("172.31.0.0".parse().unwrap(), 2);
+        assert_eq!(pool.allocate(), Some(0));
+        assert_eq!(pool.allocate(), Some(1));
+        assert_eq!(pool.allocate(), None, "full pool degrades, not collides");
+        pool.free(0);
+        assert_eq!(pool.allocate(), Some(0), "a freed slot is reused");
+        pool.free(1);
+        pool.free(1); // idempotent: a doubled teardown is safe.
+        assert_eq!(pool.allocate(), Some(1));
     }
 
     #[test]

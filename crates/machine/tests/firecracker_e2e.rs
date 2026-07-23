@@ -84,6 +84,7 @@ async fn boot_ws_sync_pause_resume_kill_round_trips() {
             vcpus: 1,
             mem_mib: 256,
             machine: granary::GrainName::new(machine::MACHINE_TYPE, "e2e-box"),
+            egress: machine::EgressPolicy::Open,
         })
         .await
         .expect("boot: the guest agent must accept a vsock connection");

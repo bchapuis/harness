@@ -305,6 +305,7 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
                 vcpus: state.vcpus,
                 mem_mib: state.mem_mib,
                 machine: ctx.name().clone(),
+                egress: state.egress.clone(),
             })
             .await
             .map_err(|e| MachineError::Vm(e.to_string()))?;

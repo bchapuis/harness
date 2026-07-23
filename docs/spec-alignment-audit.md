@@ -47,7 +47,7 @@ inherited unchanged" — was the main claim under test.
 | sandbox | Strong | S1–S5 aligned (S3/Network deliberately absent) |
 | agentic-harness | Strong | H1, H3–H8 all aligned |
 | granary | Strong | 24/24 aligned (G15 now implemented) |
-| machine | Good | M1–M5 aligned; M6/egress unwired |
+| machine | Strong | M1–M6 aligned (M6 egress now wired into boot/kill) |
 | distributed-actor | Strong (in-scope) | 22 invariants; realization of 5 lives in `actor-cluster` |
 
 **Every audit came back "faithful implementation."** No agent found a silent or
@@ -57,14 +57,28 @@ simulation, not just example assertions.
 
 ## Findings that matter
 
-### 1. Machine egress (M6) is unwired — MEDIUM (the one genuine functional gap)
+### 1. Machine egress (M6) is unwired — RESOLVED (2026-07-23)
 
-The `nft` rule generator is correct and golden-tested, but nothing installs it:
-`net::apply::install`/`remove` has zero call sites and `FirecrackerMachineProvider::boot`
-never populates `microvm::NetIf` (stays `net: None`, `firecracker.rs:95-102`). A
-real machine boots with **no network interface at all**. The spec Status line
-claims the tap/NAT plumbing exists; it is present only as an orphaned `apply`
-module, never connected to the grain lifecycle.
+Previously the `nft` rule generator was correct and golden-tested but nothing
+installed it: `net::apply::install`/`remove` had zero call sites and
+`FirecrackerMachineProvider::boot` never populated `microvm::NetIf` (stayed
+`net: None`), so a real machine booted with no network interface at all — the
+tap/NAT plumbing existed only as an orphaned `apply` module. Egress is now wired
+into the Firecracker binding's boot/kill lifecycle. `VmSpec` carries the
+machine's journaled `EgressPolicy`; `FirecrackerMachineConfig` gains an optional
+`EgressConfig` (uplink, cluster CIDRs, guest-address pool base and size). On boot,
+`wire_egress` allocates the machine a guest `/30` from a node-local `GuestPool`,
+generates its policy ruleset via `nft_ruleset`, calls `net::apply::install` to
+create and address the tap and load the rules, populates `vm_config.net` with the
+tap and a stable per-machine MAC, and appends the guest's `ip=` kernel arg so
+`eth0` comes up before init. The returned VM holds an `EgressHandle` that calls
+`net::apply::remove` and returns the pool slot on kill (and again on drop, once,
+via a latch), so a dropped activation leaks neither tap nor slot. The real
+plumbing stays behind `feature = "net"` on Linux; a node without that config or
+without `CAP_NET_ADMIN` degrades to no NIC rather than failing the boot (net.rs's
+documented posture). The pure pieces — guest addressing, the `/30` carve, the
+boot arg, the pool allocator — are unit-tested (`net.rs`); the `ip`/`nft`
+shell-out remains runtime-gated like the rest of the Firecracker suite.
 *(machine)*
 
 ### 2. Blob-store puts can ack below the durability target — RESOLVED (2026-07-23)
@@ -178,8 +192,9 @@ deterministic fault injection.
 
 Suggested priority order for action:
 
-1. **Machine egress wiring (M6)** — the one functional gap; the property holds
-   only as a pure function, not an enforced runtime posture.
+1. **Machine egress wiring (M6)** — RESOLVED (2026-07-23): the tap, node NAT, and
+   guest addressing are installed at boot and removed at kill behind
+   `feature = "net"` on Linux, degrading to no NIC where the capability is absent.
 2. **Blob-store under-W ack (B3)** — RESOLVED (2026-07-23): `run_put` returns
    `Unavailable` when fewer than W owners could hold a copy.
 3. **Doc-drift cleanup** — cheap, and it is a stated project convention.
