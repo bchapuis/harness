@@ -971,6 +971,33 @@ async fn apply_loop<R: RaftConsensus>(
     }
 }
 
+/// Drive `tick` every `interval`, exiting the moment `upgrade` yields `None` —
+/// the shard map (the `Weak` back-reference each loop holds) was dropped. Every
+/// shard-map driver loop's teardown contract — the sleep and the
+/// weak-upgrade-or-exit — lives here once; each loop supplies only its own
+/// `upgrade` (one `Arc`, or a tuple for the loops that need both `inner` and
+/// `handles`) and its per-tick body. The leadership gate stays in the body: it
+/// varies loop to loop (whole-tick, per-shard-group, or per-term), and two loops
+/// run their proposer phase ungated — so a `tick` that returns early skips just
+/// that tick, exactly as a `continue` did.
+async fn driver_loop<R, D, Fut>(
+    consensus: &R,
+    interval: Duration,
+    upgrade: impl Fn() -> Option<D>,
+    mut tick: impl FnMut(D) -> Fut,
+) where
+    R: RaftConsensus,
+    Fut: std::future::Future<Output = ()>,
+{
+    loop {
+        consensus.sleep(interval).await;
+        let Some(deps) = upgrade() else {
+            return; // the map was dropped — stop the loop
+        };
+        tick(deps).await;
+    }
+}
+
 /// The leader-only allocator (spec §7.6, §7.7): while this node leads the map
 /// group, keep each shard's committed replica set equal to its rendezvous choice
 /// over the **current cluster voters**. It re-proposes an [`Assign`](ShardMapCommand::Assign)
@@ -986,72 +1013,76 @@ async fn allocator_loop<R: RaftConsensus>(
     replicas: usize,
     inner: Weak<Mutex<Inner>>,
 ) {
-    loop {
-        consensus.sleep(ALLOCATE_INTERVAL).await;
-        let Some(inner) = inner.upgrade() else {
-            return; // the map was dropped — stop the loop
-        };
-        if !consensus.group_is_leader(group) {
-            continue;
-        }
-        let voters = consensus.cluster_voters();
-        if voters.is_empty() {
-            continue; // control plane not settled yet; nothing to allocate over
-        }
-        // The proposal set: the founding shards (allocated with their initial
-        // ranges if absent) plus every committed shard — a split-minted child
-        // (index ≥ `shards`) rebalances exactly like a founding shard once its
-        // allocation commits. `None` range ⇒ founding; `Some` ⇒ the committed
-        // range, carried unchanged (migration never moves a range).
-        let founding = initial_ranges(shards);
-        let candidates: Vec<(u32, KeyRange)> = {
-            let guard = inner.lock().expect("shard map mutex poisoned");
-            let mut candidates: Vec<(u32, KeyRange)> = founding
-                .iter()
-                .enumerate()
-                .filter(|(shard, _)| !guard.allocation.contains_key(&(*shard as u32)))
-                .map(|(shard, &range)| (shard as u32, range))
-                .collect();
-            candidates.extend(
-                guard
-                    .allocation
-                    .iter()
-                    .map(|(&shard, alloc)| (shard, alloc.range)),
-            );
-            candidates
-        };
-        for (shard, range) in candidates {
-            let desired = select_replicas(&voters, shard_group_id(grain_type, shard), replicas).0;
-            // Propose the founding allocation, or — when the desired set has
-            // drifted from the committed one — start a migration toward it
-            // (§7.7). Never re-propose while a migration is already in flight:
-            // retargeting mid-migration would flip `current` to a set the driver
-            // never caught up (the `Migrated` guard relies on this). Nor while a
-            // split is in flight — migration and split are mutually exclusive
-            // per shard (the `SplitStarted` validation enforces the converse).
-            let proposable = match inner
-                .lock()
-                .expect("shard map mutex poisoned")
-                .allocation
-                .get(&shard)
-            {
-                None => true,
-                Some(alloc) => alloc.idle() && alloc.current != desired,
-            };
-            if proposable {
-                consensus
-                    .propose_to(
-                        group,
-                        encode(&ShardMapCommand::Assign {
-                            shard,
-                            replicas: desired,
-                            range,
-                        }),
-                    )
-                    .await;
+    let consensus = &consensus;
+    driver_loop(
+        consensus,
+        ALLOCATE_INTERVAL,
+        || inner.upgrade(),
+        move |inner| async move {
+            if !consensus.group_is_leader(group) {
+                return;
             }
-        }
-    }
+            let voters = consensus.cluster_voters();
+            if voters.is_empty() {
+                return; // control plane not settled yet; nothing to allocate over
+            }
+            // The proposal set: the founding shards (allocated with their initial
+            // ranges if absent) plus every committed shard — a split-minted child
+            // (index ≥ `shards`) rebalances exactly like a founding shard once its
+            // allocation commits. `None` range ⇒ founding; `Some` ⇒ the committed
+            // range, carried unchanged (migration never moves a range).
+            let founding = initial_ranges(shards);
+            let candidates: Vec<(u32, KeyRange)> = {
+                let guard = inner.lock().expect("shard map mutex poisoned");
+                let mut candidates: Vec<(u32, KeyRange)> = founding
+                    .iter()
+                    .enumerate()
+                    .filter(|(shard, _)| !guard.allocation.contains_key(&(*shard as u32)))
+                    .map(|(shard, &range)| (shard as u32, range))
+                    .collect();
+                candidates.extend(
+                    guard
+                        .allocation
+                        .iter()
+                        .map(|(&shard, alloc)| (shard, alloc.range)),
+                );
+                candidates
+            };
+            for (shard, range) in candidates {
+                let desired =
+                    select_replicas(&voters, shard_group_id(grain_type, shard), replicas).0;
+                // Propose the founding allocation, or — when the desired set has
+                // drifted from the committed one — start a migration toward it
+                // (§7.7). Never re-propose while a migration is already in flight:
+                // retargeting mid-migration would flip `current` to a set the driver
+                // never caught up (the `Migrated` guard relies on this). Nor while a
+                // split is in flight — migration and split are mutually exclusive
+                // per shard (the `SplitStarted` validation enforces the converse).
+                let proposable = match inner
+                    .lock()
+                    .expect("shard map mutex poisoned")
+                    .allocation
+                    .get(&shard)
+                {
+                    None => true,
+                    Some(alloc) => alloc.idle() && alloc.current != desired,
+                };
+                if proposable {
+                    consensus
+                        .propose_to(
+                            group,
+                            encode(&ShardMapCommand::Assign {
+                                shard,
+                                replicas: desired,
+                                range,
+                            }),
+                        )
+                        .await;
+                }
+            }
+        },
+    )
+    .await;
 }
 
 /// The reconcile loop (spec §7.6, §7.7): drive each group **this node leads**
@@ -1075,37 +1106,40 @@ async fn reconcile_loop<R: RaftConsensus>(
     map_group: GroupId,
     inner: Weak<Mutex<Inner>>,
 ) {
-    loop {
-        consensus.sleep(ALLOCATE_INTERVAL).await;
-        let Some(inner) = inner.upgrade() else {
-            return; // the map was dropped — stop the loop
-        };
-        // Map group → current cluster voters.
-        if consensus.group_is_leader(map_group) {
-            let target = consensus.cluster_voters();
-            if !target.is_empty() {
-                consensus.reconfigure_group(map_group, target);
+    let consensus = &consensus;
+    driver_loop(
+        consensus,
+        ALLOCATE_INTERVAL,
+        || inner.upgrade(),
+        move |inner| async move {
+            // Map group → current cluster voters.
+            if consensus.group_is_leader(map_group) {
+                let target = consensus.cluster_voters();
+                if !target.is_empty() {
+                    consensus.reconfigure_group(map_group, target);
+                }
             }
-        }
-        // Each shard group this node leads → its committed allocation: the union
-        // (current ∪ target) while a migration is in flight — target members must
-        // become voters so leadership can reach them, and current members must
-        // stay voters until `Migrated` — then the (new) current set.
-        let allocation: Vec<(u32, Vec<NodeId>)> = {
-            let guard = inner.lock().expect("shard map mutex poisoned");
-            guard
-                .allocation
-                .iter()
-                .map(|(&s, alloc)| (s, alloc.union()))
-                .collect()
-        };
-        for (shard, voters) in allocation {
-            let shard_group = shard_group_id(grain_type, shard);
-            if consensus.group_is_leader(shard_group) {
-                consensus.reconfigure_group(shard_group, voters);
+            // Each shard group this node leads → its committed allocation: the union
+            // (current ∪ target) while a migration is in flight — target members must
+            // become voters so leadership can reach them, and current members must
+            // stay voters until `Migrated` — then the (new) current set.
+            let allocation: Vec<(u32, Vec<NodeId>)> = {
+                let guard = inner.lock().expect("shard map mutex poisoned");
+                guard
+                    .allocation
+                    .iter()
+                    .map(|(&s, alloc)| (s, alloc.union()))
+                    .collect()
+            };
+            for (shard, voters) in allocation {
+                let shard_group = shard_group_id(grain_type, shard);
+                if consensus.group_is_leader(shard_group) {
+                    consensus.reconfigure_group(shard_group, voters);
+                }
             }
-        }
-    }
+        },
+    )
+    .await;
 }
 
 /// The migration driver (spec §7.7): while this node leads a shard whose
@@ -1123,53 +1157,56 @@ async fn migrate_loop<R: RaftConsensus>(
     inner: Weak<Mutex<Inner>>,
     handles: Weak<Mutex<ShardHandles<R>>>,
 ) {
-    loop {
-        consensus.sleep(ALLOCATE_INTERVAL).await;
-        let (Some(inner), Some(handles)) = (inner.upgrade(), handles.upgrade()) else {
-            return; // the map was dropped — stop the loop
-        };
-        let migrating: Vec<u32> = {
-            let guard = inner.lock().expect("shard map mutex poisoned");
-            guard
-                .allocation
-                .iter()
-                .filter(|(_, alloc)| alloc.target.is_some())
-                .map(|(&shard, _)| shard)
-                .collect()
-        };
-        for shard in migrating {
-            let shard_group = shard_group_id(grain_type, shard);
-            if !consensus.group_is_leader(shard_group) {
-                continue; // another (leading) node drives this shard's migration
-            }
-            let Some((_, replicator)) = handles
-                .lock()
-                .expect("shard handles mutex poisoned")
-                .get(&shard)
-                .cloned()
-            else {
-                continue; // handles not built yet; retry next tick
+    let consensus = &consensus;
+    driver_loop(
+        consensus,
+        ALLOCATE_INTERVAL,
+        || Some((inner.upgrade()?, handles.upgrade()?)),
+        move |(inner, handles)| async move {
+            let migrating: Vec<u32> = {
+                let guard = inner.lock().expect("shard map mutex poisoned");
+                guard
+                    .allocation
+                    .iter()
+                    .filter(|(_, alloc)| alloc.target.is_some())
+                    .map(|(&shard, _)| shard)
+                    .collect()
             };
-            // One catch-up pass: enumerate from a read quorum, then migrate each
-            // grain. Any failure aborts the pass; `target` stays and we retry.
-            let Ok(grains) = replicator.migration_grains().await else {
-                continue;
-            };
-            let mut complete = true;
-            for grain in grains {
-                if replicator.migrate_grain(&grain).await.is_err() {
-                    complete = false;
-                    break;
+            for shard in migrating {
+                let shard_group = shard_group_id(grain_type, shard);
+                if !consensus.group_is_leader(shard_group) {
+                    continue; // another (leading) node drives this shard's migration
+                }
+                let Some((_, replicator)) = handles
+                    .lock()
+                    .expect("shard handles mutex poisoned")
+                    .get(&shard)
+                    .cloned()
+                else {
+                    continue; // handles not built yet; retry next tick
+                };
+                // One catch-up pass: enumerate from a read quorum, then migrate each
+                // grain. Any failure aborts the pass; `target` stays and we retry.
+                let Ok(grains) = replicator.migration_grains().await else {
+                    continue;
+                };
+                let mut complete = true;
+                for grain in grains {
+                    if replicator.migrate_grain(&grain).await.is_err() {
+                        complete = false;
+                        break;
+                    }
+                }
+                // Re-check the target is still the one we migrated toward, then flip.
+                if complete && replicator.migration_target().is_some() {
+                    consensus
+                        .propose_to(map_group, encode(&ShardMapCommand::Migrated { shard }))
+                        .await;
                 }
             }
-            // Re-check the target is still the one we migrated toward, then flip.
-            if complete && replicator.migration_target().is_some() {
-                consensus
-                    .propose_to(map_group, encode(&ShardMapCommand::Migrated { shard }))
-                    .await;
-            }
-        }
-    }
+        },
+    )
+    .await;
 }
 
 /// One transfer pass shared by the split and merge drivers (spec §7.7): seal the
@@ -1234,128 +1271,133 @@ async fn split_loop<R: RaftConsensus>(
     inner: Weak<Mutex<Inner>>,
     handles: Weak<Mutex<ShardHandles<R>>>,
 ) {
-    loop {
-        consensus.sleep(ALLOCATE_INTERVAL).await;
-        let (Some(inner), Some(handles)) = (inner.upgrade(), handles.upgrade()) else {
-            return; // the map was dropped — stop the loop
-        };
-        // Proposer: (re)propose `SplitStarted` for each requested shard. A
-        // request is RETAINED until the plan is observably committed
-        // (`split.is_some()`) or the shard becomes unsplittable/gone — so a
-        // proposal lost to a crashing map leader is retried, not dropped (the
-        // request queues node-locally and is not itself replicated). Two nodes
-        // proposing the same shard derive the identical `(child, boundary)` from
-        // committed state, and apply dedups the loser.
-        enum Action {
-            /// Propose (or re-propose) the split with this plan.
-            Propose(u32, u64),
-            /// Keep the request queued but do not propose this tick (busy).
-            Wait,
-            /// The request is done or moot — drop it.
-            Clear,
-        }
-        let requests: Vec<u32> = {
-            let guard = inner.lock().expect("shard map mutex poisoned");
-            guard.split_requests.iter().copied().collect()
-        };
-        for shard in requests {
-            let action = {
+    let consensus = &consensus;
+    driver_loop(
+        consensus,
+        ALLOCATE_INTERVAL,
+        || Some((inner.upgrade()?, handles.upgrade()?)),
+        move |(inner, handles)| async move {
+            // Proposer: (re)propose `SplitStarted` for each requested shard. A
+            // request is RETAINED until the plan is observably committed
+            // (`split.is_some()`) or the shard becomes unsplittable/gone — so a
+            // proposal lost to a crashing map leader is retried, not dropped (the
+            // request queues node-locally and is not itself replicated). Two nodes
+            // proposing the same shard derive the identical `(child, boundary)` from
+            // committed state, and apply dedups the loser.
+            enum Action {
+                /// Propose (or re-propose) the split with this plan.
+                Propose(u32, u64),
+                /// Keep the request queued but do not propose this tick (busy).
+                Wait,
+                /// The request is done or moot — drop it.
+                Clear,
+            }
+            let requests: Vec<u32> = {
                 let guard = inner.lock().expect("shard map mutex poisoned");
-                match guard.allocation.get(&shard) {
-                    None => Action::Clear, // shard gone (merged away)
-                    Some(alloc) if alloc.split.is_some() => Action::Clear, // started — handed off
-                    Some(alloc) if alloc.range.start >= alloc.range.end => Action::Clear, // one point
-                    // Migrating or merging: not idle. Retry once the shard frees up.
-                    Some(alloc) if !alloc.idle() => Action::Wait,
-                    Some(alloc) => {
-                        // One past the highest index in use — committed shards
-                        // and in-flight splits' children both count, so two
-                        // concurrent splits cannot mint the same child (the
-                        // apply validation still arbitrates a propose race).
-                        let highest = guard
-                            .allocation
-                            .iter()
-                            .flat_map(|(&s, a)| std::iter::once(s).chain(a.split.map(|p| p.child)))
-                            .max()
-                            .unwrap_or(0);
-                        let range = alloc.range;
-                        let boundary = range.start + (range.end - range.start) / 2 + 1;
-                        Action::Propose(highest + 1, boundary)
+                guard.split_requests.iter().copied().collect()
+            };
+            for shard in requests {
+                let action = {
+                    let guard = inner.lock().expect("shard map mutex poisoned");
+                    match guard.allocation.get(&shard) {
+                        None => Action::Clear, // shard gone (merged away)
+                        Some(alloc) if alloc.split.is_some() => Action::Clear, // started — handed off
+                        Some(alloc) if alloc.range.start >= alloc.range.end => Action::Clear, // one point
+                        // Migrating or merging: not idle. Retry once the shard frees up.
+                        Some(alloc) if !alloc.idle() => Action::Wait,
+                        Some(alloc) => {
+                            // One past the highest index in use — committed shards
+                            // and in-flight splits' children both count, so two
+                            // concurrent splits cannot mint the same child (the
+                            // apply validation still arbitrates a propose race).
+                            let highest = guard
+                                .allocation
+                                .iter()
+                                .flat_map(|(&s, a)| {
+                                    std::iter::once(s).chain(a.split.map(|p| p.child))
+                                })
+                                .max()
+                                .unwrap_or(0);
+                            let range = alloc.range;
+                            let boundary = range.start + (range.end - range.start) / 2 + 1;
+                            Action::Propose(highest + 1, boundary)
+                        }
+                    }
+                };
+                match action {
+                    Action::Clear => {
+                        inner
+                            .lock()
+                            .expect("shard map mutex poisoned")
+                            .split_requests
+                            .remove(&shard);
+                    }
+                    Action::Wait => {}
+                    Action::Propose(child, boundary) => {
+                        consensus
+                            .propose_to(
+                                map_group,
+                                encode(&ShardMapCommand::SplitStarted {
+                                    parent: shard,
+                                    child,
+                                    boundary,
+                                }),
+                            )
+                            .await;
                     }
                 }
+            }
+            // Driver: one transfer pass per split this node leads.
+            let splitting: Vec<(u32, SplitPlan, Vec<NodeId>)> = {
+                let guard = inner.lock().expect("shard map mutex poisoned");
+                guard
+                    .allocation
+                    .iter()
+                    .filter_map(|(&shard, alloc)| {
+                        alloc.split.map(|plan| (shard, plan, alloc.current.clone()))
+                    })
+                    .collect()
             };
-            match action {
-                Action::Clear => {
-                    inner
+            for (parent, plan, replicas) in splitting {
+                if !consensus.group_is_leader(shard_group_id(grain_type, parent)) {
+                    continue; // another (leading) node drives this split
+                }
+                let Some((_, replicator)) = handles
+                    .lock()
+                    .expect("shard handles mutex poisoned")
+                    .get(&parent)
+                    .cloned()
+                else {
+                    continue; // handles not built yet; retry next tick
+                };
+                // Seal at the boundary and transfer only the grains above it — those
+                // below are retained by the parent.
+                let complete =
+                    transfer_pass(&replicator, plan.boundary, plan.child, &replicas, |grain| {
+                        crate::system::name_at_or_above(grain, plan.boundary)
+                    })
+                    .await;
+                // Re-check the plan is still pending (a duplicate commit is a no-op
+                // anyway — apply takes the plan exactly once), then flip the map.
+                if complete
+                    && inner
                         .lock()
                         .expect("shard map mutex poisoned")
-                        .split_requests
-                        .remove(&shard);
-                }
-                Action::Wait => {}
-                Action::Propose(child, boundary) => {
+                        .allocation
+                        .get(&parent)
+                        .is_some_and(|alloc| alloc.split.is_some())
+                {
                     consensus
                         .propose_to(
                             map_group,
-                            encode(&ShardMapCommand::SplitStarted {
-                                parent: shard,
-                                child,
-                                boundary,
-                            }),
+                            encode(&ShardMapCommand::SplitCommitted { parent }),
                         )
                         .await;
                 }
             }
-        }
-        // Driver: one transfer pass per split this node leads.
-        let splitting: Vec<(u32, SplitPlan, Vec<NodeId>)> = {
-            let guard = inner.lock().expect("shard map mutex poisoned");
-            guard
-                .allocation
-                .iter()
-                .filter_map(|(&shard, alloc)| {
-                    alloc.split.map(|plan| (shard, plan, alloc.current.clone()))
-                })
-                .collect()
-        };
-        for (parent, plan, replicas) in splitting {
-            if !consensus.group_is_leader(shard_group_id(grain_type, parent)) {
-                continue; // another (leading) node drives this split
-            }
-            let Some((_, replicator)) = handles
-                .lock()
-                .expect("shard handles mutex poisoned")
-                .get(&parent)
-                .cloned()
-            else {
-                continue; // handles not built yet; retry next tick
-            };
-            // Seal at the boundary and transfer only the grains above it — those
-            // below are retained by the parent.
-            let complete =
-                transfer_pass(&replicator, plan.boundary, plan.child, &replicas, |grain| {
-                    crate::system::name_at_or_above(grain, plan.boundary)
-                })
-                .await;
-            // Re-check the plan is still pending (a duplicate commit is a no-op
-            // anyway — apply takes the plan exactly once), then flip the map.
-            if complete
-                && inner
-                    .lock()
-                    .expect("shard map mutex poisoned")
-                    .allocation
-                    .get(&parent)
-                    .is_some_and(|alloc| alloc.split.is_some())
-            {
-                consensus
-                    .propose_to(
-                        map_group,
-                        encode(&ShardMapCommand::SplitCommitted { parent }),
-                    )
-                    .await;
-            }
-        }
-    }
+        },
+    )
+    .await;
 }
 
 /// The merge proposer + driver (spec §7.7) — the mirror of [`split_loop`].
@@ -1377,125 +1419,128 @@ async fn merge_loop<R: RaftConsensus>(
     inner: Weak<Mutex<Inner>>,
     handles: Weak<Mutex<ShardHandles<R>>>,
 ) {
-    loop {
-        consensus.sleep(ALLOCATE_INTERVAL).await;
-        let (Some(inner), Some(handles)) = (inner.upgrade(), handles.upgrade()) else {
-            return; // the map was dropped — stop the loop
-        };
-        // Proposer: (re)propose `MergeStarted` for each requested left shard.
-        enum Action {
-            Propose(u32), // the right neighbour to merge in
-            Wait,
-            Clear,
-        }
-        let requests: Vec<u32> = {
-            let guard = inner.lock().expect("shard map mutex poisoned");
-            guard.merge_requests.iter().copied().collect()
-        };
-        for left in requests {
-            let action = {
+    let consensus = &consensus;
+    driver_loop(
+        consensus,
+        ALLOCATE_INTERVAL,
+        || Some((inner.upgrade()?, handles.upgrade()?)),
+        move |(inner, handles)| async move {
+            // Proposer: (re)propose `MergeStarted` for each requested left shard.
+            enum Action {
+                Propose(u32), // the right neighbour to merge in
+                Wait,
+                Clear,
+            }
+            let requests: Vec<u32> = {
                 let guard = inner.lock().expect("shard map mutex poisoned");
-                match guard.allocation.get(&left) {
-                    None => Action::Clear,                         // gone
-                    Some(l) if l.merge.is_some() => Action::Clear, // started — handed off
-                    Some(l) => {
-                        // The right neighbour: the shard whose range begins just
-                        // past left's. `None` (left owns the top) → nothing to merge.
-                        let right = l.range.end.checked_add(1).and_then(|start| {
-                            guard
-                                .allocation
-                                .iter()
-                                .find(|(_, r)| r.range.start == start)
-                                .map(|(&idx, _)| idx)
-                        });
-                        match right {
-                            None => Action::Clear,
-                            Some(right) => {
-                                let both_idle = l.idle()
-                                    && guard.allocation.get(&right).is_some_and(|r| r.idle());
-                                if both_idle {
-                                    Action::Propose(right)
-                                } else {
-                                    Action::Wait
+                guard.merge_requests.iter().copied().collect()
+            };
+            for left in requests {
+                let action = {
+                    let guard = inner.lock().expect("shard map mutex poisoned");
+                    match guard.allocation.get(&left) {
+                        None => Action::Clear,                         // gone
+                        Some(l) if l.merge.is_some() => Action::Clear, // started — handed off
+                        Some(l) => {
+                            // The right neighbour: the shard whose range begins just
+                            // past left's. `None` (left owns the top) → nothing to merge.
+                            let right = l.range.end.checked_add(1).and_then(|start| {
+                                guard
+                                    .allocation
+                                    .iter()
+                                    .find(|(_, r)| r.range.start == start)
+                                    .map(|(&idx, _)| idx)
+                            });
+                            match right {
+                                None => Action::Clear,
+                                Some(right) => {
+                                    let both_idle = l.idle()
+                                        && guard.allocation.get(&right).is_some_and(|r| r.idle());
+                                    if both_idle {
+                                        Action::Propose(right)
+                                    } else {
+                                        Action::Wait
+                                    }
                                 }
                             }
                         }
                     }
+                };
+                match action {
+                    Action::Clear => {
+                        inner
+                            .lock()
+                            .expect("shard map mutex poisoned")
+                            .merge_requests
+                            .remove(&left);
+                    }
+                    Action::Wait => {}
+                    Action::Propose(right) => {
+                        consensus
+                            .propose_to(
+                                map_group,
+                                encode(&ShardMapCommand::MergeStarted { left, right }),
+                            )
+                            .await;
+                    }
                 }
+            }
+            // Driver: one transfer pass per merge whose RIGHT shard this node leads.
+            let merging: Vec<(u32, u32, Vec<NodeId>)> = {
+                let guard = inner.lock().expect("shard map mutex poisoned");
+                guard
+                    .allocation
+                    .iter()
+                    .filter_map(|(&right, alloc)| match alloc.merge {
+                        Some(MergeRole::Absorbed(left)) => {
+                            let left_replicas = guard.allocation.get(&left)?.current.clone();
+                            Some((right, left, left_replicas))
+                        }
+                        _ => None,
+                    })
+                    .collect()
             };
-            match action {
-                Action::Clear => {
-                    inner
+            for (right, left, left_replicas) in merging {
+                if !consensus.group_is_leader(shard_group_id(grain_type, right)) {
+                    continue; // the right leader drives its own merge
+                }
+                let right_start = {
+                    let guard = inner.lock().expect("shard map mutex poisoned");
+                    match guard.allocation.get(&right) {
+                        Some(alloc) => alloc.range.start,
+                        None => continue,
+                    }
+                };
+                let Some((_, replicator)) = handles
+                    .lock()
+                    .expect("shard handles mutex poisoned")
+                    .get(&right)
+                    .cloned()
+                else {
+                    continue; // handles not built yet; retry next tick
+                };
+                // Seal the whole right range, then transfer every grain into left.
+                let complete =
+                    transfer_pass(&replicator, right_start, left, &left_replicas, |_| true).await;
+                if complete
+                    && inner
                         .lock()
                         .expect("shard map mutex poisoned")
-                        .merge_requests
-                        .remove(&left);
-                }
-                Action::Wait => {}
-                Action::Propose(right) => {
+                        .allocation
+                        .get(&right)
+                        .is_some_and(|alloc| alloc.merge.is_some())
+                {
                     consensus
                         .propose_to(
                             map_group,
-                            encode(&ShardMapCommand::MergeStarted { left, right }),
+                            encode(&ShardMapCommand::MergeCommitted { left, right }),
                         )
                         .await;
                 }
             }
-        }
-        // Driver: one transfer pass per merge whose RIGHT shard this node leads.
-        let merging: Vec<(u32, u32, Vec<NodeId>)> = {
-            let guard = inner.lock().expect("shard map mutex poisoned");
-            guard
-                .allocation
-                .iter()
-                .filter_map(|(&right, alloc)| match alloc.merge {
-                    Some(MergeRole::Absorbed(left)) => {
-                        let left_replicas = guard.allocation.get(&left)?.current.clone();
-                        Some((right, left, left_replicas))
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
-        for (right, left, left_replicas) in merging {
-            if !consensus.group_is_leader(shard_group_id(grain_type, right)) {
-                continue; // the right leader drives its own merge
-            }
-            let right_start = {
-                let guard = inner.lock().expect("shard map mutex poisoned");
-                match guard.allocation.get(&right) {
-                    Some(alloc) => alloc.range.start,
-                    None => continue,
-                }
-            };
-            let Some((_, replicator)) = handles
-                .lock()
-                .expect("shard handles mutex poisoned")
-                .get(&right)
-                .cloned()
-            else {
-                continue; // handles not built yet; retry next tick
-            };
-            // Seal the whole right range, then transfer every grain into left.
-            let complete =
-                transfer_pass(&replicator, right_start, left, &left_replicas, |_| true).await;
-            if complete
-                && inner
-                    .lock()
-                    .expect("shard map mutex poisoned")
-                    .allocation
-                    .get(&right)
-                    .is_some_and(|alloc| alloc.merge.is_some())
-            {
-                consensus
-                    .propose_to(
-                        map_group,
-                        encode(&ShardMapCommand::MergeCommitted { left, right }),
-                    )
-                    .await;
-            }
-        }
-    }
+        },
+    )
+    .await;
 }
 
 /// How often the size trigger re-measures the shards it leads. Slower than the
@@ -1519,34 +1564,38 @@ async fn split_trigger_loop<R: RaftConsensus>(
     local: Arc<dyn GrainStore>,
     inner: Weak<Mutex<Inner>>,
 ) {
-    loop {
-        consensus.sleep(SPLIT_TRIGGER_INTERVAL).await;
-        let Some(inner) = inner.upgrade() else {
-            return; // the map was dropped — stop the loop
-        };
-        // The idle, splittable shards this node's allocation knows about.
-        let candidates: Vec<u32> = {
-            let guard = inner.lock().expect("shard map mutex poisoned");
-            guard
-                .allocation
-                .iter()
-                .filter(|(_, alloc)| alloc.idle() && alloc.range.start < alloc.range.end)
-                .map(|(&shard, _)| shard)
-                .collect()
-        };
-        for shard in candidates {
-            if !consensus.group_is_leader(shard_group_id(grain_type, shard)) {
-                continue; // only the leader measures and drives its shards
+    let consensus = &consensus;
+    let local = &local;
+    driver_loop(
+        consensus,
+        SPLIT_TRIGGER_INTERVAL,
+        || inner.upgrade(),
+        move |inner| async move {
+            // The idle, splittable shards this node's allocation knows about.
+            let candidates: Vec<u32> = {
+                let guard = inner.lock().expect("shard map mutex poisoned");
+                guard
+                    .allocation
+                    .iter()
+                    .filter(|(_, alloc)| alloc.idle() && alloc.range.start < alloc.range.end)
+                    .map(|(&shard, _)| shard)
+                    .collect()
+            };
+            for shard in candidates {
+                if !consensus.group_is_leader(shard_group_id(grain_type, shard)) {
+                    continue; // only the leader measures and drives its shards
+                }
+                if local.shard_bytes(shard) > target_bytes {
+                    inner
+                        .lock()
+                        .expect("shard map mutex poisoned")
+                        .split_requests
+                        .insert(shard);
+                }
             }
-            if local.shard_bytes(shard) > target_bytes {
-                inner
-                    .lock()
-                    .expect("shard map mutex poisoned")
-                    .split_requests
-                    .insert(shard);
-            }
-        }
-    }
+        },
+    )
+    .await;
 }
 
 /// The leadership observer (spec §13): emit `LeaderChanged` once per (shard,
@@ -1559,31 +1608,46 @@ async fn leader_watch_loop<R: RaftConsensus>(
     inner: Weak<Mutex<Inner>>,
     emit: EmitEvent,
 ) {
+    let consensus = &consensus;
+    let emit = &emit;
     let self_node = consensus.node();
-    let mut last: BTreeMap<u32, u64> = BTreeMap::new();
-    loop {
-        consensus.sleep(ALLOCATE_INTERVAL).await;
-        let Some(inner) = inner.upgrade() else {
-            return; // the map was dropped — stop the loop
-        };
-        let shards: Vec<u32> = {
-            let guard = inner.lock().expect("shard map mutex poisoned");
-            guard.allocation.keys().copied().collect()
-        };
-        for shard in shards {
-            let group = shard_group_id(grain_type, shard);
-            if consensus.group_is_leader(group)
-                && let Some(term) = consensus.group_term(group)
-                && last.get(&shard) != Some(&term)
-            {
-                last.insert(shard, term);
-                emit(GrainEvent::LeaderChanged {
-                    node: self_node,
-                    grain_type,
-                    shard,
-                    term,
-                });
+    // The last (shard, term) emitted, held across ticks — a `Mutex` (not a
+    // `Cell`/`RefCell`) so the per-tick future stays `Send` for `launch`.
+    let last: Mutex<BTreeMap<u32, u64>> = Mutex::new(BTreeMap::new());
+    let last = &last;
+    driver_loop(
+        consensus,
+        ALLOCATE_INTERVAL,
+        || inner.upgrade(),
+        move |inner| async move {
+            let shards: Vec<u32> = {
+                let guard = inner.lock().expect("shard map mutex poisoned");
+                guard.allocation.keys().copied().collect()
+            };
+            for shard in shards {
+                let group = shard_group_id(grain_type, shard);
+                if consensus.group_is_leader(group)
+                    && let Some(term) = consensus.group_term(group)
+                {
+                    let unseen = last
+                        .lock()
+                        .expect("leader-watch term map poisoned")
+                        .get(&shard)
+                        != Some(&term);
+                    if unseen {
+                        last.lock()
+                            .expect("leader-watch term map poisoned")
+                            .insert(shard, term);
+                        emit(GrainEvent::LeaderChanged {
+                            node: self_node,
+                            grain_type,
+                            shard,
+                            term,
+                        });
+                    }
+                }
             }
-        }
-    }
+        },
+    )
+    .await;
 }
