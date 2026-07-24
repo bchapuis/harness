@@ -479,6 +479,19 @@ impl RaftState {
         self.snapshot_index + self.log.len() as u64
     }
 
+    /// The 0-based slot in `log` holding the entry at absolute `index`. The log
+    /// drops the compacted prefix, so absolute `index` sits at
+    /// `log[index - snapshot_index - 1]`. This method is the *one* place that
+    /// off-by-one is written — every read, truncate, and drain routes through it,
+    /// so the "log is offset by the compacted prefix" invariant lives once.
+    /// `index` must be `> snapshot_index` (index `0` and the compacted prefix have
+    /// no slot). Because `slot(index)` names an entry's position, a `..=slot(index)`
+    /// range is *inclusive* of it: it spans exactly the `index - snapshot_index`
+    /// entries at or below `index`.
+    fn slot(&self, index: u64) -> usize {
+        (index - self.snapshot_index) as usize - 1
+    }
+
     /// The term of the entry at absolute `index`. `0` is the empty head;
     /// `snapshot_index` is the snapshot's term; anything in between has been
     /// compacted away and is never queried (such a peer gets an InstallSnapshot,
@@ -489,21 +502,20 @@ impl RaftState {
         } else if index == self.snapshot_index {
             self.snapshot_term
         } else {
-            self.log[(index - self.snapshot_index) as usize - 1].term
+            self.log[self.slot(index)].term
         }
     }
 
     /// The entry at absolute `index` (`> snapshot_index`), for application and
     /// replication slicing.
     fn entry_at(&self, index: u64) -> &RaftEntry {
-        &self.log[(index - self.snapshot_index) as usize - 1]
+        &self.log[self.slot(index)]
     }
 
     /// The retained log entries from absolute index `first` (inclusive); `first`
-    /// must be `> snapshot_index` (entry `first` lives at local
-    /// `first - snapshot_index - 1`).
+    /// must be `> snapshot_index`.
     fn suffix_from(&self, first: u64) -> &[RaftEntry] {
-        &self.log[(first - self.snapshot_index - 1) as usize..]
+        &self.log[self.slot(first)..]
     }
 
     fn quorum(&self) -> usize {
@@ -781,8 +793,10 @@ impl RaftGroup {
     fn append_entry(&self, state: &mut RaftState, entry: RaftEntry) -> u64 {
         let from = state.last_index();
         state.log.push(entry);
-        let local = (from - state.snapshot_index) as usize;
-        self.storage.append(from, &state.log[local..]);
+        // The entry just pushed now sits at the tail slot; hand storage that
+        // one-entry suffix starting at absolute `from`.
+        let slot = state.slot(state.last_index());
+        self.storage.append(from, &state.log[slot..]);
         state.last_index()
     }
 
@@ -822,8 +836,9 @@ impl RaftGroup {
             return;
         }
         let term = state.term_at(index);
-        let drop = (index - state.snapshot_index) as usize;
-        state.log.drain(..drop);
+        // Shed every entry at or below `index` (inclusive range through its slot).
+        let slot = state.slot(index);
+        state.log.drain(..=slot);
         state.snapshot_index = index;
         state.snapshot_term = term;
         state.snapshot = Some(snapshot.clone());
@@ -1108,8 +1123,8 @@ impl RaftGroup {
                 break;
             }
             if state.term_at(index) != entry.term {
-                let local = (index - state.snapshot_index) as usize - 1;
-                state.log.truncate(local);
+                let slot = state.slot(index);
+                state.log.truncate(slot);
                 append_from = i;
                 break;
             }

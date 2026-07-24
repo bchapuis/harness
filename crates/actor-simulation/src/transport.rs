@@ -411,7 +411,9 @@ impl SimNetwork {
         };
 
         // Fast synchronous path only when there is neither a fault nor a base
-        // latency to apply — the cheapest case (spec §18.2).
+        // latency to apply — the cheapest case (spec §18.2). This path draws no
+        // entropy, and neither does `reserve_pair_slot` on the base-latency-only
+        // path below (see its doc): the gate here and the draw there are conjoined.
         if !self.faults.active() && self.base_latency.is_zero() {
             return sender
                 .try_send((from, frame))
@@ -466,6 +468,15 @@ impl SimNetwork {
     /// Reserve the next strictly-increasing delivery instant for `(from, to)`,
     /// applying seeded latency. Strict monotonicity is what preserves per-pair
     /// FIFO under jitter: later-sent frames never get an earlier delivery time.
+    ///
+    /// This draws entropy **only** when `max_latency` is set — the same condition
+    /// under which `route` skips its fast path. The two are conjoined: `route`'s
+    /// fast path (no faults, no base latency) returns before ever calling this, and
+    /// a base-latency-only run reaches here with `max_latency` zero, so neither path
+    /// draws. That is what keeps the seeded stream byte-identical across latency
+    /// configs. Drawing unconditionally here would silently break reproducibility —
+    /// there is no compile error to catch it, so keep the gate in lockstep with
+    /// `route`.
     fn reserve_pair_slot(&self, from: NodeId, to: NodeId) -> Instant {
         // Seeded jitter only when `max_latency` is set (drawing entropy); floored by
         // the fixed `base_latency` so every delivery is at least `now + base` — the

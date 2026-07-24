@@ -16,9 +16,10 @@ story of this codebase — the distributed protocols there had accreted repetiti
 genuine god-functions, and semantics leaking across module boundaries faster than they were
 being consolidated. That gap has now been closed: every ranked red flag (①–⑥) is resolved — the
 special-general mixtures of ⑤ and ⑥ split apart on top of the ①–④ fixes — and the edge crates read
-much closer to the pristine center. What remains is the lowest-severity tail — a short comment-audit
-list — not the change-amplification and hold-it-all-in-your-head hazards that dominated the original
-review.
+much closer to the pristine center. Even the lowest-severity tail — the comment-audit list — is now
+closed: the raft snapshot-offset off-by-one lives in one `slot()` method, and the two nonobvious
+entropy/jitter couplings carry the comments that were missing. What dominated the original review —
+change-amplification and hold-it-all-in-your-head hazards — is gone.
 
 ## 2. Red flags, ranked by impact
 
@@ -165,15 +166,25 @@ contract (the subtle invariant `SimNetwork::route` depends on) now lives on the 
 structure move — the gate body is byte-identical, verified by the full simulation conformance sweep
 (the seed-controlled `flaky_service` fault test replays unchanged).
 
-### Nonobvious code worth a comment-audit
-- The snapshot-index arithmetic `log[index - snapshot_index - 1]` recurs at five sites in
-  `raft.rs` (`485`, `783`, `824`, `1110`, `1123`), each independently responsible for the
-  off-by-one — the "log is offset by the compacted prefix" invariant wants one indexing type.
-- `SimNetwork::route`/`reserve_pair_slot` (`transport.rs:415`) are conjoined by entropy-draw
-  ordering: the fast path *must* draw nothing or byte-reproducibility silently breaks, with no
-  compile error to catch a wrong edit.
-- One stale comment: `supervision.rs:27` says "jitter is a follow-up," but `host.rs:814`
-  already implements `jittered`.
+### Nonobvious code worth a comment-audit *(resolved)*
+- The snapshot-index arithmetic `log[index - snapshot_index - 1]` was spelled inline at several
+  mutation sites in `raft.rs` (`append_entry`, `compact`, the log-matching truncate), each
+  independently owning the off-by-one even though the three read paths already funneled through
+  `term_at`/`entry_at`/`suffix_from`. **Resolved.** A single `RaftState::slot(index)` now owns the
+  absolute→local mapping — it is the one place the `- snapshot_index - 1` is written, and every
+  read, `truncate`, and `drain` routes through it (a `drain(..=slot(index))` sheds exactly the
+  entries at or below `index`). The "log is offset by the compacted prefix" invariant lives once;
+  a wrong edit can no longer diverge across sites. Pure structure move — the arithmetic is
+  identical, verified by the compaction/install-snapshot raft tests.
+- `SimNetwork::route`/`reserve_pair_slot` (`transport.rs`) are conjoined by entropy-draw ordering:
+  the fast path *must* draw nothing or byte-reproducibility silently breaks, with no compile error
+  to catch a wrong edit. **Resolved (comment).** The coupling is now documented on both ends —
+  `reserve_pair_slot`'s doc states it draws entropy only under the same `max_latency`/faults gate
+  that makes `route` skip its fast path, and the fast-path comment points back at it — so the two
+  gates are visibly a lockstep pair rather than two independent decisions.
+- One stale comment: `supervision.rs` said "jitter is a follow-up," but `host.rs:814` already
+  implements `jittered`. **Resolved.** The `Backoff` doc now states the executor adds equal-jitter
+  (`host::jittered`) to the returned delay so simultaneous restarts desynchronize.
 
 ## 3. What's done well
 
@@ -239,5 +250,6 @@ philosophy warns accumulate one at a time — and the remarkable thing is how *f
 there are across 90K lines, which is why this is an A− and not a B+. With all four now
 resolved — and the special-general mixtures of ⑤ and ⑥ split apart on top (the blob area behind
 its own `GrainBlobStore` trait, the Raft engine de-specialized so it names no control group, and
-`buggify` moved off the production `Entropy` trait onto `SimEntropy`) — the edge reads much closer
-to the center; what is left is the lowest-severity tail: a short comment-audit list. Excellent work.
+`buggify` moved off the production `Entropy` trait onto `SimEntropy`) — and the comment-audit tail
+now closed on top (one `slot()` owns the raft snapshot offset; the entropy/jitter couplings are
+documented), the edge reads much closer to the center. Excellent work.
