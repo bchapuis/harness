@@ -32,6 +32,7 @@ use granary::Grain;
 use granary::GrainCtx;
 use granary::GrainEvent;
 use granary::GrainHandler;
+use granary::GrainBlobStore;
 use granary::GrainName;
 use granary::GrainStore;
 use granary::GranaryConfig;
@@ -258,6 +259,22 @@ impl GrainStore for RefusingStore {
 
     fn truncate(&self, _shard: u32, _grain: &GrainName, _after: Seq, _term: Term) {}
 
+    fn grains(&self, _shard: u32) -> Vec<GrainName> {
+        vec![]
+    }
+
+    fn seal_range(&self, _shard: u32, _from: u64) {}
+
+    fn unseal(&self, _shard: u32) {}
+
+    fn remove_grain(&self, _shard: u32, _grain: &GrainName) {}
+
+    fn shard_bytes(&self, _shard: u32) -> u64 {
+        0
+    }
+}
+
+impl GrainBlobStore for RefusingStore {
     fn put_blob(&self, _shard: u32, _grain: &GrainName, _id: BlobId, _bytes: Vec<u8>) {}
 
     fn get_blob(&self, _shard: u32, _grain: &GrainName, _id: BlobId) -> Option<Vec<u8>> {
@@ -274,22 +291,8 @@ impl GrainStore for RefusingStore {
 
     fn retain_blobs(&self, _shard: u32, _grain: &GrainName, _retain: &BTreeSet<BlobId>) {}
 
-    fn grains(&self, _shard: u32) -> Vec<GrainName> {
-        vec![]
-    }
-
     fn blob_ids(&self, _shard: u32, _grain: &GrainName) -> Vec<BlobId> {
         vec![]
-    }
-
-    fn seal_range(&self, _shard: u32, _from: u64) {}
-
-    fn unseal(&self, _shard: u32) {}
-
-    fn remove_grain(&self, _shard: u32, _grain: &GrainName) {}
-
-    fn shard_bytes(&self, _shard: u32) -> u64 {
-        0
     }
 }
 

@@ -251,25 +251,26 @@ pub(crate) struct MultiRaft {
 }
 
 impl MultiRaft {
-    /// Build the engine and create the control group from `config.voters`,
-    /// reloading its persisted state (spec §9.4.3 item 2). The election timer
-    /// arms from `now`.
-    pub(crate) fn new(node: NodeId, config: &RaftConfig, now: Instant) -> MultiRaft {
-        let engine = MultiRaft {
+    /// Build an empty engine — a group registry with the engine-wide timing and
+    /// storage factory, and no groups yet. The caller creates the groups it wants
+    /// (the cluster layer's control group at startup, a granary shard's group on
+    /// demand); the engine names none of them, so it holds no knowledge of its
+    /// callers. Election timers arm from the `now` passed to each `create_group`.
+    pub(crate) fn new(node: NodeId, config: &RaftConfig) -> MultiRaft {
+        MultiRaft {
             node,
             election_timeout: config.election_timeout,
             storage: Arc::clone(&config.storage),
             groups: Mutex::new(BTreeMap::new()),
-        };
-        engine.create_group(GroupId::CONTROL, config.voters.clone(), Vec::new(), now);
-        engine
+        }
     }
 
     /// Create (or replace) the group `group` with voter set `voters`, reloading
     /// its persisted state from the factory. Used at startup for the control
     /// group, and (later) per shard. The election timer arms from `now` with no
-    /// jitter — the same first-tick behavior as a single group, so the entropy
-    /// draw order stays identical on the control-only path.
+    /// jitter — every group draws no entropy on its first arm, only on later
+    /// resets, so the engine-wide draw order is a deterministic function of the
+    /// group set (ticked in `GroupId` order), independent of how many groups exist.
     pub(crate) fn create_group(
         &self,
         group: GroupId,

@@ -84,6 +84,7 @@ use crate::blobs::BlobId;
 use crate::grain::GrainName;
 use crate::journal::Seq;
 use crate::journal::Term;
+use crate::store::GrainBlobStore;
 use crate::store::GrainCheckpoint;
 use crate::store::GrainRecords;
 use crate::store::GrainStore;
@@ -473,6 +474,99 @@ impl WriteGuard for FileGrainStore {
     }
 }
 
+impl GrainBlobStore for FileGrainStore {
+    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) {
+        // A blob is its own content-addressed file under the grain's blob subtree.
+        // Persisted with the same atomic write-and-fsync the fence uses, so a replica
+        // never acknowledges a blob it has not durably stored.
+        let seg_id = self
+            .segment_id(shard, grain, true)
+            .expect("create allocates an id");
+        let dir = self.blob_dir(seg_id);
+        let name = id.to_string();
+        // Idempotent: equal content under the same id is already durable (B2).
+        if dir.join(&name).exists() {
+            return;
+        }
+        fs::create_dir_all(&dir).unwrap_or_else(|err| {
+            panic!("grain store blob dir failed at {}: {err}", dir.display())
+        });
+        wal::atomic_replace(&dir, &name, &bytes).unwrap_or_else(|err| {
+            panic!(
+                "grain store blob persistence failed at {}: {err} — a replica that \
+                 cannot persist a blob cannot safely acknowledge it",
+                dir.display()
+            )
+        });
+    }
+
+    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>> {
+        let seg_id = self.segment_id(shard, grain, false)?;
+        let path = self.blob_path(seg_id, id);
+        match fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => panic!("grain store blob read failed at {}: {err}", path.display()),
+        }
+    }
+
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return false;
+        };
+        self.blob_path(seg_id, id).exists()
+    }
+
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return;
+        };
+        // Best-effort: removing a corrupt copy so the read path can re-store a good
+        // one (§7.10 self-heal). A missing file is already done.
+        let _ = fs::remove_file(self.blob_path(seg_id, id));
+    }
+
+    fn delete_blobs(&self, shard: u32, grain: &GrainName) {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return;
+        };
+        // Reclamation is best-effort (a leaked blob is harmless, only space): a
+        // missing subtree is already-done, any other error is left for a later sweep.
+        let _ = fs::remove_dir_all(self.blob_dir(seg_id));
+    }
+
+    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>) {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return;
+        };
+        let dir = self.blob_dir(seg_id);
+        let keep: HashSet<String> = retain.iter().map(|id| id.to_string()).collect();
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && !keep.contains(name)
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId> {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return Vec::new();
+        };
+        let Ok(entries) = fs::read_dir(self.blob_dir(seg_id)) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| BlobId::from_hex(entry.file_name().to_str()?))
+            .collect()
+    }
+}
+
 impl GrainStore for FileGrainStore {
     fn store_record(
         &self,
@@ -599,84 +693,6 @@ impl GrainStore for FileGrainStore {
         inner.records.truncate(after, term);
     }
 
-    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) {
-        // A blob is its own content-addressed file under the grain's blob subtree.
-        // Persisted with the same atomic write-and-fsync the fence uses, so a replica
-        // never acknowledges a blob it has not durably stored.
-        let seg_id = self
-            .segment_id(shard, grain, true)
-            .expect("create allocates an id");
-        let dir = self.blob_dir(seg_id);
-        let name = id.to_string();
-        // Idempotent: equal content under the same id is already durable (B2).
-        if dir.join(&name).exists() {
-            return;
-        }
-        fs::create_dir_all(&dir).unwrap_or_else(|err| {
-            panic!("grain store blob dir failed at {}: {err}", dir.display())
-        });
-        wal::atomic_replace(&dir, &name, &bytes).unwrap_or_else(|err| {
-            panic!(
-                "grain store blob persistence failed at {}: {err} — a replica that \
-                 cannot persist a blob cannot safely acknowledge it",
-                dir.display()
-            )
-        });
-    }
-
-    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>> {
-        let seg_id = self.segment_id(shard, grain, false)?;
-        let path = self.blob_path(seg_id, id);
-        match fs::read(&path) {
-            Ok(bytes) => Some(bytes),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-            Err(err) => panic!("grain store blob read failed at {}: {err}", path.display()),
-        }
-    }
-
-    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool {
-        let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return false;
-        };
-        self.blob_path(seg_id, id).exists()
-    }
-
-    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) {
-        let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return;
-        };
-        // Best-effort: removing a corrupt copy so the read path can re-store a good
-        // one (§7.10 self-heal). A missing file is already done.
-        let _ = fs::remove_file(self.blob_path(seg_id, id));
-    }
-
-    fn delete_blobs(&self, shard: u32, grain: &GrainName) {
-        let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return;
-        };
-        // Reclamation is best-effort (a leaked blob is harmless, only space): a
-        // missing subtree is already-done, any other error is left for a later sweep.
-        let _ = fs::remove_dir_all(self.blob_dir(seg_id));
-    }
-
-    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>) {
-        let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return;
-        };
-        let dir = self.blob_dir(seg_id);
-        let keep: HashSet<String> = retain.iter().map(|id| id.to_string()).collect();
-        let Ok(entries) = fs::read_dir(&dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str()
-                && !keep.contains(name)
-            {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-    }
-
     fn grains(&self, shard: u32) -> Vec<GrainName> {
         // The manifest assigns a segment id on the first record OR the first blob
         // (`put_blob` allocates through the same map), so its keys are the union.
@@ -687,19 +703,6 @@ impl GrainStore for FileGrainStore {
             .keys()
             .filter(|(s, _)| *s == shard)
             .map(|(_, grain)| grain.clone())
-            .collect()
-    }
-
-    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId> {
-        let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return Vec::new();
-        };
-        let Ok(entries) = fs::read_dir(self.blob_dir(seg_id)) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|entry| BlobId::from_hex(entry.file_name().to_str()?))
             .collect()
     }
 

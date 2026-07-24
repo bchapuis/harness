@@ -195,6 +195,7 @@ pub use sql::SqlHandle;
 pub use sql::SqlRow;
 #[cfg(feature = "sql")]
 pub use sql::SqlValue;
+pub use store::GrainBlobStore;
 pub use store::GrainStore;
 pub use store::GrainStoreFactory;
 pub use store::MemoryGrainStore;

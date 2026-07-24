@@ -125,15 +125,62 @@ pub enum WriteKind {
     Transfer,
 }
 
+/// A grain's immutable, content-addressed blob area (durable-workspace design).
+///
+/// Blobs live beside a grain's records in the same per-node store but **off** the
+/// ordered, term-fenced record path: content addressing needs no term (a stale leader
+/// re-storing a block writes identical bytes) and no order. Keyed by
+/// `(shard, grain, BlobId)`; reclamation is grain-scoped, the grain driving it from
+/// its own live id set. A separate trait from [`GrainStore`] because it is a separate
+/// secret — unfenced and unordered — that the fenced record log neither shares state
+/// with nor constrains; [`GrainStore`] requires it so one per-node handle serves both.
+pub trait GrainBlobStore: Send + Sync + 'static {
+    /// Store an immutable, content-addressed blob for a grain. Idempotent: an `id`
+    /// already present is kept (storing equal content writes nothing new). Unfenced.
+    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>);
+
+    /// The bytes of `id` for a grain, or `None` if this store does not hold it. The
+    /// caller re-hashes and verifies the bytes against `id` before use.
+    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>>;
+
+    /// Whether this store holds `id` for a grain.
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool;
+
+    /// Drop a **single** blob of a grain. Idempotent (a missing blob is already
+    /// done). Used by the read path to evict a copy that failed verification before
+    /// re-fetching a good one (corruption self-heal, §7.10): a content-addressed
+    /// [`put_blob`](GrainBlobStore::put_blob) of an id already on disk writes nothing, so
+    /// a corrupt copy must be removed before its replacement can be stored.
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId);
+
+    /// Drop **every** blob of a grain — grain-scoped reclamation on destroy, with no
+    /// namespace tombstone or membership gating (the area lives only on the grain's
+    /// known replicas).
+    fn delete_blobs(&self, shard: u32, grain: &GrainName);
+
+    /// Drop every blob of a grain **not** in `retain` — the grain's mark-from-roots
+    /// sweep, reclaiming blocks orphaned by overwrites. Idempotent.
+    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>);
+
+    /// Every blob id this store holds for one grain — the migration driver's
+    /// source list when copying a grain's blob area to a new replica.
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId>;
+}
+
 /// A node's durable store of grain records and snapshots (spec §7.2, §7.4).
 ///
-/// All methods are fenced by the shard **term** (§8): a write stamped with a term
-/// below the highest the store has acknowledged for that shard is refused
+/// The record methods are fenced by the shard **term** (§8): a write stamped with a
+/// term below the highest the store has acknowledged for that shard is refused
 /// (`Fenced`), so a deposed leader cannot land a write. Reads return each slot's
 /// term so the leader's recovery can read-repair (§8). Implementations key by
 /// `(shard, grain)` and persist durably enough to survive the restart their
 /// deployment targets (in-memory for the simulator, file-backed in production).
-pub trait GrainStore: Send + Sync + 'static {
+///
+/// Extends [`GrainBlobStore`]: a grain's content-addressed blob area lives in the
+/// same per-node store but off the fenced record path (see that trait). The three
+/// enumeration/reclamation methods here — `grains`, `remove_grain`, `shard_bytes` —
+/// span both areas, which is why they belong to the combining trait, not either half.
+pub trait GrainStore: GrainBlobStore {
     /// Store `records` for a grain beginning at the slot after `after`, fenced by
     /// `term`. Idempotent per slot: a slot already holding an equal-or-higher term
     /// is kept (a re-delivered or late append does not regress it). Returns
@@ -204,52 +251,14 @@ pub trait GrainStore: Send + Sync + 'static {
     /// silently shrink a committed write's durability below a quorum.
     fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: Term);
 
-    // --- The grain-native content-addressed blob store (durable-workspace design) ----
-    //
-    // A grain's immutable blobs live beside its records in the same per-node store
-    // but **off** the ordered, term-fenced record path: content addressing needs no
-    // term (a stale leader re-storing a block writes identical bytes) and no order.
-    // Keyed by `(shard, grain, BlobId)`; reclamation is grain-scoped, the grain
-    // driving it from its own live id set.
-
-    /// Store an immutable, content-addressed blob for a grain. Idempotent: an `id`
-    /// already present is kept (storing equal content writes nothing new). Unfenced.
-    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>);
-
-    /// The bytes of `id` for a grain, or `None` if this store does not hold it. The
-    /// caller re-hashes and verifies the bytes against `id` before use.
-    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>>;
-
-    /// Whether this store holds `id` for a grain.
-    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool;
-
-    /// Drop a **single** blob of a grain. Idempotent (a missing blob is already
-    /// done). Used by the read path to evict a copy that failed verification before
-    /// re-fetching a good one (corruption self-heal, §7.10): a content-addressed
-    /// [`put_blob`](GrainStore::put_blob) of an id already on disk writes nothing, so
-    /// a corrupt copy must be removed before its replacement can be stored.
-    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId);
-
-    /// Drop **every** blob of a grain — grain-scoped reclamation on destroy, with no
-    /// namespace tombstone or membership gating (the area lives only on the grain's
-    /// known replicas).
-    fn delete_blobs(&self, shard: u32, grain: &GrainName);
-
-    /// Drop every blob of a grain **not** in `retain` — the grain's mark-from-roots
-    /// sweep, reclaiming blocks orphaned by overwrites. Idempotent.
-    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>);
-
     // --- Enumeration (replica-set migration, §7.7) ---------------------------
 
     /// Every grain this store holds anything for under `shard` — records, a
     /// snapshot, or blobs. The migration driver enumerates a shard's grains from a
     /// read quorum of its replicas with this, so a grain committed while this node
-    /// was down is still found on the others.
+    /// was down is still found on the others. Spans both areas (records and blobs),
+    /// so it lives here rather than on [`GrainBlobStore`].
     fn grains(&self, shard: u32) -> Vec<GrainName>;
-
-    /// Every blob id this store holds for one grain — the migration driver's
-    /// source list when copying a grain's blob area to a new replica.
-    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId>;
 
     // --- Shard split/merge (§7.7) --------------------------------------------
 
@@ -677,6 +686,79 @@ impl WriteGuard for MemoryGrainStore {
     }
 }
 
+impl GrainBlobStore for MemoryGrainStore {
+    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .entry((shard, grain.clone()))
+            .or_default()
+            .entry(id)
+            .or_insert(bytes);
+    }
+
+    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>> {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get(&(shard, grain.clone()))
+            .and_then(|area| area.get(&id).cloned())
+    }
+
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get(&(shard, grain.clone()))
+            .is_some_and(|area| area.contains_key(&id))
+    }
+
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) {
+        if let Some(area) = self
+            .inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get_mut(&(shard, grain.clone()))
+        {
+            area.remove(&id);
+        }
+    }
+
+    fn delete_blobs(&self, shard: u32, grain: &GrainName) {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .remove(&(shard, grain.clone()));
+    }
+
+    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>) {
+        if let Some(area) = self
+            .inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get_mut(&(shard, grain.clone()))
+        {
+            area.retain(|id, _| retain.contains(id));
+        }
+    }
+
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId> {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get(&(shard, grain.clone()))
+            .map(|area| area.keys().copied().collect())
+            .unwrap_or_default()
+    }
+}
+
 impl GrainStore for MemoryGrainStore {
     fn store_record(
         &self,
@@ -760,67 +842,6 @@ impl GrainStore for MemoryGrainStore {
         }
     }
 
-    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) {
-        self.inner
-            .blobs
-            .lock()
-            .expect("grain store blobs poisoned")
-            .entry((shard, grain.clone()))
-            .or_default()
-            .entry(id)
-            .or_insert(bytes);
-    }
-
-    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>> {
-        self.inner
-            .blobs
-            .lock()
-            .expect("grain store blobs poisoned")
-            .get(&(shard, grain.clone()))
-            .and_then(|area| area.get(&id).cloned())
-    }
-
-    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool {
-        self.inner
-            .blobs
-            .lock()
-            .expect("grain store blobs poisoned")
-            .get(&(shard, grain.clone()))
-            .is_some_and(|area| area.contains_key(&id))
-    }
-
-    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) {
-        if let Some(area) = self
-            .inner
-            .blobs
-            .lock()
-            .expect("grain store blobs poisoned")
-            .get_mut(&(shard, grain.clone()))
-        {
-            area.remove(&id);
-        }
-    }
-
-    fn delete_blobs(&self, shard: u32, grain: &GrainName) {
-        self.inner
-            .blobs
-            .lock()
-            .expect("grain store blobs poisoned")
-            .remove(&(shard, grain.clone()));
-    }
-
-    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>) {
-        if let Some(area) = self
-            .inner
-            .blobs
-            .lock()
-            .expect("grain store blobs poisoned")
-            .get_mut(&(shard, grain.clone()))
-        {
-            area.retain(|id, _| retain.contains(id));
-        }
-    }
-
     fn grains(&self, shard: u32) -> Vec<GrainName> {
         // A grain can hold blobs before its first committed record (the blob is
         // durable before the metadata that references it, §7.10), so enumerate the
@@ -844,16 +865,6 @@ impl GrainStore for MemoryGrainStore {
                 .map(|(_, grain)| grain.clone()),
         );
         names.into_iter().collect()
-    }
-
-    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId> {
-        self.inner
-            .blobs
-            .lock()
-            .expect("grain store blobs poisoned")
-            .get(&(shard, grain.clone()))
-            .map(|area| area.keys().copied().collect())
-            .unwrap_or_default()
     }
 
     fn seal_range(&self, shard: u32, from: u64) {

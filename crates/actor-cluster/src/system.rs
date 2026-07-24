@@ -202,7 +202,18 @@ where
         let membership = Membership::new(node, &mode, Arc::clone(&config.events), config.joining);
         let raft = match &mode {
             MembershipMode::Leader(leader) => {
-                Some(Arc::new(MultiRaft::new(node, &leader.raft, clock.now())))
+                // The cluster layer owns the decision that a control group exists
+                // (spec §9.4.3): build the generic engine, then create the well-known
+                // `GroupId::CONTROL` from the configured voter set. The engine itself
+                // names no group — same `now`, voters, and first tick as before.
+                let engine = Arc::new(MultiRaft::new(node, &leader.raft));
+                engine.create_group(
+                    GroupId::CONTROL,
+                    leader.raft.voters.clone(),
+                    Vec::new(),
+                    clock.now(),
+                );
+                Some(engine)
             }
             _ => None,
         };
@@ -606,6 +617,31 @@ where
     async fn node_down_cascade(&self, node: NodeId) {
         self.fail_pending_to(node, CallError::Unreachable);
         self.inner.host.synthesize_node_down(node).await;
+    }
+
+    /// Apply the control group's committed entries as membership transitions (spec
+    /// §9.2): decode each as a [`MembershipCommand`], stamp its `effect()` with the
+    /// commit index, and run the node-down cascade (spec §8.1) for one that lands a
+    /// `Down`/`Leave`. This is the control group's *specialization* — the meaning of
+    /// its committed bytes — kept out of the generic `apply_raft_output` so that
+    /// applier carries no knowledge of membership.
+    async fn apply_membership_commits(&self, committed: Vec<Committed>) {
+        for observation in committed {
+            // The control group never compacts, so it only ever applies commands.
+            let Committed::Apply { index, command, .. } = observation else {
+                continue;
+            };
+            // The control group's app payload is a `MembershipCommand`; a
+            // malformed payload is defensively ignored, never panicked on.
+            let Some(command) = MembershipCommand::decode(&command) else {
+                continue;
+            };
+            let (node, status) = command.effect();
+            let now = self.inner.clock.now();
+            if self.inner.membership.apply_stamped(node, status, index, now) {
+                self.node_down_cascade(node).await;
+            }
+        }
     }
 
     async fn remote_ask_inner(
@@ -1537,51 +1573,57 @@ async fn apply_raft_output<C, E, S, T>(
             group: group.value(),
         });
     }
+    // Route the group's committed entries to whoever owns them. The control
+    // group's are membership transitions the cluster layer applies in-process;
+    // every other group's belong to its subscribers. This `if` is the sole
+    // specialization boundary — the membership *knowledge* lives in
+    // `apply_membership_commits`, not inline in this generic applier.
+    //
+    // Membership is applied here, synchronously in the tick, rather than as just
+    // another `subscribe_commits` subscriber (which would make the path fully
+    // uniform): it runs `node_down_cascade` inline and must observe each commit in
+    // the same tick it lands, and routing through the async `commit_sinks` channel
+    // would shift that interleaving. Keeping it synchronous is deliberate.
     if group == GroupId::CONTROL {
-        for observation in out.committed {
-            // The control group never compacts, so it only ever applies commands.
-            let Committed::Apply { index, command, .. } = observation else {
-                continue;
-            };
-            // The control group's app payload is a `MembershipCommand`; a
-            // malformed payload is defensively ignored, never panicked on.
-            let Some(command) = MembershipCommand::decode(&command) else {
-                continue;
-            };
-            let (node, status) = command.effect();
-            let now = system.inner.clock.now();
-            if system
-                .inner
-                .membership
-                .apply_stamped(node, status, index, now)
-            {
-                system.node_down_cascade(node).await;
-            }
-        }
+        system.apply_membership_commits(out.committed).await;
     } else {
-        // An application group (granary's sharded journal): publish each
-        // committed entry to its subscribers, in commit order. The send is a
-        // synchronous `try_send` on an unbounded channel — no `.await` between
-        // draining `out.committed` and delivering — so commit order is preserved
-        // and a slow consumer cannot interleave another group's batch.
-        if !out.committed.is_empty() {
-            let mut sinks = system
-                .inner
-                .commit_sinks
-                .lock()
-                .expect("commit sinks mutex poisoned");
-            if let Some(senders) = sinks.get_mut(&group) {
-                senders.retain(|sender| !sender.is_closed());
-                for observation in &out.committed {
-                    for sender in senders.iter() {
-                        let _ = sender.try_send(observation.clone());
-                    }
-                }
-            }
-        }
+        publish_commits(system, group, &out.committed);
     }
     for (to, frame) in out.frames {
         let _ = system.inner.transport.send(to, frame).await;
+    }
+}
+
+/// Publish an application group's committed entries (granary's sharded journal) to
+/// its subscribers, in commit order. The send is a synchronous `try_send` on an
+/// unbounded channel — no `.await` between draining `committed` and delivering — so
+/// commit order is preserved and a slow consumer cannot interleave another group's
+/// batch.
+fn publish_commits<C, E, S, T>(
+    system: &ClusterSystem<C, E, S, T>,
+    group: GroupId,
+    committed: &[Committed],
+) where
+    C: Clock,
+    E: Entropy,
+    S: Spawner,
+    T: Transport,
+{
+    if committed.is_empty() {
+        return;
+    }
+    let mut sinks = system
+        .inner
+        .commit_sinks
+        .lock()
+        .expect("commit sinks mutex poisoned");
+    if let Some(senders) = sinks.get_mut(&group) {
+        senders.retain(|sender| !sender.is_closed());
+        for observation in committed {
+            for sender in senders.iter() {
+                let _ = sender.try_send(observation.clone());
+            }
+        }
     }
 }
 

@@ -14,11 +14,11 @@ specs are kept as current-state descriptions, and audit findings get resolved ra
 papered over. The three hardest crates (`granary`, `actor-cluster`, `harness`) *were* the
 story of this codebase — the distributed protocols there had accreted repetition, a few
 genuine god-functions, and semantics leaking across module boundaries faster than they were
-being consolidated. That gap has now been closed: the top four red flags (①–④) are all
-resolved, and the edge crates read much closer to the pristine center. What remains is the
-lower-severity tail — the special-general mixtures (⑤⑥) and a short comment-audit list — not
-the change-amplification and hold-it-all-in-your-head hazards that dominated the original
-review.
+being consolidated. That gap has now been closed: the top red flags (①–④) are all resolved, as
+are ⑤'s two record/engine special-general mixtures, and the edge crates read much closer to the
+pristine center. What remains is the lowest-severity tail — the `buggify` special-general mixture
+(⑥) and a short comment-audit list — not the change-amplification and hold-it-all-in-your-head
+hazards that dominated the original review.
 
 ## 2. Red flags, ranked by impact
 
@@ -112,16 +112,39 @@ the applier. Adding a command is now one edit at the enum and its methods, not a
 file away. Pure structure move — the mapping is arm-for-arm identical; the `actor-cluster`
 suite passes unchanged.
 
-### ⑤ Special-general mixtures
-Three real ones:
-- The `GrainStore` trait (`store.rs:136`) welds a fenced term-ordered record log to an
-  orthogonal unfenced content-addressed blob area — 7 of ~24 methods are blob concerns every
-  implementor must supply, coupling two unrelated secrets behind one wide interface.
-- `MultiRaft` sells itself as a generic engine but `apply_raft_output` hard-branches on
-  `GroupId::CONTROL` to decode membership (`system.rs:1370`), and `create_group` suppresses
-  jitter specifically to keep the control-only entropy draw order stable — the general
-  mechanism carries knowledge of its one special caller.
-- `buggify` (see ⑥).
+### ⑤ Special-general mixtures *(two resolved; `buggify` tracked under ⑥)*
+Three were listed. Two welded unrelated secrets or tangled a generic mechanism with its one caller:
+- The `GrainStore` trait (`store.rs:136`) welded a fenced term-ordered record log to an
+  orthogonal unfenced content-addressed blob area — 7 of its 18 methods were blob concerns every
+  implementor had to supply, coupling two unrelated secrets behind one wide interface.
+- `MultiRaft` sells itself as a generic engine but `apply_raft_output` hard-branched on
+  `GroupId::CONTROL` to decode membership (`system.rs`), `MultiRaft::new` hard-created the control
+  group, and `create_group` justified its no-jitter first arm "on the control-only path" — the
+  general mechanism carrying knowledge of its one special caller.
+- `buggify` (see ⑥) — left open; the review judges it worth keeping.
+
+**Resolved (both record/engine mixtures).** The blob area is now its own trait: the seven
+content-addressed methods live on `GrainBlobStore` (`store.rs`) — unfenced, unordered, its secret
+documented once — and `GrainStore: GrainBlobStore` keeps the fenced record log plus the three
+enumeration/reclamation methods (`grains`/`remove_grain`/`shard_bytes`) that genuinely span both
+areas, so they belong on the combining trait, not either half. Each store splits into an
+`impl GrainBlobStore` + an `impl GrainStore`; the per-node handle stays one `Arc<dyn GrainStore>`
+(the supertrait coerces), so no consumer changed. The split stopped at the blob area — the one clean
+orthogonal sub-task — rather than a symmetric `RecordStore`/`GrainBlobStore`/combinator three-way,
+since no consumer is record-only (`shardmap` already needs the spanning methods).
+
+For `MultiRaft`, three coordinated moves de-specialize the engine. The generic `apply_raft_output`
+no longer decodes membership — it *routes* the control group's committed entries to
+`ClusterSystem::apply_membership_commits` (which owns decode → `effect()` → stamp → cascade) and
+every other group's to `publish_commits`; the `if group == CONTROL` that remains is just the
+specialization boundary, carrying no membership knowledge. `MultiRaft::new` now builds an empty
+registry, and the cluster layer creates `GroupId::CONTROL` at startup — the engine names no group in
+code. The no-first-jitter arm is re-documented as the general per-group invariant (every group draws
+no entropy on its first arm, only on later resets), not "the control-only path." Membership stays
+applied *synchronously in the tick* (not folded into a `subscribe_commits` subscriber) on purpose —
+it runs `node_down_cascade` inline and must observe a commit in the tick it lands; routing it through
+the async commit channel would shift that interleaving. Pure structure moves — the `granary` and
+`actor-cluster` suites pass unchanged.
 
 ### ⑥ `buggify` in the `Entropy` trait — special-general mixture, minor but notable
 `runtime.rs:135`. A fault-injection hook — purely a simulation concern — sits in the
@@ -202,5 +225,7 @@ helper each — red flag ③), and a command's meaning split across two modules 
 in `MembershipCommand::effect` — red flag ④). These are exactly the tactical compromises the
 philosophy warns accumulate one at a time — and the remarkable thing is how *few* of them
 there are across 90K lines, which is why this is an A− and not a B+. With all four now
-resolved, the edge reads much closer to the center; what is left is the lower-severity
-special-general tail (⑤⑥). Excellent work.
+resolved — and ⑤'s two record/engine special-general mixtures split apart on top (the blob
+area behind its own `GrainBlobStore` trait, the Raft engine de-specialized so it names no
+control group) — the edge reads much closer to the center; what is left is the lowest-severity
+tail: the `buggify` mixture (⑥) and a short comment-audit list. Excellent work.
