@@ -62,7 +62,7 @@ figure was an overcount: the function is ~146 lines, 503–648; blob migration l
 methods, not here). Both refactors are pure structure moves — the entropy/clock draw order is
 unchanged, verified by the full simulation conformance sweep.
 
-### ③ Repeated protocol skeletons — three families
+### ③ Repeated protocol skeletons — three families *(resolved)*
 The same non-trivial shape is written many times:
 - The background driver-loop preamble (weak-upgrade-or-exit + leadership gate) across *seven*
   loops in `shardmap.rs` (`allocator_loop:981` … `leader_watch_loop:1556`).
@@ -74,6 +74,24 @@ The same non-trivial shape is written many times:
 
 None is catastrophic alone; together they mean the lifecycle-teardown contract lives in seven
 places and the forwarding rule in three. Each is a change-amplification tax.
+
+**Resolved.** Each skeleton now has one home. `driver_loop` (`shardmap.rs`) owns the seven
+loops' teardown contract — the tick sleep and the weak-upgrade-or-exit — while each loop keeps
+its own leadership gate in its body: the gate was never the shared secret (it genuinely varies —
+whole-tick, per-shard-group, per-term, and two loops run their proposer phase *ungated*), the
+exit contract was, and it now lives once. `propose_or_forward` (`system.rs`) holds the
+append/forward/fan-out rule the two full copies (`submit_proposal`, `propose_to`) duplicated;
+the inbound `handle_raft_propose` stays its own function, now documented as the deliberately
+*partial* form (no fan-out, honors the `forwarded` loop-breaker). `apply_membership_op`
+(`system.rs`) holds the mode-dispatch skeleton `admit`/`drain`/`resume`/`decommission` shared,
+each now a three-line call. `resolve_twice` (`grainref.rs`) holds the two-attempt resolve-retry
+`tell` and `dispatch` layer over `resolve` — a `guard_budget` flag keeps `tell`'s "never
+`Unavailable`" contract (§6) intact while `dispatch` guards its budget, so neither behavior
+shifted. `begin_turn` (`agent.rs`) holds the reset → enqueue-`RunStarted` → start-records trio;
+`take_sandbox` (`agent.rs`) holds the slot-swap/release/announce teardown both `release_sandbox`
+and `on_passivate` ran. All are pure structure moves but one deliberate normalization:
+passivation now announces `SandboxReleased` whenever a bind is left unpaired, independent of the
+slot — the stronger H8 pairing `release_sandbox` already had. Verified by the full test suite.
 
 ### ④ Semantics split across the module boundary — information leakage
 `membership.rs:234` vs `system.rs:1398`. `MembershipCommand` and its codec live in
@@ -151,12 +169,13 @@ Not a laundry list — the three redesigns that most reduce overall complexity:
    arms behind `absorb_gossip`, one `handle_*` per family) and `recover_with` a readable spine
    over extracted `fence_read` / `write_back` phases. "Hold 400 lines in your head" is now "read
    one arm / one phase." See red flag ②.
-3. **Extract the three repeated protocol skeletons behind one helper each** — a driver-loop
-   combinator (`run_leader_loop(interval, |shard| …)`), one `apply_membership_op`, one
-   `propose_or_forward`. Kills the seven-place teardown contract and the three-place
-   forwarding rule in one sweep.
+3. ~~**Extract the three repeated protocol skeletons behind one helper each.**~~ *Done* —
+   `driver_loop` (the teardown combinator; the leadership gate stays per-loop, since it varies
+   too much to fold in), one `apply_membership_op`, one `propose_or_forward`, plus `resolve_twice`,
+   `begin_turn`, and `take_sandbox` for the two further skeletons issue ③ listed. The seven-place
+   teardown contract and the three-place forwarding rule now live once each. See red flag ③.
 
-Do these three and the edge crates start looking like the core.
+With all three done, the edge crates now read much closer to the core.
 
 ## 5. Grade: **A−**
 
@@ -167,7 +186,8 @@ back from an unqualified A is that the strategic discipline visibly thins out in
 hardest layers: a durability invariant that *was* copy-pasted across two stores where
 divergence is a silent bug (now collapsed behind a shared `WriteGuard` trait — red flag ①),
 two long functions that resisted being read in parts (now table-driven / phase-split — red
-flag ②), and a fistful of protocol skeletons repeated three-to-seven times. These are exactly the tactical compromises the
+flag ②), and a fistful of protocol skeletons repeated three-to-seven times (now behind one
+helper each — red flag ③). These are exactly the tactical compromises the
 philosophy warns accumulate one at a time — and the remarkable thing is how *few* of them
-there are across 90K lines, which is why this is an A− and not a B+. Tighten the three
-redesigns above and the edge will match the center. Excellent work; finish the job.
+there are across 90K lines, which is why this is an A− and not a B+. With the three
+redesigns above now done, the edge reads much closer to the center. Excellent work.
