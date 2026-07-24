@@ -258,6 +258,21 @@ impl MembershipCommand {
         }
     }
 
+    /// What committing this transition *means*: the target node and the
+    /// [`MemberStatus`] it moves that node to. This is the command's semantics —
+    /// `Admit`/`Resume` reach `up`, `Drain` the reversible `draining`, and both
+    /// `Leave` and `Down` the terminal `down` (spec §9.3) — and it belongs with
+    /// the enum, encode, and decode rather than in the applier that consumes it,
+    /// so that adding a command is one edit here and not a second match in the
+    /// control-group apply loop.
+    pub fn effect(self) -> (NodeId, MemberStatus) {
+        match self {
+            MembershipCommand::Admit(n) | MembershipCommand::Resume(n) => (n, MemberStatus::Up),
+            MembershipCommand::Drain(n) => (n, MemberStatus::Draining),
+            MembershipCommand::Leave(n) | MembershipCommand::Down(n) => (n, MemberStatus::Down),
+        }
+    }
+
     /// Encode as the control group's opaque app payload. A fixed 9-byte form
     /// (tag + little-endian node uid) — **canonical** (one value → one byte
     /// string), so the engine's byte-equality dedup of a re-proposed command

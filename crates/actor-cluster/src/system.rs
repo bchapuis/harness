@@ -1548,15 +1548,7 @@ async fn apply_raft_output<C, E, S, T>(
             let Some(command) = MembershipCommand::decode(&command) else {
                 continue;
             };
-            let (node, status) = match command {
-                MembershipCommand::Admit(node) | MembershipCommand::Resume(node) => {
-                    (node, MemberStatus::Up)
-                }
-                MembershipCommand::Drain(node) => (node, MemberStatus::Draining),
-                MembershipCommand::Leave(node) | MembershipCommand::Down(node) => {
-                    (node, MemberStatus::Down)
-                }
-            };
+            let (node, status) = command.effect();
             let now = system.inner.clock.now();
             if system
                 .inner

@@ -11,10 +11,14 @@ and the runtime seam — is exemplary studio work: deep modules, real informatio
 errors defined out of existence, and comments that carry rationale the code cannot.
 Complexity is trending *down* in the sense that matters — the design is actively maintained,
 specs are kept as current-state descriptions, and audit findings get resolved rather than
-papered over — but it is trending *up* locally in the three hardest crates (`granary`,
-`actor-cluster`, `harness`), where the distributed protocols are accreting repetition and a
-few genuine god-functions faster than they're being consolidated. The gap between the
-pristine center and the eroding edge is the whole story of this codebase.
+papered over. The three hardest crates (`granary`, `actor-cluster`, `harness`) *were* the
+story of this codebase — the distributed protocols there had accreted repetition, a few
+genuine god-functions, and semantics leaking across module boundaries faster than they were
+being consolidated. That gap has now been closed: the top four red flags (①–④) are all
+resolved, and the edge crates read much closer to the pristine center. What remains is the
+lower-severity tail — the special-general mixtures (⑤⑥) and a short comment-audit list — not
+the change-amplification and hold-it-all-in-your-head hazards that dominated the original
+review.
 
 ## 2. Red flags, ranked by impact
 
@@ -93,13 +97,20 @@ and `on_passivate` ran. All are pure structure moves but one deliberate normaliz
 passivation now announces `SandboxReleased` whenever a bind is left unpaired, independent of the
 slot — the stronger H8 pairing `release_sandbox` already had. Verified by the full test suite.
 
-### ④ Semantics split across the module boundary — information leakage
+### ④ Semantics split across the module boundary — information leakage *(resolved)*
 `membership.rs:234` vs `system.rs:1398`. `MembershipCommand` and its codec live in
 `membership.rs`, but the load-bearing "committed command → `MemberStatus`" mapping
-(`Drain → Draining`, `Leave|Down → Down`) lives in `system.rs`. Adding a command touches the
-enum, encode, decode *and* a match in a different file. What a command *means* is in neither
-module alone. A `MembershipCommand::effect() -> (NodeId, MemberStatus)` consolidates the
-secret.
+(`Drain → Draining`, `Leave|Down → Down`) lived in `system.rs`. Adding a command touched the
+enum, encode, decode *and* a match in a different file. What a command *meant* was in neither
+module alone.
+
+**Resolved.** `MembershipCommand::effect() -> (NodeId, MemberStatus)` (`membership.rs`) now
+owns the mapping, sitting alongside `node`/`encode`/`decode` — the same module that already
+holds `MemberStatus`, so it needs no new coupling. The control-group apply loop in `system.rs`
+collapses to a single `command.effect()` call, and the four-arm status match no longer lives in
+the applier. Adding a command is now one edit at the enum and its methods, not a second match a
+file away. Pure structure move — the mapping is arm-for-arm identical; the `actor-cluster`
+suite passes unchanged.
 
 ### ⑤ Special-general mixtures
 Three real ones:
@@ -182,12 +193,14 @@ With all three done, the edge crates now read much closer to the core.
 The center of this project is A+ work — `actor-core`, the runtime seam, and the error model
 are lecture-quality examples of deep modules, information hiding, and defining errors out of
 existence, and the simulation seam is a genuinely hard idea executed cleanly. What holds it
-back from an unqualified A is that the strategic discipline visibly thins out in the newest,
+back from an unqualified A is that the strategic discipline visibly thinned out in the newest,
 hardest layers: a durability invariant that *was* copy-pasted across two stores where
 divergence is a silent bug (now collapsed behind a shared `WriteGuard` trait — red flag ①),
 two long functions that resisted being read in parts (now table-driven / phase-split — red
-flag ②), and a fistful of protocol skeletons repeated three-to-seven times (now behind one
-helper each — red flag ③). These are exactly the tactical compromises the
+flag ②), a fistful of protocol skeletons repeated three-to-seven times (now behind one
+helper each — red flag ③), and a command's meaning split across two modules (now consolidated
+in `MembershipCommand::effect` — red flag ④). These are exactly the tactical compromises the
 philosophy warns accumulate one at a time — and the remarkable thing is how *few* of them
-there are across 90K lines, which is why this is an A− and not a B+. With the three
-redesigns above now done, the edge reads much closer to the center. Excellent work.
+there are across 90K lines, which is why this is an A− and not a B+. With all four now
+resolved, the edge reads much closer to the center; what is left is the lower-severity
+special-general tail (⑤⑥). Excellent work.
