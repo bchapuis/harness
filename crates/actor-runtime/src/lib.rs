@@ -8,7 +8,7 @@
 //! else in the framework changes (spec §4.6):
 //!
 //! - [`TokioClock`] — wall-clock time on a tokio runtime.
-//! - [`OsEntropy`] — an OS-seeded PRNG (`buggify` stays off).
+//! - [`OsEntropy`] — an OS-seeded PRNG.
 //! - [`TokioSpawner`] — tasks on a tokio runtime.
 //! - [`TcpTransport`] — length-delimited frames over TCP, behind a mutual-TLS
 //!   association handshake with a cluster secret and a node allowlist (§7, §15).

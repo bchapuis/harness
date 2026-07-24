@@ -1,9 +1,7 @@
 //! The production [`Entropy`]: an OS-seeded PRNG (spec §4.6).
 //!
-//! Production keeps `buggify` **off** (the trait default returns `false`), so
-//! the fault-injection gates scattered through the runtime cost nothing here.
-//! The stream itself is a [`ChaCha8Rng`] seeded once from the operating system —
-//! fast and good enough for the framework's uses (peer selection, SWIM's `k`,
+//! The stream is a [`ChaCha8Rng`] seeded once from the operating system — fast
+//! and good enough for the framework's uses (peer selection, SWIM's `k`,
 //! backoff jitter); it is not a CSPRNG interface and is not used for secrets.
 
 use std::sync::Arc;

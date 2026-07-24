@@ -247,7 +247,6 @@ impl Message for Work {
 
 impl Handler<Work> for Flaky {
     async fn handle(&mut self, msg: Work, ctx: &Ctx<Self>) -> u64 {
-        use actor_core::Entropy;
         // Inject a fault on roughly one call in four (spec §18.3).
         if ctx.system().entropy().buggify(1, 4) {
             panic!("injected fault");

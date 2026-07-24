@@ -14,11 +14,11 @@ specs are kept as current-state descriptions, and audit findings get resolved ra
 papered over. The three hardest crates (`granary`, `actor-cluster`, `harness`) *were* the
 story of this codebase — the distributed protocols there had accreted repetition, a few
 genuine god-functions, and semantics leaking across module boundaries faster than they were
-being consolidated. That gap has now been closed: the top red flags (①–④) are all resolved, as
-are ⑤'s two record/engine special-general mixtures, and the edge crates read much closer to the
-pristine center. What remains is the lowest-severity tail — the `buggify` special-general mixture
-(⑥) and a short comment-audit list — not the change-amplification and hold-it-all-in-your-head
-hazards that dominated the original review.
+being consolidated. That gap has now been closed: every ranked red flag (①–⑥) is resolved — the
+special-general mixtures of ⑤ and ⑥ split apart on top of the ①–④ fixes — and the edge crates read
+much closer to the pristine center. What remains is the lowest-severity tail — a short comment-audit
+list — not the change-amplification and hold-it-all-in-your-head hazards that dominated the original
+review.
 
 ## 2. Red flags, ranked by impact
 
@@ -112,7 +112,7 @@ the applier. Adding a command is now one edit at the enum and its methods, not a
 file away. Pure structure move — the mapping is arm-for-arm identical; the `actor-cluster`
 suite passes unchanged.
 
-### ⑤ Special-general mixtures *(two resolved; `buggify` tracked under ⑥)*
+### ⑤ Special-general mixtures *(resolved; `buggify` split out under ⑥)*
 Three were listed. Two welded unrelated secrets or tangled a generic mechanism with its one caller:
 - The `GrainStore` trait (`store.rs:136`) welded a fenced term-ordered record log to an
   orthogonal unfenced content-addressed blob area — 7 of its 18 methods were blob concerns every
@@ -121,7 +121,7 @@ Three were listed. Two welded unrelated secrets or tangled a generic mechanism w
   `GroupId::CONTROL` to decode membership (`system.rs`), `MultiRaft::new` hard-created the control
   group, and `create_group` justified its no-jitter first arm "on the control-only path" — the
   general mechanism carrying knowledge of its one special caller.
-- `buggify` (see ⑥) — left open; the review judges it worth keeping.
+- `buggify` (see ⑥) — the fault-injection gate sat on the production `Entropy` trait.
 
 **Resolved (both record/engine mixtures).** The blob area is now its own trait: the seven
 content-addressed methods live on `GrainBlobStore` (`store.rs`) — unfenced, unordered, its secret
@@ -146,12 +146,24 @@ it runs `node_down_cascade` inline and must observe a commit in the tick it land
 the async commit channel would shift that interleaving. Pure structure moves — the `granary` and
 `actor-cluster` suites pass unchanged.
 
-### ⑥ `buggify` in the `Entropy` trait — special-general mixture, minor but notable
-`runtime.rs:135`. A fault-injection hook — purely a simulation concern — sits in the
+### ⑥ `buggify` in the `Entropy` trait — special-general mixture, minor but notable *(resolved)*
+`runtime.rs:135`. A fault-injection hook — purely a simulation concern — sat in the
 production randomness interface, forcing `entropy.rs` and `lib.rs` to both document "buggify
-stays off." The `default → false` guard makes it cheap and defensible, and it is probably
-worth keeping, but it is the one blemish on an otherwise pure seam: three modules share the
-fault secret.
+stays off." The `default → false` guard made it cheap and defensible, but it was the one
+blemish on an otherwise pure seam: three modules shared the fault secret.
+
+**Resolved.** `buggify` is now an inherent method on `SimEntropy` (`actor-simulation/entropy.rs`),
+not a method on the `Entropy` trait. This was possible because every one of the five call sites
+already holds `SimEntropy` concretely — the four simulation modules (`transport`, `registry`, the
+harness model stub) store it by value, and the swarm test reaches it through
+`SimSystem = LocalSystem<…, SimEntropy, …>`, so none needed the method on the shared trait. The
+production `Entropy` trait (`runtime.rs`) loses the `buggify` default outright, and the two "buggify
+stays off" comments in `OsEntropy` (`actor-runtime/entropy.rs`, `lib.rs`) are gone — the production
+seam now carries no trace of the fault secret, which lives in exactly one place. The de-specialization
+also let the doc sharpen: the "always consumes one draw, so gate it behind are-faults-configured"
+contract (the subtle invariant `SimNetwork::route` depends on) now lives on the method itself. Pure
+structure move — the gate body is byte-identical, verified by the full simulation conformance sweep
+(the seed-controlled `flaky_service` fault test replays unchanged).
 
 ### Nonobvious code worth a comment-audit
 - The snapshot-index arithmetic `log[index - snapshot_index - 1]` recurs at five sites in
@@ -225,7 +237,7 @@ helper each — red flag ③), and a command's meaning split across two modules 
 in `MembershipCommand::effect` — red flag ④). These are exactly the tactical compromises the
 philosophy warns accumulate one at a time — and the remarkable thing is how *few* of them
 there are across 90K lines, which is why this is an A− and not a B+. With all four now
-resolved — and ⑤'s two record/engine special-general mixtures split apart on top (the blob
-area behind its own `GrainBlobStore` trait, the Raft engine de-specialized so it names no
-control group) — the edge reads much closer to the center; what is left is the lowest-severity
-tail: the `buggify` mixture (⑥) and a short comment-audit list. Excellent work.
+resolved — and the special-general mixtures of ⑤ and ⑥ split apart on top (the blob area behind
+its own `GrainBlobStore` trait, the Raft engine de-specialized so it names no control group, and
+`buggify` moved off the production `Entropy` trait onto `SimEntropy`) — the edge reads much closer
+to the center; what is left is the lowest-severity tail: a short comment-audit list. Excellent work.

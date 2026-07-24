@@ -125,16 +125,6 @@ pub trait Entropy: Send + Sync + 'static {
             Some((self.next_u64() % len as u64) as usize)
         }
     }
-
-    /// A fault gate for deterministic fault injection (spec §18.3). Returns
-    /// `true` with probability `numerator / denominator`, drawn from this stream.
-    ///
-    /// Production entropy leaves it **off** (the default always returns
-    /// `false`), so buggify call-sites in the runtime cost nothing outside
-    /// simulation; a simulated `Entropy` overrides it to enable faults.
-    fn buggify(&self, _numerator: u64, _denominator: u64) -> bool {
-        false
-    }
 }
 
 /// Task spawning (spec §4.6). Mailbox executors and, later, the gossip and

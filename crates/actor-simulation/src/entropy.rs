@@ -24,17 +24,26 @@ impl SimEntropy {
             rng: Arc::new(Mutex::new(ChaCha8Rng::seed_from_u64(seed))),
         }
     }
+
+    /// A deterministic fault gate (spec §18.3): fires with probability
+    /// `numerator / denominator`, drawn from this seeded stream.
+    ///
+    /// Fault injection is a simulation-only concern, so it lives here as a
+    /// `SimEntropy` method rather than on the production [`Entropy`] interface —
+    /// nothing outside this crate can turn a fault on, and the production seam
+    /// carries no trace of it.
+    ///
+    /// The gate **always** consumes one draw, whether or not it fires, so call
+    /// sites must guard it behind "are faults configured?" to keep a fault-free
+    /// run byte-identical to one with the gate absent (see `SimNetwork::route`).
+    pub fn buggify(&self, numerator: u64, denominator: u64) -> bool {
+        assert!(denominator > 0, "buggify denominator must be positive");
+        self.next_u64() % denominator < numerator
+    }
 }
 
 impl Entropy for SimEntropy {
     fn next_u64(&self) -> u64 {
         self.rng.lock().expect("entropy mutex poisoned").next_u64()
-    }
-
-    /// Enabled under simulation: fires with probability
-    /// `numerator / denominator`, drawn from the seeded stream (spec §18.3).
-    fn buggify(&self, numerator: u64, denominator: u64) -> bool {
-        assert!(denominator > 0, "buggify denominator must be positive");
-        self.next_u64() % denominator < numerator
     }
 }
