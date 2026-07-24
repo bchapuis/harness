@@ -309,6 +309,16 @@ impl<'a> JointCount<'a> {
     }
 }
 
+/// The outcome of a recovery read phase (§7.2, §8): the fenced replies that
+/// survived the read fan-out, this node's local head taken before the reply was
+/// merged, and whether the acks reached a joint read quorum. Carries the three
+/// locals the merge/write-back spine needs out of [`fence_read`](QuorumReplicator::fence_read).
+struct ReadQuorum {
+    replies: Vec<crate::store::ReadReply>,
+    local_head: Seq,
+    confirmed: bool,
+}
+
 /// The clustered `Quorum` replicator (spec §7.2, §7.4, §8). Holds the shard's
 /// leader-election group (for the term and leadership gate), this node's local
 /// [`GrainStore`] (the leader is one of the replicas, §5.2), and the
@@ -510,47 +520,11 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         };
         let sets = self.sets();
 
-        // Read phase: fence-read local and every peer (awaiting all, so no in-flight
-        // ask is dropped — no-silent-loss, §14). Each read is bounded by
-        // `RECOVER_TIMEOUT`, so an unreachable peer just falls out of the quorum.
-        let local = self.local.prepare(self.shard, grain, term);
-        let ReadOutcome::Prepared(local_reply) = local else {
-            return Err(GrainJournalError::Unavailable(
-                "fenced by a higher term".into(),
-            ));
-        };
-        let peer_nodes = self.peers_of(&sets);
-        let peer_reads = peer_nodes.iter().map(|&node| {
-            self.transport
-                .read_grain(node, self.shard, grain.clone(), term, RECOVER_TIMEOUT)
-        });
-        // Take our local head before moving the reply into the quorum set, so the
-        // write-back below can skip the network on a stable re-activation without a
-        // second read — and the recovery path never deep-clones the grain's records.
-        let local_head = head_from_reply(&local_reply);
-        let mut count = JointCount::new(&sets);
-        count.ack(self.self_node);
-        let mut replies = vec![local_reply];
-        for (node, result) in peer_nodes.iter().copied().zip(join_all(peer_reads).await) {
-            match result {
-                Ok(ReadOutcome::Prepared(reply)) => {
-                    count.ack(node);
-                    replies.push(reply);
-                }
-                // A peer promised a higher term: we are deposed, do not serve.
-                Ok(ReadOutcome::Fenced(_)) => {
-                    return Err(GrainJournalError::Unavailable(
-                        "fenced by a higher term".into(),
-                    ));
-                }
-                Err(_) => {}
-            }
-        }
+        let read = self.fence_read(grain, term, &sets).await?;
         // A joint read quorum during a migration (§7.7): every pre-migration commit
         // sits on a majority of `current`, every in-migration commit additionally on
         // a majority of `target`, so requiring both majorities intersects them all.
-        let confirmed = count.satisfied();
-        if require_quorum && !confirmed {
+        if require_quorum && !read.confirmed {
             return Err(GrainJournalError::Unavailable(
                 "recovery did not reach a read quorum".into(),
             ));
@@ -569,7 +543,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // The record was never acknowledged, so no durability claim is violated —
         // it is a transient dirty read on a partitioned minority leader, the same
         // relaxed-read window §7.5 already documents.
-        let (records, head, snapshot, any_below) = merge(replies, term);
+        let (records, head, snapshot, any_below) = merge(read.replies, term);
         // The recovered head's compacted base — the seq of the best snapshot, which
         // the recovered tail records sit above (§9).
         let base = snapshot.as_ref().map_or(Seq::ZERO, |(s, _, _)| *s);
@@ -588,63 +562,140 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             );
         }
 
-        if confirmed {
-            // Write-back phase: make the recovered tail quorum-durable under our term,
-            // so no later recovery regresses it (§8) and the local store can serve
-            // `load`. The tail sits after `base`; a replica already compacted past it
-            // skips the covered records (§8). Skip the network when nothing changed
-            // (a stable re-activation: no record below our term, head not advanced) —
-            // except during a migration, when the write-back is exactly how a target
-            // replica receives the grain's records (§7.7), so it always runs.
-            let migrating = sets.target.is_some();
-            if head.value() > base.value()
-                && (any_below || local_head.value() < head.value() || migrating)
-            {
-                let local = self.local.store_record(
-                    self.shard,
-                    grain,
-                    base,
-                    term,
-                    records.clone(),
-                    WriteKind::Repair,
-                );
-                let peers = self
-                    .peers_of(&sets)
-                    .into_iter()
-                    .map(|node| {
-                        let ack = self.transport.store_record(
-                            node,
-                            self.shard,
-                            grain.clone(),
-                            base,
-                            term,
-                            records.clone(),
-                            WriteKind::Repair,
-                            RECOVER_TIMEOUT,
-                        );
-                        Box::pin(async move { (node, ack.await) }) as StoreAckFuture
-                    })
-                    .collect();
-                let (outcome, pending) = self.collect_store_quorum(&sets, local, peers).await;
-                match outcome {
-                    QuorumOutcome::Committed => self.drain(pending),
-                    QuorumOutcome::Fenced => {
-                        return Err(GrainJournalError::Unavailable(
-                            "fenced by a higher term".into(),
-                        ));
-                    }
-                    // `Sealed` cannot occur on a `Repair` (the bound refuses only
-                    // appends); folded with the quorum-miss arm for completeness.
-                    QuorumOutcome::Stale | QuorumOutcome::Sealed | QuorumOutcome::Unavailable => {
-                        return Err(GrainJournalError::Unavailable(
-                            "recovery write-back did not reach a quorum".into(),
-                        ));
-                    }
-                }
-            }
+        if read.confirmed {
+            self.write_back(
+                grain,
+                term,
+                &sets,
+                base,
+                head,
+                &records,
+                any_below,
+                read.local_head,
+            )
+            .await?;
         }
 
         Ok(head)
+    }
+
+    /// Recovery read phase (§7.2, §8): fence-read the local store and every peer,
+    /// awaiting all reads so no in-flight ask is dropped (no-silent-loss, §14).
+    /// Each read is bounded by `RECOVER_TIMEOUT`, so an unreachable peer just falls
+    /// out of the quorum. Returns the surviving `Prepared` replies, this node's
+    /// local head, and whether the acks reached a joint read quorum; `Err` when the
+    /// local store or a peer has fenced us behind a higher term.
+    async fn fence_read(
+        &self,
+        grain: &GrainName,
+        term: Term,
+        sets: &ReplicaSets,
+    ) -> Result<ReadQuorum, GrainJournalError> {
+        let local = self.local.prepare(self.shard, grain, term);
+        let ReadOutcome::Prepared(local_reply) = local else {
+            return Err(GrainJournalError::Unavailable(
+                "fenced by a higher term".into(),
+            ));
+        };
+        let peer_nodes = self.peers_of(sets);
+        let peer_reads = peer_nodes.iter().map(|&node| {
+            self.transport
+                .read_grain(node, self.shard, grain.clone(), term, RECOVER_TIMEOUT)
+        });
+        // Take our local head before moving the reply into the quorum set, so the
+        // write-back below can skip the network on a stable re-activation without a
+        // second read — and the recovery path never deep-clones the grain's records.
+        let local_head = head_from_reply(&local_reply);
+        let mut count = JointCount::new(sets);
+        count.ack(self.self_node);
+        let mut replies = vec![local_reply];
+        for (node, result) in peer_nodes.iter().copied().zip(join_all(peer_reads).await) {
+            match result {
+                Ok(ReadOutcome::Prepared(reply)) => {
+                    count.ack(node);
+                    replies.push(reply);
+                }
+                // A peer promised a higher term: we are deposed, do not serve.
+                Ok(ReadOutcome::Fenced(_)) => {
+                    return Err(GrainJournalError::Unavailable(
+                        "fenced by a higher term".into(),
+                    ));
+                }
+                Err(_) => {}
+            }
+        }
+        Ok(ReadQuorum {
+            replies,
+            local_head,
+            confirmed: count.satisfied(),
+        })
+    }
+
+    /// Recovery write-back phase (§8): make the recovered tail quorum-durable under
+    /// our term, so no later recovery regresses it and the local store can serve
+    /// `load`. The tail sits after `base`; a replica already compacted past it skips
+    /// the covered records (§8). Skips the network — returning `Ok` without a write —
+    /// when nothing changed (a stable re-activation: no record below our term, head
+    /// not advanced), except during a migration, when the write-back is exactly how a
+    /// target replica receives the grain's records (§7.7), so it always runs.
+    #[allow(clippy::too_many_arguments)] // mirrors the raft.rs handler signatures
+    async fn write_back(
+        &self,
+        grain: &GrainName,
+        term: Term,
+        sets: &ReplicaSets,
+        base: Seq,
+        head: Seq,
+        records: &[Vec<u8>],
+        any_below: bool,
+        local_head: Seq,
+    ) -> Result<(), GrainJournalError> {
+        let migrating = sets.target.is_some();
+        if head.value() <= base.value()
+            || !(any_below || local_head.value() < head.value() || migrating)
+        {
+            return Ok(());
+        }
+        let local = self.local.store_record(
+            self.shard,
+            grain,
+            base,
+            term,
+            records.to_vec(),
+            WriteKind::Repair,
+        );
+        let peers = self
+            .peers_of(sets)
+            .into_iter()
+            .map(|node| {
+                let ack = self.transport.store_record(
+                    node,
+                    self.shard,
+                    grain.clone(),
+                    base,
+                    term,
+                    records.to_vec(),
+                    WriteKind::Repair,
+                    RECOVER_TIMEOUT,
+                );
+                Box::pin(async move { (node, ack.await) }) as StoreAckFuture
+            })
+            .collect();
+        let (outcome, pending) = self.collect_store_quorum(sets, local, peers).await;
+        match outcome {
+            QuorumOutcome::Committed => {
+                self.drain(pending);
+                Ok(())
+            }
+            QuorumOutcome::Fenced => Err(GrainJournalError::Unavailable(
+                "fenced by a higher term".into(),
+            )),
+            // `Sealed` cannot occur on a `Repair` (the bound refuses only appends);
+            // folded with the quorum-miss arm for completeness.
+            QuorumOutcome::Stale | QuorumOutcome::Sealed | QuorumOutcome::Unavailable => Err(
+                GrainJournalError::Unavailable("recovery write-back did not reach a quorum".into()),
+            ),
+        }
     }
 
     pub(crate) async fn load(

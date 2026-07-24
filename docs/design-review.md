@@ -38,7 +38,7 @@ fence and seal are per-*shard* state that lives in the store, while `GrainRecord
 per-*grain* segment, so a trait over the two stores — not the per-grain algebra — is where the
 shared secret belongs.
 
-### ② God-functions that must be held whole in the head
+### ② God-functions that must be held whole in the head *(resolved)*
 `recover_with` (`replicator.rs:503`, 435 lines) does the fence-read phase, per-slot
 highest-term merge, quorum accounting, write-back, snapshot adoption, and blob migration in
 one body — no sub-step is independently readable or testable. `receive_loop` (`system.rs:850`,
@@ -46,6 +46,21 @@ one body — no sub-step is independently readable or testable. `receive_loop` (
 `clock.now()` + `entropy` into `apply_raft_output`. Cost is cognitive load and
 unknown-unknowns: adding a frame or a recovery phase means surgery inside a monolith. A
 `Frame::dispatch(&system)` and a handful of named recovery phases would cut both sharply.
+
+**Resolved.** Both are now readable in parts. `receive_loop` is a thin shutdown-gated
+loop delegating to a flat `dispatch_frame` table where every arm is a single call; the five
+copy-paste Raft arms collapse behind one `drive_group` helper that owns the shared shape
+(resolve group, draw `clock.now()` + `entropy` once, apply the output — so a wrong edit to
+the threading can no longer diverge across arms), the four SWIM arms share an `absorb_gossip`
+preamble, and each remaining frame family is its own `handle_*` function. `RaftPropose` stays
+distinct (it never calls `apply_raft_output`). Dispatch lives in `system.rs`, not on `Frame`
+in the wire crate — the handlers reach into `host`/`membership`/`receptionist`, so moving
+them would invert the layering. `recover_with` is now a readable spine — leadership gate →
+`fence_read` → quorum policy → merge → snapshot adopt → `write_back` — with the read and
+write-back phases extracted as named methods carrying their own rationale (the "435 lines"
+figure was an overcount: the function is ~146 lines, 503–648; blob migration lives in sibling
+methods, not here). Both refactors are pure structure moves — the entropy/clock draw order is
+unchanged, verified by the full simulation conformance sweep.
 
 ### ③ Repeated protocol skeletons — three families
 The same non-trivial shape is written many times:
@@ -131,9 +146,11 @@ Not a laundry list — the three redesigns that most reduce overall complexity:
    silent-divergence correctness hazard into a single deep function, though behind a shared
    `WriteGuard` trait over the two stores rather than inside `GrainRecords` (the fence and seal
    are per-shard store state, not per-grain segment state). See red flag ①.
-2. **Table-drive the two dispatch/recovery monoliths.** A `Frame::dispatch(&system)` for
-   `receive_loop` and named phases for `recover_with` turn "hold 400 lines in your head" into
-   "read one phase." The single biggest cognitive-load reduction available.
+2. ~~**Table-drive the two dispatch/recovery monoliths.**~~ *Done* — `receive_loop` is now a
+   thin loop over a flat `dispatch_frame` table (Raft arms collapsed behind `drive_group`, SWIM
+   arms behind `absorb_gossip`, one `handle_*` per family) and `recover_with` a readable spine
+   over extracted `fence_read` / `write_back` phases. "Hold 400 lines in your head" is now "read
+   one arm / one phase." See red flag ②.
 3. **Extract the three repeated protocol skeletons behind one helper each** — a driver-loop
    combinator (`run_leader_loop(interval, |shard| …)`), one `apply_membership_op`, one
    `propose_or_forward`. Kills the seven-place teardown contract and the three-place
@@ -149,8 +166,8 @@ existence, and the simulation seam is a genuinely hard idea executed cleanly. Wh
 back from an unqualified A is that the strategic discipline visibly thins out in the newest,
 hardest layers: a durability invariant that *was* copy-pasted across two stores where
 divergence is a silent bug (now collapsed behind a shared `WriteGuard` trait — red flag ①),
-two 400-line functions that resist being read in parts, and a fistful of protocol
-skeletons repeated three-to-seven times. These are exactly the tactical compromises the
+two long functions that resisted being read in parts (now table-driven / phase-split — red
+flag ②), and a fistful of protocol skeletons repeated three-to-seven times. These are exactly the tactical compromises the
 philosophy warns accumulate one at a time — and the remarkable thing is how *few* of them
 there are across 90K lines, which is why this is an A− and not a B+. Tighten the three
 redesigns above and the edge will match the center. Excellent work; finish the job.
