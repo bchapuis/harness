@@ -293,19 +293,21 @@ impl<G: Grain> GrainRef<G> {
     {
         // Attempt the cached host; only a `DeadLetter` (a hibernated host that
         // never received the command, §10) is re-enqueued. An ambiguous failure is
-        // surfaced, not retried — a re-enqueue could double-apply (§2.2). One
-        // deadline bounds both attempts' resolutions.
+        // surfaced, not retried — a re-enqueue could double-apply (§2.2). Fire-and-
+        // forget never reports `Unavailable` (§6), so the budget is left unguarded.
         let deadline = self.system.now() + DEFAULT_ASK_TIMEOUT;
-        let host = self.resolve(true, deadline).await?;
-        if let Err(call) = host.tell(RunTyped(msg.clone())).await {
-            if is_retriable(&call) {
-                self.invalidate();
-                let host = self.resolve(false, deadline).await?;
-                return host.tell(RunTyped(msg)).await.map_err(GrainError::Call);
-            }
-            return Err(GrainError::Call(call));
-        }
-        Ok(())
+        let retry = msg.clone();
+        self.resolve_twice(
+            deadline,
+            false,
+            async |host| match host.tell(RunTyped(msg)).await {
+                Ok(()) => Attempt::Done(Ok(())),
+                Err(call) if is_retriable(&call) => Attempt::Retry,
+                Err(call) => Attempt::Done(Err(GrainError::Call(call))),
+            },
+            async |host| host.tell(RunTyped(retry)).await.map_err(GrainError::Call),
+        )
+        .await
     }
 
     /// Subscribe to the grain's committed records (spec §7.9): resolve the shard
@@ -470,42 +472,81 @@ impl<G: Grain> GrainRef<G> {
     {
         // ONE deadline bounds the whole call — resolution and ask, across both
         // attempts — so the retry path never restarts the caller's budget (a
-        // per-step `within` could stack up to ~4× the declared timeout).
+        // per-step `within` could stack up to ~4× the declared timeout). Each
+        // attempt recomputes its `remaining` from the shared deadline.
         let deadline = self.system.now() + within;
+        let retry = msg.clone();
+        self.resolve_twice(
+            deadline,
+            true,
+            async |host| {
+                let remaining = deadline.duration_since(self.system.now());
+                match host.ask_timeout(RunTyped(msg), remaining).await {
+                    // The host's reply is itself `Result<M::Reply, GrainError>`.
+                    Ok(Ok(reply)) => Attempt::Done(Ok(reply)),
+                    // Leadership moved off the cached host (§8): refresh and retry.
+                    Ok(Err(GrainError::NotLeader(_))) => Attempt::Retry,
+                    // A genuine durability outcome (quorum loss / unhandled): terminal.
+                    Ok(Err(other)) => Attempt::Done(Err(other)),
+                    // The cached host had hibernated and stopped, so the command
+                    // never reached a handler (§10): safe to refresh and re-issue.
+                    Err(call) if is_retriable(&call) => Attempt::Retry,
+                    // Ambiguous (Unreachable/Timeout) or otherwise terminal: surface
+                    // it, never auto-retry a command that may have committed (§2.2).
+                    Err(call) => Attempt::Done(Err(GrainError::Call(call))),
+                }
+            },
+            async |host| {
+                let remaining = deadline.duration_since(self.system.now());
+                match host.ask_timeout(RunTyped(retry), remaining).await {
+                    Ok(result) => result,
+                    Err(call) => Err(GrainError::Call(call)),
+                }
+            },
+        )
+        .await
+    }
 
-        // Attempt 1: cached host (or a fresh resolution if nothing is cached).
+    /// The two-attempt resolve-retry both [`tell`](Self::tell) and
+    /// [`dispatch`](Self::dispatch) layer over the [`resolve`](Self::resolve)
+    /// redirect engine, in one place. Resolve cache-preferring and run `first`
+    /// under the single `deadline`; if it reports [`Attempt::Retry`] — the command
+    /// provably never ran (a `DeadLetter`, §10; or a `NotLeader` reply, §8) — drop
+    /// the stale cache entry, resolve cache-bypassing, and run `again`, which is
+    /// terminal. Never a third attempt, so an effectful command that may have
+    /// committed is surfaced, never re-issued (at-most-once, §2.2). `guard_budget`
+    /// returns [`Unavailable`](GrainError::Unavailable) when the deadline is spent
+    /// before the retry — request/reply wants that; fire-and-forget must never
+    /// report `Unavailable` (§6), so it passes `false` and lets the second
+    /// resolution run out the deadline itself.
+    async fn resolve_twice<T>(
+        &self,
+        deadline: actor_core::Instant,
+        guard_budget: bool,
+        first: impl AsyncFnOnce(&ActorRef<Host<G>>) -> Attempt<T>,
+        again: impl AsyncFnOnce(&ActorRef<Host<G>>) -> Result<T, GrainError>,
+    ) -> Result<T, GrainError> {
         let host = self.resolve(true, deadline).await?;
-        let remaining = deadline.duration_since(self.system.now());
-        match host.ask_timeout(RunTyped(msg.clone()), remaining).await {
-            // The host's reply is itself `Result<M::Reply, GrainError>`.
-            Ok(Ok(reply)) => return Ok(reply),
-            // Leadership moved off the cached host (§8): refresh and retry.
-            Ok(Err(GrainError::NotLeader(_))) => self.invalidate(),
-            // A genuine durability outcome (quorum loss / unhandled): terminal.
-            Ok(Err(other)) => return Err(other),
-            // The cached host had hibernated and stopped, so the command never
-            // reached a handler (§10): safe to refresh and re-issue.
-            Err(call) if is_retriable(&call) => self.invalidate(),
-            // Ambiguous (Unreachable/Timeout) or otherwise terminal: surface it,
-            // never auto-retry an effectful command that may have committed (§2.2).
-            Err(call) => return Err(GrainError::Call(call)),
+        if let Attempt::Done(result) = first(&host).await {
+            return result;
         }
-
-        // Attempt 2: a fresh gateway resolution (bypassing the cache) and re-issue,
-        // within whatever budget attempt 1 left.
-        let remaining = deadline.duration_since(self.system.now());
-        if remaining.is_zero() {
+        self.invalidate();
+        if guard_budget && deadline.duration_since(self.system.now()).is_zero() {
             return Err(GrainError::Unavailable(
                 "deadline exhausted before the retry".into(),
             ));
         }
         let host = self.resolve(false, deadline).await?;
-        let remaining = deadline.duration_since(self.system.now());
-        match host.ask_timeout(RunTyped(msg), remaining).await {
-            Ok(result) => result,
-            Err(call) => Err(GrainError::Call(call)),
-        }
+        again(&host).await
     }
+}
+
+/// The outcome of one attempt in the two-attempt resolve-retry
+/// ([`GrainRef::resolve_twice`]): a terminal `Done` result, or `Retry` — the
+/// attempt provably did not run (§2.2), so re-resolve and re-issue once.
+enum Attempt<T> {
+    Done(Result<T, GrainError>),
+    Retry,
 }
 
 /// Whether a transport failure proves the command **never ran**, so re-issuing it
