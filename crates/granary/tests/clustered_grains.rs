@@ -603,8 +603,14 @@ fn shrinking_the_cluster_moves_shards_off_a_removed_node() {
     };
     assert_eq!(committed, Ok(700));
     let before = granaries[0].replicas(key);
-    let shard_leader = granaries[0]
-        .leader(key)
+    // Read the shard leader from a node that *replicates* the shard: `leader` is a
+    // node-local routing observation (it reads the shard's Raft group, which only
+    // its replicas host), so on this five-node cluster a non-replica — often
+    // `granaries[0]` — sees `None` even though the shard is led. The replicas agree
+    // on the leader, so any of them answers.
+    let shard_leader = granaries
+        .iter()
+        .find_map(|g| g.leader(key))
         .expect("the shard elected a leader");
     let victim = *before
         .iter()
