@@ -598,10 +598,8 @@ impl<S: HarnessSystem> Agent<S> {
             // `launched` claims / `resolved` ids from the ended run must not
             // suppress this run's calls — synthesized `call-{step}-{i}` ids
             // repeat across runs, and so do the step-keyed model claims.
-            act.run.reset();
-            act.events.started.push(turn_id.clone());
+            let batch = self.begin_turn(state, ctx, self.kind(), &mut act, msg.turn, msg.parent);
             drop(act);
-            let batch = self.start_records(state, ctx, self.kind(), msg.turn, msg.parent);
             self.schedule_advance(ctx);
             (
                 batch,
@@ -936,6 +934,26 @@ impl<S: HarnessSystem> Agent<S> {
         self.dispatch_pending(state, ctx, kind, &mut act, live, &turn)
     }
 
+    /// Begin a run: sweep the per-run scope, enqueue the `RunStarted` boundary
+    /// event, and produce the turn's start records. The three steps stay in this
+    /// order — `run.reset()` must precede producing records, or stale
+    /// `launched`/`resolved` claims from the ended run suppress the new run's
+    /// synthesized calls (see the note in [`on_submit`](Self::on_submit)). Shared
+    /// by the fresh-submit and queued-turn paths.
+    fn begin_turn(
+        &self,
+        state: &SessionState,
+        ctx: &GrainCtx<Agent<S>>,
+        kind: &Kind,
+        act: &mut Activation<S>,
+        turn: Turn,
+        parent: Option<Lineage>,
+    ) -> Vec<Record> {
+        act.run.reset();
+        act.events.started.push(turn.id.clone());
+        self.start_records(state, ctx, kind, turn, parent)
+    }
+
     /// (b) No live run: clear the per-run flags, then start the next queued turn
     /// if one is waiting (§3.1). Returns the records to journal — empty when the
     /// queue is empty and the grain goes idle.
@@ -946,11 +964,11 @@ impl<S: HarnessSystem> Agent<S> {
         kind: &Kind,
         act: &mut Activation<S>,
     ) -> Vec<Record> {
-        act.run.reset();
         if let Some((turn, parent)) = act.queue.pop_front() {
-            act.events.started.push(turn.id.clone());
-            return self.start_records(state, ctx, kind, turn, parent);
+            return self.begin_turn(state, ctx, kind, act, turn, parent);
         }
+        // No queued turn: still clear the per-run flags as the grain goes idle.
+        act.run.reset();
         Vec::new()
     }
 
@@ -1558,18 +1576,33 @@ impl<S: HarnessSystem> Agent<S> {
         );
     }
 
+    /// Take the bound sandbox out of `act` (H8): swap the slot to `Closed`, clear
+    /// the `bound` flag, and report the sandbox to release (if the slot was open)
+    /// plus whether a `SandboxReleased` is owed. The caller drives the release
+    /// future — deferred off the command path in
+    /// [`release_sandbox`](Self::release_sandbox), awaited inline on passivation.
+    /// The announce is paired with `bound` here, independent of the slot: an
+    /// unpaired bind is always announced (H8), so a `SandboxReleased` matches
+    /// every `SandboxBound` exactly once.
+    fn take_sandbox(act: &mut Activation<S>) -> (Option<Arc<dyn Sandbox>>, bool) {
+        let release = match std::mem::replace(&mut act.env.slot, SandboxSlot::Closed) {
+            SandboxSlot::Open(sandbox) => Some(sandbox),
+            _ => None,
+        };
+        let announce = act.env.bound;
+        act.env.bound = false;
+        (release, announce)
+    }
+
     /// Drop and release the bound sandbox, emitting `SandboxReleased` (H8).
     /// Synchronous teardown is launched off the command path.
     fn release_sandbox(&self, act: &mut Activation<S>, ctx: &GrainCtx<Agent<S>>) {
-        if let SandboxSlot::Open(sandbox) =
-            std::mem::replace(&mut act.env.slot, SandboxSlot::Closed)
-        {
-            let sandbox = sandbox.clone();
+        let (release, announce) = Self::take_sandbox(act);
+        if let Some(sandbox) = release {
             ctx.system()
                 .launch(Box::pin(async move { sandbox.release().await }));
         }
-        if act.env.bound {
-            act.env.bound = false;
+        if announce {
             self.emit_sandbox_released(ctx);
         }
     }
@@ -1651,22 +1684,15 @@ impl<S: HarnessSystem> Grain for Agent<S> {
         // Release the sandbox on every deactivation — idle hibernation, migration,
         // or forced step-down (H8). The workspace goes with it (§5.5). Scope the
         // lock so the guard is dropped before the async release.
-        let to_release = {
+        let (release, announce) = {
             let mut act = self.lock();
-            match std::mem::replace(&mut act.env.slot, SandboxSlot::Closed) {
-                SandboxSlot::Open(sandbox) => {
-                    let bound = act.env.bound;
-                    act.env.bound = false;
-                    Some((sandbox, bound))
-                }
-                _ => None,
-            }
+            Self::take_sandbox(&mut act)
         };
-        if let Some((sandbox, bound)) = to_release {
+        if let Some(sandbox) = release {
             sandbox.release().await;
-            if bound {
-                self.emit_sandbox_released(ctx);
-            }
+        }
+        if announce {
+            self.emit_sandbox_released(ctx);
         }
     }
 
