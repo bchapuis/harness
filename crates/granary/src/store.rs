@@ -586,11 +586,81 @@ impl MemoryGrainStore {
             .expect("grain store segments poisoned");
         segments.get(&(shard, grain.clone())).map(Arc::clone)
     }
+}
 
-    /// Check the shard fence against `term` and bump it to the max. Returns the
-    /// blocking fence on refusal. Taken *inside* a held segment lock, so it is a
-    /// short leaf critical section.
-    fn check_and_bump_fence(&self, shard: u32, term: Term) -> Result<(), Term> {
+/// The per-shard write-guard every [`GrainStore`] shares (§7.7, §8): the append
+/// bound and the term fence, and — the load-bearing part — the *policy* that
+/// composes them. The stores differ only in how the two primitives persist
+/// ([`MemoryGrainStore`] keeps them in memory; the file store fsyncs each fence
+/// bump), so those stay per-store; the ordering and the which-write-kinds-bypass
+/// rules live here, in one place, so a change to which kinds skip the fence cannot
+/// silently diverge between the stores into a correctness bug the compiler will not
+/// catch.
+///
+/// Every method is called *inside the grain's held segment lock* — the caller locks
+/// the segment, guards, then applies — so a write and that grain's recovery
+/// `prepare` serialize on the segment lock (the only fencing-critical race, §8). The
+/// `sealed`/`bump_fence` leaf locks are short critical sections taken beneath it.
+pub(crate) trait WriteGuard {
+    /// Whether the shard's append bound refuses this grain's appends (§7.7). An
+    /// append that passed this check is durably applied before any observer can act
+    /// on the bound, because it runs inside the segment lock.
+    fn sealed(&self, shard: u32, grain: &GrainName) -> bool;
+
+    /// Check the shard fence against `term`, bumping it durably to `term` on a strict
+    /// advance. Returns the blocking (higher, already-acknowledged) fence on refusal,
+    /// so a deposed leader learns it has been fenced (§8). A same-term append does not
+    /// rewrite the fence — only a strict advance changes it.
+    fn bump_fence(&self, shard: u32, term: Term) -> Result<(), Term>;
+
+    /// Guard a fenced **record** store; `Err` is the refusal ack the store returns.
+    ///
+    /// The append bound (§7.7) is checked FIRST, before the fence can bump: a moved
+    /// range accepts no new [`WriteKind::Append`] at any term, and a refused append
+    /// must not advance the fence as a side effect (that would fence the legitimate
+    /// leader's own writes to the range it still owns). Repairs and transfers are not
+    /// bounded — the split driver itself recovers and copies the moved grains after
+    /// sealing. The fence then applies as in [`guard_snapshot`](WriteGuard::guard_snapshot).
+    fn guard_record(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        term: Term,
+        kind: WriteKind,
+    ) -> Result<(), StoreAck> {
+        if kind == WriteKind::Append && self.sealed(shard, grain) {
+            return Err(StoreAck::Sealed);
+        }
+        self.guard_snapshot(shard, term, kind)
+    }
+
+    /// Guard a fenced store that the append bound does **not** cover — a snapshot
+    /// (§9) is not an append to the moved range, so only the fence guards it. A
+    /// [`WriteKind::Transfer`] skips the fence: its destination keys have no
+    /// contesting leader (the copy is stamped `Term::ZERO` under keys no leader
+    /// serves yet, or a merge's disjoint range), and a merge destination's live
+    /// fence must not refuse the copy.
+    fn guard_snapshot(&self, shard: u32, term: Term, kind: WriteKind) -> Result<(), StoreAck> {
+        if kind != WriteKind::Transfer
+            && let Err(fence) = self.bump_fence(shard, term)
+        {
+            return Err(StoreAck::Fenced(fence));
+        }
+        Ok(())
+    }
+}
+
+impl WriteGuard for MemoryGrainStore {
+    fn sealed(&self, shard: u32, grain: &GrainName) -> bool {
+        self.inner
+            .seals
+            .lock()
+            .expect("grain store seals poisoned")
+            .get(&shard)
+            .is_some_and(|&from| crate::system::name_at_or_above(grain, from))
+    }
+
+    fn bump_fence(&self, shard: u32, term: Term) -> Result<(), Term> {
         let mut fences = self
             .inner
             .fences
@@ -600,25 +670,10 @@ impl MemoryGrainStore {
         if term < fence {
             return Err(fence);
         }
-        // `term >= fence` here, so only a strict advance changes the fence — skip the
-        // map write in the steady-state append case where `term == fence`.
         if term > fence {
             fences.insert(shard, term);
         }
         Ok(())
-    }
-
-    /// Whether the shard's append bound refuses this grain's appends (§7.7).
-    /// Taken *inside* the held segment lock, like the fence, so an append that
-    /// passed the check is durably applied before any observer can act on the
-    /// bound being set.
-    fn sealed(&self, shard: u32, grain: &GrainName) -> bool {
-        self.inner
-            .seals
-            .lock()
-            .expect("grain store seals poisoned")
-            .get(&shard)
-            .is_some_and(|&from| crate::system::name_at_or_above(grain, from))
     }
 }
 
@@ -633,25 +688,11 @@ impl GrainStore for MemoryGrainStore {
         kind: WriteKind,
     ) -> StoreAck {
         let segment = self.segment(shard, grain);
-        // Hold the segment lock across the fence check and the apply, so a concurrent
+        // Hold the segment lock across the guard and the apply, so a concurrent
         // `prepare` for *this* grain cannot slip between them (the fencing race, §8).
         let mut records_guard = segment.lock().expect("grain segment poisoned");
-        // The append bound (§7.7) is checked FIRST, before the fence can bump: a
-        // moved range accepts no new appends here at any term, and a refused
-        // append must not advance the shard fence as a side effect (that would
-        // fence the legitimate leader's own writes to the retained range).
-        // Repairs and transfers pass — the split driver recovers and copies the
-        // moved grains after sealing.
-        if kind == WriteKind::Append && self.sealed(shard, grain) {
-            return StoreAck::Sealed;
-        }
-        // A `Transfer` skips the fence: its destination keys have no contesting
-        // leader (see `WriteKind::Transfer`), and a merge destination's live fence
-        // must not refuse the copy.
-        if kind != WriteKind::Transfer
-            && let Err(fence) = self.check_and_bump_fence(shard, term)
-        {
-            return StoreAck::Fenced(fence);
+        if let Err(ack) = self.guard_record(shard, grain, term, kind) {
+            return ack;
         }
         records_guard.store_record(after, term, records, kind)
     }
@@ -687,7 +728,7 @@ impl GrainStore for MemoryGrainStore {
         let records_guard = segment.lock().expect("grain segment poisoned");
         // Promise: bump the fence so a deposed leader at a lower term can no longer
         // commit here (the Paxos-prepare half of recovery, §8).
-        if let Err(fence) = self.check_and_bump_fence(shard, term) {
+        if let Err(fence) = self.bump_fence(shard, term) {
             return ReadOutcome::Fenced(fence);
         }
         ReadOutcome::Prepared(records_guard.read())
@@ -704,10 +745,8 @@ impl GrainStore for MemoryGrainStore {
     ) -> StoreAck {
         let segment = self.segment(shard, grain);
         let mut records_guard = segment.lock().expect("grain segment poisoned");
-        if kind != WriteKind::Transfer
-            && let Err(fence) = self.check_and_bump_fence(shard, term)
-        {
-            return StoreAck::Fenced(fence);
+        if let Err(ack) = self.guard_snapshot(shard, term, kind) {
+            return ack;
         }
         records_guard.store_snapshot(at, term, state).0
     }

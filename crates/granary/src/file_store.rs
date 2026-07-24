@@ -91,6 +91,7 @@ use crate::store::GrainStoreFactory;
 use crate::store::ReadOutcome;
 use crate::store::ReadReply;
 use crate::store::StoreAck;
+use crate::store::WriteGuard;
 use crate::store::WriteKind;
 
 /// Upper bound on one framed record's payload, a sanity check while scanning: a
@@ -301,38 +302,6 @@ impl FileGrainStore {
         self.blob_dir(seg_id).join(id.to_string())
     }
 
-    /// Check the shard fence against `term` and, if `term` advances it, persist the
-    /// bump before returning. Returns the blocking fence on refusal. The fence file is
-    /// rewritten only when the term actually advances, so a steady-state append (same
-    /// term) never touches it.
-    fn bump_fence(&self, shard: u32, term: Term) -> Result<(), Term> {
-        let mut fences = self.fences.lock().expect("grain store fences poisoned");
-        let fence = *fences.get(&shard).unwrap_or(&Term::ZERO);
-        if term < fence {
-            return Err(fence);
-        }
-        if term > fence {
-            write_fence(&self.dir, shard, term).unwrap_or_else(|err| {
-                panic!(
-                    "grain store fence persistence failed at {}: {err}",
-                    self.dir.display()
-                )
-            });
-            fences.insert(shard, term);
-        }
-        Ok(())
-    }
-
-    /// Whether the shard's append bound refuses this grain's appends (§7.7).
-    /// Checked inside the held segment lock, like the fence.
-    fn sealed(&self, shard: u32, grain: &GrainName) -> bool {
-        self.seals
-            .lock()
-            .expect("grain store seals poisoned")
-            .get(&shard)
-            .is_some_and(|&from| crate::system::name_at_or_above(grain, from))
-    }
-
     /// Rewrite a grain's segment to a single `Checkpoint` of its current state, folding
     /// away the record ops a snapshot made redundant (§9), and swap in the fresh append
     /// handle. Called under the held segment lock so no append races the rewrite.
@@ -474,6 +443,36 @@ fn read_checksummed_u64(path: &Path) -> io::Result<Option<u64>> {
     Ok(Some(raw))
 }
 
+impl WriteGuard for FileGrainStore {
+    fn sealed(&self, shard: u32, grain: &GrainName) -> bool {
+        self.seals
+            .lock()
+            .expect("grain store seals poisoned")
+            .get(&shard)
+            .is_some_and(|&from| crate::system::name_at_or_above(grain, from))
+    }
+
+    /// Persists the bump before returning. The fence file is rewritten only when the
+    /// term actually advances, so a steady-state append (same term) never touches it.
+    fn bump_fence(&self, shard: u32, term: Term) -> Result<(), Term> {
+        let mut fences = self.fences.lock().expect("grain store fences poisoned");
+        let fence = *fences.get(&shard).unwrap_or(&Term::ZERO);
+        if term < fence {
+            return Err(fence);
+        }
+        if term > fence {
+            write_fence(&self.dir, shard, term).unwrap_or_else(|err| {
+                panic!(
+                    "grain store fence persistence failed at {}: {err}",
+                    self.dir.display()
+                )
+            });
+            fences.insert(shard, term);
+        }
+        Ok(())
+    }
+}
+
 impl GrainStore for FileGrainStore {
     fn store_record(
         &self,
@@ -485,19 +484,12 @@ impl GrainStore for FileGrainStore {
         kind: WriteKind,
     ) -> StoreAck {
         let segment = self.segment_or_create(shard, grain);
+        // Guard under the segment lock (durable fence bump included), so a concurrent
+        // `prepare` for this grain cannot slip between the check and the apply (the
+        // fencing race, §8).
         let mut inner = segment.inner.lock().expect("grain segment poisoned");
-        // The append bound (§7.7) is checked FIRST, before the fence can bump: a
-        // refused append must not advance the shard fence as a side effect.
-        if kind == WriteKind::Append && self.sealed(shard, grain) {
-            return StoreAck::Sealed;
-        }
-        // Fence check (durable bump) under the segment lock, so a concurrent `prepare`
-        // for this grain cannot slip between the check and the apply (the fencing
-        // race, §8). A `Transfer` skips it (see `WriteKind::Transfer`).
-        if kind != WriteKind::Transfer
-            && let Err(fence) = self.bump_fence(shard, term)
-        {
-            return StoreAck::Fenced(fence);
+        if let Err(ack) = self.guard_record(shard, grain, term, kind) {
+            return ack;
         }
         inner
             .log
@@ -577,10 +569,8 @@ impl GrainStore for FileGrainStore {
     ) -> StoreAck {
         let segment = self.segment_or_create(shard, grain);
         let mut inner = segment.inner.lock().expect("grain segment poisoned");
-        if kind != WriteKind::Transfer
-            && let Err(fence) = self.bump_fence(shard, term)
-        {
-            return StoreAck::Fenced(fence);
+        if let Err(ack) = self.guard_snapshot(shard, term, kind) {
+            return ack;
         }
         let (ack, advanced) = inner.records.store_snapshot(at, term, state);
         // A snapshot that advanced the base just compacted the records it subsumes
