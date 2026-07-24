@@ -325,16 +325,12 @@ where
     /// transition; the *cluster* converges asynchronously through the mode's
     /// dissemination.
     pub async fn admit(&self, node: NodeId) -> bool {
-        match &self.inner.mode {
-            MembershipMode::Registry(registry) => registry.client.register(node).await.is_ok(),
-            MembershipMode::Leader(leader) => {
-                self.propose_and_wait(leader, MembershipCommand::Admit(node), move |m| {
-                    m.status(node) == Some(MemberStatus::Up)
-                })
-                .await
-            }
-            _ => false,
-        }
+        self.apply_membership_op(
+            MembershipCommand::Admit(node),
+            move |m| m.status(node) == Some(MemberStatus::Up),
+            move |client| async move { client.register(node).await.is_ok() },
+        )
+        .await
     }
 
     /// **Drain** `node` for maintenance — the reversible cordon (spec §9.1,
@@ -344,40 +340,29 @@ where
     /// [`resume`](Self::resume) returns it to `Up`. `false` in modes without an
     /// authoritative control plane.
     pub async fn drain(&self, node: NodeId) -> bool {
-        match &self.inner.mode {
-            MembershipMode::Registry(registry) => registry
-                .client
-                .set_state(node, RegistryState::Draining)
-                .await
-                .is_ok(),
-            MembershipMode::Leader(leader) => {
-                self.propose_and_wait(leader, MembershipCommand::Drain(node), move |m| {
-                    m.status(node) == Some(MemberStatus::Draining)
-                })
-                .await
-            }
-            _ => false,
-        }
+        self.apply_membership_op(
+            MembershipCommand::Drain(node),
+            move |m| m.status(node) == Some(MemberStatus::Draining),
+            move |client| async move {
+                client
+                    .set_state(node, RegistryState::Draining)
+                    .await
+                    .is_ok()
+            },
+        )
+        .await
     }
 
     /// **Resume** a drained `node` after maintenance (spec §9.1, §9.4) — the
     /// reverse of [`drain`](Self::drain). `false` in modes without an
     /// authoritative control plane.
     pub async fn resume(&self, node: NodeId) -> bool {
-        match &self.inner.mode {
-            MembershipMode::Registry(registry) => registry
-                .client
-                .set_state(node, RegistryState::Up)
-                .await
-                .is_ok(),
-            MembershipMode::Leader(leader) => {
-                self.propose_and_wait(leader, MembershipCommand::Resume(node), move |m| {
-                    m.status(node) == Some(MemberStatus::Up)
-                })
-                .await
-            }
-            _ => false,
-        }
+        self.apply_membership_op(
+            MembershipCommand::Resume(node),
+            move |m| m.status(node) == Some(MemberStatus::Up),
+            move |client| async move { client.set_state(node, RegistryState::Up).await.is_ok() },
+        )
+        .await
     }
 
     /// **Decommission** `node`: terminally remove it from the cluster through
@@ -389,14 +374,30 @@ where
     /// actors receive `Terminated { NodeDown }`. `false` in modes without an
     /// authoritative control plane.
     pub async fn decommission(&self, node: NodeId) -> bool {
+        self.apply_membership_op(
+            MembershipCommand::Down(node),
+            move |m| m.is_down(node),
+            move |client| async move { client.deregister(node).await.is_ok() },
+        )
+        .await
+    }
+
+    /// Execute a membership operator command through the mode's authority (spec
+    /// §9.4): a registry mutation (registry-based) via `registry_op`, or a
+    /// committed control-group entry (leader-based) — `command`, awaited until
+    /// `done` observes its effect in the local view. Modes without an
+    /// authoritative control plane return `false`. The single home of the
+    /// operator-command dispatch [`admit`](Self::admit) / [`drain`](Self::drain)
+    /// / [`resume`](Self::resume) / [`decommission`](Self::decommission) share.
+    async fn apply_membership_op<Fut: Future<Output = bool>>(
+        &self,
+        command: MembershipCommand,
+        done: impl Fn(&Membership) -> bool,
+        registry_op: impl FnOnce(Arc<dyn RegistryClient>) -> Fut,
+    ) -> bool {
         match &self.inner.mode {
-            MembershipMode::Registry(registry) => registry.client.deregister(node).await.is_ok(),
-            MembershipMode::Leader(leader) => {
-                self.propose_and_wait(leader, MembershipCommand::Down(node), move |m| {
-                    m.is_down(node)
-                })
-                .await
-            }
+            MembershipMode::Registry(registry) => registry_op(registry.client.clone()).await,
+            MembershipMode::Leader(leader) => self.propose_and_wait(leader, command, done).await,
             _ => false,
         }
     }
@@ -471,27 +472,40 @@ where
     /// it to theirs. The membership command is encoded to the control group's
     /// opaque app payload.
     async fn submit_proposal(&self, leader: &LeaderMode, command: MembershipCommand) {
-        let raft = self.inner.raft.as_ref().expect("leader mode has raft");
-        let Some(control) = raft.group(GroupId::CONTROL) else {
+        self.propose_or_forward(GroupId::CONTROL, command.encode(), &leader.raft.voters)
+            .await;
+    }
+
+    /// Offer an encoded app command to `group`'s leader (spec §9.4.3 item 1):
+    /// append locally when leading; otherwise forward one `RaftPropose` to the
+    /// known leader; otherwise — no leader known yet — fan the proposal out to
+    /// `voters`, which forward it to theirs. The single home of the
+    /// propose/forward/fan-out rule (its degenerate inbound form is
+    /// [`handle_raft_propose`], which never fans out). `voters` is the caller's
+    /// choice of quorum: the configured founding set for the control group, or a
+    /// group's live voter set.
+    async fn propose_or_forward(&self, group: GroupId, command: Vec<u8>, voters: &[NodeId]) {
+        let Some(raft) = self.group(group) else {
             return;
         };
-        if control.is_leader() {
-            control.propose(EntryPayload::App(command.encode()));
+        if raft.is_leader() {
+            raft.propose(EntryPayload::App(command));
             return;
         }
-        if let Some(target) = control.leader_hint() {
+        if let Some(target) = raft.leader_hint() {
             let frame = Frame::RaftPropose {
-                group: GroupId::CONTROL,
-                command: command.encode(),
+                group,
+                command,
                 forwarded: true,
             };
             let _ = self.inner.transport.send(target, frame).await;
             return;
         }
-        for &voter in leader.raft.voters.iter().filter(|&&v| v != self.node()) {
+        let self_node = self.node();
+        for &voter in voters.iter().filter(|&&v| v != self_node) {
             let frame = Frame::RaftPropose {
-                group: GroupId::CONTROL,
-                command: command.encode(),
+                group,
+                command: command.clone(),
                 forwarded: false,
             };
             let _ = self.inner.transport.send(voter, frame).await;
@@ -871,11 +885,8 @@ async fn receive_loop<C, E, S, T>(
 /// Route one inbound frame to its handler (spec §4.4). A flat table: every arm is
 /// a single call, so a new frame kind is a new row here plus one `handle_*` fn —
 /// no surgery inside a monolith.
-async fn dispatch_frame<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    from: NodeId,
-    frame: Frame,
-) where
+async fn dispatch_frame<C, E, S, T>(system: &ClusterSystem<C, E, S, T>, from: NodeId, frame: Frame)
+where
     C: Clock,
     E: Entropy,
     S: Spawner,
@@ -961,7 +972,9 @@ async fn dispatch_frame<C, E, S, T>(
             commit,
         } => {
             drive_group(system, group, |raft, now, entropy| {
-                raft.handle_append(leader, term, prev_index, prev_term, entries, commit, now, entropy)
+                raft.handle_append(
+                    leader, term, prev_index, prev_term, entries, commit, now, entropy,
+                )
             })
             .await
         }
@@ -1278,11 +1291,8 @@ async fn handle_watch<C, E, S, T>(
 }
 
 /// Drop a remote watcher's registration (spec §12).
-fn handle_unwatch<C, E, S, T>(
-    system: &ClusterSystem<C, E, S, T>,
-    target: ActorId,
-    watcher: ActorId,
-) where
+fn handle_unwatch<C, E, S, T>(system: &ClusterSystem<C, E, S, T>, target: ActorId, watcher: ActorId)
+where
     C: Clock,
     E: Entropy,
     S: Spawner,
@@ -1352,9 +1362,11 @@ fn handle_receptionist_sync<C, E, S, T>(
 }
 
 /// An application command offered to a group's leader (spec §9.4.3 item 1): append
-/// it when leading, forward it once when not. A forwarded proposal landing on a
-/// non-leader is dropped — the proposer's bounded re-submission handles the
-/// stale-leader case. The odd Raft arm out: it never calls `apply_raft_output`.
+/// it when leading, forward it once when not. This is the deliberately partial
+/// form of [`ClusterSystem::propose_or_forward`] — an already-inbound proposal is
+/// never fanned out to voters, and a `forwarded` one landing on a non-leader is
+/// dropped (the proposer's bounded re-submission handles the stale-leader case).
+/// The odd Raft arm out: it never calls `apply_raft_output`.
 async fn handle_raft_propose<C, E, S, T>(
     system: &ClusterSystem<C, E, S, T>,
     group: GroupId,
@@ -1468,31 +1480,11 @@ where
     }
 
     async fn propose_to(&self, group: GroupId, command: Vec<u8>) {
-        let Some(raft) = self.group(group) else {
-            return;
-        };
-        if raft.is_leader() {
-            raft.propose(EntryPayload::App(command));
-            return;
-        }
-        if let Some(target) = raft.leader_hint() {
-            let frame = Frame::RaftPropose {
-                group,
-                command,
-                forwarded: true,
-            };
-            let _ = self.inner.transport.send(target, frame).await;
-            return;
-        }
-        let self_node = self.inner.host.node();
-        for voter in raft.voters().into_iter().filter(|&v| v != self_node) {
-            let frame = Frame::RaftPropose {
-                group,
-                command: command.clone(),
-                forwarded: false,
-            };
-            let _ = self.inner.transport.send(voter, frame).await;
-        }
+        let voters = self
+            .group(group)
+            .map(|raft| raft.voters())
+            .unwrap_or_default();
+        self.propose_or_forward(group, command, &voters).await;
     }
 
     fn group_is_leader(&self, group: GroupId) -> bool {
