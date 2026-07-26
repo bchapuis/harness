@@ -24,202 +24,116 @@
 # --- entries below this line ---
 # --- Split-brain singleton after heal -----------------------------------------
 #
-# Two live activations at quiescence on a healed, converged cluster, against
-# `singleton-converged-exactly-one`. One bug, not three: it reproduces in the
-# gossip, registry, and leader control planes alike, and only `static` — where
-# membership never changes and the anchor never moves — is clean. That points at
-# the shared singleton-anchor logic rather than at any one mode.
+# `2 live activations at quiescence on a healed, converged cluster`, against
+# `singleton-converged-exactly-one` — plus, in leader mode, its mirror image,
+# `0 live activations`. Recorded a hundred times over from collecting soaks
+# (SWARM_CONTINUE=1) across the gossip, registry, and leader control planes at
+# roughly 0.5-1% of seeds; `static`, whose membership never changes, was clean.
 #
-# The 20000xxx and 90000xxx seeds came from collecting soaks (SWARM_CONTINUE=1)
-# over 2000-3000 seeds per mode, which failed at roughly 0.5-1% of them. They are
-# kept in bulk because a fix has to clear all three modes, but they are one bug
-# recorded a hundred times: prune to a handful per mode once the anchor bug is
-# understood and the durable regression is a scenario test.
+# Three separate reasons the workload asserted something it had not set up, none
+# of them a defect in the singleton (utilities spec §4), which held its guarantee
+# throughout — at most one activation per *converged* view:
+#
+#  1. The tail was never quiescent. `net.heal()` clears partitions but leaves the
+#     wire's seeded frame loss running, so probes kept going missing, peers kept
+#     flipping `suspect`/`unreachable`, and no two nodes' serving sets ever
+#     agreed. A run could end mid-divergence however long it waited, and two
+#     live activations across divergent views is exactly what §4 item 3 permits.
+#     Fixed by `SimNetwork::quiesce()`, which the workload now calls with the
+#     heal (`conformance_faults.rs::quiescing_the_network_stops_injecting_faults`).
+#  2. The count lagged reality. A manager emits `SingletonStopped` when it
+#     observes the termination, on its next tick, so an instance that stopped in
+#     a run's last tick was gone while its `Stopped` was still 100ms away — and
+#     counted as live. `SingletonConverged` now ends an activation at whichever
+#     comes first, the manager's report or the actor's own `ResignId`.
+#  3. Leader mode could dissolve the cluster. With `DowningPolicy::Timeout` each
+#     isolated side downs the rest, `down` is terminal, and the fixed voter set
+#     lets the survivors elect a leader that downs the previous one in turn —
+#     ending with every node `Down`, no serving set anywhere, and correctly no
+#     singleton at all. It now uses conservative downing, as its gossip twin
+#     already did for the same reason.
+#
+# Pruned to a few seeds per mode, as the note here asked: they are one finding
+# recorded a hundred times, and the durable guards are the three above.
 
-singleton-chaos/leader 900006  # split-brain singleton after heal
-singleton-chaos/leader 90000073
-singleton-chaos/leader 90000428
-singleton-chaos/leader 90000458
-singleton-chaos/leader 90000486
-singleton-chaos/leader 90000614
-singleton-chaos/leader 90000729
-singleton-chaos/leader 90000979
-singleton-chaos/leader 90001084
-singleton-chaos/leader 90001839
-singleton-chaos/leader 20000102
-singleton-chaos/leader 20000157
-singleton-chaos/leader 20000212
-singleton-chaos/leader 20000296
-singleton-chaos/leader 20000397
-singleton-chaos/leader 20000399
-singleton-chaos/leader 20000479
-singleton-chaos/leader 20000499
-singleton-chaos/leader 20000589
-singleton-chaos/leader 20000621
-singleton-chaos/leader 20000757
-singleton-chaos/leader 20000766
-singleton-chaos/leader 20000932
-singleton-chaos/leader 20000958
-singleton-chaos/leader 20001069
-singleton-chaos/leader 20001071
-singleton-chaos/leader 20001174
-singleton-chaos/leader 20001302
-singleton-chaos/leader 20001445
-singleton-chaos/leader 20001475
-singleton-chaos/leader 20001496
-singleton-chaos/leader 20001538
-singleton-chaos/leader 20001675
-singleton-chaos/leader 20001694
-singleton-chaos/leader 20001701
-singleton-chaos/leader 20001810
-singleton-chaos/leader 20001970
-singleton-chaos/leader 20001976
-singleton-chaos/leader 20002197
-singleton-chaos/leader 20002242
-singleton-chaos/leader 20002395
-singleton-chaos/leader 20002591
-singleton-chaos/leader 20002862
-singleton-chaos/leader 20002871
+singleton-chaos/leader 900006     # tail never converged (1)
+singleton-chaos/leader 90000073   # same, surplus activation still live
+singleton-chaos/leader 90000428   # cluster dissolved: every node down (3)
+singleton-chaos/leader 20001445   # same
+singleton-chaos/leader 20000102   # stop not yet reported at quiescence (2)
 
-singleton-chaos/registry 20000122  # same split-brain, registry mode
-singleton-chaos/registry 90000005
-singleton-chaos/registry 90000048
-singleton-chaos/registry 90000332
-singleton-chaos/registry 90000422
-singleton-chaos/registry 90000682
-singleton-chaos/registry 90000743
-singleton-chaos/registry 90000999
-singleton-chaos/registry 90001287
-singleton-chaos/registry 90001311
-singleton-chaos/registry 90001424
-singleton-chaos/registry 90001507
-singleton-chaos/registry 90001631
-singleton-chaos/registry 20000186
-singleton-chaos/registry 20000188
-singleton-chaos/registry 20000765
-singleton-chaos/registry 20000804
-singleton-chaos/registry 20000993
-singleton-chaos/registry 20001050
-singleton-chaos/registry 20001154
-singleton-chaos/registry 20001296
-singleton-chaos/registry 20001339
-singleton-chaos/registry 20001344
-singleton-chaos/registry 20002003
-singleton-chaos/registry 20002037
-singleton-chaos/registry 20002070
-singleton-chaos/registry 20002215
-singleton-chaos/registry 20002388
-singleton-chaos/registry 20002454
-singleton-chaos/registry 20002476
-singleton-chaos/registry 20002497
-singleton-chaos/registry 20002890
+singleton-chaos/registry 20000122 # stop not yet reported at quiescence (2)
+singleton-chaos/registry 90000005 # tail never converged (1)
+singleton-chaos/registry 31000344 # same, found after the first two fixes
 
-singleton-chaos/gossip 20000237  # same split-brain, gossip mode
-singleton-chaos/gossip 90000205
-singleton-chaos/gossip 90000376
-singleton-chaos/gossip 90000445
-singleton-chaos/gossip 90000508
-singleton-chaos/gossip 90000544
-singleton-chaos/gossip 90000827
-singleton-chaos/gossip 90001222
-singleton-chaos/gossip 90001311
-singleton-chaos/gossip 90001464
-singleton-chaos/gossip 90001999
-singleton-chaos/gossip 20000573
-singleton-chaos/gossip 20000579
-singleton-chaos/gossip 20000638
-singleton-chaos/gossip 20000792
-singleton-chaos/gossip 20000841
-singleton-chaos/gossip 20000880
-singleton-chaos/gossip 20000910
-singleton-chaos/gossip 20000970
-singleton-chaos/gossip 20001194
-singleton-chaos/gossip 20001413
-singleton-chaos/gossip 20001457
-singleton-chaos/gossip 20001817
-singleton-chaos/gossip 20002075
-singleton-chaos/gossip 20002194
+singleton-chaos/gossip 20000237   # stop not yet reported at quiescence (2)
+singleton-chaos/gossip 90000445   # tail never converged (1)
+singleton-chaos/gossip 31000512   # same, found after the first two fixes
 
 # --- Remote register not linearizable under duplication -----------------------
 #
-# A duplicated request frame is applied twice by the handler, and the caller can
-# resolve its `ask` with the duplicate's reply — a `Cas` that succeeded reports
-# `false`. Rare, around 0.2% of seeds, since duplication has to land on a
-# mutating op at a state-changing moment.
+# `no sequential order linearizes the N completed/pending operations` — a `Cas`
+# that succeeded reported `false`. Around 0.2% of seeds, because it needs two
+# faults at once: the request frame duplicated onto a mutating op, *and* the
+# first reply dropped.
 #
-# Note this workload's claim sits against `conformance_faults.rs`
-# `duplication_is_tolerated_with_one_outcome_at_the_caller`, which asserts the
-# server *does* double-handle. One of the two contracts has to give.
+# The wire delivers both copies; the recipient handles both. The first `Cas`
+# swaps the value and answers `true`, the second finds it already swapped and
+# answers `false`, and with the first reply lost the caller resolves against the
+# second. Both replies carry the same correlation id, so nothing downstream can
+# tell them apart — there is no caller-side fix.
+#
+# That is the framework's contract, not a defect in it: at-most-once holds at the
+# caller, and spec §7.2 puts exactly-once out of scope, "built atop this layer
+# with explicit idempotency keys". The workload was the side claiming too much —
+# a bare register is not a linearizable object over a duplicating wire. The
+# register in `tests/support/` now carries that key on its mutating operations,
+# which is the construction the spec prescribes, and the sweep is what shows it
+# holds. `conformance_faults.rs`'s `duplication_is_tolerated_...` keeps asserting
+# the double-handling underneath, and now says how the two fit together.
+#
+# Pruned to the two originals plus one from each later soak base.
 
 linearizable-remote-register 10000125  # duplicated Cas applied twice; caller took the duplicate's reply
 linearizable-remote-register 10000944  # same, found once the sweep stopped halting at 10000125
 linearizable-remote-register 91000312
-linearizable-remote-register 91000943
-linearizable-remote-register 91002603
-linearizable-remote-register 91005506
 linearizable-remote-register 20000148
-linearizable-remote-register 20000687
-linearizable-remote-register 20002305
-linearizable-remote-register 20002563
 linearizable-remote-register 97000111
-linearizable-remote-register 97001304
-linearizable-remote-register 97001357
-linearizable-remote-register 97002027
-linearizable-remote-register 97003306
 linearizable-remote-register 88000261
-linearizable-remote-register 88000552
-linearizable-remote-register 88000594
-linearizable-remote-register 88002303
-linearizable-remote-register 88002651
-linearizable-remote-register 88003765
-linearizable-remote-register 88004891
-linearizable-remote-register 88004987
-linearizable-remote-register 88005088
-linearizable-remote-register 88005368
-linearizable-remote-register 88005581
-linearizable-remote-register 88007068
 
 # --- Asks left pending at quiescence ------------------------------------------
 #
-# `[no-silent-loss] N ask(s) still pending at quiescence` — spec §18.5 #1, which
-# requires every `ask` to terminate and none to remain pending when the run goes
-# quiet. Several also trip `[serial-execution] dispatch ... never completed`, so
-# a dispatch is being left in flight rather than the reply being lost.
+# `[no-silent-loss] N ask(s) still pending at quiescence` — spec §18.5 #1 — and,
+# where a dispatch was the thing still in flight, `[serial-execution] dispatch
+# ... never completed`. Reproduced across four granary workloads and machine,
+# which share only the actor framework and the cluster driver underneath. Three
+# causes, found in that order, each one hiding the next:
 #
-# A separate bug from the singleton split-brain above, and the broadest one here:
-# it reproduces in four unrelated granary workloads and in machine, which share
-# only the actor framework underneath.
+#  1. The driver called quiescence too early. It flushed a fixed 2s after the
+#     traffic finished — no longer than the deadline granary's own quorum append
+#     carries, and that append fans out further asks behind it (the drained
+#     stragglers of a committed quorum, §7.2). A call issued at the end of the
+#     drive could not possibly have closed by the time the question was asked, so
+#     a live call was reported as a lost one. `drive_cluster` now flushes and
+#     then keeps advancing while any ask is in flight, capped, so a genuinely
+#     abandoned one still reaches the invariant.
+#  2. `try_join_all` abandoned asks for real. Granary fanned out blob puts, blob
+#     gets, and spilled-value reads with `futures::future::try_join_all`, which
+#     returns on the first error and drops the futures still in flight — with the
+#     `ask`s they had already issued. Those never reach a reply or a `CallError`,
+#     which is exactly what §18.5 #1 forbids. The four sites now use
+#     `actor_core::join_all_results`, which awaits every future and then reports
+#     the first error; the helper's doc is where the rule now lives.
+#  3. Only then could the seeds behind these two run to the end, and two further
+#     bugs surfaced — see the two sections below.
+#
+# Pruned to a couple of seeds per workload.
 
-granary-account-swarm 60000014
+granary-account-swarm 60000014   # ask pending: flush shorter than the call deadline (1)
 granary-account-swarm 94000001
-granary-account-swarm 94000145
-granary-account-swarm 94000219
-granary-account-swarm 94000876
-granary-account-swarm 94001084
-granary-account-swarm 94001324
-granary-account-swarm 94001341
-granary-account-swarm 94001411
-granary-account-swarm 99001008
-
-granary-blob-swarm 94000191
-granary-blob-swarm 94000236
-granary-blob-swarm 94000365
-granary-blob-swarm 94000378
-granary-blob-swarm 94000379
-granary-blob-swarm 94000454
-granary-blob-swarm 94001334
+granary-blob-swarm 94000191      # ask abandoned by `try_join_all` (2)
 granary-blob-swarm 99000090
-granary-blob-swarm 99000172
-granary-blob-swarm 99000228
-granary-blob-swarm 99000747
-granary-blob-swarm 99000751
-granary-blob-swarm 99000797
-granary-blob-swarm 99000854
-granary-blob-swarm 99000989
-granary-blob-swarm 99001012
-granary-blob-swarm 99001049
-
-granary-ws-swarm 94000683
+granary-ws-swarm 94000683        # same, on the workspace checkpoint's chunk puts (2)
 granary-ws-swarm 99000858
 
 # Found the first time the SQL facet's swarm ever ran — it is behind
@@ -228,3 +142,43 @@ granary-ws-swarm 99000858
 granary-sql-account-swarm 95000206
 
 machine-swarm 70000001
+
+# --- Acknowledged write lost when two commands encode identically -------------
+#
+# `[grain-commit-monotonic] grain bank.Account/account/1 committed seq 2 not
+# after previous head 2 (G3/G5)`. Unmasked by the fixes above; a genuine G14
+# violation, and the most serious thing the corpus turned up.
+#
+# A replica refuses an append that lands on a slot it has already filled — the
+# optimistic head check of granary §8, which is what stops a leader whose
+# recovered head is stale from overwriting a committed record. It made an
+# exception for a re-delivered append, and identified one *by its bytes*. But
+# bytes are not an identity: this workload deposits one cent every time, so two
+# clients' commands encode identically. A leader that recovered a stale head
+# (its read quorum was not reached, so it fell back to its local view, §7.5)
+# appended onto the occupied slot, every replica read it as a duplicate and
+# stored it, and the append committed. Two clients were told their deposit was
+# durable; the grain held one record.
+#
+# Fixed in `store.rs`: an append may proceed onto an occupied slot only if it is
+# the same append — same shard term as well as same bytes — and the check now
+# covers every slot of the batch, not just the first. Pinned by
+# `store::tests::an_identical_record_from_a_newer_term_is_still_a_stale_head`.
+
+granary-account-swarm 41000332
+
+# --- Workspace read judged against an outcome the spec calls ambiguous --------
+#
+# `a read returned bytes other than the last committed write (F1/G14)`. Also
+# unmasked by the fixes above, and a bug in the claim rather than the code.
+#
+# `granary-ws-swarm` recorded a path's expected content only on a successful
+# `Put` and treated every failure as if nothing had happened. But `Unavailable`
+# is ambiguous by definition (granary §7.2, §11): the record may already sit on a
+# replica minority, and the next activation's quorum recovery can find it on a
+# majority and adopt it — the spec's own fault list asks for exactly this case to
+# be exercised. Reading those bytes back is correct. `GrainError::Unavailable`'s
+# doc comment said the opposite ("so the write did not commit"), which is how the
+# claim came to be written that way; both are fixed.
+
+granary-ws-swarm 6
