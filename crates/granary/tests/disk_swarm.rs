@@ -19,8 +19,6 @@
 //! Fault *coverage* (#8) for this cluster configuration is already asserted by
 //! `tests/grain_swarm.rs` over the same transport; it is not repeated here.
 
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -29,29 +27,28 @@ use actor_cluster::SwimConfig;
 use actor_core::BoxFuture;
 use actor_core::Clock;
 use actor_core::Entropy;
-use actor_core::Event;
 use actor_core::Manifest;
 use actor_core::Message;
-use actor_core::NodeId;
 use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
-use actor_simulation::SimCluster;
-use actor_simulation::check_cluster_reproducible;
+use actor_simulation::SimNode;
 use actor_simulation::default_invariants;
+use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
+use actor_simulation::slow_seeds;
 use granary::Disk;
 use granary::DiskCaptureStats;
 use granary::DiskError;
 use granary::Grain;
 use granary::GrainCtx;
-use granary::GrainEvent;
 use granary::GrainHandler;
-use granary::GrainName;
 use granary::GranaryConfig;
 use granary::GranaryExt;
 use granary::NoEvent;
+use granary::testing::ActivationSingletonPerNode;
+use granary::testing::CommitMonotonic;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -66,7 +63,7 @@ const IMAGE_BYTES: u64 = BLOCK + BLOCK / 2;
 struct DiskBox;
 
 impl Grain for DiskBox {
-    type System = SimCluster;
+    type System = SimNode;
     type State = ();
     type Event = NoEvent;
     type Facets = (Disk,);
@@ -159,65 +156,6 @@ impl GrainHandler<ReadStamp> for DiskBox {
 
 // --- Grain-specific continuous safety checkers (as in sql_swarm.rs) -------------
 
-/// **Commit head is monotonic** (invariants **G3**, **G5**).
-#[derive(Default)]
-struct CommitMonotonic {
-    last: BTreeMap<GrainName, u64>,
-}
-
-impl Invariant for CommitMonotonic {
-    fn name(&self) -> &'static str {
-        "disk-grain-commit-monotonic"
-    }
-
-    fn observe(&mut self, event: &Event) -> Result<(), String> {
-        if let Some(GrainEvent::Committed { name, seq, .. }) = event.as_app::<GrainEvent>() {
-            let prev = self.last.get(name).copied().unwrap_or(0);
-            if *seq <= prev {
-                return Err(format!(
-                    "grain {name} committed seq {seq} not after previous head {prev} (G3/G5)"
-                ));
-            }
-            self.last.insert(name.clone(), *seq);
-        }
-        Ok(())
-    }
-}
-
-/// **Exactly-once activation per node** (invariant **G6**), crash-sound.
-#[derive(Default)]
-struct ActivationSingletonPerNode {
-    live: BTreeSet<(NodeId, GrainName)>,
-}
-
-impl Invariant for ActivationSingletonPerNode {
-    fn name(&self) -> &'static str {
-        "disk-grain-activation-singleton-per-node"
-    }
-
-    fn observe(&mut self, event: &Event) -> Result<(), String> {
-        if let Event::NodeDown { node, .. } = event {
-            self.live.retain(|(n, _)| n != node);
-            return Ok(());
-        }
-        match event.as_app::<GrainEvent>() {
-            Some(GrainEvent::Activated { node, name }) => {
-                let fresh = self.live.insert((*node, name.clone()));
-                if !fresh {
-                    return Err(format!(
-                        "grain {name} activated while already live on {node} (G6)"
-                    ));
-                }
-            }
-            Some(GrainEvent::Passivated { node, name }) => {
-                self.live.remove(&(*node, name.clone()));
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
-
 // --- The workload ---------------------------------------------------------------
 
 /// Stamp-and-read disk traffic against a handful of grains under the nemesis,
@@ -290,7 +228,7 @@ impl ClusterWorkload for DiskBoxSwarm {
     }
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
-        let nodes: Vec<SimCluster> = ctx.nodes().to_vec();
+        let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
         let config = self.config();
@@ -342,8 +280,14 @@ impl ClusterWorkload for DiskBoxSwarm {
 
     fn invariants(&self) -> Vec<Box<dyn Invariant>> {
         let mut invariants = default_invariants();
-        invariants.push(Box::new(CommitMonotonic::default()));
-        invariants.push(Box::new(ActivationSingletonPerNode::default()));
+        invariants.push(Box::new(CommitMonotonic::new(
+            "disk-grain-commit-monotonic",
+            "grain",
+        )));
+        invariants.push(Box::new(ActivationSingletonPerNode::new(
+            "disk-grain-activation-singleton-per-node",
+            "grain",
+        )));
         invariants
     }
 }
@@ -361,7 +305,7 @@ fn disk_grain_invariants_hold_under_the_cluster_swarm() {
         ops: 5,
         dir: dir.path().to_path_buf(),
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..16) {
+    if let Err(failure) = run_cluster_swarm(&workload, slow_seeds(0..16)) {
         panic!("{failure}");
     }
 }
@@ -378,9 +322,7 @@ fn disk_cluster_swarm_is_reproducible() {
         ops: 4,
         dir: dir.path().to_path_buf(),
     };
-    for seed in 0..8 {
-        if let Err(divergence) = check_cluster_reproducible(&workload, seed) {
-            panic!("{divergence}");
-        }
+    if let Err(divergence) = replay_cluster_swarm(&workload, slow_seeds(0..8)) {
+        panic!("{divergence}");
     }
 }

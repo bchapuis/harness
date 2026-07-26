@@ -1,10 +1,10 @@
 # Verification & Validation
 
-**Scope:** How the distributed actor framework is tested. The companion to the [specification](distributed-actor-spec.md): §16 (events), §17 (conformance), and §18 (deterministic simulation) say *what* must hold and define the trait contract that makes testing possible; this document is the *how* — the strategies, the primitives, and the shape they take in `actor-simulation`.
+**Scope:** How the distributed actor framework is tested. The companion to the [specification](distributed-actor-spec.md): §16 (events), §17 (conformance), and §18 (deterministic simulation) say *what* must hold and define the trait contract that makes testing possible; this document is the *how* — the strategies, the primitives, and the shape they take in `actor-simulation`. [Simulation testing](simulation-testing.md) is the third piece: the *conventions* around the mechanism — which shape of test to reach for, where it lives, and how a run decides how many seeds to spend. Where the two overlap, that document is the authority.
 
 Three principles govern the strategy.
 
-- **Determinism.** Replay every failure from a `(seed, configuration)` alone (§18.1, §18.6). One seed drives time, randomness, and scheduling, so an entire multi-node run — including its faults — reproduces exactly.
+- **Determinism.** Replay every failure from a `(workload, seed)` pair alone (§18.1, §18.6). One seed drives time, randomness, scheduling, *and* the run's sampled fault configuration, so an entire multi-node run reproduces exactly — there is nothing else to carry.
 - **Specification.** Assert the invariants of §18.5, not chosen outputs. Correctness is a small set of properties checked over the §16 event stream, not a pile of example assertions.
 - **Fault injection.** Bugs hide in the failure paths. Inject partitions, crashes, loss, duplication, delay, and reordering under seed control (§18.3), and prove the injection actually fired.
 
@@ -22,15 +22,10 @@ The one external test-only tool is **`trybuild`**, which drives the compile-fail
 pub trait Entropy: Send + Sync + 'static {
     fn next_u64(&self) -> u64;
     fn pick_index(&self, len: usize) -> Option<usize> { /* uniform over 0..len */ }
-
-    /// A fault gate (spec §18.3). Fires with probability numerator/denominator,
-    /// drawn from this stream. Off in production (the default returns false), so
-    /// `buggify` call-sites in the runtime cost nothing outside simulation.
-    fn buggify(&self, _numerator: u64, _denominator: u64) -> bool { false }
 }
 ```
 
-**`buggify` is a method, not a macro.** A runtime call-site such as `if entropy.buggify(1, 4) { /* inject */ }` vanishes in production (the trait default is `false`) and, under `SimEntropy`, fires deterministically from the seeded stream. Faults thus live inline in the real code path, gated by the same entropy that drives the rest of the run.
+**Fault gating lives on `SimEntropy`, not on the production trait.** `SimEntropy::buggify(num, den)` fires with probability `num/den` from the seeded stream, and it is deliberately *not* an `Entropy` method: fault injection is a simulation-only concern, so nothing outside `actor-simulation` can turn a fault on and the production seam carries no trace of it. The gate **always** consumes one draw whether or not it fires, so call sites must guard it behind "are faults configured?" — otherwise a fault-free run stops being byte-identical to one with the gate absent (see `SimNetwork::route`).
 
 **Quiescence-driven time.** The simulator's `Clock`, `Spawner`, and run loop share one scheduler. It polls every ready task until none remain, and only then advances virtual time to the next registered timer (§18.1 #2). A timeout, a SWIM interval, or a backoff therefore costs no wall-clock time — a run covers hours of cluster time per CPU-second — and ready-task selection is seed-randomized, so scheduling itself is a fault dimension.
 
@@ -51,7 +46,11 @@ sim.block_on(workload.run(system));
 // that injects seeded loss/dup/delay and partition/crash (§7, §18.2, §18.3).
 ```
 
-**Workloads (§18.4).** A test is a `Workload`: build actors and registrations, drive traffic through the **public API only** (never actor state — `when_local` excepted, §3.5.1), then let the runner assert invariants at quiescence. `run_swarm` / `run_cluster_swarm` sweep one workload across many seeds, sampling a `FaultConfig` / `FaultPolicy` from each seed's stream. Coverage is *cluster-time exercised per change*, not test count. A failing run is reported as a `RunFailure` carrying the `(seed, faults)` needed to replay it.
+**Workloads (§18.4).** A test is a `Workload`: build actors and registrations, drive traffic through the **public API only** (never actor state — `when_local` excepted, §3.5.1), then let the runner check invariants. `run_swarm` / `run_cluster_swarm` sweep one workload across many seeds, sampling a `FaultConfig` / `FaultPolicy` from each seed's stream. Coverage is *cluster-time exercised per change*, not test count. A failing run is reported as a `RunFailure` carrying the `(workload, seed)` that replays it — the seed regenerates the run's faults, so there is nothing run-shaped to carry beyond it.
+
+Note the asymmetry the checkers have to respect: a single-node run is driven to **quiescence**, but a cluster run is **time-bounded** (`run_for`) because the failure detector never quiesces. An at-quiescence check is therefore sound only for the single-node shape; a property that must hold for both has to hold at every *prefix*.
+
+The shapes a sweep can take, how many seeds a run spends, and where each kind of test file lives are conventions rather than mechanism: see [simulation testing](simulation-testing.md).
 
 **Continuous invariant checking.** Rather than bespoke per-scenario assertions, a small set of always-on `Invariant`s observe the event stream live through a `Checker`, on every run and at final quiescence. Seven ship as continuous checkers today — `NoSilentLoss` (#1), `SerialExecution` (#4), `LifecycleExactlyOnce` (#6), `SignalInBand` (#13), `DownIsTerminal` (#15), `OneLeaderPerTerm` (#22), and `SingletonAtMostOnePerNode` (utilities U2) — chosen because each is a safety property ("a bad thing never happens") expressible over the existing §16 events. `SignalInBand` (#13) holds the line that a `Terminated` is delivered *through the watcher's mailbox*, never out of band: since a signal flows through `enqueue_signal` (an `Enqueue` of the `Terminated` manifest) before the serial loop dispatches it, a `DispatchStart` of that signal with no matching prior `Enqueue` is an out-of-band delivery, caught live. It is a *per-event* (prefix) property, so it is sound for both quiescence-driven single-node runs and the time-bounded cluster runs (`run_for`) that stop mid-flight.
 
@@ -83,7 +82,7 @@ Promoting a *true* safety invariant from a targeted test to a continuous checker
 - **Type-safety & transparency (#20, #21).** Invalid sends do not compile; local vs remote targets produce identical replies and ordering.
 - **Cluster utilities (U1, U2).** Placement is a pure, version-stable function of the serving set with minimal movement; singleton activations never overlap on one node, a healed converged cluster runs exactly one per name, and an anchor failure re-activates.
 
-Verification is **layered**, not uniform (§18.6). The safety core runs continuously; the rest are verified by the method that fits — a liveness or scenario property by a targeted conformance test, #20 by a compile-fail case, #21 by a differential local-vs-remote run. The machine-readable `catalogue()` records, per invariant, which method applies, and the `conformance_catalogue` test fails the build if a continuous checker and its catalogue entry drift apart — so the §17 "Verified by" column stays mechanically true.
+Verification is **layered**, not uniform (§18.6). The safety core runs continuously; the rest are verified by the method that fits — a liveness or scenario property by a targeted conformance test, #20 by a compile-fail case, #21 by a differential local-vs-remote run. The machine-readable `core_catalogue()` records, per invariant, which method applies, and the `conformance_catalogue` test fails the build if a continuous checker and its catalogue entry drift apart — so the §17 "Verified by" column stays mechanically true.
 
 ## Checklist
 
@@ -95,7 +94,7 @@ For each component, write:
 4. **Simulation workloads** that assert the §18.5 invariants under the §18.3 faults — partition, crash, loss, duplication, delay, reordering — not just the happy path.
 5. **Node-crash** tests that abruptly crash a node mid-run and verify the cascade (§8.1): `Terminated { NodeDown }` to watchers, `Unreachable` to in-flight callers, receptionist pruning. (There is no durability to verify — a restart constructs fresh state, §11.2.)
 6. **Compile-fail** tests (`trybuild`) for invalid sends (#20).
-7. **Seed-reproducibility** checks: the same `(seed, config)` yields a byte-identical event stream (§18.1 #1).
+7. **Seed-reproducibility** checks: the same `(workload, seed)` yields a byte-identical event stream (§18.1 #1).
 8. **Fault-coverage** assertions: the sweep actually fired each fault type (`FaultStats`), so a green run is not a silently happy-path run.
 
-Commit every failing `(seed, configuration)` as a fixed-seed regression case and replay it permanently; the standing swarm sweeps are the corpus. CI runs many seeds per change across fault configurations — the metric is cluster-hours exercised, not tests counted. That habit makes the suite a ratchet.
+Commit every failing `(workload, seed)` pair to `crates/actor-simulation/corpus.txt` and it replays permanently, on every run of that workload, however narrow the sweep. A sweep is a *sample* of the seed space, so a bug it once found is not one it keeps finding; the corpus is what closes that gap, and it is what makes the suite a ratchet. CI runs many seeds per change across fault configurations — the metric is cluster-hours exercised, not tests counted. The mechanics of sizing, seed bases, and adding a corpus entry are in [simulation testing](simulation-testing.md).

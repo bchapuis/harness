@@ -138,11 +138,15 @@ pub fn run_seed<W: Workload>(workload: &W, seed: u64) -> Result<(), RunFailure> 
 
 /// Sweep a workload across many seeds (swarm testing, spec §18.6), stopping at
 /// the first failing seed so it can be replayed.
+///
+/// The workload's [`regression_seeds`](crate::regression_seeds) run first,
+/// ahead of `seeds` and whatever sizing produced them: a seed that failed once
+/// is checked on every run, however narrow the sweep.
 pub fn run_swarm<W: Workload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
 ) -> Result<(), RunFailure> {
-    for seed in seeds {
+    for seed in crate::corpus::regression_seeds(workload.name()).chain(seeds) {
         run_seed(workload, seed)?;
     }
     Ok(())

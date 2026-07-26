@@ -21,9 +21,11 @@ use actor_cluster::SwimConfig;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
+use actor_simulation::scenario_sweep;
+use actor_simulation::sweep_seeds;
 use granary::Alarm;
 use granary::AlarmIndex;
 use granary::AllPending;
@@ -63,7 +65,7 @@ enum TimerEvent {
 }
 
 impl Grain for Timer {
-    type System = SimCluster;
+    type System = SimNode;
     type State = TimerState;
     type Event = TimerEvent;
     type Facets = (Alarm,);
@@ -163,7 +165,7 @@ fn drive<T: Send + 'static>(
         .expect("future did not complete")
 }
 
-type Indexes = Vec<Granary<AlarmIndex<SimCluster>>>;
+type Indexes = Vec<Granary<AlarmIndex<SimNode>>>;
 
 /// Bring up a 3-node leader cluster hosting the shared `AlarmIndex` and the `Timer`
 /// type wired to it (`granary_with_alarms`) on every node. Returns the network (for
@@ -172,9 +174,9 @@ fn cluster(sim: &Simulation) -> (SimNetwork, Vec<Granary<Timer>>, Indexes) {
     let net = SimNetwork::new(sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
     let systems = [net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
-    let indexes: Vec<Granary<AlarmIndex<SimCluster>>> = systems
+    let indexes: Vec<Granary<AlarmIndex<SimNode>>> = systems
         .iter()
-        .map(|s| s.granary::<AlarmIndex<SimCluster>>(config()))
+        .map(|s| s.granary::<AlarmIndex<SimNode>>(config()))
         .collect();
     let timers: Vec<Granary<Timer>> = systems
         .iter()
@@ -187,10 +189,10 @@ fn cluster(sim: &Simulation) -> (SimNetwork, Vec<Granary<Timer>>, Indexes) {
 
 /// The `AlarmIndex` grain holding `key`'s registration, on any node's handle.
 fn index_for(
-    indexes: &[Granary<AlarmIndex<SimCluster>>],
+    indexes: &[Granary<AlarmIndex<SimNode>>],
     node: usize,
     timer_key: &str,
-) -> granary::GrainRef<AlarmIndex<SimCluster>> {
+) -> granary::GrainRef<AlarmIndex<SimNode>> {
     let shard = shard_for(TIMER_TYPE, timer_key, SHARDS).index as usize;
     indexes[node].grain(index_key(TIMER_TYPE, shard))
 }
@@ -201,9 +203,9 @@ fn index_for(
 fn alarm_fires_callerlessly_after_a_leader_crash() {
     // Several seeds: different leader placement and failover timing, one generous
     // post-crash window absorbing them all.
-    for seed in 0..4 {
+    scenario_sweep("alarm-cluster/leader-crash", sweep_seeds(0..4), |seed| {
         run_failover(seed);
-    }
+    });
 }
 
 fn run_failover(seed: u64) {
@@ -302,9 +304,9 @@ fn an_alarm_fires_after_a_split_moves_its_grain() {
         snapshot_every: 8,
         ..GranaryConfig::default()
     };
-    let indexes: Vec<Granary<AlarmIndex<SimCluster>>> = systems
+    let indexes: Vec<Granary<AlarmIndex<SimNode>>> = systems
         .iter()
-        .map(|s| s.granary::<AlarmIndex<SimCluster>>(cfg.clone()))
+        .map(|s| s.granary::<AlarmIndex<SimNode>>(cfg.clone()))
         .collect();
     let timers: Vec<Granary<Timer>> = systems
         .iter()

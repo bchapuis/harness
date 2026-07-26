@@ -23,11 +23,13 @@ use actor_core::NodeId;
 use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
-use actor_simulation::SimCluster;
-use actor_simulation::check_cluster_reproducible;
+use actor_simulation::SimNode;
+use actor_simulation::coverage_seeds;
 use actor_simulation::default_invariants;
+use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_cluster_swarm_coverage;
+use actor_simulation::slow_seeds;
 use blob_store::BlobConfig;
 use blob_store::BlobEvent;
 use blob_store::BlobId;
@@ -123,14 +125,14 @@ impl ClusterWorkload for BlobSwarm {
     fn setup(&self, _ctx: &ClusterCtx) {}
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
-        let nodes: Vec<SimCluster> = ctx.nodes().to_vec();
+        let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
         Box::pin(async move {
             // One on-disk store and `Clustered` tier per node (each spawns its
             // replica + reconcile loop). The tempdirs live until the run ends.
             let mut dirs = Vec::new();
-            let stores: Vec<ClusteredBlobStore<SimCluster>> = nodes
+            let stores: Vec<ClusteredBlobStore<SimNode>> = nodes
                 .iter()
                 .map(|system| {
                     let dir = tempfile::tempdir().expect("tempdir");
@@ -215,7 +217,7 @@ fn blob_invariants_hold_under_the_cluster_swarm() {
         clients: 3,
         ops: 6,
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..24) {
+    if let Err(failure) = run_cluster_swarm(&workload, slow_seeds(0..24)) {
         panic!("{failure}");
     }
 }
@@ -230,10 +232,8 @@ fn the_swarm_is_seed_reproducible() {
         clients: 2,
         ops: 5,
     };
-    for seed in 0..8 {
-        if let Err(divergence) = check_cluster_reproducible(&workload, seed) {
-            panic!("{divergence}");
-        }
+    if let Err(divergence) = replay_cluster_swarm(&workload, slow_seeds(0..8)) {
+        panic!("{divergence}");
     }
 }
 
@@ -246,7 +246,7 @@ fn the_swarm_exercises_every_fault() {
         clients: 3,
         ops: 6,
     };
-    let stats = match run_cluster_swarm_coverage(&workload, 0..32) {
+    let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..32)) {
         Ok(stats) => stats,
         Err(failure) => panic!("{failure}"),
     };

@@ -19,7 +19,7 @@ use actor_core::Key;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use futures::StreamExt;
@@ -31,7 +31,7 @@ use support::Stop;
 
 // --- Remote-service discovery actor (spec §13) -------------------------------
 
-type Sys = SimCluster;
+type Sys = SimNode;
 
 struct ServiceGreeter;
 
@@ -80,8 +80,8 @@ fn brisk_swim() -> SwimConfig {
     }
 }
 
-const GREETERS: Key<Greeter<SimCluster>> = Key::new("greeters");
-const ABSENT: Key<Greeter<SimCluster>> = Key::new("absent");
+const GREETERS: Key<Greeter<SimNode>> = Key::new("greeters");
+const ABSENT: Key<Greeter<SimNode>> = Key::new("absent");
 
 #[test]
 fn lookup_of_an_unregistered_key_is_empty() {
@@ -96,7 +96,7 @@ fn lookup_returns_a_correctly_typed_ref_that_is_callable() {
     let (sim, net) = support::cluster(2, None);
     let node = net.join(NodeId::new(1));
     let reply = sim.block_on(async move {
-        let greeter = node.spawn(Greeter::<SimCluster>::new("Hello"));
+        let greeter = node.spawn(Greeter::<SimNode>::new("Hello"));
         node.receptionist().register(GREETERS, &greeter);
         let listing = node.receptionist().lookup(GREETERS);
         listing
@@ -117,8 +117,8 @@ fn concurrent_registrations_under_one_key_merge() {
     let node_b = net.join(NodeId::new(2));
     let count = sim.block_on(async move {
         let clock = node_a.clock().clone();
-        let a = node_a.spawn(Greeter::<SimCluster>::new("A"));
-        let b = node_b.spawn(Greeter::<SimCluster>::new("B"));
+        let a = node_a.spawn(Greeter::<SimNode>::new("A"));
+        let b = node_b.spawn(Greeter::<SimNode>::new("B"));
         node_a.receptionist().register(GREETERS, &a);
         node_b.receptionist().register(GREETERS, &b);
         clock.sleep(Duration::from_millis(50)).await; // let registrations replicate
@@ -136,7 +136,7 @@ fn a_registered_actor_is_pruned_when_it_stops() {
     let node = net.join(NodeId::new(1));
     let count = sim.block_on(async move {
         let clock = node.clock().clone();
-        let greeter = node.spawn(Greeter::<SimCluster>::new("Hello"));
+        let greeter = node.spawn(Greeter::<SimNode>::new("Hello"));
         node.receptionist().register(GREETERS, &greeter);
         assert_eq!(node.receptionist().lookup(GREETERS).len(), 1);
         greeter.tell(Stop).await.unwrap(); // receptionist watches it
@@ -153,7 +153,7 @@ fn a_late_joiner_converges_via_anti_entropy() {
     // A registers a greeter before B exists, so broadcast-on-change never
     // reaches B.
     let node_a = net.join(NodeId::new(1));
-    let greeter = node_a.spawn(Greeter::<SimCluster>::new("Hello"));
+    let greeter = node_a.spawn(Greeter::<SimNode>::new("Hello"));
     node_a.receptionist().register(GREETERS, &greeter);
     sim.run_for(Duration::from_millis(10));
 
@@ -180,7 +180,7 @@ fn anti_entropy_reconciles_a_registration_after_a_partition_heals() {
 
     // Cut A↔B, then register on A: the broadcast-on-change is dropped in flight.
     net.partition(&[NodeId::new(1)], &[NodeId::new(2)]);
-    let greeter = node_a.spawn(Greeter::<SimCluster>::new("Hello"));
+    let greeter = node_a.spawn(Greeter::<SimNode>::new("Hello"));
     node_a.receptionist().register(GREETERS, &greeter);
     sim.run_for(Duration::from_secs(1));
     assert!(

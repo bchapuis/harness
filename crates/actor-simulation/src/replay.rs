@@ -122,11 +122,17 @@ fn check_twice(
 
 /// Sweep a per-seed determinism check across many seeds, stopping at the first
 /// divergence — the standing reproducibility corpus (spec §18.6).
+///
+/// The workload's [`regression_seeds`](crate::regression_seeds) run ahead of
+/// `seeds`, exactly as they do for an invariant sweep: a seed that once broke
+/// determinism is checked on every run, however narrow the sweep. Determinism
+/// regressions ratchet like any other.
 fn sweep(
+    workload: &str,
     seeds: impl IntoIterator<Item = u64>,
     mut check: impl FnMut(u64) -> Result<(), Box<Divergence>>,
 ) -> Result<(), Box<Divergence>> {
-    for seed in seeds {
+    for seed in crate::corpus::regression_seeds(workload).chain(seeds) {
         check(seed)?;
     }
     Ok(())
@@ -153,7 +159,7 @@ pub fn replay_swarm<W: Workload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
 ) -> Result<(), Box<Divergence>> {
-    sweep(seeds, |s| check_reproducible(workload, s))
+    sweep(workload.name(), seeds, |s| check_reproducible(workload, s))
 }
 
 /// Record the event stream of a cluster workload run under `seed`. The cluster
@@ -182,7 +188,9 @@ pub fn replay_cluster_swarm<W: ClusterWorkload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
 ) -> Result<(), Box<Divergence>> {
-    sweep(seeds, |s| check_cluster_reproducible(workload, s))
+    sweep(workload.name(), seeds, |s| {
+        check_cluster_reproducible(workload, s)
+    })
 }
 
 #[cfg(test)]

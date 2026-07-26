@@ -44,7 +44,7 @@ pub struct CatalogueEntry {
 /// each invariant to the code that verifies it (spec §17, §18.5). Kept
 /// consistent with [`default_invariants`](crate::default_invariants) by the
 /// `conformance_catalogue` test.
-pub fn catalogue() -> &'static [CatalogueEntry] {
+pub fn core_catalogue() -> &'static [CatalogueEntry] {
     CATALOGUE
 }
 

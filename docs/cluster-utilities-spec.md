@@ -103,7 +103,7 @@ Group routers (§3) define no numbered invariant: "selects only from the current
 The utilities are additionally held to the core testing contract (core §18.1, §18.3):
 
 - **Seed-reproducibility.** The manager's tick loop, the `SingletonStarted`/`Stopped` event ordering, and the router's seeded random draws reproduce byte-identically from the seed — swept by a dedicated utilities workload in `conformance_determinism.rs`.
-- **Fault coverage.** A sweep whose traffic flows entirely through routers and singleton proxies proves that loss, duplication, reordering, and partition/crash actually fired while the utilities ran (`conformance_faults.rs`) — their conformance tests alone use only controlled faults.
+- **Fault coverage.** A sweep whose traffic flows entirely through routers and singleton proxies proves that loss, duplication, reordering, and partition/crash actually fired while the utilities ran (`conformance_faults_swarm.rs`) — their conformance tests alone use only controlled faults.
 
 ---
 

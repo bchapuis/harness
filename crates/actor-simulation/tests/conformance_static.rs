@@ -27,7 +27,7 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_simulation::Recorder;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use serde::Deserialize;
@@ -39,7 +39,7 @@ const C: NodeId = NodeId::new(3);
 
 struct Echo;
 impl Actor for Echo {
-    type System = SimCluster;
+    type System = SimNode;
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Ping>();
     }

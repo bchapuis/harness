@@ -25,7 +25,7 @@ use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Terminated;
 use actor_core::TerminationReason;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
@@ -178,8 +178,8 @@ fn remote_graceful_stop_notifies_a_remote_watcher() {
 
     sim.block_on(async move {
         let clock = node_a.clock().clone();
-        let greeter = node_b.spawn(Greeter::<actor_simulation::SimCluster>::new("Hi"));
-        let remote = node_a.resolve::<Greeter<actor_simulation::SimCluster>>(greeter.id().clone());
+        let greeter = node_b.spawn(Greeter::<actor_simulation::SimNode>::new("Hi"));
+        let remote = node_a.resolve::<Greeter<actor_simulation::SimNode>>(greeter.id().clone());
         node_a.spawn(Watcher::new(remote, observed));
         clock.sleep(Duration::from_millis(5)).await; // let the Watch reach B
         greeter.tell(Stop).await.unwrap(); // graceful stop on B
@@ -193,7 +193,7 @@ fn remote_graceful_stop_notifies_a_remote_watcher() {
     );
 }
 
-type Sys = SimCluster;
+type Sys = SimNode;
 type Reasons = Arc<Mutex<Vec<TerminationReason>>>;
 
 struct Target;
@@ -257,7 +257,7 @@ impl Handler<Terminated> for WatchWatcher {
 }
 
 /// A single-node cluster with SWIM off — so `block_on` reaches quiescence.
-fn one_node(seed: u64) -> (Simulation, SimCluster) {
+fn one_node(seed: u64) -> (Simulation, SimNode) {
     let sim = Simulation::new(seed);
     let node = SimNetwork::new(&sim).join(NodeId::new(1));
     (sim, node)

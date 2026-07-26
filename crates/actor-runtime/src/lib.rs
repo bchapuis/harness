@@ -52,6 +52,6 @@ pub use transport::TlsConfig;
 
 /// A cluster node wired to the production runtime: tokio time and scheduling,
 /// OS-seeded entropy, and the TCP transport. The production counterpart of
-/// `actor_simulation::SimCluster`.
+/// `actor_simulation::SimNode`.
 pub type TcpCluster =
     actor_cluster::ClusterSystem<TokioClock, OsEntropy, TokioSpawner, TcpTransport>;

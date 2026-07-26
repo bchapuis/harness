@@ -25,7 +25,7 @@ use actor_serialization::JsonCodec;
 use actor_serialization::decode;
 use actor_serialization::encode;
 use actor_simulation::SimClock;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimEntropy;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimSpawner;
@@ -100,9 +100,9 @@ fn an_unauthorized_ask_is_rejected_as_a_system_failure() {
     let node_b = net.join(NodeId::new(2));
 
     let outcome = sim.block_on(async move {
-        let counter = node_b.spawn(Counter::<SimCluster>::new());
+        let counter = node_b.spawn(Counter::<SimNode>::new());
         node_a
-            .resolve::<Counter<SimCluster>>(counter.id().clone())
+            .resolve::<Counter<SimNode>>(counter.id().clone())
             .ask(Get)
             .await
     });
@@ -122,8 +122,8 @@ fn an_authorized_message_is_delivered_a_denied_one_is_not() {
     let node_b = net.join(NodeId::new(2));
 
     let count = sim.block_on(async move {
-        let counter = node_b.spawn(Counter::<SimCluster>::new());
-        let remote = node_a.resolve::<Counter<SimCluster>>(counter.id().clone());
+        let counter = node_b.spawn(Counter::<SimNode>::new());
+        let remote = node_a.resolve::<Counter<SimNode>>(counter.id().clone());
         remote.tell(Inc).await.unwrap(); // denied at B → dropped, never applied
         remote.ask(Get).await // permitted
     });

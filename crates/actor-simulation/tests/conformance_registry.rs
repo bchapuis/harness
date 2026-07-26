@@ -38,7 +38,7 @@ use actor_core::TerminationReason;
 use actor_simulation::FaultPolicy;
 use actor_simulation::Recorder;
 use actor_simulation::RegistryFaultPolicy;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimRegistry;
 use actor_simulation::Simulation;
@@ -99,7 +99,7 @@ fn drive<T: Send + 'static>(
 struct Echo;
 
 impl Actor for Echo {
-    type System = SimCluster;
+    type System = SimNode;
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Ping>();
     }
@@ -125,7 +125,7 @@ struct Watcher {
     got: Reasons,
 }
 impl Actor for Watcher {
-    type System = SimCluster;
+    type System = SimNode;
     async fn started(&mut self, ctx: &Ctx<Self>) -> Result<(), BoxError> {
         ctx.watch(&self.target);
         Ok(())

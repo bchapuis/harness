@@ -1,0 +1,106 @@
+name: Soak
+
+# Discovery, not regression (spec §18.6). ci.yml replays the pinned corpus from
+# seed 0; this job sweeps seeds nobody has run before, in bulk, looking for the
+# corner cases the corpus does not contain yet.
+#
+# Every run picks a fresh SWARM_SEED_BASE, so successive soaks explore disjoint
+# stretches of the seed space instead of re-running the same ground. A failure
+# names its (base, seed) pair, and because the simulation is deterministic
+# (spec §18.1) that pair replays exactly:
+#
+#     SWARM_SEED_BASE=<base> SWARM_SEEDS=<n> cargo test -p <crate> --test <name>
+#
+# Once reproduced, the seed is committed to the corpus in ci.yml as a fixed-seed
+# regression case — the ratchet of docs/simulation-testing.md.
+#
+# Seed counts are set per crate rather than once for the workspace, because
+# per-seed cost spans about four orders of magnitude across these workloads: a
+# count that keeps actor-simulation busy for an hour would keep machine going
+# for a year. Wall-time budgeting lives here rather than in the sweep helper —
+# under a seed, reading the host clock would make the seeds that ran depend on
+# the machine that ran them, which spec §18.1 exists to deny.
+
+on:
+  schedule:
+    # Nightly, off-peak UTC.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: "Multiplier on every crate's seed count"
+        required: false
+        default: "1"
+      base:
+        description: "Seed base (blank picks one from the run id)"
+        required: false
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  soak:
+    name: swarm soak (fresh seeds)
+    runs-on: ubuntu-latest
+    # A soak is bounded by its own budget; this is the backstop, not the plan.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Choose the seed base
+        id: seeds
+        run: |
+          BASE="${{ inputs.base }}"
+          # github.run_id is unique and monotonic per repository, so scaling it
+          # gives every soak a stretch of seed space no earlier soak has taken.
+          [ -n "$BASE" ] || BASE=$(( ${{ github.run_id }} % 100000000 * 100000 ))
+          SCALE="${{ inputs.scale }}"
+          [ -n "$SCALE" ] || SCALE=1
+          # Sized from measured per-seed cost so each step lands in a similar
+          # ballpark of wall time: ~1ms, ~15ms, and ~2-10s per seed respectively.
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "sim=$(( 200000 * SCALE ))" >> "$GITHUB_OUTPUT"
+          echo "store=$(( 2000 * SCALE ))" >> "$GITHUB_OUTPUT"
+          echo "heavy=$(( 40 * SCALE ))" >> "$GITHUB_OUTPUT"
+          echo "Sweeping from base $BASE at scale ${SCALE}x"
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      # Seed counts are per crate, sized from measured per-seed cost so each
+      # step lands in the same ballpark of wall time. --no-fail-fast so one
+      # failing workload does not hide the others: a soak wants every seed it
+      # can reach, not the first stop.
+      - name: Soak actor-simulation (cheap seeds, sweep wide)
+        if: ${{ !cancelled() }}
+        env:
+          SWARM_SEED_BASE: ${{ steps.seeds.outputs.base }}
+          SWARM_SEEDS: ${{ steps.seeds.outputs.sim }}
+        run: cargo test -p actor-simulation --no-fail-fast
+
+      - name: Soak granary and blob-store
+        if: ${{ !cancelled() }}
+        env:
+          SWARM_SEED_BASE: ${{ steps.seeds.outputs.base }}
+          SWARM_SEEDS: ${{ steps.seeds.outputs.store }}
+        run: cargo test -p granary -p blob-store -p tenancy --no-fail-fast
+
+      - name: Soak harness and machine (expensive seeds)
+        if: ${{ !cancelled() }}
+        env:
+          SWARM_SEED_BASE: ${{ steps.seeds.outputs.base }}
+          SWARM_SEEDS: ${{ steps.seeds.outputs.heavy }}
+        run: cargo test -p harness -p machine --no-fail-fast
+
+      - name: Report the replay command on failure
+        if: failure()
+        run: |
+          echo "::notice::Soak failed. Replay with SWARM_SEED_BASE=${{ steps.seeds.outputs.base }} and the seed named in the failure."

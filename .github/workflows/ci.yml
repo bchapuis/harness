@@ -5,10 +5,11 @@ name: CI
 # (tests/conformance_catalogue.rs), and the fixed-seed swarm sweeps in swarm.rs
 # (0..256) and cluster_swarm.rs (0..48) — the regression corpus (spec §18.6).
 #
-# TODO(§18.6 "many fresh seeds per change"): drive an additional swarm sweep from
-# a per-run seed base (e.g. github.run_number) once swarm.rs/cluster_swarm.rs read
-# a SWARM_SEED_BASE env var, so each CI run exercises fresh cluster-hours on top of
-# the fixed regression corpus.
+# This job runs the corpus and only the corpus: the same seeds every time, so a
+# fixed bug cannot come back unnoticed. Its value comes from *not* varying.
+# Discovery — the fresh seeds of §18.6's "many seeds per change" — is soak.yml's
+# job, which sweeps from a per-run SWARM_SEED_BASE. A failure there reproduces
+# from its (base, seed) pair and is then committed here as a regression case.
 
 on:
   push:
@@ -18,6 +19,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Swarm sweeps run at their declared width from seed 0 — the pinned §18.6
+  # corpus. Local runs size themselves against a wall budget instead; `full`
+  # states this job's contract in the workflow rather than leaving it to the
+  # runner's own `CI` variable.
+  SWARM_SEEDS: full
 
 jobs:
   test:

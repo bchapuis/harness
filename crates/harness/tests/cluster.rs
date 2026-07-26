@@ -23,7 +23,7 @@ use actor_cluster::SwimConfig;
 use actor_core::Event;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use granary::GranaryConfig;
@@ -109,13 +109,13 @@ fn drive<T: Send + 'static>(
 fn cluster(
     sim: &Simulation,
     sink: Arc<dyn actor_core::EventSink>,
-) -> (SimNetwork, Vec<Harness<SimCluster>>) {
+) -> (SimNetwork, Vec<Harness<SimNode>>) {
     let net = SimNetwork::new(sim)
         .with_leader(SwimConfig::default(), raft(), DowningPolicy::Conservative)
         .with_events(sink);
     let systems = [net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
-    let harnesses: Vec<Harness<SimCluster>> = systems
+    let harnesses: Vec<Harness<SimNode>> = systems
         .iter()
         .map(|s| {
             Harness::cluster(

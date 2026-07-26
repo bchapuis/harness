@@ -43,3 +43,32 @@ impl FaultPolicy {
         self.drop_num > 0 || self.duplicate_num > 0 || !self.max_latency.is_zero()
     }
 }
+
+// --- The external registry (spec §9.4.2) --------------------------------------
+
+/// Seeded registry faults (spec §18.3: a stalled, lagging, or unavailable
+/// registry sync). All draws come from the run's single [`SimEntropy`](crate::SimEntropy), so a
+/// faulted run stays reproducible from its seed.
+#[derive(Clone, Copy, Debug)]
+pub struct RegistryFaultPolicy {
+    /// Each fetch sleeps a seeded duration in `[0, max_latency]` before
+    /// returning (zero disables).
+    pub max_latency: Duration,
+    /// A fetch returns a **stale** snapshot — an older state from the history —
+    /// with probability `stale_num / stale_den` (a zero numerator disables).
+    pub stale_num: u64,
+    pub stale_den: u64,
+    /// How many revisions behind a stale read may lag, at most.
+    pub max_staleness: usize,
+}
+
+impl Default for RegistryFaultPolicy {
+    fn default() -> Self {
+        RegistryFaultPolicy {
+            max_latency: Duration::ZERO,
+            stale_num: 0,
+            stale_den: 1,
+            max_staleness: 4,
+        }
+    }
+}

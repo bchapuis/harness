@@ -127,6 +127,14 @@ tempfile = "3"
 # Dev-only: compile WebAssembly text fixtures for the compute-tier tests.
 wat = "1"
 
+# Full DWARF for every artifact is the dominant cost in both link time and disk:
+# the workspace's ~80 integration-test binaries each carry it, and cargo keeps
+# every stale variant until `cargo clean`. Line tables keep backtraces
+# (file/line, symbol names) and drop the variable/type debuginfo a debugger
+# needs — raise this to `true` on the crate you are stepping through.
+[profile.dev]
+debug = "line-tables-only"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

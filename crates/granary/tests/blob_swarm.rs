@@ -45,11 +45,13 @@ use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
-use actor_simulation::SimCluster;
-use actor_simulation::check_cluster_reproducible;
+use actor_simulation::SimNode;
+use actor_simulation::coverage_seeds;
 use actor_simulation::default_invariants;
+use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_cluster_swarm_coverage;
+use actor_simulation::sweep_seeds;
 use granary::BlobId;
 use granary::Grain;
 use granary::GrainCtx;
@@ -62,7 +64,7 @@ use serde::Serialize;
 // --- A grain that stores bytes in its colocated blob area ----------------------
 //
 // Its folded state is just the ids it has stored — the small metadata that
-// references the bulk bytes living in `ctx.blobs()`. Fixed to `SimCluster` so it
+// references the bulk bytes living in `ctx.blobs()`. Fixed to `SimNode` so it
 // hosts on the leader-based clustered system the shard map requires (§7.6).
 
 #[derive(Default)]
@@ -79,7 +81,7 @@ enum Recorded {
 }
 
 impl Grain for BlobGrain {
-    type System = SimCluster;
+    type System = SimNode;
     type State = Stored;
     type Event = Recorded;
     type Facets = ();
@@ -271,7 +273,7 @@ impl ClusterWorkload for BlobSwarm {
     fn setup(&self, _ctx: &ClusterCtx) {}
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
-        let nodes: Vec<SimCluster> = ctx.nodes().to_vec();
+        let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
         let corrupt = Arc::clone(&self.corrupt);
@@ -367,7 +369,7 @@ fn blob_integrity_holds_under_the_cluster_swarm() {
     // and the safety core holds, on every seeded run under partitions, crashes,
     // loss, duplication, and delay.
     let workload = BlobSwarm::new(3, 3, 8);
-    if let Err(failure) = run_cluster_swarm(&workload, 0..24) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{failure}");
     }
     assert!(
@@ -391,10 +393,8 @@ fn blob_swarm_is_reproducible() {
     // #7: the same seed replays to a byte-identical event stream, even under
     // cluster nemesis and transport faults on the blob RPCs.
     let workload = BlobSwarm::new(3, 2, 6);
-    for seed in 0..12 {
-        if let Err(divergence) = check_cluster_reproducible(&workload, seed) {
-            panic!("{divergence}");
-        }
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..12)) {
+        panic!("{divergence}");
     }
 }
 
@@ -404,7 +404,7 @@ fn blob_swarm_actually_fires_each_fault_type() {
     // Across the seed range the transport injected loss, duplication, reordering
     // (delay), and partition/crash blocking on the blob RPCs at least once each.
     let workload = BlobSwarm::new(3, 3, 8);
-    let stats = match run_cluster_swarm_coverage(&workload, 0..32) {
+    let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..32)) {
         Ok(stats) => stats,
         Err(failure) => panic!("{failure}"),
     };

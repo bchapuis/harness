@@ -19,7 +19,6 @@
 //!   writes included.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -30,20 +29,19 @@ use actor_core::ActorSystem;
 use actor_core::BoxFuture;
 use actor_core::Clock;
 use actor_core::Entropy;
-use actor_core::Event;
-use actor_core::NodeId;
 use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
-use actor_simulation::SimCluster;
-use actor_simulation::check_cluster_reproducible;
+use actor_simulation::SimNode;
 use actor_simulation::default_invariants;
+use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
-use granary::GrainEvent;
-use granary::GrainName;
+use actor_simulation::slow_seeds;
 use granary::GranaryConfig;
 use granary::GranaryExt;
+use granary::testing::ActivationSingletonPerNode;
+use granary::testing::CommitMonotonic;
 use machine::Attach;
 use machine::Detach;
 use machine::Machine;
@@ -51,7 +49,7 @@ use machine::Provision;
 use machine::Status;
 use machine::fake::FakeVmProvider;
 
-type ClusterMachine = Machine<SimCluster, FakeVmProvider<SimCluster>>;
+type ClusterMachine = Machine<SimNode, FakeVmProvider<SimNode>>;
 
 /// The front-door member stand-in (machine §5.1): one per node; a node crash
 /// kills it, and the machines watching it fold `Detached { FrontDoorLost }`.
@@ -59,71 +57,10 @@ type ClusterMachine = Machine<SimCluster, FakeVmProvider<SimCluster>>;
 struct DoorStub;
 
 impl Actor for DoorStub {
-    type System = SimCluster;
+    type System = SimNode;
 }
 
 // --- Grain-specific continuous safety checkers (as in the disk/sql swarms) -----
-
-/// **Commit head is monotonic** (invariants **G3**, **G5**) — the checker that
-/// would catch a deposed activation still committing (M1/M5's forbidden
-/// alternative).
-#[derive(Default)]
-struct CommitMonotonic {
-    last: BTreeMap<GrainName, u64>,
-}
-
-impl Invariant for CommitMonotonic {
-    fn name(&self) -> &'static str {
-        "machine-commit-monotonic"
-    }
-
-    fn observe(&mut self, event: &Event) -> Result<(), String> {
-        if let Some(GrainEvent::Committed { name, seq, .. }) = event.as_app::<GrainEvent>() {
-            let prev = self.last.get(name).copied().unwrap_or(0);
-            if *seq <= prev {
-                return Err(format!(
-                    "machine {name} committed seq {seq} not after previous head {prev} (G3/G5)"
-                ));
-            }
-            self.last.insert(name.clone(), *seq);
-        }
-        Ok(())
-    }
-}
-
-/// **Exactly-once activation per node** (invariant **G6**), crash-sound.
-#[derive(Default)]
-struct ActivationSingletonPerNode {
-    live: BTreeSet<(NodeId, GrainName)>,
-}
-
-impl Invariant for ActivationSingletonPerNode {
-    fn name(&self) -> &'static str {
-        "machine-activation-singleton-per-node"
-    }
-
-    fn observe(&mut self, event: &Event) -> Result<(), String> {
-        if let Event::NodeDown { node, .. } = event {
-            self.live.retain(|(n, _)| n != node);
-            return Ok(());
-        }
-        match event.as_app::<GrainEvent>() {
-            Some(GrainEvent::Activated { node, name }) => {
-                let fresh = self.live.insert((*node, name.clone()));
-                if !fresh {
-                    return Err(format!(
-                        "machine {name} activated while already live on {node} (G6)"
-                    ));
-                }
-            }
-            Some(GrainEvent::Passivated { node, name }) => {
-                self.live.remove(&(*node, name.clone()));
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
 
 // --- The workload ---------------------------------------------------------------
 
@@ -192,7 +129,7 @@ impl ClusterWorkload for MachineSwarm {
     }
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
-        let nodes: Vec<SimCluster> = ctx.nodes().to_vec();
+        let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let net = ctx.net().clone();
         let clients = self.clients;
         let ops = self.ops;
@@ -310,8 +247,14 @@ impl ClusterWorkload for MachineSwarm {
 
     fn invariants(&self) -> Vec<Box<dyn Invariant>> {
         let mut invariants = default_invariants();
-        invariants.push(Box::new(CommitMonotonic::default()));
-        invariants.push(Box::new(ActivationSingletonPerNode::default()));
+        invariants.push(Box::new(CommitMonotonic::new(
+            "machine-commit-monotonic",
+            "machine",
+        )));
+        invariants.push(Box::new(ActivationSingletonPerNode::new(
+            "machine-activation-singleton-per-node",
+            "machine",
+        )));
         invariants
     }
 }
@@ -325,7 +268,7 @@ fn machine_invariants_hold_under_the_cluster_swarm() {
         ops: 3,
         dir: dir.path().to_path_buf(),
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..12) {
+    if let Err(failure) = run_cluster_swarm(&workload, slow_seeds(0..12)) {
         panic!("{failure}");
     }
 }
@@ -339,9 +282,7 @@ fn machine_cluster_swarm_is_reproducible() {
         ops: 2,
         dir: dir.path().to_path_buf(),
     };
-    for seed in 0..6 {
-        if let Err(divergence) = check_cluster_reproducible(&workload, seed) {
-            panic!("{divergence}");
-        }
+    if let Err(divergence) = replay_cluster_swarm(&workload, slow_seeds(0..6)) {
+        panic!("{divergence}");
     }
 }

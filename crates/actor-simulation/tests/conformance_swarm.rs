@@ -23,7 +23,7 @@ use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::RegistryFaultPolicy;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimSystem;
 use actor_simulation::Workload;
 use actor_simulation::record_cluster_seed;
@@ -31,6 +31,8 @@ use actor_simulation::run_cluster_seed;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_seed;
 use actor_simulation::run_swarm;
+use actor_simulation::scenario_sweep;
+use actor_simulation::sweep_seeds;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -157,7 +159,7 @@ fn ask_storm_holds_across_seeds() {
         asks_per_actor: 8,
     };
     // Each seed perturbs scheduling order and mailbox capacity; all must pass.
-    if let Err(failure) = run_swarm(&workload, 0..256) {
+    if let Err(failure) = run_swarm(&workload, sweep_seeds(0..256)) {
         panic!("{failure}");
     }
 }
@@ -165,7 +167,7 @@ fn ask_storm_holds_across_seeds() {
 #[test]
 fn concurrent_load_stays_serial_across_seeds() {
     let workload = ConcurrentLoad { asks: 16 };
-    if let Err(failure) = run_swarm(&workload, 0..256) {
+    if let Err(failure) = run_swarm(&workload, sweep_seeds(0..256)) {
         panic!("{failure}");
     }
 }
@@ -280,7 +282,7 @@ impl Workload for FlakyService {
 #[test]
 fn flaky_service_survives_injected_faults_across_seeds() {
     let workload = FlakyService { rounds: 24 };
-    if let Err(failure) = run_swarm(&workload, 0..256) {
+    if let Err(failure) = run_swarm(&workload, sweep_seeds(0..256)) {
         panic!("{failure}");
     }
 }
@@ -290,7 +292,7 @@ fn flaky_service_survives_injected_faults_across_seeds() {
 struct Greeter;
 
 impl Actor for Greeter {
-    type System = SimCluster;
+    type System = SimNode;
 
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Greet>();
@@ -392,7 +394,7 @@ fn discover_and_call_holds_across_seeds_under_faults() {
             downing: DowningPolicy::Timeout(Duration::from_millis(300)),
         },
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
     }
 }
@@ -419,7 +421,7 @@ fn discover_and_call_holds_across_seeds_in_registry_mode() {
             },
         },
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
     }
 }
@@ -441,7 +443,7 @@ fn discover_and_call_holds_across_seeds_in_leader_mode() {
             downing: DowningPolicy::Timeout(Duration::from_millis(300)),
         },
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
     }
 }
@@ -457,7 +459,7 @@ fn discover_and_call_holds_across_seeds_in_static_mode() {
         rounds: 12,
         mode: ClusterModeSpec::Static { detector: None },
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
     }
 }
@@ -467,7 +469,7 @@ fn discover_and_call_holds_across_seeds_in_static_mode() {
 // A remotely-addressable actor that stops or fails on demand.
 struct Target;
 impl Actor for Target {
-    type System = SimCluster;
+    type System = SimNode;
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Poke>();
     }
@@ -497,7 +499,7 @@ struct WatchProbe {
     target: ActorRef<Target>,
 }
 impl Actor for WatchProbe {
-    type System = SimCluster;
+    type System = SimNode;
     async fn started(&mut self, ctx: &Ctx<Self>) -> Result<(), BoxError> {
         ctx.watch(&self.target);
         Ok(())
@@ -620,7 +622,7 @@ fn watch_under_chaos_upholds_safety_invariants_across_seeds() {
         rounds: 12,
         mode: watch_gossip_mode(watch_swim()),
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
     }
 }
@@ -635,7 +637,7 @@ fn watch_under_chaos_upholds_safety_invariants_in_leader_mode() {
         rounds: 12,
         mode: watch_leader_mode(watch_swim()),
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
     }
 }
@@ -655,26 +657,30 @@ fn watch_under_chaos_never_double_delivers_a_terminated() {
         rounds: 12,
         mode: watch_gossip_mode(watch_swim()),
     };
-    for seed in 0..48u64 {
-        let events = record_cluster_seed(&workload, seed);
-        let mut delivered: BTreeMap<(String, String), usize> = BTreeMap::new();
-        for event in &events {
-            if let actor_core::Event::TerminatedDelivered {
-                target, watcher, ..
-            } = event
-            {
-                *delivered
-                    .entry((format!("{watcher}"), format!("{target}")))
-                    .or_default() += 1;
+    scenario_sweep(
+        "watch-under-chaos/delivery",
+        sweep_seeds(0..48u64),
+        |seed| {
+            let events = record_cluster_seed(&workload, seed);
+            let mut delivered: BTreeMap<(String, String), usize> = BTreeMap::new();
+            for event in &events {
+                if let actor_core::Event::TerminatedDelivered {
+                    target, watcher, ..
+                } = event
+                {
+                    *delivered
+                        .entry((format!("{watcher}"), format!("{target}")))
+                        .or_default() += 1;
+                }
             }
-        }
-        for ((watcher, target), count) in &delivered {
-            assert!(
-                *count == 1,
-                "seed {seed}: watcher {watcher} received {count} Terminated for {target}, expected 1",
-            );
-        }
-    }
+            for ((watcher, target), count) in &delivered {
+                assert!(
+                    *count == 1,
+                    "seed {seed}: watcher {watcher} received {count} Terminated for {target}, expected 1",
+                );
+            }
+        },
+    );
 }
 
 // --- Restart churn (spec §9.4.3 item 2, §18.3) ---------------------------------
@@ -749,7 +755,7 @@ fn restart_churn_upholds_election_safety_across_seeds() {
         nodes: 3,
         rounds: 10,
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
     }
 }
@@ -759,7 +765,7 @@ fn restart_churn_upholds_election_safety_across_seeds() {
 /// A singleton instance that greets and stops on its handoff message.
 struct Highlander;
 impl Actor for Highlander {
-    type System = SimCluster;
+    type System = SimNode;
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Greet>();
         r.accept::<Halt>();
@@ -878,7 +884,7 @@ impl ClusterWorkload for SingletonChaos {
     }
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
-        let nodes: Vec<SimCluster> = ctx.nodes().to_vec();
+        let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let net = ctx.net().clone();
         Box::pin(async move {
             let clock = nodes[0].clock().clone();
@@ -921,7 +927,7 @@ fn singleton_chaos_converges_to_one_instance_across_seeds() {
             downing: DowningPolicy::Conservative,
         },
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
     }
 }
@@ -941,7 +947,7 @@ fn singleton_chaos_converges_in_registry_mode() {
             },
         },
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
     }
 }
@@ -958,7 +964,7 @@ fn singleton_chaos_converges_in_leader_mode() {
             downing: DowningPolicy::Timeout(Duration::from_millis(300)),
         },
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
     }
 }
@@ -972,7 +978,7 @@ fn singleton_chaos_converges_in_static_mode() {
         nodes: 3,
         mode: ClusterModeSpec::Static { detector: None },
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..48) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
     }
 }

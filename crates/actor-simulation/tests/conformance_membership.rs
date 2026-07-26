@@ -26,7 +26,7 @@ use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
 use actor_simulation::Recorder;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use serde::Deserialize;
@@ -47,7 +47,7 @@ fn swim() -> SwimConfig {
 struct Greeter;
 
 impl Actor for Greeter {
-    type System = actor_simulation::SimCluster;
+    type System = actor_simulation::SimNode;
 
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Greet>();
@@ -97,7 +97,7 @@ fn gossip_swim() -> SwimConfig {
 fn three_nodes(
     seed: u64,
     downing: DowningPolicy,
-) -> (Simulation, SimNetwork, SimCluster, SimCluster, SimCluster) {
+) -> (Simulation, SimNetwork, SimNode, SimNode, SimNode) {
     let sim = Simulation::new(seed);
     let net = SimNetwork::new(&sim).with_gossip(gossip_swim(), downing);
     let a = net.join(A);
@@ -107,7 +107,7 @@ fn three_nodes(
 }
 
 /// Assert every node sees every other peer reachable.
-fn assert_all_reachable(nodes: &[&SimCluster]) {
+fn assert_all_reachable(nodes: &[&SimNode]) {
     for node in nodes {
         for peer in nodes {
             if node.node() != peer.node() {

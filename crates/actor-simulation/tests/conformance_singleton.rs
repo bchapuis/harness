@@ -22,7 +22,7 @@ use actor_core::Event;
 use actor_core::NodeId;
 use actor_core::Spawner;
 use actor_simulation::Recorder;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimRegistry;
 use actor_simulation::Simulation;
@@ -47,7 +47,7 @@ fn swim() -> SwimConfig {
 
 /// Host the singleton on `node`: same name, factory, and stop message on every
 /// hosting node, per utilities spec §4 item 1.
-fn host(node: &SimCluster) -> actor_cluster::SingletonProxy<Greeter<SimCluster>> {
+fn host(node: &SimNode) -> actor_cluster::SingletonProxy<Greeter<SimNode>> {
     node.singleton(NAME, || Greeter::new("Hello"), Stop)
 }
 
@@ -180,7 +180,7 @@ fn an_anchor_crash_re_activates_on_a_new_anchor() {
     // routed around once it is downed).
     let survivor = if a.node() == anchor { &b } else { &a };
     let resolved = survivor
-        .singleton_proxy::<Greeter<SimCluster>>(NAME)
+        .singleton_proxy::<Greeter<SimNode>>(NAME)
         .resolve()
         .expect("survivor resolves the successor");
     assert_eq!(resolved.id(), &activations[1]);
@@ -311,7 +311,7 @@ fn a_proxy_with_no_instance_fails_fast() {
     let (sim, net) = support::cluster(71, None);
     let node = net.join(A);
     // A client-only proxy; nobody hosts, so the listing stays empty.
-    let proxy = node.singleton_proxy::<Greeter<SimCluster>>(NAME);
+    let proxy = node.singleton_proxy::<Greeter<SimNode>>(NAME);
     assert!(!proxy.is_active());
     let (ask, tell) = drive(&sim, Duration::from_secs(1), async move {
         (

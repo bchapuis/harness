@@ -1,0 +1,6 @@
+{
+  // rust-analyzer builds with its own flags, so sharing `target/` with the CLI
+  // makes each tool invalidate the other's artifacts and leaves a stale variant
+  // behind every time. A separate directory keeps the two from interfering.
+  "rust-analyzer.cargo.targetDir": true
+}

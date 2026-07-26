@@ -22,7 +22,7 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Path;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
@@ -78,8 +78,8 @@ fn a_full_remote_mailbox_reports_mailboxfull_never_drops() {
     let node_b = net.join(NodeId::new(2));
 
     let outcomes = sim.block_on(async move {
-        let slow = node_a.spawn(Slow::<SimCluster>::new(node_a.clock().clone()));
-        let remote = node_b.resolve::<Slow<SimCluster>>(slow.id().clone());
+        let slow = node_a.spawn(Slow::<SimNode>::new(node_a.clock().clone()));
+        let remote = node_b.resolve::<Slow<SimNode>>(slow.id().clone());
         // A burst of concurrent asks; the handler sleeps, so a capacity-1 mailbox
         // cannot drain fast enough and overflows.
         futures::future::join_all(
@@ -184,7 +184,7 @@ fn a_transport_failure_is_the_outer_error_not_the_inner() {
 
 // --- §14.2: deadlines on a slow-but-alive remote target -> Timeout -----------
 
-fn two_nodes(seed: u64) -> (Simulation, SimCluster, SimCluster) {
+fn two_nodes(seed: u64) -> (Simulation, SimNode, SimNode) {
     let (sim, net) = support::cluster(seed, None); // SWIM off: target stays alive
     let a = net.join(NodeId::new(1));
     let b = net.join(NodeId::new(2));
@@ -196,7 +196,7 @@ fn ask_timeout_to_a_slow_alive_target_is_timeout_not_unreachable() {
     let (sim, node_a, node_b) = two_nodes(4);
     let outcome = sim.block_on(async move {
         let slow = node_a.spawn(Slow::new(node_a.clock().clone()));
-        let remote = node_b.resolve::<Slow<SimCluster>>(slow.id().clone());
+        let remote = node_b.resolve::<Slow<SimNode>>(slow.id().clone());
         // Handler sleeps far longer than the deadline; the node is alive.
         remote
             .ask_timeout(Work { ms: 10_000 }, Duration::from_secs(1))
@@ -210,7 +210,7 @@ fn ask_default_deadline_elapses_to_timeout() {
     let (sim, node_a, node_b) = two_nodes(5);
     let outcome = sim.block_on(async move {
         let slow = node_a.spawn(Slow::new(node_a.clock().clone()));
-        let remote = node_b.resolve::<Slow<SimCluster>>(slow.id().clone());
+        let remote = node_b.resolve::<Slow<SimNode>>(slow.id().clone());
         // No explicit deadline: the system default applies and elapses.
         remote.ask(Work { ms: 60_000 }).await
     });
@@ -259,7 +259,7 @@ struct Collector {
     seen: Arc<Mutex<Vec<i64>>>,
 }
 impl Actor for Collector {
-    type System = SimCluster;
+    type System = SimNode;
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Record>();
     }
@@ -283,7 +283,7 @@ impl Message for Callback {
 
 struct Echoer;
 impl Actor for Echoer {
-    type System = SimCluster;
+    type System = SimNode;
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Callback>();
     }
@@ -337,7 +337,7 @@ struct Provider {
     collector: ActorRef<Collector>,
 }
 impl Actor for Provider {
-    type System = SimCluster;
+    type System = SimNode;
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Locate>();
     }
@@ -405,9 +405,9 @@ fn when_local_is_none_for_a_remote_actor() {
     // across the network.
     let (sim, node_a, node_b) = two_nodes(10);
     let result = sim.block_on(async move {
-        let counter = node_a.spawn(Counter::<SimCluster>::new());
+        let counter = node_a.spawn(Counter::<SimNode>::new());
         node_b
-            .resolve::<Counter<SimCluster>>(counter.id().clone())
+            .resolve::<Counter<SimNode>>(counter.id().clone())
             .when_local(|c| c.count)
             .await
     });
@@ -646,13 +646,13 @@ mod remote_routing {
     use actor_core::Message;
     use actor_core::NodeId;
     use actor_core::Path;
-    use actor_simulation::SimCluster;
+    use actor_simulation::SimNode;
     use actor_simulation::SimNetwork;
     use actor_simulation::Simulation;
     use serde::Deserialize;
     use serde::Serialize;
 
-    type Sys = SimCluster;
+    type Sys = SimNode;
 
     struct Greeter {
         greeting: String,
@@ -683,7 +683,7 @@ mod remote_routing {
     }
 
     /// A two-node network on one simulation.
-    fn two_nodes(seed: u64) -> (Simulation, SimCluster, SimCluster) {
+    fn two_nodes(seed: u64) -> (Simulation, SimNode, SimNode) {
         let sim = Simulation::new(seed);
         let net = SimNetwork::new(&sim);
         let a = net.join(NodeId::new(1));

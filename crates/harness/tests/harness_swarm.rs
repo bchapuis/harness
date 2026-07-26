@@ -1,9 +1,15 @@
-//! Determinism conformance (harness spec §12; core spec §18.1): the same
-//! `(seed, configuration)` reproduces the full event stream byte-for-byte —
-//! including harness *and* grain events — with model and sandbox faults firing
-//! under seed control; and a swarm sweep holds the H-invariants across seeds
-//! while those faults flow. The journal, the fence, and resume are the grain's,
-//! so simulating the harness runs granary's real consensus/rehydration code.
+//! The harness's swarm sweeps (harness spec §12; core spec §18.1).
+//!
+//! Two claims over the same faulted workload. **Determinism:** the same
+//! `(workload, seed)` reproduces the full event stream byte-for-byte —
+//! harness *and* grain events — with model and sandbox faults firing under seed
+//! control. **Invariants:** the H-invariants hold across a seed sweep while
+//! those faults flow. The journal, the fence, and resume are the grain's, so
+//! simulating the harness runs granary's real consensus/rehydration code.
+//!
+//! Named `*swarm.rs` because both are sweeps, and a sweep fails by naming a
+//! seed rather than a sequence (docs/simulation-testing.md). Harness has one
+//! area, so the crate name is the area name.
 
 mod support;
 
@@ -19,6 +25,7 @@ use actor_simulation::SimSystem;
 use actor_simulation::Workload;
 use actor_simulation::check_reproducible;
 use actor_simulation::run_swarm;
+use actor_simulation::sweep_seeds;
 use harness::Budget;
 use harness::Harness;
 use harness::Kind;
@@ -145,7 +152,7 @@ fn the_event_stream_reproduces_byte_for_byte_per_seed() {
 #[test]
 fn the_h_invariants_hold_across_a_faulted_seed_sweep() {
     let workload = FaultyWorkload::new("harness-swarm", 4, 1);
-    run_swarm(&workload, 1..=25).expect("every seed upholds the H-invariants");
+    run_swarm(&workload, sweep_seeds(1..26)).expect("every seed upholds the H-invariants");
     // Coverage accounting (§11): a green sweep proves model faults actually fired
     // while agent traffic flowed, not that seed luck dodged them.
     assert!(

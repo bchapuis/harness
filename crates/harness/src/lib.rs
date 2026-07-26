@@ -27,6 +27,8 @@ pub mod kind;
 pub mod model;
 pub mod sandbox;
 pub mod session;
+#[cfg(feature = "testing")]
+pub mod testing;
 pub mod tool;
 
 pub use agent::Accepted;

@@ -94,6 +94,9 @@
 //!   (§16), not a per-read Raft read-index (which would defeat read scaling, §7.8).
 //! - Hibernatable connections, follower reads, and cross-grain sagas (§16).
 
+#[cfg(feature = "testing")]
+pub mod testing;
+
 mod alarm;
 mod alarm_index;
 mod blobs;

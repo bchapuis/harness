@@ -22,7 +22,7 @@ use actor_cluster::DowningPolicy;
 use actor_cluster::SwimConfig;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use blob_store::BlobConfig;
@@ -70,11 +70,11 @@ fn drive<T: Send + 'static>(
         .expect("future did not complete")
 }
 
-type Node = (NodeId, ClusteredBlobStore<SimCluster>);
+type Node = (NodeId, ClusteredBlobStore<SimNode>);
 
 fn cluster(sim: &Simulation) -> (SimNetwork, Vec<Node>, Vec<tempfile::TempDir>) {
     let net = SimNetwork::new(sim).with_gossip(swim(), DowningPolicy::Conservative);
-    let systems: Vec<SimCluster> = [A, B, C].iter().map(|&n| net.join(n)).collect();
+    let systems: Vec<SimNode> = [A, B, C].iter().map(|&n| net.join(n)).collect();
     sim.run_for(Duration::from_secs(2));
 
     let mut dirs = Vec::new();

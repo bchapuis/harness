@@ -20,7 +20,7 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use granary::Grain;
@@ -58,7 +58,7 @@ struct Log {
 struct Val(i64);
 
 impl Grain for LogGrain {
-    type System = SimCluster;
+    type System = SimNode;
     type State = Log;
     type Event = Val;
     type Facets = ();
@@ -116,7 +116,7 @@ impl GrainHandler<ReadFrom> for LogGrain {
 /// journal backfill: subscribe, backfill the gap, take live batches, and on a
 /// silent move re-check the journal after `RESYNC`. The returned values are the
 /// reconstructed committed sequence.
-async fn collect(system: SimCluster, grain: GrainRef<LogGrain>, target: usize) -> Vec<i64> {
+async fn collect(system: SimNode, grain: GrainRef<LogGrain>, target: usize) -> Vec<i64> {
     let mut last: u64 = 0;
     let mut out: Vec<i64> = Vec::new();
     let mut sub: Option<Subscription<LogGrain>> = None;
@@ -176,7 +176,7 @@ async fn collect(system: SimCluster, grain: GrainRef<LogGrain>, target: usize) -
 
 /// Append `val`, retrying through a failover (`NotLeader`/`Unavailable`) until it
 /// commits — the writer's at-least-once discipline across an election.
-async fn append_retry(system: &SimCluster, grain: &GrainRef<LogGrain>, val: i64) {
+async fn append_retry(system: &SimNode, grain: &GrainRef<LogGrain>, val: i64) {
     loop {
         match grain.ask(Append(val)).await {
             Ok(_) => return,
@@ -223,7 +223,7 @@ fn drive<T: Send + 'static>(
         .expect("future did not complete")
 }
 
-fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<LogGrain>>) {
+fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, Vec<Granary<LogGrain>>) {
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2));
@@ -237,7 +237,7 @@ fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<LogGra
 
 fn surviving_caller(
     sim: &Simulation,
-    systems: &[SimCluster],
+    systems: &[SimNode],
     granaries: &[Granary<LogGrain>],
     key: &str,
 ) -> usize {

@@ -21,7 +21,7 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::StopReason;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimSystem;
 use serde::Deserialize;
 use serde::Serialize;
@@ -263,7 +263,7 @@ fn locality_is_classified_from_the_id_without_a_network_call() {
     let (_sim, net) = support::cluster(8, None);
     let node_a = net.join(NodeId::new(1));
     let node_b = net.join(NodeId::new(2));
-    let greeter = node_a.spawn(Greeter::<SimCluster>::new("Hi"));
+    let greeter = node_a.spawn(Greeter::<SimNode>::new("Hi"));
     let id = greeter.id().clone();
     assert!(node_a.is_local(&id), "owning node sees it local");
     assert!(!node_b.is_local(&id), "other node sees it remote");

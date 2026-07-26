@@ -9,6 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+actor-simulation = { workspace = true, optional = true }
 granary.workspace = true
 actor-core.workspace = true
 actor-cluster.workspace = true
@@ -18,8 +19,15 @@ serde_json.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
+# Its own `testing` module, for this crate's swarm suites.
+harness = { path = ".", features = ["testing"] }
 actor-simulation.workspace = true
 tempfile.workspace = true
+
+[features]
+# Shared simulation invariants over harness events, for the swarm suites in
+# this crate. Test support, so it stays out of a production build.
+testing = ["dep:actor-simulation"]
 
 [lints]
 workspace = true

@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use granary::Grain;
@@ -36,7 +36,7 @@ struct Empty;
 enum Never {}
 
 impl Grain for Probe {
-    type System = SimCluster;
+    type System = SimNode;
     type State = Empty;
     type Event = Never;
     type Facets = ();

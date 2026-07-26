@@ -32,14 +32,14 @@ use crate::FaultPolicy;
 use crate::FaultStats;
 use crate::RunFailure;
 use crate::SimClock;
-use crate::SimCluster;
+use crate::SimNode;
 use crate::SimEntropy;
 use crate::SimNetwork;
 use crate::Simulation;
 use crate::Violation;
 use crate::invariant::Invariant;
 use crate::invariant::default_invariants;
-use crate::registry::RegistryFaultPolicy;
+use crate::faults::RegistryFaultPolicy;
 use crate::registry::SimRegistry;
 
 // Swarm intensity for the cluster harness (spec §18.3): how hard each run is
@@ -68,7 +68,7 @@ const CLUSTER_FLUSH: Duration = Duration::from_secs(2);
 
 /// The running cluster handed to a [`ClusterWorkload`].
 pub struct ClusterCtx {
-    nodes: Vec<SimCluster>,
+    nodes: Vec<SimNode>,
     net: SimNetwork,
     /// The simulated external registry, in registry-based mode (spec §9.4.2):
     /// the operator handle a workload mutates and outages under seed control.
@@ -77,7 +77,7 @@ pub struct ClusterCtx {
 
 impl ClusterCtx {
     /// The nodes of the cluster, indexed in join order.
-    pub fn nodes(&self) -> &[SimCluster] {
+    pub fn nodes(&self) -> &[SimNode] {
         &self.nodes
     }
 
@@ -316,7 +316,7 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
         .with_events(events)
         .with_faults(faults);
 
-    let nodes: Vec<SimCluster> = (1..=workload.node_count() as u64)
+    let nodes: Vec<SimNode> = (1..=workload.node_count() as u64)
         .map(|i| net.join(NodeId::new(i)))
         .collect();
     let ctx = ClusterCtx {
@@ -396,11 +396,15 @@ pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(
 }
 
 /// Sweep a cluster workload across many seeds, stopping at the first failure.
+///
+/// The workload's [`regression_seeds`](crate::regression_seeds) run first,
+/// ahead of `seeds` and whatever sizing produced them: a seed that failed once
+/// is checked on every run, however narrow the sweep.
 pub fn run_cluster_swarm<W: ClusterWorkload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
 ) -> Result<(), RunFailure> {
-    for seed in seeds {
+    for seed in crate::corpus::regression_seeds(workload.name()).chain(seeds) {
         run_cluster_seed(workload, seed)?;
     }
     Ok(())
@@ -416,7 +420,7 @@ pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
     seeds: impl IntoIterator<Item = u64>,
 ) -> Result<FaultStats, RunFailure> {
     let mut total = FaultStats::default();
-    for seed in seeds {
+    for seed in crate::corpus::regression_seeds(workload.name()).chain(seeds) {
         let (violations, faults) = eval_cluster(workload, seed);
         if !violations.is_empty() {
             return Err(RunFailure {

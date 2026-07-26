@@ -21,7 +21,7 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use granary::BlobId;
@@ -153,7 +153,7 @@ impl<S: GranarySystem> GrainHandler<Get> for Studio<S> {
 
 // --- Cluster scaffolding (mirrors sql/kv clustered suites) --------------------
 
-type Studios = Granary<Studio<SimCluster>>;
+type Studios = Granary<Studio<SimNode>>;
 
 fn swim() -> SwimConfig {
     SwimConfig {
@@ -199,13 +199,13 @@ fn drive<T: Send + 'static>(
         .expect("future did not complete")
 }
 
-fn cluster(sim: &Simulation, cfg: GranaryConfig) -> (SimNetwork, Vec<SimCluster>, Vec<Studios>) {
+fn cluster(sim: &Simulation, cfg: GranaryConfig) -> (SimNetwork, Vec<SimNode>, Vec<Studios>) {
     let net = SimNetwork::new(sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
     let granaries: Vec<Studios> = systems
         .iter()
-        .map(|system| system.granary::<Studio<SimCluster>>(cfg.clone()))
+        .map(|system| system.granary::<Studio<SimNode>>(cfg.clone()))
         .collect();
     sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
     (net, systems, granaries)

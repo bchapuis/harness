@@ -7,14 +7,9 @@
 //! round-trip; the cluster-only invariants (G1-under-election, G11, G13–G15)
 //! arrive with the `Quorum` tier.
 
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use actor_core::BoxFuture;
-use actor_core::Entropy;
-use actor_core::Event;
 use actor_core::EventSink;
 use actor_core::LocalSystemBuilder;
 use actor_core::Manifest;
@@ -23,241 +18,26 @@ use actor_simulation::Counter;
 use actor_simulation::CounterOp;
 use actor_simulation::CounterRet;
 use actor_simulation::History;
-use actor_simulation::Invariant;
 use actor_simulation::Recorder;
-use actor_simulation::SimEntropy;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
-use actor_simulation::Workload;
 use actor_simulation::check_linearizable;
-use actor_simulation::check_reproducible;
-use actor_simulation::default_invariants;
-use actor_simulation::run_seed;
+mod support;
+
 use granary::Grain;
 use granary::GrainCtx;
 use granary::GrainEvent;
 use granary::GrainHandler;
-use granary::GrainName;
-use granary::GrainRef;
 use granary::GranaryConfig;
 use granary::GranaryExt;
-use granary::Seq;
 use serde::Deserialize;
 use serde::Serialize;
 
-// --- A counter grain matching the linearizability `Counter` model -------------
-
-#[derive(Default)]
-struct CounterGrain;
-
-#[derive(Default, Serialize, Deserialize)]
-struct CounterState {
-    value: i64,
-}
-
-#[derive(Serialize, Deserialize)]
-enum CounterEvent {
-    Added(i64),
-}
-
-impl Grain for CounterGrain {
-    type System = SimSystem;
-    type State = CounterState;
-    type Event = CounterEvent;
-    type Facets = ();
-    const GRAIN_TYPE: &'static str = "test.Counter";
-
-    fn apply(state: &mut CounterState, event: &CounterEvent) {
-        match event {
-            CounterEvent::Added(d) => state.value += *d,
-        }
-    }
-
-    fn register(r: &mut granary::GrainRegistry<Self>) {
-        r.accept::<Add>();
-        r.accept::<ReadCount>();
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Add(i64);
-impl Message for Add {
-    type Reply = i64; // the post-command value
-    const MANIFEST: Manifest = Manifest::new("test.Add");
-}
-
-impl GrainHandler<Add> for CounterGrain {
-    async fn handle(
-        &self,
-        state: &CounterState,
-        msg: Add,
-        _ctx: &GrainCtx<Self>,
-    ) -> (Vec<CounterEvent>, i64) {
-        // Non-idempotent: a double-fold shows up as a wrong Read, which the
-        // linearizability checker catches (G2).
-        (vec![CounterEvent::Added(msg.0)], state.value + msg.0)
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ReadCount;
-impl Message for ReadCount {
-    type Reply = i64;
-    const MANIFEST: Manifest = Manifest::new("test.ReadCount");
-}
-
-impl GrainHandler<ReadCount> for CounterGrain {
-    async fn handle(
-        &self,
-        state: &CounterState,
-        _msg: ReadCount,
-        _ctx: &GrainCtx<Self>,
-    ) -> (Vec<CounterEvent>, i64) {
-        (vec![], state.value) // read path: no events, commits nothing (§7.5)
-    }
-}
-
-// --- Grain invariant checkers over the §13 event stream -----------------------
-
-/// **Exactly-once activation per node** (invariant **G6**): a grain is never live
-/// twice at once on the same node. The grain analogue of
-/// `SingletonAtMostOnePerNode`; keyed by `(node, name)` so a grain that migrates
-/// on failover (a fresh `Activated` on a *different* node) is not mistaken for a
-/// second concurrent activation. Sound under the no-fault runs here (a host that
-/// hibernates emits `Passivated` before its successor's `Activated`).
-#[derive(Default)]
-struct ExactlyOnceActivation {
-    live: BTreeSet<(actor_core::NodeId, GrainName)>,
-}
-
-impl Invariant for ExactlyOnceActivation {
-    fn name(&self) -> &'static str {
-        "grain-exactly-once-activation"
-    }
-
-    fn observe(&mut self, event: &Event) -> Result<(), String> {
-        let Some(grain_event) = event.as_app::<GrainEvent>() else {
-            return Ok(());
-        };
-        match grain_event {
-            GrainEvent::Activated { node, name } => {
-                let fresh = self.live.insert((*node, name.clone()));
-                if !fresh {
-                    return Err(format!(
-                        "grain {name} activated while already live on {node} (G6)"
-                    ));
-                }
-            }
-            GrainEvent::Passivated { node, name } => {
-                self.live.remove(&(*node, name.clone()));
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
-
-/// **Commit head is monotonic** (invariants **G3**, **G5**): a grain's committed
-/// seq strictly increases and never regresses — including across a hibernation
-/// round-trip, since the head is rebuilt from the journal, not memory.
-#[derive(Default)]
-struct CommitMonotonic {
-    last: BTreeMap<GrainName, u64>,
-}
-
-impl Invariant for CommitMonotonic {
-    fn name(&self) -> &'static str {
-        "grain-commit-monotonic"
-    }
-
-    fn observe(&mut self, event: &Event) -> Result<(), String> {
-        if let Some(GrainEvent::Committed { name, seq, .. }) = event.as_app::<GrainEvent>() {
-            let prev = self.last.get(name).copied().unwrap_or(0);
-            if *seq <= prev {
-                return Err(format!(
-                    "grain {name} committed seq {seq} not after previous head {prev} (G3/G5)"
-                ));
-            }
-            self.last.insert(name.clone(), *seq);
-        }
-        Ok(())
-    }
-}
-
-fn grain_invariants() -> Vec<Box<dyn Invariant>> {
-    let mut invariants = default_invariants();
-    invariants.push(Box::new(ExactlyOnceActivation::default()));
-    invariants.push(Box::new(CommitMonotonic::default()));
-    invariants
-}
-
-// --- Linearizability workload (G2) --------------------------------------------
-
-async fn counter_client(
-    counter: GrainRef<CounterGrain>,
-    history: History<Counter>,
-    entropy: SimEntropy,
-    ops: u64,
-) {
-    for _ in 0..ops {
-        if entropy.next_u64().is_multiple_of(2) {
-            let delta = 1 + (entropy.next_u64() % 3) as i64;
-            let id = history.invoke(CounterOp::Add(delta));
-            match counter.ask(Add(delta)).await {
-                Ok(_value) => history.ok(id, CounterRet::AddOk),
-                Err(_) => history.info(id),
-            }
-        } else {
-            let id = history.invoke(CounterOp::Read);
-            match counter.ask(ReadCount).await {
-                Ok(value) => history.ok(id, CounterRet::Read(value)),
-                Err(_) => history.info(id),
-            }
-        }
-    }
-}
-
-struct CounterWorkload {
-    clients: usize,
-    ops: u64,
-}
-
-impl Workload for CounterWorkload {
-    fn name(&self) -> &'static str {
-        "linearizable-counter-grain"
-    }
-
-    fn run(&self, system: SimSystem) -> BoxFuture<'static, ()> {
-        let clients = self.clients;
-        let ops = self.ops;
-        Box::pin(async move {
-            let counters = system.granary::<CounterGrain>(GranaryConfig::default());
-            // One grain, hammered concurrently — the single linearizable object.
-            let counter = counters.grain("counter/0");
-            let history: History<Counter> = History::new();
-            let mut tasks = Vec::new();
-            for _ in 0..clients {
-                tasks.push(counter_client(
-                    counter.clone(),
-                    history.clone(),
-                    system.entropy().clone(),
-                    ops,
-                ));
-            }
-            futures::future::join_all(tasks).await;
-
-            let verdict = check_linearizable(&history);
-            assert!(
-                verdict.is_ok(),
-                "counter grain history was not linearizable: {verdict:?}",
-            );
-        })
-    }
-
-    fn invariants(&self) -> Vec<Box<dyn Invariant>> {
-        grain_invariants()
-    }
-}
+use support::Add;
+use support::CounterEvent;
+use support::CounterGrain;
+use support::CounterState;
+use support::ReadCount;
 
 #[test]
 fn register_populates_the_command_allowlist() {
@@ -266,119 +46,6 @@ fn register_populates_the_command_allowlist() {
     assert!(accepted.contains("test.Add"));
     assert!(accepted.contains("test.ReadCount"));
     assert_eq!(accepted.len(), 2);
-}
-
-#[test]
-fn counter_grain_is_linearizable_across_seeds() {
-    let workload = CounterWorkload { clients: 4, ops: 8 };
-    for seed in 0..96 {
-        if let Err(failure) = run_seed(&workload, seed) {
-            panic!("{failure}");
-        }
-    }
-}
-
-#[test]
-fn counter_grain_run_is_reproducible() {
-    // The determinism contract (§14): the same seed yields a byte-identical event
-    // stream — and grain `App` events are part of it, so this guards G2 too.
-    let workload = CounterWorkload { clients: 3, ops: 6 };
-    for seed in 0..64 {
-        if let Err(divergence) = check_reproducible(&workload, seed) {
-            panic!("{divergence}");
-        }
-    }
-}
-
-// --- Record subscription (§7.9, G16) ------------------------------------------
-
-/// A subscriber registers from the empty head, the grain takes a run of writes,
-/// and the pushed stream is reconciled by `Seq`. The reconstructed sequence MUST
-/// equal the committed records — contiguous `1..=writes`, in order, no gap or
-/// duplicate — which is exactly what `load` to the head would return (**G16**).
-struct SubscriptionWorkload {
-    writes: u64,
-}
-
-impl Workload for SubscriptionWorkload {
-    fn name(&self) -> &'static str {
-        "record-subscription"
-    }
-
-    fn run(&self, system: SimSystem) -> BoxFuture<'static, ()> {
-        let writes = self.writes;
-        Box::pin(async move {
-            let counters = system.granary::<CounterGrain>(GranaryConfig::default());
-            let counter = counters.grain("counter/sub");
-
-            // Subscribe from the empty head, before any write, so every commit is
-            // pushed live.
-            let sub = counter.subscribe(Seq::ZERO).await.expect("subscribe");
-            assert_eq!(sub.head, Seq::ZERO, "a fresh grain's head is ZERO");
-
-            let mut expected = Vec::new();
-            for i in 0..writes {
-                let delta = 1 + (i as i64 % 3);
-                counter.ask(Add(delta)).await.expect("add commits");
-                expected.push(delta);
-            }
-
-            // Drain the stream, reconciling by seq (§7.9): each batch must begin
-            // exactly after the last seq seen, and seqs strictly increase.
-            let mut deltas = Vec::new();
-            let mut last = 0u64;
-            while (deltas.len() as u64) < writes {
-                let batch = sub.records.recv().await.expect("a live batch");
-                assert_eq!(
-                    batch.from.value(),
-                    last,
-                    "batch begins after the last seq (no gap)"
-                );
-                for (seq, event) in batch.records {
-                    assert_eq!(seq.value(), last + 1, "seqs are contiguous and ordered");
-                    last = seq.value();
-                    match event {
-                        CounterEvent::Added(d) => deltas.push(d),
-                    }
-                }
-            }
-
-            assert_eq!(
-                deltas, expected,
-                "pushed records match the committed writes, in order"
-            );
-            assert_eq!(
-                last, writes,
-                "the stream reached the committed head (push == load, G16)"
-            );
-        })
-    }
-
-    fn invariants(&self) -> Vec<Box<dyn Invariant>> {
-        grain_invariants()
-    }
-}
-
-#[test]
-fn a_subscription_streams_the_committed_records_in_order() {
-    let workload = SubscriptionWorkload { writes: 8 };
-    for seed in 0..32 {
-        if let Err(failure) = run_seed(&workload, seed) {
-            panic!("{failure}");
-        }
-    }
-}
-
-#[test]
-fn a_subscription_run_is_reproducible() {
-    // Delivery rides the Spawner/Transport seams, so a seeded run's event stream
-    // stays byte-identical (§7.9, §14).
-    let workload = SubscriptionWorkload { writes: 6 };
-    for seed in 0..32 {
-        if let Err(divergence) = check_reproducible(&workload, seed) {
-            panic!("{divergence}");
-        }
-    }
 }
 
 // --- A deliberately broken grain, to prove the check has teeth ----------------

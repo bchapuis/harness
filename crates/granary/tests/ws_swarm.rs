@@ -39,11 +39,13 @@ use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
-use actor_simulation::SimCluster;
-use actor_simulation::check_cluster_reproducible;
+use actor_simulation::SimNode;
+use actor_simulation::coverage_seeds;
 use actor_simulation::default_invariants;
+use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_cluster_swarm_coverage;
+use actor_simulation::sweep_seeds;
 use granary::Grain;
 use granary::GrainCtx;
 use granary::GrainHandler;
@@ -251,7 +253,7 @@ impl ClusterWorkload for WsSwarm {
     fn setup(&self, _ctx: &ClusterCtx) {}
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
-        let nodes: Vec<SimCluster> = ctx.nodes().to_vec();
+        let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
         let config = self.config();
@@ -260,7 +262,7 @@ impl ClusterWorkload for WsSwarm {
         Box::pin(async move {
             let granaries: Vec<_> = nodes
                 .iter()
-                .map(|s| s.granary::<Studio<SimCluster>>(config.clone()))
+                .map(|s| s.granary::<Studio<SimNode>>(config.clone()))
                 .collect();
             let clock = nodes[0].clock().clone();
             let entropy = nodes[0].entropy().clone();
@@ -338,7 +340,7 @@ fn workspace_reads_never_go_stale_under_the_cluster_swarm() {
     // errors), and the safety core holds, on every seeded run under partitions,
     // crashes, loss, duplication, and delay — F1 and G14 together.
     let workload = WsSwarm::new(3, 3, 8);
-    if let Err(failure) = run_cluster_swarm(&workload, 0..24) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{failure}");
     }
     assert!(
@@ -355,10 +357,8 @@ fn workspace_reads_never_go_stale_under_the_cluster_swarm() {
 fn ws_swarm_is_reproducible() {
     // #7: the same seed replays to a byte-identical event stream.
     let workload = WsSwarm::new(3, 2, 6);
-    for seed in 0..12 {
-        if let Err(divergence) = check_cluster_reproducible(&workload, seed) {
-            panic!("{divergence}");
-        }
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..12)) {
+        panic!("{divergence}");
     }
 }
 
@@ -366,7 +366,7 @@ fn ws_swarm_is_reproducible() {
 fn ws_swarm_actually_fires_each_fault_type() {
     // #8: a green sweep of the workspace path must not be a silent happy-path run.
     let workload = WsSwarm::new(3, 3, 8);
-    let stats = match run_cluster_swarm_coverage(&workload, 0..32) {
+    let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..32)) {
         Ok(stats) => stats,
         Err(failure) => panic!("{failure}"),
     };

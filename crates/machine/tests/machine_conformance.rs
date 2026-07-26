@@ -8,7 +8,6 @@
 //! are all seed-driven, so one seed reproduces the whole story deterministically.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -24,12 +23,13 @@ use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::run_cluster_seed;
 use granary::GrainEvent;
 use granary::GrainName;
 use granary::GranaryConfig;
 use granary::GranaryExt;
+use granary::testing::ActivationSingletonPerNode;
 use machine::Attach;
 use machine::Detach;
 use machine::Machine;
@@ -37,12 +37,12 @@ use machine::Provision;
 use machine::Status;
 use machine::fake::FakeVmProvider;
 
-type ClusterMachine = Machine<SimCluster, FakeVmProvider<SimCluster>>;
+type ClusterMachine = Machine<SimNode, FakeVmProvider<SimNode>>;
 
 #[derive(Default)]
 struct DoorStub;
 impl Actor for DoorStub {
-    type System = SimCluster;
+    type System = SimNode;
 }
 
 /// **M1: single disk, never forked.** Committed seq is strictly monotonic per
@@ -70,34 +70,10 @@ impl Invariant for NeverForks {
     }
 }
 
-/// **G6, crash-sound:** at most one committing activation per node.
-#[derive(Default)]
-struct SingletonPerNode {
-    live: BTreeSet<(NodeId, GrainName)>,
-}
-impl Invariant for SingletonPerNode {
-    fn name(&self) -> &'static str {
-        "machine-singleton-per-node"
-    }
-    fn observe(&mut self, event: &Event) -> Result<(), String> {
-        if let Event::NodeDown { node, .. } = event {
-            self.live.retain(|(n, _)| n != node);
-            return Ok(());
-        }
-        match event.as_app::<GrainEvent>() {
-            Some(GrainEvent::Activated { node, name })
-                if !self.live.insert((*node, name.clone())) =>
-            {
-                return Err(format!("machine {name} double-activated on {node} (G6)"));
-            }
-            Some(GrainEvent::Passivated { node, name }) => {
-                self.live.remove(&(*node, name.clone()));
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
+// G6 ("at most one committing activation per node") is *not* redefined here:
+// it is `granary::testing::ActivationSingletonPerNode`, shared with
+// `machine_swarm.rs` and granary's own suites. An independently-maintained copy
+// is exactly what that module exists to prevent.
 
 struct Narrative {
     dir: PathBuf,
@@ -150,7 +126,7 @@ impl ClusterWorkload for Narrative {
     }
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
-        let nodes: Vec<SimCluster> = ctx.nodes().to_vec();
+        let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let net = ctx.net().clone();
         let config = self.config();
         let base = self.base_image().to_string_lossy().into_owned();
@@ -283,7 +259,10 @@ impl ClusterWorkload for Narrative {
     fn invariants(&self) -> Vec<Box<dyn Invariant>> {
         let mut invariants = actor_simulation::default_invariants();
         invariants.push(Box::new(NeverForks::default()));
-        invariants.push(Box::new(SingletonPerNode::default()));
+        invariants.push(Box::new(ActivationSingletonPerNode::new(
+            "machine-singleton-per-node",
+            "machine",
+        )));
         invariants
     }
 }

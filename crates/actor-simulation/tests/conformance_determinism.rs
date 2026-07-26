@@ -36,7 +36,7 @@ use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::RegistryFaultPolicy;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
 use actor_simulation::Workload;
@@ -44,6 +44,7 @@ use actor_simulation::check_cluster_reproducible;
 use actor_simulation::check_reproducible;
 use actor_simulation::replay_cluster_swarm;
 use actor_simulation::replay_swarm;
+use actor_simulation::sweep_seeds;
 use serde::Deserialize;
 use serde::Serialize;
 use support::Greet;
@@ -259,7 +260,7 @@ impl Workload for AskStorm {
 #[test]
 fn single_node_event_stream_is_byte_identical_across_seeds() {
     let workload = AskStorm { actors: 4, asks: 8 };
-    if let Err(divergence) = replay_swarm(&workload, 0..128) {
+    if let Err(divergence) = replay_swarm(&workload, sweep_seeds(0..128)) {
         panic!("{divergence}");
     }
 }
@@ -275,7 +276,7 @@ fn single_node_one_seed_replays_identically() {
 struct ReproGreeter;
 
 impl Actor for ReproGreeter {
-    type System = SimCluster;
+    type System = SimNode;
 
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<ReproGreet>();
@@ -361,7 +362,7 @@ fn cluster_event_stream_is_byte_identical_under_faults_across_seeds() {
         nodes: 3,
         rounds: 8,
     };
-    if let Err(divergence) = replay_cluster_swarm(&workload, 0..24) {
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{divergence}");
     }
 }
@@ -461,7 +462,7 @@ fn registry_mode_event_stream_is_byte_identical_across_seeds() {
         nodes: 3,
         rounds: 8,
     };
-    if let Err(divergence) = replay_cluster_swarm(&workload, 0..24) {
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{divergence}");
     }
 }
@@ -610,7 +611,7 @@ fn restart_churn_event_stream_is_byte_identical_across_seeds() {
         nodes: 3,
         rounds: 8,
     };
-    if let Err(divergence) = replay_cluster_swarm(&workload, 0..24) {
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{divergence}");
     }
 }
@@ -624,7 +625,7 @@ fn leader_mode_event_stream_is_byte_identical_across_seeds() {
         nodes: 3,
         rounds: 8,
     };
-    if let Err(divergence) = replay_cluster_swarm(&workload, 0..24) {
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{divergence}");
     }
 }
@@ -732,7 +733,7 @@ impl ClusterWorkload for UtilitiesChurn {
     }
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
-        let nodes: Vec<SimCluster> = ctx.nodes().to_vec();
+        let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let rounds = self.rounds;
         Box::pin(async move {
             let clock = nodes[0].clock().clone();
@@ -773,7 +774,7 @@ fn utilities_event_stream_is_byte_identical_across_seeds() {
         nodes: 3,
         rounds: 8,
     };
-    if let Err(divergence) = replay_cluster_swarm(&workload, 0..24) {
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{divergence}");
     }
 }

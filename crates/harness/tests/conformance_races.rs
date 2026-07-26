@@ -20,6 +20,8 @@ use std::time::Duration;
 use actor_core::Clock;
 use actor_simulation::SimSystem;
 use actor_simulation::run_seed;
+use actor_simulation::scenario_sweep;
+use actor_simulation::sweep_seeds;
 use harness::Kind;
 use harness::Kinds;
 use harness::Model;
@@ -77,44 +79,48 @@ fn a_submit_racing_the_post_end_advance_starts_clean() {
     // the ended run's per-run flags: B's synthesized `call-1-0` collides with
     // A's resolved `call-1-0`, and an unswept loop skips the call forever —
     // the run hangs and the prompt times out.
-    for seed in 0..96 {
-        let make_model = |system: &SimSystem| -> Arc<dyn Model> {
-            Arc::new(SlowModel {
-                inner: Arc::new(probing_script()),
-                clock: system.clock().clone(),
-                delay: Duration::from_secs(10),
-            })
-        };
-        let workload = Scenario::from_factories(
-            "submit-vs-post-end-advance",
-            probing_kind(),
-            Arc::new(make_model),
-            Arc::new(|_| Arc::new(ScriptedSandboxes::echo())),
-            move |harness, system| {
-                Box::pin(async move {
-                    let clock = system.clock().clone();
-                    let session = harness.session("echo", SessionId::new("s-race"));
-                    let a = session.prompt(Turn::new(TurnId::new("t-a"), "go"));
-                    let b = {
-                        let session = session.clone();
-                        let clock = clock.clone();
-                        async move {
-                            clock.sleep(Duration::from_secs(20)).await;
-                            session.prompt(Turn::new(TurnId::new("t-b"), "go")).await
-                        }
-                    };
-                    let (a, b) = futures::join!(a, b);
-                    assert_eq!(a.expect("submit a").expect("run a").text(), "done");
-                    let b = b
-                        .unwrap_or_else(|e| panic!("seed {seed}: run b never finished: {e:?}"))
-                        .expect("run b");
-                    assert_eq!(b.text(), "done");
-                    clock.sleep(Duration::from_secs(60)).await;
+    scenario_sweep(
+        "harness-races/submit-post-end",
+        sweep_seeds(0..96),
+        |seed| {
+            let make_model = |system: &SimSystem| -> Arc<dyn Model> {
+                Arc::new(SlowModel {
+                    inner: Arc::new(probing_script()),
+                    clock: system.clock().clone(),
+                    delay: Duration::from_secs(10),
                 })
-            },
-        );
-        run_seed(&workload, seed).unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
-    }
+            };
+            let workload = Scenario::from_factories(
+                "submit-vs-post-end-advance",
+                probing_kind(),
+                Arc::new(make_model),
+                Arc::new(|_| Arc::new(ScriptedSandboxes::echo())),
+                move |harness, system| {
+                    Box::pin(async move {
+                        let clock = system.clock().clone();
+                        let session = harness.session("echo", SessionId::new("s-race"));
+                        let a = session.prompt(Turn::new(TurnId::new("t-a"), "go"));
+                        let b = {
+                            let session = session.clone();
+                            let clock = clock.clone();
+                            async move {
+                                clock.sleep(Duration::from_secs(20)).await;
+                                session.prompt(Turn::new(TurnId::new("t-b"), "go")).await
+                            }
+                        };
+                        let (a, b) = futures::join!(a, b);
+                        assert_eq!(a.expect("submit a").expect("run a").text(), "done");
+                        let b = b
+                            .unwrap_or_else(|e| panic!("seed {seed}: run b never finished: {e:?}"))
+                            .expect("run b");
+                        assert_eq!(b.text(), "done");
+                        clock.sleep(Duration::from_secs(60)).await;
+                    })
+                },
+            );
+            run_seed(&workload, seed).unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
+        },
+    );
 }
 
 #[test]

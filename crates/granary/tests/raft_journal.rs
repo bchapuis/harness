@@ -25,7 +25,7 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use granary::FileGrainStore;
@@ -61,7 +61,7 @@ enum Ledger {
 }
 
 impl Grain for Account {
-    type System = SimCluster;
+    type System = SimNode;
     type State = Balance;
     type Event = Ledger;
     type Facets = ();

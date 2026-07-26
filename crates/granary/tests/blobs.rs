@@ -28,7 +28,7 @@ use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
 use actor_simulation::Recorder;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
@@ -385,8 +385,8 @@ fn cluster(
     sim: &Simulation,
 ) -> (
     SimNetwork,
-    Vec<SimCluster>,
-    Vec<Granary<BlobGrain<SimCluster>>>,
+    Vec<SimNode>,
+    Vec<Granary<BlobGrain<SimNode>>>,
 ) {
     cluster_cfg(sim, config())
 }
@@ -396,8 +396,8 @@ fn cluster_cfg(
     cfg: GranaryConfig,
 ) -> (
     SimNetwork,
-    Vec<SimCluster>,
-    Vec<Granary<BlobGrain<SimCluster>>>,
+    Vec<SimNode>,
+    Vec<Granary<BlobGrain<SimNode>>>,
 ) {
     let net = SimNetwork::new(sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
     let systems = vec![
@@ -406,9 +406,9 @@ fn cluster_cfg(
         net.join(NodeId::new(3)),
     ];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
-    let granaries: Vec<Granary<BlobGrain<SimCluster>>> = systems
+    let granaries: Vec<Granary<BlobGrain<SimNode>>> = systems
         .iter()
-        .map(|system| system.granary::<BlobGrain<SimCluster>>(cfg.clone()))
+        .map(|system| system.granary::<BlobGrain<SimNode>>(cfg.clone()))
         .collect();
     sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
     (net, systems, granaries)

@@ -29,10 +29,12 @@ use actor_simulation::CounterOp;
 use actor_simulation::CounterRet;
 use actor_simulation::History;
 use actor_simulation::Recorder;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use actor_simulation::check_linearizable;
+use actor_simulation::scenario_sweep;
+use actor_simulation::sweep_seeds;
 use granary::BlobId;
 use granary::Grain;
 use granary::GrainCtx;
@@ -65,7 +67,7 @@ enum Ledger {
 }
 
 impl Grain for Account {
-    type System = SimCluster;
+    type System = SimNode;
     type State = Balance;
     type Event = Ledger;
     type Facets = ();
@@ -138,7 +140,7 @@ enum CounterEvent {
 }
 
 impl Grain for CounterGrain {
-    type System = SimCluster;
+    type System = SimNode;
     type State = CounterState;
     type Event = CounterEvent;
     type Facets = ();
@@ -209,7 +211,7 @@ enum Recorded {
 }
 
 impl Grain for BlobGrain {
-    type System = SimCluster;
+    type System = SimNode;
     type State = Stored;
     type Event = Recorded;
     type Facets = ();
@@ -421,9 +423,9 @@ fn assert_split_safety(recorder: &Recorder) {
 fn cluster_of<G>(
     sim: &Simulation,
     config: GranaryConfig,
-) -> (SimNetwork, Recorder, Vec<SimCluster>, Vec<Granary<G>>)
+) -> (SimNetwork, Recorder, Vec<SimNode>, Vec<Granary<G>>)
 where
-    G: Grain<System = SimCluster> + Default,
+    G: Grain<System = SimNode> + Default,
 {
     let (net, recorder) = recorded_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
@@ -533,7 +535,7 @@ fn a_split_under_concurrent_writes_is_linearizable() {
     // committing on the parent (double apply) is exactly what the checker
     // catches. Ops that fail in the split window are recorded pending, which
     // the checker may place or drop — the §2.2 ambiguity contract.
-    for seed in 0..8 {
+    scenario_sweep("shard-split/split-writes", sweep_seeds(0..8), |seed| {
         let sim = Simulation::new(seed);
         let (_net, recorder, systems, granaries) =
             cluster_of::<CounterGrain>(&sim, one_shard_config());
@@ -593,7 +595,7 @@ fn a_split_under_concurrent_writes_is_linearizable() {
             );
         }
         assert_split_safety(&recorder);
-    }
+    });
 }
 
 #[test]
@@ -926,7 +928,7 @@ fn a_merge_under_concurrent_writes_is_linearizable() {
     // while clients write and read across the seal → transfer → commit window.
     // Every history must stay linearizable — a write lost at the seal or
     // double-applied onto the left shard would break it.
-    for seed in 0..6 {
+    scenario_sweep("shard-split/merge-writes", sweep_seeds(0..6), |seed| {
         let sim = Simulation::new(seed);
         let (_net, recorder, systems, granaries) =
             cluster_of::<CounterGrain>(&sim, two_shard_config());
@@ -985,5 +987,5 @@ fn a_merge_under_concurrent_writes_is_linearizable() {
             );
         }
         assert_split_safety(&recorder);
-    }
+    });
 }

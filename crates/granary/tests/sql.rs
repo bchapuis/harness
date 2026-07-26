@@ -3,34 +3,22 @@
 //! replay of nondeterministic SQL, and the checkpoint/rehydration round-trip.
 #![cfg(feature = "sql")]
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use actor_core::BoxFuture;
 use actor_core::CallError;
-use actor_core::Clock;
-use actor_core::Entropy;
-use actor_core::Event;
 use actor_core::EventSink;
 use actor_core::LocalSystemBuilder;
 use actor_core::Manifest;
 use actor_core::Message;
-use actor_simulation::Invariant;
 use actor_simulation::Recorder;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
-use actor_simulation::Workload;
-use actor_simulation::check_reproducible;
-use actor_simulation::default_invariants;
-use actor_simulation::run_swarm;
 use granary::Grain;
 use granary::GrainCtx;
 use granary::GrainError;
 use granary::GrainEvent;
 use granary::GrainHandler;
-use granary::GrainName;
 use granary::GranaryConfig;
 use granary::GranaryExt;
 use granary::MAX_QUERY_ROWS;
@@ -40,124 +28,14 @@ use granary::SqlValue;
 use serde::Deserialize;
 use serde::Serialize;
 
-// --- A grain whose durable state is entirely its SQLite database --------------
+mod support;
+use support::Add;
+use support::AddRandom;
+use support::Ledger;
+use support::Total;
+use support::ensure_schema;
 
-#[derive(Default)]
-struct Ledger;
-
-impl Grain for Ledger {
-    type System = SimSystem;
-    type State = ();
-    type Event = NoEvent;
-    type Facets = (Sql,);
-    const GRAIN_TYPE: &'static str = "test.SqlLedger";
-
-    fn apply(_state: &mut (), event: &NoEvent) {
-        event.unreachable()
-    }
-}
-
-/// Idempotent DDL at the top of the writing command (spec §7.14: schema setup
-/// is a journaled write like any other; `IF NOT EXISTS` makes it a no-op after
-/// the first commit and on every replayed materialization).
-fn ensure_schema(ctx: &GrainCtx<Ledger>) {
-    ctx.sql()
-        .execute(
-            "CREATE TABLE IF NOT EXISTS entries (name TEXT NOT NULL, cents INTEGER NOT NULL)",
-            &[],
-        )
-        .expect("ddl");
-}
-
-/// Insert one entry; reply with the row count after the insert — read-your-own
-/// (transactional) writes inside the command.
-#[derive(Clone, Serialize, Deserialize)]
-struct Add {
-    name: String,
-    cents: i64,
-}
-impl Message for Add {
-    type Reply = i64;
-    const MANIFEST: Manifest = Manifest::new("test.SqlAdd");
-}
-impl GrainHandler<Add> for Ledger {
-    async fn handle(&self, _state: &(), msg: Add, ctx: &GrainCtx<Self>) -> (Vec<NoEvent>, i64) {
-        ensure_schema(ctx);
-        let sql = ctx.sql();
-        sql.execute(
-            "INSERT INTO entries (name, cents) VALUES (?1, ?2)",
-            &[SqlValue::Text(msg.name), SqlValue::Integer(msg.cents)],
-        )
-        .expect("insert");
-        let row = sql
-            .query_one("SELECT COUNT(*) FROM entries", &[])
-            .expect("count");
-        let SqlValue::Integer(count) = row[0] else {
-            panic!("count is an integer");
-        };
-        (vec![], count)
-    }
-}
-
-/// Insert a row whose value SQLite itself draws with `random()`, and reply with
-/// it — nondeterministic SQL, fine under physical replication (§7.14, F1 holds
-/// on the frames, not the SQL).
-#[derive(Clone, Serialize, Deserialize)]
-struct AddRandom;
-impl Message for AddRandom {
-    type Reply = i64;
-    const MANIFEST: Manifest = Manifest::new("test.SqlAddRandom");
-}
-impl GrainHandler<AddRandom> for Ledger {
-    async fn handle(
-        &self,
-        _state: &(),
-        _msg: AddRandom,
-        ctx: &GrainCtx<Self>,
-    ) -> (Vec<NoEvent>, i64) {
-        ensure_schema(ctx);
-        let sql = ctx.sql();
-        sql.execute(
-            "INSERT INTO entries (name, cents) VALUES ('random', random() % 1000000)",
-            &[],
-        )
-        .expect("insert random");
-        let row = sql
-            .query_one(
-                "SELECT cents FROM entries WHERE name = 'random' ORDER BY rowid DESC LIMIT 1",
-                &[],
-            )
-            .expect("read back");
-        let SqlValue::Integer(value) = row[0] else {
-            panic!("cents is an integer");
-        };
-        (vec![], value)
-    }
-}
-
-/// The sum of all entries — a pure read: no frames, no record, no commit (§7.5).
-#[derive(Clone, Serialize, Deserialize)]
-struct Total;
-impl Message for Total {
-    type Reply = i64;
-    const MANIFEST: Manifest = Manifest::new("test.SqlTotal");
-}
-impl GrainHandler<Total> for Ledger {
-    async fn handle(&self, _state: &(), _msg: Total, ctx: &GrainCtx<Self>) -> (Vec<NoEvent>, i64) {
-        let row = ctx
-            .sql()
-            .query_one(
-                "SELECT COALESCE(SUM(cents), 0) FROM entries \
-                 WHERE name IN (SELECT name FROM entries)",
-                &[],
-            )
-            .expect("sum");
-        let SqlValue::Integer(total) = row[0] else {
-            panic!("sum is an integer");
-        };
-        (vec![], total)
-    }
-}
+// --- Suite-specific messages over the shared `Ledger` fixture ----------------
 
 /// Probe the handler-surface guards (spec §7.14): a `select` returns its column
 /// names alongside the rows, and the connection authorizer denies `ATTACH` and
@@ -795,146 +673,3 @@ fn sql_writes_survive_hibernation_and_reads_commit_nothing() {
 }
 
 // --- The seeded swarm (V&V checklist #4, #7) -----------------------------------
-
-/// **Commit head is monotonic** (invariants **G3**, **G5**), watched continuously
-/// over the SQL workload's `Committed` events.
-#[derive(Default)]
-struct CommitMonotonic {
-    last: BTreeMap<GrainName, u64>,
-}
-
-impl Invariant for CommitMonotonic {
-    fn name(&self) -> &'static str {
-        "sql-grain-commit-monotonic"
-    }
-
-    fn observe(&mut self, event: &Event) -> Result<(), String> {
-        if let Some(GrainEvent::Committed { name, seq, .. }) = event.as_app::<GrainEvent>() {
-            let prev = self.last.get(name).copied().unwrap_or(0);
-            if *seq <= prev {
-                return Err(format!(
-                    "grain {name} committed seq {seq} not after previous head {prev} (G3/G5)"
-                ));
-            }
-            self.last.insert(name.clone(), *seq);
-        }
-        Ok(())
-    }
-}
-
-/// SQL traffic under the seeded swarm (spec §18.4): randomized writes and reads
-/// across a small key space, with sleeps past `idle_after` so activations
-/// hibernate, checkpoint into blobs, and rematerialize mid-run. One scratch
-/// directory serves every run: the facet's restore discards stale local files
-/// (they are a cache, never truth — §1), which this sharing exercises for free.
-///
-/// `random` gates the `AddRandom` traffic (SQLite's own `random()`, OS-seeded).
-/// It is off for reproducibility sweeps: physical replication makes the value
-/// safe for durability (asserted elsewhere), but the §18.1 repro contract is
-/// kept strict — no unseeded randomness anywhere in a replayed run.
-struct SqlSwarm {
-    clients: usize,
-    ops: u64,
-    random: bool,
-    dir: PathBuf,
-}
-
-impl Workload for SqlSwarm {
-    fn name(&self) -> &'static str {
-        "granary-sql-swarm"
-    }
-
-    fn run(&self, system: SimSystem) -> BoxFuture<'static, ()> {
-        let clients = self.clients;
-        let ops = self.ops;
-        let random = self.random;
-        let dir = self.dir.clone();
-        Box::pin(async move {
-            let ledgers = system.granary::<Ledger>(GranaryConfig {
-                idle_after: Duration::from_millis(50),
-                snapshot_every: 3, // checkpoint often: the manifest+frames path runs per seed
-                data_dir: Some(dir),
-                ..GranaryConfig::default()
-            });
-            let clock = system.clock().clone();
-            let entropy = system.entropy().clone();
-            let mut tasks = Vec::new();
-            for _ in 0..clients {
-                let ledgers = ledgers.clone();
-                let clock = clock.clone();
-                let entropy = entropy.clone();
-                tasks.push(async move {
-                    for _ in 0..ops {
-                        let key = format!("ledger/{}", entropy.next_u64() % 3);
-                        let grain = ledgers.grain(key);
-                        match entropy.next_u64() % 3 {
-                            0 => {
-                                let _ = grain
-                                    .ask(Add {
-                                        name: "swarm".into(),
-                                        cents: 1,
-                                    })
-                                    .await;
-                            }
-                            1 if random => {
-                                let _ = grain.ask(AddRandom).await;
-                            }
-                            _ => {
-                                let _ = grain.ask(Total).await;
-                            }
-                        }
-                        // Sleep past `idle_after` sometimes, so grains hibernate
-                        // (checkpoint → blobs) and rehydrate under this seed.
-                        if entropy.next_u64().is_multiple_of(4) {
-                            clock.sleep(Duration::from_millis(120)).await;
-                        }
-                    }
-                });
-            }
-            futures::future::join_all(tasks).await;
-        })
-    }
-
-    fn invariants(&self) -> Vec<Box<dyn Invariant>> {
-        let mut invariants = default_invariants();
-        invariants.push(Box::new(CommitMonotonic::default()));
-        invariants
-    }
-}
-
-#[test]
-fn sql_swarm_invariants_hold_across_seeds() {
-    // #4: the safety core plus G3/G5 commit-monotonicity hold across seeds while
-    // SQL grains write, hibernate, checkpoint, and rematerialize, with the
-    // mailbox capacity fault-sampled per seed.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let workload = SqlSwarm {
-        clients: 3,
-        ops: 8,
-        random: true,
-        dir: dir.path().to_path_buf(),
-    };
-    if let Err(failure) = run_swarm(&workload, 0..16) {
-        panic!("{failure}");
-    }
-}
-
-#[test]
-fn sql_swarm_is_reproducible() {
-    // #7: the same seed yields a byte-identical event stream — grain events
-    // included — even though the workload materializes real SQLite files,
-    // checkpoints them into blobs, and rematerializes mid-run. A wall-clock
-    // read, an OS thread, or an unseeded RNG anywhere in the facet breaks this.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let workload = SqlSwarm {
-        clients: 2,
-        ops: 6,
-        random: false,
-        dir: dir.path().to_path_buf(),
-    };
-    for seed in 0..8 {
-        if let Err(divergence) = check_reproducible(&workload, seed) {
-            panic!("{divergence}");
-        }
-    }
-}

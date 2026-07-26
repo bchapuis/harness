@@ -41,9 +41,11 @@ use actor_core::Event;
 use actor_core::NodeId;
 use actor_core::Spawner;
 use actor_simulation::Recorder;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
+use actor_simulation::scenario_sweep;
+use actor_simulation::sweep_seeds;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -90,12 +92,12 @@ fn drive<T: Send + 'static>(
 /// Bring up the 5-voter cluster plus the non-voter member F, with an event
 /// recorder. Returns `(net, systems, F-system, recorder)`; `systems` is indexed to
 /// align with `VOTERS`.
-fn storm_cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, SimCluster, Recorder) {
+fn storm_cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, SimNode, Recorder) {
     let recorder = Recorder::new();
     let net = SimNetwork::new(sim)
         .with_leader(swim(), raft(), DowningPolicy::Conservative)
         .with_events(Arc::new(recorder.clone()));
-    let systems: Vec<SimCluster> = VOTERS.iter().map(|&n| net.join(n)).collect();
+    let systems: Vec<SimNode> = VOTERS.iter().map(|&n| net.join(n)).collect();
     sim.run_for(Duration::from_secs(3)); // elect the first leader
     let f = net.join_seeded(F, &[A]); // a non-voter member, admitted through the log
     sim.run_for(Duration::from_secs(3)); // gossip F in and commit its admission
@@ -105,7 +107,7 @@ fn storm_cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, SimCluster, 
 /// The leader the up majority currently agrees on, read from a node that is not
 /// presently isolated. After a full heal+reconverge every node agrees, so any
 /// reachable voter is a valid vantage point.
-fn agreed_leader(systems: &[SimCluster]) -> Option<NodeId> {
+fn agreed_leader(systems: &[SimNode]) -> Option<NodeId> {
     let mut votes: BTreeMap<NodeId, usize> = BTreeMap::new();
     for s in systems {
         if let Some(l) = s.leader() {
@@ -125,128 +127,133 @@ fn rolling_partitions_never_fork_the_committed_membership_log() {
     // every member: identical commit indices mean identical committed logs. A stale
     // leader that committed on a minority side, or a lost/duplicated entry, would
     // surface as two voters disagreeing on a member's stamp here.
-    for seed in 0..8 {
-        let sim = Simulation::new(seed);
-        let (net, systems, f, recorder) = storm_cluster(&sim);
+    scenario_sweep(
+        "leader-storm/rolling-partitions",
+        sweep_seeds(0..8),
+        |seed| {
+            let sim = Simulation::new(seed);
+            let (net, systems, f, recorder) = storm_cluster(&sim);
 
-        let mut committed_proposals = 0usize;
-        const ROUNDS: usize = 6;
-        for round in 0..ROUNDS {
-            let leader = match agreed_leader(&systems) {
-                Some(l) => l,
-                None => {
-                    // Mid-flux: let it settle and retry this round.
-                    sim.run_for(Duration::from_secs(2));
-                    continue;
+            let mut committed_proposals = 0usize;
+            const ROUNDS: usize = 6;
+            for round in 0..ROUNDS {
+                let leader = match agreed_leader(&systems) {
+                    Some(l) => l,
+                    None => {
+                        // Mid-flux: let it settle and retry this round.
+                        sim.run_for(Duration::from_secs(2));
+                        continue;
+                    }
+                };
+                let majority: Vec<NodeId> =
+                    VOTERS.iter().copied().filter(|&n| n != leader).collect();
+
+                // Isolate the leader; the majority's Raft election timeout fires and a
+                // new leader is elected at a higher term.
+                net.partition(&[leader], &majority);
+                sim.run_for(Duration::from_secs(3));
+
+                // Commit a membership change from a majority node (it forwards to the
+                // new leader). Alternate drain/resume so F's committed history grows.
+                let proposer = systems
+                    .iter()
+                    .find(|s| s.node() != leader)
+                    .expect("a majority node exists")
+                    .clone();
+                let ok = drive(&sim, Duration::from_secs(6), async move {
+                    if round % 2 == 0 {
+                        proposer.drain(F).await
+                    } else {
+                        proposer.resume(F).await
+                    }
+                });
+                if ok {
+                    committed_proposals += 1;
                 }
-            };
-            let majority: Vec<NodeId> = VOTERS.iter().copied().filter(|&n| n != leader).collect();
 
-            // Isolate the leader; the majority's Raft election timeout fires and a
-            // new leader is elected at a higher term.
-            net.partition(&[leader], &majority);
-            sim.run_for(Duration::from_secs(3));
-
-            // Commit a membership change from a majority node (it forwards to the
-            // new leader). Alternate drain/resume so F's committed history grows.
-            let proposer = systems
-                .iter()
-                .find(|s| s.node() != leader)
-                .expect("a majority node exists")
-                .clone();
-            let ok = drive(&sim, Duration::from_secs(6), async move {
-                if round % 2 == 0 {
-                    proposer.drain(F).await
-                } else {
-                    proposer.resume(F).await
-                }
-            });
-            if ok {
-                committed_proposals += 1;
+                // Heal: the isolated old leader learns the higher term and steps down.
+                net.heal();
+                sim.run_for(Duration::from_secs(4));
             }
 
-            // Heal: the isolated old leader learns the higher term and steps down.
+            // Full reconvergence after the storm.
             net.heal();
-            sim.run_for(Duration::from_secs(4));
-        }
+            sim.run_for(Duration::from_secs(8));
 
-        // Full reconvergence after the storm.
-        net.heal();
-        sim.run_for(Duration::from_secs(8));
-
-        // (#22 / State Machine Safety) Every voter agrees on every *other* member's
-        // (status, stamp). The stamp is the commit index, so agreement here is
-        // log-matching: the committed logs never diverged. A node tracks its own
-        // status via `self_status()`, not the peer map (`status(self)` is `None`),
-        // so the self-entry is checked separately below — comparing it here would
-        // flag a measurement artifact, not a fork.
-        let members = [A, B, C, D, E, F];
-        for &m in &members {
-            let views: Vec<(NodeId, Option<MemberStatus>, Option<u64>)> = systems
-                .iter()
-                .filter(|s| s.node() != m)
-                .map(|s| (s.node(), s.membership().status(m), s.membership().stamp(m)))
-                .collect();
-            let first = (views[0].1, views[0].2);
-            assert!(
-                views.iter().all(|v| (v.1, v.2) == first),
-                "seed {seed}: voters disagree on member {m:?} — committed log forked \
+            // (#22 / State Machine Safety) Every voter agrees on every *other* member's
+            // (status, stamp). The stamp is the commit index, so agreement here is
+            // log-matching: the committed logs never diverged. A node tracks its own
+            // status via `self_status()`, not the peer map (`status(self)` is `None`),
+            // so the self-entry is checked separately below — comparing it here would
+            // flag a measurement artifact, not a fork.
+            let members = [A, B, C, D, E, F];
+            for &m in &members {
+                let views: Vec<(NodeId, Option<MemberStatus>, Option<u64>)> = systems
+                    .iter()
+                    .filter(|s| s.node() != m)
+                    .map(|s| (s.node(), s.membership().status(m), s.membership().stamp(m)))
+                    .collect();
+                let first = (views[0].1, views[0].2);
+                assert!(
+                    views.iter().all(|v| (v.1, v.2) == first),
+                    "seed {seed}: voters disagree on member {m:?} — committed log forked \
                  (#22). views = {views:?}",
-            );
-            // The member's own self-view must match its peers' committed view of it
-            // (#14 convergence) — a node never disagrees with the cluster about its
-            // own committed status.
-            if let Some(self_sys) = systems.iter().find(|s| s.node() == m) {
-                assert_eq!(
-                    Some(self_sys.membership().self_status()),
-                    first.0,
-                    "seed {seed}: {m:?}'s self-view diverges from the committed cluster view (#14)",
+                );
+                // The member's own self-view must match its peers' committed view of it
+                // (#14 convergence) — a node never disagrees with the cluster about its
+                // own committed status.
+                if let Some(self_sys) = systems.iter().find(|s| s.node() == m) {
+                    assert_eq!(
+                        Some(self_sys.membership().self_status()),
+                        first.0,
+                        "seed {seed}: {m:?}'s self-view diverges from the committed cluster view (#14)",
+                    );
+                }
+            }
+
+            // (#15 / #16) No node was ever downed — a partition alone evicts nobody
+            // under the conservative policy, and there were no crashes.
+            for &m in &members {
+                assert!(
+                    !systems[0].membership().is_down(m),
+                    "seed {seed}: member {m:?} was downed by a mere partition (#16)",
                 );
             }
-        }
 
-        // (#15 / #16) No node was ever downed — a partition alone evicts nobody
-        // under the conservative policy, and there were no crashes.
-        for &m in &members {
-            assert!(
-                !systems[0].membership().is_down(m),
-                "seed {seed}: member {m:?} was downed by a mere partition (#16)",
-            );
-        }
-
-        // Teeth: the storm must have genuinely churned leadership AND committed
-        // entries through that churn — otherwise the agreement check above compared
-        // a static, never-contested log and proved nothing. Confirm from the §16
-        // stream that several terms elected leaders and that leadership actually
-        // moved between distinct nodes (a real, repeated split-brain).
-        let mut distinct_leaders: BTreeSet<NodeId> = BTreeSet::new();
-        let mut elected_terms: BTreeSet<u64> = BTreeSet::new();
-        for event in recorder.events() {
-            if let Event::LeaderElected { node, term, .. } = event {
-                distinct_leaders.insert(node);
-                elected_terms.insert(term);
+            // Teeth: the storm must have genuinely churned leadership AND committed
+            // entries through that churn — otherwise the agreement check above compared
+            // a static, never-contested log and proved nothing. Confirm from the §16
+            // stream that several terms elected leaders and that leadership actually
+            // moved between distinct nodes (a real, repeated split-brain).
+            let mut distinct_leaders: BTreeSet<NodeId> = BTreeSet::new();
+            let mut elected_terms: BTreeSet<u64> = BTreeSet::new();
+            for event in recorder.events() {
+                if let Event::LeaderElected { node, term, .. } = event {
+                    distinct_leaders.insert(node);
+                    elected_terms.insert(term);
+                }
             }
-        }
-        assert!(
-            committed_proposals > 0,
-            "seed {seed}: no membership change committed — the storm proved nothing",
-        );
-        assert!(
-            distinct_leaders.len() >= 2 && elected_terms.len() >= 3,
-            "seed {seed}: weak storm (leaders={distinct_leaders:?}, terms={}) — the log was \
+            assert!(
+                committed_proposals > 0,
+                "seed {seed}: no membership change committed — the storm proved nothing",
+            );
+            assert!(
+                distinct_leaders.len() >= 2 && elected_terms.len() >= 3,
+                "seed {seed}: weak storm (leaders={distinct_leaders:?}, terms={}) — the log was \
              never genuinely contested, so non-divergence is not meaningfully tested",
-            elected_terms.len(),
-        );
+                elected_terms.len(),
+            );
 
-        // (#14) The non-voter F converged on the same view by gossip, matching the
-        // voters' log-replicated truth.
-        let f_status_per_voter = systems[0].membership().status(F);
-        assert_eq!(
-            Some(f.membership().self_status()),
-            f_status_per_voter,
-            "seed {seed}: the non-voter F did not converge on the committed view (#14)",
-        );
-    }
+            // (#14) The non-voter F converged on the same view by gossip, matching the
+            // voters' log-replicated truth.
+            let f_status_per_voter = systems[0].membership().status(F);
+            assert_eq!(
+                Some(f.membership().self_status()),
+                f_status_per_voter,
+                "seed {seed}: the non-voter F did not converge on the committed view (#14)",
+            );
+        },
+    );
 }
 
 #[test]
@@ -256,7 +263,7 @@ fn one_leader_per_term_survives_an_election_storm() {
     // a new term every round; over the whole §16 `LeaderElected` stream, no term in
     // any group may ever name two different leaders. Teeth: assert the term actually
     // advanced well past the start, so this is not a vacuous single-election pass.
-    for seed in 0..8 {
+    scenario_sweep("leader-storm/election-storm", sweep_seeds(0..8), |seed| {
         let sim = Simulation::new(seed);
         let (net, systems, _f, recorder) = storm_cluster(&sim);
 
@@ -303,7 +310,7 @@ fn one_leader_per_term_survives_an_election_storm() {
              force at least {ROUNDS}",
             terms_seen.len(),
         );
-    }
+    });
 }
 
 #[test]

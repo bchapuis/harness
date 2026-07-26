@@ -31,7 +31,7 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimRegistry;
 use actor_simulation::Simulation;
@@ -85,7 +85,7 @@ fn drive<T: Send + 'static>(
 struct Echo;
 
 impl Actor for Echo {
-    type System = SimCluster;
+    type System = SimNode;
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Ping>();
     }

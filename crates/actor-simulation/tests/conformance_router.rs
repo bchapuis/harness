@@ -25,7 +25,7 @@ use actor_core::Clock;
 use actor_core::Key;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimRegistry;
 use actor_simulation::Simulation;
@@ -33,8 +33,8 @@ use support::Greet;
 use support::Greeter;
 use support::Stop;
 
-const GREETERS: Key<Greeter<SimCluster>> = Key::new("greeters");
-const ABSENT: Key<Greeter<SimCluster>> = Key::new("absent");
+const GREETERS: Key<Greeter<SimNode>> = Key::new("greeters");
+const ABSENT: Key<Greeter<SimNode>> = Key::new("absent");
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -84,7 +84,7 @@ fn round_robin_cycles_the_listing_in_order() {
     let node = net.join(A);
     let replies = sim.block_on(async move {
         for name in ["one", "two", "three"] {
-            let greeter = node.spawn(Greeter::<SimCluster>::new(name));
+            let greeter = node.spawn(Greeter::<SimNode>::new(name));
             node.receptionist().register(GREETERS, &greeter);
         }
         let router = Router::new(&node, GREETERS, RouteStrategy::RoundRobin);
@@ -114,7 +114,7 @@ fn random_routing_is_seed_reproducible() {
         let node = net.join(A);
         sim.block_on(async move {
             for name in ["one", "two", "three"] {
-                let greeter = node.spawn(Greeter::<SimCluster>::new(name));
+                let greeter = node.spawn(Greeter::<SimNode>::new(name));
                 node.receptionist().register(GREETERS, &greeter);
             }
             let router = Router::new(&node, GREETERS, RouteStrategy::Random);
@@ -137,7 +137,7 @@ fn hashed_routing_agrees_across_nodes() {
     let node_b = net.join(B);
     let node_c = net.join(C);
     for (node, name) in [(&node_a, "a"), (&node_b, "b"), (&node_c, "c")] {
-        let greeter = node.spawn(Greeter::<SimCluster>::new(name));
+        let greeter = node.spawn(Greeter::<SimNode>::new(name));
         node.receptionist().register(GREETERS, &greeter);
     }
     sim.run_for(Duration::from_secs(2)); // registrations replicate everywhere
@@ -163,7 +163,7 @@ fn removing_an_unrelated_routee_leaves_other_keys_mapping_unchanged() {
     sim.block_on(async move {
         let mut refs = Vec::new();
         for name in ["one", "two", "three", "four"] {
-            let greeter = node.spawn(Greeter::<SimCluster>::new(name));
+            let greeter = node.spawn(Greeter::<SimNode>::new(name));
             node.receptionist().register(GREETERS, &greeter);
             refs.push(greeter);
         }
@@ -231,7 +231,7 @@ fn a_drained_routee_is_routed_around_until_resumed() {
     let node_a = net.join(A);
     let node_b = net.join(B);
     for (node, name) in [(&node_a, "a"), (&node_b, "b")] {
-        let greeter = node.spawn(Greeter::<SimCluster>::new(name));
+        let greeter = node.spawn(Greeter::<SimNode>::new(name));
         node.receptionist().register(GREETERS, &greeter);
     }
     sim.run_for(Duration::from_secs(1));
@@ -266,7 +266,7 @@ fn remote_routees_are_callable_through_the_router() {
     let (sim, net) = support::cluster(41, Some(brisk_swim()));
     let node_a = net.join(A);
     let node_b = net.join(B);
-    let greeter = node_b.spawn(Greeter::<SimCluster>::new("Remote"));
+    let greeter = node_b.spawn(Greeter::<SimNode>::new("Remote"));
     node_b.receptionist().register(GREETERS, &greeter);
     sim.run_for(Duration::from_secs(1)); // registration reaches A
 

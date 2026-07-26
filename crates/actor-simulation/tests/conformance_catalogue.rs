@@ -12,13 +12,13 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use actor_simulation::Verify;
-use actor_simulation::catalogue;
+use actor_simulation::core_catalogue;
 use actor_simulation::default_invariants;
 use actor_simulation::utilities_catalogue;
 
 #[test]
 fn every_invariant_1_through_22_is_present_exactly_once() {
-    let mut numbers: Vec<u8> = catalogue().iter().map(|e| e.invariant).collect();
+    let mut numbers: Vec<u8> = core_catalogue().iter().map(|e| e.invariant).collect();
     numbers.sort_unstable();
     assert_eq!(
         numbers,
@@ -29,7 +29,7 @@ fn every_invariant_1_through_22_is_present_exactly_once() {
 
 #[test]
 fn every_entry_has_spec_property_and_a_verification_method() {
-    for e in catalogue() {
+    for e in core_catalogue() {
         assert!(
             !e.verify.is_empty(),
             "invariant #{} has no verification method",
@@ -69,7 +69,7 @@ fn every_utilities_invariant_is_present_exactly_once_and_described() {
 /// Checker names the catalogues (core and utilities) claim are continuously
 /// checked.
 fn catalogue_checker_names() -> BTreeSet<&'static str> {
-    catalogue()
+    core_catalogue()
         .iter()
         .chain(utilities_catalogue())
         .flat_map(|e| e.verify.iter())
@@ -120,7 +120,7 @@ fn every_file_pointer_references_a_real_file() {
         .parent()
         .expect("crate dir has a parent");
 
-    for e in catalogue().iter().chain(utilities_catalogue()) {
+    for e in core_catalogue().iter().chain(utilities_catalogue()) {
         for v in e.verify {
             match v {
                 Verify::SimTest(files) | Verify::Differential(files) => {
@@ -151,7 +151,7 @@ fn every_file_pointer_references_a_real_file() {
 
 #[test]
 fn invariant_20_is_verified_by_a_compile_fail_test() {
-    let twenty = catalogue()
+    let twenty = core_catalogue()
         .iter()
         .find(|e| e.invariant == 20)
         .expect("invariant #20 must be catalogued");

@@ -35,7 +35,7 @@ use actor_core::Spawner;
 use actor_core::Terminated;
 use actor_core::TerminationReason;
 use actor_simulation::Recorder;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use serde::Deserialize;
@@ -90,7 +90,7 @@ fn drive<T: Send + 'static>(
 }
 
 /// The elected leader's system, per the (converged) cluster's own view.
-fn elected_leader<'a>(nodes: &'a [&SimCluster]) -> &'a SimCluster {
+fn elected_leader<'a>(nodes: &'a [&SimNode]) -> &'a SimNode {
     let leader = nodes[0].leader().expect("a leader must be elected");
     for node in nodes {
         assert_eq!(
@@ -110,7 +110,7 @@ fn elected_leader<'a>(nodes: &'a [&SimCluster]) -> &'a SimCluster {
 struct Echo;
 
 impl Actor for Echo {
-    type System = SimCluster;
+    type System = SimNode;
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Ping>();
     }
@@ -136,7 +136,7 @@ struct Watcher {
     got: Reasons,
 }
 impl Actor for Watcher {
-    type System = SimCluster;
+    type System = SimNode;
     async fn started(&mut self, ctx: &Ctx<Self>) -> Result<(), BoxError> {
         ctx.watch(&self.target);
         Ok(())
@@ -282,7 +282,7 @@ fn the_cluster_elects_a_new_leader_when_the_leader_crashes() {
 
     // Commit a drain of D... no D here: drain one of the survivors? Drain must
     // target a member; pick a survivor and verify the state outlives failover.
-    let survivor: Vec<&&SimCluster> = nodes.iter().filter(|n| n.node() != old_leader).collect();
+    let survivor: Vec<&&SimNode> = nodes.iter().filter(|n| n.node() != old_leader).collect();
     let (first, second) = (survivor[0], survivor[1]);
     let target = second.node();
     let proposer = (*first).clone();
@@ -381,7 +381,7 @@ fn a_minority_partition_can_never_evict_the_majority() {
         .find(|n| n.node() == old_leader)
         .unwrap()
         .to_owned();
-    let majority: Vec<&&SimCluster> = nodes.iter().filter(|n| n.node() != old_leader).collect();
+    let majority: Vec<&&SimNode> = nodes.iter().filter(|n| n.node() != old_leader).collect();
 
     net.partition(&[old_leader], &[majority[0].node(), majority[1].node()]);
     sim.run_for(Duration::from_secs(10)); // far past the downing timeout

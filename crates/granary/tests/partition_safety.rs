@@ -41,10 +41,12 @@ use actor_simulation::Counter;
 use actor_simulation::CounterOp;
 use actor_simulation::CounterRet;
 use actor_simulation::History;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use actor_simulation::check_linearizable;
+use actor_simulation::scenario_sweep;
+use actor_simulation::sweep_seeds;
 use granary::Grain;
 use granary::GrainCtx;
 use granary::GrainError;
@@ -75,7 +77,7 @@ enum Ledger {
 }
 
 impl Grain for Account {
-    type System = SimCluster;
+    type System = SimNode;
     type State = Balance;
     type Event = Ledger;
     type Facets = ();
@@ -186,7 +188,7 @@ fn drive<T: Send + 'static>(
         .expect("future did not complete")
 }
 
-fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<Account>>) {
+fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, Vec<Granary<Account>>) {
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // control-plane leader
@@ -201,7 +203,7 @@ fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<Accoun
 /// The index of the node currently leading `key`'s shard, and the indices of the
 /// two survivors (the majority quorum once the leader is partitioned away).
 fn leader_and_majority(
-    systems: &[SimCluster],
+    systems: &[SimNode],
     granaries: &[Granary<Account>],
     key: &str,
 ) -> (usize, Vec<usize>) {
@@ -232,7 +234,7 @@ fn split_brain_partition_neither_forks_nor_loses() {
     // A fork would surface the minority deposit in the reconciled total; a lost
     // write would drop the majority deposit. Either falsifies CP. Swept across
     // seeds so every node takes a turn as the partitioned leader.
-    for seed in 0..12 {
+    scenario_sweep("partition-safety/split-brain", sweep_seeds(0..12), |seed| {
         let sim = Simulation::new(seed);
         let (net, systems, granaries) = cluster(&sim);
         let key = "account/spine";
@@ -308,7 +310,7 @@ fn split_brain_partition_neither_forks_nor_loses() {
                  no fork (the 9000 minority write left no trace) and no loss (the 30 survived)",
             );
         }
-    }
+    });
 }
 
 // --- §7.5: the minority leader's read/write asymmetry, pinned ------------------
@@ -573,7 +575,7 @@ enum CounterEvent {
 }
 
 impl Grain for CounterGrain {
-    type System = SimCluster;
+    type System = SimNode;
     type State = CounterState;
     type Event = CounterEvent;
     type Facets = ();
@@ -627,7 +629,7 @@ impl GrainHandler<ReadCount> for CounterGrain {
     }
 }
 
-fn counter_cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<CounterGrain>>) {
+fn counter_cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, Vec<Granary<CounterGrain>>) {
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2));
@@ -653,27 +655,62 @@ fn counter_grain_is_linearizable_across_a_partition_and_heal() {
     // client here writes only.) A fenced write returns an error -> recorded `info`
     // (pending), which the checker may place or drop, so it is sound. The majority
     // client reads and writes against the live leader.
-    for seed in 0..16 {
-        let sim = Simulation::new(seed);
-        let (net, systems, granaries) = counter_cluster(&sim);
-        let key = "counter/0";
-        let leader = granaries[0]
-            .leader(key)
-            .expect("the shard elected a leader");
-        let leader_idx = systems.iter().position(|s| s.node() == leader).unwrap();
-        let majority: Vec<usize> = (0..systems.len()).filter(|&i| i != leader_idx).collect();
+    scenario_sweep(
+        "partition-safety/counter-heal",
+        sweep_seeds(0..16),
+        |seed| {
+            let sim = Simulation::new(seed);
+            let (net, systems, granaries) = counter_cluster(&sim);
+            let key = "counter/0";
+            let leader = granaries[0]
+                .leader(key)
+                .expect("the shard elected a leader");
+            let leader_idx = systems.iter().position(|s| s.node() == leader).unwrap();
+            let majority: Vec<usize> = (0..systems.len()).filter(|&i| i != leader_idx).collect();
 
-        let history: History<Counter> = History::new();
+            let history: History<Counter> = History::new();
 
-        // Majority client: mixed reads and writes against the live (new) leader.
-        {
-            let granary = granaries[majority[0]].clone();
-            let history = history.clone();
-            let entropy = systems[0].entropy().clone();
-            sim.spawner().launch(Box::pin(async move {
-                let counter = granary.grain(key);
-                for _ in 0..8 {
-                    if entropy.next_u64() % 2 == 0 {
+            // Majority client: mixed reads and writes against the live (new) leader.
+            {
+                let granary = granaries[majority[0]].clone();
+                let history = history.clone();
+                let entropy = systems[0].entropy().clone();
+                sim.spawner().launch(Box::pin(async move {
+                    let counter = granary.grain(key);
+                    for _ in 0..8 {
+                        if entropy.next_u64() % 2 == 0 {
+                            let delta = 1 + (entropy.next_u64() % 3) as i64;
+                            let id = history.invoke(CounterOp::Add(delta));
+                            match counter
+                                .ask_timeout(Add(delta), Duration::from_secs(11))
+                                .await
+                            {
+                                Ok(_) => history.ok(id, CounterRet::AddOk),
+                                Err(_) => history.info(id),
+                            }
+                        } else {
+                            let id = history.invoke(CounterOp::Read);
+                            match counter
+                                .ask_timeout(ReadCount, Duration::from_secs(11))
+                                .await
+                            {
+                                Ok(value) => history.ok(id, CounterRet::Read(value)),
+                                Err(_) => history.info(id),
+                            }
+                        }
+                    }
+                }));
+            }
+
+            // Minority client: writes only, against the soon-to-be-deposed leader. Every
+            // such write must fail to commit; none may take effect.
+            {
+                let granary = granaries[leader_idx].clone();
+                let history = history.clone();
+                let entropy = systems[0].entropy().clone();
+                sim.spawner().launch(Box::pin(async move {
+                    let counter = granary.grain(key);
+                    for _ in 0..8 {
                         let delta = 1 + (entropy.next_u64() % 3) as i64;
                         let id = history.invoke(CounterOp::Add(delta));
                         match counter
@@ -683,60 +720,29 @@ fn counter_grain_is_linearizable_across_a_partition_and_heal() {
                             Ok(_) => history.ok(id, CounterRet::AddOk),
                             Err(_) => history.info(id),
                         }
-                    } else {
-                        let id = history.invoke(CounterOp::Read);
-                        match counter
-                            .ask_timeout(ReadCount, Duration::from_secs(11))
-                            .await
-                        {
-                            Ok(value) => history.ok(id, CounterRet::Read(value)),
-                            Err(_) => history.info(id),
-                        }
                     }
-                }
-            }));
-        }
+                }));
+            }
 
-        // Minority client: writes only, against the soon-to-be-deposed leader. Every
-        // such write must fail to commit; none may take effect.
-        {
-            let granary = granaries[leader_idx].clone();
-            let history = history.clone();
-            let entropy = systems[0].entropy().clone();
+            // Partition the leader away partway through, then heal before quiescence.
+            let net_p = net.clone();
+            let l_node = leader;
+            let majority_nodes: Vec<NodeId> = majority.iter().map(|&i| systems[i].node()).collect();
+            let clock = systems[0].clock().clone();
             sim.spawner().launch(Box::pin(async move {
-                let counter = granary.grain(key);
-                for _ in 0..8 {
-                    let delta = 1 + (entropy.next_u64() % 3) as i64;
-                    let id = history.invoke(CounterOp::Add(delta));
-                    match counter
-                        .ask_timeout(Add(delta), Duration::from_secs(11))
-                        .await
-                    {
-                        Ok(_) => history.ok(id, CounterRet::AddOk),
-                        Err(_) => history.info(id),
-                    }
-                }
+                clock.sleep(Duration::from_millis(400)).await;
+                net_p.partition(&[l_node], &majority_nodes);
+                clock.sleep(Duration::from_secs(8)).await;
+                net_p.heal();
             }));
-        }
 
-        // Partition the leader away partway through, then heal before quiescence.
-        let net_p = net.clone();
-        let l_node = leader;
-        let majority_nodes: Vec<NodeId> = majority.iter().map(|&i| systems[i].node()).collect();
-        let clock = systems[0].clock().clone();
-        sim.spawner().launch(Box::pin(async move {
-            clock.sleep(Duration::from_millis(400)).await;
-            net_p.partition(&[l_node], &majority_nodes);
-            clock.sleep(Duration::from_secs(8)).await;
-            net_p.heal();
-        }));
+            sim.run_for(Duration::from_secs(40));
 
-        sim.run_for(Duration::from_secs(40));
-
-        let verdict = check_linearizable(&history);
-        assert!(
-            verdict.is_ok(),
-            "seed {seed}: counter history not linearizable across partition+heal: {verdict:?}",
-        );
-    }
+            let verdict = check_linearizable(&history);
+            assert!(
+                verdict.is_ok(),
+                "seed {seed}: counter history not linearizable across partition+heal: {verdict:?}",
+            );
+        },
+    );
 }

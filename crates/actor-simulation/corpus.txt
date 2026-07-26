@@ -1,0 +1,25 @@
+# The fixed-seed regression corpus (spec §18.6, docs/simulation-testing.md).
+#
+# Every seed that ever failed belongs here. Once listed, it replays on every
+# swarm run — local, CI, and soak alike — regardless of how wide that run's
+# sweep is. That is what makes the suite a ratchet: a bug found once can never
+# come back quietly, even in the edit loop where sweeps are only a few seeds.
+#
+# Format: one `<workload-name> <seed>` per line; `#` comments and blank lines
+# ignored. The name is the workload's `name()` — the same string the failure
+# reports, so a failure message names its own corpus key. A trailing comment
+# after the seed is free-form; record what broke and where it was fixed.
+#
+# To add a seed, take it straight from the failure:
+#
+#     workload 'singleton-chaos/leader' failed at seed 900006
+#     └─ becomes: singleton-chaos/leader 900006
+#
+# and replay it on its own with:
+#
+#     SWARM_SEED_BASE=900006 SWARM_SEEDS=1 cargo test -p <crate> --test <name>
+#
+# Corpus seeds are absolute: SWARM_SEED_BASE shifts a sweep, never these.
+
+# --- entries below this line ---
+singleton-chaos/leader 900006  # split-brain singleton after heal

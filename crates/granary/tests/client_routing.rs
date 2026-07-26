@@ -16,7 +16,7 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use granary::Grain;
@@ -50,7 +50,7 @@ enum CounterEvent {
 }
 
 impl Grain for Counter {
-    type System = SimCluster;
+    type System = SimNode;
     type State = CounterState;
     type Event = CounterEvent;
     type Facets = ();
@@ -162,7 +162,7 @@ fn a_non_hosting_client_routes_to_a_cluster_grain() {
 
     // The client: wired into everyone's membership view by `join`, but NOT in the
     // Raft voter roster {A,B,C} and never a host (it never calls `granary`).
-    let client: SimCluster = net.join(CLIENT);
+    let client: SimNode = net.join(CLIENT);
 
     // Poll until the hosts' gateway has gossiped into the client's receptionist —
     // exactly as a node waits for its peers before serving.

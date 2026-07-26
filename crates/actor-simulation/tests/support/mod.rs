@@ -1,7 +1,7 @@
 //! Shared test support for the spec-conformance suite.
 //!
 //! Defines reusable actors and messages that work on *both* the single-node
-//! `SimSystem` and the multi-node `SimCluster` (the actors are generic over the
+//! `SimSystem` and the multi-node `SimNode` (the actors are generic over the
 //! system type — generic actors are allowed by the spec, §1.2), plus builders
 //! for the common system topologies. Each conformance test file pulls this in
 //! with `mod support;`.
@@ -17,6 +17,8 @@ use actor_cluster::DowningPolicy;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorSystem;
+use actor_core::Entropy;
+use actor_core::BoxFuture;
 use actor_core::Clock;
 use actor_core::Ctx;
 use actor_core::Handler;
@@ -26,7 +28,11 @@ use actor_core::LocalSystemBuilder;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::TerminationReason;
+use actor_simulation::History;
 use actor_simulation::Recorder;
+use actor_simulation::Register;
+use actor_simulation::RegisterOp;
+use actor_simulation::RegisterRet;
 use actor_simulation::SimClock;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimSystem;
@@ -249,3 +255,134 @@ pub fn cluster(seed: u64, swim: Option<SwimConfig>) -> (Simulation, SimNetwork) 
     }
     (sim, net)
 }
+
+// --- Linearizability: the shared register object (spec §18.4) ----------------
+//
+// Shared by `conformance_linearizability.rs` (single-node scenarios) and
+// `conformance_linearizability_swarm.rs` (the cluster sweep), so both decide a
+// history against the *same* object rather than two copies that can drift.
+// --- The register actor -------------------------------------------------------
+
+// A system-generic register so the same actor runs on `SimSystem` and
+// `SimNode` (generic actors are allowed by the spec, §1.2).
+
+pub struct RegisterActorIn<S> {
+    value: i64,
+    _s: PhantomData<fn() -> S>,
+}
+
+impl<S> RegisterActorIn<S> {
+    pub fn new() -> Self {
+        RegisterActorIn {
+            value: 0,
+            _s: PhantomData,
+        }
+    }
+}
+
+impl<S: ActorSystem> Actor for RegisterActorIn<S> {
+    type System = S;
+
+    fn register(r: &mut HandlerRegistry<Self>) {
+        r.accept::<Read>();
+        r.accept::<Write>();
+        r.accept::<Cas>();
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Read;
+impl Message for Read {
+    type Reply = i64;
+    const MANIFEST: Manifest = Manifest::new("lin.Read");
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Write(pub i64);
+impl Message for Write {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("lin.Write");
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Cas(pub i64, pub i64);
+impl Message for Cas {
+    type Reply = bool;
+    const MANIFEST: Manifest = Manifest::new("lin.Cas");
+}
+
+impl<S: ActorSystem> Handler<Read> for RegisterActorIn<S> {
+    async fn handle(&mut self, _msg: Read, _ctx: &Ctx<Self>) -> i64 {
+        self.value
+    }
+}
+
+impl<S: ActorSystem> Handler<Write> for RegisterActorIn<S> {
+    async fn handle(&mut self, msg: Write, _ctx: &Ctx<Self>) {
+        self.value = msg.0;
+    }
+}
+
+impl<S: ActorSystem> Handler<Cas> for RegisterActorIn<S> {
+    async fn handle(&mut self, msg: Cas, _ctx: &Ctx<Self>) -> bool {
+        if self.value == msg.0 {
+            self.value = msg.1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+// --- A client process: picks ops from the seeded stream and records them ------
+
+/// One client's traffic: `ops` operations against the shared register, each
+/// recorded into the shared history. Values are drawn from a small domain so
+/// reads, writes, and CASes actually interact (CASes sometimes match).
+pub async fn client<R>(
+    reg: R,
+    history: History<Register>,
+    entropy: actor_simulation::SimEntropy,
+    ops: u64,
+) where
+    R: RegisterRef,
+{
+    for _ in 0..ops {
+        match entropy.next_u64() % 3 {
+            0 => {
+                let id = history.invoke(RegisterOp::Read);
+                match reg.read().await {
+                    Ok(v) => history.ok(id, RegisterRet::Read(v)),
+                    Err(()) => history.info(id),
+                }
+            }
+            1 => {
+                let v = (entropy.next_u64() % 4) as i64;
+                let id = history.invoke(RegisterOp::Write(v));
+                match reg.write(v).await {
+                    Ok(()) => history.ok(id, RegisterRet::WriteOk),
+                    Err(()) => history.info(id),
+                }
+            }
+            _ => {
+                let old = (entropy.next_u64() % 4) as i64;
+                let new = (entropy.next_u64() % 4) as i64;
+                let id = history.invoke(RegisterOp::Cas(old, new));
+                match reg.cas(old, new).await {
+                    Ok(b) => history.ok(id, RegisterRet::Cas(b)),
+                    Err(()) => history.info(id),
+                }
+            }
+        }
+    }
+}
+
+/// A uniform calling surface over the register, so the same client code drives it
+/// both locally and across the network. `Err(())` means the outcome is unknown
+/// (any `CallError`) — recorded as a pending operation.
+pub trait RegisterRef: Clone {
+    fn read(&self) -> BoxFuture<'static, Result<i64, ()>>;
+    fn write(&self, v: i64) -> BoxFuture<'static, Result<(), ()>>;
+    fn cas(&self, old: i64, new: i64) -> BoxFuture<'static, Result<bool, ()>>;
+}
+

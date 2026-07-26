@@ -8,7 +8,7 @@
 //! races a leadership change is absorbed by the bounded redirect (§5.4), and a
 //! shard that loses its quorum pauses writes as `Unavailable` rather than forking
 //! (**G11**, CP). The harness mirrors `tests/raft_journal.rs`; the grain is the
-//! Appendix A `Account`, hosted on the clustered `SimCluster`.
+//! Appendix A `Account`, hosted on the clustered `SimNode`.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -27,10 +27,12 @@ use actor_simulation::Counter;
 use actor_simulation::CounterOp;
 use actor_simulation::CounterRet;
 use actor_simulation::History;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
 use actor_simulation::Simulation;
 use actor_simulation::check_linearizable;
+use actor_simulation::scenario_sweep;
+use actor_simulation::sweep_seeds;
 use granary::Grain;
 use granary::GrainCtx;
 use granary::GrainError;
@@ -68,7 +70,7 @@ enum Ledger {
 struct Overdraft;
 
 impl Grain for Account {
-    type System = SimCluster;
+    type System = SimNode;
     type State = Balance;
     type Event = Ledger;
     type Facets = ();
@@ -214,7 +216,7 @@ fn drive<T: Send + 'static>(
 /// Bring up a 3-node leader cluster and host `Account` on every node, so each
 /// creates the shards' Raft groups and registers its gateway (§5.3). Returns the
 /// network (for fault injection), the systems, and a `Granary` handle per node.
-fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<Account>>) {
+fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, Vec<Granary<Account>>) {
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
@@ -228,7 +230,7 @@ fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<Accoun
 
 /// The index of a node that does **not** lead `key`'s shard — a node that must
 /// route the call to the leader.
-fn non_leader_of(systems: &[SimCluster], granaries: &[Granary<Account>], key: &str) -> usize {
+fn non_leader_of(systems: &[SimNode], granaries: &[Granary<Account>], key: &str) -> usize {
     let leader = granaries[0]
         .leader(key)
         .expect("the shard elected a leader");
@@ -400,7 +402,7 @@ fn the_shard_map_is_consensus_agreed_across_nodes() {
 /// Promote `node` (already joined to `net`) into the control quorum via the
 /// current control leader, so it enters `cluster_voters()` and the allocator
 /// rebalances onto it. Returns once the change is committed.
-fn add_control_voter(sim: &Simulation, systems: &[SimCluster], node: NodeId) {
+fn add_control_voter(sim: &Simulation, systems: &[SimNode], node: NodeId) {
     let leader = systems
         .iter()
         .find(|s| s.leader() == Some(s.node()))
@@ -725,7 +727,7 @@ fn storage_distributes_and_non_replicas_still_route() {
         },
         DowningPolicy::Conservative,
     );
-    let systems: Vec<SimCluster> = [A, B, C, D, E].iter().map(|&n| net.join(n)).collect();
+    let systems: Vec<SimNode> = [A, B, C, D, E].iter().map(|&n| net.join(n)).collect();
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
 
     let cfg = GranaryConfig {
@@ -809,7 +811,7 @@ fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
     // then promote D and E — listing all five in RaftConfig would make them voters
     // already, so `add_voter` would be a no-op.
     let net = leader_net(&sim);
-    let systems: Vec<SimCluster> = [A, B, C, D, E].iter().map(|&n| net.join(n)).collect();
+    let systems: Vec<SimNode> = [A, B, C, D, E].iter().map(|&n| net.join(n)).collect();
     sim.run_for(Duration::from_secs(2));
     const SHARDS: usize = 8;
     let cfg = GranaryConfig {
@@ -956,7 +958,7 @@ enum CounterEvent {
 }
 
 impl Grain for CounterGrain {
-    type System = SimCluster;
+    type System = SimNode;
     type State = CounterState;
     type Event = CounterEvent;
     type Facets = ();
@@ -1012,7 +1014,7 @@ impl GrainHandler<ReadCount> for CounterGrain {
 }
 
 /// Bring up a 3-node leader cluster hosting `CounterGrain` on every node.
-fn counter_cluster(sim: &Simulation) -> (SimNetwork, Vec<SimCluster>, Vec<Granary<CounterGrain>>) {
+fn counter_cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, Vec<Granary<CounterGrain>>) {
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // control-plane leader
@@ -1040,68 +1042,72 @@ fn concurrent_counter_grain_is_linearizable_across_failover() {
     // a *stale* read from a client co-located with it (§7.5 offers only this
     // relaxed read; linearizable reads are a deferred extension). Reaching the
     // current leader — the survivors' path — is the guarantee this asserts.
-    for seed in 0..16 {
-        let sim = Simulation::new(seed);
-        let (net, systems, granaries) = counter_cluster(&sim);
-        let key = "counter/0";
-        let leader = granaries[0]
-            .leader(key)
-            .expect("the shard elected a leader");
-        let survivors: Vec<usize> = systems
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.node() != leader)
-            .map(|(i, _)| i)
-            .collect();
+    scenario_sweep(
+        "clustered-grains/counter-failover",
+        sweep_seeds(0..16),
+        |seed| {
+            let sim = Simulation::new(seed);
+            let (net, systems, granaries) = counter_cluster(&sim);
+            let key = "counter/0";
+            let leader = granaries[0]
+                .leader(key)
+                .expect("the shard elected a leader");
+            let survivors: Vec<usize> = systems
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.node() != leader)
+                .map(|(i, _)| i)
+                .collect();
 
-        let history: History<Counter> = History::new();
+            let history: History<Counter> = History::new();
 
-        // One client per survivor node; their calls route to the leader and, after
-        // the crash, fail over to the new leader.
-        for &idx in &survivors {
-            let granary = granaries[idx].clone();
-            let history = history.clone();
-            let entropy = systems[0].entropy().clone();
-            sim.spawner().launch(Box::pin(async move {
-                let counter = granary.grain(key);
-                for _ in 0..8 {
-                    if entropy.next_u64().is_multiple_of(2) {
-                        let delta = 1 + (entropy.next_u64() % 3) as i64;
-                        let id = history.invoke(CounterOp::Add(delta));
-                        match counter
-                            .ask_timeout(Add(delta), Duration::from_secs(8))
-                            .await
-                        {
-                            Ok(_) => history.ok(id, CounterRet::AddOk),
-                            Err(_) => history.info(id), // unknown outcome: pending
-                        }
-                    } else {
-                        let id = history.invoke(CounterOp::Read);
-                        match counter.ask_timeout(ReadCount, Duration::from_secs(8)).await {
-                            Ok(value) => history.ok(id, CounterRet::Read(value)),
-                            Err(_) => history.info(id),
+            // One client per survivor node; their calls route to the leader and, after
+            // the crash, fail over to the new leader.
+            for &idx in &survivors {
+                let granary = granaries[idx].clone();
+                let history = history.clone();
+                let entropy = systems[0].entropy().clone();
+                sim.spawner().launch(Box::pin(async move {
+                    let counter = granary.grain(key);
+                    for _ in 0..8 {
+                        if entropy.next_u64().is_multiple_of(2) {
+                            let delta = 1 + (entropy.next_u64() % 3) as i64;
+                            let id = history.invoke(CounterOp::Add(delta));
+                            match counter
+                                .ask_timeout(Add(delta), Duration::from_secs(8))
+                                .await
+                            {
+                                Ok(_) => history.ok(id, CounterRet::AddOk),
+                                Err(_) => history.info(id), // unknown outcome: pending
+                            }
+                        } else {
+                            let id = history.invoke(CounterOp::Read);
+                            match counter.ask_timeout(ReadCount, Duration::from_secs(8)).await {
+                                Ok(value) => history.ok(id, CounterRet::Read(value)),
+                                Err(_) => history.info(id),
+                            }
                         }
                     }
-                }
+                }));
+            }
+
+            // Crash the shard leader partway through the traffic, forcing in-flight
+            // calls to fail over to a new leader.
+            let crasher = net.clone();
+            sim.spawner().launch(Box::pin(async move {
+                systems[0].clock().sleep(Duration::from_millis(400)).await;
+                crasher.crash(leader);
             }));
-        }
 
-        // Crash the shard leader partway through the traffic, forcing in-flight
-        // calls to fail over to a new leader.
-        let crasher = net.clone();
-        sim.spawner().launch(Box::pin(async move {
-            systems[0].clock().sleep(Duration::from_millis(400)).await;
-            crasher.crash(leader);
-        }));
+            sim.run_for(Duration::from_secs(30));
 
-        sim.run_for(Duration::from_secs(30));
-
-        let verdict = check_linearizable(&history);
-        assert!(
-            verdict.is_ok(),
-            "seed {seed}: counter grain history not linearizable across failover: {verdict:?}",
-        );
-    }
+            let verdict = check_linearizable(&history);
+            assert!(
+                verdict.is_ok(),
+                "seed {seed}: counter grain history not linearizable across failover: {verdict:?}",
+            );
+        },
+    );
 }
 
 // --- Scaling claims: G7 (bounded groups), G8/G9 (control plane off data path) -
@@ -1225,7 +1231,7 @@ enum PairEvent {
 }
 
 impl Grain for Pair {
-    type System = SimCluster;
+    type System = SimNode;
     type State = PairState;
     type Event = PairEvent;
     type Facets = ();
@@ -1283,66 +1289,70 @@ impl GrainHandler<ReadPair> for Pair {
 
 #[test]
 fn a_multi_event_command_commits_atomically_across_failover() {
-    for seed in 0..12 {
-        let sim = Simulation::new(seed);
-        let net = leader_net(&sim);
-        let systems = [net.join(A), net.join(B), net.join(C)];
-        sim.run_for(Duration::from_secs(2));
-        let granaries: Vec<Granary<Pair>> = systems
-            .iter()
-            .map(|s| s.granary::<Pair>(config()))
-            .collect();
-        sim.run_for(Duration::from_secs(3));
+    scenario_sweep(
+        "clustered-grains/atomic-commit-failover",
+        sweep_seeds(0..12),
+        |seed| {
+            let sim = Simulation::new(seed);
+            let net = leader_net(&sim);
+            let systems = [net.join(A), net.join(B), net.join(C)];
+            sim.run_for(Duration::from_secs(2));
+            let granaries: Vec<Granary<Pair>> = systems
+                .iter()
+                .map(|s| s.granary::<Pair>(config()))
+                .collect();
+            sim.run_for(Duration::from_secs(3));
 
-        let key = "pair/0";
-        let leader = granaries[0]
-            .leader(key)
-            .expect("the shard elected a leader");
-        let survivors: Vec<usize> = systems
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.node() != leader)
-            .map(|(i, _)| i)
-            .collect();
+            let key = "pair/0";
+            let leader = granaries[0]
+                .leader(key)
+                .expect("the shard elected a leader");
+            let survivors: Vec<usize> = systems
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.node() != leader)
+                .map(|(i, _)| i)
+                .collect();
 
-        // Concurrent writers and readers on the survivor nodes; every read asserts
-        // the invariant a == b (a partial batch would break it).
-        let torn = Arc::new(Mutex::new(Vec::<(i64, i64)>::new()));
-        for &idx in &survivors {
-            let granary = granaries[idx].clone();
-            let torn = Arc::clone(&torn);
-            let entropy = systems[0].entropy().clone();
-            sim.spawner().launch(Box::pin(async move {
-                let pair = granary.grain(key);
-                for _ in 0..8 {
-                    if entropy.next_u64().is_multiple_of(2) {
-                        let _ = pair.ask_timeout(Bump, Duration::from_secs(8)).await;
-                    } else if let Ok((a, b)) =
-                        pair.ask_timeout(ReadPair, Duration::from_secs(8)).await
-                        && a != b
-                    {
-                        torn.lock().unwrap().push((a, b));
+            // Concurrent writers and readers on the survivor nodes; every read asserts
+            // the invariant a == b (a partial batch would break it).
+            let torn = Arc::new(Mutex::new(Vec::<(i64, i64)>::new()));
+            for &idx in &survivors {
+                let granary = granaries[idx].clone();
+                let torn = Arc::clone(&torn);
+                let entropy = systems[0].entropy().clone();
+                sim.spawner().launch(Box::pin(async move {
+                    let pair = granary.grain(key);
+                    for _ in 0..8 {
+                        if entropy.next_u64().is_multiple_of(2) {
+                            let _ = pair.ask_timeout(Bump, Duration::from_secs(8)).await;
+                        } else if let Ok((a, b)) =
+                            pair.ask_timeout(ReadPair, Duration::from_secs(8)).await
+                            && a != b
+                        {
+                            torn.lock().unwrap().push((a, b));
+                        }
                     }
-                }
+                }));
+            }
+
+            // Crash the shard leader partway through, forcing a failover mid-traffic.
+            let crasher = net.clone();
+            sim.spawner().launch(Box::pin(async move {
+                systems[0].clock().sleep(Duration::from_millis(400)).await;
+                crasher.crash(leader);
             }));
-        }
 
-        // Crash the shard leader partway through, forcing a failover mid-traffic.
-        let crasher = net.clone();
-        sim.spawner().launch(Box::pin(async move {
-            systems[0].clock().sleep(Duration::from_millis(400)).await;
-            crasher.crash(leader);
-        }));
+            sim.run_for(Duration::from_secs(30));
 
-        sim.run_for(Duration::from_secs(30));
-
-        let torn = torn.lock().unwrap();
-        assert!(
-            torn.is_empty(),
-            "seed {seed}: a read observed a partial multi-event command (a != b): {torn:?} — \
+            let torn = torn.lock().unwrap();
+            assert!(
+                torn.is_empty(),
+                "seed {seed}: a read observed a partial multi-event command (a != b): {torn:?} — \
              the batch did not commit/fold atomically (§7.3)",
-        );
-    }
+            );
+        },
+    );
 }
 
 #[test]

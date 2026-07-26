@@ -20,7 +20,7 @@ use actor_serialization::Codec;
 use actor_serialization::JsonCodec;
 use actor_serialization::decode;
 use actor_serialization::encode;
-use actor_simulation::SimCluster;
+use actor_simulation::SimNode;
 use actor_simulation::SimSystem;
 use support::Greet;
 use support::Greeter;
@@ -66,7 +66,7 @@ fn the_receive_loop_survives_hostile_frames() {
     let (sim, net) = support::cluster(2, None);
     let node_a = net.join(NodeId::new(1));
     let node_b = net.join(NodeId::new(2));
-    let greeter = node_a.spawn(Greeter::<SimCluster>::new("Hello"));
+    let greeter = node_a.spawn(Greeter::<SimNode>::new("Hello"));
     let id = greeter.id().clone();
 
     // Frames a well-behaved peer would never send, from a stranger node.
@@ -96,7 +96,7 @@ fn the_receive_loop_survives_hostile_frames() {
     // receive loop survived — spec §5.4).
     let reply = sim.block_on(async move {
         node_b
-            .resolve::<Greeter<SimCluster>>(id)
+            .resolve::<Greeter<SimNode>>(id)
             .ask(Greet {
                 name: "world".into(),
             })

@@ -12,6 +12,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+actor-simulation = { workspace = true, optional = true }
 actor-core.workspace = true
 actor-cluster.workspace = true
 actor-serialization.workspace = true
@@ -25,6 +26,8 @@ async-channel.workspace = true
 rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Its own `testing` module, for this crate's swarm suites.
+granary = { path = ".", features = ["testing"] }
 actor-simulation.workspace = true
 trybuild.workspace = true
 tempfile.workspace = true
@@ -33,3 +36,7 @@ tempfile.workspace = true
 # The SQL facet (spec §7.14): a private on-disk SQLite database per grain.
 # Off by default to keep the base crate free of the bundled C dependency.
 sql = ["dep:rusqlite"]
+# Shared simulation invariants over grain events, for swarm suites in this
+# crate and in crates layered on it (machine). Test support, so it stays out
+# of a production build.
+testing = ["dep:actor-simulation"]

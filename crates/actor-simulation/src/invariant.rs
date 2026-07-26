@@ -330,6 +330,12 @@ impl Invariant for OneLeaderPerTerm {
 /// [`default_invariants`]. (Not restart-safe: a `SimNetwork::restart` of a
 /// hosting node abandons its manager without a `SingletonStopped`, so singleton
 /// workloads use crash/partition nemeses, not restart.)
+///
+/// **Not** `granary::testing::ActivationSingletonPerNode`, despite the similar
+/// name: that one is the *grain* analogue (G6, keyed by `(node, GrainName)` off
+/// `GrainEvent::Activated`), a claim about granary's contract rather than the
+/// cluster-utilities singleton. Different layer, different event, different
+/// catalogue.
 #[derive(Default)]
 pub struct SingletonAtMostOnePerNode {
     live: BTreeMap<(&'static str, NodeId), ActorId>,

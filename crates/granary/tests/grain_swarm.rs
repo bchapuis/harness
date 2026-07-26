@@ -19,8 +19,8 @@
 //! The grain is the Appendix A `Account`, hosted on the leader-based clustered
 //! system the shard map requires (§7.6).
 
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+mod support;
+
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -28,28 +28,45 @@ use actor_cluster::SwimConfig;
 use actor_core::BoxFuture;
 use actor_core::Clock;
 use actor_core::Entropy;
-use actor_core::Event;
 use actor_core::Manifest;
 use actor_core::Message;
-use actor_core::NodeId;
+use actor_simulation::Counter;
+use actor_simulation::CounterOp;
+use actor_simulation::CounterRet;
+use actor_simulation::History;
+use actor_simulation::SimEntropy;
+use actor_simulation::SimSystem;
+use actor_simulation::Workload;
+use actor_simulation::check_linearizable;
+use actor_simulation::replay_swarm;
+use actor_simulation::run_swarm;
 use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
-use actor_simulation::SimCluster;
-use actor_simulation::check_cluster_reproducible;
+use actor_simulation::SimNode;
+use actor_simulation::coverage_seeds;
 use actor_simulation::default_invariants;
+use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_cluster_swarm_coverage;
+use actor_simulation::sweep_seeds;
 use granary::Grain;
 use granary::GrainCtx;
-use granary::GrainEvent;
 use granary::GrainHandler;
-use granary::GrainName;
 use granary::GranaryConfig;
+use granary::GrainRef;
 use granary::GranaryExt;
+use granary::Seq;
+use granary::testing::ActivationSingletonPerNode;
+use granary::testing::CommitMonotonic;
 use serde::Deserialize;
 use serde::Serialize;
+
+use support::Add;
+use support::CounterEvent;
+use support::CounterGrain;
+use support::ReadCount;
 
 // --- The Appendix A account grain (system-generic over the cluster) -----------
 
@@ -67,7 +84,7 @@ enum Ledger {
 }
 
 impl Grain for Account {
-    type System = SimCluster;
+    type System = SimNode;
     type State = Balance;
     type Event = Ledger;
     type Facets = ();
@@ -128,77 +145,6 @@ impl GrainHandler<ReadBalance> for Account {
 
 // --- A grain-specific continuous safety checker -------------------------------
 
-/// **Commit head is monotonic** (invariants **G3**, **G5**): a grain's committed
-/// seq strictly increases and never regresses. Sound across the cluster: only a
-/// shard leader commits (a quorum append, §7.2), a new leader inherits every
-/// committed entry (leader completeness, G14) and continues at a higher seq, and
-/// a minority "leader" never commits — so no `Committed` for a name ever names a
-/// seq at or below one already seen, even across failover.
-#[derive(Default)]
-struct CommitMonotonic {
-    last: BTreeMap<GrainName, u64>,
-}
-
-impl Invariant for CommitMonotonic {
-    fn name(&self) -> &'static str {
-        "grain-commit-monotonic"
-    }
-
-    fn observe(&mut self, event: &Event) -> Result<(), String> {
-        if let Some(GrainEvent::Committed { name, seq, .. }) = event.as_app::<GrainEvent>() {
-            let prev = self.last.get(name).copied().unwrap_or(0);
-            if *seq <= prev {
-                return Err(format!(
-                    "grain {name} committed seq {seq} not after previous head {prev} (G3/G5)"
-                ));
-            }
-            self.last.insert(name.clone(), *seq);
-        }
-        Ok(())
-    }
-}
-
-/// **Exactly-once activation per node** (invariant **G6**): on any one node, a
-/// grain is never live twice at once. Keyed by `(node, name)`, so an activation
-/// that migrates to another leader on failover is not mistaken for a second one.
-/// Crash-sound: a node's live set is cleared when the stream reports that node
-/// `NodeDown` (its activations are gone), so a re-activation after the node
-/// rejoins and re-leads is not a false positive.
-#[derive(Default)]
-struct ActivationSingletonPerNode {
-    live: BTreeSet<(NodeId, GrainName)>,
-}
-
-impl Invariant for ActivationSingletonPerNode {
-    fn name(&self) -> &'static str {
-        "grain-activation-singleton-per-node"
-    }
-
-    fn observe(&mut self, event: &Event) -> Result<(), String> {
-        // A node declared down loses its activations; drop them so a later
-        // re-activation on the recovered node is sound (G6 is per live node).
-        if let Event::NodeDown { node, .. } = event {
-            self.live.retain(|(n, _)| n != node);
-            return Ok(());
-        }
-        match event.as_app::<GrainEvent>() {
-            Some(GrainEvent::Activated { node, name }) => {
-                let fresh = self.live.insert((*node, name.clone()));
-                if !fresh {
-                    return Err(format!(
-                        "grain {name} activated while already live on {node} (G6)"
-                    ));
-                }
-            }
-            Some(GrainEvent::Passivated { node, name }) => {
-                self.live.remove(&(*node, name.clone()));
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
-
 // --- The workload -------------------------------------------------------------
 
 fn config() -> GranaryConfig {
@@ -255,7 +201,7 @@ impl ClusterWorkload for AccountSwarm {
     fn setup(&self, _ctx: &ClusterCtx) {}
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
-        let nodes: Vec<SimCluster> = ctx.nodes().to_vec();
+        let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
         Box::pin(async move {
@@ -298,8 +244,14 @@ impl ClusterWorkload for AccountSwarm {
 
     fn invariants(&self) -> Vec<Box<dyn Invariant>> {
         let mut invariants = default_invariants();
-        invariants.push(Box::new(CommitMonotonic::default()));
-        invariants.push(Box::new(ActivationSingletonPerNode::default()));
+        invariants.push(Box::new(CommitMonotonic::new(
+            "grain-commit-monotonic",
+            "grain",
+        )));
+        invariants.push(Box::new(ActivationSingletonPerNode::new(
+            "grain-activation-singleton-per-node",
+            "grain",
+        )));
         invariants
     }
 }
@@ -313,7 +265,7 @@ fn grain_invariants_hold_under_the_cluster_swarm() {
         clients: 3,
         ops: 6,
     };
-    if let Err(failure) = run_cluster_swarm(&workload, 0..24) {
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{failure}");
     }
 }
@@ -327,10 +279,8 @@ fn grain_swarm_is_reproducible() {
         clients: 2,
         ops: 5,
     };
-    for seed in 0..12 {
-        if let Err(divergence) = check_cluster_reproducible(&workload, seed) {
-            panic!("{divergence}");
-        }
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..12)) {
+        panic!("{divergence}");
     }
 }
 
@@ -344,7 +294,7 @@ fn grain_swarm_actually_fires_each_fault_type() {
         clients: 3,
         ops: 6,
     };
-    let stats = match run_cluster_swarm_coverage(&workload, 0..32) {
+    let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..32)) {
         Ok(stats) => stats,
         Err(failure) => panic!("{failure}"),
     };
@@ -364,4 +314,209 @@ fn grain_swarm_actually_fires_each_fault_type() {
         stats.blocked > 0,
         "the sweep never blocked a frame (partition/crash uncovered): {stats:?}"
     );
+}
+
+// =============================================================================
+// Single-node sweeps (granary §14)
+// =============================================================================
+//
+// The cluster sweeps above put the grain under a nemesis; these put it under
+// concurrency alone, on the single-node `Local` tier: a linearizability sweep
+// over the shared `CounterGrain` and a record-subscription sweep, each paired
+// with its reproducibility sweep. They live here rather than beside the
+// scenarios in `grains.rs` because they are sweeps — they fail by naming a seed
+// (docs/simulation-testing.md).
+
+// --- Grain invariant checkers over the §13 event stream -----------------------
+
+/// The grain safety core for these single-node suites: G3/G5 commit
+/// monotonicity and G6 per-node exactly-once activation, both taken from
+/// [`granary::testing`] rather than restated here. `ActivationSingletonPerNode`
+/// additionally clears a node's live set on `NodeDown`, which is inert in the
+/// no-fault runs below and correct in the faulted ones.
+fn grain_invariants() -> Vec<Box<dyn Invariant>> {
+    let mut invariants = default_invariants();
+    invariants.push(Box::new(ActivationSingletonPerNode::new(
+        "grain-exactly-once-activation",
+        "grain",
+    )));
+    invariants.push(Box::new(CommitMonotonic::new(
+        "grain-commit-monotonic",
+        "grain",
+    )));
+    invariants
+}
+
+// --- Linearizability workload (G2) --------------------------------------------
+
+async fn counter_client(
+    counter: GrainRef<CounterGrain>,
+    history: History<Counter>,
+    entropy: SimEntropy,
+    ops: u64,
+) {
+    for _ in 0..ops {
+        if entropy.next_u64().is_multiple_of(2) {
+            let delta = 1 + (entropy.next_u64() % 3) as i64;
+            let id = history.invoke(CounterOp::Add(delta));
+            match counter.ask(Add(delta)).await {
+                Ok(_value) => history.ok(id, CounterRet::AddOk),
+                Err(_) => history.info(id),
+            }
+        } else {
+            let id = history.invoke(CounterOp::Read);
+            match counter.ask(ReadCount).await {
+                Ok(value) => history.ok(id, CounterRet::Read(value)),
+                Err(_) => history.info(id),
+            }
+        }
+    }
+}
+
+struct CounterWorkload {
+    clients: usize,
+    ops: u64,
+}
+
+impl Workload for CounterWorkload {
+    fn name(&self) -> &'static str {
+        "linearizable-counter-grain"
+    }
+
+    fn run(&self, system: SimSystem) -> BoxFuture<'static, ()> {
+        let clients = self.clients;
+        let ops = self.ops;
+        Box::pin(async move {
+            let counters = system.granary::<CounterGrain>(GranaryConfig::default());
+            // One grain, hammered concurrently — the single linearizable object.
+            let counter = counters.grain("counter/0");
+            let history: History<Counter> = History::new();
+            let mut tasks = Vec::new();
+            for _ in 0..clients {
+                tasks.push(counter_client(
+                    counter.clone(),
+                    history.clone(),
+                    system.entropy().clone(),
+                    ops,
+                ));
+            }
+            futures::future::join_all(tasks).await;
+
+            let verdict = check_linearizable(&history);
+            assert!(
+                verdict.is_ok(),
+                "counter grain history was not linearizable: {verdict:?}",
+            );
+        })
+    }
+
+    fn invariants(&self) -> Vec<Box<dyn Invariant>> {
+        grain_invariants()
+    }
+}
+
+
+#[test]
+fn counter_grain_is_linearizable_across_seeds() {
+    let workload = CounterWorkload { clients: 4, ops: 8 };
+    if let Err(failure) = run_swarm(&workload, sweep_seeds(0..96)) {
+        panic!("{failure}");
+    }
+}
+
+#[test]
+fn counter_grain_run_is_reproducible() {
+    // The determinism contract (§14): the same seed yields a byte-identical event
+    // stream — and grain `App` events are part of it, so this guards G2 too.
+    let workload = CounterWorkload { clients: 3, ops: 6 };
+    if let Err(divergence) = replay_swarm(&workload, sweep_seeds(0..64)) {
+        panic!("{divergence}");
+    }
+}
+
+// --- Record subscription (§7.9, G16) ------------------------------------------
+
+/// A subscriber registers from the empty head, the grain takes a run of writes,
+/// and the pushed stream is reconciled by `Seq`. The reconstructed sequence MUST
+/// equal the committed records — contiguous `1..=writes`, in order, no gap or
+/// duplicate — which is exactly what `load` to the head would return (**G16**).
+struct SubscriptionWorkload {
+    writes: u64,
+}
+
+impl Workload for SubscriptionWorkload {
+    fn name(&self) -> &'static str {
+        "record-subscription"
+    }
+
+    fn run(&self, system: SimSystem) -> BoxFuture<'static, ()> {
+        let writes = self.writes;
+        Box::pin(async move {
+            let counters = system.granary::<CounterGrain>(GranaryConfig::default());
+            let counter = counters.grain("counter/sub");
+
+            // Subscribe from the empty head, before any write, so every commit is
+            // pushed live.
+            let sub = counter.subscribe(Seq::ZERO).await.expect("subscribe");
+            assert_eq!(sub.head, Seq::ZERO, "a fresh grain's head is ZERO");
+
+            let mut expected = Vec::new();
+            for i in 0..writes {
+                let delta = 1 + (i as i64 % 3);
+                counter.ask(Add(delta)).await.expect("add commits");
+                expected.push(delta);
+            }
+
+            // Drain the stream, reconciling by seq (§7.9): each batch must begin
+            // exactly after the last seq seen, and seqs strictly increase.
+            let mut deltas = Vec::new();
+            let mut last = 0u64;
+            while (deltas.len() as u64) < writes {
+                let batch = sub.records.recv().await.expect("a live batch");
+                assert_eq!(
+                    batch.from.value(),
+                    last,
+                    "batch begins after the last seq (no gap)"
+                );
+                for (seq, event) in batch.records {
+                    assert_eq!(seq.value(), last + 1, "seqs are contiguous and ordered");
+                    last = seq.value();
+                    match event {
+                        CounterEvent::Added(d) => deltas.push(d),
+                    }
+                }
+            }
+
+            assert_eq!(
+                deltas, expected,
+                "pushed records match the committed writes, in order"
+            );
+            assert_eq!(
+                last, writes,
+                "the stream reached the committed head (push == load, G16)"
+            );
+        })
+    }
+
+    fn invariants(&self) -> Vec<Box<dyn Invariant>> {
+        grain_invariants()
+    }
+}
+
+#[test]
+fn a_subscription_streams_the_committed_records_in_order() {
+    let workload = SubscriptionWorkload { writes: 8 };
+    if let Err(failure) = run_swarm(&workload, sweep_seeds(0..32)) {
+        panic!("{failure}");
+    }
+}
+
+#[test]
+fn a_subscription_run_is_reproducible() {
+    // Delivery rides the Spawner/Transport seams, so a seeded run's event stream
+    // stays byte-identical (§7.9, §14).
+    let workload = SubscriptionWorkload { writes: 6 };
+    if let Err(divergence) = replay_swarm(&workload, sweep_seeds(0..32)) {
+        panic!("{divergence}");
+    }
 }

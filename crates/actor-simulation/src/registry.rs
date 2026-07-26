@@ -25,6 +25,7 @@ use actor_core::Entropy;
 use actor_core::NodeId;
 
 use crate::FaultStats;
+use crate::faults::RegistryFaultPolicy;
 use crate::SimClock;
 use crate::SimEntropy;
 use crate::Simulation;
@@ -32,32 +33,9 @@ use crate::Simulation;
 /// How many past snapshots a stale read may be served from.
 const HISTORY_DEPTH: usize = 32;
 
-/// Seeded registry faults (spec §18.3: a stalled, lagging, or unavailable
-/// registry sync). All draws come from the run's single [`SimEntropy`], so a
-/// faulted run stays reproducible from its seed.
-#[derive(Clone, Copy, Debug)]
-pub struct RegistryFaultPolicy {
-    /// Each fetch sleeps a seeded duration in `[0, max_latency]` before
-    /// returning (zero disables).
-    pub max_latency: Duration,
-    /// A fetch returns a **stale** snapshot — an older state from the history —
-    /// with probability `stale_num / stale_den` (a zero numerator disables).
-    pub stale_num: u64,
-    pub stale_den: u64,
-    /// How many revisions behind a stale read may lag, at most.
-    pub max_staleness: usize,
-}
-
-impl Default for RegistryFaultPolicy {
-    fn default() -> Self {
-        RegistryFaultPolicy {
-            max_latency: Duration::ZERO,
-            stale_num: 0,
-            stale_den: 1,
-            max_staleness: 4,
-        }
-    }
-}
+// `RegistryFaultPolicy` — the *input* side of registry fault injection — lives
+// in `crate::faults` beside `FaultPolicy`, so every fault knob a run configures
+// is in one module and the coverage tally that answers it is in another.
 
 struct SimRegistryState {
     /// The global monotonic revision, bumped by every mutation.
