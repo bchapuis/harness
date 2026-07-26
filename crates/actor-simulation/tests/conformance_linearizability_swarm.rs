@@ -37,6 +37,7 @@ use support::Cas;
 use support::Read;
 use support::RegisterActorIn;
 use support::RegisterRef;
+use support::ReqId;
 use support::Write;
 use support::client;
 
@@ -62,18 +63,18 @@ impl RegisterRef for RemoteReg {
                 .map_err(|_| ())
         })
     }
-    fn write(&self, v: i64) -> BoxFuture<'static, Result<(), ()>> {
+    fn write(&self, req: ReqId, v: i64) -> BoxFuture<'static, Result<(), ()>> {
         let r = self.0.clone();
         Box::pin(async move {
-            r.ask_timeout(Write(v), Duration::from_millis(500))
+            r.ask_timeout(Write(req, v), Duration::from_millis(500))
                 .await
                 .map_err(|_| ())
         })
     }
-    fn cas(&self, old: i64, new: i64) -> BoxFuture<'static, Result<bool, ()>> {
+    fn cas(&self, req: ReqId, old: i64, new: i64) -> BoxFuture<'static, Result<bool, ()>> {
         let r = self.0.clone();
         Box::pin(async move {
-            r.ask_timeout(Cas(old, new), Duration::from_millis(500))
+            r.ask_timeout(Cas(req, old, new), Duration::from_millis(500))
                 .await
                 .map_err(|_| ())
         })
@@ -139,7 +140,7 @@ impl ClusterWorkload for RemoteRegisterWorkload {
                     let listing = node.receptionist().lookup(REG);
                     if let Some(reg) = listing.iter().next() {
                         let reg = RemoteReg(reg.clone());
-                        client(reg, history, entropy, ops).await;
+                        client(reg, history, entropy, ops, c as u64).await;
                     }
                 });
             }
@@ -150,7 +151,7 @@ impl ClusterWorkload for RemoteRegisterWorkload {
             let verdict = check_linearizable(&history);
             assert!(
                 verdict.is_ok(),
-                "remote register history was not linearizable: {verdict:?}",
+                "remote register history was not linearizable: {verdict}",
             );
         })
     }

@@ -182,6 +182,22 @@ fn total_loss_yields_timeout_not_a_hang() {
 }
 
 // --- §7.2: duplication double-handles the server but the caller resolves once -
+//
+// This is the boundary of what the framework promises, and it is worth stating
+// plainly because it is easy to read "at-most-once" as more than it is. The
+// framework never retransmits a delivered message and never surfaces a call
+// twice to its caller; it does **not** suppress a duplicate the *wire* made, so
+// the recipient's handler runs once per copy. §7.2 says so and names the
+// remedy in the same breath: higher guarantees are out of scope here and are
+// built above this layer with explicit idempotency keys.
+//
+// That matters most for an operation whose *answer* depends on the state it
+// changes. A duplicated `Cas` succeeds on the first copy and fails on the
+// second, and a caller that loses the first reply learns that its successful
+// swap failed. `tests/support/`'s register carries the key that makes it come
+// out right, and `conformance_linearizability_swarm.rs` sweeps it under the
+// nemesis to prove it — so the two contracts here fit together rather than
+// contradicting.
 
 #[test]
 fn duplication_is_tolerated_with_one_outcome_at_the_caller() {

@@ -741,7 +741,7 @@ fn counter_grain_is_linearizable_across_a_partition_and_heal() {
             let verdict = check_linearizable(&history);
             assert!(
                 verdict.is_ok(),
-                "seed {seed}: counter history not linearizable across partition+heal: {verdict:?}",
+                "seed {seed}: counter history not linearizable across partition+heal: {verdict}",
             );
         },
     );

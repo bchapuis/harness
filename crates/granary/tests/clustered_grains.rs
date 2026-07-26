@@ -1104,7 +1104,7 @@ fn concurrent_counter_grain_is_linearizable_across_failover() {
             let verdict = check_linearizable(&history);
             assert!(
                 verdict.is_ok(),
-                "seed {seed}: counter grain history not linearizable across failover: {verdict:?}",
+                "seed {seed}: counter grain history not linearizable across failover: {verdict}",
             );
         },
     );

@@ -200,6 +200,30 @@ impl<M: Model> History<M> {
     }
 }
 
+impl<M: Model> std::fmt::Display for History<M> {
+    /// The recorded history in real-time order, one mark per line — what the
+    /// clients actually saw. A violation is only actionable with this in hand:
+    /// "no sequential order linearizes 18 operations" names nothing to look at,
+    /// and the history cannot be recovered from the seed without re-running.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.lock().expect("history mutex poisoned");
+        for (ts, mark) in inner.marks.iter().enumerate() {
+            match mark {
+                Mark::Invoke { id, op } => writeln!(f, "  {ts:>3} op{id:<3} invoke {op:?}")?,
+                Mark::Complete { id, outcome } => {
+                    let outcome = match outcome {
+                        Outcome::Ok(ret) => format!("ok     {ret:?}"),
+                        Outcome::Info => "info   (unknown outcome)".to_string(),
+                        Outcome::Fail => "fail   (no effect)".to_string(),
+                    };
+                    writeln!(f, "  {ts:>3} op{id:<3} {outcome}")?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// An operation lowered for the linearizer: its invoke time, its completion time
 /// (`usize::MAX` if pending), and the observed return (`None` if pending).
 struct LinOp<M: Model> {
@@ -222,6 +246,18 @@ impl Linearization {
     /// Whether the history was linearizable.
     pub fn is_ok(&self) -> bool {
         matches!(self, Linearization::Ok)
+    }
+}
+
+impl std::fmt::Display for Linearization {
+    /// The verdict as a failure message. Prefer this to `{verdict:?}` at a call
+    /// site: a violation carries the history that produced it (see
+    /// [`History`]'s `Display`), and `Debug` escapes it into one unreadable line.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Linearization::Ok => f.write_str("linearizable"),
+            Linearization::Violation { detail } => f.write_str(detail),
+        }
     }
 }
 
@@ -250,7 +286,7 @@ pub fn check<M: Model>(history: &History<M>) -> Linearization {
     } else {
         Linearization::Violation {
             detail: format!(
-                "no sequential order linearizes the {} completed/pending operations",
+                "no sequential order linearizes the {} completed/pending operations:\n{history}",
                 ops.len()
             ),
         }

@@ -405,7 +405,7 @@ impl Workload for CounterWorkload {
             let verdict = check_linearizable(&history);
             assert!(
                 verdict.is_ok(),
-                "counter grain history was not linearizable: {verdict:?}",
+                "counter grain history was not linearizable: {verdict}",
             );
         })
     }

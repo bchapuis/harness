@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -17,10 +18,10 @@ use actor_cluster::DowningPolicy;
 use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorSystem;
-use actor_core::Entropy;
 use actor_core::BoxFuture;
 use actor_core::Clock;
 use actor_core::Ctx;
+use actor_core::Entropy;
 use actor_core::Handler;
 use actor_core::HandlerRegistry;
 use actor_core::LocalSystem;
@@ -261,13 +262,47 @@ pub fn cluster(seed: u64, swim: Option<SwimConfig>) -> (Simulation, SimNetwork) 
 // Shared by `conformance_linearizability.rs` (single-node scenarios) and
 // `conformance_linearizability_swarm.rs` (the cluster sweep), so both decide a
 // history against the *same* object rather than two copies that can drift.
+//
+// The mutating operations carry an **idempotency key** (`ReqId`), which is what
+// makes the object linearizable when it is reached across a faulted network.
+// The framework's delivery guarantee is at-most-once *at the caller* (spec
+// §7.2): a frame the wire duplicates is handled twice by the recipient, and the
+// caller resolves against whichever reply survives. For a `Cas` the two
+// handlings answer differently — the first flips the value and returns `true`,
+// the second finds it already flipped and returns `false` — so a caller whose
+// first reply was dropped learns that its successful `Cas` failed. The spec
+// names the remedy in the same section: higher guarantees are out of scope for
+// the transport and are "built atop this layer with explicit idempotency keys".
+// This is that construction, and the sweep is what proves it holds under the
+// nemesis.
 // --- The register actor -------------------------------------------------------
 
 // A system-generic register so the same actor runs on `SimSystem` and
 // `SimNode` (generic actors are allowed by the spec, §1.2).
 
+/// A caller's name for one mutating call *attempt* — the idempotency key of
+/// spec §7.2. Unique per (client, operation), and identical across every copy
+/// of the same request the wire may deliver.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+pub struct ReqId {
+    pub client: u64,
+    pub seq: u64,
+}
+
+/// What a mutating operation answered, kept so a duplicate gets the *same*
+/// answer rather than a second, differently-timed one.
+#[derive(Clone, Copy)]
+enum Applied {
+    Write,
+    Cas(bool),
+}
+
 pub struct RegisterActorIn<S> {
     value: i64,
+    /// The mutating call attempts already applied, by key. A real service would
+    /// bound this (a per-client high-water mark, or eviction by age); a test
+    /// register issuing a fixed number of operations does not need to.
+    applied: BTreeMap<ReqId, Applied>,
     _s: PhantomData<fn() -> S>,
 }
 
@@ -275,6 +310,7 @@ impl<S> RegisterActorIn<S> {
     pub fn new() -> Self {
         RegisterActorIn {
             value: 0,
+            applied: BTreeMap::new(),
             _s: PhantomData,
         }
     }
@@ -298,14 +334,14 @@ impl Message for Read {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Write(pub i64);
+pub struct Write(pub ReqId, pub i64);
 impl Message for Write {
     type Reply = ();
     const MANIFEST: Manifest = Manifest::new("lin.Write");
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Cas(pub i64, pub i64);
+pub struct Cas(pub ReqId, pub i64, pub i64);
 impl Message for Cas {
     type Reply = bool;
     const MANIFEST: Manifest = Manifest::new("lin.Cas");
@@ -317,20 +353,33 @@ impl<S: ActorSystem> Handler<Read> for RegisterActorIn<S> {
     }
 }
 
+// `Read` needs no key: it changes nothing, and a duplicate's reply is the value
+// at *its* own instant, which still falls inside the caller's call window and so
+// linearizes there. Only the mutating operations below are deduplicated.
+
 impl<S: ActorSystem> Handler<Write> for RegisterActorIn<S> {
     async fn handle(&mut self, msg: Write, _ctx: &Ctx<Self>) {
-        self.value = msg.0;
+        let Write(req, value) = msg;
+        if self.applied.contains_key(&req) {
+            return;
+        }
+        self.value = value;
+        self.applied.insert(req, Applied::Write);
     }
 }
 
 impl<S: ActorSystem> Handler<Cas> for RegisterActorIn<S> {
     async fn handle(&mut self, msg: Cas, _ctx: &Ctx<Self>) -> bool {
-        if self.value == msg.0 {
-            self.value = msg.1;
-            true
-        } else {
-            false
+        let Cas(req, old, new) = msg;
+        if let Some(Applied::Cas(answered)) = self.applied.get(&req) {
+            return *answered;
         }
+        let swapped = self.value == old;
+        if swapped {
+            self.value = new;
+        }
+        self.applied.insert(req, Applied::Cas(swapped));
+        swapped
     }
 }
 
@@ -344,10 +393,14 @@ pub async fn client<R>(
     history: History<Register>,
     entropy: actor_simulation::SimEntropy,
     ops: u64,
+    client: u64,
 ) where
     R: RegisterRef,
 {
-    for _ in 0..ops {
+    for seq in 0..ops {
+        // One key per mutating attempt, distinct across clients: this is what a
+        // duplicate frame is recognized by (see `ReqId`).
+        let req = ReqId { client, seq };
         match entropy.next_u64() % 3 {
             0 => {
                 let id = history.invoke(RegisterOp::Read);
@@ -359,7 +412,7 @@ pub async fn client<R>(
             1 => {
                 let v = (entropy.next_u64() % 4) as i64;
                 let id = history.invoke(RegisterOp::Write(v));
-                match reg.write(v).await {
+                match reg.write(req, v).await {
                     Ok(()) => history.ok(id, RegisterRet::WriteOk),
                     Err(()) => history.info(id),
                 }
@@ -368,7 +421,7 @@ pub async fn client<R>(
                 let old = (entropy.next_u64() % 4) as i64;
                 let new = (entropy.next_u64() % 4) as i64;
                 let id = history.invoke(RegisterOp::Cas(old, new));
-                match reg.cas(old, new).await {
+                match reg.cas(req, old, new).await {
                     Ok(b) => history.ok(id, RegisterRet::Cas(b)),
                     Err(()) => history.info(id),
                 }
@@ -382,7 +435,6 @@ pub async fn client<R>(
 /// (any `CallError`) — recorded as a pending operation.
 pub trait RegisterRef: Clone {
     fn read(&self) -> BoxFuture<'static, Result<i64, ()>>;
-    fn write(&self, v: i64) -> BoxFuture<'static, Result<(), ()>>;
-    fn cas(&self, old: i64, new: i64) -> BoxFuture<'static, Result<bool, ()>>;
+    fn write(&self, req: ReqId, v: i64) -> BoxFuture<'static, Result<(), ()>>;
+    fn cas(&self, req: ReqId, old: i64, new: i64) -> BoxFuture<'static, Result<bool, ()>>;
 }
-

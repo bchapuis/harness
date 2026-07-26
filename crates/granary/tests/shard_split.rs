@@ -591,7 +591,7 @@ fn a_split_under_concurrent_writes_is_linearizable() {
             let verdict = check_linearizable(history);
             assert!(
                 verdict.is_ok(),
-                "seed {seed}: {key} history not linearizable across the split: {verdict:?}",
+                "seed {seed}: {key} history not linearizable across the split: {verdict}",
             );
         }
         assert_split_safety(&recorder);
@@ -983,7 +983,7 @@ fn a_merge_under_concurrent_writes_is_linearizable() {
             let verdict = check_linearizable(history);
             assert!(
                 verdict.is_ok(),
-                "seed {seed}: {key} history not linearizable across the merge: {verdict:?}",
+                "seed {seed}: {key} history not linearizable across the merge: {verdict}",
             );
         }
         assert_split_safety(&recorder);

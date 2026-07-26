@@ -41,6 +41,7 @@ use support::Cas;
 use support::Read;
 use support::RegisterActorIn;
 use support::RegisterRef;
+use support::ReqId;
 use support::Write;
 use support::client;
 
@@ -54,13 +55,13 @@ impl RegisterRef for LocalReg {
         let r = self.0.clone();
         Box::pin(async move { r.ask(Read).await.map_err(|_| ()) })
     }
-    fn write(&self, v: i64) -> BoxFuture<'static, Result<(), ()>> {
+    fn write(&self, req: ReqId, v: i64) -> BoxFuture<'static, Result<(), ()>> {
         let r = self.0.clone();
-        Box::pin(async move { r.ask(Write(v)).await.map_err(|_| ()) })
+        Box::pin(async move { r.ask(Write(req, v)).await.map_err(|_| ()) })
     }
-    fn cas(&self, old: i64, new: i64) -> BoxFuture<'static, Result<bool, ()>> {
+    fn cas(&self, req: ReqId, old: i64, new: i64) -> BoxFuture<'static, Result<bool, ()>> {
         let r = self.0.clone();
-        Box::pin(async move { r.ask(Cas(old, new)).await.map_err(|_| ()) })
+        Box::pin(async move { r.ask(Cas(req, old, new)).await.map_err(|_| ()) })
     }
 }
 
@@ -81,12 +82,13 @@ impl Workload for RegisterWorkload {
             let reg = LocalReg(system.spawn(RegisterActorIn::<SimSystem>::new()));
             let history: History<Register> = History::new();
             let mut tasks = Vec::new();
-            for _ in 0..clients {
+            for c in 0..clients {
                 tasks.push(client(
                     reg.clone(),
                     history.clone(),
                     system.entropy().clone(),
                     ops,
+                    c as u64,
                 ));
             }
             // join_all interleaves the clients at every await point, so their
@@ -96,7 +98,7 @@ impl Workload for RegisterWorkload {
             let verdict = check_linearizable(&history);
             assert!(
                 verdict.is_ok(),
-                "register history was not linearizable: {verdict:?}",
+                "register history was not linearizable: {verdict}",
             );
         })
     }
