@@ -426,20 +426,35 @@ impl GrainRecords {
         kind: WriteKind,
     ) -> StoreAck {
         let base = self.base.value();
-        // Optimistic head check (§8): a normal append whose first target slot already
-        // holds a *different* record means the leader's head is stale — reject so it
-        // steps down and re-recovers rather than overwriting a committed record. An
-        // append whose `after` is below our compacted base is stale by the same logic
-        // (the leader recovered without seeing our snapshot).
+        // Optimistic head check (§8): a normal append landing on a slot this replica
+        // has already filled means the leader's head is stale — reject so it steps
+        // down and re-recovers rather than overwriting a committed record. An append
+        // whose `after` is below our compacted base is stale by the same logic (the
+        // leader recovered without seeing our snapshot).
+        //
+        // The one occupied slot an append may proceed onto is a **re-delivery of the
+        // very append that filled it** (§7.2: the wire may duplicate, and a drained
+        // straggler can arrive late). That is identified by the shard `term` as well
+        // as the bytes. Bytes alone are not an identity: two clients issuing the same
+        // command encode identically — `Deposit { cents: 1 }` twice is the same
+        // record twice — so a byte-only check reads a *different* append onto a stale
+        // head as a harmless duplicate, stores it into the slot the earlier one
+        // already committed, and acks. Both leaders then report their write durable
+        // while only one record exists, which is an acknowledged write lost (**G14**).
+        // A genuine re-delivery carries the term of the append that made it; a
+        // stale-head append from a newer leader never can.
         if kind == WriteKind::Append {
             if after.value() < base {
                 return StoreAck::Stale(self.head());
             }
             let first_local = (after.value() - base) as usize;
-            if let (Some(Some(existing)), Some(incoming)) =
-                (self.slots.get(first_local), records.first())
-                && &existing.bytes != incoming
-            {
+            let stale = records.iter().enumerate().any(|(offset, incoming)| {
+                match self.slots.get(first_local + offset) {
+                    Some(Some(existing)) => existing.term != term || &existing.bytes != incoming,
+                    _ => false,
+                }
+            });
+            if stale {
                 return StoreAck::Stale(self.head());
             }
         }
@@ -1293,6 +1308,92 @@ mod tests {
         assert_eq!(
             store.read(0, &n).slots,
             vec![(Seq::new(1), Term::new(3), b"repaired".to_vec())]
+        );
+    }
+
+    #[test]
+    fn an_identical_record_from_a_newer_term_is_still_a_stale_head() {
+        // The bytes of a command are not its identity. Two clients issuing the
+        // same command — a `Deposit { cents: 1 }` twice — encode identically, so a
+        // check that compares only bytes reads a *different* append landing on an
+        // occupied slot as a harmless re-delivery. It stores it over the record
+        // that slot already committed and acks; both leaders then report their
+        // write durable while the grain holds one record, and one acknowledged
+        // write is gone (**G14**). The shard term is what tells them apart.
+        let store = MemoryGrainStore::new();
+        let n = name("a");
+        store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"deposit-1".to_vec()],
+            WriteKind::Append,
+        );
+        assert_eq!(
+            store.store_record(
+                0,
+                &n,
+                Seq::ZERO,
+                Term::new(2),
+                vec![b"deposit-1".to_vec()],
+                WriteKind::Append
+            ),
+            StoreAck::Stale(Seq::new(1)),
+            "a newer leader appending onto a head it recovered stale must be refused, \
+             however its record happens to encode",
+        );
+        // The committed record is untouched, still at the term that committed it.
+        assert_eq!(
+            store.read(0, &n).slots,
+            vec![(Seq::new(1), Term::new(1), b"deposit-1".to_vec())]
+        );
+        // The case this tolerance exists for still works: on a replica that has
+        // seen no newer term, the very same append re-delivered (a duplicated
+        // frame, or a drained straggler arriving late, §7.2) is idempotent.
+        let fresh = MemoryGrainStore::new();
+        fresh.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"deposit-1".to_vec()],
+            WriteKind::Append,
+        );
+        assert_eq!(
+            fresh.store_record(
+                0,
+                &n,
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"deposit-1".to_vec()],
+                WriteKind::Append
+            ),
+            StoreAck::Stored(Seq::new(1))
+        );
+        // And a batch is judged over every slot it targets, not just the first: a
+        // stale head that happens to line up on a gap must not let the rest of the
+        // batch overwrite what follows it.
+        let gapped = MemoryGrainStore::new();
+        gapped.store_record(
+            0,
+            &n,
+            Seq::new(2),
+            Term::new(1),
+            vec![b"third".to_vec()],
+            WriteKind::Append,
+        );
+        assert_eq!(
+            gapped.store_record(
+                0,
+                &n,
+                Seq::new(1),
+                Term::new(2),
+                vec![b"second".to_vec(), b"third".to_vec()],
+                WriteKind::Append
+            ),
+            StoreAck::Stale(Seq::ZERO),
+            "slot 2 was empty but slot 3 is occupied under an older term",
         );
     }
 
