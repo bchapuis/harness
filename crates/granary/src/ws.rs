@@ -33,6 +33,7 @@
 //! caches like `target/`) live in the same directory but are never captured,
 //! journaled, or restored — a rebuild on a new node regenerates them.
 
+use actor_core::join_all_results;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
@@ -420,7 +421,10 @@ impl Facet for Ws {
             let manifest: WsManifest = decode_payload("ws restore", bytes)?;
             // Fetch every file's chunks concurrently; each get verifies by
             // content (G17).
-            let contents = futures::future::try_join_all(
+            // `join_all_results`, not `try_join_all`: a short-circuiting join
+            // drops the fetches still in flight and abandons their asks (core
+            // spec §18.5 #1).
+            let contents = join_all_results(
                 manifest
                     .files
                     .iter()

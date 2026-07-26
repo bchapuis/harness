@@ -26,6 +26,7 @@
 //! later without API change. A native logical facet adds no C dependency, holds
 //! its form in memory, and runs unchanged under deterministic simulation (§14).
 
+use actor_core::join_all_results;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -309,7 +310,9 @@ where
     /// Spilled values are fetched concurrently and verified (G17).
     pub async fn list(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, GrainError> {
         let entries = self.merged_range(prefix);
-        futures::future::try_join_all(entries.into_iter().map(|(key, value)| async move {
+        // `join_all_results`, not `try_join_all`: a short-circuiting join drops
+        // the fetches still in flight and abandons their asks (core spec §18.5 #1).
+        join_all_results(entries.into_iter().map(|(key, value)| async move {
             Ok(match value {
                 KvValue::Inline(bytes) => (key, bytes),
                 KvValue::Spilled { id, .. } => (key, self.blobs.get(id, None).await?),

@@ -6,6 +6,8 @@
 
 use std::collections::BTreeSet;
 
+use actor_core::join_all_results;
+
 use crate::blobs::BlobId;
 use crate::blobs::GrainBlobs;
 use crate::facet::FacetError;
@@ -50,7 +52,12 @@ pub(crate) async fn put_chunked(
     chunks: Vec<Vec<u8>>,
     what: &str,
 ) -> Result<Vec<BlobId>, FacetError> {
-    futures::future::try_join_all(chunks.into_iter().map(|chunk| blobs.put(chunk)))
+    // `join_all_results`, not `try_join_all`: the latter returns on the first
+    // failure and drops the puts still in flight, abandoning the peer `ask`s they
+    // had already issued (core spec §18.5 #1). The puts are independent and
+    // content-addressed, so finishing them costs nothing and leaves more of the
+    // checkpoint durable.
+    join_all_results(chunks.into_iter().map(|chunk| blobs.put(chunk)))
         .await
         .map_err(|e| FacetError(format!("{what} put: {e:?}")))
 }
@@ -65,7 +72,9 @@ pub(crate) async fn get_concat(
     ids: &[BlobId],
     what: &str,
 ) -> Result<Vec<u8>, FacetError> {
-    let parts = futures::future::try_join_all(ids.iter().map(|id| blobs.get(*id, None)))
+    // See `put_chunked`: a short-circuiting join would abandon the fetches still
+    // in flight along with their asks.
+    let parts = join_all_results(ids.iter().map(|id| blobs.get(*id, None)))
         .await
         .map_err(|e| FacetError(format!("{what} get: {e:?}")))?;
     Ok(parts.concat())

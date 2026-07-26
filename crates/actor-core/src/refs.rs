@@ -249,3 +249,36 @@ impl<A: Actor> ActorRef<A> {
         }
     }
 }
+
+// --- Fanning out calls --------------------------------------------------------
+
+/// Await **every** future, then report the first error — the non-abandoning
+/// counterpart to `futures::future::try_join_all`.
+///
+/// `try_join_all` returns the moment one future fails and **drops** the rest.
+/// That is fine for pure computation and wrong for anything that has issued an
+/// [`ask`](ActorRef::ask): dropping the future abandons the call, which then
+/// never reaches a reply or a definite [`CallError`] — exactly what no-silent-
+/// loss forbids (spec §7.2, §18.5 #1). The recipient still handles the request,
+/// and its reply arrives for a caller that no longer exists. Under simulation
+/// the abandoned call shows up as an ask pending at quiescence; in production it
+/// is a leaked deadline and a reply nobody reads.
+///
+/// So: fan out with this. The futures are independent by construction — that is
+/// why they were joined — so letting the losers finish costs only the
+/// concurrency already in flight, and leaves the system in the state the
+/// successful ones actually reached.
+///
+/// ```ignore
+/// // not `try_join_all`: a failing chunk would drop its siblings' asks
+/// let ids = join_all_results(chunks.into_iter().map(|c| store.put(c))).await?;
+/// ```
+pub async fn join_all_results<F, T, E>(futures: impl IntoIterator<Item = F>) -> Result<Vec<T>, E>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    futures::future::join_all(futures)
+        .await
+        .into_iter()
+        .collect()
+}
