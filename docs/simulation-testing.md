@@ -165,6 +165,32 @@ Controlled by two environment variables:
 CI pins `SWARM_SEEDS: full`. Local runs, with neither set, take the cost-class
 width.
 
+## Stopping at the first failure, or collecting them all
+
+A sweep stops at the first failing seed. That is right for CI — the build is
+already red, and proving the other 1,999 seeds also fail buys nothing — and
+wrong for a soak, whose whole job is to mine `(workload, seed)` pairs for the
+corpus. Stopping throws away the rest of the run.
+
+It compounds, too. Corpus seeds replay *ahead* of every sweep, so once a
+workload has a failing seed on record, that replay fails first and the workload
+stops exploring new ground entirely until someone fixes the bug — exactly the
+workload you would most like to keep mining.
+
+- `SWARM_CONTINUE=1` — run the sweep to the end and report every seed that
+  failed, printed as `corpus.txt` lines ready to paste. `soak.yml` sets it; CI
+  leaves it unset.
+
+A collecting run also catches a panic *inside* a workload, attributes it to its
+seed, and carries on. Sweeps fail two ways — an invariant returns a violation,
+or the workload simply asserts (a `drive` that checks its own outcome, a
+`scenario_sweep` body) — and the second kind used to unwind straight out of the
+sweep, taking the remaining seeds with it and reporting no seed at all, since
+the panic message is the workload's own.
+
+One seed reports once, even though the corpus replay and a wide sweep can both
+reach it.
+
 ## The regression corpus
 
 `crates/actor-simulation/corpus.txt` records every seed that ever failed, keyed

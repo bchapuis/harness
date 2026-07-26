@@ -103,6 +103,132 @@ impl std::fmt::Display for RunFailure {
 
 impl std::error::Error for RunFailure {}
 
+/// Every seed a sweep failed at, and how many it ran (spec §18.6).
+///
+/// A sweep reports a *set* rather than a single seed because the two runs want
+/// different things from it: CI stops at the first failure, so this carries one
+/// [`RunFailure`] and prints exactly as one; a soak under
+/// [`collect_all_failures`](crate::collect_all_failures) runs to the end, so
+/// this carries every pair the run found and prints them ready to paste into
+/// `corpus.txt`.
+#[derive(Clone, Debug)]
+pub struct SweepFailure {
+    pub workload: &'static str,
+    /// How many seeds ran, including the ones that failed. With the sweep
+    /// stopping at the first failure this is where it stopped, not the width.
+    pub seeds_run: u64,
+    /// The failing seeds, in the order the sweep reached them. Never empty.
+    pub failures: Vec<RunFailure>,
+}
+
+impl std::fmt::Display for SweepFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // One failure prints as the bare `RunFailure` it always did, so the
+        // stop-at-first output every call site was written against is unchanged
+        // and a failure message still names its own corpus key.
+        if let [only] = self.failures.as_slice() {
+            return write!(f, "{only}");
+        }
+        writeln!(
+            f,
+            "workload '{}' failed at {} of the {} seeds run:\n",
+            self.workload,
+            self.failures.len(),
+            self.seeds_run
+        )?;
+        for failure in &self.failures {
+            writeln!(f, "{failure}")?;
+        }
+        // The whole point of a collecting run: a block that goes straight into
+        // corpus.txt, in the format `<workload> <seed>` that file parses.
+        writeln!(f, "corpus.txt lines for every seed above:\n")?;
+        for failure in &self.failures {
+            writeln!(f, "{} {}", failure.workload, failure.seed)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SweepFailure {}
+
+/// Run one seed, turning a panic into a [`RunFailure`] against that seed.
+///
+/// Sweeps fail two ways: an invariant returns a violation, or the workload
+/// simply asserts — a `drive` that checks its own outcome, a `scenario_sweep`
+/// body. The second kind used to unwind straight out of the sweep, which cost
+/// two things: the remaining seeds, and the seed number itself, since the
+/// panic message is the workload's and says nothing about which seed produced
+/// it. Catching here buys both back.
+pub(crate) fn caught(
+    workload: &'static str,
+    seed: u64,
+    run: impl FnOnce() -> Result<(), RunFailure>,
+) -> Result<(), RunFailure> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(result) => result,
+        Err(payload) => Err(RunFailure {
+            workload,
+            seed,
+            violations: vec![Violation {
+                invariant: "panic",
+                detail: panic_detail(payload.as_ref()),
+            }],
+        }),
+    }
+}
+
+/// The message a caught panic carried, for the two payload types `panic!`
+/// produces. Anything else is reported by shape, which is still enough to name
+/// the seed that did it.
+pub(crate) fn panic_detail(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panicked with a non-string payload".to_string()
+    }
+}
+
+/// The sweep loop shared by every invariant runner: sweep the seeds, and decide
+/// whether a failure ends the run or joins a list.
+///
+/// `collect` is passed in rather than read from the environment here so the loop
+/// is a pure function of its inputs — the runners read
+/// [`collect_all_failures`](crate::collect_all_failures) once, at the edge.
+pub(crate) fn sweep_collecting(
+    workload: &'static str,
+    seeds: impl IntoIterator<Item = u64>,
+    collect: bool,
+    mut run: impl FnMut(u64) -> Result<(), RunFailure>,
+) -> Result<(), SweepFailure> {
+    let mut failures: Vec<RunFailure> = Vec::new();
+    let mut seeds_run = 0;
+    for seed in seeds {
+        seeds_run += 1;
+        if let Err(failure) = caught(workload, seed, || run(seed)) {
+            // The corpus replay runs ahead of the sweep, and a soak wide enough
+            // to reach a corpus seed runs it a second time. It is one case, so
+            // it earns one line.
+            if !failures.iter().any(|seen| seen.seed == seed) {
+                failures.push(failure);
+            }
+            if !collect {
+                break;
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(SweepFailure {
+            workload,
+            seeds_run,
+            failures,
+        })
+    }
+}
+
 /// Build and run a workload once under `seed`, routing its event stream to
 /// `events`. Shared by [`run_seed`] (which feeds a [`Checker`]) and the
 /// reproducibility harness (which feeds a [`Recorder`](crate::Recorder)), so both
@@ -137,7 +263,9 @@ pub fn run_seed<W: Workload>(workload: &W, seed: u64) -> Result<(), RunFailure> 
 }
 
 /// Sweep a workload across many seeds (swarm testing, spec §18.6), stopping at
-/// the first failing seed so it can be replayed.
+/// the first failing seed so it can be replayed — or, under
+/// [`collect_all_failures`](crate::collect_all_failures), running to the end and
+/// reporting every one.
 ///
 /// The workload's [`regression_seeds`](crate::regression_seeds) run first,
 /// ahead of `seeds` and whatever sizing produced them: a seed that failed once
@@ -145,9 +273,105 @@ pub fn run_seed<W: Workload>(workload: &W, seed: u64) -> Result<(), RunFailure> 
 pub fn run_swarm<W: Workload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
-) -> Result<(), RunFailure> {
-    for seed in crate::corpus::regression_seeds(workload.name()).chain(seeds) {
-        run_seed(workload, seed)?;
+) -> Result<(), SweepFailure> {
+    sweep_collecting(
+        workload.name(),
+        crate::corpus::regression_seeds(workload.name()).chain(seeds),
+        crate::sweep::collect_all_failures(),
+        |seed| run_seed(workload, seed),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run that fails on the seeds named, and passes on the rest.
+    fn failing_on(bad: &[u64]) -> impl Fn(u64) -> Result<(), RunFailure> + '_ {
+        move |seed| {
+            if bad.contains(&seed) {
+                Err(RunFailure {
+                    workload: "w",
+                    seed,
+                    violations: vec![Violation {
+                        invariant: "inv",
+                        detail: format!("seed {seed} is bad"),
+                    }],
+                })
+            } else {
+                Ok(())
+            }
+        }
     }
-    Ok(())
+
+    #[test]
+    fn stopping_reports_only_the_first_failure() {
+        let run = failing_on(&[3, 5, 7]);
+        let failure = sweep_collecting("w", 0..10, false, run).expect_err("3 fails");
+        assert_eq!(failure.failures.len(), 1);
+        assert_eq!(failure.failures[0].seed, 3);
+        // Four seeds ran: 0, 1, 2, and the one that stopped it.
+        assert_eq!(failure.seeds_run, 4);
+    }
+
+    #[test]
+    fn collecting_reports_every_failing_seed_and_runs_them_all() {
+        let run = failing_on(&[3, 5, 7]);
+        let failure = sweep_collecting("w", 0..10, true, run).expect_err("three fail");
+        let seeds: Vec<u64> = failure.failures.iter().map(|f| f.seed).collect();
+        assert_eq!(seeds, vec![3, 5, 7]);
+        assert_eq!(failure.seeds_run, 10, "collecting runs the whole sweep");
+    }
+
+    #[test]
+    fn a_seed_reached_twice_is_reported_once() {
+        // What the corpus replay does: seed 3 runs ahead of the sweep, and the
+        // sweep covers it again.
+        let seeds = [3].into_iter().chain(0..5);
+        let failure = sweep_collecting("w", seeds, true, failing_on(&[3])).expect_err("seed 3");
+        assert_eq!(failure.failures.len(), 1);
+        assert_eq!(failure.seeds_run, 6, "it still ran twice; it reports once");
+    }
+
+    #[test]
+    fn a_clean_sweep_is_ok() {
+        assert!(sweep_collecting("w", 0..10, true, failing_on(&[])).is_ok());
+    }
+
+    #[test]
+    fn a_panicking_seed_is_caught_and_named() {
+        let failure = sweep_collecting("w", 0..4, true, |seed| {
+            assert_ne!(seed, 2, "the workload asserted");
+            Ok(())
+        })
+        .expect_err("seed 2 panics");
+        assert_eq!(failure.failures[0].seed, 2);
+        assert_eq!(failure.failures[0].violations[0].invariant, "panic");
+        assert!(
+            failure.failures[0].violations[0]
+                .detail
+                .contains("the workload asserted"),
+            "the panic message is kept: {}",
+            failure.failures[0].violations[0].detail
+        );
+        assert_eq!(failure.seeds_run, 4, "a panic does not end the sweep");
+    }
+
+    #[test]
+    fn one_failure_prints_exactly_as_a_run_failure() {
+        let run = failing_on(&[3]);
+        let failure = sweep_collecting("w", 0..10, false, run).expect_err("3 fails");
+        assert_eq!(failure.to_string(), failure.failures[0].to_string());
+    }
+
+    #[test]
+    fn many_failures_print_pasteable_corpus_lines() {
+        let run = failing_on(&[3, 5]);
+        let failure = sweep_collecting("w", 0..10, true, run).expect_err("two fail");
+        let report = failure.to_string();
+        let summary = "failed at 2 of the 10 seeds run";
+        assert!(report.contains(summary), "{report}");
+        // The block the soak exists to produce, in the format corpus.txt parses.
+        assert!(report.contains("\nw 3\nw 5\n"), "{report}");
+    }
 }

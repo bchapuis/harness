@@ -41,6 +41,8 @@ use crate::invariant::Invariant;
 use crate::invariant::default_invariants;
 use crate::faults::RegistryFaultPolicy;
 use crate::registry::SimRegistry;
+use crate::workload::SweepFailure;
+use crate::workload::sweep_collecting;
 
 // Swarm intensity for the cluster harness (spec §18.3): how hard each run is
 // faulted and how long it may take. Collected here as named constants so the
@@ -395,7 +397,9 @@ pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(
     }
 }
 
-/// Sweep a cluster workload across many seeds, stopping at the first failure.
+/// Sweep a cluster workload across many seeds, stopping at the first failure —
+/// or, under [`collect_all_failures`](crate::collect_all_failures), running to
+/// the end and reporting every failing seed.
 ///
 /// The workload's [`regression_seeds`](crate::regression_seeds) run first,
 /// ahead of `seeds` and whatever sizing produced them: a seed that failed once
@@ -403,11 +407,13 @@ pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(
 pub fn run_cluster_swarm<W: ClusterWorkload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
-) -> Result<(), RunFailure> {
-    for seed in crate::corpus::regression_seeds(workload.name()).chain(seeds) {
-        run_cluster_seed(workload, seed)?;
-    }
-    Ok(())
+) -> Result<(), SweepFailure> {
+    sweep_collecting(
+        workload.name(),
+        crate::corpus::regression_seeds(workload.name()).chain(seeds),
+        crate::sweep::collect_all_failures(),
+        |seed| run_cluster_seed(workload, seed),
+    )
 }
 
 /// Sweep a cluster workload across many seeds, checking invariants on each run
@@ -418,18 +424,26 @@ pub fn run_cluster_swarm<W: ClusterWorkload>(
 pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
-) -> Result<FaultStats, RunFailure> {
+) -> Result<FaultStats, SweepFailure> {
     let mut total = FaultStats::default();
-    for seed in crate::corpus::regression_seeds(workload.name()).chain(seeds) {
-        let (violations, faults) = eval_cluster(workload, seed);
-        if !violations.is_empty() {
-            return Err(RunFailure {
-                workload: workload.name(),
-                seed,
-                violations,
-            });
-        }
-        total = total + faults;
-    }
+    sweep_collecting(
+        workload.name(),
+        crate::corpus::regression_seeds(workload.name()).chain(seeds),
+        crate::sweep::collect_all_failures(),
+        |seed| {
+            let (violations, faults) = eval_cluster(workload, seed);
+            if !violations.is_empty() {
+                return Err(RunFailure {
+                    workload: workload.name(),
+                    seed,
+                    violations,
+                });
+            }
+            // Only a clean seed contributes coverage, so the fault totals stay a
+            // claim about runs that actually held their invariants.
+            total = total + faults;
+            Ok(())
+        },
+    )?;
     Ok(total)
 }

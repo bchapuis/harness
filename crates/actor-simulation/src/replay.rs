@@ -121,7 +121,10 @@ fn check_twice(
 }
 
 /// Sweep a per-seed determinism check across many seeds, stopping at the first
-/// divergence — the standing reproducibility corpus (spec §18.6).
+/// divergence — or, under
+/// [`collect_all_failures`](crate::collect_all_failures), running to the end and
+/// reporting every seed that diverged. The standing reproducibility corpus
+/// (spec §18.6).
 ///
 /// The workload's [`regression_seeds`](crate::regression_seeds) run ahead of
 /// `seeds`, exactly as they do for an invariant sweep: a seed that once broke
@@ -131,12 +134,70 @@ fn sweep(
     workload: &str,
     seeds: impl IntoIterator<Item = u64>,
     mut check: impl FnMut(u64) -> Result<(), Box<Divergence>>,
-) -> Result<(), Box<Divergence>> {
+) -> Result<(), Box<SweepDivergence>> {
+    let mut divergences: Vec<Divergence> = Vec::new();
+    let mut seeds_run = 0;
     for seed in crate::corpus::regression_seeds(workload).chain(seeds) {
-        check(seed)?;
+        seeds_run += 1;
+        if let Err(divergence) = check(seed) {
+            // One line per seed, even when the corpus replay and the sweep range
+            // both reach it.
+            let already_seen = divergences.iter().any(|seen| seen.seed == seed);
+            if !already_seen {
+                divergences.push(*divergence);
+            }
+            if !crate::sweep::collect_all_failures() {
+                break;
+            }
+        }
     }
-    Ok(())
+    if divergences.is_empty() {
+        Ok(())
+    } else {
+        Err(Box::new(SweepDivergence {
+            seeds_run,
+            divergences,
+        }))
+    }
 }
+
+/// Every seed at which a reproducibility sweep found a divergence.
+///
+/// Boxed by its callers for the same reason a single [`Divergence`] is: each one
+/// carries two full events, so the error dwarfs the `Ok` path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SweepDivergence {
+    /// How many seeds ran, including the ones that diverged.
+    pub seeds_run: u64,
+    /// The diverging seeds, in sweep order. Never empty.
+    pub divergences: Vec<Divergence>,
+}
+
+impl std::fmt::Display for SweepDivergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // As with `SweepFailure`, one divergence prints exactly as it always
+        // did, so the stop-at-first message is unchanged.
+        if let [only] = self.divergences.as_slice() {
+            return write!(f, "{only}");
+        }
+        writeln!(
+            f,
+            "{} of the {} seeds run are non-deterministic:\n",
+            self.divergences.len(),
+            self.seeds_run
+        )?;
+        for divergence in &self.divergences {
+            writeln!(f, "{divergence}\n")?;
+        }
+        writeln!(f, "corpus.txt lines for every seed above:\n")?;
+        for divergence in &self.divergences {
+            writeln!(f, "{} {}", divergence.workload, divergence.seed)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SweepDivergence {}
 
 /// Record the event stream of a single-node workload run under `seed`.
 pub fn record_seed<W: Workload>(workload: &W, seed: u64) -> Vec<Event> {
@@ -154,11 +215,12 @@ pub fn check_reproducible<W: Workload>(workload: &W, seed: u64) -> Result<(), Bo
 }
 
 /// Sweep the determinism contract across seeds for a single-node workload — the
-/// standing reproducibility corpus (spec §18.6). Stops at the first divergence.
+/// standing reproducibility corpus (spec §18.6). Stops at the first divergence
+/// unless the run asks for every one.
 pub fn replay_swarm<W: Workload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
-) -> Result<(), Box<Divergence>> {
+) -> Result<(), Box<SweepDivergence>> {
     sweep(workload.name(), seeds, |s| check_reproducible(workload, s))
 }
 
@@ -183,11 +245,11 @@ pub fn check_cluster_reproducible<W: ClusterWorkload>(
 }
 
 /// Sweep the determinism contract across seeds for a cluster workload (spec
-/// §18.6). Stops at the first divergence.
+/// §18.6). Stops at the first divergence unless the run asks for every one.
 pub fn replay_cluster_swarm<W: ClusterWorkload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
-) -> Result<(), Box<Divergence>> {
+) -> Result<(), Box<SweepDivergence>> {
     sweep(workload.name(), seeds, |s| {
         check_cluster_reproducible(workload, s)
     })

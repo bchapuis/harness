@@ -82,6 +82,7 @@ pub use cluster_swarm::run_cluster_seed;
 pub use cluster_swarm::run_cluster_swarm;
 pub use cluster_swarm::run_cluster_swarm_coverage;
 pub use workload::RunFailure;
+pub use workload::SweepFailure;
 pub use workload::Workload;
 pub use workload::run_seed;
 pub use workload::run_swarm;
@@ -90,6 +91,7 @@ pub use workload::run_swarm;
 // The determinism contract enforced over the real event stream (spec §18.1 #1).
 pub use recorder::Recorder;
 pub use replay::Divergence;
+pub use replay::SweepDivergence;
 pub use replay::check_cluster_reproducible;
 pub use replay::check_reproducible;
 pub use replay::record_cluster_seed;
@@ -101,6 +103,7 @@ pub use replay::replay_swarm;
 // Sizing by declared cost class, plus the pinned corpus that ignores sizing
 // entirely (spec §18.6).
 pub use corpus::regression_seeds;
+pub use sweep::collect_all_failures;
 pub use sweep::coverage_seeds;
 pub use sweep::scenario_sweep;
 pub use sweep::slow_seeds;

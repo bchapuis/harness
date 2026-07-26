@@ -44,6 +44,8 @@
 //! - `SWARM_SEEDS=full` (or `0`) — the declared width, the corpus as written.
 //! - `SWARM_SEED_BASE=<n>` — offset every sweep by `n`. A soak sets this fresh
 //!   per run so it explores seeds the corpus has never covered.
+//! - `SWARM_CONTINUE=1` — do not stop at the first failing seed; run the whole
+//!   sweep and report every seed that failed. See [`collect_all_failures`].
 //!
 //! Unset, a run under `CI` takes the declared width and a local run takes its
 //! cost class's width.
@@ -61,6 +63,7 @@ const LOCAL_SLOW_SEEDS: u64 = 1;
 
 const ENV_WIDTH: &str = "SWARM_SEEDS";
 const ENV_BASE: &str = "SWARM_SEED_BASE";
+const ENV_CONTINUE: &str = "SWARM_CONTINUE";
 
 /// The seeds to sweep for a declared range whose seeds are cheap.
 ///
@@ -150,6 +153,27 @@ fn is_ci() -> bool {
     std::env::var_os("CI").is_some_and(|value| !value.is_empty())
 }
 
+/// Whether a sweep runs to the end and reports **every** failing seed, rather
+/// than stopping at the first.
+///
+/// The two runs want opposite things here. CI wants the first failure and wants
+/// it fast: the build is already red, and the seconds spent proving the other
+/// 1,999 seeds also fail buy nothing. A soak wants the opposite — it is mining
+/// the seed space for `(workload, seed)` pairs to write into `corpus.txt`, and a
+/// sweep that halts on the first one throws away the rest of the run. Worse, it
+/// compounds: once a corpus seed fails, the regression replay that runs *ahead*
+/// of every sweep (`corpus.txt`) fails first, and that workload stops exploring
+/// new ground entirely until someone fixes the bug.
+///
+/// So this is off by default — stop at the first failure, the behaviour every
+/// call site was written against — and `soak.yml` turns it on.
+pub fn collect_all_failures() -> bool {
+    match std::env::var(ENV_CONTINUE) {
+        Ok(raw) => !matches!(raw.trim(), "" | "0" | "false" | "no"),
+        Err(_) => false,
+    }
+}
+
 /// Say once per test binary how sweeps are sized, so a narrow run is never
 /// mistaken for the corpus. Visible with `--nocapture` and on failure.
 fn announce_once() {
@@ -169,9 +193,15 @@ fn announce_once() {
                 format!("{LOCAL_SEEDS} seed(s) per sweep, {LOCAL_SLOW_SEEDS} for slow ones")
             }
         };
+        let stopping = if collect_all_failures() {
+            ", reporting every failing seed"
+        } else {
+            ""
+        };
         eprintln!(
-            "note: swarm sweeps run {sizing}{from}; \
-             set {ENV_WIDTH}=full for the declared corpus"
+            "note: swarm sweeps run {sizing}{from}{stopping}; \
+             set {ENV_WIDTH}=full for the declared corpus, \
+             {ENV_CONTINUE}=1 to collect every failure"
         );
     });
 }
@@ -194,10 +224,47 @@ fn announce_once() {
 /// ```
 ///
 /// The body panics to fail, as a test body does; the sweep stops at the first
-/// seed that does. Prefer a `Workload` when the scenario fits one — the trait
-/// buys invariant checking and reproducibility sweeps as well as a name.
+/// seed that does — or, under [`collect_all_failures`], catches each panic, runs
+/// the rest of the seeds, and fails at the end naming every one. Prefer a
+/// `Workload` when the scenario fits one — the trait buys invariant checking and
+/// reproducibility sweeps as well as a name.
 pub fn scenario_sweep(name: &str, seeds: impl IntoIterator<Item = u64>, mut run: impl FnMut(u64)) {
-    for seed in crate::corpus::regression_seeds(name).chain(seeds) {
-        run(seed);
+    let seeds = crate::corpus::regression_seeds(name).chain(seeds);
+    if !collect_all_failures() {
+        for seed in seeds {
+            run(seed);
+        }
+        return;
     }
+    // A scenario body reports by panicking and has no `RunFailure` to return, so
+    // collecting means catching the panic, keeping its message against the seed,
+    // and re-raising the lot once the sweep is done.
+    let mut failed: Vec<(u64, String)> = Vec::new();
+    let mut seeds_run = 0;
+    for seed in seeds {
+        seeds_run += 1;
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(seed)));
+        if let Err(payload) = attempt
+            && !failed.iter().any(|(seen, _)| *seen == seed)
+        {
+            // One line per seed, even when the corpus replay and the sweep range
+            // both reach it.
+            failed.push((seed, crate::workload::panic_detail(payload.as_ref())));
+        }
+    }
+    if failed.is_empty() {
+        return;
+    }
+    let mut report = format!(
+        "scenario '{name}' failed at {} of the {seeds_run} seeds run:\n\n",
+        failed.len()
+    );
+    for (seed, detail) in &failed {
+        report.push_str(&format!("  seed {seed}: {detail}\n"));
+    }
+    report.push_str("\ncorpus.txt lines for every seed above:\n\n");
+    for (seed, _) in &failed {
+        report.push_str(&format!("{name} {seed}\n"));
+    }
+    panic!("{report}");
 }
