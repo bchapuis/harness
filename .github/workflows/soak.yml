@@ -97,7 +97,12 @@ jobs:
         env:
           SWARM_SEED_BASE: ${{ steps.seeds.outputs.base }}
           SWARM_SEEDS: ${{ steps.seeds.outputs.store }}
-        run: cargo test -p granary -p blob-store -p tenancy --no-fail-fast
+        # `--features sql` because granary's SQL facet (spec §7.14) is off by
+        # default, and its suites — `sql.rs` and `sql_swarm.rs`, 11 tests
+        # including two cluster sweeps — are `#![cfg(feature = "sql")]`. Without
+        # the flag they compile to zero tests, so the facet was soaked by nobody
+        # and had rotted into a build error before anyone noticed.
+        run: cargo test -p granary --features sql -p blob-store -p tenancy --no-fail-fast
 
       - name: Soak harness and machine (expensive seeds)
         if: ${{ !cancelled() }}

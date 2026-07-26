@@ -29,11 +29,11 @@ use serde::Deserialize;
 use serde::Serialize;
 
 mod support;
-use support::Add;
-use support::AddRandom;
-use support::Ledger;
-use support::Total;
-use support::ensure_schema;
+use support::ledger::Add;
+use support::ledger::AddRandom;
+use support::ledger::Ledger;
+use support::ledger::Total;
+use support::ledger::ensure_schema;
 
 // --- Suite-specific messages over the shared `Ledger` fixture ----------------
 

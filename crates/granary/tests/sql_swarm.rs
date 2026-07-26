@@ -57,10 +57,10 @@ use serde::Deserialize;
 use serde::Serialize;
 
 mod support;
-use support::Add;
-use support::AddRandom;
-use support::Ledger;
-use support::Total;
+use support::ledger::Add;
+use support::ledger::AddRandom;
+use support::ledger::Ledger;
+use support::ledger::Total;
 
 // --- A grain whose durable state is entirely its SQLite database ---------------
 
