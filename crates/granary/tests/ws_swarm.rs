@@ -48,6 +48,7 @@ use actor_simulation::run_cluster_swarm_coverage;
 use actor_simulation::sweep_seeds;
 use granary::Grain;
 use granary::GrainCtx;
+use granary::GrainError;
 use granary::GrainHandler;
 use granary::GrainRegistry;
 use granary::GranaryConfig;
@@ -175,17 +176,57 @@ fn content(n: u64) -> Vec<u8> {
         .collect()
 }
 
+/// What one client is entitled to read back at one path.
+///
+/// A committed `Put` pins the value. A `Put` whose outcome was **ambiguous** does
+/// not: `Unavailable` means the quorum was not observed, not that the record was
+/// refused (granary §7.2, §11) — a replica minority may hold it, and the next
+/// activation's quorum recovery can find it on a majority and adopt it. So the
+/// bytes of an ambiguous write are admissible from then on, and the check is
+/// that a read returns *some value this client actually wrote and that nothing
+/// has superseded* — which is still what F1/G14 claim, stated over the outcomes
+/// the spec actually gives.
+///
+/// Reads never narrow the set: the read path is read-your-leader, not
+/// linearizable (§7.5), so a deposed-but-unfenced activation may serve an older
+/// admissible value after a newer one was seen.
+#[derive(Default)]
+struct PathState {
+    /// The last value known to have committed, if any.
+    committed: Option<Vec<u8>>,
+    /// Values written since then whose fate is unknown, oldest first.
+    ambiguous: Vec<Vec<u8>>,
+}
+
+impl PathState {
+    /// A `Put` that returned success: it committed, and it is ordered after every
+    /// ambiguous attempt before it, so those can no longer be the visible value.
+    fn committed(&mut self, bytes: Vec<u8>) {
+        self.committed = Some(bytes);
+        self.ambiguous.clear();
+    }
+
+    /// A `Put` whose outcome was ambiguous: it may surface later.
+    fn may_have_landed(&mut self, bytes: Vec<u8>) {
+        self.ambiguous.push(bytes);
+    }
+
+    /// Whether `got` is a value this client is entitled to read here.
+    fn admits(&self, got: &[u8]) -> bool {
+        self.committed.as_deref() == Some(got) || self.ambiguous.iter().any(|v| v == got)
+    }
+}
+
 /// Write/read/overwrite traffic against a handful of workspace grains, driven
 /// through the public `GrainRef` API only (§18.4). Each client writes only paths
 /// in its own subtree (`c{client}/...`), so a read of a path it wrote has a
-/// single well-defined expected value — its last committed write — with no
-/// cross-client race. A faulted call is recorded as nothing and the client moves
-/// on, so the drive future always completes.
+/// well-defined set of admissible values with no cross-client race. A faulted
+/// call is recorded per [`PathState`] and the client moves on, so the drive
+/// future always completes.
 ///
 /// `stale` is shared across every seeded run: a client sets it if a read of one
-/// of its own paths ever returns bytes other than its last committed write to
-/// that path (an F1/G14 violation — a lost or stale-shadowed acknowledged
-/// capture).
+/// of its own paths ever returns bytes it cannot account for (an F1/G14
+/// violation — a lost or stale-shadowed acknowledged capture).
 struct WsSwarm {
     nodes: usize,
     clients: usize,
@@ -275,9 +316,9 @@ impl ClusterWorkload for WsSwarm {
                 let stale = Arc::clone(&stale);
                 let reads_verified = Arc::clone(&reads_verified);
                 tasks.push(async move {
-                    // A small per-client key/path space; `last[path]` is this
-                    // client's last committed write to that path.
-                    let mut last: std::collections::BTreeMap<(String, String), Vec<u8>> =
+                    // A small per-client key/path space; `paths[path]` tracks what
+                    // this client is entitled to read back there.
+                    let mut paths: std::collections::BTreeMap<(String, String), PathState> =
                         std::collections::BTreeMap::new();
                     for _ in 0..ops {
                         // Workspace key shared across clients (several grains per
@@ -286,9 +327,9 @@ impl ClusterWorkload for WsSwarm {
                         let path = format!("c{c}/f{}.bin", entropy.next_u64() % 3);
                         let grain = granary.grain(&key);
                         if entropy.next_u64().is_multiple_of(2) {
-                            // WRITE (and overwrite): record only on a committed ack.
+                            // WRITE (and overwrite).
                             let bytes = content(entropy.next_u64());
-                            if let Ok(Ok(_)) = grain
+                            let outcome = grain
                                 .ask_timeout(
                                     Put {
                                         path: path.clone(),
@@ -296,19 +337,44 @@ impl ClusterWorkload for WsSwarm {
                                     },
                                     Duration::from_secs(2),
                                 )
-                                .await
-                            {
-                                last.insert((key, path), bytes);
+                                .await;
+                            let state = paths.entry((key, path)).or_default();
+                            match outcome {
+                                // Committed: this is the value, and it supersedes
+                                // every earlier attempt — a late-landing ambiguous
+                                // record occupies an *earlier* `Seq` slot, so it can
+                                // never shadow a commit that came after it.
+                                Ok(Ok(_)) => state.committed(bytes),
+                                // `NotLeader` survived the bounded redirect: the
+                                // append was refused before any store, and a fenced
+                                // one reached no quorum either (§6, §8), so it
+                                // provably did not commit and this path is unchanged.
+                                Err(GrainError::NotLeader(_)) => {}
+                                // Ambiguous (§7.2, §11): the record may already sit
+                                // on a replica minority and be adopted by a later
+                                // activation's quorum recovery. Reading it back then
+                                // is correct, not stale.
+                                Err(GrainError::Unavailable(_) | GrainError::Call(_)) => {
+                                    state.may_have_landed(bytes)
+                                }
+                                // The handler ran and its capture failed. Nothing
+                                // committed, but this grain writes the file before
+                                // capturing it, so the bytes sit in the live
+                                // materialization until the next activation wipes it
+                                // and rebuilds from the committed records.
+                                Ok(Err(_)) => state.may_have_landed(bytes),
                             }
-                        } else if let Some(want) = last.get(&(key.clone(), path.clone())) {
-                            // READ a path this client has committed: the bytes must
-                            // equal its last committed write, or the call must fail
-                            // (under a fault) — never stale or wrong bytes.
+                        } else if let Some(state) = paths.get(&(key.clone(), path.clone())) {
+                            // READ a path this client has written: the bytes must be
+                            // one this client is entitled to see there, or the call
+                            // must fail (under a fault) — never another path's bytes,
+                            // never a value it never wrote, never one a later commit
+                            // superseded.
                             if let Ok(Ok(got)) = grain
                                 .ask_timeout(Get { path: path.clone() }, Duration::from_secs(2))
                                 .await
                             {
-                                if &got != want {
+                                if !state.admits(&got) {
                                     stale.store(true, Ordering::SeqCst);
                                 }
                                 reads_verified.fetch_add(1, Ordering::SeqCst);
@@ -318,14 +384,6 @@ impl ClusterWorkload for WsSwarm {
                 });
             }
             futures::future::join_all(tasks).await;
-            // Settle before the workload reports done: `on_activate` launches
-            // root-driven blob repair (§7.10 B6) — a background task that
-            // issues blob asks (and drains their stragglers). A repair pass
-            // kicked late by a re-activation can still be in flight when
-            // traffic ends. No-silent-loss (#1) requires every issued ask to
-            // *reach an outcome*, so give those background asks a window
-            // (> the 2s timeout) to resolve before quiescence is measured.
-            clock.sleep(Duration::from_secs(5)).await;
         })
     }
 

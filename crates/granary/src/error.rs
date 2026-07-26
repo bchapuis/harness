@@ -28,9 +28,21 @@ pub enum GrainError {
     /// hint and surfaces this only once the bounded redirect is exhausted (§5.4,
     /// §8). Unreachable in the `Local` single-node journal, kept for API stability.
     NotLeader(NodeId),
-    /// The grain's shard could not reach a quorum, so the write did not commit
+    /// The grain's shard could not reach a quorum, **or** the commit timed out
     /// (§11). CP, not AP: the caller retries or fails over rather than forking.
+    ///
+    /// The outcome is **ambiguous**, and callers must treat it that way: a
+    /// replica minority may already hold the record, and a later activation's
+    /// quorum recovery can find it on a majority and adopt it — so a command
+    /// that reported `Unavailable` MAY still become visible, at its own `Seq`
+    /// slot, some time afterwards (§7.2, §7.3, §11). That is why the runtime
+    /// never auto-retries it (§5.4) and why writes that must not double-apply
+    /// carry the caller's own idempotence (§2.2). Contrast [`NotLeader`], which
+    /// the spec does pin as never committing.
+    ///
     /// Unreachable in the `Local` single-node journal, kept for API stability.
+    ///
+    /// [`NotLeader`]: GrainError::NotLeader
     Unavailable(String),
 }
 
