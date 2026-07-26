@@ -796,6 +796,15 @@ const SINGLETON: &str = "swarm-highlander";
 /// ends with a heal and a settle window, exactly one activation per name is
 /// live. (The per-node half rides along continuously in `default_invariants`;
 /// mid-run dual activation across nodes is legal divergence and not flagged.)
+///
+/// "Live" is judged by the *actor's* lifecycle, not the manager's report. A
+/// manager emits `SingletonStopped` when it observes the termination, on its
+/// next tick (utilities spec §5) — so an instance that stops in the last tick of
+/// a run is gone while its `Stopped` is still one tick away. `ResignId` is
+/// emitted synchronously as the identity is released (core spec §4.2 step 5),
+/// which is the ground truth the count wants. Taking either event as the end of
+/// an activation drops that false positive and keeps every real one: a stopped
+/// activation nobody re-activated still leaves the count at zero and fails.
 #[derive(Default)]
 struct SingletonConverged {
     open: Vec<actor_core::ActorId>,
@@ -813,7 +822,8 @@ impl actor_simulation::Invariant for SingletonConverged {
                 self.ever_started = true;
                 self.open.push(actor.clone());
             }
-            actor_core::Event::SingletonStopped { actor, .. } => {
+            actor_core::Event::SingletonStopped { actor, .. }
+            | actor_core::Event::ResignId { id: actor } => {
                 self.open.retain(|a| a != actor);
             }
             _ => {}
@@ -903,10 +913,15 @@ impl ClusterWorkload for SingletonChaos {
                     }
                 }
             }
-            // Outlast the nemesis entirely, then heal and reconverge so the
-            // at-quiescence exactly-one check is meaningful.
+            // Outlast the nemesis entirely, then heal *and* quiesce the wire
+            // before letting the views reconverge. Both halves matter: healing
+            // clears the partitions, but a network still dropping its seeded
+            // share of frames keeps the detector flipping peers in and out of
+            // every serving set, so the cluster would never converge and the
+            // exactly-one check below would be asserting against a moving view.
             clock.sleep(Duration::from_secs(3)).await;
             net.heal();
+            net.quiesce();
             clock.sleep(Duration::from_secs(3)).await;
         })
     }
@@ -961,7 +976,18 @@ fn singleton_chaos_converges_in_leader_mode() {
             voters: 3,
             election_timeout: Duration::from_millis(500),
             heartbeat_interval: Duration::from_millis(100),
-            downing: DowningPolicy::Timeout(Duration::from_millis(300)),
+            // Conservative downing, for the reason the gossip twin above gives,
+            // which leader mode takes further. An aggressive timeout under the
+            // nemesis's total partitions lets each isolated side down the rest,
+            // and `down` is terminal (spec invariant #15) — a heal cannot undo
+            // it. In leader mode the voter set is fixed, so a node the previous
+            // leader downed still votes; the survivors elect a new leader that
+            // downs *it*, and the cluster can end with every node `Down`, an
+            // empty serving set on all of them, and no anchor to host the
+            // singleton anywhere. That cluster has converged, on nothing, and a
+            // global exactly-one is not a claim about it. `watch-under-chaos`
+            // sweeps the quorum-committed downing path in leader mode instead.
+            downing: DowningPolicy::Conservative,
         },
     };
     if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
