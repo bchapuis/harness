@@ -48,7 +48,9 @@ sim.block_on(workload.run(system));
 
 **Workloads (§18.4).** A test is a `Workload`: build actors and registrations, drive traffic through the **public API only** (never actor state — `when_local` excepted, §3.5.1), then let the runner check invariants. `run_swarm` / `run_cluster_swarm` sweep one workload across many seeds, sampling a `FaultConfig` / `FaultPolicy` from each seed's stream. Coverage is *cluster-time exercised per change*, not test count. A failing run is reported as a `RunFailure` carrying the `(workload, seed)` that replays it — the seed regenerates the run's faults, so there is nothing run-shaped to carry beyond it.
 
-Note the asymmetry the checkers have to respect: a single-node run is driven to **quiescence**, but a cluster run is **time-bounded** (`run_for`) because the failure detector never quiesces. An at-quiescence check is therefore sound only for the single-node shape; a property that must hold for both has to hold at every *prefix*.
+Note the asymmetry the checkers have to respect: a single-node run is driven to **quiescence**, but a cluster run is **time-bounded** (`run_for`) because the failure detector never quiesces. A property that must hold for both has to hold at every *prefix*.
+
+An at-quiescence check over a cluster run is therefore a claim about a state the run has to be *put into*, and getting that wrong is the single richest source of false failures this corpus has recorded. The driver does its half — after the traffic finishes it flushes, then keeps advancing while any `ask` is still in flight, so "pending at quiescence" is not just "pending inside its own deadline". A workload asserting something about a **converged** cluster has to do the rest: `heal()` clears the nemesis's partitions but leaves the seeded frame loss running, and a detector fed lossy probes never lets the views settle, so it calls `quiesce()` too. See [simulation testing](simulation-testing.md#asserting-at-quiescence).
 
 The shapes a sweep can take, how many seeds a run spends, and where each kind of test file lives are conventions rather than mechanism: see [simulation testing](simulation-testing.md).
 

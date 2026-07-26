@@ -25,8 +25,8 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_simulation::FaultPolicy;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
 use serde::Deserialize;
 use serde::Serialize;
@@ -203,4 +203,50 @@ fn duplication_is_tolerated_with_one_outcome_at_the_caller() {
     // Server double-handled the Inc (count == 2); the caller still got a single
     // well-formed reply.
     assert_eq!(count, Ok(2));
+}
+
+// --- §18.3: quiescing retires fault injection for the rest of the run ---------
+
+#[test]
+fn quiescing_the_network_stops_injecting_faults() {
+    // The counterpart to `heal`. `heal` clears partitions but leaves the wire's
+    // seeded loss running, which is right for a nemesis that heals between
+    // rounds — and wrong for the tail of a run that means to assert something
+    // about a *converged* cluster, because a detector fed lossy probes keeps
+    // flipping peers in and out of every serving set and the views never settle.
+    // `quiesce` is what makes that tail quiet.
+    let sim = Simulation::new(4);
+    let net = SimNetwork::new(&sim).with_faults(FaultPolicy {
+        drop_num: 1,
+        drop_den: 1, // every frame is lost
+        ..FaultPolicy::default()
+    });
+    let node_a = net.join(NodeId::new(1));
+    let node_b = net.join(NodeId::new(2));
+    let quiet = net.clone();
+
+    let (before, after) = sim.block_on(async move {
+        let greeter = node_a.spawn(Greeter::<SimNode>::new("Hello"));
+        let remote = node_b.resolve::<Greeter<SimNode>>(greeter.id().clone());
+        let greet = || Greet {
+            name: "world".into(),
+        };
+        let before = remote.ask_timeout(greet(), Duration::from_secs(1)).await;
+        quiet.quiesce();
+        let after = remote.ask_timeout(greet(), Duration::from_secs(1)).await;
+        (before, after)
+    });
+    assert_eq!(before, Err(CallError::Timeout), "faulted: every frame lost");
+    assert_eq!(
+        after,
+        Ok("Hello, world!".to_string()),
+        "quiesced: none lost"
+    );
+
+    // Faults the run already exercised stay on the tally, so a coverage
+    // assertion still sees what happened before the wire went quiet.
+    assert!(
+        net.fault_stats().dropped > 0,
+        "quiescing must not erase the coverage the run earned",
+    );
 }

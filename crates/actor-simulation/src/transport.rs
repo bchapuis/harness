@@ -79,7 +79,10 @@ pub struct SimNetwork {
     pub(crate) mode: MembershipMode,
     pub(crate) events: Arc<dyn EventSink>,
     pub(crate) authorizer: Option<Arc<dyn Authorizer>>,
-    faults: FaultPolicy,
+    /// Seeded loss/duplication/latency, shared with every clone of this handle
+    /// so [`quiesce`](SimNetwork::quiesce) reaches the routing path a node is
+    /// already sending on.
+    pub(crate) faults: Arc<Mutex<FaultPolicy>>,
     /// A fixed minimum delivery latency applied to every frame (spec §18.2). It is
     /// **not** a fault and draws no entropy — it exists so virtual time always
     /// advances on delivery. Without it, zero-latency delivery completes
@@ -110,7 +113,7 @@ impl SimNetwork {
             mode: MembershipMode::Static { detector: None },
             events: Arc::new(()),
             authorizer: None,
-            faults: FaultPolicy::default(),
+            faults: Arc::new(Mutex::new(FaultPolicy::default())),
             // A small, realistic default so virtual time always advances on
             // delivery (see the field doc). Deterministic and entropy-free.
             base_latency: Duration::from_millis(1),
@@ -133,9 +136,15 @@ impl SimNetwork {
     }
 
     /// Enable seed-controlled transport faults (spec §18.3).
-    pub fn with_faults(mut self, faults: FaultPolicy) -> SimNetwork {
-        self.faults = faults;
+    pub fn with_faults(self, faults: FaultPolicy) -> SimNetwork {
+        *self.faults.lock().expect("fault policy mutex poisoned") = faults;
         self
+    }
+
+    /// The fault policy in force right now (a snapshot; the policy is shared and
+    /// [`quiesce`](SimNetwork::quiesce) can retire it mid-run).
+    fn faults(&self) -> FaultPolicy {
+        *self.faults.lock().expect("fault policy mutex poisoned")
     }
 
     /// Run every node in **gossip-based** mode (spec §9.4.4): full SWIM failure
@@ -215,6 +224,7 @@ impl SimNetwork {
     /// [`FaultPolicy`] the frame may be dropped, duplicated, or delayed, with
     /// per-pair delivery kept strictly ordered so per-pair FIFO survives (#3).
     fn route(&self, from: NodeId, to: NodeId, frame: Frame) -> Result<(), TransportError> {
+        let faults = self.faults();
         let sender = {
             let inner = self.inner.lock().expect("network mutex poisoned");
             if inner.blocked.contains(&(from, to)) {
@@ -231,7 +241,7 @@ impl SimNetwork {
         // latency to apply — the cheapest case (spec §18.2). This path draws no
         // entropy, and neither does `reserve_pair_slot` on the base-latency-only
         // path below (see its doc): the gate here and the draw there are conjoined.
-        if !self.faults.active() && self.base_latency.is_zero() {
+        if !faults.active() && self.base_latency.is_zero() {
             return sender
                 .try_send((from, frame))
                 .map_err(|_| TransportError::Unreachable);
@@ -241,13 +251,10 @@ impl SimNetwork {
         // base-latency-only default draws no entropy here — the seeded random
         // stream stays byte-identical to a zero-latency run, only delivery timing
         // shifts. (`buggify` always consumes entropy, so it must not run otherwise.)
-        let copies = if self.faults.active() {
+        let copies = if faults.active() {
             // Seeded loss (also models corruption / association loss): the node
             // never sees the frame, so it cannot be wedged by it (spec §7.3).
-            if self
-                .entropy
-                .buggify(self.faults.drop_num, self.faults.drop_den)
-            {
+            if self.entropy.buggify(faults.drop_num, faults.drop_den) {
                 self.stats.record_dropped();
                 return Ok(());
             }
@@ -255,7 +262,7 @@ impl SimNetwork {
             // caller still sees a single outcome (§7.2).
             if self
                 .entropy
-                .buggify(self.faults.duplicate_num, self.faults.duplicate_den)
+                .buggify(faults.duplicate_num, faults.duplicate_den)
             {
                 self.stats.record_duplicated();
                 2
@@ -266,7 +273,7 @@ impl SimNetwork {
             1
         };
         for _ in 0..copies {
-            let deliver_at = self.reserve_pair_slot(from, to);
+            let deliver_at = self.reserve_pair_slot(from, to, faults.max_latency);
             if deliver_at > self.clock.now() {
                 self.stats.record_delayed();
             }
@@ -294,14 +301,14 @@ impl SimNetwork {
     /// configs. Drawing unconditionally here would silently break reproducibility —
     /// there is no compile error to catch it, so keep the gate in lockstep with
     /// `route`.
-    fn reserve_pair_slot(&self, from: NodeId, to: NodeId) -> Instant {
+    fn reserve_pair_slot(&self, from: NodeId, to: NodeId, max_latency: Duration) -> Instant {
         // Seeded jitter only when `max_latency` is set (drawing entropy); floored by
         // the fixed `base_latency` so every delivery is at least `now + base` — the
         // floor draws no entropy.
-        let jitter = if self.faults.max_latency.is_zero() {
+        let jitter = if max_latency.is_zero() {
             Duration::ZERO
         } else {
-            let span = self.faults.max_latency.as_nanos() as u64 + 1;
+            let span = max_latency.as_nanos() as u64 + 1;
             Duration::from_nanos(self.entropy.next_u64() % span)
         };
         let earliest = self.clock.now() + jitter.max(self.base_latency);

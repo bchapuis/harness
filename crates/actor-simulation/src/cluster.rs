@@ -22,8 +22,8 @@
 use std::sync::Arc;
 
 use actor_cluster::ClusterConfig;
-use actor_cluster::Frame;
 use actor_cluster::ClusterSystem;
+use actor_cluster::Frame;
 use actor_core::NodeId;
 use actor_serialization::Codec;
 use actor_serialization::JsonCodec;
@@ -216,11 +216,37 @@ impl SimNetwork {
     }
 
     /// Clear all partitions/crashes — the network heals (spec §9.2).
+    ///
+    /// This is about *blocks*, not about the wire's quality: seeded loss,
+    /// duplication, and latency keep running, because the nemesis heals between
+    /// rounds and a heal that retired fault injection would leave the rest of
+    /// the run unfaulted. [`quiesce`](SimNetwork::quiesce) is the other half.
     pub fn heal(&self) {
         self.inner
             .lock()
             .expect("network mutex poisoned")
             .blocked
             .clear();
+    }
+
+    /// Stop injecting transport faults: from here on frames are neither dropped,
+    /// duplicated, nor jittered (the fixed base latency stays — it is not a
+    /// fault, spec §18.2).
+    ///
+    /// This is what a workload needs to reach a genuinely **converged** cluster,
+    /// and [`heal`](SimNetwork::heal) alone does not get there. A healed network
+    /// that still loses a seeded share of frames keeps the SWIM detector firing:
+    /// probes go missing, peers flip to `suspect` and on to `unreachable`, and
+    /// every node's serving set (utilities spec §2.1) keeps changing under it. A
+    /// run can then end mid-divergence however long it waits, so an
+    /// at-quiescence assertion that presumes convergence — the singleton's
+    /// exactly-one (utilities spec §4 item 3) — has no ground to stand on.
+    /// Quiescing first gives the detector clean probes and lets the views
+    /// actually settle.
+    ///
+    /// Faults already tallied stay counted, so a coverage assertion (spec §18.3)
+    /// still sees what the run exercised.
+    pub fn quiesce(&self) {
+        *self.faults.lock().expect("fault policy mutex poisoned") = crate::FaultPolicy::default();
     }
 }

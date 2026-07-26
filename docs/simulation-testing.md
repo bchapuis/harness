@@ -191,6 +191,34 @@ the panic message is the workload's own.
 One seed reports once, even though the corpus replay and a wide sweep can both
 reach it.
 
+## Asserting at quiescence
+
+An at-quiescence assertion is a claim about a run that has stopped happening,
+and a run only stops happening if you let it. Two things get this wrong, and
+both have cost the corpus a hundred seeds.
+
+**Wait for the calls to close.** A call issued at the end of the drive carries
+its own deadline, and a subsystem may fan out more calls behind it — granary's
+quorum append returns at quorum latency and drains the slower replicas
+afterwards, each with a seconds-long timeout. `drive_cluster` therefore flushes
+and then keeps advancing while any `ask` is in flight, up to a cap. Nothing to
+do at the call site; the point is that "still pending at quiescence" now means
+what it says, so a workload should not paper over it with a sleep of its own.
+
+**A heal is not a quiet network.** `net.heal()` clears the nemesis's partitions.
+It does not stop the seeded loss, duplication, and latency, which run for the
+whole seed — deliberately, since the nemesis heals between rounds. But a
+detector fed lossy probes keeps flipping peers in and out of every node's view,
+so the cluster never converges, and a run can end mid-divergence however long it
+waits. A workload that means to assert something about a **converged** cluster
+calls `net.quiesce()` alongside the heal, then gives the views time to settle.
+Faults already tallied stay counted, so coverage assertions are unaffected.
+
+Related: judge liveness by the event that states it. `SingletonConverged` counts
+an activation as over at `SingletonStopped` *or* `ResignId`, because the first is
+the manager's report on its next tick and the second is the actor's own identity
+being released. Between them sits a window a run can end inside.
+
 ## The regression corpus
 
 `crates/actor-simulation/corpus.txt` records every seed that ever failed, keyed

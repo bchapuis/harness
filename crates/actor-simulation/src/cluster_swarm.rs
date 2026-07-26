@@ -32,14 +32,14 @@ use crate::FaultPolicy;
 use crate::FaultStats;
 use crate::RunFailure;
 use crate::SimClock;
-use crate::SimNode;
 use crate::SimEntropy;
 use crate::SimNetwork;
+use crate::SimNode;
 use crate::Simulation;
 use crate::Violation;
+use crate::faults::RegistryFaultPolicy;
 use crate::invariant::Invariant;
 use crate::invariant::default_invariants;
-use crate::faults::RegistryFaultPolicy;
 use crate::registry::SimRegistry;
 use crate::workload::SweepFailure;
 use crate::workload::sweep_collecting;
@@ -67,6 +67,11 @@ const CLUSTER_STEP: Duration = Duration::from_millis(500);
 /// Window after traffic completes for post-traffic signals (terminations,
 /// prunes) to flush.
 const CLUSTER_FLUSH: Duration = Duration::from_secs(2);
+/// Cap on the extra time [`drive_cluster`] will spend waiting for in-flight
+/// `ask`s to close after the flush window (see `AskTally`). Generous next to any
+/// per-call deadline a workload configures, and finite so a genuinely lost ask
+/// still reaches the no-silent-loss invariant instead of spinning here.
+const CLUSTER_SETTLE_MAX: Duration = Duration::from_secs(30);
 
 /// The running cluster handed to a [`ClusterWorkload`].
 pub struct ClusterCtx {
@@ -249,6 +254,11 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
     seed: u64,
     events: Arc<dyn actor_core::EventSink>,
 ) -> ClusterRun {
+    let tally = Arc::new(AskTally::default());
+    let events: Arc<dyn actor_core::EventSink> = Arc::new(TallyingSink {
+        tally: Arc::clone(&tally),
+        inner: events,
+    });
     let sim = Simulation::new(seed);
     // Seed-sampled transport faults: modest drop, duplication, and latency, so
     // the run exercises loss, dups, and reordering on top of the nemesis's
@@ -353,8 +363,19 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
     while !done.load(Ordering::SeqCst) && sim.now() < deadline {
         sim.run_for(CLUSTER_STEP);
     }
-    // Let post-traffic signals (terminations, prunes) flush.
+    // Let post-traffic signals (terminations, prunes) flush, then keep going
+    // while any `ask` is still in flight. A fixed window cannot be right here:
+    // the last call a workload issues carries its own deadline, and a subsystem
+    // may fan out further calls behind it — granary's quorum append returns at
+    // quorum latency and drains the slower replicas afterwards, each with a
+    // seconds-long timeout of its own. Stopping the clock inside that deadline
+    // and then asking "is anything still pending?" reports a live call as a lost
+    // one. Waiting for the answer is what makes the question meaningful.
+    let settle_by = sim.now() + CLUSTER_SETTLE_MAX;
     sim.run_for(CLUSTER_FLUSH);
+    while tally.in_flight() && sim.now() < settle_by {
+        sim.run_for(CLUSTER_STEP);
+    }
 
     let mut faults = net.fault_stats();
     if let Some(registry) = &ctx.registry {
@@ -446,4 +467,43 @@ pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
         },
     )?;
     Ok(total)
+}
+
+/// How many `ask`s the run has issued but not yet resolved.
+///
+/// The driver reads this to decide when the run has actually gone quiet (see
+/// [`drive_cluster`]). It is deliberately the same bracket the no-silent-loss
+/// invariant counts (spec §18.5 #1), so "the driver stopped waiting" and "the
+/// invariant is satisfied" cannot disagree about what pending means.
+#[derive(Default)]
+struct AskTally {
+    outstanding: std::sync::atomic::AtomicI64,
+}
+
+impl AskTally {
+    fn in_flight(&self) -> bool {
+        self.outstanding.load(Ordering::SeqCst) > 0
+    }
+}
+
+/// The run's event sink, counting the `ask` bracket on its way through to the
+/// [`Checker`] or [`Recorder`](crate::Recorder) the caller supplied.
+struct TallyingSink {
+    tally: Arc<AskTally>,
+    inner: Arc<dyn actor_core::EventSink>,
+}
+
+impl actor_core::EventSink for TallyingSink {
+    fn emit(&self, event: actor_core::Event) {
+        match event {
+            actor_core::Event::AskIssued { .. } => {
+                self.tally.outstanding.fetch_add(1, Ordering::SeqCst);
+            }
+            actor_core::Event::AskOutcome { .. } => {
+                self.tally.outstanding.fetch_sub(1, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+        self.inner.emit(event);
+    }
 }
