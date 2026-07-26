@@ -22,4 +22,209 @@
 # Corpus seeds are absolute: SWARM_SEED_BASE shifts a sweep, never these.
 
 # --- entries below this line ---
+# --- Split-brain singleton after heal -----------------------------------------
+#
+# Two live activations at quiescence on a healed, converged cluster, against
+# `singleton-converged-exactly-one`. One bug, not three: it reproduces in the
+# gossip, registry, and leader control planes alike, and only `static` — where
+# membership never changes and the anchor never moves — is clean. That points at
+# the shared singleton-anchor logic rather than at any one mode.
+#
+# The 20000xxx and 90000xxx seeds came from collecting soaks (SWARM_CONTINUE=1)
+# over 2000-3000 seeds per mode, which failed at roughly 0.5-1% of them. They are
+# kept in bulk because a fix has to clear all three modes, but they are one bug
+# recorded a hundred times: prune to a handful per mode once the anchor bug is
+# understood and the durable regression is a scenario test.
+
 singleton-chaos/leader 900006  # split-brain singleton after heal
+singleton-chaos/leader 90000073
+singleton-chaos/leader 90000428
+singleton-chaos/leader 90000458
+singleton-chaos/leader 90000486
+singleton-chaos/leader 90000614
+singleton-chaos/leader 90000729
+singleton-chaos/leader 90000979
+singleton-chaos/leader 90001084
+singleton-chaos/leader 90001839
+singleton-chaos/leader 20000102
+singleton-chaos/leader 20000157
+singleton-chaos/leader 20000212
+singleton-chaos/leader 20000296
+singleton-chaos/leader 20000397
+singleton-chaos/leader 20000399
+singleton-chaos/leader 20000479
+singleton-chaos/leader 20000499
+singleton-chaos/leader 20000589
+singleton-chaos/leader 20000621
+singleton-chaos/leader 20000757
+singleton-chaos/leader 20000766
+singleton-chaos/leader 20000932
+singleton-chaos/leader 20000958
+singleton-chaos/leader 20001069
+singleton-chaos/leader 20001071
+singleton-chaos/leader 20001174
+singleton-chaos/leader 20001302
+singleton-chaos/leader 20001445
+singleton-chaos/leader 20001475
+singleton-chaos/leader 20001496
+singleton-chaos/leader 20001538
+singleton-chaos/leader 20001675
+singleton-chaos/leader 20001694
+singleton-chaos/leader 20001701
+singleton-chaos/leader 20001810
+singleton-chaos/leader 20001970
+singleton-chaos/leader 20001976
+singleton-chaos/leader 20002197
+singleton-chaos/leader 20002242
+singleton-chaos/leader 20002395
+singleton-chaos/leader 20002591
+singleton-chaos/leader 20002862
+singleton-chaos/leader 20002871
+
+singleton-chaos/registry 20000122  # same split-brain, registry mode
+singleton-chaos/registry 90000005
+singleton-chaos/registry 90000048
+singleton-chaos/registry 90000332
+singleton-chaos/registry 90000422
+singleton-chaos/registry 90000682
+singleton-chaos/registry 90000743
+singleton-chaos/registry 90000999
+singleton-chaos/registry 90001287
+singleton-chaos/registry 90001311
+singleton-chaos/registry 90001424
+singleton-chaos/registry 90001507
+singleton-chaos/registry 90001631
+singleton-chaos/registry 20000186
+singleton-chaos/registry 20000188
+singleton-chaos/registry 20000765
+singleton-chaos/registry 20000804
+singleton-chaos/registry 20000993
+singleton-chaos/registry 20001050
+singleton-chaos/registry 20001154
+singleton-chaos/registry 20001296
+singleton-chaos/registry 20001339
+singleton-chaos/registry 20001344
+singleton-chaos/registry 20002003
+singleton-chaos/registry 20002037
+singleton-chaos/registry 20002070
+singleton-chaos/registry 20002215
+singleton-chaos/registry 20002388
+singleton-chaos/registry 20002454
+singleton-chaos/registry 20002476
+singleton-chaos/registry 20002497
+singleton-chaos/registry 20002890
+
+singleton-chaos/gossip 20000237  # same split-brain, gossip mode
+singleton-chaos/gossip 90000205
+singleton-chaos/gossip 90000376
+singleton-chaos/gossip 90000445
+singleton-chaos/gossip 90000508
+singleton-chaos/gossip 90000544
+singleton-chaos/gossip 90000827
+singleton-chaos/gossip 90001222
+singleton-chaos/gossip 90001311
+singleton-chaos/gossip 90001464
+singleton-chaos/gossip 90001999
+singleton-chaos/gossip 20000573
+singleton-chaos/gossip 20000579
+singleton-chaos/gossip 20000638
+singleton-chaos/gossip 20000792
+singleton-chaos/gossip 20000841
+singleton-chaos/gossip 20000880
+singleton-chaos/gossip 20000910
+singleton-chaos/gossip 20000970
+singleton-chaos/gossip 20001194
+singleton-chaos/gossip 20001413
+singleton-chaos/gossip 20001457
+singleton-chaos/gossip 20001817
+singleton-chaos/gossip 20002075
+singleton-chaos/gossip 20002194
+
+# --- Remote register not linearizable under duplication -----------------------
+#
+# A duplicated request frame is applied twice by the handler, and the caller can
+# resolve its `ask` with the duplicate's reply — a `Cas` that succeeded reports
+# `false`. Rare, around 0.2% of seeds, since duplication has to land on a
+# mutating op at a state-changing moment.
+#
+# Note this workload's claim sits against `conformance_faults.rs`
+# `duplication_is_tolerated_with_one_outcome_at_the_caller`, which asserts the
+# server *does* double-handle. One of the two contracts has to give.
+
+linearizable-remote-register 10000125  # duplicated Cas applied twice; caller took the duplicate's reply
+linearizable-remote-register 10000944  # same, found once the sweep stopped halting at 10000125
+linearizable-remote-register 91000312
+linearizable-remote-register 91000943
+linearizable-remote-register 91002603
+linearizable-remote-register 91005506
+linearizable-remote-register 20000148
+linearizable-remote-register 20000687
+linearizable-remote-register 20002305
+linearizable-remote-register 20002563
+linearizable-remote-register 97000111
+linearizable-remote-register 97001304
+linearizable-remote-register 97001357
+linearizable-remote-register 97002027
+linearizable-remote-register 97003306
+linearizable-remote-register 88000261
+linearizable-remote-register 88000552
+linearizable-remote-register 88000594
+linearizable-remote-register 88002303
+linearizable-remote-register 88002651
+linearizable-remote-register 88003765
+linearizable-remote-register 88004891
+linearizable-remote-register 88004987
+linearizable-remote-register 88005088
+linearizable-remote-register 88005368
+linearizable-remote-register 88005581
+linearizable-remote-register 88007068
+
+# --- Asks left pending at quiescence ------------------------------------------
+#
+# `[no-silent-loss] N ask(s) still pending at quiescence` — spec §18.5 #1, which
+# requires every `ask` to terminate and none to remain pending when the run goes
+# quiet. Several also trip `[serial-execution] dispatch ... never completed`, so
+# a dispatch is being left in flight rather than the reply being lost.
+#
+# A separate bug from the singleton split-brain above, and the broadest one here:
+# it reproduces in four unrelated granary workloads and in machine, which share
+# only the actor framework underneath.
+
+granary-account-swarm 60000014
+granary-account-swarm 94000001
+granary-account-swarm 94000145
+granary-account-swarm 94000219
+granary-account-swarm 94000876
+granary-account-swarm 94001084
+granary-account-swarm 94001324
+granary-account-swarm 94001341
+granary-account-swarm 94001411
+granary-account-swarm 99001008
+
+granary-blob-swarm 94000191
+granary-blob-swarm 94000236
+granary-blob-swarm 94000365
+granary-blob-swarm 94000378
+granary-blob-swarm 94000379
+granary-blob-swarm 94000454
+granary-blob-swarm 94001334
+granary-blob-swarm 99000090
+granary-blob-swarm 99000172
+granary-blob-swarm 99000228
+granary-blob-swarm 99000747
+granary-blob-swarm 99000751
+granary-blob-swarm 99000797
+granary-blob-swarm 99000854
+granary-blob-swarm 99000989
+granary-blob-swarm 99001012
+granary-blob-swarm 99001049
+
+granary-ws-swarm 94000683
+granary-ws-swarm 99000858
+
+# Found the first time the SQL facet's swarm ever ran — it is behind
+# `--features sql`, which neither ci.yml nor soak.yml enabled, and the suite had
+# bit-rotted into a compile error in the meantime.
+granary-sql-account-swarm 95000206
+
+machine-swarm 70000001
