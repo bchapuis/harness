@@ -41,6 +41,29 @@ Use this when the property should hold under *every* interleaving, not one. The
 workload says what traffic to generate and which invariants must hold; the
 runner varies scheduling, seeded transport faults, and the nemesis per seed.
 
+Each round the nemesis draws one action: a symmetric partition, a one-way
+partition, a crash (isolation — the process keeps running), a bounded process
+freeze, a heal, or a quiet round, plus a registry outage in registry-based mode.
+
+A **restart** — real process death, with durable state reloaded through the
+storage seam — joins that list only for a workload that returns a `Rehost` hook
+from `ClusterWorkload::rehost`, because the successor process comes up empty.
+Whatever `setup` installed on that node is gone, so without the hook a restarted
+node stops leading shards and stops counting toward a quorum, and the run has
+quietly shrunk the cluster rather than faulted it. A consenting workload also
+bounds its calls (`ask_timeout`) and keeps no long-lived handle on a node other
+than the first, which the nemesis never restarts.
+
+Restart ends the old process for real: its scheduler domain is retired, so none
+of its tasks is ever polled again. That leaves brackets open — an actor stopped
+between `DispatchStart` and `DispatchEnd`, an `ask` issued and never answered, an
+identity assigned and never resigned — which is what dying looks like, not a
+violation. `NodeRestarted` is how a checker learns the boundary: the `Checker`
+calls `Invariant::forget_node` on every invariant before the successor's events
+arrive reusing the predecessor's identities. An invariant that accumulates
+per-node state overrides it; one whose claim survives a restart, like
+`OneLeaderPerTerm` over a reloaded term and vote, does not.
+
 ### 3. Coverage sweep
 
 An invariant sweep that additionally asserts fault injection actually fired:
@@ -260,6 +283,24 @@ a seed means. So the seed is the *discovery* mechanism; once the bug is
 understood, the durable regression is a scenario test that reproduces its shape.
 Write that too, and keep the corpus line as the cheap belt-and-braces.
 
+## When a sweep finds a bug you are not fixing yet
+
+The corpus is the ratchet for a bug that has been *understood* — a seed goes in,
+the scenario test that pins its shape goes in beside it, and from then on both
+run forever. A sweep that reproduces an **open** defect is a different situation:
+recording its seeds would make every run red until someone fixes the system, and
+deleting the sweep would throw away the reproduction.
+
+Quarantine it instead. Keep the workload, put the failing claim behind a flag the
+workload carries, and `#[ignore]` the one test that turns the flag on, with a
+reason naming the defect and where it is written up. The sweep's other tests —
+reproducibility, fault coverage — drive the same traffic with the claim off and
+stay green, so the workload keeps earning its place. `tenancy-directory-swarm` is
+the worked example, and `docs/simulation-hardening.md` §0 is what it points at.
+
+Un-ignore it in the commit that fixes the defect, and move its seeds into
+`corpus.txt` then — at that point they guard something again.
+
 ## Adding a sweep
 
 1. Write the workload — `Workload` for single-node, `ClusterWorkload` for a
@@ -268,7 +309,22 @@ Write that too, and keep the corpus line as the cheap belt-and-braces.
    sweep over it — or, if the crate hoists determinism by shape, the
    reproducibility sweep goes in its `*determinism.rs` instead.
 3. Size it: `sweep_seeds` unless a seed costs seconds, then `slow_seeds`.
-4. If it injects faults, add a coverage sweep with `coverage_seeds`.
+4. If it injects faults, add a coverage sweep with `coverage_seeds`. That covers
+   the transport's faults, the ones `FaultStats` counts. For a fault the wire
+   cannot see — a grain that hibernates, a process that dies — tally the events
+   that say so and assert once at the end, and then ask **which kind of claim it
+   is**, because that decides where it goes:
+
+   - Something the *workload* drives holds however narrow the run, so it can
+     ride the invariant sweep. Make it actually deterministic: idle past
+     `idle_after` on a fixed cadence rather than a seeded coin, and snapshot
+     often enough that a grain has a checkpoint to return from before it first
+     passivates. `granary`'s `support::Exercised` is the shared tally.
+   - Something the *nemesis* draws is a property of the seed range, so it needs
+     `coverage_seeds`, which never narrows. At `slow_seeds`' single local seed a
+     six-round nemesis misses any one action about two runs in five, so the same
+     assertion on an invariant sweep is not stricter, only flaky. State it once
+     for the nemesis rather than once per workload.
 5. If it needs a grain or actor a scenario suite already drives, take it from
    `tests/support/` rather than writing a second one.
 6. When soak finds a failing seed, add it to `corpus.txt` — and write the
