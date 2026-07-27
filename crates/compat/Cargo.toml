@@ -1,0 +1,15 @@
+[package]
+name = "compat"
+description = "The compatibility-boundary vocabulary: a format revision, the window of revisions a build accepts, the negotiation rule, and the named refusal outside it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }

@@ -22,6 +22,12 @@ actor-cluster = { path = "crates/actor-cluster", version = "0.1.0" }
 actor-simulation = { path = "crates/actor-simulation", version = "0.1.0" }
 actor-runtime = { path = "crates/actor-runtime", version = "0.1.0" }
 
+# The compatibility-boundary vocabulary (compatibility spec §2): one definition of
+# a format revision, the window of revisions a build accepts, the negotiation rule,
+# and the named refusal outside it. Depends on nothing in the tree so it can sit
+# below `wal`, which is itself below its callers.
+compat = { path = "crates/compat", version = "0.1.0" }
+
 # A generic, framed, checksummed write-ahead log — the shared substrate behind the
 # file-backed Raft WAL and grain store.
 wal = { path = "crates/wal", version = "0.1.0" }
