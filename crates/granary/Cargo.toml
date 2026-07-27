@@ -16,6 +16,7 @@ actor-simulation = { workspace = true, optional = true }
 actor-core.workspace = true
 actor-cluster.workspace = true
 actor-serialization.workspace = true
+compat.workspace = true
 wal.workspace = true
 blake3.workspace = true
 serde = { workspace = true }

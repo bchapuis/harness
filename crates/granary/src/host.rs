@@ -316,7 +316,7 @@ impl<G: Grain> Host<G> {
                 // plus one contribution per declared facet, all at `s_seq`. G4
                 // applies to it as a whole; a part that will not restore aborts
                 // the activation rather than serving a half-rebuilt grain.
-                let composite = CompositeSnapshot::decode(&bytes).map_err(boxed)?;
+                let composite = CompositeSnapshot::decode(&bytes, codec.name()).map_err(boxed)?;
                 self.state =
                     actor_serialization::decode(&*codec, &composite.state).map_err(boxed)?;
                 let forms = G::Facets::restore(&composite.facets, &self.facet_env(ctx))
@@ -696,7 +696,7 @@ impl<G: Grain> Host<G> {
         let Ok(facets) = G::Facets::snapshot(&forms, &self.facet_env(ctx)).await else {
             return;
         };
-        let Ok(bytes) = (CompositeSnapshot { state, facets }).encode() else {
+        let Ok(bytes) = (CompositeSnapshot { state, facets }).encode(codec.name()) else {
             return;
         };
         if let AppendOutcome::Committed(at) = self

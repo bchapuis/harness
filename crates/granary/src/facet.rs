@@ -11,7 +11,9 @@
 //!
 //! **Tagged records, one order, one barrier (G19).** Every record a grain
 //! journals carries a one-byte facet tag; tag [`EVENT_TAG`] (0) is *facet 0*, the
-//! grain's own event fold. All records a command produces — its events plus every
+//! grain's own event fold. Tags run to [`MAX_TAG`], the high bit being reserved as
+//! the escape into a later envelope revision ([`RECORD`]), so the envelope can
+//! change later without costing a byte today. All records a command produces — its events plus every
 //! facet's staged operations — append as one atomic batch (§6), so a command that
 //! touches state, the KV map, and the filesystem commits everywhere or nowhere.
 //! Replay dispatches each record to its facet by tag; an unrecognized tag aborts
@@ -52,6 +54,54 @@ use crate::blobs::GrainBlobs;
 /// The record tag of facet 0 — the grain's own event fold (spec §7.12).
 pub(crate) const EVENT_TAG: u8 = 0;
 
+/// The record envelope's revisions, and the one this build writes (spec §7.12,
+/// compatibility spec §3).
+///
+/// Revision 1 is `[tag][payload]` with `tag <= MAX_TAG` — exactly the layout the
+/// journal has always carried, so every record ever written is already a validly
+/// stamped revision-1 record and this window costs **no bytes on disk**. That is
+/// the point of stamping this boundary through the tag space rather than through a
+/// version byte: a record is the hottest durable path in the tree, and it is also
+/// the one place a version *prefix* could not be retrofitted unambiguously —
+/// `[version 1][tag 1][payload]` and `[tag 1][payload starting 0x01]` are the same
+/// bytes.
+///
+/// A future revision announces itself by setting the high bit of the leading byte
+/// (see [`MAX_TAG`]), which no revision-1 record can do.
+pub(crate) const RECORD: compat::Window = compat::Window::at("granary.record", 1);
+
+/// The largest facet tag a record envelope may carry.
+///
+/// The high bit of the leading byte is **reserved**: a byte at or above `0x80`
+/// is not a tag but the escape into a later envelope revision (`[0x80 | revision]`
+/// followed by that revision's own header). Reserving it now is what lets the
+/// envelope change later — per-record compression, a record-level digest, a wider
+/// tag space — without a migration, and it costs nothing today because the built-in
+/// facets occupy tags 0 through 6.
+///
+/// Note what this does *not* version: a facet's **payload** schema, which is a
+/// separate lever. `postcard` appends enum variants safely, so a facet's op enum
+/// grows variants at its end indefinitely; that is the mechanism a facet uses for
+/// an ordinary schema change. This escape is for changing the *envelope*.
+pub(crate) const MAX_TAG: u8 = 0x7F;
+
+/// The largest tag this crate will ever assign to a built-in facet.
+///
+/// The tag space is split so it can be allocated by two parties without either
+/// having to consult the other: `0..=MAX_BUILTIN_TAG` is granary's, and
+/// `MAX_BUILTIN_TAG+1..=MAX_TAG` belongs to facets defined outside this crate. A
+/// tag is permanent — it is the dispatch key for every record ever written under it
+/// — so a collision is not a compile error somewhere, it is two different readings
+/// of the same durable byte.
+///
+/// This split is a precondition for publishing the facet seam (§16), which is
+/// deferred *because* the tag registry had not settled. Reserving the halves costs
+/// nothing now and is the half of that question that does not need real use to
+/// answer: 64 built-in facets is far beyond what §7.12's "a feature earns facet-hood
+/// only when it needs host participation" rule can plausibly produce, and 64 is
+/// enough for out-of-crate facets to allocate freely.
+pub(crate) const MAX_BUILTIN_TAG: u8 = 0x3F;
+
 /// A facet's interpretation of its durable input failed: a record that will not
 /// decode, a snapshot contribution that will not restore, or — the load-bearing
 /// case (G19) — a record tag no declared facet claims. The host aborts the
@@ -69,7 +119,17 @@ impl std::error::Error for FacetError {}
 
 /// Prefix `payload` with its facet `tag` — the record envelope every journaled
 /// record wears (spec §7.12).
+///
+/// Panics on a tag above [`MAX_TAG`], mirroring the refusal in [`split_record`]:
+/// the high bit means "a later envelope revision" to every reader, so a record
+/// carrying it must never be written by a build whose envelope is revision 1. The
+/// write path and the read path have to agree on what a valid record is, and this
+/// is the write half of that agreement.
 pub(crate) fn tag_record(tag: u8, payload: &[u8]) -> Vec<u8> {
+    assert!(
+        tag <= MAX_TAG,
+        "facet tag {tag} sets the reserved envelope-escape bit; tags are 0..={MAX_TAG}"
+    );
     let mut bytes = Vec::with_capacity(payload.len() + 1);
     bytes.push(tag);
     bytes.extend_from_slice(payload);
@@ -79,10 +139,23 @@ pub(crate) fn tag_record(tag: u8, payload: &[u8]) -> Vec<u8> {
 /// Split a journaled record into its facet tag and payload. An empty record is
 /// corrupt (every record wears the envelope); the caller aborts activation.
 pub(crate) fn split_record(bytes: &[u8]) -> Result<(u8, &[u8]), FacetError> {
-    bytes
+    let (&lead, payload) = bytes
         .split_first()
-        .map(|(tag, payload)| (*tag, payload))
-        .ok_or_else(|| FacetError("empty record (missing facet tag)".into()))
+        .ok_or_else(|| FacetError("empty record (missing facet tag)".into()))?;
+    if lead > MAX_TAG {
+        // The high bit escapes into a later envelope revision (§7.12), which
+        // revision 1 never sets — so these bytes come from a build newer than this
+        // one. Refusing by name matters here: reported as "unrecognized facet tag
+        // 129" it would send an operator hunting for a facet this build is missing,
+        // when the actual fault is a version skew and the fix is at the other end.
+        return Err(FacetError(
+            RECORD
+                .admit(compat::Version(u16::from(lead & MAX_TAG)))
+                .map(|v| format!("record envelope {v} has no reader in this build"))
+                .unwrap_or_else(|err| err.to_string()),
+        ));
+    }
+    Ok((lead, payload))
 }
 
 /// Postcard-encode a facet payload — an op, a delta, a manifest, a form. Facet
@@ -101,6 +174,51 @@ pub(crate) fn decode_payload<T: serde::de::DeserializeOwned>(
     postcard::from_bytes(bytes).map_err(|e| FacetError(format!("{what}: {e}")))
 }
 
+/// The composite snapshot's stamp (spec §7.12, compatibility spec §3).
+///
+/// Unlike the record envelope ([`RECORD`]), which is stamped through a reserved bit
+/// of a byte it already carries, a snapshot gets a full magic and revision. The
+/// asymmetry is a cost decision: a snapshot is large and cold, so eight bytes is
+/// noise, and `postcard` gives its leading bytes no structure a reader could use to
+/// recognize the format otherwise. Reading the revision **before** the body is what
+/// lets a snapshot from another revision be refused instead of misparsed — the one
+/// thing a positional encoding cannot do for itself.
+pub(crate) const SNAPSHOT: compat::Stamp =
+    compat::Stamp::new(b"GRSNAP", compat::Window::at("granary.snapshot", 1));
+
+/// The composite snapshot's on-disk body (spec §7.12), inside the [`SNAPSHOT`]
+/// stamp. Separate from [`CompositeSnapshot`] so the envelope's concerns — the
+/// revision and the codec identity — never appear in the type callers hold.
+#[derive(Serialize, Deserialize)]
+struct SnapshotBody {
+    /// The codec that encoded `snapshot.state`.
+    ///
+    /// Recorded because facet 0's contribution is the only part of a snapshot that
+    /// is **not** codec-independent: it is a user type encoded with the
+    /// deployment's codec (§4.1, §5), while facet payloads are deliberately
+    /// `postcard`. Without this, changing the configured codec turns every stored
+    /// snapshot into bytes that fail to decode, reported as a corrupt grain rather
+    /// than as the misconfiguration it is.
+    codec: String,
+    snapshot: CompositeSnapshot,
+    /// Room to grow without a revision bump (compatibility spec §2.1).
+    ///
+    /// This body is `postcard`, which is positional: it cannot gain a field, so
+    /// without this area every future addition — a compression marker, a
+    /// provenance note, a per-facet digest — would be a new revision carrying a
+    /// second decoder forever. One byte when empty buys that back. A change that
+    /// reinterprets bytes already here is still a revision; this is only for
+    /// carrying *more*.
+    ext: compat::Extensions,
+}
+
+/// The critical extension keys this build implements — none yet.
+///
+/// A snapshot carrying a critical key outside this list is refused (**V2**): its
+/// writer marked that entry as one a reader must understand, so skipping it would be
+/// exactly the silent misread the stamp exists to prevent.
+const SNAPSHOT_EXT_KNOWN: &[u16] = &[];
+
 /// The composite snapshot (spec §7.12): facet 0's codec-encoded `State` plus one
 /// contribution per declared facet, all at one `Seq`. G4 applies to the composite
 /// as a whole. Encoded with `postcard` — facet payloads and this envelope are
@@ -115,12 +233,41 @@ pub(crate) struct CompositeSnapshot {
 }
 
 impl CompositeSnapshot {
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, FacetError> {
-        postcard::to_allocvec(self).map_err(|e| FacetError(format!("snapshot encode: {e}")))
+    /// Stamp and encode the composite. `codec` is the name of the codec that
+    /// encoded [`state`](CompositeSnapshot::state), recorded so a later read can
+    /// tell a codec change from a corrupt grain.
+    ///
+    /// Consumes the composite: a snapshot's `state` and facet contributions are as
+    /// large as the grain, and the caller builds this to encode it once.
+    pub(crate) fn encode(self, codec: &str) -> Result<Vec<u8>, FacetError> {
+        let body = SnapshotBody {
+            codec: codec.to_string(),
+            snapshot: self,
+            ext: compat::Extensions::new(),
+        };
+        postcard::to_allocvec(&body)
+            .map(|bytes| SNAPSHOT.stamp(&bytes))
+            .map_err(|e| FacetError(format!("snapshot encode: {e}")))
     }
 
-    pub(crate) fn decode(bytes: &[u8]) -> Result<CompositeSnapshot, FacetError> {
-        postcard::from_bytes(bytes).map_err(|e| FacetError(format!("snapshot decode: {e}")))
+    /// Admit the stamp, decode the body, and confirm it was encoded with `codec` —
+    /// in that order, so nothing downstream sees bytes from a revision or a codec
+    /// this build cannot read (compatibility **V2**).
+    pub(crate) fn decode(bytes: &[u8], codec: &str) -> Result<CompositeSnapshot, FacetError> {
+        let (_revision, body) = SNAPSHOT.unstamp(bytes).map_err(|e| FacetError(e.to_string()))?;
+        let body: SnapshotBody =
+            postcard::from_bytes(body).map_err(|e| FacetError(format!("snapshot decode: {e}")))?;
+        body.ext
+            .admit(SNAPSHOT.window().boundary(), SNAPSHOT_EXT_KNOWN)
+            .map_err(|e| FacetError(e.to_string()))?;
+        if body.codec != codec {
+            return Err(FacetError(format!(
+                "granary.snapshot: encoded with codec '{}', but this node runs '{codec}' \
+                 — facet 0's state is codec-encoded (§4.1), so it cannot be decoded here",
+                body.codec
+            )));
+        }
+        Ok(body.snapshot)
     }
 }
 
@@ -576,14 +723,24 @@ pub(crate) struct FacetCell<FS: FacetSet> {
 
 impl<FS: FacetSet> FacetCell<FS> {
     /// A fresh cell with empty forms and no armed stage. Asserts the declared
-    /// tags are distinct and nonzero (a duplicated tag would make record
-    /// dispatch ambiguous; tag 0 is facet 0's).
+    /// tags are distinct, nonzero, and within the tag space (a duplicated tag
+    /// would make record dispatch ambiguous; tag 0 is facet 0's; the high bit is
+    /// the envelope-revision escape, [`MAX_TAG`]).
     pub(crate) fn new() -> FacetCell<FS> {
         let mut seen = BTreeSet::new();
         for &tag in FS::TAGS {
             assert!(
                 tag != EVENT_TAG,
                 "facet tag 0 is reserved for the event fold"
+            );
+            assert!(
+                tag <= MAX_TAG,
+                "facet tag {tag} sets the reserved envelope-escape bit; tags are 1..={MAX_TAG}"
+            );
+            assert!(
+                tag <= MAX_BUILTIN_TAG,
+                "facet tag {tag} is in the range reserved for facets defined outside \
+                 this crate; a built-in facet takes 1..={MAX_BUILTIN_TAG}"
             );
             assert!(seen.insert(tag), "duplicate facet tag {tag} in facet set");
         }
@@ -770,21 +927,148 @@ mod tests {
     }
 
     #[test]
+    fn every_revision_1_record_is_already_stamped() {
+        // The window costs no bytes: today's envelope *is* revision 1, so every
+        // tag in the space splits without a stamp to read.
+        for tag in [EVENT_TAG, 1, 6, MAX_TAG] {
+            let record = tag_record(tag, &[7]);
+            assert_eq!(record.len(), 2, "revision 1 adds one byte, the tag");
+            assert_eq!(split_record(&record).unwrap(), (tag, &[7][..]));
+        }
+    }
+
+    #[test]
+    fn a_later_envelope_revision_is_refused_as_a_version_skew() {
+        // A record from a build whose envelope revision this one does not read.
+        // The refusal must name the boundary and the revision, not look like a
+        // facet this build forgot to declare.
+        let err = split_record(&[0x80 | 2, 9, 9]).expect_err("revision 2 is unreadable here");
+        assert!(
+            err.0.contains("granary.record") && err.0.contains("v2"),
+            "the refusal must name the boundary and the revision: {err}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved envelope-escape bit")]
+    fn writing_an_escape_tag_panics_instead_of_forging_a_revision() {
+        // The write half of the agreement: a reader would take this for a later
+        // envelope revision, so it must never be written by a revision-1 build.
+        tag_record(0x80, &[1]);
+    }
+
+    #[test]
     fn empty_set_rejects_every_nonzero_tag() {
         let mut forms = ();
         assert!(<() as FacetSet>::fold(&mut forms, 1, &[], false).is_err());
         assert!(<() as FacetSet>::fold(&mut forms, 7, &[], true).is_err());
     }
 
-    #[test]
-    fn composite_snapshot_round_trips() {
-        let composite = CompositeSnapshot {
+    fn composite() -> CompositeSnapshot {
+        CompositeSnapshot {
             state: vec![9, 9],
             facets: vec![(1, vec![4]), (2, vec![])],
-        };
-        let bytes = composite.encode().unwrap();
-        let back = CompositeSnapshot::decode(&bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn composite_snapshot_round_trips() {
+        let bytes = composite().encode("json").unwrap();
+        assert!(bytes.starts_with(b"GRSNAP"), "the stamp leads the body");
+        let back = CompositeSnapshot::decode(&bytes, "json").unwrap();
         assert_eq!(back.state, vec![9, 9]);
         assert_eq!(back.facets, vec![(1, vec![4]), (2, vec![])]);
+    }
+
+    #[test]
+    fn a_snapshot_from_a_later_revision_is_refused_by_name() {
+        let mut bytes = composite().encode("json").unwrap();
+        // A revision above the window, as a future release would write.
+        bytes[6..8].copy_from_slice(&9u16.to_le_bytes());
+        let err = CompositeSnapshot::decode(&bytes, "json")
+            .err()
+            .expect("an unreadable revision must not decode");
+        assert!(
+            err.0.contains("granary.snapshot") && err.0.contains("v9"),
+            "the refusal must name the boundary and the revision: {err}"
+        );
+    }
+
+    #[test]
+    fn unstamped_bytes_are_refused_rather_than_misparsed() {
+        // What a pre-stamp snapshot, or another format's bytes, look like. The
+        // magic check runs before any decode, so nothing tries to read this as a
+        // composite (**V2**).
+        let err = CompositeSnapshot::decode(&[2, 9, 9, 0], "json")
+            .err()
+            .expect("unstamped bytes must not decode");
+        assert!(
+            err.0.contains("granary.snapshot"),
+            "the refusal must name the boundary: {err}"
+        );
+    }
+
+    #[test]
+    fn a_codec_change_is_reported_as_a_codec_change() {
+        // Facet 0's state is codec-encoded (§4.1), so a snapshot written under one
+        // codec cannot be read under another. This must name both codecs: reported
+        // as a decode failure it would look like a corrupt grain, and the operator
+        // would go looking for disk trouble instead of a config change.
+        let bytes = composite().encode("json").unwrap();
+        let err = CompositeSnapshot::decode(&bytes, "postcard")
+            .err()
+            .expect("a codec change must not decode");
+        assert!(
+            err.0.contains("'json'") && err.0.contains("'postcard'"),
+            "the refusal must name both codecs: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_ancillary_snapshot_extension_is_ignored() {
+        // The whole point of the area: a snapshot written by a later build, carrying
+        // a field this one has never heard of, still restores. Without it, that
+        // addition would have been a revision bump and this build would refuse.
+        let mut body = SnapshotBody {
+            codec: "json".into(),
+            snapshot: composite(),
+            ext: compat::Extensions::new(),
+        };
+        body.ext.insert(0x0001, vec![1, 2, 3]);
+        let bytes = SNAPSHOT.stamp(&postcard::to_allocvec(&body).unwrap());
+
+        let back = CompositeSnapshot::decode(&bytes, "json").expect("an ancillary entry is skipped");
+        assert_eq!(back.state, vec![9, 9]);
+    }
+
+    #[test]
+    fn an_unknown_critical_snapshot_extension_is_refused() {
+        // And the other half: an addition its writer marked must-understand cannot
+        // be skipped, so the area can never smuggle meaning past an old reader.
+        let mut body = SnapshotBody {
+            codec: "json".into(),
+            snapshot: composite(),
+            ext: compat::Extensions::new(),
+        };
+        body.ext.insert(compat::Extensions::CRITICAL | 0x7, vec![]);
+        let bytes = SNAPSHOT.stamp(&postcard::to_allocvec(&body).unwrap());
+
+        let err = CompositeSnapshot::decode(&bytes, "json")
+            .err()
+            .expect("a critical entry this build does not know must be refused");
+        assert!(
+            err.0.contains("granary.snapshot") && err.0.contains("0x8007"),
+            "the refusal must name the boundary and the key: {err}"
+        );
+    }
+
+    #[test]
+    fn the_extension_area_costs_one_byte_while_empty() {
+        // Headroom is only worth reserving if it is free until used.
+        let stamped = composite().encode("json").unwrap();
+        let bare = SNAPSHOT.stamp(
+            &postcard::to_allocvec(&(String::from("json"), composite())).unwrap(),
+        );
+        assert_eq!(stamped.len(), bare.len() + 1);
     }
 }
