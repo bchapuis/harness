@@ -45,7 +45,7 @@ pub use storage::FileRaftWAL;
 pub use transport::DEFAULT_CONNECT_TIMEOUT;
 pub use transport::DEFAULT_HANDSHAKE_TIMEOUT;
 pub use transport::DEFAULT_OUTBOUND_CAPACITY;
-pub use transport::PROTO_VERSION;
+pub use transport::WIRE;
 pub use transport::TcpConfig;
 pub use transport::TcpTransport;
 pub use transport::TlsConfig;

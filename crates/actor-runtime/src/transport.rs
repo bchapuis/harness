@@ -7,9 +7,11 @@
 //! reply travels back over the replier's own dialed connection, not the request's
 //! socket.
 //!
-//! Before any actor traffic, the two ends exchange a [`Hello`] handshake
-//! (protocol version, node identity, codec name, cluster secret) and reject the
-//! association on any mismatch (spec §7.1). When a [`TlsConfig`] is present the
+//! Before any actor traffic, the two ends exchange a [`Hello`] handshake (the
+//! accepted wire revisions, node identity, codec name, cluster secret) and reject
+//! the association on any mismatch (spec §7.1). The revision is *negotiated* to the
+//! highest both ends accept ([`WIRE`]) rather than compared for equality, so a
+//! rolling upgrade can run two releases side by side. When a [`TlsConfig`] is present the
 //! handshake runs over a mutually-authenticated TLS stream and the node
 //! allowlist is enforced (spec §15); the connection logic is generic over the
 //! byte stream, so it serves both plaintext and TLS unchanged.
@@ -53,9 +55,16 @@ use crate::wire::read_wire;
 use crate::wire::write_hello;
 use crate::wire::write_wire;
 
-/// The protocol version this build speaks (spec §7.1). A peer announcing a
-/// different version is rejected at the handshake.
-pub const PROTO_VERSION: u32 = 1;
+/// The wire revisions this build accepts, and the one it writes (spec §7.1,
+/// compatibility spec §3).
+///
+/// The handshake settles on the highest revision both ends accept; a peer whose
+/// range does not overlap this one is refused by name. Bumping the wire format is
+/// therefore two releases, not one: widen the range first (`Window::new("actor.wire",
+/// 1, 2, 1)`, so this build *reads* v2 without writing it), and only once that
+/// release is everywhere move `writes` up. That ordering is invariant **V4**, and it
+/// is what keeps a rolling upgrade from needing two releases to agree exactly.
+pub const WIRE: compat::Window = compat::Window::at("actor.wire", 1);
 
 /// Default for [`TcpConfig::connect_timeout`]: how long to wait for a TCP
 /// connect before giving up (spec §7). Bounds a dial to a black-holed peer, so
@@ -143,7 +152,7 @@ struct Shared {
 impl Shared {
     fn hello(&self) -> Hello {
         Hello {
-            proto_version: PROTO_VERSION,
+            accepts: WIRE.accepted(),
             node: self.config.node,
             advertised: self.config.advertised,
             codec_name: self.config.codec.name().to_string(),
@@ -196,12 +205,14 @@ impl Shared {
     /// id. `expected` is `Some` when we dialed a specific peer and want to
     /// confirm we reached it.
     fn accept_hello(&self, hello: &Hello, expected: Option<NodeId>) -> Result<NodeId, String> {
-        if hello.proto_version != PROTO_VERSION {
-            return Err(format!(
-                "protocol version mismatch: {}",
-                hello.proto_version
-            ));
-        }
+        // The negotiated revision is dropped: the live behavior this buys is the
+        // *refusal* — a peer outside our range is turned away by name instead of
+        // half-understood. Nothing yet varies its behavior by revision, and
+        // returning a value no caller reads would be a pass-through. The first
+        // consumer (a frame this build can only send to a peer at v2 or above, or
+        // the simulator driving a mixed-version cluster) is what should widen this
+        // signature.
+        WIRE.negotiate(hello.accepts).map_err(|e| e.to_string())?;
         if hello.codec_name != self.config.codec.name() {
             return Err(format!("codec mismatch: {}", hello.codec_name));
         }
@@ -577,5 +588,90 @@ async fn endpoint_gossip(shared: Arc<Shared>, interval: Duration) {
                 }
             });
         futures::future::join_all(sends).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compat::Accepted;
+
+    /// A `Shared` with no listener and no tasks — enough to exercise
+    /// [`Shared::accept_hello`]'s policy, which reads only the config.
+    fn shared(secret: &str) -> Shared {
+        Shared {
+            config: TcpConfig {
+                node: NodeId::new(1),
+                advertised: "127.0.0.1:1".parse().expect("a literal address"),
+                peers: BTreeMap::new(),
+                endpoint_gossip_interval: Duration::from_secs(1),
+                connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+                handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+                outbound_capacity: DEFAULT_OUTBOUND_CAPACITY,
+                codec: Arc::new(actor_serialization::JsonCodec),
+                cluster_secret: secret.to_string(),
+                allowlist: None,
+                tls: None,
+            },
+            inbound: async_channel::unbounded().0,
+            conns: Mutex::new(HashMap::new()),
+            endpoints: Mutex::new(BTreeMap::new()),
+            shutdown: watch::channel(false).0,
+        }
+    }
+
+    fn hello(accepts: Accepted) -> Hello {
+        Hello {
+            accepts,
+            node: NodeId::new(2),
+            advertised: "127.0.0.1:2".parse().expect("a literal address"),
+            codec_name: "json".to_string(),
+            cluster_secret: "secret".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_peer_sharing_a_wire_revision_associates() {
+        let shared = shared("secret");
+        // Our own range, and a peer whose range is strictly wider on both sides —
+        // the rolling-upgrade case. The old equality check refused this, which is
+        // what made a wire bump a cluster-wide mutual partition (spec §7.1).
+        for accepts in [WIRE.accepted(), Accepted::new(1, 9)] {
+            assert_eq!(
+                shared.accept_hello(&hello(accepts), None),
+                Ok(NodeId::new(2)),
+                "a peer accepting {accepts} shares a revision with {}",
+                WIRE.accepted()
+            );
+        }
+    }
+
+    #[test]
+    fn a_peer_with_no_shared_wire_revision_is_refused_by_name() {
+        let shared = shared("secret");
+        // A peer from a future release that has dropped support for everything we
+        // speak. Refused, and the message names both ranges so an operator knows
+        // which end to move (**V2**).
+        let err = shared
+            .accept_hello(&hello(Accepted::new(7, 9)), None)
+            .expect_err("disjoint ranges must not associate");
+        assert!(
+            err.contains("actor.wire") && err.contains("v7..=v9"),
+            "the refusal must name the boundary and the peer's range: {err}"
+        );
+    }
+
+    #[test]
+    fn the_version_check_precedes_the_secret_check() {
+        // An unreadable peer is turned away before its secret is compared, so a
+        // version skew is never reported as a security failure — the two have very
+        // different operator responses.
+        let shared = shared("secret");
+        let mut peer = hello(Accepted::new(7, 9));
+        peer.cluster_secret = "wrong".to_string();
+        let err = shared
+            .accept_hello(&peer, None)
+            .expect_err("a disjoint peer must be refused");
+        assert!(err.contains("actor.wire"), "version first: {err}");
     }
 }

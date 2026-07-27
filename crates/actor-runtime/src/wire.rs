@@ -19,6 +19,7 @@ use actor_core::NodeId;
 use actor_serialization::Codec;
 use actor_serialization::decode;
 use actor_serialization::encode;
+use compat::Accepted;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncRead;
@@ -31,13 +32,20 @@ use tokio::io::AsyncWriteExt;
 /// a huge buffer (spec §7, §15).
 pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 
-/// The association handshake preamble (spec §7.1): protocol version, the
-/// sender's node identity and the address peers should dial it back on, the
+/// The association handshake preamble (spec §7.1): the wire revisions the sender
+/// accepts, its node identity and the address peers should dial it back on, the
 /// codec it speaks, and a shared cluster secret. The receiver rejects the
 /// association on any mismatch (§7, §15) and learns the advertised address.
+///
+/// `accepts` is a *range*, not the single version this build speaks, and that is
+/// the whole point: two builds settle on the highest revision both accept
+/// (`compat::Window::negotiate`), so a bump adds a revision to the range for one
+/// release before anything writes it, and a rolling upgrade never has to make two
+/// releases agree exactly. A single version compared for equality would partition
+/// the cluster into two halves that refuse each other on the first bump.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hello {
-    pub proto_version: u32,
+    pub accepts: Accepted,
     pub node: NodeId,
     pub advertised: SocketAddr,
     pub codec_name: String,
@@ -110,8 +118,9 @@ where
 }
 
 /// Write the handshake preamble. Always JSON-framed independent of the
-/// negotiated codec, so the `codec_name` field can be compared before any
-/// codec-specific decoding happens.
+/// negotiated codec, so the `codec_name` and `accepts` fields can be read before
+/// any codec-specific decoding happens — neither the codec nor the wire revision
+/// is settled yet, so the preamble cannot depend on either.
 pub async fn write_hello<W>(stream: &mut W, hello: &Hello) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -201,7 +210,7 @@ mod tests {
     #[tokio::test]
     async fn hello_round_trips() {
         let hello = Hello {
-            proto_version: 1,
+            accepts: Accepted::new(1, 2),
             node: NodeId::new(3),
             advertised: "127.0.0.1:9003".parse().unwrap(),
             codec_name: "json".to_string(),
@@ -214,6 +223,7 @@ mod tests {
         assert_eq!(got.advertised, hello.advertised);
         assert_eq!(got.codec_name, "json");
         assert_eq!(got.cluster_secret, "s3cr3t");
+        assert_eq!(got.accepts, Accepted::new(1, 2));
     }
 
     #[tokio::test]
