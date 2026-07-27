@@ -30,7 +30,9 @@ use actor_simulation::History;
 use actor_simulation::Register;
 use actor_simulation::SimNode;
 use actor_simulation::check_linearizable;
+use actor_simulation::coverage_seeds;
 use actor_simulation::run_cluster_swarm;
+use actor_simulation::run_cluster_swarm_coverage;
 use actor_simulation::sweep_seeds;
 
 use support::Cas;
@@ -167,4 +169,39 @@ fn remote_register_is_linearizable_under_faults() {
     if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{failure}");
     }
+}
+
+#[test]
+fn the_register_sweep_actually_fires_each_fault_type() {
+    // #8, and this workload needs it more than most. The bug its corpus entries
+    // record — a duplicated `Cas` applied twice, with the first reply lost — takes
+    // *two* faults at once and showed up at roughly 0.2% of seeds. A sweep that
+    // quietly stopped duplicating frames would still pass every seed and prove
+    // nothing about the idempotency key that now carries the claim.
+    let workload = RemoteRegisterWorkload {
+        nodes: 3,
+        clients: 3,
+        ops: 6,
+    };
+    let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..32)) {
+        Ok(stats) => stats,
+        Err(failure) => panic!("{failure}"),
+    };
+    assert!(
+        stats.duplicated > 0,
+        "the sweep never duplicated a frame — the case the corpus entries are \
+         about goes unexercised: {stats:?}"
+    );
+    assert!(
+        stats.dropped > 0,
+        "the sweep never dropped a frame (loss uncovered): {stats:?}"
+    );
+    assert!(
+        stats.delayed > 0,
+        "the sweep never delayed a frame (reordering uncovered): {stats:?}"
+    );
+    assert!(
+        stats.blocked > 0,
+        "the sweep never blocked a frame (partition/crash uncovered): {stats:?}"
+    );
 }

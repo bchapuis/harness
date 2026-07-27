@@ -34,9 +34,11 @@ use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
 use actor_simulation::SimNode;
+use actor_simulation::coverage_seeds;
 use actor_simulation::default_invariants;
 use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
+use actor_simulation::run_cluster_swarm_coverage;
 use actor_simulation::slow_seeds;
 use granary::GranaryConfig;
 use granary::GranaryExt;
@@ -271,6 +273,42 @@ fn machine_invariants_hold_under_the_cluster_swarm() {
     if let Err(failure) = run_cluster_swarm(&workload, slow_seeds(0..12)) {
         panic!("{failure}");
     }
+}
+
+#[test]
+fn machine_cluster_swarm_actually_fires_each_fault_type() {
+    // #8, sized for the slowest workload in the tree: `coverage_seeds` never
+    // narrows, so the declared range is the whole cost, and a machine seed drives
+    // a fake guest through boot, dirty blocks, and capture on three nodes. Four
+    // carries the claim — each seed draws its own transport fault rates and runs
+    // six nemesis rounds — without the coverage check dominating the suite.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workload = MachineSwarm {
+        nodes: 3,
+        clients: 2,
+        ops: 2,
+        dir: dir.path().to_path_buf(),
+    };
+    let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..4)) {
+        Ok(stats) => stats,
+        Err(failure) => panic!("{failure}"),
+    };
+    assert!(
+        stats.dropped > 0,
+        "the sweep never dropped a frame (loss uncovered): {stats:?}"
+    );
+    assert!(
+        stats.duplicated > 0,
+        "the sweep never duplicated a frame: {stats:?}"
+    );
+    assert!(
+        stats.delayed > 0,
+        "the sweep never delayed a frame (reordering uncovered): {stats:?}"
+    );
+    assert!(
+        stats.blocked > 0,
+        "the sweep never blocked a frame (partition/crash uncovered): {stats:?}"
+    );
 }
 
 #[test]
