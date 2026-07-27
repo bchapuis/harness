@@ -27,6 +27,11 @@
 //! 4. **Usable.** A recovered log still appends, and the appended record comes
 //!    back on the next open. Recovery leaves the file in a writable state, with
 //!    the write landing after the surviving prefix rather than over it.
+//! 5. **Refused, not recovered.** Damage to the *file header* is the one case that
+//!    is not a truncated recovery: the log's identity is what was damaged, so
+//!    nothing about the frames can be trusted and `open` refuses. Every one of its
+//!    sixteen bytes is covered, which is also what proves the header validates all
+//!    of itself rather than only its magic.
 
 use std::fs;
 use std::path::Path;
@@ -38,6 +43,9 @@ use wal::Wal;
 
 /// Bounds one record; a length header above this is corruption by definition.
 const MAX_RECORD: u32 = 1 << 16;
+
+/// This suite's record schema. The header carries it; these tests never change it.
+const RECORDS: compat::Window = compat::Window::at("wal.crash_points", 1);
 
 /// Records of deliberately varied width, so truncation lands inside headers,
 /// payloads, and checksums rather than always at a tidy boundary.
@@ -60,7 +68,7 @@ fn entries(n: u64) -> Vec<Entry> {
 /// Write `records` to a fresh log and return the file's bytes.
 fn written(dir: &Path, records: &[Entry]) -> Vec<u8> {
     let path = dir.join("full.log");
-    let (mut wal, recovered) = Wal::<Entry>::open(&path, MAX_RECORD).expect("open");
+    let (mut wal, recovered) = Wal::<Entry>::open(&path, MAX_RECORD, &RECORDS).expect("open");
     assert!(recovered.is_empty(), "a fresh log recovers nothing");
     wal.append_batch(records).expect("append");
     fs::read(&path).expect("read back")
@@ -71,7 +79,7 @@ fn written(dir: &Path, records: &[Entry]) -> Vec<u8> {
 fn recover(dir: &Path, name: &str, bytes: &[u8]) -> (Vec<Entry>, PathBuf) {
     let path = dir.join(name);
     fs::write(&path, bytes).expect("write case");
-    let (_wal, recovered) = Wal::<Entry>::open(&path, MAX_RECORD).expect("open");
+    let (_wal, recovered) = Wal::<Entry>::open(&path, MAX_RECORD, &RECORDS).expect("open");
     (recovered, path)
 }
 
@@ -105,7 +113,7 @@ fn every_truncation_recovers_a_prefix_and_stays_recovered() {
         previous = recovered.len();
 
         // 3. The torn tail was dropped *on disk*, so a second open agrees.
-        let again = Wal::<Entry>::open(&path, MAX_RECORD).expect("reopen").1;
+        let again = Wal::<Entry>::open(&path, MAX_RECORD, &RECORDS).expect("reopen").1;
         assert_eq!(
             again, recovered,
             "reopening the log recovered at {cut} produced a different history — \
@@ -113,14 +121,14 @@ fn every_truncation_recovers_a_prefix_and_stays_recovered() {
         );
 
         // 4. The recovered log still takes writes, landing after the prefix.
-        let mut wal = Wal::<Entry>::open(&path, MAX_RECORD).expect("reopen").0;
+        let mut wal = Wal::<Entry>::open(&path, MAX_RECORD, &RECORDS).expect("reopen").0;
         let extra = Entry {
             seq: 999,
             body: "after".into(),
         };
         wal.append(&extra).expect("append after recovery");
         drop(wal);
-        let after = Wal::<Entry>::open(&path, MAX_RECORD)
+        let after = Wal::<Entry>::open(&path, MAX_RECORD, &RECORDS)
             .expect("reopen after append")
             .1;
         let mut expected = recovered.clone();
@@ -149,9 +157,27 @@ fn every_single_byte_corruption_drops_that_record_and_the_rest() {
 
     for pos in 0..full.len() {
         let mut corrupt = full.clone();
-        // Flip the low bit: a one-bit change anywhere in a length header, a
-        // payload, or a checksum.
+        // Flip the low bit: a one-bit change anywhere in the file header, a length
+        // header, a payload, or a checksum.
         corrupt[pos] ^= 1;
+
+        if pos < wal::HEADER_LEN {
+            // Damage in the *file* header is a different outcome, and the stronger
+            // one: the log's identity is what was damaged, so nothing about the
+            // frames can be trusted and `open` refuses outright rather than
+            // recovering a prefix. Every one of the sixteen bytes is covered — the
+            // magic, the frame revision, the checksum kind, the record schema, and
+            // the reserved field.
+            let path = dir.path().join(format!("hdr{pos}.log"));
+            fs::write(&path, &corrupt).expect("write case");
+            assert!(
+                Wal::<Entry>::open(&path, MAX_RECORD, &RECORDS).is_err(),
+                "corrupting header byte {pos} was accepted; a log whose identity is \
+                 damaged must be refused, not scanned",
+            );
+            continue;
+        }
+
         let (recovered, _) = recover(dir.path(), &format!("bit{pos}.log"), &corrupt);
 
         assert!(
@@ -175,8 +201,9 @@ fn a_length_header_claiming_more_than_the_file_holds_is_refused() {
 
     // Rewrite the first record's length header as `MAX_RECORD + 1`. The scan must
     // treat an oversized length as corruption rather than trusting it and reading
-    // past the end — the case a hostile or bit-rotted header produces.
-    full[..4].copy_from_slice(&(MAX_RECORD + 1).to_le_bytes());
+    // past the end — the case a hostile or bit-rotted header produces. The frames
+    // begin after the file header, which this must not disturb.
+    full[wal::HEADER_LEN..wal::HEADER_LEN + 4].copy_from_slice(&(MAX_RECORD + 1).to_le_bytes());
     let (recovered, _) = recover(dir.path(), "oversized.log", &full);
     assert!(
         recovered.is_empty(),

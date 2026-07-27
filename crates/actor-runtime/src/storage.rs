@@ -60,6 +60,15 @@ use wal::Wal;
 /// scanning: a length above this is treated as corruption, not an allocation.
 const MAX_RECORD: u32 = 1 << 20;
 
+/// The schema revision of this log's `(index, RaftEntry)` records, stamped into the
+/// log's header (compatibility spec §3).
+///
+/// A Raft log is the strictest of the durable boundaries: its records are the
+/// consensus history, and a node that cannot read its own log cannot rejoin without
+/// losing committed state. Bumping this therefore follows **V4** without exception —
+/// widen the accepted range one release before anything writes the new revision.
+const LOG_RECORDS: compat::Window = compat::Window::at("actor.raft.log", 1);
+
 /// The `term` file's content (spec §9.4.3 item 2): the current term and the
 /// vote cast in it, always written together — they are one atomic decision.
 #[derive(Serialize, Deserialize)]
@@ -149,7 +158,9 @@ impl FileRaftWAL {
         };
 
         // The log: the shared WAL recovers the valid prefix and truncates a torn tail.
-        let (mut log, records) = Wal::<(u64, RaftEntry)>::open(dir.join("log"), MAX_RECORD)?;
+        let (mut log, records) =
+            Wal::<(u64, RaftEntry)>::open(dir.join("log"), MAX_RECORD, &LOG_RECORDS)
+                .map_err(|e| e.into_io())?;
 
         // Discard records the snapshot subsumes (absolute index `≤ snapshot_index`):
         // the self-heal for a crash between persisting a snapshot and rewriting the
@@ -521,13 +532,14 @@ mod tests {
         );
         drop(storage);
 
-        // Flip a byte inside the second record's payload. Each frame is
-        // `[u32 len][payload][u64 checksum]`, so the second frame starts just past
-        // the first.
+        // Flip a byte inside the second record's payload. Frames follow the file
+        // header (wal §2.1) and each is `[u32 len][payload][u64 checksum]`, so the
+        // second frame starts just past the first.
         let log_path = dir.path().join("log");
         let mut bytes = fs::read(&log_path).unwrap();
-        let len0 = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-        let second_start = 4 + len0 + 8;
+        let first = wal::HEADER_LEN;
+        let len0 = u32::from_le_bytes(bytes[first..first + 4].try_into().unwrap()) as usize;
+        let second_start = first + 4 + len0 + 8;
         bytes[second_start + 5] ^= 0xff;
         fs::write(&log_path, &bytes).unwrap();
 

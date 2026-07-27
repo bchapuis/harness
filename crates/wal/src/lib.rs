@@ -8,7 +8,8 @@
 //!
 //! # The log
 //!
-//! [`Wal<T>`] is an append-only log of postcard-encoded `T` records, each framed
+//! [`Wal<T>`] is a 16-byte header followed by an append-only run of postcard-encoded
+//! `T` records, each framed
 //! `[u32 little-endian length][postcard payload][u64 little-endian FNV-1a checksum]`
 //! and fsynced before the call that wrote it returns. It exposes four operations:
 //!
@@ -25,6 +26,20 @@
 //! acknowledged, so dropping it is correct. Whatever higher-level recovery runs on top
 //! operates on the returned records.
 //!
+//! # The header
+//!
+//! The header is what lets any of this change later. It carries a magic, the **frame
+//! layout's** revision and the **checksum kind** — this crate's own secrets — and a
+//! **record-schema** revision that belongs to the caller and that this crate stores
+//! and returns without interpreting. That last field is the load-bearing one: a
+//! `Wal<T>`'s records are postcard, which is positional and has no field names, so `T`
+//! cannot gain a field and its revision has nowhere to live except outside the payload.
+//!
+//! [`open`](Wal::open) therefore takes the caller's [`compat::Window`] and does the
+//! refusing itself, rather than exposing the header for a caller to check. An optional
+//! check is one somebody forgets, and the forgotten case is the misparse the stamp
+//! exists to prevent.
+//!
 //! # Sidecars
 //!
 //! Some durable state is not a log but a single small file rewritten in place (a
@@ -39,6 +54,13 @@
 //! failure *means*. The caller does — code that cannot persist a record it must not
 //! lose may have no safe way to continue, so it panics with a domain-specific message.
 //! Keeping that policy out of this crate is deliberate.
+//!
+//! [`open`](Wal::open) is the exception, returning [`OpenError`], because it has a
+//! second failure that is not an I/O event at all: a file this build cannot read. The
+//! bytes are intact and the disk is fine; the refusal is policy. Folding it into
+//! `io::ErrorKind::InvalidData` would blur exactly the distinction this crate is
+//! careful about elsewhere, so a caller that wants them collapsed says so, with
+//! [`OpenError::into_io`].
 //!
 //! The checksum is FNV-1a: it catches torn and partial writes, not adversarial
 //! tampering, which is all a local log needs.
@@ -110,6 +132,159 @@ const LEN_BYTES: usize = size_of::<u32>();
 /// Width of the little-endian FNV-1a checksum that closes every frame.
 const CHECKSUM_BYTES: usize = size_of::<u64>();
 
+/// The magic that opens every log file, in the PNG convention: a high-bit byte, the
+/// name, then a CRLF/EOF trap that catches a text-mode transfer.
+///
+/// Its first four bytes read as a little-endian `u32` are `0x4C41_5789`, which
+/// exceeds every `max_record` this crate permits ([`Wal::open`] asserts it). A
+/// headerless file therefore can never begin with this magic — its first bytes are a
+/// frame length at or below `max_record` — so an unstamped file is refused by name
+/// instead of scanned for frames that happen to parse.
+const MAGIC: &[u8] = b"\x89WAL\r\n\x1a\n";
+
+/// The frame layout's revisions, and the one this build writes (compatibility spec
+/// §3). Revision 1 is the `[len][payload][checksum]` framing of §2.
+const FRAME: compat::Stamp =
+    compat::Stamp::new(MAGIC, compat::Window::at("wal.frame", 1));
+
+/// The checksum this build computes and requires: FNV-1a, 64-bit.
+///
+/// An *identity*, not a revision — there is no ordering over hash functions and
+/// nothing to gain by pretending otherwise, so it is compared for equality and a
+/// mismatch is refused by name. Reserving the field is what makes the stronger
+/// digest a caller might want for untrusted media a header change rather than a
+/// layout change.
+const CHECKSUM_FNV1A: u16 = 1;
+
+/// Width of the header **at frame revision 1** — the overhead a log written by this
+/// build carries before its first frame. Public so a caller sizing a store, or
+/// reaching past the header in a test, can account for it.
+///
+/// ```text
+/// [magic 8][frame revision u16][checksum kind u16][record schema u16][reserved u16]
+/// ```
+///
+/// The width belongs to the revision, not to the format: a later revision may define
+/// a different header entirely, and can, because a revision-1 reader refuses a
+/// revision-2 file before reaching its header. Only the magic and the `u16` after it
+/// are fixed across revisions — a reader consults those *before* it knows which
+/// layout applies. Code that must work across revisions should therefore take the
+/// width from the revision it admitted rather than from this constant.
+///
+/// The header has no checksum of its own. Every field is validated against a known
+/// value or window, so detectable damage is refused; the reserved `u16` is where a
+/// header digest would go if that ever proves insufficient.
+pub const HEADER_LEN: usize = 16;
+
+/// Build the header a new log opens with. `records` is the caller's schema
+/// revision — this crate stores and returns it without interpreting it (§2).
+fn header(records: compat::Version) -> Vec<u8> {
+    let mut tail = Vec::with_capacity(6);
+    tail.extend_from_slice(&CHECKSUM_FNV1A.to_le_bytes());
+    tail.extend_from_slice(&records.0.to_le_bytes());
+    tail.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    let bytes = FRAME.stamp(&tail);
+    debug_assert_eq!(bytes.len(), HEADER_LEN, "the header is a fixed width");
+    bytes
+}
+
+/// Admit a log's header, returning the frame bytes that follow it.
+///
+/// The order is the contract: the magic, then the frame revision, then the checksum
+/// kind, then the caller's record schema. Nothing is scanned until all four are
+/// accepted (compatibility **V2**), so a file this build cannot read is never
+/// partially interpreted.
+fn admit_header<'a>(
+    bytes: &'a [u8],
+    records: &compat::Window,
+) -> Result<&'a [u8], compat::Incompatible> {
+    let (_frame, tail) = FRAME.unstamp(bytes)?;
+    if tail.len() < HEADER_LEN - MAGIC.len() - size_of::<u16>() {
+        // A header cut short. Unreachable through `open`, which initializes a file
+        // too short to hold one, but the check keeps this function sound on its own.
+        return Err(compat::Incompatible::Unstamped {
+            boundary: FRAME.window().boundary(),
+            accepted: FRAME.window().accepted(),
+        });
+    }
+    let field = |i: usize| u16::from_le_bytes([tail[i * 2], tail[i * 2 + 1]]);
+    if field(0) != CHECKSUM_FNV1A {
+        return Err(compat::Incompatible::Version {
+            boundary: "wal.checksum",
+            found: compat::Version(field(0)),
+            accepted: compat::Accepted::only(CHECKSUM_FNV1A),
+        });
+    }
+    records.admit(compat::Version(field(1)))?;
+    if field(2) != 0 {
+        // Revision 1 defines the reserved field as zero, and the frame revision gates
+        // the layout, so a later revision that gives it meaning will say so by bumping
+        // that. Requiring it here costs nothing and makes all sixteen header bytes
+        // self-validating: without it, corruption in this field would be the one header
+        // damage that passes silently.
+        return Err(compat::Incompatible::Version {
+            boundary: "wal.reserved",
+            found: compat::Version(field(2)),
+            accepted: compat::Accepted::only(0),
+        });
+    }
+    Ok(&bytes[HEADER_LEN..])
+}
+
+/// Opening a log failed.
+///
+/// Two variants because the two failures are different kinds and collapsing them
+/// would lose the distinction that matters: an [`Io`](OpenError::Io) failure is a
+/// filesystem event whose *meaning* is still the caller's to decide (see the
+/// module's failure policy), while an [`Incompatible`](OpenError::Incompatible) file
+/// is a policy refusal — the bytes are intact and simply not something this build
+/// reads.
+#[derive(Debug)]
+pub enum OpenError {
+    /// A filesystem error reading, creating, or truncating the file.
+    Io(io::Error),
+    /// The file is not a log this build can read: a foreign file, a frame layout
+    /// from another revision, a checksum this build does not compute, or a record
+    /// schema outside the caller's window.
+    Incompatible(compat::Incompatible),
+}
+
+impl OpenError {
+    /// Collapse into an [`io::Error`], for a caller whose own signature is
+    /// `io::Result`. An incompatible file becomes `InvalidData` — the bytes are not
+    /// what this build reads — with the refusal's own message carrying which
+    /// boundary and which revision.
+    pub fn into_io(self) -> io::Error {
+        match self {
+            OpenError::Io(err) => err,
+            OpenError::Incompatible(err) => io::Error::new(io::ErrorKind::InvalidData, err),
+        }
+    }
+}
+
+impl From<io::Error> for OpenError {
+    fn from(err: io::Error) -> OpenError {
+        OpenError::Io(err)
+    }
+}
+
+impl From<compat::Incompatible> for OpenError {
+    fn from(err: compat::Incompatible) -> OpenError {
+        OpenError::Incompatible(err)
+    }
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::Io(err) => write!(f, "{err}"),
+            OpenError::Incompatible(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for OpenError {}
+
 /// Frame one record: `[u32 len][postcard payload][u64 checksum]`, all little-endian.
 ///
 /// Panics if the payload exceeds `max_record`. The scan that recovers the log treats a
@@ -132,11 +307,20 @@ fn encode<T: Serialize>(value: &T, max_record: u32) -> Vec<u8> {
     record
 }
 
-/// Scan a framed log's bytes into `(records, per-record start offsets, valid length)`.
-/// The scan stops at the first incomplete, oversized, checksum-failing, or unparsable
-/// record — the recovery rule: the valid prefix is the log; the tail was never
-/// acknowledged.
-fn scan<T: DeserializeOwned>(bytes: &[u8], max_record: u32) -> (Vec<T>, Vec<u64>, u64) {
+/// Scan a framed log's frame bytes into `(records, per-record start offsets, valid
+/// length)`. The scan stops at the first incomplete, oversized, checksum-failing, or
+/// unparsable record — the recovery rule: the valid prefix is the log; the tail was
+/// never acknowledged.
+///
+/// `bytes` is the frame region alone (the header is already admitted); `base` is
+/// where that region starts in the file, so the returned offsets are absolute and
+/// [`Wal::truncate`] stays a single `set_len`. The returned length is relative to
+/// `base`.
+fn scan<T: DeserializeOwned>(
+    bytes: &[u8],
+    max_record: u32,
+    base: u64,
+) -> (Vec<T>, Vec<u64>, u64) {
     let mut records = Vec::new();
     let mut offsets = Vec::new();
     let mut pos = 0usize;
@@ -159,7 +343,7 @@ fn scan<T: DeserializeOwned>(bytes: &[u8], max_record: u32) -> (Vec<T>, Vec<u64>
         let Ok(record) = postcard::from_bytes::<T>(payload) else {
             break;
         };
-        offsets.push(pos as u64);
+        offsets.push(base + pos as u64);
         records.push(record);
         pos += LEN_BYTES + len + CHECKSUM_BYTES;
     }
@@ -182,6 +366,22 @@ pub struct Wal<T> {
     /// rejected loudly) and on recovery (a larger length is treated as corruption), so
     /// the write path and the scan path agree on what is a valid record.
     max_record: u32,
+    /// The record-schema revision this build *writes*, held so
+    /// [`rewrite`](Wal::rewrite) can stamp the replacement it produces. This crate
+    /// never interprets it.
+    ///
+    /// Note what this is not: the revision stamped in the file that was opened. The
+    /// two differ only once a caller's window spans more than one revision, and then
+    /// [`append`](Wal::append) adds frames at *this* revision to a file whose header
+    /// still records the older one — so the stamp understates until a
+    /// [`rewrite`](Wal::rewrite) restamps it. The consequence is bounded and
+    /// fail-closed: a later build whose window starts above the stale stamp refuses
+    /// the file by name rather than misreading it, because every frame in it is in
+    /// fact readable at the higher revision. A caller widening its window should
+    /// compact affected logs; raising the stamp in place on the first append after a
+    /// bump is the refinement that would remove the caveat, and it needs a second,
+    /// non-append handle to reach the header.
+    records: compat::Version,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -199,23 +399,79 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
     /// # Errors
     ///
     /// Any filesystem error reading, opening, or truncating the file.
-    pub fn open(path: impl Into<PathBuf>, max_record: u32) -> io::Result<(Wal<T>, Vec<T>)> {
+    pub fn open(
+        path: impl Into<PathBuf>,
+        max_record: u32,
+        records: &compat::Window,
+    ) -> Result<(Wal<T>, Vec<T>), OpenError> {
+        // What keeps the unstamped-file refusal sound: a headerless file begins with
+        // a frame length at or below `max_record`, so it cannot begin with `MAGIC`
+        // (see there). A caller permitting a larger record would break that.
+        assert!(
+            u64::from(max_record) < 0x4C41_5789,
+            "max_record must stay below the magic's u32 reading so an unstamped file \
+             is never mistaken for a stamped one"
+        );
         let path = path.into();
         let (bytes, existed) = match fs::read(&path) {
             Ok(bytes) => (bytes, true),
             Err(err) if err.kind() == io::ErrorKind::NotFound => (Vec::new(), false),
-            Err(err) => return Err(err),
+            Err(err) => return Err(err.into()),
         };
-        let (records, offsets, valid_end) = scan::<T>(&bytes, max_record);
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
-        if !existed {
-            // The file was just created. Its bytes become durable on the first append's
-            // fsync, but the directory entry that names it needs its own fsync, or a
-            // crash could lose a file whose appends were already acknowledged. Doing it
-            // here makes the new log's entry durable for every caller, including one
-            // that creates its logs lazily, so no caller has to remember to.
-            sync_dir(parent_dir(&path))?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+
+        // A file whose bytes are a *prefix* of the header we would write holds no
+        // frames — the header is written and fsynced before any append can follow it —
+        // so stamping it in place is lossless. This covers a missing file, an empty
+        // one, and a header torn by a crash between creating the file and syncing it,
+        // which would otherwise turn a benign crash into a log that can never be
+        // opened again.
+        //
+        // The prefix test is what keeps that from becoming a licence to overwrite: a
+        // short file that is *not* heading toward this header — a foreign file, or a
+        // log from a build that framed records differently — falls through to the
+        // refusal below instead of being silently truncated.
+        let fresh = header(records.writes());
+        if bytes.len() < HEADER_LEN {
+            if !fresh.starts_with(&bytes) {
+                return Err(compat::Incompatible::Unstamped {
+                    boundary: FRAME.window().boundary(),
+                    accepted: FRAME.window().accepted(),
+                }
+                .into());
+            }
+            if !bytes.is_empty() {
+                file.set_len(0)?;
+            }
+            file.write_all(&fresh)?;
+            file.sync_all()?;
+            if !existed {
+                // The file was just created. Its bytes become durable on the fsync
+                // above, but the directory entry that names it needs its own fsync,
+                // or a crash could lose a file whose appends were already
+                // acknowledged. Doing it here makes the new log's entry durable for
+                // every caller, including one that creates its logs lazily, so no
+                // caller has to remember to.
+                sync_dir(parent_dir(&path))?;
+            }
+            return Ok((
+                Wal {
+                    path,
+                    file,
+                    offsets: Vec::new(),
+                    end: HEADER_LEN as u64,
+                    max_record,
+                    records: records.writes(),
+                    _marker: PhantomData,
+                },
+                Vec::new(),
+            ));
         }
+
+        // The header is admitted whole before a single frame is scanned (**V2**).
+        let frames = admit_header(&bytes, records)?;
+        let (recovered, offsets, valid_body) = scan::<T>(frames, max_record, HEADER_LEN as u64);
+        let valid_end = HEADER_LEN as u64 + valid_body;
         if (valid_end as usize) < bytes.len() {
             // A torn tail: the write never returned, so the record was never
             // acknowledged. Truncate it away before anything is appended.
@@ -229,9 +485,10 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
                 offsets,
                 end: valid_end,
                 max_record,
+                records: records.writes(),
                 _marker: PhantomData,
             },
-            records,
+            recovered,
         ))
     }
 
@@ -297,6 +554,9 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
     /// recorded offset, made durable before any conflicting record can be appended
     /// after it. A no-op when `keep` is already the length.
     ///
+    /// The offsets are absolute and the first is the header's width, so truncating to
+    /// zero records leaves the header in place rather than emptying the file.
+    ///
     /// # Errors
     ///
     /// Any filesystem error truncating or syncing.
@@ -305,6 +565,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
             return Ok(());
         }
         let cut = self.offsets[keep];
+        debug_assert!(cut >= HEADER_LEN as u64, "truncation never cuts the header");
         self.file.set_len(cut)?;
         self.file.sync_all()?;
         self.offsets.truncate(keep);
@@ -321,7 +582,10 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
     ///
     /// Any filesystem error writing, renaming, or reopening.
     pub fn rewrite(&mut self, records: &[T]) -> io::Result<()> {
-        let (buf, offsets) = self.frame_all(records, 0);
+        let (frames, offsets) = self.frame_all(records, HEADER_LEN as u64);
+        // The replacement is a whole file, so it carries a header like any other.
+        let mut buf = header(self.records);
+        buf.extend_from_slice(&frames);
         let dir = parent_dir(&self.path);
         let name = self
             .path
@@ -356,8 +620,10 @@ mod tests {
         }
     }
 
+    const RECORDS: compat::Window = compat::Window::at("wal.test", 1);
+
     fn open(path: &Path) -> (Wal<Rec>, Vec<Rec>) {
-        Wal::<Rec>::open(path, MAX).unwrap()
+        Wal::<Rec>::open(path, MAX, &RECORDS).unwrap()
     }
 
     #[test]
@@ -429,8 +695,9 @@ mod tests {
         }
         // Flip a byte inside the second record's payload.
         let mut bytes = fs::read(&path).unwrap();
-        let len0 = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-        let second_start = 4 + len0 + 8;
+        let first = HEADER_LEN;
+        let len0 = u32::from_le_bytes(bytes[first..first + 4].try_into().unwrap()) as usize;
+        let second_start = first + 4 + len0 + 8;
         bytes[second_start + 5] ^= 0xff;
         fs::write(&path, &bytes).unwrap();
 
@@ -499,7 +766,7 @@ mod tests {
         let path = dir.path().join("log");
         // A tiny limit: scan would reject a frame larger than this, so the write must
         // reject it too rather than acknowledge a record recovery would silently drop.
-        let (mut wal, _) = Wal::<Rec>::open(&path, 8).unwrap();
+        let (mut wal, _) = Wal::<Rec>::open(&path, 8, &RECORDS).unwrap();
         wal.append(&rec(1, &[0u8; 64])).unwrap();
     }
 
@@ -511,5 +778,146 @@ mod tests {
         // A second replace overwrites it whole.
         atomic_replace(dir.path(), "state", b"world!").unwrap();
         assert_eq!(fs::read(dir.path().join("state")).unwrap(), b"world!");
+    }
+
+    #[test]
+    fn a_new_log_is_stamped_and_the_stamp_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        {
+            let (mut wal, recovered) = open(&path);
+            assert!(recovered.is_empty());
+            // The header exists before any record does, so an empty log is still a
+            // recognizable one.
+            assert_eq!(fs::metadata(&path).unwrap().len(), HEADER_LEN as u64);
+            wal.append(&rec(1, b"a")).unwrap();
+        }
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.starts_with(MAGIC), "the magic leads the file");
+        let (_wal, recovered) = open(&path);
+        assert_eq!(recovered, vec![rec(1, b"a")]);
+    }
+
+    #[test]
+    fn an_unstamped_file_is_refused_rather_than_scanned() {
+        // A headerless log, as a build predating the header would have written: one
+        // valid-looking frame. It must be refused, not scanned — the frames may parse
+        // and still mean something else.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let payload = postcard::to_allocvec(&rec(1, b"a")).unwrap();
+        let mut bytes = (payload.len() as u32).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(&checksum(&payload).to_le_bytes());
+        fs::write(&path, &bytes).unwrap();
+
+        let err = Wal::<Rec>::open(&path, MAX, &RECORDS)
+            .err()
+            .expect("an unstamped file must not open");
+        assert!(
+            matches!(err, OpenError::Incompatible(compat::Incompatible::Unstamped { .. })),
+            "expected an Unstamped refusal, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_record_schema_outside_the_window_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        {
+            let (mut wal, _) = open(&path);
+            wal.append(&rec(1, b"a")).unwrap();
+        }
+        // Reopen under a caller whose records have moved on. The frames are intact and
+        // this build simply cannot interpret them.
+        const LATER: compat::Window = compat::Window::new("wal.test", 4, 5, 4);
+        let err = Wal::<Rec>::open(&path, MAX, &LATER)
+            .err()
+            .expect("a schema outside the window must not open");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wal.test") && msg.contains("v1"),
+            "the refusal must name the boundary and what it found: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_foreign_checksum_kind_is_refused_by_name() {
+        // The reserved field doing its job: a log written with a digest this build does
+        // not compute is refused, rather than every frame failing its checksum and the
+        // whole log reading as one torn tail.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        {
+            let (mut wal, _) = open(&path);
+            wal.append(&rec(1, b"a")).unwrap();
+        }
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[10..12].copy_from_slice(&7u16.to_le_bytes());
+        fs::write(&path, &bytes).unwrap();
+
+        let msg = Wal::<Rec>::open(&path, MAX, &RECORDS)
+            .err()
+            .expect("a foreign checksum must not open")
+            .to_string();
+        assert!(msg.contains("wal.checksum"), "must name the field: {msg}");
+    }
+
+    #[test]
+    fn a_header_lost_to_a_crash_before_the_first_append_is_reinitialized() {
+        // A crash between creating the file and stamping it. The file holds no frames,
+        // so re-stamping is lossless — and the alternative would turn a benign crash
+        // into a log that can never be opened again.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        for partial in [Vec::new(), MAGIC[..3].to_vec()] {
+            fs::write(&path, &partial).unwrap();
+            let (mut wal, recovered) = open(&path);
+            assert!(recovered.is_empty());
+            wal.append(&rec(1, b"a")).unwrap();
+            drop(wal);
+            let (_wal, recovered) = open(&path);
+            assert_eq!(recovered, vec![rec(1, b"a")], "the log works after re-stamping");
+        }
+    }
+
+    #[test]
+    fn truncating_every_record_keeps_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let (mut wal, _) = open(&path);
+        wal.append_batch(&[rec(1, b"a"), rec(2, b"b")]).unwrap();
+        wal.truncate(0).unwrap();
+        assert_eq!(wal.len(), 0);
+        assert_eq!(fs::metadata(&path).unwrap().len(), HEADER_LEN as u64);
+        // And the emptied log is still a stamped one the next open accepts.
+        wal.append(&rec(3, b"c")).unwrap();
+        drop(wal);
+        let (_wal, recovered) = open(&path);
+        assert_eq!(recovered, vec![rec(3, b"c")]);
+    }
+
+    #[test]
+    fn rewrite_restamps_the_replacement() {
+        // `rewrite` replaces the whole file, so it must write a header too — otherwise
+        // compaction would produce a log nothing can reopen.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        {
+            let (mut wal, _) = open(&path);
+            wal.append_batch(&[rec(1, b"a"), rec(2, b"b")]).unwrap();
+            wal.rewrite(&[rec(9, b"z")]).unwrap();
+        }
+        assert!(fs::read(&path).unwrap().starts_with(MAGIC));
+        let (_wal, recovered) = open(&path);
+        assert_eq!(recovered, vec![rec(9, b"z")]);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_record must stay below the magic")]
+    fn a_max_record_that_could_alias_the_magic_is_rejected() {
+        // What keeps the unstamped-file refusal sound (see `MAGIC`).
+        let dir = tempfile::tempdir().unwrap();
+        let _ = Wal::<Rec>::open(dir.path().join("log"), 0x4C41_5789, &RECORDS);
     }
 }

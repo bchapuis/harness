@@ -36,7 +36,33 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
 2. The checksum MUST be **FNV-1a, 64-bit**, over the payload bytes only: offset basis `0xcbf29ce484222325`, prime `0x100000001b3`. It detects torn and partial writes, **not** adversarial tampering — all a local log needs. The function MUST be stable: it MUST NOT vary across platforms, crate versions, or process runs, so a file written by one build recovers identically under another. (`std::hash` and other unstable hashers are therefore ruled out.)
 
-3. The log file is the concatenation of zero or more such frames in append order. There is no file header, no trailer, and no global checksum: the file's meaning is the maximal sequence of valid frames from its start (§3.1).
+3. The log file is a **header** (§2.1) followed by the concatenation of zero or more such frames in append order. There is no trailer and no global checksum: past the header, the file's meaning is the maximal sequence of valid frames (§3.1).
+
+### 2.1 The file header
+
+1. Every log file MUST open with:
+
+   ```
+   [magic 8] [u16 frame revision] [u16 checksum kind] [u16 record schema] [u16 reserved]
+   ```
+
+   all little-endian. The magic is `89 57 41 4C 0D 0A 1A 0A` (`\x89WAL\r\n\x1a\n`), the PNG convention: a high-bit byte, the name, then a CRLF/EOF trap that catches a text-mode transfer.
+
+2. `open` MUST admit the whole header — magic, then frame revision, then checksum kind, then record schema — **before scanning a single frame** ([compatibility](compatibility-spec.md) **V2**). A file this build cannot read is never partially interpreted.
+
+3. The header's **length and layout belong to the frame revision**, not to the format for all time. Revision 1 is the sixteen bytes above; a later revision may define a different header entirely, and is free to, because a revision-1 reader refuses a revision-2 file outright rather than trying to parse its header. Only the magic and the `u16` immediately after it are fixed across revisions — they are what a reader consults *before* it knows which layout applies. Nothing else in this crate may assume the header is sixteen bytes.
+
+4. **Frame revision** versions §2's framing; revision 1 is the layout above. **Checksum kind** identifies the digest, `1` being FNV-1a (§2 rule 2); it is compared for equality, being an identity rather than an ordering, and it is what makes the pluggable checksum of §Deferred a header change rather than a layout change. **Reserved** MUST be zero at frame revision 1, so every header byte is validated and no detectable damage passes silently. The header carries no checksum of its own; the reserved field is where one would go.
+
+5. **Record schema** belongs to the *caller*: `open` takes the caller's `compat::Window`, stamps its written revision into a new file, admits the field on an existing one, and never interprets it. This field is load-bearing rather than decorative — `Wal<T>`'s records are `postcard`, which is positional and has no field names, so `T` cannot gain or reorder a field within a revision and its revision has nowhere to live but outside the payload. An enum may still grow variants at its end, which no existing record can carry; that needs no bump.
+
+6. The check is part of `open` rather than an accessor a caller may consult, because an optional check is one a caller forgets, and the forgotten case is the misparse the header exists to prevent. `open` therefore returns `OpenError`, keeping a policy refusal distinct from the I/O failures §6 leaves to the caller.
+
+   `append` does **not** update the record-schema field, and `rewrite` stamps the revision this build writes. The two matter only once a caller's window spans more than one revision: appends then add frames at the newer revision to a file whose header still names the older one, so the stamp understates until a `rewrite` restamps it. The consequence is bounded and fail-closed — every frame in such a file *is* readable at the higher revision, so a later build whose window starts above the stale stamp refuses the file by name rather than misreading it. A caller widening its window SHOULD compact affected logs.
+
+7. A file whose bytes are a **prefix** of the header `open` would write MUST be stamped in place rather than refused: the header is written and fsynced before any frame can follow it, so such a file holds no records and stamping it loses nothing. This covers a missing file, an empty one, and a header torn by a crash between creating the file and syncing it — which would otherwise make a benign crash a log that can never be opened. Any other file too short to hold a header MUST be refused, so the rule is not a licence to overwrite a foreign file.
+
+8. `max_record` MUST stay below `0x4C41_5789`, the magic's first four bytes read as a little-endian `u32` (`open` asserts it). A headerless file begins with a frame length at or below `max_record` and therefore can never begin with the magic, which is what makes rule 2's refusal sound rather than merely probable.
 
 ---
 
@@ -44,7 +70,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
 ### 3.1 Recovery (`open`)
 
-1. `open(path, max_record)` MUST read the file (treating a missing file as empty), **scan its maximal valid prefix** into records, and return them alongside the live `Wal<T>`. The scan MUST stop at the first frame that is any of: **incomplete** (fewer bytes remain than the frame claims), **oversized** (`length > max_record`, §4), **checksum-failing**, or **unparsable** as `T`. Everything from that frame onward is the torn tail.
+1. `open(path, max_record, records)` MUST read the file (treating a missing file as empty), admit its header (§2.1), **scan its maximal valid prefix** into records, and return them alongside the live `Wal<T>`. The scan MUST stop at the first frame that is any of: **incomplete** (fewer bytes remain than the frame claims), **oversized** (`length > max_record`, §4), **checksum-failing**, or **unparsable** as `T`. Everything from that frame onward is the torn tail.
 
 2. The valid prefix is the log; the torn tail was never acknowledged (§3.2), so dropping it is correct. When the torn tail is non-empty, `open` MUST **truncate the file to the valid length and fsync it** before returning — the recovery decision is made durable immediately, so no later append can land after un-acknowledged bytes.
 
@@ -126,4 +152,4 @@ Non-goals (today and by design):
 Possible future work, only if a caller needs it:
 
 - **Group commit across handles** — batching fsyncs for many small logs sharing a disk, trading a bounded latency for throughput. Today each `append_batch` already amortizes within one log.
-- **A pluggable checksum** — a stronger digest behind the same framing, were a caller ever to store a WAL on untrusted media. The framing reserves a fixed 8-byte trailer, so this is a format-version change, not a layout change.
+- **A pluggable checksum** — a stronger digest behind the same framing, were a caller ever to store a WAL on untrusted media. The framing reserves a fixed 8-byte trailer and the header a **checksum kind** field (§2.1), so this is now a matter of defining a second value for that field: no layout change, and a log written either way says which it is.

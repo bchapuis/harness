@@ -101,6 +101,19 @@ use crate::store::WriteKind;
 /// can be large.
 const MAX_RECORD: u32 = 1 << 30;
 
+/// The schema revisions of this store's two log record types, stamped into each log's
+/// header (compatibility spec §3). They are separate boundaries because the two logs
+/// evolve independently: adding a field to [`SegOp`] says nothing about
+/// [`ManifestEntry`].
+///
+/// Both are `postcard`, so neither type can gain or reorder a field within a revision
+/// — that is exactly why the revision lives in the header instead of the payload. An
+/// enum may still grow variants at its **end**, which `postcard` encodes as a higher
+/// discriminant and which no existing record can carry; that is the ordinary change,
+/// and it needs no bump.
+const MANIFEST_RECORDS: compat::Window = compat::Window::at("granary.store.manifest", 1);
+const SEGMENT_RECORDS: compat::Window = compat::Window::at("granary.store.segment", 1);
+
 /// One mutating call on a grain's segment, as logged and replayed. Replaying a
 /// segment's ops through a fresh [`GrainRecords`] reproduces its state exactly (the
 /// methods are deterministic in prior state), so a reloaded segment equals the live one.
@@ -340,7 +353,8 @@ fn load_fences(dir: &Path) -> io::Result<HashMap<u32, Term>> {
 /// Open and replay the manifest, truncating any torn tail.
 fn load_manifest(dir: &Path) -> io::Result<Manifest> {
     let path = dir.join("manifest");
-    let (log, entries) = Wal::<ManifestEntry>::open(&path, MAX_RECORD)?;
+    let (log, entries) =
+        Wal::<ManifestEntry>::open(&path, MAX_RECORD, &MANIFEST_RECORDS).map_err(|e| e.into_io())?;
     let mut ids = HashMap::new();
     let mut next = 0u64;
     for entry in entries {
@@ -359,7 +373,7 @@ fn load_manifest(dir: &Path) -> io::Result<Manifest> {
 /// loads the whole segment state; every other op is re-applied to it in log order.
 fn open_segment(dir: &Path, id: u64) -> Segment {
     let path = dir.join("segments").join(id.to_string());
-    let (log, ops) = Wal::<SegOp>::open(&path, MAX_RECORD)
+    let (log, ops) = Wal::<SegOp>::open(&path, MAX_RECORD, &SEGMENT_RECORDS)
         .unwrap_or_else(|err| panic!("cannot open grain segment {}: {err}", path.display()));
     let mut records = GrainRecords::default();
     for op in ops {
