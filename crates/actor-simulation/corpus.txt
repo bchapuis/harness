@@ -183,45 +183,34 @@ granary-account-swarm 41000332
 
 granary-ws-swarm 6
 
-# --- A `Created` reply whose record is not in the journal on re-activation -----
+# --- A command applied to the wrong grain after a node restart ----------------
 #
-# `p2 acknowledged Record(app.Session/keep-c1-2) — a name nothing in this run ever
-# forgets — and a committed probe found it absent`. Around 1 seed in 1,500.
+# `p2 acknowledged Record(app.Session/keep-c1-2) ... and a committed probe found
+# it absent`. Around 1 seed in 1,500, only in workloads whose nemesis restarts a
+# node.
 #
-# UNRESOLVED. What the event stream shows on this seed, for one grain:
+# An `ActorId` is `(node, path, incarnation)`, and `assign_id` handed out paths
+# from a counter starting at zero while always stamping incarnation `0`. Within
+# one process that is unique. Across a *restart* it is not: the successor
+# re-issues `node-2//user/2#0`, the very id its predecessor used, and spawn order
+# does not survive a restart, so that id now names a different actor.
 #
-#   Committed seq=1
-#   Record(keep-c1-1) -> Ok(Created)
-#   Record(keep-c1-2) -> Ok(Created)     <- no Committed of its own
-#   Rehydrated replayed=1                <- the journal holds one record
-#   ...
-#   probe Record(keep-c1-2) -> Created   <- committed probe: still absent
+# Granary caches a resolved host ref per grain (`HostCache`), guarded before each
+# send by a leadership check but not by liveness. So a ref cached before the
+# restart still looked good afterwards and delivered to whatever now sat at that
+# path — another grain's host. The `Record` was applied to principal `p0`'s
+# directory, committed there, and answered `Created`; `p2`, which the caller had
+# addressed, never saw it. `ActorId::incarnation` exists precisely to separate a
+# fresh actor from "a resigned predecessor that reused the same path" and was
+# never populated.
 #
-# Three mutating commands answered `Created` against two commits, and the next
-# activation replayed two records. `GrainEvent::Committed` is emitted on the
-# commit path *before* the reply is released (`host.rs`), so a `Created` with no
-# preceding `Committed` is not an ordering artifact of the trace.
+# Fixed by stamping the **process** incarnation onto every id a host assigns
+# (`LocalHost::with_incarnation`), threaded through `ClusterConfig::incarnation`;
+# the simulation passes the scheduler domain, which is already one per incarnation.
+# A stale ref now fails to resolve, which is a `DeadLetter` — the one outcome that
+# proves the command never ran (§2.2) — so `GrainRef` re-resolves and re-issues.
 #
-# The claim itself has been narrowed three times and each narrowing was a real
-# test bug, so this one is recorded rather than asserted about granary:
-#  - expectations were held on the workload, which a sweep shares across seeds
-#    (that alone looked exactly like a G14 defect — see docs/simulation-testing.md,
-#    "A workload outlives its runs");
-#  - `Unchanged` was counted as an acknowledgement, though it commits nothing;
-#  - the verification read was `List`, a query, which §7.5 serves from the
-#    activation and explicitly does not make linearizable. It is now a *writing*
-#    command, the construction §7.5 prescribes, so the answer is committed state.
-#
-# What is left is not explained by any of those. Reproduce with:
-#
-#     SWARM_SEED_BASE=9300730 SWARM_SEEDS=1 \
-#       cargo test -p tenancy --test directory_swarm --exact \
-#       the_directory_index_survives_the_cluster_swarm
-#
-# Disabling the churn traffic (keeping the entropy draw) makes this seed pass, but
-# the same anomaly is still visible in its trace — a `Created` whose record is
-# gone by the next activation — and merely self-heals there, because the client
-# happens to record that name again. Churn decides whether the loss is observable,
-# not whether it happens.
+# Kept as a corpus seed because the sweep that found it only reaches this with a
+# restart, a passivation, and a cached ref lining up.
 
 tenancy-directory-swarm 9300730

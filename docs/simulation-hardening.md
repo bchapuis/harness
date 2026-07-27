@@ -6,66 +6,60 @@ mechanism and conventions are in [simulation testing](simulation-testing.md);
 this file is the list of gaps, ranked by leverage, and it should be deleted once
 its findings are resolved or refuted.
 
-Every finding below is resolved. Closing them turned up four further problems in
-the *sweeps* — each one an assertion claiming more than the layer promises — and
-one anomaly in the system that is still open (§0).
+Every finding below is resolved, and so is the defect they turned up — see §0,
+which is the reason the rest of this was worth doing.
 
-Three of the four are worth reading before writing the next sweep, because none
-of them fails in a way that looks like a test bug:
+## 0. FIXED — a command applied to the wrong grain after a node restart
+
+The sweeps' last surviving failure was a real defect, and a serious one: a
+`Record` addressed to one principal's directory was applied to **another's**,
+committed there, and answered `Created`. The addressed grain never saw it.
+
+`ActorId` is `(node, path, incarnation)`. `assign_id` handed out paths from a
+counter starting at zero and always stamped incarnation `0`, which is unique
+within a process and *not* across a restart: the successor re-issues
+`node-2//user/2#0`, the very id its predecessor used, and spawn order does not
+survive a restart, so that id now names a different actor. `ActorId::incarnation`
+documents itself as distinguishing "a fresh actor from a resigned predecessor
+that reused the same path" — the mechanism was there and never populated.
+
+Granary caches a resolved host ref per grain (`HostCache`), guarded before each
+send by a leadership check but not by liveness, so a ref cached before the
+restart still looked good afterwards and delivered to whatever now sat at that
+path.
+
+Fixed by stamping the **process** incarnation onto every id a host assigns
+(`LocalHost::with_incarnation`, threaded through `ClusterConfig::incarnation`);
+the simulation passes the scheduler domain, which is already one per incarnation
+and monotonic. A stale ref now fails to resolve, which is a `DeadLetter` — the one
+outcome that proves the command never ran (§2.2) — so `GrainRef` re-resolves and
+re-issues. Seed `9300730` stays in `corpus.txt`; 2,000 seeds clean.
+
+Two things are worth keeping from how long this took. It was only reachable with
+a restart, a passivation, and a cached ref lining up — which is exactly the
+combination the widened nemesis (§1) and the hibernating sweeps (§2) created, and
+which nothing in the tree could produce before. And it sat behind four *test*
+bugs, each of which failed in the same shape as a durability violation:
 
 1. **Expectations held on the workload.** A sweep drives every seed through the
    same `&self`, so seed N's acknowledged writes were checked against seed N+1's
-   freshly empty grains. It reports acknowledged writes vanishing — a textbook
-   G14 violation, on a system that did nothing wrong. See "A workload outlives
-   its runs" in [simulation testing](simulation-testing.md).
+   freshly empty grains. See "A workload outlives its runs" in
+   [simulation testing](simulation-testing.md).
 2. **`Unchanged` counted as an acknowledgement.** It commits nothing; it reports
    what the serving activation believed, which §7.5 lets a quorum-less recovery
    seed with an uncommitted record.
 3. **Reading with a query.** §7.5 is explicit that a read is "read-your-leader
    (relaxed), not linearizable under partition", and names the interim
-   construction: issue a trivial *writing* command. A sweep that asserts a
-   durability property against a query is asking the wrong question.
-4. **A mutating command with no idempotency key.** The wire duplicates, so a bare
-   `Deposit` lands twice for one logical operation. §7.2 puts exactly-once out of
-   scope and says higher guarantees are "built atop this layer with explicit
-   idempotency keys" — the same finding `corpus.txt` already records for the
-   remote register.
+   construction: issue a trivial *writing* command.
+4. **An unbounded end-of-run check.** Verification retried per name, so a
+   degraded cluster multiplied the cost by however many names the run
+   acknowledged and overran the driver's time budget — failing the seed for
+   liveness rather than for anything observed. It is now bounded in total, and a
+   seed that runs out of budget makes no claim rather than a false one.
 
-## 0. OPEN — a `Created` reply whose record is not in the journal
-
-`tenancy-directory-swarm` fails at roughly one seed in 1,500, and the corpus
-holds `9300730` so it replays on every run. **The suite is red on this, and that
-is deliberate**: the alternative is hiding an unexplained durability anomaly.
-
-On that seed, for one grain, the event stream reads:
-
-```
-Committed seq=1
-Record(keep-c1-1) -> Ok(Created)
-Record(keep-c1-2) -> Ok(Created)     <- no Committed of its own
-Rehydrated replayed=1                <- the journal holds one record
-...
-probe Record(keep-c1-2) -> Created   <- a committed probe: still absent
-```
-
-Three mutating commands answered `Created` against two commits, and the next
-activation replayed two records. `GrainEvent::Committed` is emitted on the commit
-path *before* the reply is released (`host.rs`), so a `Created` with no preceding
-`Committed` is not an artifact of interleaved tracing.
-
-**Not root-caused, and not asserted to be granary's.** This same claim has been
-wrong three times already (the four points above are what each attempt turned
-out to be), so the entry records what is observed and what is ruled out rather
-than naming a mechanism. Two hypotheses were checked and do not fit: the
-optimistic head check does handle a compacted base (`after < base` → `Stale`), and
-the failed-append rollback is bounded to slots above `after`, so it cannot drop a
-lower committed record.
-
-Disabling the churn traffic — while keeping its entropy draw, so the run is
-otherwise identical — makes this seed pass, but the same anomaly is still visible
-in its trace and merely self-heals, because the client happens to record that
-name again. Churn decides whether the loss is *observable*, not whether it
-happens.
+A fifth, in the account sweep: a mutating command with **no idempotency key**,
+so a duplicated frame deposited twice (§7.2 — the finding `corpus.txt` already
+records for the remote register).
 
 ## 1. The nemesis vocabulary is narrower than the fault library
 
