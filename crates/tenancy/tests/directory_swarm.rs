@@ -89,6 +89,16 @@ use tenancy::Recorded;
 const IDLE_AFTER: Duration = Duration::from_millis(200);
 /// A client's idle, comfortably past [`IDLE_AFTER`].
 const IDLE_FOR: Duration = Duration::from_millis(500);
+/// How long the whole end-of-run verification may take.
+///
+/// It has to be bounded, and bounded *in total* rather than per name. Each probe
+/// is a real quorum write that can sit out its own timeout, so a per-name retry
+/// budget multiplies by however many names the run acknowledged — enough, on a
+/// cluster still recovering, to overrun the driver's own time budget and fail the
+/// seed for liveness rather than for anything it observed. When this runs out the
+/// remaining names go unchecked, which is the right trade: a seed that makes no
+/// claim is better than a seed that makes a false one.
+const VERIFY_BUDGET: Duration = Duration::from_secs(30);
 
 fn config() -> GranaryConfig {
     GranaryConfig {
@@ -335,7 +345,11 @@ impl ClusterWorkload for DirectorySwarm {
             // fails". `Record` with *different* metadata is one: it commits either
             // way, and its reply is the committed answer to the question asked —
             // `Updated` iff the name was already owned, `Created` iff it was not.
+            let verify_by = clock.now() + VERIFY_BUDGET;
             for (principal, name) in &recorded {
+                if clock.now() >= verify_by {
+                    break;
+                }
                 let dir = granary.grain(principal);
                 let probe = Meta {
                     label: Some("probe".into()),
@@ -345,7 +359,7 @@ impl ClusterWorkload for DirectorySwarm {
                 // A failed probe says nothing about the index, so retry; if it
                 // never commits, this seed makes no claim rather than a false one.
                 let mut answer = None;
-                for _ in 0..20 {
+                while clock.now() < verify_by {
                     match dir
                         .ask_timeout(
                             Record {
