@@ -11,7 +11,12 @@
 //! contract, spec §8) and fault coverage (every fault type actually fired), so a
 //! green run is provably not a silently happy-path run.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use actor_cluster::SwimConfig;
@@ -103,10 +108,57 @@ fn config() -> BlobConfig {
 /// only (spec §8 / V&V §18.4). Clients share a small pool of namespaces, so puts,
 /// reads, and deletes interleave and race — exercising put-racing-delete and
 /// reconcile-against-tombstone under the injected faults.
+/// Acknowledged blobs, keyed by `(namespace bytes, id)`, valued by the index of
+/// the node whose store took the `put`.
+type Durable = BTreeMap<(Vec<u8>, BlobId), usize>;
+
 struct BlobSwarm {
     nodes: usize,
     clients: usize,
     ops: u64,
+    /// Blobs whose `put` was acknowledged, with the node that stored them.
+    /// Checked after the run heals: re-replication (**B6**) must have restored a
+    /// readable copy despite the crashes and partitions in between.
+    durable: Arc<Mutex<Durable>>,
+    /// Every namespace any client *attempted* to delete, successfully or not.
+    ///
+    /// A failed `delete_namespace` is ambiguous in the same way a failed write is:
+    /// the tombstone may already sit on a minority and be adopted later, so a blob
+    /// in that namespace may legitimately be gone — or legitimately still there.
+    /// Excluding the whole namespace from the durability claim is what keeps the
+    /// claim about **B6** rather than about which way an ambiguous delete fell.
+    touched_by_delete: Arc<Mutex<BTreeSet<Vec<u8>>>>,
+    /// How many of those were actually re-read, so a green sweep is not one where
+    /// every put failed.
+    reread: Arc<AtomicUsize>,
+    /// Whether to make the **B6** re-replication claim at the end of the run.
+    ///
+    /// Off by default, because the claim does not hold yet and it is not settled
+    /// whether that is B6 or the claim. See `check_rereplication` below and
+    /// `docs/simulation-hardening.md` §6.
+    check_rereplication: bool,
+}
+
+impl BlobSwarm {
+    fn new(nodes: usize, clients: usize, ops: u64) -> BlobSwarm {
+        BlobSwarm {
+            nodes,
+            clients,
+            ops,
+            durable: Arc::new(Mutex::new(BTreeMap::new())),
+            touched_by_delete: Arc::new(Mutex::new(BTreeSet::new())),
+            reread: Arc::new(AtomicUsize::new(0)),
+            check_rereplication: false,
+        }
+    }
+
+    /// The same traffic, with the end-of-run B6 claim turned on.
+    fn checking_rereplication(nodes: usize, clients: usize, ops: u64) -> BlobSwarm {
+        BlobSwarm {
+            check_rereplication: true,
+            ..BlobSwarm::new(nodes, clients, ops)
+        }
+    }
 }
 
 impl ClusterWorkload for BlobSwarm {
@@ -128,6 +180,11 @@ impl ClusterWorkload for BlobSwarm {
         let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
+        let durable = Arc::clone(&self.durable);
+        let touched_by_delete = Arc::clone(&self.touched_by_delete);
+        let reread = Arc::clone(&self.reread);
+        let check_rereplication = self.check_rereplication;
+        let net = ctx.net().clone();
         Box::pin(async move {
             // One on-disk store and `Clustered` tier per node (each spawns its
             // replica + reconcile loop). The tempdirs live until the run ends.
@@ -148,8 +205,11 @@ impl ClusterWorkload for BlobSwarm {
             let entropy = nodes[0].entropy().clone();
             let mut tasks = Vec::new();
             for client in 0..clients {
-                let store = stores[client % stores.len()].clone();
+                let index = client % stores.len();
+                let store = stores[index].clone();
                 let entropy = entropy.clone();
+                let durable = Arc::clone(&durable);
+                let touched_by_delete = Arc::clone(&touched_by_delete);
                 tasks.push(async move {
                     for _ in 0..ops {
                         let ns =
@@ -161,12 +221,23 @@ impl ClusterWorkload for BlobSwarm {
                             0..=5 => {
                                 if let Ok(id) = store.put(&ns, data).await {
                                     let _ = store.get(&ns, &id, None).await;
+                                    durable
+                                        .lock()
+                                        .expect("durable mutex")
+                                        .insert((ns.as_bytes().to_vec(), id), index);
                                 }
                             }
                             6..=7 => {
                                 let _ = store.get(&ns, &BlobId::of(&data), None).await;
                             }
                             _ => {
+                                // Whatever the outcome, this namespace is now
+                                // undecidable — record that before the call, since
+                                // a timed-out delete can still land afterwards.
+                                touched_by_delete
+                                    .lock()
+                                    .expect("delete mutex")
+                                    .insert(ns.as_bytes().to_vec());
                                 let _ = store.delete_namespace(&ns).await;
                             }
                         }
@@ -174,6 +245,42 @@ impl ClusterWorkload for BlobSwarm {
                 });
             }
             futures::future::join_all(tasks).await;
+
+            // **B6, the half the sweep never asserted.** The reconcile loop has been
+            // re-replicating throughout, but nothing checked it achieved anything:
+            // the drive read each blob back immediately after its put, while every
+            // replica still held it. Heal and quiesce, give reconcile time to
+            // restore the copies the crashes and partitions cost, then read every
+            // still-live blob again. `quiesce` matters as much as `heal` here — a
+            // wire still dropping frames keeps the owner set churning, and a `get`
+            // that fails then says nothing about re-replication
+            // (docs/simulation-testing.md, "Asserting at quiescence").
+            if check_rereplication {
+                net.heal();
+                net.quiesce();
+                nodes[0].clock().sleep(Duration::from_secs(45)).await;
+                let deleted = touched_by_delete.lock().expect("delete mutex").clone();
+                let expected = durable.lock().expect("durable mutex").clone();
+                for ((space, id), index) in &expected {
+                    if deleted.contains(space) {
+                        continue;
+                    }
+                    let ns = Namespace::new(space.clone());
+                    // Read through a *different* node than the one that stored it, so a
+                    // surviving local copy cannot answer for the cluster.
+                    let reader = &stores[(index + 1) % stores.len()];
+                    let got = reader.get(&ns, id, None).await;
+                    assert!(
+                        matches!(&got, Ok(bytes) if BlobId::of(bytes) == *id),
+                        "a blob acknowledged by `put`, in a namespace never deleted \
+                     since, did not read back on a healed cluster: re-replication \
+                     did not restore it (B6). id={id:?} outcome={:?}",
+                        got.as_ref().map(|b| b.len()),
+                    );
+                    reread.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
             // Stop the per-node reconcile loops (dropping the last store handle lets
             // each loop's `Weak` upgrade fail), then settle past the tier's internal
             // timeout so every in-flight background ask — a straggler drain, a final
@@ -212,14 +319,39 @@ fn blob_invariants_hold_under_the_cluster_swarm() {
     // The framework invariants (no silent loss, serial dispatch, …) and B7
     // (no resurrection) hold on every seeded run under partitions, crashes, loss,
     // duplication, and delay.
-    let workload = BlobSwarm {
-        nodes: 3,
-        clients: 3,
-        ops: 6,
-    };
+    let workload = BlobSwarm::new(3, 3, 6);
     if let Err(failure) = run_cluster_swarm(&workload, slow_seeds(0..24)) {
         panic!("{failure}");
     }
+}
+
+/// **Currently fails — see `docs/simulation-hardening.md` §6.** A blob whose
+/// `put` was acknowledged, in a namespace no client ever tried to delete, does
+/// not read back through another node on a healed and quiesced cluster, even
+/// given 45 virtual seconds for the reconcile loop to restore it. It is not a
+/// settling bound: a longer wait does not change it.
+///
+/// Quarantined rather than deleted because it is not yet established which side
+/// is wrong — B6's re-replication, or this claim, which has already been too
+/// strong twice (it first ignored that a failed `delete_namespace` leaves the
+/// namespace's fate ambiguous). Run it with
+///
+/// ```text
+/// cargo test -p blob-store --test swarm -- --ignored --exact \
+///     acknowledged_blobs_are_re_replicated_after_a_heal
+/// ```
+#[test]
+#[ignore = "unresolved: an acknowledged blob does not read back after a heal;             either B6 or the claim (docs/simulation-hardening.md §6)"]
+fn acknowledged_blobs_are_re_replicated_after_a_heal() {
+    let workload = BlobSwarm::checking_rereplication(3, 3, 6);
+    if let Err(failure) = run_cluster_swarm(&workload, slow_seeds(0..24)) {
+        panic!("{failure}");
+    }
+    assert!(
+        workload.reread.load(Ordering::Relaxed) > 0,
+        "no acknowledged blob was ever re-read on a healed cluster — the B6 \
+         re-replication claim was asserted against nothing",
+    );
 }
 
 #[test]
@@ -227,11 +359,7 @@ fn the_swarm_is_seed_reproducible() {
     // The determinism contract (spec §8): the same seed replays to a byte-identical
     // event stream, even with real on-disk stores — reconcile enumerates blobs in a
     // sorted, OS-independent order, so nothing path-dependent leaks into the stream.
-    let workload = BlobSwarm {
-        nodes: 3,
-        clients: 2,
-        ops: 5,
-    };
+    let workload = BlobSwarm::new(3, 2, 5);
     if let Err(divergence) = replay_cluster_swarm(&workload, slow_seeds(0..8)) {
         panic!("{divergence}");
     }
@@ -241,11 +369,7 @@ fn the_swarm_is_seed_reproducible() {
 fn the_swarm_exercises_every_fault() {
     // A sweep that configures faults but never triggers one gives false confidence.
     // Assert each fault type actually fired across the seed range (spec §8).
-    let workload = BlobSwarm {
-        nodes: 3,
-        clients: 3,
-        ops: 6,
-    };
+    let workload = BlobSwarm::new(3, 3, 6);
     let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..32)) {
         Ok(stats) => stats,
         Err(failure) => panic!("{failure}"),
