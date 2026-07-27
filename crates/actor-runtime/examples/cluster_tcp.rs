@@ -174,6 +174,8 @@ fn start_node(
             }),
             joining: false,
             authorizer: None,
+            // A single long-lived process per node here; see `ClusterConfig`.
+            incarnation: 0,
         },
     )
 }

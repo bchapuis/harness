@@ -177,6 +177,9 @@ struct HostState {
     /// lookups only (never iterated), so it adds no observable nondeterminism.
     dispatch_cache: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
     next_path: AtomicU64,
+    /// This process incarnation's stamp on every actor id it assigns — see
+    /// [`LocalHost::with_incarnation`].
+    incarnation: u64,
 }
 
 impl HostState {
@@ -308,6 +311,34 @@ impl LocalHost {
     /// Create a host for `node`, emitting events to `events`, with the given
     /// per-actor mailbox capacity.
     pub fn new(node: NodeId, events: Arc<dyn EventSink>, mailbox_capacity: usize) -> LocalHost {
+        LocalHost::with_incarnation(node, events, mailbox_capacity, 0)
+    }
+
+    /// A host whose actor ids carry `incarnation` — the **process** incarnation,
+    /// not the per-actor one (spec §3.6).
+    ///
+    /// Paths are handed out by a counter that starts at zero, so a process that
+    /// restarts under the same [`NodeId`] re-issues the very ids its predecessor
+    /// used. `ActorId` already has the field that separates them, and until now it
+    /// was always `0`, so a peer holding a ref from before the restart resolved it
+    /// against whatever actor now occupies that path — a *different* actor, since
+    /// spawn order does not survive a restart. Granary reproduced this as a grain
+    /// command applied to the wrong grain (`corpus.txt`,
+    /// `tenancy-directory-swarm 9300730`): the caller's cached host ref outlived
+    /// the node, and its `Record` landed on another principal's directory.
+    ///
+    /// Stamping the process incarnation makes such a ref fail to resolve instead,
+    /// which is a `DeadLetter` — the one outcome that proves the command never ran
+    /// (§2.2), so the caller re-resolves and re-issues safely.
+    ///
+    /// A single-node system passes `0`: it has no restart-under-the-same-identity
+    /// path, and holding the value at zero keeps its ids byte-identical.
+    pub fn with_incarnation(
+        node: NodeId,
+        events: Arc<dyn EventSink>,
+        mailbox_capacity: usize,
+        incarnation: u64,
+    ) -> LocalHost {
         LocalHost {
             state: Arc::new(HostState {
                 node,
@@ -319,6 +350,7 @@ impl LocalHost {
                 escalators: Mutex::new(BTreeMap::new()),
                 dispatch_cache: Mutex::new(HashMap::new()),
                 next_path: AtomicU64::new(0),
+                incarnation,
             }),
         }
     }
@@ -357,7 +389,11 @@ impl LocalHost {
 
     fn assign_id(&self) -> ActorId {
         let n = self.state.next_path.fetch_add(1, Ordering::Relaxed);
-        let id = ActorId::new(self.state.node, Path::new(format!("/user/{n}")), 0);
+        let id = ActorId::new(
+            self.state.node,
+            Path::new(format!("/user/{n}")),
+            self.state.incarnation,
+        );
         self.state.events.emit(Event::AssignId { id: id.clone() });
         id
     }

@@ -102,6 +102,13 @@ pub struct ClusterConfig {
     /// Per-message authorization (spec §15); `None` permits every message that
     /// clears the transport handshake.
     pub authorizer: Option<Arc<dyn Authorizer>>,
+    /// This **process** incarnation, stamped onto every actor id the node assigns
+    /// (spec §3.6). It must differ from the value any predecessor process used
+    /// under this `NodeId`, or a peer's ref from before a restart resolves against
+    /// whatever actor now holds that path — see
+    /// [`LocalHost::with_incarnation`](actor_core::LocalHost::with_incarnation).
+    /// A deployment that never restarts a node in place can leave it `0`.
+    pub incarnation: u64,
 }
 
 impl Default for ClusterConfig {
@@ -113,6 +120,7 @@ impl Default for ClusterConfig {
             membership: MembershipMode::Static { detector: None },
             joining: false,
             authorizer: None,
+            incarnation: 0,
         }
     }
 }
@@ -198,7 +206,12 @@ where
     ) -> ClusterSystem<C, E, S, T> {
         let mode = config.membership.clone();
         let swim = mode.detector().unwrap_or_default();
-        let host = LocalHost::new(node, Arc::clone(&config.events), config.mailbox_capacity);
+        let host = LocalHost::with_incarnation(
+            node,
+            Arc::clone(&config.events),
+            config.mailbox_capacity,
+            config.incarnation,
+        );
         let membership = Membership::new(node, &mode, Arc::clone(&config.events), config.joining);
         let raft = match &mode {
             MembershipMode::Leader(leader) => {

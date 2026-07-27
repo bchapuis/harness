@@ -221,6 +221,8 @@ pub fn start_node_leader(
         }),
         joining: false,
         authorizer: None,
+        // A single long-lived process per node here; see `ClusterConfig`.
+        incarnation: 0,
     };
     ClusterSystem::start(
         node,
@@ -251,6 +253,8 @@ fn start_node_cfg(cfg: TcpConfig, listener: TcpListener, swim: Option<SwimConfig
         membership,
         joining: false,
         authorizer: None,
+        // A single long-lived process per node here; see `ClusterConfig`.
+        incarnation: 0,
     };
     ClusterSystem::start(
         node,

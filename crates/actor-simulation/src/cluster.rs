@@ -35,15 +35,22 @@ use crate::transport::SimTransport;
 /// A node's process was replaced by [`SimNetwork::restart`] — emitted on the
 /// event stream (actor §16) just before the old system is shut down.
 ///
-/// It exists because an [`ActorId`](actor_core::ActorId) identifies an actor only
-/// within one process: the successor assigns paths and incarnations from zero, so
-/// `node-2//user/0#0` names one actor before the restart and a different one
-/// after. A checker that accumulates per-`ActorId` state — the lifecycle
-/// invariant (#6) is the one that does — would otherwise read the successor's
-/// first actor as a second assignment of the predecessor's. Restarts are a
-/// simulation fault, not a production event, which is why this rides
-/// [`Event::App`](actor_core::Event::App) rather than adding a variant to the
-/// framework's own enum.
+/// It exists because a successor process assigns actor *paths* from zero, so
+/// `node-2//user/0` names one actor before the restart and a different one after.
+/// A checker that accumulates per-actor state — the lifecycle invariant (#6) is
+/// the one that does — would otherwise read the successor's first actor as a
+/// second assignment of the predecessor's.
+///
+/// The ids themselves no longer collide: a host stamps its **process
+/// incarnation** onto every id it assigns
+/// ([`LocalHost::with_incarnation`](actor_core::LocalHost::with_incarnation)),
+/// which is what stops a stale ref from resolving to whatever now holds that path
+/// (`corpus.txt`, `tenancy-directory-swarm 9300730`). Paths still repeat, so a
+/// checker still needs the boundary; routing no longer does.
+///
+/// Restarts are a simulation fault, not a production event, which is why this
+/// rides [`Event::App`](actor_core::Event::App) rather than adding a variant to
+/// the framework's own enum.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeRestarted {
     pub node: NodeId,
@@ -70,6 +77,11 @@ impl SimNetwork {
             membership: self.mode.clone(),
             joining,
             authorizer: self.authorizer.clone(),
+            // The scheduler domain is already one-per-incarnation and monotonic,
+            // so it is exactly the stamp actor ids need to stop colliding across a
+            // restart (`LocalHost::with_incarnation`). Reusing it keeps the two
+            // notions of "this process" from drifting apart.
+            incarnation: domain,
         };
         let system = ClusterSystem::start(
             node,
@@ -136,9 +148,7 @@ impl SimNetwork {
     /// retired, so every task it owns leaves the run and is never polled again.
     /// Only then does the successor exist. Without the third step the
     /// predecessor's actors would keep being polled alongside their replacement,
-    /// emitting into the same [`ActorId`](actor_core::ActorId) space — the
-    /// successor numbers paths and incarnations from zero again — which is a
-    /// state no production restart can reach.
+    /// both live at once — a state no production restart can reach.
     ///
     /// Ending a process mid-flight leaves brackets open: an actor stopped between
     /// `DispatchStart` and `DispatchEnd`, an `ask` issued and never answered, an

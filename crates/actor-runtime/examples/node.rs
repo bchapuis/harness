@@ -197,6 +197,8 @@ async fn run(args: &[String]) {
             // gossips itself in via its seeds (spec §9.3).
             joining: opts.join,
             authorizer: None,
+            // A single long-lived process per node here; see `ClusterConfig`.
+            incarnation: 0,
         },
     );
     // Every configured peer is a member from the start: for a founding node the
