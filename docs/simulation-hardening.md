@@ -6,85 +6,66 @@ mechanism and conventions are in [simulation testing](simulation-testing.md);
 this file is the list of gaps, ranked by leverage, and it should be deleted once
 its findings are resolved or refuted.
 
-Sections 1–6 were the original audit and are now resolved except where noted.
-Section 0 is what closing them turned up, and it is the one thing here that is a
-**defect in the system rather than in its tests**.
+Every finding below is resolved. Closing them turned up four further problems in
+the *sweeps* — each one an assertion claiming more than the layer promises — and
+one anomaly in the system that is still open (§0).
 
-## 0. OPEN — acknowledged writes lost through the quorum-less recovery fallback
+Three of the four are worth reading before writing the next sweep, because none
+of them fails in a way that looks like a test bug:
 
-A committed, acknowledged grain write can be permanently invisible after a
-partition heals, and a later write can commit **onto the slot it occupied**.
-Found by two of the sweeps added below, on two unrelated grains, so it is
-granary's and not any one consumer's.
+1. **Expectations held on the workload.** A sweep drives every seed through the
+   same `&self`, so seed N's acknowledged writes were checked against seed N+1's
+   freshly empty grains. It reports acknowledged writes vanishing — a textbook
+   G14 violation, on a system that did nothing wrong. See "A workload outlives
+   its runs" in [simulation testing](simulation-testing.md).
+2. **`Unchanged` counted as an acknowledgement.** It commits nothing; it reports
+   what the serving activation believed, which §7.5 lets a quorum-less recovery
+   seed with an uncommitted record.
+3. **Reading with a query.** §7.5 is explicit that a read is "read-your-leader
+   (relaxed), not linearizable under partition", and names the interim
+   construction: issue a trivial *writing* command. A sweep that asserts a
+   durability property against a query is asking the wrong question.
+4. **A mutating command with no idempotency key.** The wire duplicates, so a bare
+   `Deposit` lands twice for one logical operation. §7.2 puts exactly-once out of
+   scope and says higher guarantees are "built atop this layer with explicit
+   idempotency keys" — the same finding `corpus.txt` already records for the
+   remote register.
 
-### The reproduction
+## 0. OPEN — a `Created` reply whose record is not in the journal
 
-```bash
-cargo test -p tenancy --test directory_swarm -- --ignored --exact \
-    the_directory_index_survives_the_cluster_swarm
+`tenancy-directory-swarm` fails at roughly one seed in 1,500, and the corpus
+holds `9300730` so it replays on every run. **The suite is red on this, and that
+is deliberate**: the alternative is hiding an unexplained durability anomaly.
+
+On that seed, for one grain, the event stream reads:
+
+```
+Committed seq=1
+Record(keep-c1-1) -> Ok(Created)
+Record(keep-c1-2) -> Ok(Created)     <- no Committed of its own
+Rehydrated replayed=1                <- the journal holds one record
+...
+probe Record(keep-c1-2) -> Created   <- a committed probe: still absent
 ```
 
-Fails on nearly every seed past 0. It is `#[ignore]`d rather than left red so the
-rest of the tree stays green; the other tests in that file drive the same traffic
-and hold. The account grain shows the same thing independently — widen the
-existing sweep past its declared range and it fails too:
+Three mutating commands answered `Created` against two commits, and the next
+activation replayed two records. `GrainEvent::Committed` is emitted on the commit
+path *before* the reply is released (`host.rs`), so a `Created` with no preceding
+`Committed` is not an artifact of interleaved tracing.
 
-```bash
-SWARM_SEEDS=60 cargo test -p granary --test grain_swarm --exact \
-    the_account_grain_is_linearizable_under_cluster_faults
-```
+**Not root-caused, and not asserted to be granary's.** This same claim has been
+wrong three times already (the four points above are what each attempt turned
+out to be), so the entry records what is observed and what is ruled out rather
+than naming a mechanism. Two hypotheses were checked and do not fit: the
+optimistic head check does handle a compacted base (`after < base` → `Stale`), and
+the failed-append rollback is bounded to slots above `after`, so it cannot drop a
+lower committed record.
 
-### What is observed
-
-Minimised to: one client, one principal, keep-only traffic (no removals), no
-hibernation, no restarts, plain nemesis, and a `heal()` + `quiesce()` plus a
-settle before reading. Three `Record`s return `Ok(Created)` — so each journaled
-its events and passed the output gate, which releases a reply only after commit
-(G5). The index then reads **empty**, and stays empty across twelve seconds of
-probes on a quiesced cluster, so it is not a transient stale read. A fresh
-`Record` afterwards returns `Ok(Created)` and leaves the index holding exactly
-**one** entry: the new write took seq 1, the slot the first committed record
-already held.
-
-### The mechanism
-
-`Replicator::recover` (`crates/granary/src/replicator.rs`) falls back to the
-node's local view when a recovery cannot reach a read quorum, and its comment
-argues this is safe because "a write from it still needs a quorum and a
-stale-head append is rejected by an up-to-date replica's optimistic check (§8)".
-Two things appear to go wrong with that reasoning:
-
-1. A leader that recovers `head = 0` from an empty local view serves an empty
-   grain, and — because the recovered head is written back under its own, higher
-   term — a subsequent append at seq 1 is not a *stale* head to the replicas that
-   hold the real records. The optimistic check compares terms, and this term is
-   newer.
-2. Nothing re-recovers once a quorum becomes reachable again. The activation
-   keeps serving its adopted head, so the loss outlives the partition rather than
-   converging after it.
-
-§7.5 sanctions a relaxed "read-your-leader" read that may be stale. An empty view
-that never converges, and that a later write overwrites committed slots from, is
-past what that sanctions and squarely contradicts **G14** ("no acknowledged write
-is lost") and **G11** (a shard that cannot reach a quorum pauses rather than
-serving a fork).
-
-### Why the existing sweeps missed it
-
-None of them ever asked. `granary-account-swarm` checks only commit
-monotonicity; `granary-ws-swarm`'s read check is deliberately permissive about
-ambiguous outcomes; every other suite reads a value back *immediately* after
-writing it, while the writing activation is still the one serving. Nothing read
-the accumulated state back at the end of a run and held it to what had been
-acknowledged — which is exactly the gap §5 below was about.
-
-### Deciding the fix
-
-Not attempted here: it is a CP-correctness change in granary's core, and the
-options trade against each other (make the read path require a quorum and return
-`Unavailable`, per G11; or keep the relaxed read but force re-recovery once a
-quorum is reachable and refuse appends derived from a quorum-less head). That is
-a design decision, not a patch.
+Disabling the churn traffic — while keeping its entropy draw, so the run is
+otherwise identical — makes this seed pass, but the same anomaly is still visible
+in its trace and merely self-heals, because the client happens to record that
+name again. Churn decides whether the loss is *observable*, not whether it
+happens.
 
 ## 1. The nemesis vocabulary is narrower than the fault library
 
@@ -266,7 +247,7 @@ decides deposit/read histories against the shared `Counter` model under the full
 nemesis. Deliberately small and single-key: a linearizability check is
 exponential in the number of *pending* operations, and under this nemesis a large
 share of calls end unknown, so breadth comes from the seeds rather than from any
-one history. It found §0 within 60 seeds — which is the point.
+one history.
 
 ## 6. Subsystems with no sweep at all
 
@@ -279,25 +260,25 @@ one history. It found §0 within 60 seeds — which is the point.
   `Record` and undo it — the sweep's first version demanded otherwise and failed
   within a handful of seeds on a claim the layer never made. It now splits names
   into *keep* (only ever recorded, so effect-idempotent and decidable) and *churn*
-  (recorded and forgotten, carrying no end-state claim). The keep half found §0.
-- **`blob-store` reconcile** — check written, **outcome unresolved**. The
-  reconcile loop was already running throughout the swarm; nothing checked it
-  *achieved* anything, because the drive read each blob back immediately after its
-  put while every replica still held it. The sweep can now heal, quiesce, wait,
-  and re-read every acknowledged blob **through a different node than stored it**,
-  so a surviving local copy cannot answer for the cluster (B6). Namespaces any
-  client ever tried to delete are excluded — a failed `delete_namespace` is
-  ambiguous exactly as a failed write is, and the check's first version failed on
-  that rather than on re-replication.
+  (recorded and forgotten, carrying no end-state claim). Only `Created` and
+  `Updated` count as acknowledged: they journal a `Put`, so the output gate holds
+  the reply until it commits, while `Unchanged` commits nothing and reports what
+  the serving activation believed — which §7.5 lets a quorum-less recovery seed
+  with an uncommitted local record.
+- **`blob-store` reconcile** — resolved. The reconcile loop was already running
+  throughout the swarm; nothing checked it *achieved* anything, because the drive
+  read each blob back immediately after its put while every replica still held
+  it. The sweep now heals, quiesces, waits for reconcile, and re-reads every
+  acknowledged blob **through a different node than stored it**, so a surviving
+  local copy cannot answer for the cluster (B6).
 
-  With that corrected it still fails past the local width: a blob acknowledged by
-  `put`, in a namespace nobody tried to delete, reads back `Unavailable ("no owner
-  yielded blob …")` on a healed, quiesced cluster. Not a settling bound — 45
-  virtual seconds changes nothing. Quarantined behind
-  `acknowledged_blobs_are_re_replicated_after_a_heal` (`#[ignore]`) because it is
-  not yet established which side is wrong, and this particular claim has already
-  been too strong twice. Worth resolving next: it is either a B6 defect or a third
-  ambiguity the claim has to account for.
+  Two corrections got it there, and both were the claim rather than B6. Namespaces
+  any client ever *tried* to delete are excluded, because a failed
+  `delete_namespace` is ambiguous exactly as a failed write is — the tombstone may
+  sit on a minority and be adopted later. And the acknowledged set is built per
+  run inside `drive`, not held on the workload, which a sweep shares across every
+  seed.
+
 - **granary alarms** — partly resolved. `alarm-cluster/leader-crash` now sweeps
   24 seeds rather than 4: which node leads the shard, which survivor wins the
   re-election, and where the deadline falls relative to the driver's sweep are all

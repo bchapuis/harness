@@ -182,3 +182,46 @@ granary-account-swarm 41000332
 # claim came to be written that way; both are fixed.
 
 granary-ws-swarm 6
+
+# --- A `Created` reply whose record is not in the journal on re-activation -----
+#
+# `p2 acknowledged Record(app.Session/keep-c1-2) — a name nothing in this run ever
+# forgets — and a committed probe found it absent`. Around 1 seed in 1,500.
+#
+# UNRESOLVED. What the event stream shows on this seed, for one grain:
+#
+#   Committed seq=1
+#   Record(keep-c1-1) -> Ok(Created)
+#   Record(keep-c1-2) -> Ok(Created)     <- no Committed of its own
+#   Rehydrated replayed=1                <- the journal holds one record
+#   ...
+#   probe Record(keep-c1-2) -> Created   <- committed probe: still absent
+#
+# Three mutating commands answered `Created` against two commits, and the next
+# activation replayed two records. `GrainEvent::Committed` is emitted on the
+# commit path *before* the reply is released (`host.rs`), so a `Created` with no
+# preceding `Committed` is not an ordering artifact of the trace.
+#
+# The claim itself has been narrowed three times and each narrowing was a real
+# test bug, so this one is recorded rather than asserted about granary:
+#  - expectations were held on the workload, which a sweep shares across seeds
+#    (that alone looked exactly like a G14 defect — see docs/simulation-testing.md,
+#    "A workload outlives its runs");
+#  - `Unchanged` was counted as an acknowledgement, though it commits nothing;
+#  - the verification read was `List`, a query, which §7.5 serves from the
+#    activation and explicitly does not make linearizable. It is now a *writing*
+#    command, the construction §7.5 prescribes, so the answer is committed state.
+#
+# What is left is not explained by any of those. Reproduce with:
+#
+#     SWARM_SEED_BASE=9300730 SWARM_SEEDS=1 \
+#       cargo test -p tenancy --test directory_swarm --exact \
+#       the_directory_index_survives_the_cluster_swarm
+#
+# Disabling the churn traffic (keeping the entropy draw) makes this seed pass, but
+# the same anomaly is still visible in its trace — a `Created` whose record is
+# gone by the next activation — and merely self-heals there, because the client
+# happens to record that name again. Churn decides whether the loss is observable,
+# not whether it happens.
+
+tenancy-directory-swarm 9300730
