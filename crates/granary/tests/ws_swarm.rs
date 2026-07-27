@@ -21,6 +21,8 @@
 //! - **Fault coverage (#8).** Each transport fault type actually fired.
 
 use std::marker::PhantomData;
+mod support;
+
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
@@ -39,6 +41,7 @@ use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
+use actor_simulation::Rehost;
 use actor_simulation::SimNode;
 use actor_simulation::coverage_seeds;
 use actor_simulation::default_invariants;
@@ -57,8 +60,10 @@ use granary::GranarySystem;
 use granary::NoEvent;
 use granary::Ws;
 use granary::WsError;
+
 use serde::Deserialize;
 use serde::Serialize;
+use support::Exercised;
 
 // --- The workspace test grain (the ws_clustered twin) -------------------------
 
@@ -235,37 +240,79 @@ struct WsSwarm {
     /// materializations by node and grain beneath it, and every activation
     /// restores through a wipe, so seeded runs cannot contaminate each other.
     scratch: tempfile::TempDir,
+    /// Idle past `idle_after` between operations, so activations passivate and
+    /// rehydrate mid-run.
+    hibernating: bool,
+    /// Let the nemesis kill and re-launch node processes, not just isolate them.
+    restarting: bool,
     stale: Arc<AtomicBool>,
     reads_verified: Arc<AtomicU64>,
+    exercised: Exercised,
 }
 
 impl WsSwarm {
+    /// Activations resident for the whole run; the nemesis only isolates nodes.
     fn new(nodes: usize, clients: usize, ops: u64) -> WsSwarm {
         WsSwarm {
             nodes,
             clients,
             ops,
             scratch: tempfile::tempdir().expect("scratch tempdir"),
+            hibernating: false,
+            restarting: false,
             stale: Arc::new(AtomicBool::new(false)),
             reads_verified: Arc::new(AtomicU64::new(0)),
+            exercised: Exercised::default(),
         }
     }
 
+    /// Short activation lifetime, clients that idle past it, and a nemesis that
+    /// kills processes — so a read has to come from a directory the next
+    /// activation rebuilt, byte-deterministically, from the committed records.
+    fn hibernating(nodes: usize, clients: usize, ops: u64) -> WsSwarm {
+        WsSwarm {
+            hibernating: true,
+            restarting: true,
+            ..WsSwarm::new(nodes, clients, ops)
+        }
+    }
+
+    /// `hibernating` picks the activation lifetime: resident for the whole run,
+    /// or short enough that clients can idle past it so the workspace directory
+    /// is wiped and rebuilt mid-run. The snapshot cadence follows, so a returning
+    /// activation restores from a composite snapshot plus a replayed tail rather
+    /// than from an empty base.
     fn config(&self) -> GranaryConfig {
         GranaryConfig {
             shards: 2,
             replication_factor: 3,
-            idle_after: Duration::from_secs(60),
-            snapshot_every: 8,
+            idle_after: if self.hibernating {
+                IDLE_AFTER
+            } else {
+                RESIDENT
+            },
+            snapshot_every: if self.hibernating { 3 } else { 8 },
             data_dir: Some(self.scratch.path().to_path_buf()),
             ..GranaryConfig::default()
         }
     }
 }
 
+/// Activation lifetime for the resident sweeps: longer than any run.
+const RESIDENT: Duration = Duration::from_secs(60);
+/// Activation lifetime for the hibernating sweep.
+const IDLE_AFTER: Duration = Duration::from_millis(200);
+/// How long a hibernating client idles when it idles — comfortably past
+/// [`IDLE_AFTER`], so the host really does passivate rather than nearly.
+const IDLE_FOR: Duration = Duration::from_millis(500);
+
 impl ClusterWorkload for WsSwarm {
     fn name(&self) -> &'static str {
-        "granary-ws-swarm"
+        if self.hibernating {
+            "granary-ws-hibernating-swarm"
+        } else {
+            "granary-ws-swarm"
+        }
     }
 
     fn node_count(&self) -> usize {
@@ -291,12 +338,31 @@ impl ClusterWorkload for WsSwarm {
         }
     }
 
+    fn rehost(&self) -> Option<Rehost> {
+        if !self.restarting {
+            return None;
+        }
+        // A restarted node comes up empty and would otherwise stop hosting
+        // `Studio` — no gateway, no shard leadership, no replica for the write
+        // quorum. Re-host it, or the run shrinks the cluster rather than faulting
+        // it. The config carries the same scratch root, which is right: the
+        // facet's restore discards stale local files, they are a cache and never
+        // truth (§1), and a fresh process rebuilding over its predecessor's
+        // leftovers is exactly the case worth covering.
+        let config = self.config();
+        Some(Arc::new(move |node: &SimNode| {
+            node.granary::<Studio<SimNode>>(config.clone());
+        }))
+    }
+
     fn setup(&self, _ctx: &ClusterCtx) {}
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
         let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
+        let hibernating = self.hibernating;
+        let restarting = self.restarting;
         let config = self.config();
         let stale = Arc::clone(&self.stale);
         let reads_verified = Arc::clone(&self.reads_verified);
@@ -311,7 +377,17 @@ impl ClusterWorkload for WsSwarm {
 
             let mut tasks = Vec::new();
             for c in 0..clients {
-                let granary = granaries[c % granaries.len()].clone();
+                // Under restarts every client goes through node 1's gateway, the
+                // one node the nemesis leaves alone: a handle for a restarted node
+                // points at a system that has been shut down. Location
+                // transparency (G13) keeps the coverage — the call still lands on
+                // whichever node leads the grain's shard.
+                let granary = if restarting {
+                    granaries[0].clone()
+                } else {
+                    granaries[c % granaries.len()].clone()
+                };
+                let clock = clock.clone();
                 let entropy = entropy.clone();
                 let stale = Arc::clone(&stale);
                 let reads_verified = Arc::clone(&reads_verified);
@@ -320,7 +396,7 @@ impl ClusterWorkload for WsSwarm {
                     // this client is entitled to read back there.
                     let mut paths: std::collections::BTreeMap<(String, String), PathState> =
                         std::collections::BTreeMap::new();
-                    for _ in 0..ops {
+                    for op in 0..ops {
                         // Workspace key shared across clients (several grains per
                         // shard); the PATH is private to this client.
                         let key = format!("ws/{}", entropy.next_u64() % 3);
@@ -380,6 +456,12 @@ impl ClusterWorkload for WsSwarm {
                                 reads_verified.fetch_add(1, Ordering::SeqCst);
                             }
                         }
+                        // Idle past the activation lifetime often enough that the
+                        // next call wipes the materialization and rebuilds the
+                        // directory from the committed records (F1 on the bytes).
+                        if hibernating && op % 2 == 1 {
+                            clock.sleep(IDLE_FOR).await;
+                        }
                     }
                 });
             }
@@ -388,7 +470,9 @@ impl ClusterWorkload for WsSwarm {
     }
 
     fn invariants(&self) -> Vec<Box<dyn Invariant>> {
-        default_invariants()
+        let mut invariants = default_invariants();
+        invariants.push(Box::new(self.exercised.clone()));
+        invariants
     }
 }
 
@@ -409,6 +493,40 @@ fn workspace_reads_never_go_stale_under_the_cluster_swarm() {
         workload.reads_verified.load(Ordering::SeqCst) > 0,
         "no read ever returned bytes — the integrity check never ran",
     );
+}
+
+// --- The same claim across hibernation and process death ---------------------
+//
+// The sweep above holds every activation resident, so a read is served from the
+// live directory the write landed in — the materialization is never rebuilt. This
+// one tears it down: the grain passivates, its directory goes, and the next read
+// is served from a tree the new activation reconstructed by applying the captured
+// bytes over a composite snapshot (F1 holds on the bytes, never on re-execution),
+// possibly in a process that did not exist when the write committed.
+
+#[test]
+fn workspace_reads_never_go_stale_across_hibernation_and_restarts() {
+    let workload = WsSwarm::hibernating(3, 3, 8);
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
+        panic!("{failure}");
+    }
+    assert!(
+        !workload.stale.load(Ordering::SeqCst),
+        "a read returned bytes other than the last committed write (F1/G14)",
+    );
+    assert!(
+        workload.reads_verified.load(Ordering::SeqCst) > 0,
+        "no read ever returned bytes — the integrity check never ran",
+    );
+    workload.exercised.assert_hibernated();
+}
+
+#[test]
+fn ws_hibernating_swarm_is_reproducible() {
+    let workload = WsSwarm::hibernating(3, 2, 6);
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..12)) {
+        panic!("{divergence}");
+    }
 }
 
 #[test]

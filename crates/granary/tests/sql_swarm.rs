@@ -21,6 +21,7 @@
 #![cfg(feature = "sql")]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -34,13 +35,16 @@ use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
+use actor_simulation::Rehost;
 use actor_simulation::SimNode;
 use actor_simulation::SimSystem;
 use actor_simulation::Workload;
+use actor_simulation::coverage_seeds;
 use actor_simulation::default_invariants;
 use actor_simulation::replay_cluster_swarm;
 use actor_simulation::replay_swarm;
 use actor_simulation::run_cluster_swarm;
+use actor_simulation::run_cluster_swarm_coverage;
 use actor_simulation::run_swarm;
 use actor_simulation::sweep_seeds;
 use granary::Grain;
@@ -53,8 +57,10 @@ use granary::Sql;
 use granary::SqlValue;
 use granary::testing::ActivationSingletonPerNode;
 use granary::testing::CommitMonotonic;
+
 use serde::Deserialize;
 use serde::Serialize;
+use support::Exercised;
 
 mod support;
 use support::ledger::Add;
@@ -165,26 +171,81 @@ struct SqlAccountSwarm {
     clients: usize,
     ops: u64,
     dir: PathBuf,
+    /// Idle past `idle_after` between operations, so activations passivate and
+    /// the database is rematerialized mid-run.
+    hibernating: bool,
+    /// Let the nemesis kill and re-launch node processes, not just isolate them.
+    restarting: bool,
+    /// What the sweep actually exercised, accumulated across its seeds.
+    exercised: Exercised,
 }
 
 impl SqlAccountSwarm {
+    /// Activations resident for the whole run; the nemesis only isolates nodes.
+    fn new(nodes: usize, clients: usize, ops: u64, dir: PathBuf) -> SqlAccountSwarm {
+        SqlAccountSwarm {
+            nodes,
+            clients,
+            ops,
+            dir,
+            hibernating: false,
+            restarting: false,
+            exercised: Exercised::default(),
+        }
+    }
+
+    /// Short activation lifetime, clients that idle past it, and a nemesis that
+    /// kills processes — so a read has to come from a database the next
+    /// activation rebuilt: composite snapshot, pages fetched and verified by
+    /// content (G17), frame records after the snapshot seq replayed on top
+    /// (byte-deterministic, F1).
+    ///
+    /// `sql_swarm.rs`'s single-node `SqlSwarm` already hibernates, but with no
+    /// transport and no nemesis; this is the same restore path with a cluster and
+    /// faults around it.
+    fn hibernating(nodes: usize, clients: usize, ops: u64, dir: PathBuf) -> SqlAccountSwarm {
+        SqlAccountSwarm {
+            hibernating: true,
+            restarting: true,
+            ..SqlAccountSwarm::new(nodes, clients, ops, dir)
+        }
+    }
+
     fn config(&self) -> GranaryConfig {
         GranaryConfig {
             shards: 2,
             replication_factor: 3,
-            idle_after: Duration::from_secs(60),
+            idle_after: if self.hibernating {
+                IDLE_AFTER
+            } else {
+                RESIDENT
+            },
             // Checkpoint often: the manifest + blob-chunk path runs under faults,
             // and failover rematerializes from it plus the later frame records.
-            snapshot_every: 4,
+            // Oftener when hibernating, so a grain has a checkpoint to come back
+            // from before it first passivates.
+            snapshot_every: if self.hibernating { 2 } else { 4 },
             data_dir: Some(self.dir.clone()),
             ..GranaryConfig::default()
         }
     }
 }
 
+/// Activation lifetime for the resident sweeps: longer than any run.
+const RESIDENT: Duration = Duration::from_secs(60);
+/// Activation lifetime for the hibernating sweep.
+const IDLE_AFTER: Duration = Duration::from_millis(200);
+/// How long a hibernating client idles when it idles — comfortably past
+/// [`IDLE_AFTER`], so the host really does passivate rather than nearly.
+const IDLE_FOR: Duration = Duration::from_millis(500);
+
 impl ClusterWorkload for SqlAccountSwarm {
     fn name(&self) -> &'static str {
-        "granary-sql-account-swarm"
+        if self.hibernating {
+            "granary-sql-account-hibernating-swarm"
+        } else {
+            "granary-sql-account-swarm"
+        }
     }
 
     fn node_count(&self) -> usize {
@@ -212,12 +273,29 @@ impl ClusterWorkload for SqlAccountSwarm {
         }
     }
 
+    fn rehost(&self) -> Option<Rehost> {
+        if !self.restarting {
+            return None;
+        }
+        // A restarted node comes up empty and would otherwise stop hosting
+        // `SqlAccount`. The config carries the same scratch root: restore
+        // discards stale local files (a cache, never truth — §1), so a fresh
+        // process rebuilding over its predecessor's leftover database file is
+        // exactly the case worth covering.
+        let config = self.config();
+        Some(Arc::new(move |node: &SimNode| {
+            node.granary::<SqlAccount>(config.clone());
+        }))
+    }
+
     fn setup(&self, _ctx: &ClusterCtx) {}
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
         let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
+        let hibernating = self.hibernating;
+        let restarting = self.restarting;
         let config = self.config();
         Box::pin(async move {
             let granaries: Vec<_> = nodes
@@ -231,10 +309,19 @@ impl ClusterWorkload for SqlAccountSwarm {
 
             let mut tasks = Vec::new();
             for c in 0..clients {
-                let granary = granaries[c % granaries.len()].clone();
+                // Under restarts every client goes through node 1's gateway, the
+                // one node the nemesis leaves alone; location transparency (G13)
+                // keeps the coverage, since the call still lands on the shard's
+                // leader.
+                let granary = if restarting {
+                    granaries[0].clone()
+                } else {
+                    granaries[c % granaries.len()].clone()
+                };
+                let clock = clock.clone();
                 let entropy = entropy.clone();
                 tasks.push(async move {
-                    for _ in 0..ops {
+                    for op in 0..ops {
                         // A small key space so several grains share each shard.
                         let key = format!("account/{}", entropy.next_u64() % 4);
                         let acct = granary.grain(key);
@@ -246,6 +333,12 @@ impl ClusterWorkload for SqlAccountSwarm {
                                 .await;
                         } else {
                             let _ = acct.ask_timeout(ReadTotal, Duration::from_secs(2)).await;
+                        }
+                        // Idle past the activation lifetime on a fixed cadence, so
+                        // the next call rematerializes the database from its
+                        // checkpoint plus replayed frames whatever the seed.
+                        if hibernating && op % 2 == 1 {
+                            clock.sleep(IDLE_FOR).await;
                         }
                     }
                 });
@@ -264,6 +357,7 @@ impl ClusterWorkload for SqlAccountSwarm {
             "sql-grain-activation-singleton-per-node",
             "grain",
         )));
+        invariants.push(Box::new(self.exercised.clone()));
         invariants
     }
 }
@@ -274,15 +368,64 @@ fn sql_grain_invariants_hold_under_the_cluster_swarm() {
     // grains commit WAL-frame records, checkpoint into blobs, and rematerialize
     // across failover, under partitions, crashes, loss, duplication, and delay.
     let dir = tempfile::tempdir().expect("tempdir");
-    let workload = SqlAccountSwarm {
-        nodes: 3,
-        clients: 3,
-        ops: 6,
-        dir: dir.path().to_path_buf(),
-    };
+    let workload = SqlAccountSwarm::new(3, 3, 6, dir.path().to_path_buf());
     if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..16)) {
         panic!("{failure}");
     }
+}
+
+#[test]
+fn sql_grain_invariants_hold_across_hibernation_and_restarts() {
+    // The clustered restore path: the grain passivates, its database file goes,
+    // and the next call rebuilds it from the composite snapshot's pages plus the
+    // frame records above it — in a process that may not have existed when the
+    // write committed.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workload = SqlAccountSwarm::hibernating(3, 3, 6, dir.path().to_path_buf());
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..16)) {
+        panic!("{failure}");
+    }
+    workload.exercised.assert_hibernated();
+}
+
+#[test]
+fn sql_hibernating_cluster_swarm_is_reproducible() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workload = SqlAccountSwarm::hibernating(3, 2, 5, dir.path().to_path_buf());
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..8)) {
+        panic!("{divergence}");
+    }
+}
+
+#[test]
+fn sql_cluster_swarm_actually_fires_each_fault_type() {
+    // #8: the SQL facet's clustered sweeps configure faults, so something must
+    // prove they fire. A narrow declared range keeps the cost honest — the claim
+    // is "each fault type fired somewhere across these seeds", and 8 of them
+    // carry it as well as 32 would while a seed here materializes real SQLite
+    // files on three nodes.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workload = SqlAccountSwarm::new(3, 3, 6, dir.path().to_path_buf());
+    let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..8)) {
+        Ok(stats) => stats,
+        Err(failure) => panic!("{failure}"),
+    };
+    assert!(
+        stats.dropped > 0,
+        "the sweep never dropped a frame (loss uncovered): {stats:?}"
+    );
+    assert!(
+        stats.duplicated > 0,
+        "the sweep never duplicated a frame: {stats:?}"
+    );
+    assert!(
+        stats.delayed > 0,
+        "the sweep never delayed a frame (reordering uncovered): {stats:?}"
+    );
+    assert!(
+        stats.blocked > 0,
+        "the sweep never blocked a frame (partition/crash uncovered): {stats:?}"
+    );
 }
 
 #[test]
@@ -291,12 +434,7 @@ fn sql_cluster_swarm_is_reproducible() {
     // included — even under cluster nemesis and transport faults, with real
     // SQLite files materialized on every node.
     let dir = tempfile::tempdir().expect("tempdir");
-    let workload = SqlAccountSwarm {
-        nodes: 3,
-        clients: 2,
-        ops: 5,
-        dir: dir.path().to_path_buf(),
-    };
+    let workload = SqlAccountSwarm::new(3, 2, 5, dir.path().to_path_buf());
     if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..8)) {
         panic!("{divergence}");
     }

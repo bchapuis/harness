@@ -202,8 +202,12 @@ fn index_for(
 #[test]
 fn alarm_fires_callerlessly_after_a_leader_crash() {
     // Several seeds: different leader placement and failover timing, one generous
-    // post-crash window absorbing them all.
-    scenario_sweep("alarm-cluster/leader-crash", sweep_seeds(0..4), |seed| {
+    // post-crash window absorbing them all. Widened from four because four is a
+    // sample of leader placements, not a cover of them: which node leads the
+    // shard, which survivor wins the re-election, and how the deadline falls
+    // relative to the driver's sweep are all seed-dependent, and the callerless
+    // re-activation has to hold for every combination.
+    scenario_sweep("alarm-cluster/leader-crash", sweep_seeds(0..24), |seed| {
         run_failover(seed);
     });
 }

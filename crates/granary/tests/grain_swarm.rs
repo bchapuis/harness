@@ -21,6 +21,7 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -44,6 +45,7 @@ use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
+use actor_simulation::Rehost;
 use actor_simulation::SimNode;
 use actor_simulation::coverage_seeds;
 use actor_simulation::default_invariants;
@@ -66,6 +68,7 @@ use serde::Serialize;
 use support::Add;
 use support::CounterEvent;
 use support::CounterGrain;
+use support::Exercised;
 use support::ReadCount;
 
 // --- The Appendix A account grain (system-generic over the cluster) -----------
@@ -147,15 +150,30 @@ impl GrainHandler<ReadBalance> for Account {
 
 // --- The workload -------------------------------------------------------------
 
-fn config() -> GranaryConfig {
+/// `hibernating` picks the activation lifetime: `false` keeps every activation
+/// resident for the whole run, `true` gives it a lifetime short enough that
+/// clients can idle past it, so grains passivate and rehydrate from a quorum
+/// while the nemesis is still running. The snapshot cadence follows, because a
+/// hibernating grain that never snapshotted comes back by replaying from an
+/// empty base and never exercises the snapshot-plus-tail restore.
+fn config(hibernating: bool) -> GranaryConfig {
     GranaryConfig {
         shards: 2,
         replication_factor: 3,
-        idle_after: Duration::from_secs(60),
-        snapshot_every: 8,
+        idle_after: if hibernating { IDLE_AFTER } else { RESIDENT },
+        snapshot_every: if hibernating { 3 } else { 8 },
         ..GranaryConfig::default()
     }
 }
+
+/// Activation lifetime for the resident sweeps: longer than any run, so nothing
+/// passivates.
+const RESIDENT: Duration = Duration::from_secs(60);
+/// Activation lifetime for the hibernating sweep.
+const IDLE_AFTER: Duration = Duration::from_millis(200);
+/// How long a hibernating client idles when it idles — comfortably past
+/// [`IDLE_AFTER`], so the host really does passivate rather than nearly.
+const IDLE_FOR: Duration = Duration::from_millis(500);
 
 /// Deposit-and-read traffic against a handful of grains, hosted on a leader-based
 /// cluster, driven through the public `GrainRef` API only (spec §18.4). Every
@@ -166,15 +184,42 @@ struct AccountSwarm {
     nodes: usize,
     clients: usize,
     ops: u64,
+    /// Idle past `idle_after` between operations, so activations passivate and
+    /// rehydrate mid-run.
+    hibernating: bool,
+    /// Let the nemesis kill and re-launch node processes, not just isolate them.
+    restarting: bool,
+    /// What the sweep actually exercised, accumulated across its seeds.
+    exercised: Exercised,
 }
 
 impl ClusterWorkload for AccountSwarm {
+    // Both corpus keys are literals here rather than a field, because that is
+    // where `tests/corpus_keys.rs` looks for them: a key it cannot see is one
+    // `corpus.txt` cannot guard (docs/simulation-testing.md).
     fn name(&self) -> &'static str {
-        "granary-account-swarm"
+        if self.hibernating {
+            "granary-account-hibernating-swarm"
+        } else {
+            "granary-account-swarm"
+        }
     }
 
     fn node_count(&self) -> usize {
         self.nodes
+    }
+
+    fn rehost(&self) -> Option<Rehost> {
+        if !self.restarting {
+            return None;
+        }
+        // A restarted node comes up empty: it no longer hosts `Account`, so
+        // without this it would stop leading shards and stop counting toward a
+        // quorum — the run would shrink the cluster rather than fault it.
+        let hibernating = self.hibernating;
+        Some(Arc::new(move |node: &SimNode| {
+            node.granary::<Account>(config(hibernating));
+        }))
     }
 
     fn swim(&self) -> SwimConfig {
@@ -204,13 +249,15 @@ impl ClusterWorkload for AccountSwarm {
         let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
+        let hibernating = self.hibernating;
+        let restarting = self.restarting;
         Box::pin(async move {
             // Host the type on every node: each starts its gateway and joins/leads
             // its shards (§5.3). Done at drive start; the bounded redirect absorbs
             // the bootstrap window.
             let granaries: Vec<_> = nodes
                 .iter()
-                .map(|s| s.granary::<Account>(config()))
+                .map(|s| s.granary::<Account>(config(hibernating)))
                 .collect();
             let clock = nodes[0].clock().clone();
             let entropy = nodes[0].entropy().clone();
@@ -219,10 +266,22 @@ impl ClusterWorkload for AccountSwarm {
 
             let mut tasks = Vec::new();
             for c in 0..clients {
-                let granary = granaries[c % granaries.len()].clone();
+                // Spread the clients across the nodes' gateways — except under
+                // restarts, where every client goes through node 1, the one node
+                // the nemesis leaves alone. A handle for a restarted node points
+                // at a system that has been shut down, and location transparency
+                // (G13) means routing through one gateway costs no coverage: the
+                // call still lands on whichever node leads the grain's shard,
+                // which is exactly the set being restarted.
+                let granary = if restarting {
+                    granaries[0].clone()
+                } else {
+                    granaries[c % granaries.len()].clone()
+                };
+                let clock = clock.clone();
                 let entropy = entropy.clone();
                 tasks.push(async move {
-                    for _ in 0..ops {
+                    for op in 0..ops {
                         // A small key space so several grains share each shard.
                         let key = format!("account/{}", entropy.next_u64() % 4);
                         let acct = granary.grain(key);
@@ -234,6 +293,13 @@ impl ClusterWorkload for AccountSwarm {
                                 .await;
                         } else {
                             let _ = acct.ask_timeout(ReadBalance, Duration::from_secs(2)).await;
+                        }
+                        // Idle past the activation lifetime often enough that the
+                        // next call to this grain rehydrates it — from a snapshot
+                        // plus a replayed tail, recovered from a write quorum, on
+                        // whichever node leads the shard by then (§8, §9).
+                        if hibernating && op % 2 == 1 {
+                            clock.sleep(IDLE_FOR).await;
                         }
                     }
                 });
@@ -252,7 +318,40 @@ impl ClusterWorkload for AccountSwarm {
             "grain-activation-singleton-per-node",
             "grain",
         )));
+        invariants.push(Box::new(self.exercised.clone()));
         invariants
+    }
+}
+
+/// The resident sweeps' workload: activations live for the whole run and the
+/// nemesis only isolates nodes.
+fn resident(clients: usize, ops: u64) -> AccountSwarm {
+    AccountSwarm {
+        nodes: 3,
+        clients,
+        ops,
+        hibernating: false,
+        restarting: false,
+        exercised: Exercised::default(),
+    }
+}
+
+/// The hibernating sweeps' workload: short activation lifetime, clients that
+/// idle past it, and a nemesis allowed to kill node processes outright.
+///
+/// Restarts matter most to *this* workload. A crash only isolates a process that
+/// keeps running, so the grains it hosts stay activated behind the partition and
+/// a heal finds them warm; killing the process is what forces the next call to
+/// rebuild the grain's head and tail from a write quorum on a node that holds
+/// none of it in memory.
+fn hibernating(clients: usize, ops: u64) -> AccountSwarm {
+    AccountSwarm {
+        nodes: 3,
+        clients,
+        ops,
+        hibernating: true,
+        restarting: true,
+        exercised: Exercised::default(),
     }
 }
 
@@ -260,12 +359,7 @@ impl ClusterWorkload for AccountSwarm {
 fn grain_invariants_hold_under_the_cluster_swarm() {
     // #4: the safety core plus G3/G5 commit-monotonicity hold on every seeded run
     // under partitions, crashes, loss, duplication, and delay.
-    let workload = AccountSwarm {
-        nodes: 3,
-        clients: 3,
-        ops: 6,
-    };
-    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
+    if let Err(failure) = run_cluster_swarm(&resident(3, 6), sweep_seeds(0..24)) {
         panic!("{failure}");
     }
 }
@@ -274,12 +368,219 @@ fn grain_invariants_hold_under_the_cluster_swarm() {
 fn grain_swarm_is_reproducible() {
     // #7: the same seed replays to a byte-identical event stream — grain `App`
     // events included — even under cluster nemesis and transport faults.
-    let workload = AccountSwarm {
+    if let Err(divergence) = replay_cluster_swarm(&resident(2, 5), sweep_seeds(0..12)) {
+        panic!("{divergence}");
+    }
+}
+
+// --- The account as a linearizable object under faults (G2/G14) ---------------
+//
+// `CommitMonotonic` is a claim about the *journal*: seqs advance, nothing lands
+// twice on a slot. It caught the stale-head bug in `corpus.txt` only indirectly —
+// what actually went wrong there was an acknowledged deposit that no later read
+// could see, and monotonicity happened to notice the slot collision underneath.
+// A reference model says the thing directly (V&V checklist #3): every read must
+// be explicable by *some* sequential order of the deposits, so a lost or
+// double-applied write is named as what it is.
+//
+// Deliberately small, and one grain rather than four. A linearizability check is
+// exponential in the number of *pending* operations, and under this nemesis a
+// large share of calls end unknown — each one an op the checker may place
+// anywhere or drop. Few ops keep that search bounded; the breadth comes from the
+// seeds, not from any one history.
+
+/// Deposits and reads against a single account, recorded as a [`Counter`]
+/// history. A deposit is `Add`, a read is `Read`, and a call that fails is left
+/// pending (`info`) — its effect may or may not have landed, which is exactly
+/// what the checker is entitled to decide either way.
+struct LinearizableAccountSwarm {
+    nodes: usize,
+    clients: usize,
+    ops: u64,
+}
+
+impl ClusterWorkload for LinearizableAccountSwarm {
+    fn name(&self) -> &'static str {
+        "linearizable-account-grain"
+    }
+
+    fn node_count(&self) -> usize {
+        self.nodes
+    }
+
+    fn swim(&self) -> SwimConfig {
+        SwimConfig {
+            probe_interval: Duration::from_millis(100),
+            rtt: Duration::from_millis(50),
+            suspect_timeout: Duration::from_millis(300),
+            indirect_count: 2,
+        }
+    }
+
+    fn mode(&self) -> ClusterModeSpec {
+        ClusterModeSpec::Leader {
+            swim: self.swim(),
+            voters: self.nodes,
+            election_timeout: Duration::from_millis(500),
+            heartbeat_interval: Duration::from_millis(100),
+            downing: DowningPolicy::Conservative,
+        }
+    }
+
+    fn setup(&self, _ctx: &ClusterCtx) {}
+
+    fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
+        let nodes: Vec<SimNode> = ctx.nodes().to_vec();
+        let clients = self.clients;
+        let ops = self.ops;
+        Box::pin(async move {
+            let granaries: Vec<_> = nodes
+                .iter()
+                .map(|s| s.granary::<Account>(config(false)))
+                .collect();
+            let clock = nodes[0].clock().clone();
+            let entropy = nodes[0].entropy().clone();
+            clock.sleep(Duration::from_secs(3)).await;
+
+            let history: History<Counter> = History::new();
+            let mut tasks = Vec::new();
+            for c in 0..clients {
+                // Each client through a different node's gateway, so the history
+                // mixes local and forwarded calls against one object (G13).
+                let granary = granaries[c % granaries.len()].clone();
+                let history = history.clone();
+                let entropy = entropy.clone();
+                tasks.push(async move {
+                    let acct = granary.grain("account/linearizable");
+                    for _ in 0..ops {
+                        if entropy.next_u64().is_multiple_of(2) {
+                            let delta = 1 + (entropy.next_u64() % 3) as i64;
+                            let id = history.invoke(CounterOp::Add(delta));
+                            match acct
+                                .ask_timeout(
+                                    Deposit {
+                                        cents: delta as u64,
+                                    },
+                                    Duration::from_secs(2),
+                                )
+                                .await
+                            {
+                                Ok(_) => history.ok(id, CounterRet::AddOk),
+                                // Ambiguous or refused alike: the record may sit on
+                                // a minority and be adopted by a later recovery
+                                // (§7.2, §11), so the checker decides.
+                                _ => history.info(id),
+                            }
+                        } else {
+                            let id = history.invoke(CounterOp::Read);
+                            match acct.ask_timeout(ReadBalance, Duration::from_secs(2)).await {
+                                Ok(balance) => history.ok(id, CounterRet::Read(balance)),
+                                _ => history.info(id),
+                            }
+                        }
+                    }
+                });
+            }
+            futures::future::join_all(tasks).await;
+
+            let verdict = check_linearizable(&history);
+            assert!(
+                verdict.is_ok(),
+                "account history was not linearizable — a deposit was lost or \
+                 applied twice: {verdict}",
+            );
+        })
+    }
+
+    fn invariants(&self) -> Vec<Box<dyn Invariant>> {
+        let mut invariants = default_invariants();
+        invariants.push(Box::new(CommitMonotonic::new(
+            "linearizable-account-commit-monotonic",
+            "grain",
+        )));
+        invariants
+    }
+}
+
+#[test]
+fn the_account_grain_is_linearizable_under_cluster_faults() {
+    let workload = LinearizableAccountSwarm {
         nodes: 3,
         clients: 2,
-        ops: 5,
+        ops: 4,
+    };
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
+        panic!("{failure}");
+    }
+}
+
+#[test]
+fn the_linearizable_account_sweep_is_reproducible() {
+    let workload = LinearizableAccountSwarm {
+        nodes: 3,
+        clients: 2,
+        ops: 3,
     };
     if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..12)) {
+        panic!("{divergence}");
+    }
+}
+
+// --- Hibernation crossed with the nemesis (G12 × G14) -------------------------
+//
+// The sweep above keeps every activation resident for the whole run, so it never
+// reaches the path where a grain is evicted and the *next* call has to rebuild it
+// — head and tail recovered from a write quorum, on whatever node leads the shard
+// by then (§8, §9). That path is where the acknowledged-write-lost bug in
+// `corpus.txt` lived, and until now G12 (hibernation round-trip) and G14
+// (lossless failover) were each exercised alone: `sql_swarm.rs`'s single-node
+// workload hibernates with no faults at all, and every clustered workload faults
+// without ever hibernating.
+//
+// This one crosses them: grains passivate and snapshot mid-run, and the next
+// call rehydrates through the quorum barrier while the nemesis partitions,
+// freezes, and kills the processes around it. `CommitMonotonic` is the checker
+// that would name a write the recovery dropped or replayed onto an occupied
+// slot.
+
+#[test]
+fn hibernating_grain_invariants_hold_under_restarts() {
+    let workload = hibernating(3, 6);
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
+        panic!("{failure}");
+    }
+    // #8, for the faults the transport's `FaultStats` cannot see.
+    workload.exercised.assert_hibernated();
+}
+
+#[test]
+fn the_nemesis_actually_restarts_a_node() {
+    // #8 for the fault the wire cannot see. Stated once, here, for every
+    // hibernating sweep in the crate: whether the nemesis *draws* a restart is a
+    // property of its vocabulary and the seed range, not of any one facet's
+    // traffic, and this is the cheapest workload to ask it of.
+    //
+    // `coverage_seeds`, not `sweep_seeds`, because the claim is about the whole
+    // declared range. One seed runs six nemesis rounds against a seven-action
+    // vocabulary, so it draws no restart about two runs in five — narrowing this
+    // would not weaken the assertion, it would make it flaky.
+    let workload = hibernating(3, 6);
+    if let Err(failure) = run_cluster_swarm(&workload, coverage_seeds(0..16)) {
+        panic!("{failure}");
+    }
+    assert!(
+        workload.exercised.restarted() > 0,
+        "the nemesis never restarted a node across the declared range: process \
+         death went unexercised, so every hibernating sweep's restart is a claim \
+         about nothing",
+    );
+}
+
+#[test]
+fn hibernating_grain_swarm_is_reproducible() {
+    // Passivation, snapshot, rehydration, and process restart all ride the
+    // Clock/Entropy/Spawner seams, so the stream stays byte-identical per seed.
+    if let Err(divergence) = replay_cluster_swarm(&hibernating(2, 5), sweep_seeds(0..12)) {
         panic!("{divergence}");
     }
 }
@@ -289,11 +590,7 @@ fn grain_swarm_actually_fires_each_fault_type() {
     // #8: a green sweep must not be a silent happy-path sweep. Across the seed
     // range the transport injected loss, duplication, reordering (delay), and
     // partition/crash blocking at least once each.
-    let workload = AccountSwarm {
-        nodes: 3,
-        clients: 3,
-        ops: 6,
-    };
+    let workload = resident(3, 6);
     let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..32)) {
         Ok(stats) => stats,
         Err(failure) => panic!("{failure}"),

@@ -19,7 +19,10 @@
 //! Fault *coverage* (#8) for this cluster configuration is already asserted by
 //! `tests/grain_swarm.rs` over the same transport; it is not repeated here.
 
+mod support;
+
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
@@ -33,10 +36,13 @@ use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
+use actor_simulation::Rehost;
 use actor_simulation::SimNode;
+use actor_simulation::coverage_seeds;
 use actor_simulation::default_invariants;
 use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
+use actor_simulation::run_cluster_swarm_coverage;
 use actor_simulation::slow_seeds;
 use granary::Disk;
 use granary::DiskCaptureStats;
@@ -49,8 +55,10 @@ use granary::GranaryExt;
 use granary::NoEvent;
 use granary::testing::ActivationSingletonPerNode;
 use granary::testing::CommitMonotonic;
+
 use serde::Deserialize;
 use serde::Serialize;
+use support::Exercised;
 
 /// 1 MiB — the facet's fixed block size (spec §7.15).
 const BLOCK: u64 = 1 << 20;
@@ -170,18 +178,58 @@ struct DiskBoxSwarm {
     clients: usize,
     ops: u64,
     dir: PathBuf,
+    /// Idle past `idle_after` between operations, so activations passivate and
+    /// the image is rematerialized mid-run.
+    hibernating: bool,
+    /// Let the nemesis kill and re-launch node processes, not just isolate them.
+    restarting: bool,
+    /// What the sweep actually exercised, accumulated across its seeds.
+    exercised: Exercised,
 }
 
 impl DiskBoxSwarm {
+    /// Activations resident for the whole run; the nemesis only isolates nodes.
+    fn new(nodes: usize, clients: usize, ops: u64, dir: PathBuf) -> DiskBoxSwarm {
+        DiskBoxSwarm {
+            nodes,
+            clients,
+            ops,
+            dir,
+            hibernating: false,
+            restarting: false,
+            exercised: Exercised::default(),
+        }
+    }
+
+    /// Short activation lifetime, clients that idle past it, and a nemesis that
+    /// kills processes — so a read has to come from an image the next activation
+    /// rebuilt: checkpoint manifest, blocks re-fetched and verified by content
+    /// (G17), capture manifests folded and applied on top.
+    fn hibernating(nodes: usize, clients: usize, ops: u64, dir: PathBuf) -> DiskBoxSwarm {
+        DiskBoxSwarm {
+            hibernating: true,
+            restarting: true,
+            ..DiskBoxSwarm::new(nodes, clients, ops, dir)
+        }
+    }
+
     fn config(&self) -> GranaryConfig {
         GranaryConfig {
             shards: 2,
             replication_factor: 3,
-            idle_after: Duration::from_secs(60),
+            idle_after: if self.hibernating {
+                IDLE_AFTER
+            } else {
+                RESIDENT
+            },
             // Checkpoint often: the index-manifest contribution runs under
             // faults, and failover rematerializes from it plus the later
-            // capture records (fold + rehydrate).
-            snapshot_every: 4,
+            // capture records (fold + rehydrate). Oftener still when
+            // hibernating, so a grain has a checkpoint to come back from before
+            // it first passivates — otherwise every rehydration replays from an
+            // empty base and the manifest restore path goes untested, which is
+            // what `Exercised::from_snapshot` refuses to let pass silently.
+            snapshot_every: if self.hibernating { 2 } else { 4 },
             data_dir: Some(self.dir.clone()),
             ..GranaryConfig::default()
         }
@@ -192,9 +240,21 @@ impl DiskBoxSwarm {
     }
 }
 
+/// Activation lifetime for the resident sweeps: longer than any run.
+const RESIDENT: Duration = Duration::from_secs(60);
+/// Activation lifetime for the hibernating sweep.
+const IDLE_AFTER: Duration = Duration::from_millis(200);
+/// How long a hibernating client idles when it idles — comfortably past
+/// [`IDLE_AFTER`], so the host really does passivate rather than nearly.
+const IDLE_FOR: Duration = Duration::from_millis(500);
+
 impl ClusterWorkload for DiskBoxSwarm {
     fn name(&self) -> &'static str {
-        "granary-disk-box-swarm"
+        if self.hibernating {
+            "granary-disk-box-hibernating-swarm"
+        } else {
+            "granary-disk-box-swarm"
+        }
     }
 
     fn node_count(&self) -> usize {
@@ -227,10 +287,27 @@ impl ClusterWorkload for DiskBoxSwarm {
         std::fs::write(self.base_image(), bytes).expect("write base image");
     }
 
+    fn rehost(&self) -> Option<Rehost> {
+        if !self.restarting {
+            return None;
+        }
+        // A restarted node comes up empty and would otherwise stop hosting
+        // `DiskBox`. The config carries the same scratch root: the facet's
+        // restore discards stale local files (a cache, never truth — §1), so a
+        // fresh process rebuilding over its predecessor's leftover image is
+        // exactly the case worth covering.
+        let config = self.config();
+        Some(Arc::new(move |node: &SimNode| {
+            node.granary::<DiskBox>(config.clone());
+        }))
+    }
+
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
         let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
+        let hibernating = self.hibernating;
+        let restarting = self.restarting;
         let config = self.config();
         let base = self.base_image().to_string_lossy().into_owned();
         Box::pin(async move {
@@ -245,11 +322,20 @@ impl ClusterWorkload for DiskBoxSwarm {
 
             let mut tasks = Vec::new();
             for c in 0..clients {
-                let granary = granaries[c % granaries.len()].clone();
+                // Under restarts every client goes through node 1's gateway, the
+                // one node the nemesis leaves alone; location transparency (G13)
+                // keeps the coverage, since the call still lands on the shard's
+                // leader.
+                let granary = if restarting {
+                    granaries[0].clone()
+                } else {
+                    granaries[c % granaries.len()].clone()
+                };
+                let clock = clock.clone();
                 let entropy = entropy.clone();
                 let base = base.clone();
                 tasks.push(async move {
-                    for _ in 0..ops {
+                    for op in 0..ops {
                         // A small key space so several grains share each shard.
                         let key = format!("box/{}", entropy.next_u64() % 3);
                         let grain = granary.grain(key);
@@ -271,6 +357,12 @@ impl ClusterWorkload for DiskBoxSwarm {
                                 .ask_timeout(ReadStamp { offset }, Duration::from_secs(2))
                                 .await;
                         }
+                        // Idle past the activation lifetime often enough that the
+                        // next call rehydrates: fetch the checkpoint's blocks,
+                        // verify them by content, apply the pending manifests.
+                        if hibernating && op % 2 == 1 {
+                            clock.sleep(IDLE_FOR).await;
+                        }
                     }
                 });
             }
@@ -288,6 +380,7 @@ impl ClusterWorkload for DiskBoxSwarm {
             "disk-grain-activation-singleton-per-node",
             "grain",
         )));
+        invariants.push(Box::new(self.exercised.clone()));
         invariants
     }
 }
@@ -299,15 +392,70 @@ fn disk_grain_invariants_hold_under_the_cluster_swarm() {
     // rematerialize across failover (restore + fold + rehydrate, G17), under
     // partitions, crashes, loss, duplication, and delay.
     let dir = tempfile::tempdir().expect("tempdir");
-    let workload = DiskBoxSwarm {
-        nodes: 3,
-        clients: 3,
-        ops: 5,
-        dir: dir.path().to_path_buf(),
-    };
+    let workload = DiskBoxSwarm::new(3, 3, 5, dir.path().to_path_buf());
     if let Err(failure) = run_cluster_swarm(&workload, slow_seeds(0..16)) {
         panic!("{failure}");
     }
+}
+
+// --- The same claims across hibernation and process death --------------------
+//
+// The sweep above holds every activation resident, so a read is served from the
+// image the write landed in — the block image is never rebuilt. This one tears it
+// down: the grain passivates, its image goes, and the next read is served from
+// one the new activation rehydrated block by block out of content-addressed
+// blobs, possibly in a process that did not exist when the write committed. That
+// is the disk facet's whole durability story, and until now only a scripted
+// failover reached it.
+
+#[test]
+fn disk_grain_invariants_hold_across_hibernation_and_restarts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workload = DiskBoxSwarm::hibernating(3, 3, 5, dir.path().to_path_buf());
+    if let Err(failure) = run_cluster_swarm(&workload, slow_seeds(0..16)) {
+        panic!("{failure}");
+    }
+    workload.exercised.assert_hibernated();
+}
+
+#[test]
+fn disk_hibernating_swarm_is_reproducible() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workload = DiskBoxSwarm::hibernating(3, 2, 4, dir.path().to_path_buf());
+    if let Err(divergence) = replay_cluster_swarm(&workload, slow_seeds(0..8)) {
+        panic!("{divergence}");
+    }
+}
+
+#[test]
+fn disk_cluster_swarm_actually_fires_each_fault_type() {
+    // #8, sized for a workload whose seeds cost seconds apiece: `coverage_seeds`
+    // never narrows, so the declared range *is* the cost. Four seeds is enough
+    // to carry "each fault type fired at least once" — the transport draws its
+    // fault rates per seed and the nemesis runs six rounds within each — and
+    // small enough not to dominate the suite.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workload = DiskBoxSwarm::new(3, 3, 5, dir.path().to_path_buf());
+    let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..4)) {
+        Ok(stats) => stats,
+        Err(failure) => panic!("{failure}"),
+    };
+    assert!(
+        stats.dropped > 0,
+        "the sweep never dropped a frame (loss uncovered): {stats:?}"
+    );
+    assert!(
+        stats.duplicated > 0,
+        "the sweep never duplicated a frame: {stats:?}"
+    );
+    assert!(
+        stats.delayed > 0,
+        "the sweep never delayed a frame (reordering uncovered): {stats:?}"
+    );
+    assert!(
+        stats.blocked > 0,
+        "the sweep never blocked a frame (partition/crash uncovered): {stats:?}"
+    );
 }
 
 #[test]
@@ -316,12 +464,7 @@ fn disk_cluster_swarm_is_reproducible() {
     // included — even under cluster nemesis and transport faults, with real
     // image files materialized on every node.
     let dir = tempfile::tempdir().expect("tempdir");
-    let workload = DiskBoxSwarm {
-        nodes: 3,
-        clients: 2,
-        ops: 4,
-        dir: dir.path().to_path_buf(),
-    };
+    let workload = DiskBoxSwarm::new(3, 2, 4, dir.path().to_path_buf());
     if let Err(divergence) = replay_cluster_swarm(&workload, slow_seeds(0..8)) {
         panic!("{divergence}");
     }

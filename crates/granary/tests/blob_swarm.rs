@@ -28,6 +28,8 @@
 //!   fired ([`run_cluster_swarm_coverage`]), so a green sweep is provably not a
 //!   silent happy-path sweep of the blob path.
 
+mod support;
+
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
@@ -45,6 +47,7 @@ use actor_simulation::ClusterCtx;
 use actor_simulation::ClusterModeSpec;
 use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
+use actor_simulation::Rehost;
 use actor_simulation::SimNode;
 use actor_simulation::coverage_seeds;
 use actor_simulation::default_invariants;
@@ -58,8 +61,10 @@ use granary::GrainCtx;
 use granary::GrainHandler;
 use granary::GranaryConfig;
 use granary::GranaryExt;
+
 use serde::Deserialize;
 use serde::Serialize;
+use support::Exercised;
 
 // --- A grain that stores bytes in its colocated blob area ----------------------
 //
@@ -187,15 +192,28 @@ impl GrainHandler<KeepOnly> for BlobGrain {
 
 // --- The workload -------------------------------------------------------------
 
-fn config() -> GranaryConfig {
+/// `hibernating` picks the activation lifetime: `false` keeps every activation
+/// resident for the whole run, `true` makes it short enough that clients can idle
+/// past it, so a grain's blob area is torn down and rebuilt mid-run. The snapshot
+/// cadence follows, so a returning activation restores from a composite snapshot
+/// (whose blob root set it must re-fan, §7.10) rather than from an empty base.
+fn config(hibernating: bool) -> GranaryConfig {
     GranaryConfig {
         shards: 2,
         replication_factor: 3,
-        idle_after: Duration::from_secs(60),
-        snapshot_every: 8,
+        idle_after: if hibernating { IDLE_AFTER } else { RESIDENT },
+        snapshot_every: if hibernating { 3 } else { 8 },
         ..GranaryConfig::default()
     }
 }
+
+/// Activation lifetime for the resident sweeps: longer than any run.
+const RESIDENT: Duration = Duration::from_secs(60);
+/// Activation lifetime for the hibernating sweep.
+const IDLE_AFTER: Duration = Duration::from_millis(200);
+/// How long a hibernating client idles when it idles — comfortably past
+/// [`IDLE_AFTER`], so the host really does passivate rather than nearly.
+const IDLE_FOR: Duration = Duration::from_millis(500);
 
 /// Content that varies in length and bytes with `n`, so distinct draws address
 /// distinct blobs (and equal draws dedup). Kept small so a run stays cheap; the
@@ -222,27 +240,52 @@ struct BlobSwarm {
     nodes: usize,
     clients: usize,
     ops: u64,
+    /// Idle past `idle_after` between operations, so activations passivate and
+    /// rehydrate mid-run.
+    hibernating: bool,
+    /// Let the nemesis kill and re-launch node processes, not just isolate them.
+    restarting: bool,
     corrupt: Arc<AtomicBool>,
     wrong_id: Arc<AtomicBool>,
     gets_verified: Arc<AtomicU64>,
+    exercised: Exercised,
 }
 
 impl BlobSwarm {
+    /// Activations resident for the whole run; the nemesis only isolates nodes.
     fn new(nodes: usize, clients: usize, ops: u64) -> BlobSwarm {
         BlobSwarm {
             nodes,
             clients,
             ops,
+            hibernating: false,
+            restarting: false,
             corrupt: Arc::new(AtomicBool::new(false)),
             wrong_id: Arc::new(AtomicBool::new(false)),
             gets_verified: Arc::new(AtomicU64::new(0)),
+            exercised: Exercised::default(),
+        }
+    }
+
+    /// Short activation lifetime, clients that idle past it, and a nemesis that
+    /// kills processes — so a `get` has to serve bytes whose activation was torn
+    /// down and rebuilt from a quorum since the `put`.
+    fn hibernating(nodes: usize, clients: usize, ops: u64) -> BlobSwarm {
+        BlobSwarm {
+            hibernating: true,
+            restarting: true,
+            ..BlobSwarm::new(nodes, clients, ops)
         }
     }
 }
 
 impl ClusterWorkload for BlobSwarm {
     fn name(&self) -> &'static str {
-        "granary-blob-swarm"
+        if self.hibernating {
+            "granary-blob-hibernating-swarm"
+        } else {
+            "granary-blob-swarm"
+        }
     }
 
     fn node_count(&self) -> usize {
@@ -270,19 +313,35 @@ impl ClusterWorkload for BlobSwarm {
         }
     }
 
+    fn rehost(&self) -> Option<Rehost> {
+        if !self.restarting {
+            return None;
+        }
+        // A restarted node comes up empty and would otherwise stop hosting
+        // `BlobGrain` — no gateway, no shard leadership, no replica for the blob
+        // write quorum. Re-host it, or the run shrinks the cluster rather than
+        // faulting it.
+        let hibernating = self.hibernating;
+        Some(Arc::new(move |node: &SimNode| {
+            node.granary::<BlobGrain>(config(hibernating));
+        }))
+    }
+
     fn setup(&self, _ctx: &ClusterCtx) {}
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
         let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
+        let hibernating = self.hibernating;
+        let restarting = self.restarting;
         let corrupt = Arc::clone(&self.corrupt);
         let wrong_id = Arc::clone(&self.wrong_id);
         let gets_verified = Arc::clone(&self.gets_verified);
         Box::pin(async move {
             let granaries: Vec<_> = nodes
                 .iter()
-                .map(|s| s.granary::<BlobGrain>(config()))
+                .map(|s| s.granary::<BlobGrain>(config(hibernating)))
                 .collect();
             let clock = nodes[0].clock().clone();
             let entropy = nodes[0].entropy().clone();
@@ -291,7 +350,17 @@ impl ClusterWorkload for BlobSwarm {
 
             let mut tasks = Vec::new();
             for c in 0..clients {
-                let granary = granaries[c % granaries.len()].clone();
+                // Under restarts every client goes through node 1's gateway, the
+                // one node the nemesis leaves alone: a handle for a restarted node
+                // points at a system that has been shut down. Location
+                // transparency (G13) means this costs no coverage — the call still
+                // lands on whichever node leads the grain's shard.
+                let granary = if restarting {
+                    granaries[0].clone()
+                } else {
+                    granaries[c % granaries.len()].clone()
+                };
+                let clock = clock.clone();
                 let entropy = entropy.clone();
                 let corrupt = Arc::clone(&corrupt);
                 let wrong_id = Arc::clone(&wrong_id);
@@ -301,7 +370,7 @@ impl ClusterWorkload for BlobSwarm {
                     // so a later get can verify the bytes it gets back are the
                     // exact bytes it stored under that id (catches misrouting too).
                     let mut mine: Vec<(String, BlobId, Vec<u8>)> = Vec::new();
-                    for _ in 0..ops {
+                    for op in 0..ops {
                         // A small key space so several grains share each shard.
                         let key = format!("ws/{}", entropy.next_u64() % 4);
                         let grain = granary.grain(&key);
@@ -339,6 +408,12 @@ impl ClusterWorkload for BlobSwarm {
                                     grain.ask_timeout(Exists(*id), Duration::from_secs(2)).await;
                             }
                         }
+                        // Idle past the activation lifetime often enough that the
+                        // next call rehydrates the grain and re-fans its blob root
+                        // set, on whichever node leads the shard by then.
+                        if hibernating && op % 2 == 1 {
+                            clock.sleep(IDLE_FOR).await;
+                        }
                     }
                     // A best-effort GC pass keeping everything live: exercises the
                     // SweepBlobs fan-out under faults without dropping a live blob.
@@ -359,7 +434,9 @@ impl ClusterWorkload for BlobSwarm {
         // The safety core observes the blob RPCs as ordinary asks to the
         // per-node ReplicaStore actors: no-silent-loss covers the drained
         // straggler asks, serial-execution the replica store's mailbox.
-        default_invariants()
+        let mut invariants = default_invariants();
+        invariants.push(Box::new(self.exercised.clone()));
+        invariants
     }
 }
 
@@ -386,6 +463,45 @@ fn blob_integrity_holds_under_the_cluster_swarm() {
         workload.gets_verified.load(Ordering::SeqCst) > 0,
         "no get ever returned bytes — the integrity check never ran",
     );
+}
+
+// --- The same traffic across hibernation and process death -------------------
+//
+// The sweep above holds every activation resident, so a `get` is always served by
+// the activation that took the `put`. This one tears that down: the grain
+// passivates, its blob area goes with it, and the next `get` must rebuild from a
+// composite snapshot and re-fan the root set from a write quorum — on a node that
+// may have been a different process entirely a moment ago. G17 (returned bytes
+// hash to the requested id) and B2/G18 (the id is the content hash) are the same
+// claims, now against a rebuilt blob area.
+
+#[test]
+fn blob_integrity_holds_across_hibernation_and_restarts() {
+    let workload = BlobSwarm::hibernating(3, 3, 8);
+    if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
+        panic!("{failure}");
+    }
+    assert!(
+        !workload.corrupt.load(Ordering::SeqCst),
+        "a get returned bytes that did not verify against the requested id (G17)",
+    );
+    assert!(
+        !workload.wrong_id.load(Ordering::SeqCst),
+        "a put minted an id that was not the content hash (B2/G18)",
+    );
+    assert!(
+        workload.gets_verified.load(Ordering::SeqCst) > 0,
+        "no get ever returned bytes — the integrity check never ran",
+    );
+    workload.exercised.assert_hibernated();
+}
+
+#[test]
+fn blob_hibernating_swarm_is_reproducible() {
+    let workload = BlobSwarm::hibernating(3, 2, 6);
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..12)) {
+        panic!("{divergence}");
+    }
 }
 
 #[test]
