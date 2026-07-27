@@ -137,3 +137,193 @@ impl Invariant for ActivationSingletonPerNode {
         self.live.retain(|(n, _)| *n != node);
     }
 }
+
+/// A [`GrainStore`](crate::GrainStore) with a fixed answer: every write returns
+/// `refusal`, every read is empty, every enumeration is empty.
+///
+/// The deterministic stand-in for a store that never acknowledges — an index whose
+/// registrations always fail, a replica permanently fenced — where a real store
+/// would need a fault injector to reach the same state. `StaticGrainStore::fenced()`
+/// is the common case: writes refused at an unreachably high term.
+///
+/// It lives here rather than in a test binary because a hand-written double has to
+/// be re-written from scratch on every seam change, and a double that lags the seam
+/// stops standing in for anything. One implementation, maintained with the trait.
+pub struct StaticGrainStore {
+    refusal: crate::StoreAck,
+}
+
+impl StaticGrainStore {
+    /// A store whose every write is refused with `refusal`.
+    pub fn new(refusal: crate::StoreAck) -> StaticGrainStore {
+        StaticGrainStore { refusal }
+    }
+
+    /// A store fenced at an unreachably high term, so nothing hosted on it can
+    /// commit while reads still succeed — activation works and the failure surfaces
+    /// where it does in production, at the commit.
+    pub fn fenced() -> StaticGrainStore {
+        StaticGrainStore::new(crate::StoreAck::Fenced(crate::Term::new(u64::MAX)))
+    }
+
+    /// A factory handing this store to every node, for
+    /// [`GranaryConfig::grain_store`](crate::GranaryConfig).
+    pub fn factory(refusal: crate::StoreAck) -> crate::GrainStoreFactory {
+        std::sync::Arc::new(move |_| {
+            std::sync::Arc::new(StaticGrainStore::new(refusal.clone()))
+                as std::sync::Arc<dyn crate::GrainStore>
+        })
+    }
+
+    fn empty_reply() -> crate::ReadReply {
+        crate::ReadReply {
+            slots: Vec::new(),
+            snapshot: None,
+        }
+    }
+}
+
+impl crate::GrainBlobStore for StaticGrainStore {
+    fn put_blob(
+        &self,
+        _shard: u32,
+        _grain: &GrainName,
+        _id: crate::BlobId,
+        _bytes: Vec<u8>,
+    ) -> crate::Reserved<()> {
+        crate::Reserved::ready(())
+    }
+
+    fn get_blob(
+        &self,
+        _shard: u32,
+        _grain: &GrainName,
+        _id: crate::BlobId,
+    ) -> crate::Reserved<Option<Vec<u8>>> {
+        crate::Reserved::ready(None)
+    }
+
+    fn has_blob(
+        &self,
+        _shard: u32,
+        _grain: &GrainName,
+        _id: crate::BlobId,
+    ) -> crate::Reserved<bool> {
+        crate::Reserved::ready(false)
+    }
+
+    fn delete_blob(
+        &self,
+        _shard: u32,
+        _grain: &GrainName,
+        _id: crate::BlobId,
+    ) -> crate::Reserved<()> {
+        crate::Reserved::ready(())
+    }
+
+    fn delete_blobs(&self, _shard: u32, _grain: &GrainName) -> crate::Reserved<()> {
+        crate::Reserved::ready(())
+    }
+
+    fn retain_blobs(
+        &self,
+        _shard: u32,
+        _grain: &GrainName,
+        _retain: &BTreeSet<crate::BlobId>,
+    ) -> crate::Reserved<()> {
+        crate::Reserved::ready(())
+    }
+
+    fn blob_ids(&self, _shard: u32, _grain: &GrainName) -> crate::Reserved<Vec<crate::BlobId>> {
+        crate::Reserved::ready(Vec::new())
+    }
+}
+
+impl crate::GrainStore for StaticGrainStore {
+    fn store_record(
+        &self,
+        _shard: u32,
+        _grain: &GrainName,
+        _after: crate::Seq,
+        _term: crate::Term,
+        _records: Vec<Vec<u8>>,
+        _kind: crate::WriteKind,
+    ) -> crate::Reserved<crate::StoreAck> {
+        crate::Reserved::ready(self.refusal.clone())
+    }
+
+    fn read(&self, _shard: u32, _grain: &GrainName) -> crate::Reserved<crate::ReadReply> {
+        crate::Reserved::ready(StaticGrainStore::empty_reply())
+    }
+
+    fn read_from(
+        &self,
+        _shard: u32,
+        _grain: &GrainName,
+        _from: crate::Seq,
+        _limit: usize,
+    ) -> crate::Reserved<Vec<(crate::Seq, Vec<u8>)>> {
+        crate::Reserved::ready(Vec::new())
+    }
+
+    fn prepare(
+        &self,
+        _shard: u32,
+        _grain: &GrainName,
+        _term: crate::Term,
+    ) -> crate::Reserved<crate::ReadOutcome> {
+        // Prepared, not fenced: a read must succeed so activation gets far enough
+        // for the refusal to land at the commit.
+        crate::Reserved::ready(crate::ReadOutcome::Prepared(StaticGrainStore::empty_reply()))
+    }
+
+    fn store_snapshot(
+        &self,
+        _shard: u32,
+        _grain: &GrainName,
+        _at: crate::Seq,
+        _term: crate::Term,
+        _state: Vec<u8>,
+        _kind: crate::WriteKind,
+    ) -> crate::Reserved<crate::StoreAck> {
+        crate::Reserved::ready(self.refusal.clone())
+    }
+
+    fn truncate(
+        &self,
+        _shard: u32,
+        _grain: &GrainName,
+        _after: crate::Seq,
+        _term: crate::Term,
+    ) -> crate::Reserved<()> {
+        crate::Reserved::ready(())
+    }
+
+    fn grains(&self, _shard: u32) -> Vec<GrainName> {
+        Vec::new()
+    }
+
+    fn seal_range(&self, _shard: u32, _from: u64) -> crate::Reserved<()> {
+        crate::Reserved::ready(())
+    }
+
+    fn unseal(&self, _shard: u32) -> crate::Reserved<()> {
+        crate::Reserved::ready(())
+    }
+
+    fn remove_grain(&self, _shard: u32, _grain: &GrainName) -> crate::Reserved<()> {
+        crate::Reserved::ready(())
+    }
+
+    fn remove_range(&self, _shard: u32, _from: u64) -> crate::Reserved<()> {
+        crate::Reserved::ready(())
+    }
+
+    fn drop_shard(&self, _shard: u32) -> crate::Reserved<()> {
+        crate::Reserved::ready(())
+    }
+
+    fn shard_bytes(&self, _shard: u32) -> u64 {
+        0
+    }
+}

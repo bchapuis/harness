@@ -262,54 +262,82 @@ impl<G: Grain> Actor for ReplicaStore<G> {
     }
 }
 
+// Every handler's reply IS the peer's acknowledgement, so each awaits durability
+// before returning: a reply released early would let the leader count this replica
+// toward a quorum for something this node has not stored (**G14**). A refusal is the
+// one thing that needs no wait — it changed nothing — and short-circuiting it keeps a
+// deposed leader from waiting a commit interval to learn it is deposed.
 impl<G: Grain> Handler<StoreRecord> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreRecord, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
-        self.store.store_record(
+        let stored = self.store.store_record(
             msg.shard,
             &msg.grain,
             msg.after,
             msg.term,
             msg.records,
             msg.kind,
-        )
+        );
+        match stored.refusal() {
+            Some(refused) => refused,
+            None => stored.durable().await,
+        }
     }
 }
 
 impl<G: Grain> Handler<ReadGrain> for ReplicaStore<G> {
     async fn handle(&mut self, msg: ReadGrain, _ctx: &Ctx<ReplicaStore<G>>) -> ReadOutcome {
-        self.store.prepare(msg.shard, &msg.grain, msg.term)
+        let prepared = self.store.prepare(msg.shard, &msg.grain, msg.term);
+        match prepared.refusal() {
+            Some(higher) => ReadOutcome::Fenced(higher),
+            None => prepared.durable().await,
+        }
     }
 }
 
 impl<G: Grain> Handler<StoreSnapshot> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreSnapshot, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
-        self.store
-            .store_snapshot(msg.shard, &msg.grain, msg.at, msg.term, msg.state, msg.kind)
+        let stored = self
+            .store
+            .store_snapshot(msg.shard, &msg.grain, msg.at, msg.term, msg.state, msg.kind);
+        match stored.refusal() {
+            Some(refused) => refused,
+            None => stored.durable().await,
+        }
     }
 }
 
 impl<G: Grain> Handler<SealRange> for ReplicaStore<G> {
     async fn handle(&mut self, msg: SealRange, _ctx: &Ctx<ReplicaStore<G>>) {
-        self.store.seal_range(msg.shard, msg.from);
+        // The bound must be durable before this ask resolves, or a majority could
+        // report itself sealed while a restart would forget the promise (**G15**).
+        self.store.seal_range(msg.shard, msg.from).durable().await;
     }
 }
 
 impl<G: Grain> Handler<StoreBlob> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreBlob, _ctx: &Ctx<ReplicaStore<G>>) {
         self.store
-            .put_blob(msg.shard, &msg.grain, msg.id, msg.bytes);
+            .put_blob(msg.shard, &msg.grain, msg.id, msg.bytes)
+            .durable()
+            .await;
     }
 }
 
 impl<G: Grain> Handler<FetchBlob> for ReplicaStore<G> {
     async fn handle(&mut self, msg: FetchBlob, _ctx: &Ctx<ReplicaStore<G>>) -> Option<Vec<u8>> {
-        self.store.get_blob(msg.shard, &msg.grain, msg.id)
+        self.store
+            .get_blob(msg.shard, &msg.grain, msg.id)
+            .durable()
+            .await
     }
 }
 
 impl<G: Grain> Handler<HasBlob> for ReplicaStore<G> {
     async fn handle(&mut self, msg: HasBlob, _ctx: &Ctx<ReplicaStore<G>>) -> bool {
-        self.store.has_blob(msg.shard, &msg.grain, msg.id)
+        self.store
+            .has_blob(msg.shard, &msg.grain, msg.id)
+            .durable()
+            .await
     }
 }
 
@@ -321,6 +349,8 @@ impl<G: Grain> Handler<SweepBlobs> for ReplicaStore<G> {
                 .store
                 .retain_blobs(msg.shard, &msg.grain, &ids.into_iter().collect()),
         }
+        .durable()
+        .await;
     }
 }
 
@@ -332,7 +362,7 @@ impl<G: Grain> Handler<ListGrains> for ReplicaStore<G> {
 
 impl<G: Grain> Handler<ListBlobs> for ReplicaStore<G> {
     async fn handle(&mut self, msg: ListBlobs, _ctx: &Ctx<ReplicaStore<G>>) -> Vec<BlobId> {
-        self.store.blob_ids(msg.shard, &msg.grain)
+        self.store.blob_ids(msg.shard, &msg.grain).durable().await
     }
 }
 

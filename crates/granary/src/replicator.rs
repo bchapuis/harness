@@ -33,6 +33,7 @@ use crate::journal::Term;
 use crate::replica_store::ReplicaTransport;
 use crate::store::GrainStore;
 use crate::store::ReadOutcome;
+use crate::store::Reserved;
 use crate::store::StoreAck;
 use crate::store::WriteKind;
 
@@ -41,6 +42,21 @@ use crate::store::WriteKind;
 /// set(s) during a replica-set migration (§7.7).
 type StoreAckFuture =
     actor_core::BoxFuture<'static, (NodeId, Result<StoreAck, actor_core::CallError>)>;
+
+/// This node's own store outcome as one more replica's ack, so a quorum is counted
+/// uniformly over all R replicas (the leader is a replica, §5.2).
+///
+/// A refusal is already settled and wrote nothing, so it is reported with no wait — it
+/// never delayed the count before, and making a deposed leader wait a commit interval
+/// to learn it is deposed would be a regression. A `Stored` counts only once its bytes
+/// are stable: counting it earlier would tally a quorum for a write whose durability
+/// is below it (**G14**).
+fn local_ack(node: NodeId, reserved: Reserved<StoreAck>) -> StoreAckFuture {
+    match reserved.refusal() {
+        Some(refused) => Box::pin(std::future::ready((node, Ok(refused)))),
+        None => Box::pin(async move { (node, Ok(reserved.durable().await)) }),
+    }
+}
 
 /// A pending per-replica blob store from the [`ReplicaTransport`] blob fan-out: it
 /// resolves `Ok(())` once that peer has durably stored the blob (no ack variants —
@@ -92,15 +108,23 @@ impl LocalReplicator {
         events: Vec<Vec<u8>>,
     ) -> AppendOutcome {
         // A single writer at term 0 is never fenced or stale (its fence stays 0 and
-        // `after` always equals the head behind the input gate, §6).
-        match self.store.store_record(
+        // `after` always equals the head behind the input gate, §6). On this tier the
+        // local fsync IS the commit (§7.4), so the await is the durability the
+        // `Committed` outcome asserts.
+        let stored = self.store.store_record(
             self.shard,
             grain,
             after,
             Term::ZERO,
             events,
             WriteKind::Append,
-        ) {
+        );
+        if let Some(refused) = stored.refusal() {
+            return AppendOutcome::Unavailable(format!(
+                "local store rejected the append: {refused:?}"
+            ));
+        }
+        match stored.durable().await {
             StoreAck::Stored(head) => AppendOutcome::Committed(head),
             other => {
                 AppendOutcome::Unavailable(format!("local store rejected the append: {other:?}"))
@@ -109,7 +133,9 @@ impl LocalReplicator {
     }
 
     pub(crate) async fn head(&self, grain: &GrainName) -> Result<Seq, GrainJournalError> {
-        Ok(head_from_reply(&self.store.read(self.shard, grain)))
+        Ok(head_from_reply(
+            &self.store.read(self.shard, grain).durable().await,
+        ))
     }
 
     pub(crate) async fn load(
@@ -118,7 +144,11 @@ impl LocalReplicator {
         from: Seq,
         limit: usize,
     ) -> Result<Vec<(Seq, Vec<u8>)>, GrainJournalError> {
-        Ok(self.store.read_from(self.shard, grain, from, limit))
+        Ok(self
+            .store
+            .read_from(self.shard, grain, from, limit)
+            .durable()
+            .await)
     }
 
     pub(crate) async fn save_snapshot(
@@ -127,10 +157,15 @@ impl LocalReplicator {
         at: Seq,
         state: Vec<u8>,
     ) -> AppendOutcome {
-        match self
-            .store
-            .store_snapshot(self.shard, grain, at, Term::ZERO, state, WriteKind::Append)
-        {
+        let stored =
+            self.store
+                .store_snapshot(self.shard, grain, at, Term::ZERO, state, WriteKind::Append);
+        if let Some(refused) = stored.refusal() {
+            return AppendOutcome::Unavailable(format!(
+                "local store rejected the snapshot: {refused:?}"
+            ));
+        }
+        match stored.durable().await {
             StoreAck::Stored(seq) => AppendOutcome::Committed(seq),
             other => {
                 AppendOutcome::Unavailable(format!("local store rejected the snapshot: {other:?}"))
@@ -142,7 +177,9 @@ impl LocalReplicator {
         &self,
         grain: &GrainName,
     ) -> Result<Option<(Seq, Vec<u8>)>, GrainJournalError> {
-        Ok(snapshot_of(self.store.read(self.shard, grain)))
+        Ok(snapshot_of(
+            self.store.read(self.shard, grain).durable().await,
+        ))
     }
 
     // --- The grain-native content-addressed blob store (single-node) --------------
@@ -153,7 +190,10 @@ impl LocalReplicator {
         id: BlobId,
         bytes: Vec<u8>,
     ) -> Result<(), GrainJournalError> {
-        self.store.put_blob(self.shard, grain, id, bytes);
+        self.store
+            .put_blob(self.shard, grain, id, bytes)
+            .durable()
+            .await;
         Ok(())
     }
 
@@ -164,7 +204,7 @@ impl LocalReplicator {
     ) -> Result<Option<Vec<u8>>, GrainJournalError> {
         // Verify the stored bytes against the id (B1): a single store can still suffer
         // on-disk bit-rot, which must surface as an error, never as wrong bytes.
-        match self.store.get_blob(self.shard, grain, id) {
+        match self.store.get_blob(self.shard, grain, id).durable().await {
             Some(bytes) if id.verifies(&bytes) => Ok(Some(bytes)),
             Some(_) => Err(GrainJournalError::Unavailable(format!(
                 "blob {id} failed verification"
@@ -178,16 +218,18 @@ impl LocalReplicator {
         grain: &GrainName,
         id: BlobId,
     ) -> Result<bool, GrainJournalError> {
-        Ok(self.store.has_blob(self.shard, grain, id))
+        Ok(self.store.has_blob(self.shard, grain, id).durable().await)
     }
 
     pub(crate) async fn retain_blobs(&self, grain: &GrainName, retain: Vec<BlobId>) {
         self.store
-            .retain_blobs(self.shard, grain, &retain.into_iter().collect());
+            .retain_blobs(self.shard, grain, &retain.into_iter().collect())
+            .durable()
+            .await;
     }
 
     pub(crate) async fn delete_blobs(&self, grain: &GrainName) {
-        self.store.delete_blobs(self.shard, grain);
+        self.store.delete_blobs(self.shard, grain).durable().await;
     }
 }
 
@@ -427,7 +469,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // message; then write this node's own replica directly, *moving* the payload in
         // — the leader is a replica (§5.2), so its write needs no copy. The batch is
         // deep-cloned R-1 times (once per peer), never R.
-        let peers = self
+        let mut replicas: Vec<StoreAckFuture> = self
             .peers_of(&sets)
             .into_iter()
             .map(|node| {
@@ -444,10 +486,17 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 Box::pin(async move { (node, ack.await) }) as StoreAckFuture
             })
             .collect();
+        // The local write happens here, synchronously; only its *durability* joins the
+        // fan-out, as one more replica's ack. That is what it always was — the leader
+        // is a replica (§5.2) — but until the store could report durability separately
+        // from its outcome, the local ack had to be counted before the peers were even
+        // polled. Now all R acks are gathered the same way, and this node counts toward
+        // the quorum exactly when its own bytes are stable.
         let local =
             self.local
                 .store_record(self.shard, grain, after, term, events, WriteKind::Append);
-        let (outcome, pending) = self.collect_store_quorum(&sets, local, peers).await;
+        replicas.push(local_ack(self.self_node, local));
+        let (outcome, pending) = self.collect_store_quorum(&sets, replicas).await;
         if matches!(outcome, QuorumOutcome::Committed) {
             // Committed on a quorum: return now and drain the slower replicas off the
             // hot path (§7.2), so the append's latency is the quorum's, not the slowest
@@ -461,7 +510,10 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             // Bounded by our own term: while the quorum wait was in flight a newer
             // leader may have fenced this store and landed committed records above
             // `after` — those carry a higher term and must survive (G14).
-            self.local.truncate(self.shard, grain, after, term);
+            self.local
+                .truncate(self.shard, grain, after, term)
+                .durable()
+                .await;
         }
         match outcome {
             QuorumOutcome::Committed => {
@@ -552,14 +604,17 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // aligned to `base` before the write-back lands the tail above it. Records
         // remain the authority, so the snapshot need not be quorum-durable here.
         if let Some((at, snap_term, state)) = snapshot {
-            self.local.store_snapshot(
-                self.shard,
-                grain,
-                at,
-                snap_term.max(term),
-                state,
-                WriteKind::Repair,
-            );
+            self.local
+                .store_snapshot(
+                    self.shard,
+                    grain,
+                    at,
+                    snap_term.max(term),
+                    state,
+                    WriteKind::Repair,
+                )
+                .durable()
+                .await;
         }
 
         if read.confirmed {
@@ -591,8 +646,15 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         term: Term,
         sets: &ReplicaSets,
     ) -> Result<ReadQuorum, GrainJournalError> {
+        // The promise is made under the grain's segment lock, before `prepare`
+        // returns, so it fences a concurrent append either way. The *view* is another
+        // matter and must not be released before it is stable: `write_back` below
+        // skips the quorum re-write when nothing changed, so a reply naming a record
+        // this replica has applied but not yet persisted could be merged into the
+        // adopted head and then never re-written anywhere — a crash here would lose a
+        // record already reported committed (**G14**).
         let local = self.local.prepare(self.shard, grain, term);
-        let ReadOutcome::Prepared(local_reply) = local else {
+        let ReadOutcome::Prepared(local_reply) = local.durable().await else {
             return Err(GrainJournalError::Unavailable(
                 "fenced by a higher term".into(),
             ));
@@ -664,7 +726,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             records.to_vec(),
             WriteKind::Repair,
         );
-        let peers = self
+        let mut replicas: Vec<StoreAckFuture> = self
             .peers_of(sets)
             .into_iter()
             .map(|node| {
@@ -681,7 +743,8 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 Box::pin(async move { (node, ack.await) }) as StoreAckFuture
             })
             .collect();
-        let (outcome, pending) = self.collect_store_quorum(sets, local, peers).await;
+        replicas.push(local_ack(self.self_node, local));
+        let (outcome, pending) = self.collect_store_quorum(sets, replicas).await;
         match outcome {
             QuorumOutcome::Committed => {
                 self.drain(pending);
@@ -704,14 +767,20 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         from: Seq,
         limit: usize,
     ) -> Result<Vec<(Seq, Vec<u8>)>, GrainJournalError> {
-        Ok(self.local.read_from(self.shard, grain, from, limit))
+        Ok(self
+            .local
+            .read_from(self.shard, grain, from, limit)
+            .durable()
+            .await)
     }
 
     pub(crate) async fn load_snapshot(
         &self,
         grain: &GrainName,
     ) -> Result<Option<(Seq, Vec<u8>)>, GrainJournalError> {
-        Ok(snapshot_of(self.local.read(self.shard, grain)))
+        Ok(snapshot_of(
+            self.local.read(self.shard, grain).durable().await,
+        ))
     }
 
     // --- The grain-native content-addressed blob store (clustered) ----------------
@@ -754,7 +823,16 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             .collect();
         // The local write always succeeds (the leader is a replica), so it always acks;
         // a blob has no fence or order, so any `Ok` from a peer counts.
-        self.local.put_blob(self.shard, grain, id, bytes);
+        //
+        // Awaited *before* the peers are polled, rather than joining the fan-out as
+        // one more ack the way the record path does: **G18** requires a blob's quorum
+        // to always include the leader, because that is what makes a later `get` a
+        // local read (§7.10 colocation). Counting the leader only if its fsync happens
+        // to win the race would leave the property to chance.
+        self.local
+            .put_blob(self.shard, grain, id, bytes)
+            .durable()
+            .await;
         let (satisfied, pending) = self
             .accumulate_quorum(&sets, true, pending, |result| result.is_ok())
             .await;
@@ -779,7 +857,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     ) -> Result<Option<Vec<u8>>, GrainJournalError> {
         let sets = self.sets();
         let mut corrupt = false;
-        if let Some(bytes) = self.local.get_blob(self.shard, grain, id) {
+        if let Some(bytes) = self.local.get_blob(self.shard, grain, id).durable().await {
             if id.verifies(&bytes) {
                 return Ok(Some(bytes));
             }
@@ -791,7 +869,10 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             // (§7.10 self-heal). It is safe to drop unconditionally: a copy that fails
             // verification can never be returned, so it carries no value to lose.
             corrupt = true;
-            self.local.delete_blob(self.shard, grain, id);
+            self.local
+                .delete_blob(self.shard, grain, id)
+                .durable()
+                .await;
         }
         for node in self.peers_of(&sets) {
             match self
@@ -802,7 +883,10 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 Ok(Some(bytes)) if id.verifies(&bytes) => {
                     // Backfill locally so the next read is local (lazy hydration), and
                     // repair a corrupt local copy evicted above (self-heal).
-                    self.local.put_blob(self.shard, grain, id, bytes.clone());
+                    self.local
+                        .put_blob(self.shard, grain, id, bytes.clone())
+                        .durable()
+                        .await;
                     return Ok(Some(bytes));
                 }
                 Ok(Some(_)) => corrupt = true,
@@ -826,7 +910,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         grain: &GrainName,
         id: BlobId,
     ) -> Result<bool, GrainJournalError> {
-        if self.local.has_blob(self.shard, grain, id) {
+        if self.local.has_blob(self.shard, grain, id).durable().await {
             return Ok(true);
         }
         for node in self.peers_of(&self.sets()) {
@@ -846,7 +930,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// next sweep, never a correctness issue.
     pub(crate) async fn retain_blobs(&self, grain: &GrainName, retain: Vec<BlobId>) {
         self.local
-            .retain_blobs(self.shard, grain, &retain.iter().copied().collect());
+            .retain_blobs(self.shard, grain, &retain.iter().copied().collect())
+            .durable()
+            .await;
         let sweeps = self.peers_of(&self.sets()).into_iter().map(|node| {
             self.transport.sweep_blobs(
                 node,
@@ -861,7 +947,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
 
     /// Drop the grain's whole blob area on every replica (destroy). Best-effort.
     pub(crate) async fn delete_blobs(&self, grain: &GrainName) {
-        self.local.delete_blobs(self.shard, grain);
+        self.local.delete_blobs(self.shard, grain).durable().await;
         let sweeps = self.peers_of(&self.sets()).into_iter().map(|node| {
             self.transport
                 .sweep_blobs(node, self.shard, grain.clone(), None, QUORUM_TIMEOUT)
@@ -886,7 +972,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let sets = self.sets();
         // Clone the state for each remote peer's wire message, then move it into this
         // node's own replica write (§5.2) — R-1 copies, not R.
-        let peers = self
+        let mut replicas: Vec<StoreAckFuture> = self
             .peers_of(&sets)
             .into_iter()
             .map(|node| {
@@ -906,7 +992,8 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let local =
             self.local
                 .store_snapshot(self.shard, grain, at, term, state, WriteKind::Append);
-        let (outcome, pending) = self.collect_store_quorum(&sets, local, peers).await;
+        replicas.push(local_ack(self.self_node, local));
+        let (outcome, pending) = self.collect_store_quorum(&sets, replicas).await;
         match outcome {
             QuorumOutcome::Committed => {
                 self.drain(pending);
@@ -971,7 +1058,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// decision is irreversible before any consensus gate (G15).
     pub(crate) async fn migrate_grain(&self, grain: &GrainName) -> Result<(), GrainJournalError> {
         self.recover(grain).await?;
-        if let Some((at, state)) = snapshot_of(self.local.read(self.shard, grain))
+        if let Some((at, state)) = snapshot_of(self.local.read(self.shard, grain).durable().await)
             && let AppendOutcome::NotLeader(_) | AppendOutcome::Unavailable(_) =
                 self.save_snapshot(grain, at, state).await
         {
@@ -992,8 +1079,13 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             return Ok(());
         };
         // Source ids: this replica's plus every reachable current peer's.
-        let mut ids: std::collections::BTreeSet<BlobId> =
-            self.local.blob_ids(self.shard, grain).into_iter().collect();
+        let mut ids: std::collections::BTreeSet<BlobId> = self
+            .local
+            .blob_ids(self.shard, grain)
+            .durable()
+            .await
+            .into_iter()
+            .collect();
         let current_peers: Vec<NodeId> = sets
             .current
             .iter()
@@ -1049,7 +1141,11 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// bounded store. Idempotent and monotone.
     pub(crate) async fn seal_shard(&self, from: u64) -> Result<(), GrainJournalError> {
         let sets = self.sets();
-        self.local.seal_range(self.shard, from);
+        // Durable before this node counts itself toward the barrier: the bound is a
+        // promise, and a majority that included an unpersisted one could be forgotten
+        // by a restart, letting a stale leader assemble a quorum for the moved range
+        // afterward (**G15**).
+        self.local.seal_range(self.shard, from).durable().await;
         let mut count = JointCount::new(&sets);
         count.ack(self.self_node);
         // Return as soon as a majority has sealed — never block on a dead replica
@@ -1098,7 +1194,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         dest_replicas: &[NodeId],
     ) -> Result<(), GrainJournalError> {
         self.recover_quorum(grain).await?;
-        let reply = self.local.read(self.shard, grain);
+        let reply = self.local.read(self.shard, grain).durable().await;
         let head = head_from_reply(&reply);
         let base = reply.snapshot.as_ref().map_or(Seq::ZERO, |(s, _, _)| *s);
         // The committed prefix: the snapshot plus the contiguous records above
@@ -1183,12 +1279,19 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     async fn transfer_to_majority(
         &self,
         total: usize,
-        local: Option<StoreAck>,
+        local: Option<Reserved<StoreAck>>,
         peers: Vec<StoreAckFuture>,
     ) -> bool {
-        let mut acked = usize::from(matches!(local, Some(StoreAck::Stored(_))));
+        let mut acked = 0usize;
         let need = majority(total);
-        let mut pending: FuturesUnordered<StoreAckFuture> = peers.into_iter().collect();
+        // As in `collect_store_quorum`, this node's copy counts through the same
+        // stream as the peers' — it is a destination replica like any other, and its
+        // ack means the same thing: the bytes are stable there.
+        let mut replicas = peers;
+        if let Some(local) = local {
+            replicas.push(local_ack(self.self_node, local));
+        }
+        let mut pending: FuturesUnordered<StoreAckFuture> = replicas.into_iter().collect();
         while acked < need {
             match pending.next().await {
                 Some((_, Ok(StoreAck::Stored(_)))) => acked += 1,
@@ -1241,8 +1344,13 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     ) -> Result<(), GrainJournalError> {
         let sets = self.sets();
         // Source ids under THIS shard's keys: local plus every reachable peer.
-        let mut ids: std::collections::BTreeSet<BlobId> =
-            self.local.blob_ids(self.shard, grain).into_iter().collect();
+        let mut ids: std::collections::BTreeSet<BlobId> = self
+            .local
+            .blob_ids(self.shard, grain)
+            .durable()
+            .await
+            .into_iter()
+            .collect();
         let source_peers = self.peers_of(&sets);
         let lists = source_peers.iter().map(|&node| {
             self.transport
@@ -1253,7 +1361,12 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         }
         for &node in dest_replicas {
             let held: std::collections::BTreeSet<BlobId> = if node == self.self_node {
-                self.local.blob_ids(dest, grain).into_iter().collect()
+                self.local
+                    .blob_ids(dest, grain)
+                    .durable()
+                    .await
+                    .into_iter()
+                    .collect()
             } else {
                 match self
                     .transport
@@ -1273,7 +1386,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                     continue;
                 };
                 if node == self.self_node {
-                    self.local.put_blob(dest, grain, id, bytes);
+                    self.local.put_blob(dest, grain, id, bytes).durable().await;
                 } else if self
                     .transport
                     .store_blob(node, dest, grain.clone(), id, bytes, QUORUM_TIMEOUT)
@@ -1327,41 +1440,26 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         (false, pending)
     }
 
-    /// Count a local ack plus the peers' acks toward a quorum (spec §7.2) on the
-    /// record path, over [`accumulate_quorum`](Self::accumulate_quorum). A `Stored`
-    /// counts; a `Fenced`/`Stale` reply does not but is remembered, so short of a
-    /// quorum a single `Fenced` means we are deposed and a `Stale` means the head was
-    /// stale — running out of replies with neither is `Unavailable`. A quorum that
-    /// stored wins even if a lagging replica also reported a higher term: had a
-    /// higher-term leader prepared a quorum, the intersection would have fenced this
-    /// store (§8).
+    /// Count every replica's ack toward a quorum (spec §7.2) on the record path, over
+    /// [`accumulate_quorum`](Self::accumulate_quorum). A `Stored` counts; a
+    /// `Fenced`/`Stale` reply does not but is remembered, so short of a quorum a single
+    /// `Fenced` means we are deposed and a `Stale` means the head was stale — running
+    /// out of replies with neither is `Unavailable`. A quorum that stored wins even if
+    /// a lagging replica also reported a higher term: had a higher-term leader prepared
+    /// a quorum, the intersection would have fenced this store (§8).
     async fn collect_store_quorum(
         &self,
         sets: &ReplicaSets,
-        local: StoreAck,
-        peers: Vec<StoreAckFuture>,
+        replicas: Vec<StoreAckFuture>,
     ) -> (QuorumOutcome, FuturesUnordered<StoreAckFuture>) {
         let mut fenced = false;
         let mut stale = false;
         let mut sealed = false;
-        let local_acked = match local {
-            StoreAck::Stored(_) => true,
-            StoreAck::Fenced(_) => {
-                fenced = true;
-                false
-            }
-            StoreAck::Stale(_) => {
-                stale = true;
-                false
-            }
-            StoreAck::Sealed => {
-                sealed = true;
-                false
-            }
-        };
-        let pending: FuturesUnordered<StoreAckFuture> = peers.into_iter().collect();
+        // Every replica including this node arrives through the stream (see
+        // [`local_ack`]), so nothing is counted before the poll loop.
+        let pending: FuturesUnordered<StoreAckFuture> = replicas.into_iter().collect();
         let (satisfied, pending) = self
-            .accumulate_quorum(sets, local_acked, pending, |reply| match reply {
+            .accumulate_quorum(sets, false, pending, |reply| match reply {
                 Ok(StoreAck::Stored(_)) => true,
                 Ok(StoreAck::Fenced(_)) => {
                     fenced = true;

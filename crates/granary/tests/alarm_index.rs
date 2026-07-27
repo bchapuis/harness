@@ -10,7 +10,6 @@
 //! an alarmed grain hibernates once (and only once) the index has acknowledged
 //! its deadline, the driver waking it when the alarm falls due.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -27,24 +26,18 @@ use granary::Alarm;
 use granary::AlarmIndex;
 use granary::AlarmSync;
 use granary::AllPending;
-use granary::BlobId;
 use granary::Grain;
 use granary::GrainCtx;
 use granary::GrainEvent;
 use granary::GrainHandler;
-use granary::GrainBlobStore;
 use granary::GrainName;
-use granary::GrainStore;
 use granary::GranaryConfig;
 use granary::GranaryExt;
-use granary::ReadOutcome;
-use granary::ReadReply;
-use granary::Seq;
 use granary::StoreAck;
 use granary::Term;
-use granary::WriteKind;
 use granary::index_key;
 use granary::shard_for;
+use granary::testing::StaticGrainStore;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -196,104 +189,6 @@ fn passivations_of(recorder: &Recorder, key: &str) -> usize {
             matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Passivated { name, .. }) if name.key() == key)
         })
         .count()
-}
-
-/// A [`GrainStore`] that refuses every write (`Fenced`), so nothing a grain
-/// hosted on it can ever commit. Reads see an empty store, so activation
-/// succeeds and the failure surfaces exactly where it does in production — at
-/// the commit. Given to the *index* granary, it is the deterministic stand-in
-/// for an alarm index that never acknowledges a registration.
-struct RefusingStore;
-
-impl RefusingStore {
-    fn refuse() -> StoreAck {
-        StoreAck::Fenced(Term::new(u64::MAX))
-    }
-}
-
-impl GrainStore for RefusingStore {
-    fn store_record(
-        &self,
-        _shard: u32,
-        _grain: &GrainName,
-        _after: Seq,
-        _term: Term,
-        _records: Vec<Vec<u8>>,
-        _kind: WriteKind,
-    ) -> StoreAck {
-        RefusingStore::refuse()
-    }
-
-    fn read(&self, _shard: u32, _grain: &GrainName) -> ReadReply {
-        ReadReply {
-            slots: vec![],
-            snapshot: None,
-        }
-    }
-
-    fn read_from(
-        &self,
-        _shard: u32,
-        _grain: &GrainName,
-        _from: Seq,
-        _limit: usize,
-    ) -> Vec<(Seq, Vec<u8>)> {
-        vec![]
-    }
-
-    fn prepare(&self, _shard: u32, _grain: &GrainName, _term: Term) -> ReadOutcome {
-        ReadOutcome::Prepared(self.read(0, &GrainName::new("", "")))
-    }
-
-    fn store_snapshot(
-        &self,
-        _shard: u32,
-        _grain: &GrainName,
-        _at: Seq,
-        _term: Term,
-        _state: Vec<u8>,
-        _kind: WriteKind,
-    ) -> StoreAck {
-        RefusingStore::refuse()
-    }
-
-    fn truncate(&self, _shard: u32, _grain: &GrainName, _after: Seq, _term: Term) {}
-
-    fn grains(&self, _shard: u32) -> Vec<GrainName> {
-        vec![]
-    }
-
-    fn seal_range(&self, _shard: u32, _from: u64) {}
-
-    fn unseal(&self, _shard: u32) {}
-
-    fn remove_grain(&self, _shard: u32, _grain: &GrainName) {}
-
-    fn shard_bytes(&self, _shard: u32) -> u64 {
-        0
-    }
-}
-
-impl GrainBlobStore for RefusingStore {
-    fn put_blob(&self, _shard: u32, _grain: &GrainName, _id: BlobId, _bytes: Vec<u8>) {}
-
-    fn get_blob(&self, _shard: u32, _grain: &GrainName, _id: BlobId) -> Option<Vec<u8>> {
-        None
-    }
-
-    fn has_blob(&self, _shard: u32, _grain: &GrainName, _id: BlobId) -> bool {
-        false
-    }
-
-    fn delete_blob(&self, _shard: u32, _grain: &GrainName, _id: BlobId) {}
-
-    fn delete_blobs(&self, _shard: u32, _grain: &GrainName) {}
-
-    fn retain_blobs(&self, _shard: u32, _grain: &GrainName, _retain: &BTreeSet<BlobId>) {}
-
-    fn blob_ids(&self, _shard: u32, _grain: &GrainName) -> Vec<BlobId> {
-        vec![]
-    }
 }
 
 // --- Tests --------------------------------------------------------------------
@@ -507,7 +402,12 @@ fn unacked_registration_keeps_an_alarmed_grain_resident() {
         .build();
     let index = system.granary::<AlarmIndex<SimSystem>>(GranaryConfig {
         shards: SHARDS,
-        grain_store: Some(Arc::new(|_| Arc::new(RefusingStore) as Arc<dyn GrainStore>)),
+        // An index whose registrations never acknowledge: reads succeed, so
+        // activation gets far enough for the refusal to land at the commit, exactly
+        // where it does in production.
+        grain_store: Some(StaticGrainStore::factory(StoreAck::Fenced(Term::new(
+            u64::MAX,
+        )))),
         ..GranaryConfig::default()
     });
     let timers = system.granary_with_alarms::<Timer>(

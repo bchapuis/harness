@@ -16,8 +16,9 @@
 //! (the same substrate the Raft WAL is built on), so this module is just the grain
 //! store's layout and policy over it.
 //!
-//! **Layout.** A node's store is a directory holding three kinds of file:
+//! **Layout.** A node's store is a directory holding:
 //!
+//! - `LOCK` — the single-writer guard (see below), taken before anything is read.
 //! - `segments/<id>` — one **per-grain op log** ([`wal::Wal`] of [`SegOp`]). Each grain
 //!   is an independent segment: its mutating calls
 //!   ([`store_record`](GrainStore::store_record),
@@ -25,17 +26,28 @@
 //!   are appended and fsynced before the call returns. Because segments are per grain,
 //!   one grain's snapshot compaction rewrites only that grain's file, never the whole
 //!   node's store — the write amplification that a single shared log would suffer under
-//!   many grains is gone.
+//!   many grains is gone. The cost is the other side of that trade: a grain owns a
+//!   file, so a node's file count tracks its grain count, and no two grains' appends
+//!   can share an fsync.
 //! - `manifest` — an append-only map from `(shard, GrainName)` to a small integer
 //!   segment **id**, so segment filenames are collision-free whatever a grain's key
 //!   contains. A grain's segment is opened and replayed **lazily**, on first access,
-//!   so a node holding millions of grains does not scan them all at startup.
+//!   so a node holding millions of grains does not scan them all at startup — though
+//!   the manifest itself is replayed and held whole, and only ever grows: an id
+//!   assignment outlives the grain it names, which is why *presence* is the files',
+//!   not the manifest's, to answer ([`grains`](GrainStore::grains)).
 //! - `fences/<shard>` — the per-shard **fence**: the highest shard term this node has
 //!   acknowledged (§8), the one piece of state shared across a shard's grains. It is
 //!   rewritten (atomically) only when the term advances — on failover and recovery
 //!   `prepare`, never on a steady-state append — and loaded eagerly on open (there are
 //!   few shards per node), so a grain's records load lazily while the fence that
 //!   guards them is always known.
+//! - `seals/<shard>` — the per-shard **append bound** (§7.7): refuse appends at or
+//!   above this name hash. Durable and loaded eagerly for the same reason as the
+//!   fence — a restart that forgot the bound could let a stale leader assemble a
+//!   majority for a range a split moved away (**G15**).
+//! - `blobs/<id>/<blob hex>` — a grain's content-addressed blob area (§7.10), one
+//!   file per blob under the same collision-free id the manifest assigns the grain.
 //!
 //! **Snapshot-driven compaction (§9).** When a stored snapshot advances a grain's
 //! compacted base (dropping the records it subsumes), that grain's segment is rewritten
@@ -59,11 +71,21 @@
 //! [`FileRaftWAL`](actor_runtime), this panics on an I/O error after open rather than
 //! risk announcing un-persisted state; peers observe the node unreachable.
 //!
-//! **Single writer.** A node's directory must belong to one process at a time. The
-//! [`factory`](FileGrainStore::factory) caches per node, so repeated hostings within a
-//! process share one instance, and a restart opens a fresh one. Each grain's mutations
-//! serialize on its own segment lock, so different grains persist concurrently; the
-//! shared fence sits behind its own short leaf lock.
+//! **Single writer.** A node's directory belongs to one store at a time, enforced by
+//! an advisory `flock` on `LOCK` held for the store's lifetime — so a second
+//! [`open`](FileGrainStore::open) of the same directory fails by name instead of
+//! quietly interleaving appends into the first's segments. Within a process the
+//! [`factory`](FileGrainStore::factory) caches per node, so repeated hostings share
+//! one instance and never contend for it. Each grain's mutations serialize on its own
+//! segment lock, so different grains persist concurrently; the shared fence sits
+//! behind its own short leaf lock.
+//!
+//! **Durability reporting.** Every mutating method returns a
+//! [`Reserved`](crate::store::Reserved): the outcome is settled under the grain's
+//! segment lock before the call returns, and its stability is awaited separately.
+//! This store fsyncs inside the call, so its outcomes are stable as soon as they are
+//! settled and every `Reserved` it hands back is already ready; the seam is shaped
+//! that way for a store whose writers share one fsync.
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -91,6 +113,7 @@ use crate::store::GrainStore;
 use crate::store::GrainStoreFactory;
 use crate::store::ReadOutcome;
 use crate::store::ReadReply;
+use crate::store::Reserved;
 use crate::store::StoreAck;
 use crate::store::WriteGuard;
 use crate::store::WriteKind;
@@ -175,6 +198,11 @@ struct Manifest {
 /// See the module docs for the layout, recovery, and failure policy.
 pub struct FileGrainStore {
     dir: PathBuf,
+    /// The single-writer guard (see the module docs), held open for this store's
+    /// lifetime because the lock lasts exactly as long as the open file does.
+    /// `None` where the platform has no advisory lock; the invariant is then
+    /// documented rather than enforced.
+    _lock: Option<fs::File>,
     /// The per-shard fence (§8), mirrored from `fences/<shard>`; its own leaf lock.
     fences: Mutex<HashMap<u32, Term>>,
     /// The per-shard append bound (§7.7), mirrored from `seals/<shard>`: refuse
@@ -196,6 +224,10 @@ impl FileGrainStore {
     /// Any filesystem error opening the directory or its index files.
     pub fn open(dir: impl Into<PathBuf>) -> io::Result<FileGrainStore> {
         let dir = dir.into();
+        fs::create_dir_all(&dir)?;
+        // Before anything is read: two writers in one directory would interleave
+        // appends into each other's segments and each recover a state neither wrote.
+        let lock = acquire_lock(&dir)?;
         fs::create_dir_all(dir.join("segments"))?;
         fs::create_dir_all(dir.join("fences"))?;
         // The per-shard append bounds (§7.7), one small file per sealed shard.
@@ -215,6 +247,7 @@ impl FileGrainStore {
 
         Ok(FileGrainStore {
             dir,
+            _lock: lock,
             fences: Mutex::new(fences),
             seals: Mutex::new(seals),
             segments: Mutex::new(HashMap::new()),
@@ -257,9 +290,23 @@ impl FileGrainStore {
             return Some(Arc::clone(segment));
         }
         let id = self.segment_id(shard, grain, create)?;
+        // An id is not evidence the grain still exists. The manifest is append-only,
+        // so `remove_grain` leaves the assignment behind and `segment_id` keeps
+        // answering for a grain whose files are gone — while `open_segment` would
+        // *create* the segment file it opens. Without this check a plain `read` of a
+        // removed grain silently resurrects it on disk: the reply is still empty, so
+        // nothing looks wrong, but the grain reappears in `grains` and its file leaks.
+        if !create && !self.segment_path(id).exists() {
+            return None;
+        }
         let segment = Arc::new(open_segment(&self.dir, id));
         segments.insert((shard, grain.clone()), Arc::clone(&segment));
         Some(segment)
+    }
+
+    /// The on-disk path of one grain's segment log, `segments/<segment id>`.
+    fn segment_path(&self, seg_id: u64) -> PathBuf {
+        self.dir.join("segments").join(seg_id.to_string())
     }
 
     /// The loaded segment for `(shard, grain)`, allocating one if the grain is unknown
@@ -316,6 +363,22 @@ impl FileGrainStore {
         self.blob_dir(seg_id).join(id.to_string())
     }
 
+    /// Drop the live segment handle, its on-disk log, and the blob subtree of one
+    /// grain. The manifest keeps the id assignment (append-only); a later access
+    /// reopens an empty segment under the same id, which reads as absent.
+    ///
+    /// Shared by `remove_grain` and the range reclamations, which differ only in
+    /// which grains they select — so the removal itself is stated once.
+    fn remove_grain_inner(&self, shard: u32, grain: &GrainName) {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return;
+        };
+        let mut segments = self.segments.lock().expect("grain store segments poisoned");
+        segments.remove(&(shard, grain.clone()));
+        let _ = fs::remove_file(self.segment_path(seg_id));
+        let _ = fs::remove_dir_all(self.blob_dir(seg_id));
+    }
+
     /// Rewrite a grain's segment to a single `Checkpoint` of its current state, folding
     /// away the record ops a snapshot made redundant (§9), and swap in the fresh append
     /// handle. Called under the held segment lock so no append races the rewrite.
@@ -330,6 +393,43 @@ impl FileGrainStore {
                 )
             });
     }
+}
+
+/// Take the store directory's single-writer lock, held until the returned handle is
+/// dropped (the lock lives on the open file description, not the path).
+///
+/// An advisory `flock` rather than a pid file, because the kernel drops it when the
+/// holder's process ends: a node that crashed mid-write must be openable by its
+/// replacement, which a stale pid file on disk would refuse. The cost is that it is
+/// advisory — it stops another *`FileGrainStore`*, not a stray `rm`.
+#[cfg(unix)]
+fn acquire_lock(dir: &Path) -> io::Result<Option<fs::File>> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join("LOCK"))?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
+        |err| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "grain store at {} is already open: a node's directory belongs to one \
+                     writer at a time, and two would interleave appends into each other's \
+                     segments ({err})",
+                    dir.display()
+                ),
+            )
+        },
+    )?;
+    Ok(Some(file))
+}
+
+/// Where no advisory lock is available the single-writer rule stands as documentation
+/// (as `wal::sync_dir` does for the directory fsync).
+#[cfg(not(unix))]
+fn acquire_lock(_dir: &Path) -> io::Result<Option<fs::File>> {
+    Ok(None)
 }
 
 /// Load every `fences/<shard>` file into a shard→term map (eager: there are few shards
@@ -353,8 +453,8 @@ fn load_fences(dir: &Path) -> io::Result<HashMap<u32, Term>> {
 /// Open and replay the manifest, truncating any torn tail.
 fn load_manifest(dir: &Path) -> io::Result<Manifest> {
     let path = dir.join("manifest");
-    let (log, entries) =
-        Wal::<ManifestEntry>::open(&path, MAX_RECORD, &MANIFEST_RECORDS).map_err(|e| e.into_io())?;
+    let (log, entries) = Wal::<ManifestEntry>::open(&path, MAX_RECORD, &MANIFEST_RECORDS)
+        .map_err(|e| e.into_io())?;
     let mut ids = HashMap::new();
     let mut next = 0u64;
     for entry in entries {
@@ -488,8 +588,12 @@ impl WriteGuard for FileGrainStore {
     }
 }
 
+// Every reply is `Reserved::ready`: this store still fsyncs synchronously inside each
+// call, so an outcome it settles is already stable when it returns. The packed store
+// is what makes that wait shared rather than per-write; the seam is shaped for it now
+// so the change is one implementation, not one more signature break.
 impl GrainBlobStore for FileGrainStore {
-    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) {
+    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) -> Reserved<()> {
         // A blob is its own content-addressed file under the grain's blob subtree.
         // Persisted with the same atomic write-and-fsync the fence uses, so a replica
         // never acknowledges a blob it has not durably stored.
@@ -500,7 +604,7 @@ impl GrainBlobStore for FileGrainStore {
         let name = id.to_string();
         // Idempotent: equal content under the same id is already durable (B2).
         if dir.join(&name).exists() {
-            return;
+            return Reserved::ready(());
         }
         fs::create_dir_all(&dir).unwrap_or_else(|err| {
             panic!("grain store blob dir failed at {}: {err}", dir.display())
@@ -512,51 +616,60 @@ impl GrainBlobStore for FileGrainStore {
                 dir.display()
             )
         });
+        Reserved::ready(())
     }
 
-    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>> {
-        let seg_id = self.segment_id(shard, grain, false)?;
+    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Reserved<Option<Vec<u8>>> {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return Reserved::ready(None);
+        };
         let path = self.blob_path(seg_id, id);
-        match fs::read(&path) {
+        Reserved::ready(match fs::read(&path) {
             Ok(bytes) => Some(bytes),
             Err(err) if err.kind() == io::ErrorKind::NotFound => None,
             Err(err) => panic!("grain store blob read failed at {}: {err}", path.display()),
+        })
+    }
+
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Reserved<bool> {
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return Reserved::ready(false);
+        };
+        Reserved::ready(self.blob_path(seg_id, id).exists())
+    }
+
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Reserved<()> {
+        if let Some(seg_id) = self.segment_id(shard, grain, false) {
+            // Best-effort: removing a corrupt copy so the read path can re-store a
+            // good one (§7.10 self-heal). A missing file is already done.
+            let _ = fs::remove_file(self.blob_path(seg_id, id));
         }
+        Reserved::ready(())
     }
 
-    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool {
-        let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return false;
-        };
-        self.blob_path(seg_id, id).exists()
+    fn delete_blobs(&self, shard: u32, grain: &GrainName) -> Reserved<()> {
+        if let Some(seg_id) = self.segment_id(shard, grain, false) {
+            // Reclamation is best-effort (a leaked blob is harmless, only space): a
+            // missing subtree is already-done, any other error is left for a later
+            // sweep.
+            let _ = fs::remove_dir_all(self.blob_dir(seg_id));
+        }
+        Reserved::ready(())
     }
 
-    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) {
+    fn retain_blobs(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        retain: &BTreeSet<BlobId>,
+    ) -> Reserved<()> {
         let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return;
-        };
-        // Best-effort: removing a corrupt copy so the read path can re-store a good
-        // one (§7.10 self-heal). A missing file is already done.
-        let _ = fs::remove_file(self.blob_path(seg_id, id));
-    }
-
-    fn delete_blobs(&self, shard: u32, grain: &GrainName) {
-        let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return;
-        };
-        // Reclamation is best-effort (a leaked blob is harmless, only space): a
-        // missing subtree is already-done, any other error is left for a later sweep.
-        let _ = fs::remove_dir_all(self.blob_dir(seg_id));
-    }
-
-    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>) {
-        let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return;
+            return Reserved::ready(());
         };
         let dir = self.blob_dir(seg_id);
         let keep: HashSet<String> = retain.iter().map(|id| id.to_string()).collect();
         let Ok(entries) = fs::read_dir(&dir) else {
-            return;
+            return Reserved::ready(());
         };
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
@@ -565,19 +678,22 @@ impl GrainBlobStore for FileGrainStore {
                 let _ = fs::remove_file(entry.path());
             }
         }
+        Reserved::ready(())
     }
 
-    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId> {
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Reserved<Vec<BlobId>> {
         let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return Vec::new();
+            return Reserved::ready(Vec::new());
         };
         let Ok(entries) = fs::read_dir(self.blob_dir(seg_id)) else {
-            return Vec::new();
+            return Reserved::ready(Vec::new());
         };
-        entries
-            .flatten()
-            .filter_map(|entry| BlobId::from_hex(entry.file_name().to_str()?))
-            .collect()
+        Reserved::ready(
+            entries
+                .flatten()
+                .filter_map(|entry| BlobId::from_hex(entry.file_name().to_str()?))
+                .collect(),
+        )
     }
 }
 
@@ -590,14 +706,14 @@ impl GrainStore for FileGrainStore {
         term: Term,
         records: Vec<Vec<u8>>,
         kind: WriteKind,
-    ) -> StoreAck {
+    ) -> Reserved<StoreAck> {
         let segment = self.segment_or_create(shard, grain);
         // Guard under the segment lock (durable fence bump included), so a concurrent
         // `prepare` for this grain cannot slip between the check and the apply (the
         // fencing race, §8).
         let mut inner = segment.inner.lock().expect("grain segment poisoned");
         if let Err(ack) = self.guard_record(shard, grain, term, kind) {
-            return ack;
+            return Reserved::ready(ack);
         }
         inner
             .log
@@ -614,11 +730,11 @@ impl GrainStore for FileGrainStore {
                     segment.path.display()
                 )
             });
-        inner.records.store_record(after, term, records, kind)
+        Reserved::ready(inner.records.store_record(after, term, records, kind))
     }
 
-    fn read(&self, shard: u32, grain: &GrainName) -> ReadReply {
-        match self.segment_existing(shard, grain) {
+    fn read(&self, shard: u32, grain: &GrainName) -> Reserved<ReadReply> {
+        Reserved::ready(match self.segment_existing(shard, grain) {
             Some(segment) => segment
                 .inner
                 .lock()
@@ -629,7 +745,7 @@ impl GrainStore for FileGrainStore {
                 slots: Vec::new(),
                 snapshot: None,
             },
-        }
+        })
     }
 
     fn read_from(
@@ -638,8 +754,8 @@ impl GrainStore for FileGrainStore {
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> Vec<(Seq, Vec<u8>)> {
-        match self.segment_existing(shard, grain) {
+    ) -> Reserved<Vec<(Seq, Vec<u8>)>> {
+        Reserved::ready(match self.segment_existing(shard, grain) {
             Some(segment) => segment
                 .inner
                 .lock()
@@ -647,10 +763,10 @@ impl GrainStore for FileGrainStore {
                 .records
                 .read_from(from, limit),
             None => Vec::new(),
-        }
+        })
     }
 
-    fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> ReadOutcome {
+    fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> Reserved<ReadOutcome> {
         // The promise (the fence bump) must be durable before it is made — else a
         // restart could forget it and let a deposed leader commit (§8). Create the
         // segment even for a grain never seen here, exactly as `MemoryGrainStore`
@@ -661,9 +777,9 @@ impl GrainStore for FileGrainStore {
         let segment = self.segment_or_create(shard, grain);
         let inner = segment.inner.lock().expect("grain segment poisoned");
         if let Err(fence) = self.bump_fence(shard, term) {
-            return ReadOutcome::Fenced(fence);
+            return Reserved::ready(ReadOutcome::Fenced(fence));
         }
-        ReadOutcome::Prepared(inner.records.read())
+        Reserved::ready(ReadOutcome::Prepared(inner.records.read()))
     }
 
     fn store_snapshot(
@@ -674,11 +790,11 @@ impl GrainStore for FileGrainStore {
         term: Term,
         state: Vec<u8>,
         kind: WriteKind,
-    ) -> StoreAck {
+    ) -> Reserved<StoreAck> {
         let segment = self.segment_or_create(shard, grain);
         let mut inner = segment.inner.lock().expect("grain segment poisoned");
         if let Err(ack) = self.guard_snapshot(shard, term, kind) {
-            return ack;
+            return Reserved::ready(ack);
         }
         let (ack, advanced) = inner.records.store_snapshot(at, term, state);
         // A snapshot that advanced the base just compacted the records it subsumes
@@ -689,11 +805,18 @@ impl GrainStore for FileGrainStore {
         if advanced {
             self.checkpoint(&segment, &mut inner);
         }
-        ack
+        Reserved::ready(ack)
     }
 
-    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: Term) {
-        let segment = self.segment_or_create(shard, grain);
+    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: Term) -> Reserved<()> {
+        // A grain this store holds nothing for has no tail to drop, and truncating
+        // one must not bring it into existence — it would then be enumerated by
+        // `grains` and migrated as if it held data (`MemoryGrainStore` creates
+        // nothing here either). This also spares the durable write: the rollback of
+        // an append that never landed locally has nothing to undo.
+        let Some(segment) = self.segment_existing(shard, grain) else {
+            return Reserved::ready(());
+        };
         let mut inner = segment.inner.lock().expect("grain segment poisoned");
         inner
             .log
@@ -705,22 +828,39 @@ impl GrainStore for FileGrainStore {
                 )
             });
         inner.records.truncate(after, term);
+        Reserved::ready(())
     }
 
     fn grains(&self, shard: u32) -> Vec<GrainName> {
         // The manifest assigns a segment id on the first record OR the first blob
-        // (`put_blob` allocates through the same map), so its keys are the union.
-        self.manifest
-            .lock()
-            .expect("grain store manifest poisoned")
-            .ids
-            .keys()
-            .filter(|(s, _)| *s == shard)
-            .map(|(_, grain)| grain.clone())
+        // (`put_blob` allocates through the same map), so its keys are the union of
+        // the two areas — but only ever *grow*: the log is append-only, so
+        // `remove_grain` leaves the id assignment behind (it must, to keep segment
+        // filenames collision-free). The manifest therefore answers "has this store
+        // ever held anything for this grain", where the seam asks whether it holds
+        // anything *now*. So the presence of the grain's own files is the answer, and
+        // the manifest is only the candidate list.
+        let ids: Vec<(GrainName, u64)> = {
+            let manifest = self.manifest.lock().expect("grain store manifest poisoned");
+            manifest
+                .ids
+                .iter()
+                .filter(|((s, _), _)| *s == shard)
+                .map(|((_, grain), &id)| (grain.clone(), id))
+                .collect()
+        };
+        ids.into_iter()
+            .filter(|(_, id)| {
+                // Records or blobs — either makes the grain held. A blob-only grain
+                // has no segment file, since `put_blob` allocates an id without
+                // opening the segment.
+                self.segment_path(*id).exists() || self.blob_dir(*id).exists()
+            })
+            .map(|(grain, _)| grain)
             .collect()
     }
 
-    fn seal_range(&self, shard: u32, from: u64) {
+    fn seal_range(&self, shard: u32, from: u64) -> Reserved<()> {
         let mut seals = self.seals.lock().expect("grain store seals poisoned");
         // Monotone tighten, persisted before it is honoured — the bound is a
         // promise (like the fence) and must survive a restart, else a stale
@@ -736,28 +876,55 @@ impl GrainStore for FileGrainStore {
             });
             seals.insert(shard, bound);
         }
+        Reserved::ready(())
     }
 
-    fn unseal(&self, shard: u32) {
+    fn unseal(&self, shard: u32) -> Reserved<()> {
         let mut seals = self.seals.lock().expect("grain store seals poisoned");
         if seals.remove(&shard).is_some() {
             // Best-effort removal: a leftover file re-seals on reopen, which a
             // re-applied merge commit clears again — conservative, never unsafe.
             let _ = fs::remove_file(self.dir.join("seals").join(shard.to_string()));
         }
+        Reserved::ready(())
     }
 
-    fn remove_grain(&self, shard: u32, grain: &GrainName) {
-        // Drop the live segment handle, its on-disk log, and the blob subtree.
-        // The manifest keeps the id assignment (append-only); a later access
-        // reopens an empty segment under the same id, which reads as absent.
-        let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return;
-        };
-        let mut segments = self.segments.lock().expect("grain store segments poisoned");
-        segments.remove(&(shard, grain.clone()));
-        let _ = fs::remove_file(self.dir.join("segments").join(seg_id.to_string()));
-        let _ = fs::remove_dir_all(self.blob_dir(seg_id));
+    fn remove_grain(&self, shard: u32, grain: &GrainName) -> Reserved<()> {
+        self.remove_grain_inner(shard, grain);
+        Reserved::ready(())
+    }
+
+    /// Enumerate-and-remove, because a grain owns a file: the range is expressible
+    /// only as the set of files in it. The packed store replaces this with a bound
+    /// it can honour by discarding whole packs — which is why the seam states the
+    /// range rather than the loop.
+    fn remove_range(&self, shard: u32, from: u64) -> Reserved<()> {
+        for grain in self.grains(shard) {
+            if crate::system::name_at_or_above(&grain, from) {
+                self.remove_grain_inner(shard, &grain);
+            }
+        }
+        Reserved::ready(())
+    }
+
+    fn drop_shard(&self, shard: u32) -> Reserved<()> {
+        for grain in self.grains(shard) {
+            self.remove_grain_inner(shard, &grain);
+        }
+        // The fence and the bound go with the data (see `MemoryGrainStore`), so a
+        // shard index reused later starts from a clean promise rather than one this
+        // shard's retired leader made.
+        self.fences
+            .lock()
+            .expect("grain store fences poisoned")
+            .remove(&shard);
+        let _ = fs::remove_file(self.dir.join("fences").join(shard.to_string()));
+        self.seals
+            .lock()
+            .expect("grain store seals poisoned")
+            .remove(&shard);
+        let _ = fs::remove_file(self.dir.join("seals").join(shard.to_string()));
+        Reserved::ready(())
     }
 
     fn shard_bytes(&self, shard: u32) -> u64 {
@@ -774,7 +941,7 @@ impl GrainStore for FileGrainStore {
         };
         let mut total = 0u64;
         for id in ids {
-            let seg_path = self.dir.join("segments").join(id.to_string());
+            let seg_path = self.segment_path(id);
             if let Ok(meta) = fs::metadata(&seg_path) {
                 total += meta.len();
             }
@@ -801,6 +968,33 @@ mod tests {
         GrainName::new("test.Grain", key)
     }
 
+    /// Drive a store call to its durable outcome. These tests are synchronous by
+    /// design — `a_prepare_append_race_never_hides_a_stored_record` races the store's
+    /// own lock discipline (§18.1), which an async task cannot exercise — so they
+    /// block rather than run a runtime.
+    fn now<T: Send + 'static>(reserved: Reserved<T>) -> T {
+        futures::executor::block_on(reserved.durable())
+    }
+
+    /// The single-writer rule, enforced rather than documented. Two stores over one
+    /// directory would interleave appends into each other's segments and each recover
+    /// a state neither wrote.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_open_of_one_directory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = FileGrainStore::open(dir.path()).expect("first open");
+        assert!(
+            FileGrainStore::open(dir.path()).is_err(),
+            "a second store opened a directory another already holds"
+        );
+        // Released with the store, so a replacement can take over — the reason this
+        // is an advisory lock on an open file and not a pid file left on disk, which
+        // a crashed node could never clear.
+        drop(first);
+        FileGrainStore::open(dir.path()).expect("reopen once the holder is gone");
+    }
+
     #[test]
     fn records_round_trip_across_a_reopen() {
         let dir = tempfile::tempdir().unwrap();
@@ -808,33 +1002,33 @@ mod tests {
         {
             let store = FileGrainStore::open(dir.path()).unwrap();
             assert_eq!(
-                store.store_record(
+                now(store.store_record(
                     0,
                     &n,
                     Seq::ZERO,
                     Term::new(1),
                     vec![b"e1".to_vec(), b"e2".to_vec()],
                     WriteKind::Append
-                ),
+                )),
                 StoreAck::Stored(Seq::new(2))
             );
             // A snapshot below the head leaves a live tail, so records survive reopen.
             assert_eq!(
-                store.store_snapshot(
+                now(store.store_snapshot(
                     0,
                     &n,
                     Seq::new(1),
                     Term::new(1),
                     b"snap".to_vec(),
                     WriteKind::Append
-                ),
+                )),
                 StoreAck::Stored(Seq::new(1))
             );
         }
         // A fresh open recovers the retained record (e1 is compacted under the
         // snapshot at seq 1), its term, and the snapshot from disk.
         let reopened = FileGrainStore::open(dir.path()).unwrap();
-        let reply = reopened.read(0, &n);
+        let reply = now(reopened.read(0, &n));
         assert_eq!(
             reply.slots,
             vec![(Seq::new(2), Term::new(1), b"e2".to_vec())]
@@ -852,14 +1046,14 @@ mod tests {
         let store = FileGrainStore::open(dir.path()).unwrap();
         // Grow the grain's segment with many sizeable records.
         for i in 0..50u64 {
-            store.store_record(
+            now(store.store_record(
                 0,
                 &n,
                 Seq::new(i),
                 Term::new(1),
                 vec![vec![b'x'; 1000]],
                 WriteKind::Append,
-            );
+            ));
         }
         let id = *store
             .manifest
@@ -873,14 +1067,14 @@ mod tests {
 
         // A snapshot at the head subsumes every record: the segment compacts and its
         // file is rewritten to a single (small) checkpoint.
-        store.store_snapshot(
+        now(store.store_snapshot(
             0,
             &n,
             Seq::new(50),
             Term::new(1),
             b"snap@50".to_vec(),
             WriteKind::Append,
-        );
+        ));
         let after = fs::metadata(&seg_path).unwrap().len();
         assert!(
             after < before,
@@ -890,7 +1084,7 @@ mod tests {
 
         // The compacted segment reloads the snapshot and the (now empty) live tail.
         let reopened = FileGrainStore::open(dir.path()).unwrap();
-        let reply = reopened.read(0, &n);
+        let reply = now(reopened.read(0, &n));
         assert!(reply.slots.is_empty());
         assert_eq!(
             reply.snapshot,
@@ -898,14 +1092,14 @@ mod tests {
         );
         // The next append continues contiguously from the recovered head.
         assert_eq!(
-            reopened.store_record(
+            now(reopened.store_record(
                 0,
                 &n,
                 Seq::new(50),
                 Term::new(1),
                 vec![b"e51".to_vec()],
                 WriteKind::Append
-            ),
+            )),
             StoreAck::Stored(Seq::new(51))
         );
     }
@@ -915,22 +1109,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = (name("a"), name("b"));
         let store = FileGrainStore::open(dir.path()).unwrap();
-        store.store_record(
+        now(store.store_record(
             0,
             &a,
             Seq::ZERO,
             Term::new(1),
             vec![b"a1".to_vec()],
             WriteKind::Append,
-        );
-        store.store_record(
+        ));
+        now(store.store_record(
             0,
             &b,
             Seq::ZERO,
             Term::new(1),
             vec![b"b1".to_vec(), b"b2".to_vec()],
             WriteKind::Append,
-        );
+        ));
         let id_b = *store
             .manifest
             .lock()
@@ -941,14 +1135,14 @@ mod tests {
         let b_path = dir.path().join("segments").join(id_b.to_string());
         let b_before = fs::read(&b_path).unwrap();
         // Compacting grain `a` must not rewrite grain `b`'s segment.
-        store.store_snapshot(
+        now(store.store_snapshot(
             0,
             &a,
             Seq::new(1),
             Term::new(1),
             b"snap-a".to_vec(),
             WriteKind::Append,
-        );
+        ));
         assert_eq!(
             fs::read(&b_path).unwrap(),
             b_before,
@@ -961,23 +1155,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let n = name("a");
         let store = FileGrainStore::open(dir.path()).unwrap();
-        store.store_record(
+        now(store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(1),
             vec![b"e1".to_vec(), b"e2".to_vec()],
             WriteKind::Append,
-        );
+        ));
         // A first snapshot advances the base and compacts to a checkpoint.
-        store.store_snapshot(
+        now(store.store_snapshot(
             0,
             &n,
             Seq::new(2),
             Term::new(1),
             b"snap@2".to_vec(),
             WriteKind::Append,
-        );
+        ));
         let id = *store
             .manifest
             .lock()
@@ -991,14 +1185,14 @@ mod tests {
         // re-activations would — must write nothing: the segment file does not grow.
         for _ in 0..20 {
             assert_eq!(
-                store.store_snapshot(
+                now(store.store_snapshot(
                     0,
                     &n,
                     Seq::new(2),
                     Term::new(1),
                     b"snap@2".to_vec(),
                     WriteKind::Append
-                ),
+                )),
                 StoreAck::Stored(Seq::new(2))
             );
         }
@@ -1011,7 +1205,7 @@ mod tests {
         drop(store);
         let reopened = FileGrainStore::open(dir.path()).unwrap();
         assert_eq!(
-            reopened.read(0, &n).snapshot,
+            now(reopened.read(0, &n)).snapshot,
             Some((Seq::new(2), Term::new(1), b"snap@2".to_vec()))
         );
     }
@@ -1023,47 +1217,47 @@ mod tests {
         {
             let store = FileGrainStore::open(dir.path()).unwrap();
             // Bound the whole space: every append on shard 0 is refused.
-            store.seal_range(0, 0);
+            now(store.seal_range(0, 0));
         }
         // The bound is a durable promise (G15): a reopen must not forget it, or a
         // stale leader could assemble a majority for the moved range afterward.
         let reopened = FileGrainStore::open(dir.path()).unwrap();
         assert_eq!(
-            reopened.store_record(
+            now(reopened.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(9),
                 vec![b"e".to_vec()],
                 WriteKind::Append
-            ),
+            )),
             StoreAck::Sealed
         );
         // A repair (the split driver's write-back) still lands.
         assert!(matches!(
-            reopened.store_record(
+            now(reopened.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(9),
                 vec![b"e".to_vec()],
                 WriteKind::Repair
-            ),
+            )),
             StoreAck::Stored(_)
         ));
         // A committed merge lifts the bound, durably.
-        reopened.unseal(0);
+        now(reopened.unseal(0));
         drop(reopened);
         let again = FileGrainStore::open(dir.path()).unwrap();
         assert!(matches!(
-            again.store_record(
+            now(again.store_record(
                 0,
                 &n,
                 Seq::new(1),
                 Term::new(9),
                 vec![b"e2".to_vec()],
                 WriteKind::Append
-            ),
+            )),
             StoreAck::Stored(_)
         ));
     }
@@ -1074,23 +1268,23 @@ mod tests {
         let n = name("moved");
         {
             let store = FileGrainStore::open(dir.path()).unwrap();
-            store.store_record(
+            now(store.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(1),
                 vec![b"e1".to_vec()],
                 WriteKind::Append,
-            );
-            store.put_blob(0, &n, BlobId::of(b"b"), b"b".to_vec());
-            store.remove_grain(0, &n);
-            assert!(store.read(0, &n).slots.is_empty());
-            assert!(!store.has_blob(0, &n, BlobId::of(b"b")));
+            ));
+            now(store.put_blob(0, &n, BlobId::of(b"b"), b"b".to_vec()));
+            now(store.remove_grain(0, &n));
+            assert!(now(store.read(0, &n)).slots.is_empty());
+            assert!(!now(store.has_blob(0, &n, BlobId::of(b"b"))));
         }
         // Durable: the reopened store does not resurrect the grain.
         let reopened = FileGrainStore::open(dir.path()).unwrap();
-        assert!(reopened.read(0, &n).slots.is_empty());
-        assert!(reopened.blob_ids(0, &n).is_empty());
+        assert!(now(reopened.read(0, &n)).slots.is_empty());
+        assert!(now(reopened.blob_ids(0, &n)).is_empty());
     }
 
     #[test]
@@ -1101,21 +1295,21 @@ mod tests {
             let store = FileGrainStore::open(dir.path()).unwrap();
             // A recovery prepare at term 5 promises not to accept a lower term.
             assert!(matches!(
-                store.prepare(0, &n, Term::new(5)),
+                now(store.prepare(0, &n, Term::new(5))),
                 ReadOutcome::Prepared(_)
             ));
         }
         // The promise is durable: after reopen, a term-4 write is still fenced.
         let reopened = FileGrainStore::open(dir.path()).unwrap();
         assert_eq!(
-            reopened.store_record(
+            now(reopened.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(4),
                 vec![b"stale".to_vec()],
                 WriteKind::Append
-            ),
+            )),
             StoreAck::Fenced(Term::new(5))
         );
     }
@@ -1131,7 +1325,7 @@ mod tests {
         let n = name("fresh");
         let store = FileGrainStore::open(dir.path()).unwrap();
         assert!(matches!(
-            store.prepare(0, &n, Term::new(2)),
+            now(store.prepare(0, &n, Term::new(2))),
             ReadOutcome::Prepared(_)
         ));
         // The segment now exists in the manifest: the prepare serialized on it.
@@ -1145,14 +1339,14 @@ mod tests {
         );
         // And the promise still fences a later lower-term append.
         assert_eq!(
-            store.store_record(
+            now(store.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(1),
                 vec![b"late".to_vec()],
                 WriteKind::Append
-            ),
+            )),
             StoreAck::Fenced(Term::new(2))
         );
     }
@@ -1176,19 +1370,19 @@ mod tests {
             let (s1, n1, b1) = (store.clone(), n.clone(), barrier.clone());
             let append = std::thread::spawn(move || {
                 b1.wait();
-                s1.store_record(
+                now(s1.store_record(
                     0,
                     &n1,
                     Seq::ZERO,
                     Term::new(1),
                     vec![b"e1".to_vec()],
                     WriteKind::Append,
-                )
+                ))
             });
             let (s2, n2, b2) = (store.clone(), n.clone(), barrier.clone());
             let prepare = std::thread::spawn(move || {
                 b2.wait();
-                s2.prepare(0, &n2, Term::new(2))
+                now(s2.prepare(0, &n2, Term::new(2)))
             });
             let ack = append.join().unwrap();
             let view = prepare.join().unwrap();
@@ -1209,21 +1403,21 @@ mod tests {
             // which must survive even though no segment was ever written.
             let store = FileGrainStore::open(dir.path()).unwrap();
             assert!(matches!(
-                store.prepare(0, &name("ghost"), Term::new(7)),
+                now(store.prepare(0, &name("ghost"), Term::new(7))),
                 ReadOutcome::Prepared(_)
             ));
         }
         let reopened = FileGrainStore::open(dir.path()).unwrap();
         // A different grain in the same shard is fenced by the recovered promise.
         assert_eq!(
-            reopened.store_record(
+            now(reopened.store_record(
                 0,
                 &name("other"),
                 Seq::ZERO,
                 Term::new(6),
                 vec![b"x".to_vec()],
                 WriteKind::Append
-            ),
+            )),
             StoreAck::Fenced(Term::new(7))
         );
     }
@@ -1234,14 +1428,14 @@ mod tests {
         let n = name("a");
         {
             let store = FileGrainStore::open(dir.path()).unwrap();
-            store.store_record(
+            now(store.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(1),
                 vec![b"e1".to_vec()],
                 WriteKind::Append,
-            );
+            ));
         }
         // A torn write: garbage lands after the valid record in the grain's segment.
         let id = {
@@ -1261,24 +1455,24 @@ mod tests {
 
         let reopened = FileGrainStore::open(dir.path()).unwrap();
         assert_eq!(
-            reopened.read(0, &n).slots,
+            now(reopened.read(0, &n)).slots,
             vec![(Seq::new(1), Term::new(1), b"e1".to_vec())]
         );
         // The recovery truncated the garbage; appends land cleanly after it.
         assert_eq!(
-            reopened.store_record(
+            now(reopened.store_record(
                 0,
                 &n,
                 Seq::new(1),
                 Term::new(1),
                 vec![b"e2".to_vec()],
                 WriteKind::Append
-            ),
+            )),
             StoreAck::Stored(Seq::new(2))
         );
         drop(reopened);
         let again = FileGrainStore::open(dir.path()).unwrap();
-        assert_eq!(again.read(0, &n).slots.len(), 2);
+        assert_eq!(now(again.read(0, &n)).slots.len(), 2);
     }
 
     /// The differential workhorse: drive the same op sequence through `FileGrainStore`
@@ -1329,30 +1523,30 @@ mod tests {
             // A fresh open every step: the state must come back from disk.
             let file = FileGrainStore::open(dir.path()).unwrap();
             assert_eq!(
-                file.read(0, &n).slots,
-                mirror.read(0, &n).slots,
+                now(file.read(0, &n)).slots,
+                now(mirror.read(0, &n)).slots,
                 "diverged before step {step}"
             );
             match op {
                 Op::Record(after, term, recs, kind) => {
-                    file.store_record(0, &n, *after, *term, recs.clone(), *kind);
-                    mirror.store_record(0, &n, *after, *term, recs.clone(), *kind);
+                    now(file.store_record(0, &n, *after, *term, recs.clone(), *kind));
+                    now(mirror.store_record(0, &n, *after, *term, recs.clone(), *kind));
                 }
                 Op::Snapshot(at, term, state) => {
-                    file.store_snapshot(0, &n, *at, *term, state.clone(), WriteKind::Append);
-                    mirror.store_snapshot(0, &n, *at, *term, state.clone(), WriteKind::Append);
+                    now(file.store_snapshot(0, &n, *at, *term, state.clone(), WriteKind::Append));
+                    now(mirror.store_snapshot(0, &n, *at, *term, state.clone(), WriteKind::Append));
                 }
                 Op::Prepare(term) => {
-                    file.prepare(0, &n, *term);
-                    mirror.prepare(0, &n, *term);
+                    now(file.prepare(0, &n, *term));
+                    now(mirror.prepare(0, &n, *term));
                 }
                 Op::Truncate(after, term) => {
-                    file.truncate(0, &n, *after, *term);
-                    mirror.truncate(0, &n, *after, *term);
+                    now(file.truncate(0, &n, *after, *term));
+                    now(mirror.truncate(0, &n, *after, *term));
                 }
             }
-            let f = file.read(0, &n);
-            let m = mirror.read(0, &n);
+            let f = now(file.read(0, &n));
+            let m = now(mirror.read(0, &n));
             assert_eq!(f.slots, m.slots, "slots diverged after step {step}");
             assert_eq!(
                 f.snapshot, m.snapshot,

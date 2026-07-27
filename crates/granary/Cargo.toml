@@ -19,6 +19,9 @@ actor-serialization.workspace = true
 compat.workspace = true
 wal.workspace = true
 blake3.workspace = true
+# `fs`, for the store directory's single-writer `flock` (`file_store`). Already in
+# the graph via `cap-std`; cargo unions this with the workspace's `process` feature.
+rustix = { workspace = true, features = ["fs"] }
 serde = { workspace = true }
 serde_json.workspace = true
 postcard.workspace = true

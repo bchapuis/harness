@@ -765,14 +765,20 @@ async fn apply_loop<R: RaftConsensus>(
                     // A parent replica arms the leader-local freeze and bounds
                     // its own store as apply-time catch-up; the driver's
                     // majority-acked seal fan is the authoritative barrier.
-                    if let Some((control, _)) = handles
-                        .lock()
-                        .expect("shard handles mutex poisoned")
-                        .get(&parent)
-                    {
-                        control.lock().expect("shard control poisoned").frozen_from =
-                            Some(boundary);
-                        local.seal_range(parent, boundary);
+                    //
+                    // The store call is *reserved* inside the handles guard and
+                    // awaited outside it: this loop holds `std::sync::Mutex`
+                    // guards, which cannot cross an await.
+                    let sealed = {
+                        let handles = handles.lock().expect("shard handles mutex poisoned");
+                        handles.get(&parent).map(|(control, _)| {
+                            control.lock().expect("shard control poisoned").frozen_from =
+                                Some(boundary);
+                            local.seal_range(parent, boundary)
+                        })
+                    };
+                    if let Some(sealed) = sealed {
+                        sealed.durable().await;
                     }
                 }
             }
@@ -818,24 +824,26 @@ async fn apply_loop<R: RaftConsensus>(
                 // bound in case this replica missed the driver's fan, and GC the
                 // moved grains' parent-keyed data — the child copy is
                 // quorum-durable, that is what licensed `SplitCommitted`.
-                if let Some((control, _)) = handles
-                    .lock()
-                    .expect("shard handles mutex poisoned")
-                    .get(&parent)
-                {
-                    {
-                        let mut control = control.lock().expect("shard control poisoned");
-                        control.range.end = plan.boundary - 1;
-                        control.frozen_from = None;
-                    }
-                    local.seal_range(parent, plan.boundary);
-                    for grain in local.grains(parent) {
-                        if crate::system::name_hash(grain.grain_type(), grain.key())
-                            >= plan.boundary
+                let reclaimed = {
+                    let handles = handles.lock().expect("shard handles mutex poisoned");
+                    handles.get(&parent).map(|(control, _)| {
                         {
-                            local.remove_grain(parent, &grain);
+                            let mut control = control.lock().expect("shard control poisoned");
+                            control.range.end = plan.boundary - 1;
+                            control.frozen_from = None;
                         }
-                    }
+                        // One bound and one range reclamation, rather than a bound
+                        // plus a walk of every grain in the shard to re-derive the
+                        // same boundary the bound already states (§7.7).
+                        (
+                            local.seal_range(parent, plan.boundary),
+                            local.remove_range(parent, plan.boundary),
+                        )
+                    })
+                };
+                if let Some((sealed, removed)) = reclaimed {
+                    sealed.durable().await;
+                    removed.durable().await;
                 }
                 // Child replicas (the parent's set, inherited): create the
                 // child's leader-election group and journal — only now, so no
@@ -885,15 +893,19 @@ async fn apply_loop<R: RaftConsensus>(
                         let guard = inner.lock().expect("shard map mutex poisoned");
                         guard.allocation.get(&right).map(|a| a.range.start)
                     };
-                    if let (Some(start), Some((control, _))) = (
-                        right_start,
-                        handles
-                            .lock()
-                            .expect("shard handles mutex poisoned")
-                            .get(&right),
-                    ) {
-                        control.lock().expect("shard control poisoned").frozen_from = Some(start);
-                        local.seal_range(right, start);
+                    let sealed = {
+                        let handles = handles.lock().expect("shard handles mutex poisoned");
+                        match (right_start, handles.get(&right)) {
+                            (Some(start), Some((control, _))) => {
+                                control.lock().expect("shard control poisoned").frozen_from =
+                                    Some(start);
+                                Some(local.seal_range(right, start))
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(sealed) = sealed {
+                        sealed.durable().await;
                     }
                 }
             }
@@ -927,15 +939,22 @@ async fn apply_loop<R: RaftConsensus>(
                 // left (a no-op-safe backstop when none do), so a stale
                 // higher-term leader can never append past left's committed range
                 // (G15). Left keeps its journal/group.
-                if let Some((control, _)) = handles
-                    .lock()
-                    .expect("shard handles mutex poisoned")
-                    .get(&left)
-                {
-                    control.lock().expect("shard control poisoned").range.end = new_end;
-                    local.unseal(left);
-                    if let Some(bound) = new_end.checked_add(1) {
-                        local.seal_range(left, bound);
+                let rebounded = {
+                    let handles = handles.lock().expect("shard handles mutex poisoned");
+                    handles.get(&left).map(|(control, _)| {
+                        control.lock().expect("shard control poisoned").range.end = new_end;
+                        (
+                            local.unseal(left),
+                            new_end
+                                .checked_add(1)
+                                .map(|bound| local.seal_range(left, bound)),
+                        )
+                    })
+                };
+                if let Some((unsealed, resealed)) = rebounded {
+                    unsealed.durable().await;
+                    if let Some(resealed) = resealed {
+                        resealed.durable().await;
                     }
                 }
                 // Right replicas: GC the now-unreachable right-keyed data (the
@@ -950,10 +969,11 @@ async fn apply_loop<R: RaftConsensus>(
                     .remove(&right)
                     .is_some();
                 if had_right {
-                    for grain in local.grains(right) {
-                        local.remove_grain(right, &grain);
-                    }
-                    local.unseal(right);
+                    // The whole shard goes, so say that once rather than walking
+                    // its grains to remove them one at a time; `drop_shard` also
+                    // clears right's fence and bound, which the retired shard has
+                    // no further use for.
+                    local.drop_shard(right).durable().await;
                 }
                 handles
                     .lock()

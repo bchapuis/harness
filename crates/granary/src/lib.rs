@@ -205,6 +205,7 @@ pub use store::MemoryGrainStore;
 pub use store::ReadOutcome;
 pub use store::ReadReply;
 pub use store::RecordSlot;
+pub use store::Reserved;
 pub use store::StoreAck;
 pub use store::WriteKind;
 pub use subscription::RecordBatch;
