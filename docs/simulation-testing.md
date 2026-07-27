@@ -283,23 +283,34 @@ a seed means. So the seed is the *discovery* mechanism; once the bug is
 understood, the durable regression is a scenario test that reproduces its shape.
 Write that too, and keep the corpus line as the cheap belt-and-braces.
 
-## When a sweep finds a bug you are not fixing yet
+## A workload outlives its runs
 
-The corpus is the ratchet for a bug that has been *understood* — a seed goes in,
-the scenario test that pins its shape goes in beside it, and from then on both
-run forever. A sweep that reproduces an **open** defect is a different situation:
-recording its seeds would make every run red until someone fixes the system, and
-deleting the sweep would throw away the reproduction.
+`run_cluster_swarm` drives every seed through the **same** workload value: `drive`
+takes `&self`, and the sweep calls it once per seed. So a field on the workload is
+sweep-scoped, not run-scoped, and the distinction decides whether an end-of-run
+assertion means anything.
 
-Quarantine it instead. Keep the workload, put the failing claim behind a flag the
-workload carries, and `#[ignore]` the one test that turns the flag on, with a
-reason naming the defect and where it is written up. The sweep's other tests —
-reproducibility, fault coverage — drive the same traffic with the claim off and
-stay green, so the workload keeps earning its place. `tenancy-directory-swarm` is
-the worked example, and `docs/simulation-hardening.md` §0 is what it points at.
+Two kinds of state end up on a workload, and only one belongs there:
 
-Un-ignore it in the commit that fixes the defect, and move its seeds into
-`corpus.txt` then — at that point they guard something again.
+- **Tallies** — "did this ever happen across the sweep": faults that fired,
+  activations that hibernated, reads that were actually checked, a violation flag
+  a client set. These are cumulative on purpose. `support::Exercised` is the
+  shared one.
+- **Expectations** — "what this run should find at the end": the names a run
+  acknowledged, the blobs it stored. These are per *run*, and a field is the wrong
+  place for them. Build them inside `drive` and share them among that run's client
+  tasks with a local `Arc<Mutex<_>>`.
+
+Getting this wrong does not fail loudly, it fails *convincingly*: seed N's
+expectations are checked against seed N+1's freshly empty grains, so the sweep
+reports acknowledged writes that vanished — a textbook G14 violation, on a system
+that did nothing wrong. It reads like the most serious kind of find, which is
+exactly why it is worth knowing about. It cost this tree two false reports, in
+`tenancy-directory-swarm` and `blob-store-swarm`, before the event stream showed
+that the "lost" name had been acknowledged in the *previous* seed's run.
+
+The tell, when a sweep claims a durability violation: check whether it fails on
+every seed *except the first*. Seed 0 has nothing to inherit.
 
 ## Adding a sweep
 

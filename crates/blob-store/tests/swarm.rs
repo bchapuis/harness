@@ -116,20 +116,12 @@ struct BlobSwarm {
     nodes: usize,
     clients: usize,
     ops: u64,
-    /// Blobs whose `put` was acknowledged, with the node that stored them.
-    /// Checked after the run heals: re-replication (**B6**) must have restored a
-    /// readable copy despite the crashes and partitions in between.
-    durable: Arc<Mutex<Durable>>,
-    /// Every namespace any client *attempted* to delete, successfully or not.
+    /// How many acknowledged blobs were re-read after a heal, tallied across the
+    /// whole sweep so a green run is not one where every put failed. Cumulative on
+    /// purpose, unlike the per-run expectations — which live in [`drive`] and must
+    /// not be workload state.
     ///
-    /// A failed `delete_namespace` is ambiguous in the same way a failed write is:
-    /// the tombstone may already sit on a minority and be adopted later, so a blob
-    /// in that namespace may legitimately be gone — or legitimately still there.
-    /// Excluding the whole namespace from the durability claim is what keeps the
-    /// claim about **B6** rather than about which way an ambiguous delete fell.
-    touched_by_delete: Arc<Mutex<BTreeSet<Vec<u8>>>>,
-    /// How many of those were actually re-read, so a green sweep is not one where
-    /// every put failed.
+    /// [`drive`]: ClusterWorkload::drive
     reread: Arc<AtomicUsize>,
     /// Whether to make the **B6** re-replication claim at the end of the run.
     ///
@@ -145,8 +137,6 @@ impl BlobSwarm {
             nodes,
             clients,
             ops,
-            durable: Arc::new(Mutex::new(BTreeMap::new())),
-            touched_by_delete: Arc::new(Mutex::new(BTreeSet::new())),
             reread: Arc::new(AtomicUsize::new(0)),
             check_rereplication: false,
         }
@@ -180,12 +170,19 @@ impl ClusterWorkload for BlobSwarm {
         let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
-        let durable = Arc::clone(&self.durable);
-        let touched_by_delete = Arc::clone(&self.touched_by_delete);
         let reread = Arc::clone(&self.reread);
         let check_rereplication = self.check_rereplication;
         let net = ctx.net().clone();
         Box::pin(async move {
+            // Per **run**, not per workload. A sweep drives every seed through the
+            // same `&self`, so a field here would carry seed N's acknowledged blobs
+            // into seed N+1's fresh, empty stores and report them as lost to
+            // re-replication. (It did: that is what made this check look like a B6
+            // defect.)
+            let durable: Arc<Mutex<Durable>> = Arc::new(Mutex::new(BTreeMap::new()));
+            let touched_by_delete: Arc<Mutex<BTreeSet<Vec<u8>>>> =
+                Arc::new(Mutex::new(BTreeSet::new()));
+
             // One on-disk store and `Clustered` tier per node (each spawns its
             // replica + reconcile loop). The tempdirs live until the run ends.
             let mut dirs = Vec::new();
@@ -325,23 +322,12 @@ fn blob_invariants_hold_under_the_cluster_swarm() {
     }
 }
 
-/// **Currently fails — see `docs/simulation-hardening.md` §6.** A blob whose
-/// `put` was acknowledged, in a namespace no client ever tried to delete, does
-/// not read back through another node on a healed and quiesced cluster, even
-/// given 45 virtual seconds for the reconcile loop to restore it. It is not a
-/// settling bound: a longer wait does not change it.
-///
-/// Quarantined rather than deleted because it is not yet established which side
-/// is wrong — B6's re-replication, or this claim, which has already been too
-/// strong twice (it first ignored that a failed `delete_namespace` leaves the
-/// namespace's fate ambiguous). Run it with
-///
-/// ```text
-/// cargo test -p blob-store --test swarm -- --ignored --exact \
-///     acknowledged_blobs_are_re_replicated_after_a_heal
-/// ```
+/// **B6.** A blob whose `put` was acknowledged, in a namespace no client ever
+/// tried to delete, must read back through *another* node once the cluster has
+/// healed — the reconcile loop's whole job. Kept as its own test because the end
+/// check needs a healed, quiesced cluster and a settle, which the other sweeps
+/// have no reason to pay for.
 #[test]
-#[ignore = "unresolved: an acknowledged blob does not read back after a heal;             either B6 or the claim (docs/simulation-hardening.md §6)"]
 fn acknowledged_blobs_are_re_replicated_after_a_heal() {
     let workload = BlobSwarm::checking_rereplication(3, 3, 6);
     if let Err(failure) = run_cluster_swarm(&workload, slow_seeds(0..24)) {

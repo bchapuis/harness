@@ -30,6 +30,12 @@
 //! present at the end, and failed within a handful of seeds on a claim the layer
 //! never made.
 //!
+//! (The second version failed for a duller reason worth recording: it kept those
+//! names on the *workload*, which a sweep shares across every seed, so each run
+//! was judged against its predecessors' names too. Expectations are per run and
+//! live in `drive` — see "A workload outlives its runs" in
+//! `docs/simulation-testing.md`.)
+//!
 //! So the names are split by what can be claimed about them:
 //!
 //! - **Keep names** are only ever recorded, never forgotten. `Record` is
@@ -74,9 +80,9 @@ use granary::testing::ActivationSingletonPerNode;
 use granary::testing::CommitMonotonic;
 use tenancy::Directory;
 use tenancy::Forget;
-use tenancy::List;
 use tenancy::Meta;
 use tenancy::Record;
+use tenancy::Recorded;
 
 /// Short enough that clients idle past it, so a principal's index is passivated
 /// and rebuilt from its journal mid-run (G12 crossed with G14).
@@ -127,17 +133,19 @@ struct DirectorySwarm {
     nodes: usize,
     clients: usize,
     ops: u64,
-    acked: Arc<Mutex<Acked>>,
-    /// Names checked against the final index, so a green sweep is not one where
-    /// every call happened to fail.
+    /// Names checked against a final index, tallied across the whole sweep so a
+    /// green run is not one where every call happened to fail. Cumulative on
+    /// purpose, unlike the per-run expectations — which live in [`drive`] and
+    /// must not be workload state.
+    ///
+    /// [`drive`]: ClusterWorkload::drive
     verified: Arc<AtomicUsize>,
     /// Whether to hold the final index to what was acknowledged.
     ///
-    /// Off for the reproducibility and coverage sweeps, which are about the
+    /// Off for the reproducibility and coverage sweeps: they are about the
     /// *traffic* — that a seed replays byte-identically, and that the faults it
-    /// configures actually fire — and hold regardless of the open G14 defect this
-    /// claim currently trips over. On only for the ignored reproduction, so the
-    /// finding stays runnable without wedging the two tests that pass.
+    /// configures actually fire — and the end check costs them a heal, a quiesce,
+    /// and a settle they have no reason to pay for.
     check_index: bool,
 }
 
@@ -147,7 +155,6 @@ impl DirectorySwarm {
             nodes,
             clients,
             ops,
-            acked: Arc::new(Mutex::new(Acked::default())),
             verified: Arc::new(AtomicUsize::new(0)),
             check_index: false,
         }
@@ -204,11 +211,15 @@ impl ClusterWorkload for DirectorySwarm {
         let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
         let ops = self.ops;
-        let acked = Arc::clone(&self.acked);
         let verified = Arc::clone(&self.verified);
         let check_index = self.check_index;
         let net = ctx.net().clone();
         Box::pin(async move {
+            // Per **run**, not per workload. A sweep drives every seed through the
+            // same `&self`, so a field here would carry seed N's acknowledged names
+            // into seed N+1's freshly empty grains and report them as lost writes.
+            // (It did: that is what made this sweep look like a G14 defect.)
+            let acked: Arc<Mutex<Acked>> = Arc::new(Mutex::new(Acked::default()));
             let granaries: Vec<_> = nodes
                 .iter()
                 .map(|s| s.granary::<Directory<SimNode>>(config()))
@@ -261,7 +272,7 @@ impl ClusterWorkload for DirectorySwarm {
                             // run ever removes it, so it must still be owned at the
                             // end however the wire behaved.
                             let name = keep(c, slot);
-                            if dir
+                            let outcome = dir
                                 .ask_timeout(
                                     Record {
                                         name: name.clone(),
@@ -269,9 +280,8 @@ impl ClusterWorkload for DirectorySwarm {
                                     },
                                     Duration::from_secs(2),
                                 )
-                                .await
-                                .is_ok()
-                            {
+                                .await;
+                            if matches!(outcome, Ok(Recorded::Created | Recorded::Updated)) {
                                 let mut acked = acked.lock().expect("acked mutex");
                                 acked.recorded.insert((principal.clone(), name));
                             }
@@ -309,37 +319,62 @@ impl ClusterWorkload for DirectorySwarm {
                 let acked = acked.lock().expect("acked mutex");
                 acked.recorded.clone()
             };
-            let principals: BTreeSet<String> = recorded.iter().map(|(p, _)| p.clone()).collect();
-            for principal in principals {
-                let dir = granary.grain(&principal);
-                // A read that fails says nothing, so retry it; if it never answers,
-                // this seed makes no claim rather than a false one.
-                let mut listing = None;
+            // Ask about each name with a *writing* command, not `List`.
+            //
+            // `List` is a query, and a query commits nothing, so §7.5 serves it
+            // from the activation: "read-your-leader (relaxed), not linearizable
+            // under partition" — a deposed-but-unfenced leader may answer from
+            // stale state, and a quorum-less recovery may have seeded that state
+            // with an uncommitted record. Asserting a durability property against
+            // it asks the wrong question, and a `List`-based version of this check
+            // failed about one seed in eight hundred for exactly that reason.
+            //
+            // The spec names the construction in the same paragraph: issue a
+            // trivial writing command, which rides the §6 output gate and so
+            // "commits through the shard leader and reflects committed state, or
+            // fails". `Record` with *different* metadata is one: it commits either
+            // way, and its reply is the committed answer to the question asked —
+            // `Updated` iff the name was already owned, `Created` iff it was not.
+            for (principal, name) in &recorded {
+                let dir = granary.grain(principal);
+                let probe = Meta {
+                    label: Some("probe".into()),
+                    created_at: Some(1),
+                    attrs: BTreeMap::new(),
+                };
+                // A failed probe says nothing about the index, so retry; if it
+                // never commits, this seed makes no claim rather than a false one.
+                let mut answer = None;
                 for _ in 0..20 {
-                    match dir.ask_timeout(List, Duration::from_secs(2)).await {
-                        Ok(entries) => {
-                            listing = Some(entries);
+                    match dir
+                        .ask_timeout(
+                            Record {
+                                name: name.clone(),
+                                meta: probe.clone(),
+                            },
+                            Duration::from_secs(2),
+                        )
+                        .await
+                    {
+                        // `Unchanged` cannot come from a first delivery here (the
+                        // metadata differs), only from a duplicate of a probe that
+                        // already landed — which itself proves the name is owned.
+                        Ok(outcome) => {
+                            answer = Some(outcome);
                             break;
                         }
                         Err(_) => clock.sleep(Duration::from_millis(250)).await,
                     }
                 }
-                let Some(listing) = listing else { continue };
-                let present: BTreeSet<GrainName> =
-                    listing.into_iter().map(|entry| entry.name).collect();
-
-                for (p, name) in &recorded {
-                    if p != &principal {
-                        continue;
-                    }
-                    assert!(
-                        present.contains(name),
-                        "{principal} acknowledged Record({name}) — a name nothing \
-                         in this run ever forgets — but the index does not hold \
-                         it: an acknowledged write was lost (G14)",
-                    );
-                    verified.fetch_add(1, Ordering::Relaxed);
-                }
+                let Some(answer) = answer else { continue };
+                assert_ne!(
+                    answer,
+                    Recorded::Created,
+                    "{principal} acknowledged Record({name}) — a name nothing in \
+                     this run ever forgets — and a committed probe found it absent: \
+                     an acknowledged write was lost (G14)",
+                );
+                verified.fetch_add(1, Ordering::Relaxed);
             }
         })
     }
@@ -358,22 +393,7 @@ impl ClusterWorkload for DirectorySwarm {
     }
 }
 
-/// **Currently reproduces an open granary defect — see
-/// `docs/simulation-hardening.md` §0.** An acknowledged, committed `Record` is
-/// missing from the index after the cluster has healed and quiesced, and a
-/// subsequent write commits onto the slot it occupied. Ignored rather than
-/// deleted or left red: the reproduction is the useful artifact, and it runs on
-/// demand with
-///
-/// ```text
-/// cargo test -p tenancy --test directory_swarm -- --ignored --exact \
-///     the_directory_index_survives_the_cluster_swarm
-/// ```
-///
-/// Un-ignore it the moment the defect is fixed; the other two tests in this file
-/// exercise the same traffic and invariants and stay green meanwhile.
 #[test]
-#[ignore = "reproduces an open G14 defect: acknowledged writes lost via the             quorum-less recovery fallback (docs/simulation-hardening.md §0)"]
 fn the_directory_index_survives_the_cluster_swarm() {
     let workload = DirectorySwarm::checking_index(3, 3, 6);
     if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
