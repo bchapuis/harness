@@ -31,33 +31,33 @@ use actor_core::Clock;
 use actor_core::Entropy;
 use actor_core::Manifest;
 use actor_core::Message;
+use actor_simulation::ClusterCtx;
+use actor_simulation::ClusterModeSpec;
+use actor_simulation::ClusterWorkload;
 use actor_simulation::Counter;
 use actor_simulation::CounterOp;
 use actor_simulation::CounterRet;
 use actor_simulation::History;
+use actor_simulation::Invariant;
+use actor_simulation::Rehost;
 use actor_simulation::SimEntropy;
+use actor_simulation::SimNode;
 use actor_simulation::SimSystem;
 use actor_simulation::Workload;
 use actor_simulation::check_linearizable;
-use actor_simulation::replay_swarm;
-use actor_simulation::run_swarm;
-use actor_simulation::ClusterCtx;
-use actor_simulation::ClusterModeSpec;
-use actor_simulation::ClusterWorkload;
-use actor_simulation::Invariant;
-use actor_simulation::Rehost;
-use actor_simulation::SimNode;
 use actor_simulation::coverage_seeds;
 use actor_simulation::default_invariants;
 use actor_simulation::replay_cluster_swarm;
+use actor_simulation::replay_swarm;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_cluster_swarm_coverage;
+use actor_simulation::run_swarm;
 use actor_simulation::sweep_seeds;
 use granary::Grain;
 use granary::GrainCtx;
 use granary::GrainHandler;
-use granary::GranaryConfig;
 use granary::GrainRef;
+use granary::GranaryConfig;
 use granary::GranaryExt;
 use granary::Seq;
 use granary::testing::ActivationSingletonPerNode;
@@ -389,6 +389,134 @@ fn grain_swarm_is_reproducible() {
 // anywhere or drop. Few ops keep that search bounded; the breadth comes from the
 // seeds, not from any one history.
 
+/// The account this sweep decides, whose deposit carries an **idempotency key**.
+///
+/// The Appendix A `Account` above cannot be held to a linearizable history over
+/// this wire, and that is the framework's contract rather than a defect in it.
+/// Delivery is at-most-once *at the caller* (§7.2): a duplicated request frame is
+/// handled twice, so a bare `Deposit { cents: 1 }` lands twice for one logical
+/// operation and no sequential order explains the balance that follows. The spec
+/// names the remedy in the same section — higher guarantees are "built atop this
+/// layer with explicit idempotency keys" — and `tests/support/mod.rs` in
+/// `actor-simulation` is the same construction for the register, recorded in
+/// `corpus.txt` after the identical mistake.
+///
+/// The key lives in the *event*, so the applied set is folded from the journal
+/// and survives passivation and failover: a duplicate that arrives after a
+/// rehydration is still recognized. A read needs no key — it changes nothing, and
+/// a duplicate's reply is the value at its own instant, which falls inside the
+/// caller's window and linearizes there.
+///
+/// Its **read** is a writing command, for the other half of the same reason. A
+/// query commits nothing and is served from the activation, and §7.5 is explicit
+/// that this is "read-your-leader (relaxed), not linearizable under partition":
+/// a deposed-but-unfenced leader MAY serve a stale value, and a quorum-less
+/// recovery may even seed that state with an uncommitted record. Linearizable
+/// reads are a deferred upgrade (§16). The spec names the interim construction in
+/// the same paragraph — "a caller that needs a linearizable read in the meantime
+/// issues a trivial *writing* command (one that emits an event): it rides the §6
+/// output gate, so it commits through the shard leader and reflects committed
+/// state, or fails". `Probed` is that event: the fold ignores it, so the reply is
+/// the committed balance at the seq the read itself commits at.
+#[derive(Default)]
+struct KeyedAccount;
+
+#[derive(Default, Serialize, Deserialize)]
+struct KeyedBalance {
+    cents: i64,
+    applied: std::collections::BTreeSet<(u64, u64)>,
+}
+
+#[derive(Serialize, Deserialize)]
+enum KeyedLedger {
+    Deposited {
+        req: (u64, u64),
+        cents: u64,
+    },
+    /// What makes a read linearizable: an event, and nothing else.
+    Probed,
+}
+
+impl Grain for KeyedAccount {
+    type System = SimNode;
+    type State = KeyedBalance;
+    type Event = KeyedLedger;
+    type Facets = ();
+    const GRAIN_TYPE: &'static str = "bank.KeyedAccount";
+
+    fn apply(state: &mut KeyedBalance, event: &KeyedLedger) {
+        match event {
+            KeyedLedger::Deposited { req, cents } => {
+                if state.applied.insert(*req) {
+                    state.cents += *cents as i64;
+                }
+            }
+            KeyedLedger::Probed => {}
+        }
+    }
+
+    fn register(r: &mut granary::GrainRegistry<Self>) {
+        r.accept::<KeyedDeposit>();
+        r.accept::<ReadKeyedBalance>();
+    }
+}
+
+/// A deposit named by its caller's `(client, seq)` — identical across every copy
+/// of the request the wire may deliver.
+#[derive(Clone, Serialize, Deserialize)]
+struct KeyedDeposit {
+    req: (u64, u64),
+    cents: u64,
+}
+impl Message for KeyedDeposit {
+    type Reply = i64;
+    const MANIFEST: Manifest = Manifest::new("bank.KeyedDeposit");
+}
+
+impl GrainHandler<KeyedDeposit> for KeyedAccount {
+    async fn handle(
+        &self,
+        state: &KeyedBalance,
+        msg: KeyedDeposit,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<KeyedLedger>, i64) {
+        // A re-delivery journals nothing and answers from the state it already
+        // produced; the history records `AddOk` either way, so the balance the
+        // duplicate reports is not what the model is deciding.
+        if state.applied.contains(&msg.req) {
+            return (vec![], state.cents);
+        }
+        (
+            vec![KeyedLedger::Deposited {
+                req: msg.req,
+                cents: msg.cents,
+            }],
+            state.cents + msg.cents as i64,
+        )
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ReadKeyedBalance;
+impl Message for ReadKeyedBalance {
+    type Reply = i64;
+    const MANIFEST: Manifest = Manifest::new("bank.ReadKeyedBalance");
+}
+
+impl GrainHandler<ReadKeyedBalance> for KeyedAccount {
+    async fn handle(
+        &self,
+        state: &KeyedBalance,
+        _msg: ReadKeyedBalance,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<KeyedLedger>, i64) {
+        // Emitting an event is the whole point (see the type's doc): it puts this
+        // read behind the output gate, so the balance returned is the committed one
+        // and a deposed leader fails the call instead of answering staler.
+        (vec![KeyedLedger::Probed], state.cents)
+    }
+}
+
 /// Deposits and reads against a single account, recorded as a [`Counter`]
 /// history. A deposit is `Add`, a read is `Read`, and a call that fails is left
 /// pending (`info`) — its effect may or may not have landed, which is exactly
@@ -436,7 +564,7 @@ impl ClusterWorkload for LinearizableAccountSwarm {
         Box::pin(async move {
             let granaries: Vec<_> = nodes
                 .iter()
-                .map(|s| s.granary::<Account>(config(false)))
+                .map(|s| s.granary::<KeyedAccount>(config(false)))
                 .collect();
             let clock = nodes[0].clock().clone();
             let entropy = nodes[0].entropy().clone();
@@ -452,13 +580,16 @@ impl ClusterWorkload for LinearizableAccountSwarm {
                 let entropy = entropy.clone();
                 tasks.push(async move {
                     let acct = granary.grain("account/linearizable");
-                    for _ in 0..ops {
+                    for seq in 0..ops {
                         if entropy.next_u64().is_multiple_of(2) {
                             let delta = 1 + (entropy.next_u64() % 3) as i64;
                             let id = history.invoke(CounterOp::Add(delta));
+                            // One key per attempt, distinct across clients: what a
+                            // duplicated frame is recognized by.
                             match acct
                                 .ask_timeout(
-                                    Deposit {
+                                    KeyedDeposit {
+                                        req: (c as u64, seq),
                                         cents: delta as u64,
                                     },
                                     Duration::from_secs(2),
@@ -473,7 +604,10 @@ impl ClusterWorkload for LinearizableAccountSwarm {
                             }
                         } else {
                             let id = history.invoke(CounterOp::Read);
-                            match acct.ask_timeout(ReadBalance, Duration::from_secs(2)).await {
+                            match acct
+                                .ask_timeout(ReadKeyedBalance, Duration::from_secs(2))
+                                .await
+                            {
                                 Ok(balance) => history.ok(id, CounterRet::Read(balance)),
                                 _ => history.info(id),
                             }
@@ -711,7 +845,6 @@ impl Workload for CounterWorkload {
         grain_invariants()
     }
 }
-
 
 #[test]
 fn counter_grain_is_linearizable_across_seeds() {
