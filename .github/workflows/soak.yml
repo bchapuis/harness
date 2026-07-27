@@ -55,8 +55,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Toolchain and components come from `rust-toolchain.toml`, so a soak runs
+      # the same rustc as CI and as a developer's checkout.
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2

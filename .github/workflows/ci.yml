@@ -32,10 +32,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      # No toolchain action: `rust-toolchain.toml` pins the version and its
+      # components, and rustup installs it on the first cargo invocation. Naming
+      # a version here too would give the pin a second source of truth to drift
+      # from — and the compile-fail snapshots only hold on the pinned rustc.
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -70,10 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # Toolchain and components come from `rust-toolchain.toml` (see above).
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2

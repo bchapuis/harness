@@ -1,0 +1,27 @@
+# The toolchain every checkout builds and tests with.
+#
+# Pinned rather than floating because two of this tree's conformance tests
+# compare against rustc's own output, and rustc rewords its diagnostics between
+# releases. `trybuild` snapshots (`actor-core/tests/compile_fail/`,
+# `granary/tests/compile_fail/`) are the whole stderr, byte for byte: they are how
+# invariant #20 and G10 — "an invalid send does not compile" — are verified at
+# all, since no runtime test can express a property about type-checking.
+#
+# Floating on `stable` made those snapshots fail for whoever's rustc differed
+# from whoever blessed them last, which reads as a broken build and is not one.
+# It had already cost one bless (`Bless the unhandled-ask compile-fail snapshot
+# under rustc 1.97`) and a note in the docs telling people to ignore the red.
+# Pinning removes the divergence instead of documenting it.
+#
+# To move the toolchain: bump `channel` here, run
+# `TRYBUILD=overwrite cargo test -p actor-core -p granary --test conformance_compile_fail --test compile_fail`,
+# and commit the re-blessed snapshots in the same change. Doing it in one commit
+# is what keeps the snapshots meaningful — they only prove anything while they
+# match the compiler that produced them.
+#
+# This is the *development* toolchain, not the MSRV. That stays
+# `workspace.package.rust-version` in Cargo.toml, and is a separate promise about
+# what downstream can build with.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
