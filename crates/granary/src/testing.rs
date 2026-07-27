@@ -128,4 +128,12 @@ impl Invariant for ActivationSingletonPerNode {
         }
         Ok(())
     }
+
+    fn forget_node(&mut self, node: NodeId) {
+        // The same reasoning as `NodeDown` above, for the other way a node's
+        // activations vanish: its process ended. Nothing emits `Passivated` for
+        // an activation that died with its host, and the successor may re-activate
+        // the same grain — legitimately, since G6 is per *live* node.
+        self.live.retain(|(n, _)| *n != node);
+    }
 }

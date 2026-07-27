@@ -1,7 +1,8 @@
 //! Swarm testing for the cluster (spec §18.3, §18.6).
 //!
 //! Runs a [`ClusterWorkload`] over a multi-node [`SimNetwork`] while a seeded
-//! [`Nemesis`](nemesis) injects partitions, crashes, and heals, and a
+//! [`Nemesis`](nemesis) injects partitions (symmetric and one-way), crashes,
+//! process freezes, restarts, and heals, and a
 //! [`Checker`](crate::Checker) watches the event stream. Each run is bounded in
 //! virtual time (the failure detector never quiesces) and reproducible from its
 //! seed; a failure is reported with the seed for replay.
@@ -57,7 +58,7 @@ const CLUSTER_MAX_DROP_NUM: u64 = 4;
 const CLUSTER_MAX_DUP_NUM: u64 = 3;
 /// Frames are delayed by a seeded amount in `0..CLUSTER_MAX_LATENCY_MS` ms.
 const CLUSTER_MAX_LATENCY_MS: u64 = 30;
-/// Partition/crash/heal rounds the nemesis runs per run.
+/// Rounds the nemesis runs per run, one action drawn from its vocabulary each.
 const CLUSTER_NEMESIS_ROUNDS: usize = 6;
 /// Upper bound on a run's virtual time, so a hung call cannot loop forever (the
 /// failure detector itself never quiesces).
@@ -99,6 +100,12 @@ impl ClusterCtx {
         self.registry.as_ref()
     }
 }
+
+/// A workload's hook for putting a restarted node back to work, run by the
+/// driver on the fresh system the moment it is up — see
+/// [`ClusterWorkload::rehost`]. Shared and `'static` because the nemesis outlives
+/// the borrow of the workload that produced it.
+pub type Rehost = Arc<dyn Fn(&SimNode) + Send + Sync>;
 
 /// A declarative membership-mode choice for a [`ClusterWorkload`] (spec §9.4).
 /// Declarative because the registry- and leader-based modes need per-run
@@ -170,6 +177,31 @@ pub trait ClusterWorkload {
         }
     }
 
+    /// What it takes to bring a **restarted** node back into service — and, by
+    /// being `Some` at all, this workload's consent for the nemesis to restart
+    /// one (spec §18.3).
+    ///
+    /// A restart is process death: volatile state lost, durable state reloaded
+    /// through the storage seam. It is the fault that reaches
+    /// recovery-on-activation, where `crash` only isolates a process that keeps
+    /// running. But the fresh process comes up **empty**, so everything
+    /// [`setup`](Self::setup) installed on that node — a granary host, a spawned
+    /// actor, a receptionist registration — is gone. Left that way a restarted
+    /// node silently stops participating, and the run quietly shrinks its
+    /// cluster instead of faulting it. The hook is where a workload puts the
+    /// node back to work; a workload with nothing to re-install still opts in
+    /// with a hook that does nothing.
+    ///
+    /// Two things a consenting workload must tolerate. A restart shuts the old
+    /// system down, so any [`SimNode`] cloned out of [`ClusterCtx::nodes`] for
+    /// that id is dead afterwards — the nemesis never restarts the first node,
+    /// so one handle always stays live. And every call should be bounded
+    /// (`ask_timeout`), so one issued into a shut-down node resolves as a
+    /// failure rather than sitting pending at quiescence.
+    fn rehost(&self) -> Option<Rehost> {
+        None
+    }
+
     /// Build actors and registrations before traffic starts.
     fn setup(&self, ctx: &ClusterCtx);
 
@@ -182,10 +214,85 @@ pub trait ClusterWorkload {
     }
 }
 
-/// A seeded fault injector (spec §18.3): over several rounds it partitions,
-/// crashes, and heals at random, so a run exercises the failure paths. In
-/// registry-based mode a fifth action opens a bounded registry **outage**
-/// window — the "stalled, lagging, or unavailable registry sync" fault.
+/// One action in the nemesis's vocabulary (spec §18.3). Named rather than
+/// numbered because the vocabulary is now built per run — a registry-based run
+/// can open an outage, a restart-tolerant workload can lose a process — and
+/// modular arithmetic over a conditional tail stops reading as policy.
+#[derive(Clone, Copy)]
+enum Fault {
+    /// Sever two random groups in both directions.
+    Partition,
+    /// Sever one random group's frames *to* another, leaving the reverse
+    /// flowing: the asymmetric case `Partition` cannot express, and the source
+    /// of zombie leaders (§8.1).
+    PartitionOneWay,
+    /// Isolate a node from every peer — a crash as the rest of the cluster sees
+    /// it. The process keeps running; [`Fault::Restart`] is the one that kills it.
+    Crash,
+    /// Freeze a node's tasks for a bounded window, then thaw: a GC stall or VM
+    /// pause. State and inbound frames survive, and overdue timers fire at once
+    /// on resume, so a paused leader wakes already deposed.
+    Pause,
+    /// Kill a node's process and bring a fresh one up under the same identity:
+    /// volatile state lost, durable state reloaded through the storage seam.
+    Restart,
+    /// Clear every partition and crash.
+    Heal,
+    /// A quiet round.
+    Quiet,
+    /// A bounded registry outage window — the "stalled, lagging, or unavailable
+    /// registry sync" fault (spec §9.4.2 item 6).
+    RegistryOutage,
+}
+
+/// The actions available to one run. The network-only ones — both partitions,
+/// crash, freeze, heal, quiet — are always in it, since every workload survives
+/// them by construction. The two that touch more than the wire are gated on the
+/// run saying it can take them.
+fn vocabulary(registry: bool, restarts: bool) -> Vec<Fault> {
+    let mut faults = vec![
+        Fault::Partition,
+        Fault::PartitionOneWay,
+        Fault::Crash,
+        Fault::Pause,
+        Fault::Heal,
+        Fault::Quiet,
+    ];
+    if registry {
+        faults.push(Fault::RegistryOutage);
+    }
+    if restarts {
+        faults.push(Fault::Restart);
+    }
+    faults
+}
+
+/// Split `nodes` into two non-empty random groups, or `None` if the coin came up
+/// all one way. Shared by the symmetric and one-way partition actions so they
+/// divide the cluster the same way and differ only in which directions block.
+fn two_groups(entropy: &SimEntropy, nodes: &[NodeId]) -> Option<(Vec<NodeId>, Vec<NodeId>)> {
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for &node in nodes {
+        if entropy.next_u64().is_multiple_of(2) {
+            left.push(node);
+        } else {
+            right.push(node);
+        }
+    }
+    if left.is_empty() || right.is_empty() {
+        None
+    } else {
+        Some((left, right))
+    }
+}
+
+/// A seeded fault injector (spec §18.3): over several rounds it draws from the
+/// run's [`vocabulary`] at random, so a run exercises the failure paths.
+///
+/// Every action is either instantaneous or bounded within its own round. A pause
+/// that outlived the nemesis would stall the run rather than fault it, so the
+/// freeze and its thaw are one action, exactly as the registry outage is.
 async fn nemesis(
     net: SimNetwork,
     entropy: SimEntropy,
@@ -193,39 +300,59 @@ async fn nemesis(
     nodes: Vec<NodeId>,
     rounds: usize,
     registry: Option<SimRegistry>,
+    rehost: Option<Rehost>,
 ) {
-    let actions = if registry.is_some() { 5 } else { 4 };
+    let faults = vocabulary(registry.is_some(), rehost.is_some());
     for _ in 0..rounds {
         let wait = 200 + entropy.next_u64() % 600;
         clock.sleep(Duration::from_millis(wait)).await;
-        match entropy.next_u64() % actions {
-            // Partition the nodes into two random groups.
-            0 => {
-                let mut left = Vec::new();
-                let mut right = Vec::new();
-                for &node in &nodes {
-                    if entropy.next_u64().is_multiple_of(2) {
-                        left.push(node);
-                    } else {
-                        right.push(node);
-                    }
-                }
-                if !left.is_empty() && !right.is_empty() {
+        let Some(action) = entropy.pick_index(faults.len()) else {
+            continue;
+        };
+        match faults[action] {
+            Fault::Partition => {
+                if let Some((left, right)) = two_groups(&entropy, &nodes) {
                     net.partition(&left, &right);
                 }
             }
-            // Crash a random node.
-            1 => {
+            Fault::PartitionOneWay => {
+                if let Some((from, to)) = two_groups(&entropy, &nodes) {
+                    net.partition_one_way(&from, &to);
+                }
+            }
+            Fault::Crash => {
                 if let Some(i) = entropy.pick_index(nodes.len()) {
                     net.crash(nodes[i]);
                 }
             }
-            // Heal all partitions/crashes.
-            2 => net.heal(),
-            // A quiet round.
-            3 => {}
-            // A bounded registry outage window (spec §9.4.2 item 6, §18.3).
-            _ => {
+            Fault::Pause => {
+                if let Some(i) = entropy.pick_index(nodes.len()) {
+                    let node = nodes[i];
+                    net.pause(node);
+                    let freeze = 100 + entropy.next_u64() % 300;
+                    clock.sleep(Duration::from_millis(freeze)).await;
+                    net.resume(node);
+                }
+            }
+            Fault::Restart => {
+                // Never the first node. A restart shuts the old system down, so
+                // every `SimNode` a workload cloned out of `ClusterCtx::nodes()`
+                // for that id is dead afterwards; leaving node 1 alone leaves a
+                // workload one handle it can count on, which is the discipline
+                // `restart-churn` already keeps by hand.
+                if let Some(i) = entropy.pick_index(nodes.len() - 1) {
+                    let system = net.restart(nodes[i + 1]);
+                    // The fresh process is empty. Put it back to work before the
+                    // next round, or the run has shrunk the cluster rather than
+                    // faulted it (`ClusterWorkload::rehost`).
+                    if let Some(rehost) = &rehost {
+                        rehost(&system);
+                    }
+                }
+            }
+            Fault::Heal => net.heal(),
+            Fault::Quiet => {}
+            Fault::RegistryOutage => {
                 if let Some(registry) = &registry {
                     registry.set_available(false);
                     let outage = 100 + entropy.next_u64() % 300;
@@ -355,6 +482,7 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
         node_ids,
         CLUSTER_NEMESIS_ROUNDS,
         ctx.registry.clone(),
+        workload.rehost(),
     )));
 
     // Drive until the traffic completes, bounded so a hung call cannot loop

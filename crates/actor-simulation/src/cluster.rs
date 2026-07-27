@@ -32,10 +32,31 @@ use crate::SimNetwork;
 use crate::transport::SimNode;
 use crate::transport::SimTransport;
 
+/// A node's process was replaced by [`SimNetwork::restart`] — emitted on the
+/// event stream (actor §16) just before the old system is shut down.
+///
+/// It exists because an [`ActorId`](actor_core::ActorId) identifies an actor only
+/// within one process: the successor assigns paths and incarnations from zero, so
+/// `node-2//user/0#0` names one actor before the restart and a different one
+/// after. A checker that accumulates per-`ActorId` state — the lifecycle
+/// invariant (#6) is the one that does — would otherwise read the successor's
+/// first actor as a second assignment of the predecessor's. Restarts are a
+/// simulation fault, not a production event, which is why this rides
+/// [`Event::App`](actor_core::Event::App) rather than adding a variant to the
+/// framework's own enum.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeRestarted {
+    pub node: NodeId,
+}
+
 impl SimNetwork {
     /// Bring up a node's system on the network, registering it for routing.
     /// `joining` selects founding (`Up`) vs joiner (`Joining`) startup (spec §9.3).
     fn bring_up(&self, node: NodeId, joining: bool) -> SimNode {
+        // A fresh scheduler domain per incarnation, not per node: `restart` needs
+        // to retire the outgoing process's tasks while leaving its successor's —
+        // which carry the same `NodeId` — untouched.
+        let (spawner, domain) = self.spawner.with_fresh_domain();
         let (tx, rx) = async_channel::unbounded();
         let transport = SimTransport {
             net: self.clone(),
@@ -54,18 +75,17 @@ impl SimNetwork {
             node,
             self.clock.clone(),
             self.entropy.clone(),
-            // Tag the node's spawner with its id so all its tasks can be frozen as a
-            // unit by `pause` (spec §18.3); child tasks inherit the tag.
-            self.spawner.clone().with_domain(node.uid()),
+            // Every task this system spawns carries its incarnation's domain, so
+            // the process can be frozen by `pause` or ended by `restart` as a
+            // unit (spec §18.3); child tasks inherit the tag.
+            spawner,
             transport,
             rx,
             config,
         );
-        self.inner
-            .lock()
-            .expect("network mutex poisoned")
-            .nodes
-            .insert(node, tx);
+        let mut inner = self.inner.lock().expect("network mutex poisoned");
+        inner.nodes.insert(node, tx);
+        inner.domains.insert(node, domain);
         system
     }
 
@@ -109,10 +129,22 @@ impl SimNetwork {
     /// external registry. Network blocks involving the node are cleared: the
     /// new process comes up with working connectivity.
     ///
-    /// The old instance is shut down *before* its successor exists, and a
-    /// shut-down node processes nothing further, so the old incarnation can
-    /// never write to the shared durable state after the new one has loaded
-    /// it — the property the production restart relies on, modeled exactly.
+    /// The old process is **ended**, not merely disconnected, and that takes
+    /// three steps in order. [`ClusterSystem::shutdown`] sets the shutdown flag
+    /// and drops the transport; the inbound sender is dropped, so queued frames
+    /// die with the old receive loop; and the incarnation's scheduler domain is
+    /// retired, so every task it owns leaves the run and is never polled again.
+    /// Only then does the successor exist. Without the third step the
+    /// predecessor's actors would keep being polled alongside their replacement,
+    /// emitting into the same [`ActorId`](actor_core::ActorId) space — the
+    /// successor numbers paths and incarnations from zero again — which is a
+    /// state no production restart can reach.
+    ///
+    /// Ending a process mid-flight leaves brackets open: an actor stopped between
+    /// `DispatchStart` and `DispatchEnd`, an `ask` issued and never answered, an
+    /// identity assigned and never resigned. That is what process death *is*, and
+    /// [`NodeRestarted`] is how a checker learns to stop expecting the other half
+    /// (see [`crate::default_invariants`]).
     pub fn restart(&self, node: NodeId) -> SimNode {
         let old = {
             let mut inner = self.inner.lock().expect("network mutex poisoned");
@@ -124,13 +156,22 @@ impl SimNetwork {
             inner.joined.remove(index)
         };
         old.shutdown();
-        {
+        let retiring = {
             let mut inner = self.inner.lock().expect("network mutex poisoned");
             // Drop the old inbound sender: queued frames die with the old
             // receive loop, and new frames route to the successor only.
             inner.nodes.remove(&node);
             inner.blocked.retain(|(a, b)| *a != node && *b != node);
+            inner.domains.remove(&node)
+        };
+        // End the process for real. Ordered after the shutdown and before the
+        // announcement, so the predecessor has emitted everything it will ever
+        // emit by the time a checker is told the boundary is here.
+        if let Some(domain) = retiring {
+            self.spawner.retire_domain(domain);
         }
+        self.events
+            .emit(actor_core::Event::app(NodeRestarted { node }));
         let system = self.bring_up(node, false);
         let mut inner = self.inner.lock().expect("network mutex poisoned");
         for existing in &inner.joined {
@@ -206,13 +247,31 @@ impl SimNetwork {
     /// `resume` thaws it; the backlog then drains and any timers that came due in the
     /// meantime fire at once.
     pub fn pause(&self, node: NodeId) {
-        self.spawner.set_paused(node.uid(), true);
+        if let Some(domain) = self.domain_of(node) {
+            self.spawner.set_paused(domain, true);
+        }
+    }
+
+    /// The scheduler domain of `node`'s live process, or `None` if it never
+    /// joined. Read through the registry rather than derived from the id, because
+    /// a restart gives the successor a different domain (see [`restart`]).
+    ///
+    /// [`restart`]: SimNetwork::restart
+    fn domain_of(&self, node: NodeId) -> Option<u64> {
+        self.inner
+            .lock()
+            .expect("network mutex poisoned")
+            .domains
+            .get(&node)
+            .copied()
     }
 
     /// Thaw a node frozen by [`pause`](SimNetwork::pause): its queued inbound frames
     /// drain and its overdue timers fire, so it rejoins and reconciles (spec §18.3).
     pub fn resume(&self, node: NodeId) {
-        self.spawner.set_paused(node.uid(), false);
+        if let Some(domain) = self.domain_of(node) {
+            self.spawner.set_paused(domain, false);
+        }
     }
 
     /// Clear all partitions/crashes — the network heals (spec §9.2).

@@ -61,6 +61,10 @@ pub(crate) struct NetInner {
     pair_clock: BTreeMap<(NodeId, NodeId), Instant>,
     /// Joined systems, so a new node can be wired into every roster.
     pub(crate) joined: Vec<SimNode>,
+    /// Each node's **live** process incarnation (its scheduler domain), so
+    /// `pause`/`resume` freeze the running process and `restart` retires exactly
+    /// the outgoing one. Keyed by node because a restart replaces the value.
+    pub(crate) domains: BTreeMap<NodeId, u64>,
 }
 
 /// An in-memory network shared by the nodes of one simulation (spec §18.2).
@@ -105,6 +109,7 @@ impl SimNetwork {
                 blocked: BTreeSet::new(),
                 pair_clock: BTreeMap::new(),
                 joined: Vec::new(),
+                domains: BTreeMap::new(),
             })),
             clock: sim.clock(),
             entropy: sim.entropy(),

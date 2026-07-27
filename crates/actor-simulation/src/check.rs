@@ -87,6 +87,15 @@ impl EventSink for Checker {
             invariants,
             violations,
         } = &mut *inner;
+        // A process ended. Every invariant gets the chance to drop what it knew
+        // about that node before the successor's events arrive reusing its
+        // identities — one place decides the semantics, rather than each
+        // invariant re-deriving it (see `Invariant::forget_node`).
+        if let Some(crate::NodeRestarted { node }) = event.as_app() {
+            for inv in invariants.iter_mut() {
+                inv.forget_node(*node);
+            }
+        }
         for inv in invariants.iter_mut() {
             if let Err(detail) = inv.observe(&event) {
                 violations.push(Violation {

@@ -110,6 +110,8 @@ impl<A: Actor> Mailbox<A> {
         // terminates and none stays pending at quiescence (invariant #1).
         self.events.emit(Event::AskIssued {
             actor: self.id.clone(),
+            // A local ask: the caller is the actor's own node by construction.
+            caller: self.id.node(),
             manifest,
         });
         let (reply_tx, reply_rx) = oneshot::channel::<M::Reply>();
@@ -126,6 +128,7 @@ impl<A: Actor> Mailbox<A> {
         };
         self.events.emit(Event::AskOutcome {
             actor: self.id.clone(),
+            caller: self.id.node(),
             manifest,
             failed: result.is_err(),
         });

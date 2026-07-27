@@ -36,6 +36,23 @@ pub trait Invariant: Send {
     /// Observe one event; return `Err(detail)` on violation.
     fn observe(&mut self, event: &Event) -> Result<(), String>;
 
+    /// Forget everything known about `node`'s process, because that process has
+    /// **ended** — a [`NodeRestarted`](crate::NodeRestarted), which the
+    /// [`Checker`](crate::Checker) dispatches here before passing the event on.
+    ///
+    /// Process death leaves brackets open by definition: an actor stopped between
+    /// `DispatchStart` and `DispatchEnd`, an `ask` issued and never answered, an
+    /// identity assigned and never resigned. Those are not violations, they are
+    /// what dying looks like — and the successor reuses the identities, since a
+    /// fresh process numbers paths and incarnations from zero. An invariant that
+    /// accumulates per-node state overrides this to drop it.
+    ///
+    /// The default does nothing, which is right for a claim a restart does not
+    /// reset — [`OneLeaderPerTerm`] is the example, since a restarted voter
+    /// reloads its persisted term and vote through the storage seam and is
+    /// bound by every election it took part in before.
+    fn forget_node(&mut self, _node: NodeId) {}
+
     /// Final check once the run is quiescent; return `Err(detail)` on violation.
     fn at_quiescence(&mut self) -> Result<(), String> {
         Ok(())
@@ -57,9 +74,16 @@ pub fn default_invariants() -> Vec<Box<dyn Invariant>> {
 
 /// **No silent loss** (spec §18.5 #1): every issued `ask` reaches an outcome,
 /// and none remains pending at quiescence.
+///
+/// Counted per **calling** node, not in one total, so a restart can forget the
+/// calls that died with its process. An ask the dead caller issued will never be
+/// answered — nothing is left to receive the answer — while an ask a *live*
+/// caller issued *to* the dead node must still resolve, with `Unreachable`
+/// (invariant #2). One total could not tell those apart; `caller` is what
+/// separates them.
 #[derive(Default)]
 pub struct NoSilentLoss {
-    outstanding: i64,
+    outstanding: BTreeMap<NodeId, i64>,
 }
 
 impl Invariant for NoSilentLoss {
@@ -69,11 +93,16 @@ impl Invariant for NoSilentLoss {
 
     fn observe(&mut self, event: &Event) -> Result<(), String> {
         match event {
-            Event::AskIssued { .. } => self.outstanding += 1,
-            Event::AskOutcome { .. } => {
-                self.outstanding -= 1;
-                if self.outstanding < 0 {
-                    return Err("ask outcome with no matching issued ask".into());
+            Event::AskIssued { caller, .. } => {
+                *self.outstanding.entry(*caller).or_default() += 1;
+            }
+            Event::AskOutcome { caller, .. } => {
+                let count = self.outstanding.entry(*caller).or_default();
+                *count -= 1;
+                if *count < 0 {
+                    return Err(format!(
+                        "ask outcome with no matching issued ask (caller {caller})"
+                    ));
                 }
             }
             _ => {}
@@ -81,12 +110,14 @@ impl Invariant for NoSilentLoss {
         Ok(())
     }
 
+    fn forget_node(&mut self, node: NodeId) {
+        self.outstanding.remove(&node);
+    }
+
     fn at_quiescence(&mut self) -> Result<(), String> {
-        if self.outstanding != 0 {
-            return Err(format!(
-                "{} ask(s) still pending at quiescence",
-                self.outstanding
-            ));
+        let pending: i64 = self.outstanding.values().sum();
+        if pending != 0 {
+            return Err(format!("{pending} ask(s) still pending at quiescence"));
         }
         Ok(())
     }
@@ -125,6 +156,12 @@ impl Invariant for SerialExecution {
         Ok(())
     }
 
+    fn forget_node(&mut self, node: NodeId) {
+        // A process killed mid-dispatch leaves `DispatchStart` unmatched; that is
+        // death, not reentrancy, and the successor reuses the actor ids.
+        self.busy.retain(|actor, _| actor.node() != node);
+    }
+
     fn at_quiescence(&mut self) -> Result<(), String> {
         for (actor, busy) in &self.busy {
             if *busy {
@@ -138,6 +175,13 @@ impl Invariant for SerialExecution {
 /// **Lifecycle order and exactly-once** (spec §18.5 #6): per actor,
 /// `AssignId` → `ActorReady` → `ResignId`, with assign/ready/resign each at most
 /// once and never out of order.
+///
+/// The claim is about *one actor*, and an [`ActorId`] names one actor only within
+/// a process: a restarted node assigns paths and incarnations from zero again
+/// (spec §11.2 — a restart constructs fresh state). So a
+/// [`NodeRestarted`](crate::NodeRestarted) forgets that node's actors, and the
+/// successor's `/user/0#0` is judged on its own rather than as a second
+/// assignment of its predecessor's.
 #[derive(Default)]
 pub struct LifecycleExactlyOnce {
     actors: BTreeMap<ActorId, Lifecycle>,
@@ -188,6 +232,10 @@ impl Invariant for LifecycleExactlyOnce {
         }
         Ok(())
     }
+
+    fn forget_node(&mut self, node: NodeId) {
+        self.actors.retain(|id, _| id.node() != node);
+    }
 }
 
 /// **`down` is terminal** (spec §18.5 #15): once an observer declares a node
@@ -221,6 +269,14 @@ impl Invariant for DownIsTerminal {
             _ => {}
         }
         Ok(())
+    }
+
+    fn forget_node(&mut self, node: NodeId) {
+        // Only the *observer* side. A fresh process remembers downing nobody, so
+        // its own view resets; but another node's `down` verdict about this one
+        // is that observer's, and stays terminal however often the subject
+        // restarts.
+        self.down.retain(|(observer, _)| *observer != node);
     }
 }
 
@@ -275,6 +331,11 @@ impl Invariant for SignalInBand {
             _ => {}
         }
         Ok(())
+    }
+
+    fn forget_node(&mut self, node: NodeId) {
+        self.enqueued.retain(|actor, _| actor.node() != node);
+        self.dispatched.retain(|actor, _| actor.node() != node);
     }
 }
 
@@ -369,6 +430,10 @@ impl Invariant for SingletonAtMostOnePerNode {
         }
         Ok(())
     }
+
+    fn forget_node(&mut self, node: NodeId) {
+        self.live.retain(|(_, host), _| *host != node);
+    }
 }
 
 // Note: death-watch exactly-once (#11) is intentionally *not* a continuous
@@ -402,12 +467,14 @@ mod tests {
     fn issued(n: u64) -> Event {
         Event::AskIssued {
             actor: id(n),
+            caller: NodeId::new(0),
             manifest: "m",
         }
     }
     fn outcome(n: u64) -> Event {
         Event::AskOutcome {
             actor: id(n),
+            caller: NodeId::new(0),
             manifest: "m",
             failed: false,
         }

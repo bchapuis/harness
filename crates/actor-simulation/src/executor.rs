@@ -39,10 +39,15 @@ pub(crate) type Shared = Arc<Mutex<Inner>>;
 struct Task {
     /// `None` only while the task is mid-poll (taken out to avoid re-entrancy).
     future: Mutex<Option<BoxFuture<'static, ()>>>,
-    /// The node ("domain") this task belongs to, for pause/resume (spec §18.3).
-    /// `None` for test-driver tasks (`block_on`, a bare `sim.spawner()`), which
-    /// are never frozen. Set from the spawning node's tagged spawner, and
-    /// inherited by child tasks via [`CURRENT_DOMAIN`].
+    /// The **process incarnation** ("domain") this task belongs to, for
+    /// pause/resume and retirement (spec §18.3). `None` for test-driver tasks
+    /// (`block_on`, a bare `sim.spawner()`), which are never frozen or retired.
+    /// Set from the spawning system's tagged spawner, and inherited by child
+    /// tasks via [`CURRENT_DOMAIN`].
+    ///
+    /// A domain is per incarnation rather than per node so that a restart can
+    /// retire the predecessor's tasks without touching the successor's, even
+    /// though both run under the same [`NodeId`](actor_core::NodeId).
     domain: Option<u64>,
 }
 
@@ -100,6 +105,9 @@ pub(crate) struct Inner {
     /// still fire (re-readying the task) but never run until it resumes. Empty in
     /// every run that uses no pause, so scheduling is then byte-identical.
     paused: BTreeSet<u64>,
+    /// Source of process-incarnation ids. A plain counter, drawing no entropy, so
+    /// handing out domains cannot perturb a seeded run.
+    next_domain: u64,
 }
 
 impl Inner {
@@ -112,6 +120,7 @@ impl Inner {
             next_task_id: 0,
             next_seq: 0,
             paused: BTreeSet::new(),
+            next_domain: 0,
         }
     }
 
@@ -122,6 +131,36 @@ impl Inner {
         } else {
             self.paused.remove(&domain);
         }
+    }
+
+    /// Hand out the next process-incarnation id.
+    fn fresh_domain(&mut self) -> u64 {
+        let domain = self.next_domain;
+        self.next_domain += 1;
+        domain
+    }
+
+    /// Forget every task belonging to `domain` — the scheduler half of a process
+    /// death (spec §18.3). The tasks leave the ready set and the task table, so
+    /// nothing in that incarnation is ever polled again.
+    ///
+    /// Returns the removed tasks rather than dropping them, because dropping a
+    /// future runs its destructors and those can re-enter the scheduler (closing
+    /// a channel, releasing a guard that launches a task). Dropping them while
+    /// holding the scheduler lock would deadlock, so the caller drops outside it.
+    fn retire_domain(&mut self, domain: u64) -> Vec<Arc<Task>> {
+        let doomed: BTreeSet<u64> = self
+            .tasks
+            .iter()
+            .filter(|(_, task)| task.domain == Some(domain))
+            .map(|(id, _)| *id)
+            .collect();
+        self.ready.retain(|id| !doomed.contains(id));
+        self.paused.remove(&domain);
+        doomed
+            .iter()
+            .filter_map(|id| self.tasks.remove(id))
+            .collect()
     }
 
     pub(crate) fn now(&self) -> Instant {
@@ -187,12 +226,23 @@ pub struct SimSpawner {
 }
 
 impl SimSpawner {
-    /// A clone of this spawner that tags every task it launches with `domain` (a
-    /// node id), so the node can be frozen/thawed as a unit (spec §18.3). Clones of
-    /// the result keep the tag, so the whole subtree a node spawns is tagged.
-    pub(crate) fn with_domain(mut self, domain: u64) -> SimSpawner {
-        self.domain = Some(domain);
-        self
+    /// A clone of this spawner tagged with a **fresh process incarnation**, whose
+    /// id is returned alongside it so the caller can later freeze, thaw, or retire
+    /// that incarnation as a unit (spec §18.3). Clones of the result keep the tag,
+    /// so the whole subtree the incarnation spawns belongs to it.
+    pub(crate) fn with_fresh_domain(&self) -> (SimSpawner, u64) {
+        let domain = self
+            .shared
+            .lock()
+            .expect("scheduler mutex poisoned")
+            .fresh_domain();
+        (
+            SimSpawner {
+                shared: Arc::clone(&self.shared),
+                domain: Some(domain),
+            },
+            domain,
+        )
     }
 
     /// Freeze or thaw a node's tasks in the shared scheduler.
@@ -201,6 +251,17 @@ impl SimSpawner {
             .lock()
             .expect("scheduler mutex poisoned")
             .set_paused(domain, paused);
+    }
+
+    /// End a process incarnation: drop every task it owns, so none is ever polled
+    /// again (spec §18.3). The futures are dropped after the scheduler lock is
+    /// released — see [`Inner::retire_domain`].
+    pub(crate) fn retire_domain(&self, domain: u64) {
+        let retired = {
+            let mut inner = self.shared.lock().expect("scheduler mutex poisoned");
+            inner.retire_domain(domain)
+        };
+        drop(retired);
     }
 }
 

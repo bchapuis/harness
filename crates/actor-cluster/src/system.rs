@@ -768,6 +768,7 @@ where
         // (#1) covers remote asks, not just local ones.
         self.inner.events.emit(Event::AskIssued {
             actor: recipient.clone(),
+            caller: self.node(),
             manifest,
         });
         let result = self
@@ -775,6 +776,7 @@ where
             .await;
         self.inner.events.emit(Event::AskOutcome {
             actor: recipient.clone(),
+            caller: self.node(),
             manifest,
             failed: result.is_err(),
         });

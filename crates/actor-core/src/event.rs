@@ -64,8 +64,14 @@ pub enum Event {
     /// A request/response call was issued to an actor (spec §3.3). Paired with
     /// [`Event::AskOutcome`]; an issued ask that never reaches an outcome is a
     /// silently-lost call (invariant #1).
+    ///
+    /// `actor` is the **target**; `caller` is the node that issued the call, which
+    /// for a remote ask is a different node. Both are carried because the pairing
+    /// is the caller's property: it is the caller that is still waiting, so it is
+    /// the caller's death that makes an unanswered ask expected rather than lost.
     AskIssued {
         actor: ActorId,
+        caller: NodeId,
         manifest: &'static str,
     },
     /// A request/response call terminated, in success or a [`CallError`]
@@ -74,6 +80,7 @@ pub enum Event {
     /// [`CallError`]: crate::CallError
     AskOutcome {
         actor: ActorId,
+        caller: NodeId,
         manifest: &'static str,
         failed: bool,
     },

@@ -63,6 +63,7 @@ mod workload;
 // The simulated halves of the same `Clock`/`Entropy`/`Spawner`/`Transport`
 // traits production uses (spec §4.6, §7, §18.2).
 pub use clock::SimClock;
+pub use cluster::NodeRestarted;
 pub use entropy::SimEntropy;
 pub use executor::SimSpawner;
 pub use executor::Simulation;
@@ -78,6 +79,7 @@ pub use workload::SimSystem;
 pub use cluster_swarm::ClusterCtx;
 pub use cluster_swarm::ClusterModeSpec;
 pub use cluster_swarm::ClusterWorkload;
+pub use cluster_swarm::Rehost;
 pub use cluster_swarm::run_cluster_seed;
 pub use cluster_swarm::run_cluster_swarm;
 pub use cluster_swarm::run_cluster_swarm_coverage;
