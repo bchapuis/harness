@@ -11,6 +11,7 @@ mod codec;
 pub use codec::Codec;
 pub use codec::CodecError;
 pub use codec::JsonCodec;
+pub use codec::PostcardCodec;
 pub use codec::decode;
 pub use codec::encode;
 

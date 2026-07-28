@@ -43,7 +43,7 @@ use actor_runtime::TcpConfig;
 use actor_runtime::TcpTransport;
 use actor_runtime::TokioClock;
 use actor_runtime::TokioSpawner;
-use actor_serialization::JsonCodec;
+use actor_serialization::PostcardCodec;
 use granary::AlarmIndex;
 use granary::FileGrainStore;
 use granary::GrainName;
@@ -175,7 +175,14 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             outbound_capacity: DEFAULT_OUTBOUND_CAPACITY,
-            codec: Arc::new(JsonCodec),
+            // Binary, not the library's JSON default: a machine's disk moves as
+            // 1 MiB blocks through the blob path, and a payload is encoded
+            // twice — once as the message, again as the frame field carrying
+            // it. Under JSON that pair costs ~10.7 MiB and over a second of CPU
+            // per copy, so a block's replication misses the quorum timeout on
+            // an unremarkable host and provisioning fails as `Unavailable`.
+            // Nothing on this system's wire needs a self-describing format.
+            codec: Arc::new(PostcardCodec),
             cluster_secret: opts.secret.clone(),
             allowlist: Some(admitted),
             // Plaintext, guarded by the cluster secret: fine on loopback or a
@@ -194,6 +201,12 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         transport,
         inbound,
         ClusterConfig {
+            // The message layer, matching the transport's above: a blob's bytes
+            // are encoded here first and framed there second, so both have to
+            // be binary for either to help. This is also the codec granary
+            // encodes a grain's records and snapshots with, so a deployment
+            // that changes it cannot read journals written under the old one.
+            codec: Arc::new(PostcardCodec),
             events: Arc::new(StderrEvents { node }),
             membership: MembershipMode::Leader(LeaderMode {
                 // Deliberately more patient than the library defaults (1s
