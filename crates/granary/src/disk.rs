@@ -10,21 +10,17 @@
 //! batch (G19) — one capture, one record, one commit, so a crash can never
 //! commit part of one.
 //!
-//! **Capture rides a command.** The guest writes the image *between* commands
-//! (the one departure §7.15 owns), so nothing captures implicitly at
-//! [`Facet::seal`]: the consumer drives every capture through
-//! [`DiskHandle::capture`] inside an explicit command — the machine's
-//! checkpoint alarm and quiescent points (machine §4). Between captures the
-//! guest's writes live only in the activation-local image, a rebuildable cache
-//! (§1) the fence renders unrecoverable-if-lost: a non-committed outcome
-//! discards it (G20).
+//! **Capture rides a command.** The guest writes the image *between* commands,
+//! so nothing captures implicitly at [`Facet::seal`]: the consumer drives every
+//! capture through [`DiskHandle::capture`] inside an explicit command — the
+//! machine's checkpoint alarm and quiescent points (machine §4). Between
+//! captures the guest's writes live only in the activation-local image, a
+//! rebuildable cache (§1); a non-committed outcome discards it (G20).
 //!
 //! **Dirty tracking is content-hash pruning** (§7.15's reference mechanism):
 //! the committed form keeps a per-block [`BlobId`] index, and a capture scans
 //! the image, diffing block hashes against it — the mismatches *are* the dirty
-//! set. Unprivileged, deterministic under simulation, and the scan is the
-//! capture's only cost; the copy-on-write overlay is the deferred upgrade
-//! (§16).
+//! set. Not implemented: the copy-on-write overlay (§16).
 //!
 //! **Checkpoints upload nothing.** The composite-snapshot contribution is the
 //! block index serialized as a full-coverage manifest: every referenced blob
@@ -213,9 +209,7 @@ impl DiskState {
     }
 
     /// A cheap content identifier for the committed image: the hash of its
-    /// block index, reflecting committed state without re-reading the
-    /// multi-MiB image file, and identical across a rehydration that
-    /// reproduces the same committed blocks.
+    /// block index (see [`DiskHandle::content_digest`]).
     fn content_digest(&self) -> BlobId {
         BlobId::of(&crate::facet::encode_payload(&self.manifest()))
     }
@@ -268,8 +262,7 @@ impl DiskImage {
         Ok(())
     }
 
-    /// Delete the materialization — the discard of G20. The next activation
-    /// rematerializes from the composite snapshot plus committed manifests.
+    /// Delete the materialization — the discard of G20.
     fn delete_file(&self) {
         let _ = fs::remove_file(&self.path);
         *self.state() = DiskState::default();
@@ -305,10 +298,10 @@ impl Facet for Disk {
     type Stage = DiskStage;
 
     fn begin(form: &mut DiskForm, _stage: &mut DiskStage) -> Result<(), FacetError> {
-        // Guard that the materialized image still backs the committed size (the
-        // workspace facet's begin guard): a file deleted out from under the
-        // activation means the materialization can no longer be trusted; the
-        // error forces a step-down and the next activation rematerializes.
+        // Guard that the materialized image still backs the committed size: a
+        // file deleted out from under the activation means the materialization
+        // can no longer be trusted; the error forces a step-down and the next
+        // activation rematerializes.
         let image = form.image()?;
         if image.state().image_bytes > 0 && !image.path.exists() {
             return Err(FacetError("disk: image file vanished".into()));
@@ -352,11 +345,8 @@ impl Facet for Disk {
     }
 
     async fn snapshot(form: &DiskForm, _env: &FacetEnv) -> Result<Vec<u8>, FacetError> {
-        // The contribution is the committed block index, serialized as a
-        // full-coverage manifest — no scan and no uploads: every referenced
-        // blob was put by the capture that committed it, and the live image's
-        // uncaptured writes are not committed state and must not enter the
-        // snapshot (§7.15). `None` entries (never covered by a manifest) are
+        // The committed block index as a full-coverage manifest — no scan and
+        // no uploads (§7.15). `None` entries (never covered by a manifest) are
         // all-zero regions and restore as such.
         let manifest = form.image()?.state().manifest();
         Ok(crate::facet::encode_payload(&manifest))
@@ -371,9 +361,8 @@ impl Facet for Disk {
             path,
             state: Mutex::new(DiskState::default()),
         };
-        // Drop any stale local cache before materializing: the manifest +
-        // committed capture records are the truth (§1); the prior activation's
-        // file is not trusted.
+        // Drop any stale local cache: the manifest plus committed capture
+        // records are the truth (§1); the prior activation's file is not trusted.
         image.delete_file();
         if let Some(bytes) = part {
             let manifest: DiskManifest = crate::facet::decode_payload("disk restore", bytes)?;
@@ -465,12 +454,11 @@ where
             .map_err(|e| DiskError(e.to_string()))
     }
 
-    /// Provision the image from `src`, staging one **full-coverage** manifest
-    /// — the base image *is* a capture (§7.15), so a fresh machine boots
-    /// against shared, content-addressed base blocks and diverges by dirty
-    /// blocks as the guest writes. Replaces any prior image wholesale (also
-    /// the restore-from-checkpoint path, machine §8). One capture or import
-    /// per command.
+    /// Provision the image from `src`, staging one **full-coverage** manifest —
+    /// the base image *is* a capture (§7.15), so a fresh machine boots against
+    /// shared, content-addressed base blocks. Replaces any prior image wholesale
+    /// (also the restore-from-checkpoint path, machine §8). One capture or
+    /// import per command.
     pub async fn import(&self, src: &std::path::Path) -> Result<DiskCaptureStats, DiskError> {
         let (path, image) = self.begin_staged_op()?;
         let src_bytes = fs::metadata(src).map_err(io_disk_err)?.len();
@@ -610,9 +598,7 @@ where
     /// Fold a finished capture into the committed form (interior mutability; a
     /// non-committed outcome discards the whole materialization, G20, so no
     /// rollback is needed) — and stage its manifest into the command's batch.
-    /// `replace` resets the index first (an import covers the whole image; a
-    /// capture is incremental), sharing [`DiskState::apply`] with the
-    /// replay/restore path.
+    /// `replace` is [`DiskState::apply`]'s, shared with the replay/restore path.
     fn commit_staged_op(&self, image: &Arc<DiskImage>, manifest: DiskManifest, replace: bool) {
         image.state().apply(&manifest, replace);
         self.ctx.facet_cell().with_stage::<Disk, I, _>(|stage| {

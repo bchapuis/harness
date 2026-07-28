@@ -1,8 +1,7 @@
 //! The real VM binding (machine §2.1): Firecracker through the shared
 //! [`microvm`] plumbing.
 //!
-//! What differs from the agent sandbox's Firecracker tier (sandbox §3.5), by
-//! design (machine §2.1 "reuse, not reinvention, stated honestly"):
+//! What differs from the agent sandbox's Firecracker tier (sandbox §3.5):
 //!
 //! - **The drive is the disk facet's materialized image** (grain §7.15),
 //!   mounted in place — no per-VM rootfs copy, because the guest writing that
@@ -12,8 +11,7 @@
 //!   (machine §5.1); the guest agent is an ordinary service the base image
 //!   ships, not pid 1.
 //! - **Readiness is the guest agent accepting a vsock connection** on
-//!   [`machine_proto::AGENT_PORT`], with a boot budget sized for a full
-//!   distro rather than the sandbox's minimal agent-as-init image.
+//!   [`machine_proto::AGENT_PORT`], with a boot budget sized for a full distro.
 //! - **Pause/resume are load-bearing** (machine §4): the capture command's
 //!   quiescent point is `PATCH /vm` on the API socket. Pause is
 //!   crash-consistency, not filesystem cleanliness; the guest agent's `sync`
@@ -55,10 +53,9 @@ pub struct FirecrackerMachineConfig {
     /// agent-as-init image, so the default is a minute.
     pub ready_timeout: Duration,
     /// The node's egress configuration (machine §5.2, M6). `None` — the default
-    /// — boots machines with no NIC (the pre-egress posture); set it to wire
-    /// the per-machine tap, node NAT, and per-machine guest addressing. Realized
-    /// only behind `feature = "net"` on Linux; a node without the capability
-    /// degrades to no NIC even when set (see [`FirecrackerMachineProvider::boot`]).
+    /// — boots machines with no NIC; set it to wire the per-machine tap, node
+    /// NAT, and guest addressing. Realized only behind `feature = "net"` on
+    /// Linux; a node without the capability degrades to no NIC even when set.
     pub egress: Option<crate::net::EgressConfig>,
 }
 
@@ -82,8 +79,8 @@ impl FirecrackerMachineConfig {
     }
 }
 
-/// Boots machines on this node's Firecracker (machine §2.1). Injected into
-/// the grain factory (`granary_named`), one per node.
+/// Boots machines on this node's Firecracker (machine §2.1). One per node,
+/// injected into the grain factory (`granary_named`).
 pub struct FirecrackerMachineProvider {
     config: Arc<FirecrackerMachineConfig>,
     /// The node-local guest-address pool (machine §5.2), `Some` iff the config
@@ -111,8 +108,8 @@ impl FirecrackerMachineProvider {
     /// guest /30, install the tap and policy ruleset, and point `vm_config` at
     /// the NIC. Returns the teardown handle to hand the VM, or `None` when
     /// egress is unconfigured, the pool is full, or the plumbing could not be
-    /// installed — in which case the machine boots with no NIC (net.rs's
-    /// documented graceful degrade), never failing the boot over egress.
+    /// installed — in which case the machine boots with no NIC rather than
+    /// failing the boot over egress.
     #[cfg(all(feature = "net", target_os = "linux"))]
     fn wire_egress(&self, spec: &VmSpec, vm_config: &mut microvm::VmConfig) -> Option<EgressHandle> {
         let pool = self.pool.as_ref()?;
@@ -206,8 +203,8 @@ impl EgressHandle {
 impl MachineVmProvider for FirecrackerMachineProvider {
     fn boot(&self, spec: VmSpec) -> BoxFuture<'static, Result<Arc<dyn MachineVm>, VmError>> {
         let config = Arc::clone(&self.config);
-        // The disk facet's image, in place (module docs): the guest's writes
-        // land in the materialization the capture command scans (grain §7.15).
+        // The disk facet's image, in place: the guest's writes land in the
+        // materialization the capture command scans (grain §7.15).
         let mut vm_config =
             microvm::VmConfig::rooted(&config.binary, &config.kernel, &config.boot_args, &spec.image);
         vm_config.vcpus = spec.vcpus.max(1) as u32;
@@ -274,8 +271,7 @@ impl FirecrackerMachineVm {
 
 impl Drop for FirecrackerMachineVm {
     /// A dropped activation must leak neither a running guest (MicroVm kills
-    /// itself on drop) nor its egress plumbing (machine §5.2). The teardown is
-    /// a no-op if kill already ran it.
+    /// itself on drop) nor its egress plumbing (machine §5.2).
     fn drop(&mut self) {
         if let Some(egress) = &self.egress {
             egress.teardown();
@@ -306,8 +302,7 @@ impl MachineVm for FirecrackerMachineVm {
         Box::pin(async move {
             let mut vm = self.vm.lock().await;
             vm.kill().await;
-            // Remove the egress plumbing with the guest (machine §5.2): the tap
-            // and ruleset outlive the VM process otherwise.
+            // The tap and ruleset outlive the VM process otherwise (machine §5.2).
             if let Some(egress) = &self.egress {
                 egress.teardown();
             }
@@ -337,8 +332,8 @@ impl MachineVm for FirecrackerMachineVm {
                 .await
                 .map_err(|e| sync_error("ws pull", e))?;
             // Two-phase staged restore: a corrupt guest tar leaves the host
-            // workspace untouched, so nothing partial can be durably
-            // captured as deletions (the staging is the codec's secret).
+            // workspace untouched, so nothing partial can be durably captured
+            // as deletions.
             microvm::ws_sync::restore_workspace(&ws, &tar)
                 .map_err(|e| VmError::Transport(format!("ws pull: {e}")))
         })

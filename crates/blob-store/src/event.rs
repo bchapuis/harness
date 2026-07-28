@@ -2,13 +2,9 @@
 //!
 //! The store emits its events on the actor framework's single extensible `Event`
 //! stream (actor §16) as application events ([`Event::app`](actor_core::Event)),
-//! exactly as granary emits `GrainEvent`: one totally-ordered stream interleaved
-//! with the core actor events, so the seed-reproducibility contract covers blob
-//! events for free, and the simulator's invariant checkers (spec §8, §9) read them
-//! with [`Event::as_app::<BlobEvent>`](actor_core::Event::as_app). `BlobEvent`
-//! qualifies as an `AppEvent` through the framework's blanket impl (it is
-//! `Debug + Clone + PartialEq + Send + Sync + 'static`); no hand-written impl is
-//! needed.
+//! so they are totally ordered with the core actor events and covered by the
+//! seed-reproducibility contract. The simulator's invariant checkers (spec §8, §9)
+//! read them with [`Event::as_app::<BlobEvent>`](actor_core::Event::as_app).
 
 use actor_core::NodeId;
 
@@ -18,12 +14,11 @@ use crate::blob::Namespace;
 /// A blob-store event on the framework's `Event` stream (spec §8, §9).
 ///
 /// The per-node variants ([`Stored`](BlobEvent::Stored),
-/// [`Tombstoned`](BlobEvent::Tombstoned)) carry the `node` that acted, which is
-/// what makes the safety invariants expressible as continuous checkers: a
-/// `Stored` for a namespace a node has already `Tombstoned` would be a
-/// resurrection (**B7**), and that ordering is only visible per node. The
-/// coordinator variants record the outcome a caller observed
-/// ([`PutAcked`](BlobEvent::PutAcked), [`GetVerified`](BlobEvent::GetVerified),
+/// [`Tombstoned`](BlobEvent::Tombstoned)) carry the `node` that acted: a `Stored`
+/// for a namespace that node has already `Tombstoned` is a resurrection (**B7**),
+/// and that ordering is only visible per node. The coordinator variants record the
+/// outcome a caller observed ([`PutAcked`](BlobEvent::PutAcked),
+/// [`GetVerified`](BlobEvent::GetVerified),
 /// [`GetCorrupt`](BlobEvent::GetCorrupt)).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlobEvent {

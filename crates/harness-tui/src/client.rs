@@ -4,8 +4,8 @@
 //! Two shapes of call:
 //!
 //! - **Request-response** (`list_sessions`, `fetch_records`, `cancel`) — send,
-//!   read the whole reply, parse the JSON. The same one-connection-per-request,
-//!   `connection: close` style as the standalone deployment's model seam.
+//!   read the whole reply, parse the JSON. One connection per request,
+//!   `connection: close`.
 //! - **Streaming** (`open_prompt`) — submit a turn with `Accept: text/event-stream`
 //!   and hand back an [`Events`] iterator that yields the run's records live off
 //!   the chunked SSE body, so the TUI renders as the agent works.

@@ -4,17 +4,16 @@
 //! The cluster self-hosts its membership authority as a **replicated log**: an
 //! elected leader serializes every transition as a [`RaftEntry`], a quorum of
 //! **voters** commits it, and the **commit index** is the authority stamp the
-//! membership merge orders decisions by (spec §9.2). The scope is deliberately
-//! minimal — elections, heartbeats, log replication, quorum commit, and
-//! single-server voter changes; no snapshots or log compaction — enough for
-//! every observable guarantee the spec requires (election safety, log matching,
-//! leader completeness) and invariant #22.
+//! membership merge orders decisions by (spec §9.2). The scope is elections,
+//! heartbeats, log replication, quorum commit, single-server voter changes, and
+//! snapshot/compaction (§9) — enough for every observable guarantee the spec
+//! requires (election safety, log matching, leader completeness) and invariant
+//! #22.
 //!
 //! **Multi-group.** The consensus algorithm is generic; only the entry *payload*
-//! and the voter-set-change handling are application-specific. So a single
-//! [`RaftGroup`] carries an opaque application command as bytes
-//! ([`EntryPayload::App`]) — the same opaque-bytes seam philosophy as `Transport`
-//! and granary's `GrainJournal` — and [`MultiRaft`] runs O(groups) independent groups
+//! and the voter-set-change handling are application-specific. A [`RaftGroup`]
+//! therefore carries an opaque application command as bytes
+//! ([`EntryPayload::App`]), and [`MultiRaft`] runs O(groups) independent groups
 //! keyed by [`GroupId`], each with its own log, leadership, and term sequence.
 //! The membership control plane is one well-known group ([`GroupId::CONTROL`]);
 //! granary's per-shard journals are additional groups.
@@ -213,9 +212,8 @@ pub struct RaftConfig {
 impl RaftConfig {
     /// A config for `voters` with in-memory storage and default timing
     /// (1s election timeout, 250ms heartbeats). The default storage factory
-    /// caches one [`InMemoryRaftWAL`] per `(group, node)`, so state survives
-    /// as long as the config does — under simulation, a restarted node reloads
-    /// its persisted Raft state exactly as a production node reloads it from disk.
+    /// caches one [`InMemoryRaftWAL`] per `(group, node)`, so state survives as
+    /// long as the config does and a simulated restart reloads it.
     pub fn new(voters: Vec<NodeId>) -> RaftConfig {
         let cache: Mutex<BTreeMap<(GroupId, NodeId), Arc<dyn RaftWAL>>> =
             Mutex::new(BTreeMap::new());
@@ -254,8 +252,7 @@ impl MultiRaft {
     /// Build an empty engine — a group registry with the engine-wide timing and
     /// storage factory, and no groups yet. The caller creates the groups it wants
     /// (the cluster layer's control group at startup, a granary shard's group on
-    /// demand); the engine names none of them, so it holds no knowledge of its
-    /// callers. Election timers arm from the `now` passed to each `create_group`.
+    /// demand). Election timers arm from the `now` passed to each `create_group`.
     pub(crate) fn new(node: NodeId, config: &RaftConfig) -> MultiRaft {
         MultiRaft {
             node,
@@ -266,9 +263,8 @@ impl MultiRaft {
     }
 
     /// Create (or replace) the group `group` with voter set `voters`, reloading
-    /// its persisted state from the factory. Used at startup for the control
-    /// group, and (later) per shard. The election timer arms from `now` with no
-    /// jitter — every group draws no entropy on its first arm, only on later
+    /// its persisted state from the factory. The election timer arms from `now`
+    /// with no jitter: no group draws entropy on its first arm, only on later
     /// resets, so the engine-wide draw order is a deterministic function of the
     /// group set (ticked in `GroupId` order), independent of how many groups exist.
     pub(crate) fn create_group(
@@ -305,13 +301,11 @@ impl MultiRaft {
     }
 
     /// Stop running `group`: drop it from the tick map so it no longer elects,
-    /// heartbeats, or commits (spec §7.7, G7 reclamation on a shard merge). The
-    /// group carries no data — a granary leader-election group is placement only
-    /// (§7.1) — so a merged-away shard's group is retired with no in-group
-    /// consensus, each node dropping it as it applies the committed `Merged`.
-    /// Idempotent; a group this node never ran is already gone. (Its on-disk
-    /// storage, if any, is left for a later sweep — an empty leader-election log
-    /// is a bounded residue, never grain data.)
+    /// heartbeats, or commits (spec §7.7, G7 reclamation on a shard merge).
+    /// Retiring needs no in-group consensus (see
+    /// [`RaftConsensus::remove_group`](crate::RaftConsensus::remove_group)).
+    /// Idempotent; a group this node never ran is already gone. Not implemented:
+    /// sweeping the group's on-disk storage.
     pub(crate) fn remove_group(&self, group: GroupId) {
         self.groups
             .lock()
@@ -352,14 +346,10 @@ enum Role {
 
 /// One observation the caller folds into its state machine, in commit order
 /// (spec §9.4.3). The opaque-bytes seam: the caller decodes and applies these.
-///
-/// `Apply` is one committed application command at its log `index` (the membership
-/// merge stamps decisions by it, spec §9.2; a granary shard appends its journal
-/// record). `Snapshot` is delivered when this node **installs** a leader's state-
-/// machine snapshot (the log prefix it subsumes was compacted away, §9): the
-/// caller must *replace* its state with `snapshot`, which reflects every command
-/// through `index`. The two share one ordered stream, so an install and the
-/// commands after it never reorder.
+/// A `Snapshot` is delivered when this node installs a leader's state-machine
+/// snapshot, the log prefix it subsumes having been compacted away (§9). Both
+/// variants ride one ordered stream, so an install and the commands after it
+/// never reorder.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Committed {
     /// A committed application command at this 1-based log index. `commit` is the
@@ -443,8 +433,7 @@ struct RaftState {
     /// never elect, lead, or count toward a quorum (spec §7.1, the granary shards'
     /// extra replicas beyond the voter quorum). Kept sorted and disjoint from
     /// `voters`. A learner adopts the leader on append, so it can route and serve
-    /// reads; bounding `voters` to `R` keeps write quorum at `⌈R/2⌉` independent of
-    /// cluster size.
+    /// reads.
     learners: Vec<NodeId>,
     /// The leader this node currently believes in (itself when leading).
     leader: Option<NodeId>,
@@ -481,13 +470,11 @@ impl RaftState {
 
     /// The 0-based slot in `log` holding the entry at absolute `index`. The log
     /// drops the compacted prefix, so absolute `index` sits at
-    /// `log[index - snapshot_index - 1]`. This method is the *one* place that
-    /// off-by-one is written — every read, truncate, and drain routes through it,
-    /// so the "log is offset by the compacted prefix" invariant lives once.
-    /// `index` must be `> snapshot_index` (index `0` and the compacted prefix have
-    /// no slot). Because `slot(index)` names an entry's position, a `..=slot(index)`
-    /// range is *inclusive* of it: it spans exactly the `index - snapshot_index`
-    /// entries at or below `index`.
+    /// `log[index - snapshot_index - 1]`; every read, truncate, and drain routes
+    /// through here. `index` must be `> snapshot_index` (index `0` and the
+    /// compacted prefix have no slot). Because `slot(index)` names an entry's
+    /// position, a `..=slot(index)` range is *inclusive* of it: it spans exactly
+    /// the `index - snapshot_index` entries at or below `index`.
     fn slot(&self, index: u64) -> usize {
         (index - self.snapshot_index) as usize - 1
     }
@@ -535,10 +522,8 @@ impl RaftState {
     }
 }
 
-/// One group's Raft instance on this node (spec §9.4.3). A voter elects and
-/// leads; a non-voter is a passive learner that only replicates committed
-/// state. All state sits behind one mutex, mutated by the driver tick and the
-/// frame handlers.
+/// One group's Raft instance on this node (spec §9.4.3). All state sits behind
+/// one mutex, mutated by the driver tick and the frame handlers.
 pub(crate) struct RaftGroup {
     group: GroupId,
     node: NodeId,
@@ -581,9 +566,6 @@ impl RaftGroup {
             votes: BTreeSet::new(),
             next: BTreeMap::new(),
             matched: BTreeMap::new(),
-            // The base timeout without jitter; re-armed with jitter on every
-            // subsequent reset (the first tick draws no entropy, keeping the
-            // draw order simple and deterministic).
             election_deadline: now + election_timeout,
         };
         RaftGroup {
@@ -622,12 +604,11 @@ impl RaftGroup {
     /// The reloaded state-machine snapshot as a [`Committed::Snapshot`], if this
     /// group came up over a **compacted** log (`snapshot_index > 0`), else `None`.
     ///
-    /// A node that restarts from a snapshot reloads it into [`RaftState`] but the
+    /// A node that restarts from a snapshot reloads it into [`RaftState`], but the
     /// engine never re-emits already-applied state on the commit stream (`applied`
-    /// starts at the snapshot base, see [`new`]). So a fresh subscriber — a granary
-    /// journal rebuilding its projection after a full cluster restart — would
-    /// otherwise see only the post-snapshot tail and miss the whole compacted
-    /// prefix. Handing it this observation first rebuilds the projection from the
+    /// starts at the snapshot base, see [`new`]), so a fresh subscriber would
+    /// otherwise see only the post-snapshot tail and miss the compacted prefix
+    /// entirely. Handing it this observation first rebuilds the projection from the
     /// snapshot, the leaderless counterpart of a leader-driven InstallSnapshot
     /// (§9). Its `commit` watermark is the snapshot base: the snapshot proves the
     /// projection current only through `snapshot_index`, never beyond.
@@ -768,8 +749,7 @@ impl RaftGroup {
         state.leader = Some(self.node);
         out.elected = Some(state.term);
         // Track replication progress for every member — voters and learners — so
-        // the leader sends each the right log suffix. Only voters' progress is
-        // consulted for the commit quorum (`advance_commit`).
+        // the leader sends each the right log suffix.
         let next = state.last_index() + 1;
         let members: Vec<NodeId> = state
             .voters
@@ -804,8 +784,7 @@ impl RaftGroup {
     /// pending (uncommitted) — the dedup that keeps the leader's per-tick duties
     /// and forwarded proposals from piling up duplicates. Returns whether the
     /// payload is now in the log (newly or already). Byte-equality of an
-    /// [`EntryPayload::App`] makes a re-proposed application command idempotent,
-    /// exactly as a repeated config command was.
+    /// [`EntryPayload::App`] makes a re-proposed application command idempotent.
     pub(crate) fn propose(&self, payload: EntryPayload) -> bool {
         let mut state = self.lock();
         if state.role != Role::Leader {
@@ -864,9 +843,7 @@ impl RaftGroup {
     /// suffix it still misses (a heartbeat when empty), then advance the commit
     /// index to the highest current-term entry a quorum has matched.
     fn replicate(&self, state: &mut RaftState, out: &mut RaftOutput) {
-        // Replicate to every other member, learners included (§7.1): a learner
-        // gets the committed log so it can route and serve reads, but never votes
-        // or counts toward the commit quorum (`advance_commit`).
+        // Every other member, learners included (§7.1).
         let peers = state.replication_targets(self.node);
         for peer in peers {
             let next = *state.next.get(&peer).unwrap_or(&(state.last_index() + 1));
@@ -901,9 +878,8 @@ impl RaftGroup {
     /// committed its own `RemoveVoter` it must not vote itself over the commit
     /// line, or a non-voter leader could advance commit on a phantom self-vote
     /// with sub-quorum real replication — a minority evicting the majority (spec
-    /// §18.5 #22: a side lacking a quorum of voters commits none). The `tick`
-    /// non-voter early-return already keeps such a leader dormant, so this is a
-    /// defense-in-depth guard that makes the property local rather than emergent.
+    /// §18.5 #22: a side lacking a quorum of voters commits none). Defense in
+    /// depth: the `tick` non-voter early-return already keeps such a leader dormant.
     fn advance_commit(&self, state: &mut RaftState) {
         for index in (state.commit + 1..=state.last_index()).rev() {
             if state.term_at(index) != state.term {
@@ -930,10 +906,8 @@ impl RaftGroup {
     /// changes never reach the caller; only [`EntryPayload::App`] bytes do.
     ///
     /// A leader that commits its own `RemoveVoter` steps down here (Raft
-    /// dissertation §4.2.2): it is no longer a voter, so it stops leading rather
-    /// than lingering as a `Role::Leader` non-voter that the commit quorum and the
-    /// `tick` guard both have to special-case. `now`/`entropy` re-arm its election
-    /// timer on the way down like any other step-down.
+    /// dissertation §4.2.2): it is no longer a voter, so it stops leading.
+    /// `now`/`entropy` re-arm its election timer as on any other step-down.
     fn drain_committed<E: Entropy>(
         &self,
         state: &mut RaftState,
@@ -943,8 +917,7 @@ impl RaftGroup {
     ) {
         while state.applied < state.commit {
             state.applied += 1;
-            // Cloned out of the log (a `RaftEntry` is no longer `Copy`); the
-            // borrow ends before the voter-set mutations below.
+            // Cloned so the borrow ends before the voter-set mutations below.
             let entry = state.entry_at(state.applied).clone();
             match entry.payload {
                 EntryPayload::AddVoter(node) if !state.voters.contains(&node) => {
@@ -1414,7 +1387,7 @@ mod tests {
     }
 
     /// Two Raft groups on the same three nodes elect independently and commit
-    /// disjoint logs — the multi-group capability the engine exists to provide.
+    /// disjoint logs.
     #[test]
     fn two_groups_run_independently_on_the_same_nodes() {
         let nodes = [NodeId::new(1), NodeId::new(2), NodeId::new(3)];

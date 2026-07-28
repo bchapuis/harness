@@ -17,16 +17,14 @@ use crate::facet::FacetError;
 /// never pruned mid-activation — so a failed `save_snapshot` can never leave the
 /// *current* durable manifest's blobs sweepable; the next activation restores
 /// from the durable manifest and resets the set. Plain data: each facet guards
-/// it with its own lock (the SQL and workspace facets a dedicated `Mutex`, the
-/// disk facet its one state lock).
+/// it with its own lock.
 #[derive(Default)]
 pub(crate) struct RootSet(BTreeSet<BlobId>);
 
 impl RootSet {
     /// Adopt the durable manifest's ids wholesale — the restore path, the one
     /// place the union may shrink (a fresh activation starts from the durable
-    /// truth, so nothing live is dropped). Only the SQL facet restores into a
-    /// long-lived set; the workspace and disk facets build a fresh one.
+    /// truth, so nothing live is dropped).
     #[cfg(feature = "sql")]
     pub(crate) fn reset(&mut self, ids: impl IntoIterator<Item = BlobId>) {
         self.0 = ids.into_iter().collect();

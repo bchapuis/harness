@@ -2,17 +2,12 @@
 //!
 //! A swarm sweep is a *sample* of the seed space, so a bug it once found is not
 //! one it keeps finding: widen the base, narrow the width, and the seed that
-//! caught it is no longer in the sample. The corpus closes that gap. Every seed
-//! recorded in `corpus.txt` replays on every run of its workload — local, CI,
-//! and soak alike — on top of whatever that run's sweep covers.
-//!
-//! That is the ratchet described in `docs/simulation-testing.md`: soak discovers
-//! a `(workload, seed)` pair, the pair is written down, and from then on it is
-//! checked forever at negligible cost.
+//! caught it is no longer in the sample. Every seed recorded in `corpus.txt`
+//! therefore replays on every run of its workload (local, CI, and soak alike) on
+//! top of whatever that run's sweep covers. See `docs/simulation-testing.md`.
 //!
 //! Corpus seeds are *absolute*. `SWARM_SEED_BASE` moves a sweep to unexplored
-//! ground; it must not move the regressions, or the ratchet would slip on
-//! exactly the runs meant to strengthen it.
+//! ground; it MUST NOT move the regressions.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -40,9 +35,8 @@ fn index() -> &'static BTreeMap<String, Vec<u64>> {
     INDEX.get_or_init(|| parse(CORPUS))
 }
 
-/// Parse the corpus. A malformed line is a hard error rather than a skip: a
-/// typo that silently dropped a regression case would defeat the file's whole
-/// purpose, and it is caught the first time any swarm runs.
+/// Parse the corpus. A malformed line is a hard error rather than a skip: a typo
+/// that silently dropped a regression case would defeat the file's purpose.
 fn parse(text: &str) -> BTreeMap<String, Vec<u64>> {
     let mut index: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     for (number, raw) in text.lines().enumerate() {

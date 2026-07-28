@@ -1,17 +1,12 @@
 //! Continuously-checked invariants over the event stream (spec §18.5).
 //!
-//! Correctness is expressed as a small set of invariants checked on **every**
-//! run, not as bespoke example tests. Each
-//! [`Invariant`] observes the [`Event`] stream live and reports a violation
+//! Each [`Invariant`] observes the [`Event`] stream live and reports a violation
 //! string; the [`Checker`](crate::Checker) collects them. Seven ship as
 //! continuous checkers; the rest are verified by example tests.
 //!
-//! [`catalogue`](crate::catalogue) is the single source of truth linking each of
-//! the 22 §18.5 invariants to *how* it is verified (a continuous [`Checker`], a
-//! conformance test, a compile-fail case, a differential test, or a compile-time
-//! bound). The `conformance_catalogue` integration test asserts this catalogue
-//! stays consistent with [`default_invariants`] — so a checker added in code but
-//! not recorded here (or vice versa) fails the build (spec §17, §18.5, §18.6).
+//! [`catalogue`](crate::catalogue) records which of the 22 §18.5 invariants is
+//! verified how, kept consistent with [`default_invariants`] by the
+//! `conformance_catalogue` test (spec §17, §18.5, §18.6).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -24,11 +19,10 @@ use actor_core::Terminated;
 
 /// A property checked continuously during a run and at final quiescence
 /// (spec §18.5). Observation must be side-effect-free apart from the invariant's
-/// own bookkeeping, and must never panic (a violation is a returned `Err`, so
-/// the run is reported, not unwound through the executor). Alongside the core
-/// catalogue, the cluster-utilities invariants (U1, U2, … — see
-/// [`utilities_catalogue`](crate::utilities_catalogue)) check through the same
-/// mechanism.
+/// own bookkeeping, and must never panic: a violation is a returned `Err`, so
+/// the run is reported, not unwound through the executor. The cluster-utilities
+/// invariants (U1, U2, … see
+/// [`utilities_catalogue`](crate::utilities_catalogue)) use the same mechanism.
 pub trait Invariant: Send {
     /// A stable name for reporting.
     fn name(&self) -> &'static str;
@@ -40,17 +34,12 @@ pub trait Invariant: Send {
     /// **ended** — a [`NodeRestarted`](crate::NodeRestarted), which the
     /// [`Checker`](crate::Checker) dispatches here before passing the event on.
     ///
-    /// Process death leaves brackets open by definition: an actor stopped between
-    /// `DispatchStart` and `DispatchEnd`, an `ask` issued and never answered, an
-    /// identity assigned and never resigned. Those are not violations, they are
-    /// what dying looks like — and the successor reuses the identities, since a
-    /// fresh process numbers paths and incarnations from zero. An invariant that
-    /// accumulates per-node state overrides this to drop it.
-    ///
-    /// The default does nothing, which is right for a claim a restart does not
-    /// reset — [`OneLeaderPerTerm`] is the example, since a restarted voter
-    /// reloads its persisted term and vote through the storage seam and is
-    /// bound by every election it took part in before.
+    /// Process death leaves brackets open (a dispatch without its end, an `ask`
+    /// never answered, an identity never resigned), and the successor reuses the
+    /// identities, since a fresh process numbers paths and incarnations from
+    /// zero. Neither is a violation. An invariant that accumulates per-node state
+    /// overrides this to drop it; the default does nothing, which is right for a
+    /// claim a restart does not reset, such as [`OneLeaderPerTerm`].
     fn forget_node(&mut self, _node: NodeId) {}
 
     /// Final check once the run is quiescent; return `Err(detail)` on violation.
@@ -75,12 +64,10 @@ pub fn default_invariants() -> Vec<Box<dyn Invariant>> {
 /// **No silent loss** (spec §18.5 #1): every issued `ask` reaches an outcome,
 /// and none remains pending at quiescence.
 ///
-/// Counted per **calling** node, not in one total, so a restart can forget the
-/// calls that died with its process. An ask the dead caller issued will never be
-/// answered — nothing is left to receive the answer — while an ask a *live*
+/// Counted per **calling** node, so a restart can forget the calls that died
+/// with its process: nothing is left to receive their answers. An ask a *live*
 /// caller issued *to* the dead node must still resolve, with `Unreachable`
-/// (invariant #2). One total could not tell those apart; `caller` is what
-/// separates them.
+/// (invariant #2).
 #[derive(Default)]
 pub struct NoSilentLoss {
     outstanding: BTreeMap<NodeId, i64>,
@@ -176,9 +163,8 @@ impl Invariant for SerialExecution {
 /// `AssignId` → `ActorReady` → `ResignId`, with assign/ready/resign each at most
 /// once and never out of order.
 ///
-/// The claim is about *one actor*, and an [`ActorId`] names one actor only within
-/// a process: a restarted node assigns paths and incarnations from zero again
-/// (spec §11.2 — a restart constructs fresh state). So a
+/// An [`ActorId`] names one actor only within a process: a restarted node
+/// assigns paths and incarnations from zero again (spec §11.2). So a
 /// [`NodeRestarted`](crate::NodeRestarted) forgets that node's actors, and the
 /// successor's `/user/0#0` is judged on its own rather than as a second
 /// assignment of its predecessor's.
@@ -240,8 +226,8 @@ impl Invariant for LifecycleExactlyOnce {
 
 /// **`down` is terminal** (spec §18.5 #15): once an observer declares a node
 /// `down`, that observer never sees its reachability change again. Tracked per
-/// `(observer, subject)`, because without gossip each node decides `down`
-/// independently — node A downing C does not bind node B's view of C.
+/// `(observer, subject)`: without gossip each node decides `down` independently,
+/// so node A downing C does not bind node B's view of C.
 #[derive(Default)]
 pub struct DownIsTerminal {
     down: BTreeSet<(NodeId, NodeId)>,
@@ -272,10 +258,9 @@ impl Invariant for DownIsTerminal {
     }
 
     fn forget_node(&mut self, node: NodeId) {
-        // Only the *observer* side. A fresh process remembers downing nobody, so
-        // its own view resets; but another node's `down` verdict about this one
-        // is that observer's, and stays terminal however often the subject
-        // restarts.
+        // Only the *observer* side: a fresh process remembers downing nobody,
+        // but another node's `down` verdict about this one stays terminal
+        // however often the subject restarts.
         self.down.retain(|(observer, _)| *observer != node);
     }
 }
@@ -284,17 +269,11 @@ impl Invariant for DownIsTerminal {
 /// is delivered through the watcher's mailbox like any other message — never out
 /// of band, straight into a running handler.
 ///
-/// A `Terminated` flows through [`enqueue_signal`](actor_core::Mailbox), which
-/// emits an `Enqueue` for the `Terminated` manifest and then lets the serial
-/// message loop dispatch it (a `DispatchStart`). So "in band" is checkable as a
-/// prefix property: a `Terminated` is never *dispatched* on an actor more times
-/// than it was *enqueued* there. An out-of-band delivery — invoking the handler
-/// directly, bypassing the queue — would `DispatchStart` a signal that was never
-/// enqueued, and is caught here. The serial, non-reentrant half of #13 is already
-/// covered by [`SerialExecution`] (#4), which treats the signal like any message.
-///
-/// This is a *per-event* invariant (it holds at every prefix), so it is sound for
-/// both quiescence-driven single-node runs and time-bounded cluster runs.
+/// Signals enter through [`enqueue_signal`](actor_core::Mailbox), so "in band"
+/// is checkable as a prefix property: a `Terminated` is never *dispatched* on an
+/// actor more times than it was *enqueued* there. Holding at every prefix, it is
+/// sound for both quiescence-driven and time-bounded runs. The serial,
+/// non-reentrant half of #13 is covered by [`SerialExecution`] (#4).
 #[derive(Default)]
 pub struct SignalInBand {
     enqueued: BTreeMap<ActorId, u64>,
@@ -340,18 +319,14 @@ impl Invariant for SignalInBand {
 }
 
 /// **Quorum-gated control plane — election safety** (spec §18.5 #22, §9.4.3):
-/// at most one node ever announces leadership for a given term. This is the
-/// half of #22 expressible as a safety property over the event stream
-/// (`LeaderElected` carries the term); the quorum-gating and
-/// minority-cannot-evict halves are scenario properties, verified by the
-/// targeted tests in `conformance_leader.rs`. Vacuously green outside
-/// leader-based mode (no `LeaderElected` is ever emitted), so it is safe in
-/// [`default_invariants`].
+/// at most one node ever announces leadership for a given term. The quorum-gating
+/// and minority-cannot-evict halves of #22 are scenario properties, verified by
+/// `conformance_leader.rs`. Vacuously green outside leader-based mode (no
+/// `LeaderElected` is ever emitted), so it is safe in [`default_invariants`].
 ///
-/// Terms are **per Raft group** (the engine runs O(groups) independent groups,
-/// each with its own term sequence), so election safety is keyed by
-/// `(group, term)`: two groups legitimately reaching term `N` is not a double
-/// election. The membership control plane is group `0`.
+/// Terms are **per Raft group**, so election safety is keyed by `(group, term)`:
+/// two groups legitimately reaching term `N` is not a double election. The
+/// membership control plane is group `0`.
 #[derive(Default)]
 pub struct OneLeaderPerTerm {
     leaders: BTreeMap<(u64, u64), NodeId>,
@@ -382,21 +357,13 @@ impl Invariant for OneLeaderPerTerm {
 /// **Singleton activation discipline — the per-node half** (utilities spec §4,
 /// invariant U2): a node never has two live activations of one singleton name
 /// at once — every `SingletonStarted` for a `(name, node)` must follow the
-/// `SingletonStopped` of its predecessor. The cross-node "exactly one" is only
-/// guaranteed at view convergence, so overlap *across* nodes during divergence
-/// is legal and deliberately not flagged here; the converged-exactly-one and
-/// re-activation halves are scenario properties, verified by
-/// `conformance_singleton.rs` and the singleton swarm workload. Vacuously green
-/// for workloads that host no singleton, so it is safe in
-/// [`default_invariants`]. (Not restart-safe: a `SimNetwork::restart` of a
-/// hosting node abandons its manager without a `SingletonStopped`, so singleton
-/// workloads use crash/partition nemeses, not restart.)
-///
-/// **Not** `granary::testing::ActivationSingletonPerNode`, despite the similar
-/// name: that one is the *grain* analogue (G6, keyed by `(node, GrainName)` off
-/// `GrainEvent::Activated`), a claim about granary's contract rather than the
-/// cluster-utilities singleton. Different layer, different event, different
-/// catalogue.
+/// `SingletonStopped` of its predecessor. Overlap *across* nodes during
+/// divergence is legal (cross-node "exactly one" holds only at view convergence)
+/// and not flagged here; `conformance_singleton.rs` and the singleton swarm
+/// workload verify the other halves. Vacuously green for workloads that host no
+/// singleton, so it is safe in [`default_invariants`]. Not restart-safe: a
+/// `SimNetwork::restart` of a hosting node abandons its manager without a
+/// `SingletonStopped`, so singleton workloads use crash/partition nemeses.
 #[derive(Default)]
 pub struct SingletonAtMostOnePerNode {
     live: BTreeMap<(&'static str, NodeId), ActorId>,
@@ -436,24 +403,19 @@ impl Invariant for SingletonAtMostOnePerNode {
     }
 }
 
-// Note: death-watch exactly-once (#11) is intentionally *not* a continuous
-// checker. The tempting form — "at most one `TerminatedDelivered` per
-// (target, watcher)" — is unsound: a watcher may legitimately `watch` the same
-// target more than once, and watching an already-terminated actor yields a fresh
-// `Terminated` each time (spec §12, invariant #12). The receptionist does
-// exactly this when anti-entropy re-delivers a stale registration for an actor
-// that has since died. With no per-`watch` identity on the event stream, the
-// "exactly one *per watch*" property is not expressible as a safety invariant
-// over the existing events, so #11 stays verified by targeted tests.
+// Two invariants are *not* continuous checkers, and must not be made ones.
 //
-// Likewise, bounded-non-dropping mailbox (#5) is *not* a continuous checker. Its
-// "bounded" half is structural — the mailbox is a fixed-capacity channel that
-// cannot exceed its bound — and its "blocks or returns `MailboxFull`, never drops
-// silently" half is a per-call API contract (`tell` awaits, `try_tell` returns
-// `MailboxFull`). Neither is an emergent property of the event stream: a depth
-// check would need per-actor capacity in the stream, and "depth 0 at quiescence"
-// is unsound for the time-bounded cluster runs (`run_for`) that stop mid-flight.
-// So #5 stays verified by targeted tests (`actor.rs`, `conformance_messaging.rs`).
+// #11 (death-watch exactly-once): a watcher may `watch` the same target more
+// than once, and watching an already-terminated actor yields a fresh
+// `Terminated` each time (spec §12, #12). The stream carries no per-`watch`
+// identity, so "exactly one per watch" is not expressible over it.
+//
+// #5 (bounded, non-dropping mailbox): the "bounded" half is structural and the
+// "blocks or returns `MailboxFull`" half is a per-call API contract; neither is
+// emergent on the event stream, and "depth 0 at quiescence" is unsound for the
+// time-bounded cluster runs (`run_for`) that stop mid-flight.
+//
+// Both are verified by targeted tests (`actor.rs`, `conformance_messaging.rs`).
 
 #[cfg(test)]
 mod tests {

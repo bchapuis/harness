@@ -3,10 +3,9 @@
 //!
 //! Session ids are arbitrary strings — delegation derives child ids like
 //! `parent/turn/call` — and two distinct ids must never map to one
-//! directory: merged workspaces would leak state across sessions, the very
-//! thing the seam exists to prevent (harness spec H8). The digest suffix
-//! makes the mapping injective; the sanitized prefix keeps the directory
-//! listing readable.
+//! directory: merged workspaces would leak state across sessions (harness
+//! spec H8). The digest suffix makes the mapping injective; the sanitized
+//! prefix keeps the directory listing readable.
 
 use harness::session::content_digest;
 

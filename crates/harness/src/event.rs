@@ -6,11 +6,10 @@
 //! single-writer fence are the grain's events (`Activated`/`Passivated`/
 //! `LeaderChanged`, granary §13), not duplicated here.
 //!
-//! The vocabulary is the harness's; the stream is the framework's: each
-//! event rides the core stream as [`Event::App`] (core spec §16), so
+//! Each event rides the core stream as [`Event::App`] (core spec §16), so
 //! checkers observe one totally ordered sequence interleaved with the core
-//! events, and the seed-reproducibility contract (core spec §18.1 #1) covers
-//! these for free. Recover them with `event.as_app::<HarnessEvent>()`.
+//! events and the seed-reproducibility contract (core spec §18.1 #1) covers
+//! these too. Recover them with `event.as_app::<HarnessEvent>()`.
 
 use actor_core::Event;
 use actor_core::NodeId;
@@ -18,10 +17,8 @@ use actor_core::NodeId;
 use crate::session::SessionId;
 use crate::session::TurnId;
 
-/// One harness event (harness spec §10.4). The events a stream checker
-/// cannot reconstruct from the grain's own events: session activation,
-/// deactivation, and the single-writer fence are observed through the grain's
-/// `Activated`/`Passivated`/`LeaderChanged` (granary §13), never duplicated here.
+/// One harness event (harness spec §10.4): the events a stream checker cannot
+/// reconstruct from the grain's own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HarnessEvent {
     /// A run began for a newly journaled turn: fires once per `(session, turn)`
@@ -47,10 +44,9 @@ pub enum HarnessEvent {
         usage: u64,
     },
     /// One tool call's `ToolOutcome` committed on a live activation (§5.4,
-    /// §6.4). Content-free like the rest — observability that a tool result
-    /// landed, the tool-side counterpart to `ModelCompleted`. Scoped to a live
-    /// run: a straggler of an ended or cancelled run commits no record, so emits
-    /// nothing (§3.2, §9.2). `node` attributes it to its enclosing activation.
+    /// §6.4). Scoped to a live run: a straggler of an ended or cancelled run
+    /// commits no record, so emits nothing (§3.2, §9.2). `node` attributes it to
+    /// its enclosing activation.
     ToolCompleted {
         session: SessionId,
         turn: TurnId,

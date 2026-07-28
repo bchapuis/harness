@@ -12,8 +12,7 @@
 //! Who decides the member set is the configurable [`MembershipMode`] (spec
 //! §9.4): a fixed **static** roster (§9.4.1), an external **registry** behind
 //! the [`RegistryClient`] seam (§9.4.2), a self-hosted Raft log behind an
-//! elected **leader** (§9.4.3), or peer-to-peer **gossip** with a deterministic
-//! coordinator (§9.4.4).
+//! elected **leader** (§9.4.3), or peer-to-peer **gossip** (§9.4.4).
 
 mod consensus;
 mod correlator;

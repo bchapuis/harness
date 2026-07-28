@@ -45,9 +45,8 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     fn spawn_child<A: Actor<System = Self>>(&self, child: A, parent: ActorId) -> ActorRef<A>;
 
     /// Spawn a child from a `factory` so a `Restart` directive can re-create it
-    /// (spec §11.2), parented to `parent`. The value-based [`spawn_child`]
-    /// cannot reconstruct its actor — a restart there degrades to `Stop` — so a
-    /// child that wants to be restartable is spawned this way. Used by
+    /// (spec §11.2), parented to `parent`. The value-based [`spawn_child`] cannot
+    /// reconstruct its actor, so a restart there degrades to `Stop`. Used by
     /// [`Ctx::spawn_with`].
     ///
     /// [`spawn_child`]: ActorSystem::spawn_child
@@ -115,10 +114,10 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// This node's identity.
     fn node(&self) -> NodeId;
 
-    /// A draw from the system's seeded [`Entropy`](crate::Entropy) (§4.6) — the
-    /// single source of randomness in the run. Used for supervision backoff
-    /// jitter (§11.2) and available to actors that need deterministic randomness;
-    /// it never reaches for a host RNG, so a simulated run stays reproducible.
+    /// A draw from the system's seeded [`Entropy`](crate::Entropy) (§4.6), the
+    /// single source of randomness in the run: it never reaches for a host RNG, so
+    /// a simulated run stays reproducible. Used for supervision backoff jitter
+    /// (§11.2) and by actors needing deterministic randomness.
     fn next_random(&self) -> u64;
 
     /// The shared receptionist registry backing [`receptionist`](Self::receptionist).

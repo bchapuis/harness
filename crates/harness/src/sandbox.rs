@@ -1,11 +1,9 @@
 //! The sandbox seam (harness spec §5.3): isolated execution environments.
 //!
-//! The third harness seam, and the isolation boundary of §5.1: every declared
-//! tool except the built-in `delegate` executes inside its session's sandbox
-//! and nowhere else. The spec mandates *that* effects run behind this seam,
-//! not *how*: process, container, or microVM is the provider's secret (§1.1);
-//! the simulator's scripted sandbox is one more implementation of the same
-//! trait (§12.1).
+//! The isolation boundary of §5.1: every declared tool except the built-in
+//! `delegate` executes inside its session's sandbox and nowhere else. The spec
+//! mandates *that* effects run behind this seam, not *how*: process, container,
+//! or microVM is the provider's secret (§1.1).
 //!
 //! A sandbox is **working state, not session state** (§5.5): the fold never
 //! reads it, no record depends on its contents, and losing it never loses the
@@ -28,10 +26,9 @@ use crate::tool::ToolError;
 /// and withholds the rest.
 ///
 /// `Ord` exists only so tiers can live in a `BTreeSet` (the cap) and iterate
-/// in a canonical order (the digest, §7.1). The derived order happens to
-/// match today's inclusion chain, but the cap is a *set*, never a maximum
-/// (sandbox spec §2.2): no grant decision may compare tiers with `<` or
-/// `max` — a future peripheral tier would sit beside the chain, not on it.
+/// in a canonical order (the digest, §7.1). The derived order happens to match
+/// today's inclusion chain, but the cap is a *set*, never a maximum (sandbox
+/// spec §2.2): no grant decision may compare tiers with `<` or `max`.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]

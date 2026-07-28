@@ -3,9 +3,9 @@
 This guide installs `harness-standalone` — the runnable deployment of the
 agentic harness — and walks through a three-node cluster: one OS process per
 node, each with its own data directory, agentic sessions backed by the
-Anthropic API, and the failure drill the architecture exists for (kill a node,
-watch its sessions resume on a survivor). It starts on one host and spans
-machines with two flags ("Across machines").
+Anthropic API, and the failure drill (kill a node, watch its sessions resume on
+a survivor). It starts on one host and spans machines with two flags ("Across
+machines").
 
 ## What runs
 
@@ -38,8 +38,8 @@ and one node's harness — host actor, session actors, and the three seams:
   *replicated*, not shared: a session's record is appended to a quorum of the
   shard's replicas over the transport, fenced by the shard's term (spec §7.2,
   §8). A node writes only its own directory, so nodes share neither a directory
-  nor a filesystem. It is durable, which is what makes the failure drill work:
-  a new owner recovers a grain's head from a quorum on activation (§8, G14).
+  nor a filesystem. It is durable: a new owner recovers a grain's head from a
+  quorum on activation (§8, G14).
 - **Sandbox** — one private workspace directory per session under
   `--data/workspaces`, where the `shell` tool runs.
 
@@ -69,9 +69,8 @@ instead.
 
 - Rust ≥ 1.85 (`rustup` recommended).
 - An Anthropic API key in `ANTHROPIC_API_KEY`.
-- macOS or Linux. Each node keeps its own `--data` directory; the journal
-  replicates over the transport, so nodes need not share a filesystem (see
-  "Across machines" below).
+- macOS or Linux. Each node keeps its own `--data` directory; nodes need not
+  share a filesystem (see "Across machines" below).
 
 ## Install
 
@@ -102,9 +101,8 @@ harness-standalone node --id 2 --data ./harness-data/node2 --client 100=127.0.0.
 harness-standalone node --id 3 --data ./harness-data/node3 --client 100=127.0.0.1 --sandbox docker --sandbox-image python:3.12-slim
 ```
 
-On one host the nodes find each other on loopback (the default). Nothing is
-shared between the three directories; the journal replicates over the
-transport. `--client 100=127.0.0.1` admits the gateway (node id 100, outside the
+On one host the nodes find each other on loopback (the default).
+`--client 100=127.0.0.1` admits the gateway (node id 100, outside the
 `1..=3` voter roster) as a non-voting member, so it can join and route through
 the receptionist gossip.
 
@@ -202,15 +200,14 @@ node reconstructs the session — there is no other session state.
 Sessions are durable and named: prompt `demo` again days later (any gateway
 replica, any node) and it resumes the same transcript.
 
-Delegation works out of the box: ask the assistant to farm something out and
-it calls the `delegate` tool; the child runs as its own session of the
-`worker` kind — possibly on a different node — with a budget carved from the
-parent's, and the records show the `delegated to …` entry.
+Ask the assistant to farm something out and it calls the `delegate` tool; the
+child runs as its own session of the `worker` kind — possibly on a different
+node — with a budget carved from the parent's, and the records show the
+`delegated to …` entry.
 
 ## The failure drill
 
-This is the deployment's reason to exist: a session survives the machine
-that was running it.
+A session survives the machine that was running it.
 
 1. Submit a long-ish turn, e.g.
    `Write a fibonacci script, run it for n=1..20, and summarize the timing.`
@@ -236,11 +233,9 @@ that was running it.
    sandbox mode shapes the kind digest existing sessions have pinned):
    survivors log `Reachable`, and new sessions place onto it again.
 
-Two details make this honest rather than staged: the journal's fenced append
-means even a *not actually dead* node (a partition, a pause) cannot fork the
-transcript — the old owner's next append loses the fence and deactivates —
-and re-submitting a turn id is always safe: a completed run returns its
-recorded outcome, a live run is re-attached, never run twice (invariant H7).
+The journal's fenced append means even a *not actually dead* node (a partition,
+a pause) cannot fork the transcript: the old owner's next append loses the fence
+and deactivates. Re-submitting a turn id is always safe (invariant H7).
 
 ## Configuration
 
@@ -309,15 +304,10 @@ over HTTP — and needs no API key.
   `/dev/kvm`, pass `--sandbox firecracker --fc-kernel <vmlinux> --fc-rootfs
   <ext4>` (both built by `guest/fc-rootfs/build.sh`) for the microVM grade
   instead: one Firecracker VM per activation, the workspace synced over vsock,
-  no network device (sandbox spec §3.5's reference choice). Both back the
-  workspace with a durable filesystem grain, so a session's files survive
-  hibernation, migration, and node loss. Where no container runtime is
-  available, `--sandbox durable` gives the same durable workspace through typed
-  file tools with no shell.
+  no network device (sandbox spec §3.5's reference choice).
 - **Each node keeps its own `--data` directory**; the journal replicates over
   the transport (a quorum append per grain, §7.2), so the roster spans machines
-  — set `--bind-host` and `--peer` (see "Across machines"). The store is local
-  to each node, never shared.
+  — set `--bind-host` and `--peer` (see "Across machines").
 - **The fake-friendly `--api-url`** speaks HTTP/1.1 without retry-relevant
   streaming; long completions are bounded by a 300s per-request timeout
   under the model client's retry policy.

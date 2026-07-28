@@ -1,21 +1,16 @@
 //! Seed-reproducibility: the determinism contract, enforced (spec §18.1 #1).
 //!
-//! The bedrock property of deterministic simulation is that a seed reproduces an
-//! entire run *exactly*: two runs of the same workload under the same seed MUST
-//! produce byte-identical event streams (spec §18.1 #1). Everything else — replaying a
-//! failure from its seed, shrinking, a regression corpus — rests on it. A single
-//! leak of ambient nondeterminism (a wall-clock read, an OS thread, a non-seeded
-//! RNG, `HashMap` iteration order) silently breaks it, so it deserves to be
-//! checked directly rather than assumed.
+//! Two runs of the same workload under the same seed MUST produce byte-identical
+//! event streams (spec §18.1 #1). A single leak of ambient nondeterminism (a
+//! wall-clock read, an OS thread, a non-seeded RNG, `HashMap` iteration order)
+//! silently breaks it, so it is checked directly rather than assumed.
 //!
 //! This module runs a [`Workload`] or [`ClusterWorkload`] twice under one seed
-//! with a [`Recorder`] on each, then diffs the two [`Event`] streams. The first
-//! point of divergence is reported as a [`Divergence`] — the exact index and the
-//! two differing events — so a determinism regression names itself instead of
-//! showing up as a mysterious flaky swarm. [`check_reproducible`] and
-//! [`check_cluster_reproducible`] are the single-run gates; [`replay_swarm`] and
-//! [`replay_cluster_swarm`] sweep them across seeds, the standing determinism
-//! corpus (spec §18.6).
+//! with a [`Recorder`] on each, then diffs the two [`Event`] streams, reporting
+//! the first point of divergence as a [`Divergence`].
+//! [`check_reproducible`] and [`check_cluster_reproducible`] are the single-run
+//! gates; [`replay_swarm`] and [`replay_cluster_swarm`] sweep them across seeds,
+//! the standing determinism corpus (spec §18.6).
 
 use std::sync::Arc;
 
@@ -42,8 +37,7 @@ pub struct Divergence {
     pub left: Option<Event>,
     /// The event the second run emitted at `index` (`None` if it ended early).
     pub right: Option<Event>,
-    /// The total length of each run's stream — a quick signal of how far they
-    /// agreed before diverging.
+    /// The total length of each run's stream.
     pub left_len: usize,
     pub right_len: usize,
 }
@@ -103,10 +97,9 @@ fn first_divergence(
 }
 
 /// Run a workload twice under one seed and diff the two event streams, reporting
-/// the first [`Divergence`] (spec §18.1 #1). The `record` closure captures which
-/// driver — single-node or cluster — produced the stream, so the determinism
-/// check itself lives once for both. Boxed because a `Divergence` carries two
-/// full events and dwarfs the `Ok` path.
+/// the first [`Divergence`] (spec §18.1 #1). The `record` closure supplies the
+/// driver, single-node or cluster. Boxed because a `Divergence` carries two full
+/// events and dwarfs the `Ok` path.
 fn check_twice(
     name: &'static str,
     seed: u64,
@@ -128,8 +121,7 @@ fn check_twice(
 ///
 /// The workload's [`regression_seeds`](crate::regression_seeds) run ahead of
 /// `seeds`, exactly as they do for an invariant sweep: a seed that once broke
-/// determinism is checked on every run, however narrow the sweep. Determinism
-/// regressions ratchet like any other.
+/// determinism is checked on every run, however narrow the sweep.
 fn sweep(
     workload: &str,
     seeds: impl IntoIterator<Item = u64>,
@@ -161,10 +153,9 @@ fn sweep(
     }
 }
 
-/// Every seed at which a reproducibility sweep found a divergence.
-///
-/// Boxed by its callers for the same reason a single [`Divergence`] is: each one
-/// carries two full events, so the error dwarfs the `Ok` path.
+/// Every seed at which a reproducibility sweep found a divergence. Boxed by its
+/// callers: each [`Divergence`] carries two full events, so the error dwarfs the
+/// `Ok` path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SweepDivergence {
     /// How many seeds ran, including the ones that diverged.
@@ -175,8 +166,7 @@ pub struct SweepDivergence {
 
 impl std::fmt::Display for SweepDivergence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // As with `SweepFailure`, one divergence prints exactly as it always
-        // did, so the stop-at-first message is unchanged.
+        // One divergence prints exactly as a bare `Divergence`.
         if let [only] = self.divergences.as_slice() {
             return write!(f, "{only}");
         }
@@ -225,9 +215,9 @@ pub fn replay_swarm<W: Workload>(
 }
 
 /// Record the event stream of a cluster workload run under `seed`. The cluster
-/// stream interleaves every node's events; reproducing it byte-for-byte is the
-/// stronger contract, because it pins down multi-node scheduling, the seeded
-/// transport faults, and the nemesis all at once.
+/// stream interleaves every node's events, so reproducing it byte-for-byte pins
+/// down multi-node scheduling, the seeded transport faults, and the nemesis at
+/// once.
 pub fn record_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Vec<Event> {
     let recorder = Recorder::new();
     drive_cluster(workload, seed, Arc::new(recorder.clone()));

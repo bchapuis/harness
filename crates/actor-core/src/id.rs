@@ -1,10 +1,7 @@
 //! Actor and node identity (spec §3.6).
 //!
 //! An [`ActorId`] is the cluster-unique, serializable name the system assigns:
-//! `{ node, path, incarnation }`. The `node` lets any node classify a target as
-//! local or remote from the id alone, with no network round-trip (spec §4.3).
-//! The `incarnation` distinguishes a fresh actor from a resigned one that reused
-//! the same name.
+//! `{ node, path, incarnation }`.
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -79,8 +76,7 @@ impl ActorId {
         }
     }
 
-    /// The node that owns this actor — the locality key (spec §3.6, §4.3). Any
-    /// node classifies a target as local or remote by comparing this to its own.
+    /// The node that owns this actor — the locality key (spec §3.6, §4.3).
     pub fn node(&self) -> NodeId {
         self.node
     }
@@ -90,8 +86,7 @@ impl ActorId {
         &self.path
     }
 
-    /// The incarnation distinguishing a fresh actor from a resigned predecessor
-    /// that reused the same path (spec §3.6).
+    /// The incarnation (spec §3.6).
     pub fn incarnation(&self) -> u64 {
         self.incarnation
     }

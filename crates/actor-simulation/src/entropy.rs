@@ -28,10 +28,9 @@ impl SimEntropy {
     /// A deterministic fault gate (spec §18.3): fires with probability
     /// `numerator / denominator`, drawn from this seeded stream.
     ///
-    /// Fault injection is a simulation-only concern, so it lives here as a
-    /// `SimEntropy` method rather than on the production [`Entropy`] interface —
-    /// nothing outside this crate can turn a fault on, and the production seam
-    /// carries no trace of it.
+    /// Fault injection is simulation-only, so it lives here rather than on the
+    /// production [`Entropy`] interface: nothing outside this crate can turn a
+    /// fault on.
     ///
     /// The gate **always** consumes one draw, whether or not it fires, so call
     /// sites must guard it behind "are faults configured?" to keep a fault-free

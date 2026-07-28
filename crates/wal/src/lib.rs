@@ -1,10 +1,7 @@
 //! A generic, framed, checksummed write-ahead log on the local filesystem.
 //!
-//! A file-backed durable store needs the same small, safety-critical machinery every
-//! time: frame records the same way, checksum them the same way, recover the same way
-//! (scan the valid prefix, discard a torn tail), and rewrite atomically the same way.
 //! A divergence between the write path and the recovery path mis-recovers a node, so
-//! that logic lives here, once.
+//! framing, checksumming, recovery, and atomic rewrite live here, once.
 //!
 //! # The log
 //!
@@ -28,17 +25,15 @@
 //!
 //! # The header
 //!
-//! The header is what lets any of this change later. It carries a magic, the **frame
-//! layout's** revision and the **checksum kind** — this crate's own secrets — and a
-//! **record-schema** revision that belongs to the caller and that this crate stores
-//! and returns without interpreting. That last field is the load-bearing one: a
-//! `Wal<T>`'s records are postcard, which is positional and has no field names, so `T`
-//! cannot gain a field and its revision has nowhere to live except outside the payload.
+//! The header carries a magic, the **frame layout's** revision and the **checksum
+//! kind** — this crate's own secrets — and a **record-schema** revision that belongs
+//! to the caller and that this crate stores and returns without interpreting. That
+//! last field is the load-bearing one: a `Wal<T>`'s records are postcard, which is
+//! positional and has no field names, so `T` cannot gain a field and its revision has
+//! nowhere to live except outside the payload.
 //!
 //! [`open`](Wal::open) therefore takes the caller's [`compat::Window`] and does the
-//! refusing itself, rather than exposing the header for a caller to check. An optional
-//! check is one somebody forgets, and the forgotten case is the misparse the stamp
-//! exists to prevent.
+//! refusing itself, rather than exposing the header for a caller to check.
 //!
 //! # Sidecars
 //!
@@ -53,17 +48,11 @@
 //! Every method returns [`io::Result`]: this crate does not decide what an I/O
 //! failure *means*. The caller does — code that cannot persist a record it must not
 //! lose may have no safe way to continue, so it panics with a domain-specific message.
-//! Keeping that policy out of this crate is deliberate.
 //!
 //! [`open`](Wal::open) is the exception, returning [`OpenError`], because it has a
 //! second failure that is not an I/O event at all: a file this build cannot read. The
-//! bytes are intact and the disk is fine; the refusal is policy. Folding it into
-//! `io::ErrorKind::InvalidData` would blur exactly the distinction this crate is
-//! careful about elsewhere, so a caller that wants them collapsed says so, with
-//! [`OpenError::into_io`].
-//!
-//! The checksum is FNV-1a: it catches torn and partial writes, not adversarial
-//! tampering, which is all a local log needs.
+//! bytes are intact and the disk is fine; the refusal is policy. A caller that wants
+//! the two collapsed says so, with [`OpenError::into_io`].
 
 use std::fs;
 use std::fs::File;
@@ -126,8 +115,7 @@ fn parent_dir(path: &Path) -> &Path {
 
 /// Width of the little-endian length prefix that opens every frame. Tied to the
 /// prefix's own type so the write path ([`encode`]) and the recovery path ([`scan`])
-/// frame from one definition and cannot drift apart on the layout — the divergence this
-/// crate exists to prevent.
+/// frame from one definition and cannot drift apart on the layout.
 const LEN_BYTES: usize = size_of::<u32>();
 /// Width of the little-endian FNV-1a checksum that closes every frame.
 const CHECKSUM_BYTES: usize = size_of::<u64>();
@@ -149,11 +137,9 @@ const FRAME: compat::Stamp =
 
 /// The checksum this build computes and requires: FNV-1a, 64-bit.
 ///
-/// An *identity*, not a revision — there is no ordering over hash functions and
-/// nothing to gain by pretending otherwise, so it is compared for equality and a
-/// mismatch is refused by name. Reserving the field is what makes the stronger
-/// digest a caller might want for untrusted media a header change rather than a
-/// layout change.
+/// An *identity*, not a revision: there is no ordering over hash functions, so it is
+/// compared for equality and a mismatch is refused by name. Reserving the field makes
+/// a different digest a header change rather than a layout change.
 const CHECKSUM_FNV1A: u16 = 1;
 
 /// Width of the header **at frame revision 1** — the overhead a log written by this
@@ -165,15 +151,15 @@ const CHECKSUM_FNV1A: u16 = 1;
 /// ```
 ///
 /// The width belongs to the revision, not to the format: a later revision may define
-/// a different header entirely, and can, because a revision-1 reader refuses a
-/// revision-2 file before reaching its header. Only the magic and the `u16` after it
-/// are fixed across revisions — a reader consults those *before* it knows which
-/// layout applies. Code that must work across revisions should therefore take the
-/// width from the revision it admitted rather than from this constant.
+/// a different header entirely, because a revision-1 reader refuses a revision-2 file
+/// before reaching its header. Only the magic and the `u16` after it are fixed across
+/// revisions, since a reader consults those *before* it knows which layout applies.
+/// Code that must work across revisions should take the width from the revision it
+/// admitted rather than from this constant.
 ///
 /// The header has no checksum of its own. Every field is validated against a known
 /// value or window, so detectable damage is refused; the reserved `u16` is where a
-/// header digest would go if that ever proves insufficient.
+/// header digest would go.
 pub const HEADER_LEN: usize = 16;
 
 /// Build the header a new log opens with. `records` is the caller's schema
@@ -218,10 +204,10 @@ fn admit_header<'a>(
     records.admit(compat::Version(field(1)))?;
     if field(2) != 0 {
         // Revision 1 defines the reserved field as zero, and the frame revision gates
-        // the layout, so a later revision that gives it meaning will say so by bumping
-        // that. Requiring it here costs nothing and makes all sixteen header bytes
-        // self-validating: without it, corruption in this field would be the one header
-        // damage that passes silently.
+        // the layout, so a later revision that gives it meaning bumps that. Requiring
+        // it here keeps all sixteen header bytes self-validating: without it,
+        // corruption in this field would be the one header damage that passes
+        // silently.
         return Err(compat::Incompatible::Version {
             boundary: "wal.reserved",
             found: compat::Version(field(2)),
@@ -233,12 +219,10 @@ fn admit_header<'a>(
 
 /// Opening a log failed.
 ///
-/// Two variants because the two failures are different kinds and collapsing them
-/// would lose the distinction that matters: an [`Io`](OpenError::Io) failure is a
-/// filesystem event whose *meaning* is still the caller's to decide (see the
-/// module's failure policy), while an [`Incompatible`](OpenError::Incompatible) file
-/// is a policy refusal — the bytes are intact and simply not something this build
-/// reads.
+/// An [`Io`](OpenError::Io) failure is a filesystem event whose *meaning* is the
+/// caller's to decide (see the module's failure policy); an
+/// [`Incompatible`](OpenError::Incompatible) file is a policy refusal, its bytes
+/// intact and simply not something this build reads.
 #[derive(Debug)]
 pub enum OpenError {
     /// A filesystem error reading, creating, or truncating the file.
@@ -370,17 +354,14 @@ pub struct Wal<T> {
     /// [`rewrite`](Wal::rewrite) can stamp the replacement it produces. This crate
     /// never interprets it.
     ///
-    /// Note what this is not: the revision stamped in the file that was opened. The
-    /// two differ only once a caller's window spans more than one revision, and then
-    /// [`append`](Wal::append) adds frames at *this* revision to a file whose header
-    /// still records the older one — so the stamp understates until a
-    /// [`rewrite`](Wal::rewrite) restamps it. The consequence is bounded and
-    /// fail-closed: a later build whose window starts above the stale stamp refuses
-    /// the file by name rather than misreading it, because every frame in it is in
-    /// fact readable at the higher revision. A caller widening its window should
-    /// compact affected logs; raising the stamp in place on the first append after a
-    /// bump is the refinement that would remove the caveat, and it needs a second,
-    /// non-append handle to reach the header.
+    /// Not the revision stamped in the file that was opened. The two differ once a
+    /// caller's window spans more than one revision: [`append`](Wal::append) adds
+    /// frames at *this* revision to a file whose header still records the older one,
+    /// so the stamp understates until a [`rewrite`](Wal::rewrite) restamps it. The
+    /// consequence is fail-closed — a later build whose window starts above the stale
+    /// stamp refuses the file by name rather than misreading it. A caller widening its
+    /// window should compact affected logs. Not implemented: raising the stamp in
+    /// place on the first append after a bump.
     records: compat::Version,
     _marker: PhantomData<fn() -> T>,
 }
@@ -427,10 +408,9 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         // which would otherwise turn a benign crash into a log that can never be
         // opened again.
         //
-        // The prefix test is what keeps that from becoming a licence to overwrite: a
-        // short file that is *not* heading toward this header — a foreign file, or a
-        // log from a build that framed records differently — falls through to the
-        // refusal below instead of being silently truncated.
+        // The prefix test bounds that: a short file that is *not* heading toward this
+        // header falls through to the refusal below instead of being silently
+        // truncated.
         let fresh = header(records.writes());
         if bytes.len() < HEADER_LEN {
             if !fresh.starts_with(&bytes) {
@@ -449,9 +429,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
                 // The file was just created. Its bytes become durable on the fsync
                 // above, but the directory entry that names it needs its own fsync,
                 // or a crash could lose a file whose appends were already
-                // acknowledged. Doing it here makes the new log's entry durable for
-                // every caller, including one that creates its logs lazily, so no
-                // caller has to remember to.
+                // acknowledged.
                 sync_dir(parent_dir(&path))?;
             }
             return Ok((
@@ -522,8 +500,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
     }
 
     /// Frame `record`, append it, and fsync — durable before the call returns. The
-    /// single-record case of [`append_batch`](Wal::append_batch); the fsync dominates,
-    /// so the one-element slice costs nothing measurable.
+    /// single-record case of [`append_batch`](Wal::append_batch).
     ///
     /// # Errors
     ///

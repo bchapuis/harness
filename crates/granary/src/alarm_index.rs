@@ -22,9 +22,9 @@
 //! # Shape
 //!
 //! One index grain per **(target grain type, shard)**, keyed
-//! [`index_key`](index_key)-style, holding a `GrainName → due-nanos` map. It mirrors
-//! [`tenancy::Directory`](../../tenancy/index.html): a small event-sourced map, pure
-//! fold, generic over the hosting system so it runs on either durability tier. Reads
+//! [`index_key`](index_key)-style, holding a `GrainName → due-nanos` map — a small
+//! event-sourced map with a pure fold, mirroring
+//! [`tenancy::Directory`](../../tenancy/index.html). Reads
 //! (`due_before`) serve locally from the activation (§7.5); registration is
 //! idempotent (§7.5), so a re-register of an unchanged deadline commits nothing.
 //! Registration is an **acknowledged** `ask`: the reply releases only after this
@@ -46,12 +46,9 @@ use crate::grain::GrainName;
 use crate::grain::GrainRegistry;
 use crate::system::GranarySystem;
 
-/// The grain type of the alarm index (spec §16).
 pub const ALARM_INDEX_TYPE: &str = "granary.AlarmIndex";
 
-/// The index grain key for one target grain type and shard index. One index grain
-/// per (type, shard) keeps each type's driver reading only its own shards, and keeps
-/// a single index grain from growing across every type in the cluster.
+/// The index grain key for one target grain type and shard index.
 pub fn index_key(target_type: &str, shard: usize) -> String {
     format!("{target_type}/{shard}")
 }
@@ -61,8 +58,7 @@ pub fn index_key(target_type: &str, shard: usize) -> String {
 /// grain's own alarm changes (it advances by every commit and never regresses, even
 /// across activations), so the index resolves an out-of-order pair of updates — the
 /// register and clear a single activation may emit as independently launched
-/// asks — by keeping the higher head. A real clear always carries a higher head
-/// than the register it supersedes, so it always wins.
+/// asks — by keeping the higher head.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct Slot {
     due: u64,
@@ -109,17 +105,14 @@ impl Pending {
         self.slots.get(name).map(|slot| slot.due)
     }
 
-    /// The head at which a grain's entry was last written, if registered.
     fn head_of(&self, name: &GrainName) -> Option<u64> {
         self.slots.get(name).map(|slot| slot.head)
     }
 
-    /// How many grains are registered.
     pub fn len(&self) -> usize {
         self.slots.len()
     }
 
-    /// Whether the index is empty.
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
@@ -173,8 +166,7 @@ impl<S: GranarySystem> Grain for AlarmIndex<S> {
 /// Sync a grain's alarm state into the index at a journal head (spec §16). `due` is
 /// `Some(ns)` while an alarm is pending, `None` once it clears. Applied only if
 /// `head` is at least the entry's last head, so an out-of-order pair from one
-/// activation resolves to the higher head (see [`Slot`]) — the register and clear a
-/// grain launches independently never race to the wrong result. Idempotent: an
+/// activation resolves to the higher head (see [`Slot`]). Idempotent: an
 /// unchanged `(due, head)` commits nothing (§7.5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Sync {
@@ -190,7 +182,6 @@ impl<S: GranarySystem> GrainHandler<Sync> for AlarmIndex<S> {
     async fn handle(&self, state: &Pending, msg: Sync, _ctx: &GrainCtx<Self>) -> (Vec<Change>, ()) {
         let last_head = state.head_of(&msg.grain);
         match msg.due {
-            // Register/update: keep the higher head; skip a stale or unchanged update.
             Some(due) => {
                 let stale = last_head.is_some_and(|h| msg.head < h);
                 let unchanged = state.get(&msg.grain) == Some(due) && last_head == Some(msg.head);

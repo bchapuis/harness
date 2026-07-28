@@ -1,13 +1,8 @@
 //! The observability event stream (spec §16).
 //!
-//! A conforming system emits structured events for lifecycle transitions,
-//! mailbox activity, and call outcomes. The same stream is what a deterministic
-//! simulator subscribes to in order to check invariants and to assert
-//! seed-reproducibility: two runs with the same seed must produce byte-identical
-//! event streams (spec §18.1).
-//!
-//! The enum is `#[non_exhaustive]`; later slices add membership, supervision,
-//! and `Terminated` variants without breaking matches.
+//! A deterministic simulator subscribes to this stream to check invariants and
+//! to assert seed-reproducibility: two runs with the same seed must produce
+//! byte-identical event streams (spec §18.1).
 
 use crate::actor::TerminationReason;
 use crate::id::ActorId;
@@ -65,10 +60,9 @@ pub enum Event {
     /// [`Event::AskOutcome`]; an issued ask that never reaches an outcome is a
     /// silently-lost call (invariant #1).
     ///
-    /// `actor` is the **target**; `caller` is the node that issued the call, which
-    /// for a remote ask is a different node. Both are carried because the pairing
-    /// is the caller's property: it is the caller that is still waiting, so it is
-    /// the caller's death that makes an unanswered ask expected rather than lost.
+    /// `actor` is the **target**; `caller` is the node that issued the call. The
+    /// pairing is the caller's property: it is the caller's death that makes an
+    /// unanswered ask expected rather than lost.
     AskIssued {
         actor: ActorId,
         caller: NodeId,
@@ -84,8 +78,8 @@ pub enum Event {
         manifest: &'static str,
         failed: bool,
     },
-    /// `observer` marked `node` suspect (spec §10). The observer is carried
-    /// because reachability is per-node until gossip disseminates it.
+    /// `observer` marked `node` suspect (spec §10). Reachability is per-observer
+    /// until gossip disseminates it.
     Suspected { observer: NodeId, node: NodeId },
     /// `observer` confirmed `node` unreachable (a suspicion unrefuted for
     /// `T_suspect`, spec §10).
@@ -106,20 +100,18 @@ pub enum Event {
     /// it for maintenance. Unlike `down`, this is not terminal: the node stays a
     /// member and a later `resume` returns it to `up`.
     MemberDraining { observer: NodeId, node: NodeId },
-    /// `observer` saw a `draining` `node` return to `up` — the operator resumed it
-    /// after maintenance (spec §9.4). The reverse of [`Event::MemberDraining`].
+    /// `observer` saw a `draining` `node` return to `up` (spec §9.4).
     MemberResumed { observer: NodeId, node: NodeId },
     /// `observer` applied the external registry's state at `revision`
-    /// (registry-based mode, spec §9.4.2). Emitted when a sync first lands a new
-    /// revision, so tests can await convergence on a registry mutation.
+    /// (registry-based mode, spec §9.4.2). Emitted when a sync *first* lands a
+    /// given revision.
     RegistrySynced { observer: NodeId, revision: u64 },
     /// `node` won the leader election for `term` in Raft `group` (leader-based
     /// mode, spec §9.4.3). At most one node may ever announce a given
     /// `(group, term)` — the election-safety half of invariant #22 a continuous
-    /// checker enforces. Terms are **per group** (a multi-group engine runs
-    /// O(groups) independent Raft groups), so the group is part of the identity;
-    /// it is a plain `u64` (the `GroupId` value) to keep this crate agnostic of
-    /// the cluster's group type. The membership control plane is group `0`.
+    /// checker enforces. Terms are **per group**, so the group is part of the
+    /// identity; it is the `GroupId` value as a plain `u64`. The membership
+    /// control plane is group `0`.
     LeaderElected { node: NodeId, term: u64, group: u64 },
     /// Supervision chose a directive for a faulted actor (spec §11.2, §16).
     Supervised {
@@ -134,8 +126,8 @@ pub enum Event {
     /// legal until convergence.
     SingletonStarted { name: &'static str, actor: ActorId },
     /// A singleton manager observed its activation `actor` of `name` terminated
-    /// (utilities spec §4) — by handoff, supervision, or its own stop. Pairs
-    /// with the [`Event::SingletonStarted`] that activated it.
+    /// (utilities spec §4). Pairs with the [`Event::SingletonStarted`] that
+    /// activated it.
     SingletonStopped { name: &'static str, actor: ActorId },
     /// A `Terminated` signal was delivered to a watcher (spec §12, §16): emitted
     /// when the signal is enqueued onto the watcher's mailbox, on the watcher's
@@ -149,16 +141,11 @@ pub enum Event {
     },
     /// An application-layer event riding the framework's stream (spec §16).
     ///
-    /// The extension point for runtimes layered *on* the framework (the
-    /// agentic harness, harness spec §10.4): they define their own typed
-    /// event enum and emit it here, so their checkers observe one totally
-    /// ordered stream interleaved with the core events — and the
-    /// seed-reproducibility contract (spec §18.1 #1) covers application
-    /// events for free. Core knows the mechanism, never the vocabulary: an
-    /// application's event type stays in the application's crate.
-    ///
-    /// Match with [`Event::as_app`]:
-    /// `event.as_app::<HarnessEvent>()`.
+    /// A runtime layered *on* the framework (the agentic harness, harness spec
+    /// §10.4) defines its own typed event enum and emits it here, so its
+    /// checkers observe one totally ordered stream interleaved with the core
+    /// events, under the same seed-reproducibility contract (spec §18.1 #1).
+    /// Read it back with [`Event::as_app`].
     App(Box<dyn AppEvent>),
 }
 
@@ -169,15 +156,12 @@ impl Event {
     }
 
     /// The application event inside an [`Event::App`], if it is one and is of
-    /// type `E`. The downcast is how an application's checkers recover their
-    /// typed events from the shared stream.
+    /// type `E`.
     pub fn as_app<E: AppEvent>(&self) -> Option<&E> {
         match self {
-            // Dispatch through the inner `dyn AppEvent` explicitly: the
-            // blanket impl also covers `Box<dyn AppEvent>` itself (the box
-            // is Debug + Clone + PartialEq), so a method call on the box
-            // receiver would resolve to the *box's* impl and `as_any` would
-            // return the box, never the event.
+            // Dispatch through the inner `dyn AppEvent` explicitly: the blanket
+            // impl also covers the box itself, so `event.as_any()` would return
+            // the box, never the event.
             Event::App(event) => (**event).as_any().downcast_ref::<E>(),
             _ => None,
         }
@@ -185,11 +169,9 @@ impl Event {
 }
 
 /// An application-defined event (spec §16): anything `Debug + Clone +
-/// PartialEq + Send + Sync` qualifies via the blanket impl — applications
-/// never implement this by hand. The bounds exist so [`Event`] keeps its
-/// derives: `Clone` for fan-out sinks, `PartialEq`/`Eq` for the
-/// reproducibility recorder's byte-identical comparison (spec §18.1 #1),
-/// `Debug` for reporting.
+/// PartialEq + Send + Sync` qualifies via the blanket impl — applications never
+/// implement this by hand. Those bounds are what let [`Event`] stay `Clone` and
+/// `Eq` for the reproducibility recorder's comparison (spec §18.1 #1).
 pub trait AppEvent: std::fmt::Debug + Send + Sync + 'static {
     fn as_any(&self) -> &dyn std::any::Any;
     fn clone_app(&self) -> Box<dyn AppEvent>;
@@ -235,11 +217,8 @@ impl PartialEq for Box<dyn AppEvent> {
 
 impl Eq for Box<dyn AppEvent> {}
 
-/// A sink the runtime emits [`Event`]s to (spec §16).
-///
-/// Production may discard them; the simulator records them for invariant
-/// checking. Implemented for `()` as a no-op so a system can run without
-/// observability wired up.
+/// A sink the runtime emits [`Event`]s to (spec §16). Implemented for `()` as a
+/// no-op, so a system can run with no observability wired up.
 pub trait EventSink: Send + Sync + 'static {
     fn emit(&self, event: Event);
 }

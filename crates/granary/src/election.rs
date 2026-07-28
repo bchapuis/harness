@@ -8,9 +8,9 @@
 //! per-grain append carries (§8).
 //!
 //! [`LeaderElection`] is the thin wrapper the journal sees over that group, built on
-//! the same `actor-cluster` Raft the control plane uses (actor §9.4.3), so the
-//! simulator drives the real consensus code. The group is created and reconfigured
-//! by [`shardmap`](crate::shardmap); this wrapper only reads its leadership and term.
+//! the same `actor-cluster` Raft the control plane uses (actor §9.4.3). The group is
+//! created and reconfigured by [`shardmap`](crate::shardmap); this wrapper only reads
+//! its leadership and term.
 
 use actor_cluster::GroupId;
 use actor_cluster::RaftConsensus;

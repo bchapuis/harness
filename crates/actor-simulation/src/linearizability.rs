@@ -1,29 +1,22 @@
 //! History recording and linearizability checking (spec §18.4).
 //!
-//! The invariant catalogue (§18.5) checks *safety predicates over the event
-//! stream* — "a bad thing never happens". This module attacks correctness from
-//! the other side: record the history of operations a *client* observed — each as
-//! an invoke/complete pair, with concurrency preserved — then ask whether that
+//! Record the history of operations a *client* observed, each as an
+//! invoke/complete pair with concurrency preserved, then ask whether that
 //! history could have been produced by some legal sequential ordering of a
 //! reference object. That is **linearizability**.
 //!
-//! The machinery:
-//!
 //! - A [`History`] an in-simulation client records into, marking each operation
 //!   `invoke` → (`ok` with the observed return | `info` unknown | `fail` did not
-//!   happen). Recording is by the public API only (spec §18.4), so the checker
-//!   sees exactly what a real client would.
+//!   happen). Recording is by the public API only (spec §18.4).
 //! - A [`check`] that decides linearizability by the **Wing & Gong** algorithm:
 //!   linearize operations one at a time, only ever choosing one whose invoke
 //!   precedes the earliest still-pending completion, backtracking on a dead end,
-//!   memoizing visited `(linearized-set, state)` pairs so the exponential search
-//!   stays tractable.
+//!   memoizing visited `(linearized-set, state)` pairs.
 //! - A [`Model`] trait with two reference objects, [`Register`] and [`Counter`].
 //!
-//! `info` (unknown-outcome) operations are the crux of distributed testing: an
-//! `ask` that returns `Unreachable` or `Timeout` under fault injection *may or
-//! may not* have taken effect. The checker models that honestly — a pending
-//! operation may be linearized at any later point, or not at all.
+//! An `ask` that returns `Unreachable` or `Timeout` under fault injection *may
+//! or may not* have taken effect; it is recorded `info`. A pending operation may
+//! be linearized at any later point, or not at all.
 
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -32,8 +25,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 /// A deterministic sequential reference object: the "model" a history is checked
-/// against. `Register` and `Counter` implement it; any single-object,
-/// deterministic ADT can.
+/// against. Any single-object, deterministic ADT can implement it.
 pub trait Model {
     /// The object's abstract state.
     type State: Clone + Eq + Hash;
@@ -79,9 +71,9 @@ struct Inner<M: Model> {
 pub struct OpId(usize);
 
 /// A client-observed operation history (spec §18.4), recorded live during a run.
-/// Clone to share one log among several concurrent client tasks; the recorded
-/// order is their real-time interleaving (the executor is single-threaded, so
-/// the order is exactly the virtual-time order in which calls returned).
+/// Clone to share one log among several concurrent client tasks; the executor is
+/// single-threaded, so the recorded order is exactly the virtual-time order in
+/// which calls returned.
 pub struct History<M: Model> {
     inner: Arc<Mutex<Inner<M>>>,
 }
@@ -201,10 +193,9 @@ impl<M: Model> History<M> {
 }
 
 impl<M: Model> std::fmt::Display for History<M> {
-    /// The recorded history in real-time order, one mark per line — what the
-    /// clients actually saw. A violation is only actionable with this in hand:
-    /// "no sequential order linearizes 18 operations" names nothing to look at,
-    /// and the history cannot be recovered from the seed without re-running.
+    /// The recorded history in real-time order, one mark per line. A violation
+    /// is only actionable with this in hand, and the history cannot be recovered
+    /// from the seed without re-running.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inner = self.inner.lock().expect("history mutex poisoned");
         for (ts, mark) in inner.marks.iter().enumerate() {
@@ -250,9 +241,9 @@ impl Linearization {
 }
 
 impl std::fmt::Display for Linearization {
-    /// The verdict as a failure message. Prefer this to `{verdict:?}` at a call
-    /// site: a violation carries the history that produced it (see
-    /// [`History`]'s `Display`), and `Debug` escapes it into one unreadable line.
+    /// The verdict as a failure message. Prefer this to `{verdict:?}`: a
+    /// violation carries the history that produced it (see [`History`]'s
+    /// `Display`), and `Debug` escapes it into one unreadable line.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Linearization::Ok => f.write_str("linearizable"),
@@ -262,9 +253,8 @@ impl std::fmt::Display for Linearization {
 }
 
 /// The largest history the bitmask-based linearizer accepts. Wing & Gong is
-/// worst-case exponential; memoization keeps realistic histories fast, but
-/// workloads should keep a single checked history within this bound (long
-/// histories are best checked in chunks).
+/// worst-case exponential, so a workload should keep a single checked history
+/// within this bound and check long ones in chunks.
 pub const MAX_HISTORY: usize = 128;
 
 /// Decide whether `history` is linearizable with respect to model `M`, by the
@@ -303,9 +293,9 @@ fn search<M: Model>(
     memo: &mut HashSet<(u128, M::State)>,
 ) -> bool {
     // The earliest completion still outstanding. An operation may be linearized
-    // next only if it was invoked before this instant — otherwise the operation
-    // that completes here, having both started and finished first, would have to
-    // come after it, which no real-time order allows.
+    // next only if it was invoked before this instant: otherwise the operation
+    // completing here, having both started and finished first, would have to come
+    // after it, which no real-time order allows.
     let mut min_complete = usize::MAX;
     let mut any_completed = false;
     for (i, o) in ops.iter().enumerate() {
@@ -356,8 +346,7 @@ fn search<M: Model>(
 
 // --- Reference models ---------------------------------------------------------
 
-/// A linearizable read/write/compare-and-set register over `i64` — the canonical
-/// reference object.
+/// A linearizable read/write/compare-and-set register over `i64`.
 pub struct Register;
 
 /// An operation on a [`Register`].
@@ -404,10 +393,8 @@ impl Model for Register {
     }
 }
 
-/// A linearizable counter supporting add and read — the other canonical
-/// reference object. Useful because add is *not* idempotent, so a duplicated or
-/// replayed operation that took effect twice is a linearizability violation the
-/// checker catches.
+/// A linearizable counter supporting add and read. Add is *not* idempotent, so
+/// an operation that took effect twice is a violation the checker catches.
 pub struct Counter;
 
 /// An operation on a [`Counter`].
@@ -445,8 +432,6 @@ impl Model for Counter {
 mod tests {
     use super::*;
 
-    /// Build a history by replaying a script of marks, so tests can pin exact
-    /// real-time interleavings. Each tuple is (kind, id-or-op).
     fn reg() -> History<Register> {
         History::new()
     }

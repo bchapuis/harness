@@ -12,11 +12,10 @@
 //! [`granary_client`](granary::GranaryExt::granary_client)): a full local actor
 //! system that hosts no grains but is still a member — it holds `GrainRef`s
 //! discovered through the receptionist gossip, routes `ask`/`subscribe` to the
-//! shard leader, and spawns the ephemeral reply mailbox the host calls back. This
-//! puts the gateway **inside** the cluster's trust boundary (it holds the cluster
-//! secret and rides the receptionist bus) — the Akka-`ClusterClient` tradeoff we
-//! accept, because the gateway is already where tenant auth terminates. Untrusted
-//! callers reach it only over HTTP with a bearer token.
+//! shard leader, and spawns the ephemeral reply mailbox the host calls back. It is
+//! therefore **inside** the cluster's trust boundary (it holds the cluster secret
+//! and rides the receptionist bus); untrusted callers reach it only over HTTP with
+//! a bearer token.
 //!
 //! Stateless: the gateway holds no durable state. Run N replicas behind a load
 //! balancer; each joins the cluster as its own client id.
@@ -83,15 +82,11 @@ impl Default for Limits {
     }
 }
 
-/// The running gateway's shared state: a routing-only client [`Harness`], a
-/// client [`Granary`] for the tenancy ownership index, the tenant-token verifier,
-/// the edge [`Limits`], and a readiness flag. Shared behind an `Arc` across all
-/// requests; cheap, stateless (holds no durable state).
+/// The running gateway's shared state, held behind an `Arc` across all requests.
 ///
 /// The verifier is behind an `RwLock` so it can be hot-swapped (`SIGHUP` token
-/// reload) without a restart; the read is a cheap uncontended lock on the auth
-/// path. The readiness flag flips to `false` on a shutdown signal so `/readyz`
-/// deregisters the pod from a load balancer before the drain.
+/// reload) without a restart. The readiness flag flips to `false` on a shutdown
+/// signal so `/readyz` deregisters the pod from a load balancer before the drain.
 pub struct Gateway<S: HarnessSystem> {
     harness: Harness<S>,
     directory: Granary<Directory<S>>,
@@ -146,8 +141,7 @@ impl<S: HarnessSystem> Gateway<S> {
         self.ready.load(Ordering::Relaxed)
     }
 
-    /// Flip the readiness flag — `false` on a shutdown signal so `/readyz` fails
-    /// and the load balancer stops routing new requests before the drain.
+    /// Flip the readiness flag; `false` starts the drain (see [`Gateway`]).
     pub fn set_ready(&self, ready: bool) {
         self.ready.store(ready, Ordering::Relaxed);
     }
@@ -198,9 +192,9 @@ impl<S: HarnessSystem> Gateway<S> {
 
 /// Join the cluster as a client and build the [`Gateway`]: poll until both the
 /// kinds' and the directory's host gateways have gossiped into this client's
-/// receptionist (exactly as a node waits for its peers), then assemble the shared
-/// state. `directory_shards` MUST match the nodes' `Directory` shards (the
-/// granary default). Errors if discovery does not complete within `timeout`.
+/// receptionist, then assemble the shared state. `directory_shards` MUST match the
+/// nodes' `Directory` shards (the granary default). Errors if discovery does not
+/// complete within `timeout`.
 pub async fn connect<S: HarnessSystem>(
     system: S,
     kinds: Kinds,

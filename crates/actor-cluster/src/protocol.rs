@@ -2,10 +2,8 @@
 //!
 //! This is the vocabulary every subsystem speaks across the network — actor
 //! envelopes and replies, SWIM probes, death-watch, and receptionist
-//! replication. It is kept apart from the [`Transport`](crate::Transport) trait
-//! (the *mechanism* that carries frames, in [`crate::transport`]): the protocol
-//! references domain types (e.g. [`MemberDigest`]), while the transport trait
-//! stays a thin carrier that need not know any subsystem's payload.
+//! replication. It references domain types (e.g. [`MemberDigest`]); the
+//! [`Transport`](crate::Transport) that carries it does not.
 
 use actor_core::ActorId;
 use actor_core::NodeId;

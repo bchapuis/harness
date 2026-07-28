@@ -49,10 +49,9 @@ const INPUT_MAX_ROWS: u16 = 6;
 /// Width of the sessions sidebar (including its borders).
 const SIDEBAR_WIDTH: u16 = 26;
 
-/// Draw the whole interface for one frame.
-///
-/// The sessions list is a full-height sidebar on the left; the conversation and
-/// its prompt stack in the column to its right, above a full-width status bar.
+/// Draw the whole interface for one frame: a full-height sessions sidebar on the
+/// left, the conversation and its prompt stacked to its right, and a full-width
+/// status bar beneath both.
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
@@ -124,10 +123,9 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let viewport = area.height.saturating_sub(2) as usize;
 
-    // Project the records to logical lines, then word-wrap into physical rows so
-    // the row count — and therefore the scroll math — is exact rather than
-    // estimated. Rendering the pre-wrapped slice means no widget re-wrapping can
-    // disagree with our offset and clip the final record.
+    // Project the records to logical lines, then word-wrap into physical rows here
+    // (see `wrap_line`). Rendering the pre-wrapped slice means no widget
+    // re-wrapping can disagree with our offset and clip the final record.
     let logical = if app.records.is_empty() {
         vec![Line::styled(
             "  no records yet — type a prompt below and press Enter",

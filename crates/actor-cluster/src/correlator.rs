@@ -3,8 +3,7 @@
 //! Outbound requests that expect a reply — an `ask` awaiting its `Reply`, a SWIM
 //! probe awaiting its `Ack` — register a waiter under a fresh id and park until
 //! the reply arrives or a deadline fires. A [`Correlator`] is that id-source plus
-//! waiter registry, the one mechanism behind both the `ask` and the SWIM probe
-//! paths (which previously kept parallel counters and maps).
+//! waiter registry, shared by the `ask` and SWIM probe paths.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;

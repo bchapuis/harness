@@ -10,20 +10,15 @@
 //! - **cluster-wide awareness** ([`TombstoneSet`]): every serving node holds the
 //!   set so it can refuse a `StoreBlob`, short-circuit a `get`, and skip a
 //!   reconcile copy. The set is small (one entry per deleted namespace), monotonic
-//!   (set-once), and gossip-able, so it needs no ordering and no term — the spec
-//!   §4 thesis applied to deletion: a flag fanned out and gossiped, not an
-//!   agreement round.
+//!   (set-once), and gossip-able, so it needs no ordering and no term.
 //! - a **durable anchor** with sweep tracking ([`AnchorTracker`]): the namespace's
 //!   tombstone owners hold the loss-proof copy and record which nodes have finished
 //!   sweeping, so the tombstone can be retained exactly as long as B7 safety
 //!   requires and no longer.
 //!
-//! This module owns those two structures and, critically, the **retention
-//! decision** ([`AnchorTracker::reclaimable`]): a tombstone outlives every node
-//! that could still carry a stale copy, where *which* nodes those are is a
-//! membership fact, not a clock reading. The cluster fan-out that anchors a
-//! tombstone on `W` owners and disseminates it (spec §5.3) is the `Clustered`
-//! tier's orchestration; the safety boundary lives here.
+//! The cluster fan-out that anchors a tombstone on `W` owners and disseminates it
+//! (spec §5.3) is the `Clustered` tier's orchestration; the retention decision
+//! ([`AnchorTracker::reclaimable`]) lives here.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -53,8 +48,7 @@ pub struct Tombstone {
 ///
 /// It is a grow-only set keyed by namespace; the associated `deleted_at` converges
 /// to the **minimum** seen, so `merge` is commutative and idempotent regardless of
-/// gossip order (namespaces are single-use, spec §2, so in practice one delete
-/// stamps one value and the min is that value).
+/// gossip order.
 #[derive(Clone, Default)]
 pub struct TombstoneSet {
     inner: Arc<Mutex<BTreeMap<Namespace, u64>>>,
@@ -108,10 +102,8 @@ impl TombstoneSet {
         }
     }
 
-    /// Drop `ns` from the awareness set once it has been **reclaimed** — every
-    /// holder has swept or reached terminal `down`, so no copy can be resurrected
-    /// and the namespace resolves nowhere anyway (spec §5.3). Driven only by the
-    /// anchor's reclamation decision, never by a timer.
+    /// Drop `ns` from the awareness set once it has been **reclaimed** (spec
+    /// §5.3). Driven only by [`AnchorTracker::reclaimable`], never by a timer.
     pub fn remove(&self, ns: &Namespace) {
         self.lock().remove(ns);
     }
@@ -132,8 +124,7 @@ impl TombstoneSet {
 }
 
 /// The **durable anchor's** sweep tracker for the namespaces it owns (spec §5.3):
-/// it decides, per tombstoned namespace, when the tombstone may be reclaimed
-/// without risking resurrection.
+/// when a tombstone may be reclaimed without risking resurrection.
 ///
 /// The hazard B7 closes is a node partitioned during the delete: it still holds
 /// blobs of `ns`, and on rejoin reconcile would re-push them to owners that had
@@ -141,12 +132,11 @@ impl TombstoneSet {
 /// stale copy**, and which nodes those are is a *membership fact*: every node that
 /// was a serving member when the tombstone was anchored, until each has either
 /// acked its sweep or reached the terminal `down`/`removed` state (actor §9.1).
-/// That terminal state is load-bearing — `down` is irrevocable and absorbing, and
-/// a downed node rejoins only under a fresh, empty identity, so it can never
-/// return carrying an un-swept blob under its old id. A merely `unreachable` node
-/// is **not** enough: that state is reversible, so its tombstone is held until it
-/// returns and sweeps or is downed. The store owns **no grace timer**; it inherits
-/// its safety boundary from the membership lattice.
+/// `down` is irrevocable and absorbing, and a downed node rejoins only under a
+/// fresh, empty identity, so it can never return carrying an un-swept blob under
+/// its old id. A merely `unreachable` node is **not** enough: that state is
+/// reversible, so its tombstone is held until it returns and sweeps or is downed.
+/// There is **no grace timer**; retention is gated on membership alone.
 #[derive(Default)]
 pub struct AnchorTracker {
     inner: Mutex<BTreeMap<Namespace, AnchorState>>,
@@ -169,8 +159,7 @@ impl AnchorTracker {
     /// Begin tracking `ns`, anchored over the serving set `members_at_anchor`.
     /// Set-once and monotonic: re-anchoring an already-tracked namespace (a
     /// redelivered delete) is a no-op, so it never resets sweep progress or the
-    /// anchor's membership snapshot. The `deleted_at` stamp lives in the
-    /// [`TombstoneSet`]; the retention decision needs only the membership snapshot.
+    /// anchor's membership snapshot.
     pub fn anchor(&self, ns: &Namespace, members_at_anchor: impl IntoIterator<Item = NodeId>) {
         self.lock()
             .entry(ns.clone())
@@ -192,9 +181,9 @@ impl AnchorTracker {
 
     /// The members the tombstone is still waiting on: those that have neither
     /// acked their sweep nor reached a terminal state. `is_terminal(node)` reports
-    /// whether `node` is `down`/`removed` (or otherwise gone for good) — the
-    /// caller supplies it from membership, so this stays free of that dependency.
-    /// An **empty** result for a tracked namespace means it is reclaimable.
+    /// whether `node` is `down`/`removed` (or otherwise gone for good); the caller
+    /// supplies it from membership. An **empty** result for a tracked namespace
+    /// means it is reclaimable.
     pub fn pending(&self, ns: &Namespace, is_terminal: impl Fn(NodeId) -> bool) -> Vec<NodeId> {
         // Collect the not-yet-swept members under the lock, then apply the caller's
         // predicate without holding it (the predicate may take a membership lock).

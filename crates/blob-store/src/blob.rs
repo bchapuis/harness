@@ -4,9 +4,8 @@
 //! **namespace** scopes that name (spec §2). The address of a blob is the pair
 //! `(Namespace, BlobId)`: the [`BlobId`] is a pure function of the bytes and is
 //! identical across namespaces, while the [`Namespace`] selects *which copy* a
-//! `get` reads and *which owners* hold it. This module owns the types every tier
-//! shares and the single read-path verification chokepoint ([`verify`], B1), so
-//! corruption and misdelivery are detectable at the point of use, never silent.
+//! `get` reads and *which owners* hold it. The types every tier shares live here,
+//! with the single read-path verification chokepoint ([`verify`], B1).
 
 use std::fmt;
 use std::future::Future;
@@ -21,9 +20,8 @@ use serde::Serialize;
 /// A `BlobId` is a pure function of the bytes: the same content yields the same
 /// id wherever and however it is stored, so a writer and a reader agree on a
 /// blob's name with no coordination, and a reader proves it received the right
-/// bytes by re-hashing them ([`verify`], B1). BLAKE3 is chosen over SHA-256
-/// because every `get` re-hashes its bytes to verify them, so hashing throughput
-/// sits on the read path, not only the write path (spec §2).
+/// bytes by re-hashing them ([`verify`], B1). BLAKE3: every `get` re-hashes its
+/// bytes, so hashing sits on the read path, not only the write path (spec §2).
 ///
 /// Rendered in lowercase hex for display.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -36,14 +34,13 @@ impl BlobId {
         BlobId(*blake3::hash(bytes).as_bytes())
     }
 
-    /// The raw 32-byte digest.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
-    /// Wrap a raw 32-byte digest. Used when an id arrives off the wire or is
-    /// reconstructed from storage; the bytes it names are still verified against
-    /// it on read ([`verify`], B1), so a wrong id cannot yield wrong bytes.
+    /// Wrap a raw 32-byte digest, as it arrives off the wire or out of storage.
+    /// The bytes it names are still verified against it on read ([`verify`], B1),
+    /// so a wrong id cannot yield wrong bytes.
     pub fn from_bytes(bytes: [u8; 32]) -> BlobId {
         BlobId(bytes)
     }
@@ -60,8 +57,6 @@ impl fmt::Display for BlobId {
 
 impl fmt::Debug for BlobId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The hex digest already identifies the blob; a `BlobId(..)` wrapper around
-        // 32 raw bytes would only add noise to a panic or a log line.
         write!(f, "BlobId({self})")
     }
 }
@@ -72,9 +67,8 @@ impl fmt::Debug for BlobId {
 /// A namespace carries no meaning to the store beyond grouping blobs that share a
 /// lifecycle (a tenant, a workspace, a snapshot-set): every blob is stored under
 /// exactly one namespace, and `delete_namespace` removes all of them. A namespace
-/// is **single-use**: a consumer MUST NOT reuse an id after deleting it (the
-/// motivating filesystem grain mints a fresh UUID), so a delete tombstone can
-/// never be confused with a later recreation.
+/// is **single-use**: a consumer MUST NOT reuse an id after deleting it, so a
+/// delete tombstone can never be confused with a later recreation.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Namespace(Vec<u8>);
 
@@ -93,9 +87,8 @@ impl Namespace {
 
 impl fmt::Display for Namespace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Render as hex: a namespace is opaque bytes (often a UUID), not
-        // necessarily UTF-8, and the hex form is also the on-disk directory name
-        // for the `Local` tier (spec §5.1).
+        // Hex: a namespace is opaque bytes, not necessarily UTF-8, and this form
+        // is the on-disk directory name for the `Local` tier (spec §5.1).
         for byte in &self.0 {
             write!(f, "{byte:02x}")?;
         }
@@ -113,8 +106,7 @@ impl fmt::Debug for Namespace {
 ///
 /// Like the grain error model (granary §12), this carries only the failures of
 /// *reaching and committing*, kept distinct from a blob's bytes: a `get` either
-/// returns verified bytes or one of these, never wrong bytes (B1). The variants
-/// are exhaustive by design — a caller handles every real partial failure.
+/// returns verified bytes or one of these, never wrong bytes (B1).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlobError {
     /// Could not reach `W` copies on `put`, or any owner on `get` (spec §5.2).
@@ -171,12 +163,11 @@ pub struct BlobConfig {
 /// **B1**).
 ///
 /// Every `get` MUST call this before returning bytes, *after* any network
-/// transfer, so corruption and misdelivery are caught at the point of use. This
-/// is the blob store's analogue of `wal`'s torn-tail rejection (wal §3.1),
-/// strengthened from a checksum to a cryptographic digest because the bytes may
-/// have crossed the network. On mismatch the caller MUST NOT return the bytes: on
-/// the clustered tier it tries the next owner; if none verify it returns
-/// [`BlobError::Corrupt`].
+/// transfer, so corruption and misdelivery are caught at the point of use. A
+/// cryptographic digest rather than `wal`'s checksum (wal §3.1), because the
+/// bytes may have crossed the network. On mismatch the caller MUST NOT return
+/// the bytes: on the clustered tier it tries the next owner; if none verify it
+/// returns [`BlobError::Corrupt`].
 pub fn verify(id: &BlobId, bytes: &[u8]) -> Result<(), BlobError> {
     if BlobId::of(bytes) == *id {
         Ok(())
@@ -204,11 +195,10 @@ pub(crate) fn slice(bytes: Vec<u8>, range: Option<Range<u64>>) -> Vec<u8> {
 
 /// A content-addressed store for immutable blobs, scoped by namespace (spec §3).
 ///
-/// This is the simulation and deployment seam, like `GrainJournal`, `Transport`,
-/// and `Clock` (granary §7.3, actor §4.6): the [`Local`](crate) and `Clustered`
-/// tiers are two implementations of it, satisfying the contract identically and
-/// differing only in where the bytes live. The trait is codec-agnostic — it moves
-/// raw bytes, and the [`BlobId`] is computed from those bytes, so no serialization
+/// The simulation and deployment seam, like `GrainJournal`, `Transport`, and
+/// `Clock` (granary §7.3, actor §4.6): the [`Local`](crate) and `Clustered` tiers
+/// satisfy the contract identically. The trait is codec-agnostic — it moves raw
+/// bytes, and the [`BlobId`] is computed from those bytes, so no serialization
 /// format leaks across the seam.
 ///
 /// `Clone` (like `GrainJournal`) so the object-safe [`DynBlobStore`] mirror can
@@ -221,8 +211,7 @@ pub trait BlobStore: Clone + Send + Sync + 'static {
     /// an error ([`BlobError::Deleted`]); namespaces are single-use (spec §2).
     /// Returns [`BlobError::Unavailable`] if the durability target (spec §5.2)
     /// could not be met, in which case the blob MAY or MAY NOT be partially
-    /// stored, and the caller retries (the id is a pure function of the bytes, so
-    /// a retry carries no double-write risk).
+    /// stored and the caller retries.
     fn put(
         &self,
         ns: &Namespace,
@@ -234,8 +223,8 @@ pub trait BlobStore: Clone + Send + Sync + 'static {
     /// an absent or corrupt blob is an error, never wrong bytes. A node that knows
     /// `ns` is deleted returns [`BlobError::Deleted`] (spec §5.3); a node not yet
     /// aware of the tombstone may still serve the real bytes until it learns of it
-    /// (B7 liveness). A ranged request is served by obtaining and verifying the
-    /// whole blob, then slicing (spec §2); efficient range streaming is deferred.
+    /// (B7 liveness). A ranged request obtains and verifies the whole blob, then
+    /// slices it (spec §2).
     fn get(
         &self,
         ns: &Namespace,
@@ -279,14 +268,13 @@ type BoxFuture<T> = actor_core::BoxFuture<'static, T>;
 
 /// The object-safe form of [`BlobStore`], so a consumer can hold a store as
 /// `Arc<dyn DynBlobStore>` and **select the durability tier at construction**
-/// without threading a tier type parameter through its own code — mirroring
-/// `DynGrainJournal` (granary §7.3).
+/// without threading a tier type parameter through its own code (as
+/// `DynGrainJournal` does, granary §7.3).
 ///
 /// [`BlobStore`]'s `impl Future` returns are not object-safe; this mirror boxes
-/// them ([`BoxFuture`](actor_core::BoxFuture)). The blanket impl below adapts any
-/// [`BlobStore`]: it clones the store (cheap — tiers wrap an `Arc`) and the
-/// namespace/id into each boxed future, so the returned future is `'static` and
-/// the caller borrows nothing.
+/// them ([`BoxFuture`](actor_core::BoxFuture)). The blanket impl below clones the
+/// store and the namespace/id into each boxed future, so the returned future is
+/// `'static` and the caller borrows nothing.
 pub trait DynBlobStore: Send + Sync + 'static {
     /// See [`BlobStore::put`].
     fn put(&self, ns: &Namespace, bytes: Vec<u8>) -> PutFuture;
@@ -332,8 +320,6 @@ mod tests {
 
     #[test]
     fn id_is_the_blake3_digest_and_dedups_equal_content() {
-        // The id is a pure function of the bytes (spec §2): equal content, equal
-        // id; different content, different id.
         let a = BlobId::of(b"the quick brown fox");
         let b = BlobId::of(b"the quick brown fox");
         let c = BlobId::of(b"the quick brown cat");
@@ -356,8 +342,7 @@ mod tests {
 
     #[test]
     fn verify_accepts_matching_bytes_and_rejects_tampering() {
-        // B1: verification is the read-path chokepoint. Matching bytes pass;
-        // a single flipped bit is reported as Corrupt against the requested id.
+        // B1: verification is the read-path chokepoint.
         let bytes = b"a bounded block of bytes".to_vec();
         let id = BlobId::of(&bytes);
         assert_eq!(verify(&id, &bytes), Ok(()));
@@ -377,7 +362,6 @@ mod tests {
 
     #[test]
     fn errors_display_without_leaking_bytes() {
-        // BlobError carries only reach/commit failures, never blob bytes.
         let id = BlobId::of(b"z");
         assert_eq!(
             BlobError::Corrupt(id).to_string(),

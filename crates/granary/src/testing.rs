@@ -1,17 +1,16 @@
 //! Shared simulation invariants over grain events (granary spec §7, spec §18.5).
 //!
 //! These are safety predicates every grain-backed swarm wants: commits advance,
-//! and a grain is live at most once per node. They live here rather than in each
-//! test binary because they are claims about *granary's* contract, not about any
-//! one suite — and because six independent copies of "commits are monotonic" can
-//! drift apart, so that one of them quietly stops checking what its name says.
+//! and a grain is live at most once per node. They are claims about *granary's*
+//! contract, not about any one suite, so they live here rather than in each test
+//! binary.
 //!
 //! Each is constructed with the label it reports under, so a suite still names
 //! its own violations: `machine-commit-monotonic` and `disk-grain-commit-monotonic`
 //! are the same predicate observed from different workloads.
 //!
-//! Behind the `testing` feature: this is test support, not part of the durable
-//! object API, and it should not ship in a production build of the crate.
+//! Behind the `testing` feature: test support, which should not ship in a
+//! production build of the crate.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -79,9 +78,7 @@ impl Invariant for CommitMonotonic {
 /// **Not** [`actor_simulation::SingletonAtMostOnePerNode`], despite the similar
 /// name: that one is the *cluster-utilities* singleton (U2), keyed off
 /// `Event::SingletonStarted`. This is the grain analogue, keyed off
-/// `GrainEvent::Activated`. Different layer, different event, different
-/// catalogue — and the reason to reach for the shared type rather than write a
-/// third one.
+/// `GrainEvent::Activated`.
 pub struct ActivationSingletonPerNode {
     label: &'static str,
     noun: &'static str,
@@ -130,10 +127,9 @@ impl Invariant for ActivationSingletonPerNode {
     }
 
     fn forget_node(&mut self, node: NodeId) {
-        // The same reasoning as `NodeDown` above, for the other way a node's
-        // activations vanish: its process ended. Nothing emits `Passivated` for
-        // an activation that died with its host, and the successor may re-activate
-        // the same grain — legitimately, since G6 is per *live* node.
+        // The other way a node's activations vanish: its process ended. Nothing
+        // emits `Passivated` for an activation that died with its host, and the
+        // successor may legitimately re-activate it (G6 is per *live* node).
         self.live.retain(|(n, _)| *n != node);
     }
 }
@@ -145,10 +141,6 @@ impl Invariant for ActivationSingletonPerNode {
 /// registrations always fail, a replica permanently fenced — where a real store
 /// would need a fault injector to reach the same state. `StaticGrainStore::fenced()`
 /// is the common case: writes refused at an unreachably high term.
-///
-/// It lives here rather than in a test binary because a hand-written double has to
-/// be re-written from scratch on every seam change, and a double that lags the seam
-/// stops standing in for anything. One implementation, maintained with the trait.
 pub struct StaticGrainStore {
     refusal: crate::StoreAck,
 }

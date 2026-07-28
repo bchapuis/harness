@@ -49,9 +49,8 @@ use crate::system::ShardId;
 const DEFAULT_ASK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long the client-side redirect waits between resolution attempts while a
-/// shard has no reachable leader — a fresh election or a not-yet-gossiped gateway
-/// registration (§5.4). Short relative to an election timeout so convergence is
-/// observed promptly.
+/// shard has no reachable leader (§5.4). Short relative to an election timeout, so
+/// convergence is observed promptly.
 const RESOLVE_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Safety bound on the redirect loop; the real bound is the caller's deadline
@@ -67,22 +66,15 @@ const FORWARD_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// A node-local cache of resolved host handles, shared by every [`GrainRef`] a
 /// [`Granary`] hands out (spec §5.4). A cache hit lets a call go **straight to the
-/// host actor**, skipping the serial gateway on the steady-state hot path; the
-/// gateway then only serializes genuine activations and the `NotLeader` refresh.
+/// host actor**, skipping the serial gateway on the steady-state hot path.
 ///
 /// A cached handle is returned only after a cheap, local check that its node still
 /// leads the grain's shard ([`HostCache::get`]). This is the pre-send guard that
 /// keeps a cache hit from dispatching to a **deposed** leader: a write to a crashed
 /// leader can time out, and a timeout is not safe to auto-retry (the command may
-/// have committed — at-most-once, §6, §2.2). Validating leadership before sending
-/// routes around a settled failover entirely, so the cache self-heals safely.
-///
-/// `Arc`-shared and never serialized: a `GrainRef` that crosses the wire arrives
-/// cache-less and resolves through the gateway each call.
+/// have committed — at-most-once, §6, §2.2).
 pub(crate) struct HostCache<G: Grain> {
     system: G::System,
-    /// The runtime type name (spec §5.1) this cache routes for, `G::GRAIN_TYPE`
-    /// by default but a caller-supplied name under [`granary_named`](GranaryExt::granary_named).
     grain_type: &'static str,
     /// The founding shard count — the [`resolve_shard`] fallback while the map
     /// bootstraps (and the only resolution a routing-only client ever has).
@@ -110,13 +102,12 @@ impl<G: Grain> HostCache<G> {
     }
 
     /// A cached host for `name`. On a node that **replicates** the name's shard the
-    /// current leader is known locally, so a handle that no longer sits on it (the
-    /// leader moved) is proactively dropped — the pre-send guard that keeps a write
-    /// off a deposed leader (§5.4). A node that does **not** replicate the shard
-    /// cannot know the leader (`shard_leader` is `None`), so it returns the cached
-    /// handle and relies on reactive invalidation (a `NotLeader`/`DeadLetter`/
-    /// `Unreachable` outcome drops it and re-resolves). The leadership read is a
-    /// local lock read, off the network and off the control plane (invariant **G9**).
+    /// current leader is known locally, so a handle that no longer sits on it is
+    /// proactively dropped (§5.4). A node that does **not** replicate the shard
+    /// cannot know the leader, so it returns the cached handle and relies on
+    /// reactive invalidation (a `NotLeader`/`DeadLetter`/`Unreachable` outcome drops
+    /// it and re-resolves). The leadership read is a local lock read, off the
+    /// network and off the control plane (invariant **G9**).
     fn get(&self, name: &GrainName) -> Option<ActorRef<Host<G>>> {
         let mut hosts = self.hosts.lock().expect("host cache mutex poisoned");
         let host = hosts.get(name)?.clone();
@@ -126,12 +117,10 @@ impl<G: Grain> HostCache<G> {
             name.key(),
             self.shards,
         )) {
-            // Replica node, leader moved: drop the stale handle before it is used.
             Some(leader) if host.id().node() != leader => {
                 hosts.remove(name);
                 None
             }
-            // Leader matches, or this node cannot tell (a non-replica): use it.
             _ => Some(host),
         }
     }
@@ -161,10 +150,8 @@ impl<G: Grain> HostCache<G> {
 /// The only handle to a grain (spec §4.3): it carries the [`GrainName`] and a
 /// handle to the grain type's gateway, and **never** grants access to state.
 ///
-/// `Clone + Serialize + DeserializeOwned + Send + Sync`: it travels as the name
-/// plus the gateway's id, and the gateway handle rebinds on decode (the framework
-/// `ActorRef` discipline). The `G: GrainHandler<M>` bound on `ask`/`tell` proves
-/// at compile time that the grain accepts `M` (invariant **G10**).
+/// The `G: GrainHandler<M>` bound on `ask`/`tell` proves at compile time that the
+/// grain accepts `M` (invariant **G10**).
 ///
 /// It also carries an optional, **non-serialized** [`HostCache`] (present when
 /// obtained from a [`Granary`] on this node): repeated calls hit the cache and go
@@ -173,17 +160,13 @@ impl<G: Grain> HostCache<G> {
 /// resolves through the gateway each call — correct, just not cached.
 ///
 /// The system handle drives the **client-side bounded redirect** (§5.4 step 4):
-/// the gateway answers single-shot, and this ref follows `NotLeader(hint)` to the
-/// hinted node's gateway (looked up in the receptionist), backing off until the
-/// shard's leader is found or the caller's deadline expires. It is never
-/// serialized; a wire-arrived ref recovers it from its decoded `gateway` handle
-/// ([`ActorRef::system`]), which rebinds to the local system on decode (§4.4).
+/// it follows `NotLeader(hint)` toward the shard's leader until the caller's
+/// deadline expires. Never serialized; a wire-arrived ref recovers it from its
+/// decoded `gateway` handle, which rebinds to the local system on decode (§4.4).
 pub struct GrainRef<G: Grain> {
     /// The runtime type name (spec §5.1) this ref routes under, used to look up
-    /// the leader's gateway in the receptionist (the `&'static` a [`Key`] needs).
-    /// `G::GRAIN_TYPE` for the common case; a caller-supplied name when the type
-    /// is hosted under [`granary_named`](GranaryExt::granary_named). A ref decoded
-    /// off the wire recovers it as `G::GRAIN_TYPE` (see the `Deserialize` note).
+    /// the leader's gateway in the receptionist. A ref decoded off the wire
+    /// recovers it as `G::GRAIN_TYPE` (see the `Deserialize` note).
     grain_type: &'static str,
     name: GrainName,
     gateway: ActorRef<Gateway<G>>,
@@ -200,15 +183,12 @@ impl<G: Grain> Serialize for GrainRef<G> {
 }
 
 // Decoding recovers the local system from the rebound gateway ref, so a ref
-// embedded in a message is usable on the node that receives it (§4.4). It arrives
-// cache-less and resolves through the gateway each call (correct, just not
-// cached). `grain_type` recovers as `G::GRAIN_TYPE`: the receptionist `Key` needs
-// a `&'static str` and the wire carries only the name's owned string, so this is
-// the one path that cannot honor a runtime type name. It is correct for every
-// grain hosted under its own `G::GRAIN_TYPE` (granary's native use); a type hosted
-// under `granary_named` (the agentic harness's per-kind grains) must therefore
-// re-mint its refs locally from its `Granary` handle rather than ship them over
-// the wire — which it does (it addresses children by key through the handle).
+// embedded in a message is usable on the node that receives it (§4.4).
+// `grain_type` recovers as `G::GRAIN_TYPE`: the receptionist `Key` needs a
+// `&'static str` and the wire carries only the name's owned string, so this is the
+// one path that cannot honor a runtime type name. A type hosted under
+// `granary_named` MUST therefore re-mint its refs locally from its `Granary`
+// handle rather than ship them over the wire.
 impl<'de, G: Grain> Deserialize<'de> for GrainRef<G> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let (name, gateway) = <(GrainName, ActorRef<Gateway<G>>)>::deserialize(deserializer)?;
@@ -264,8 +244,7 @@ impl<G: Grain> GrainRef<G> {
     ///
     /// `M: Clone` so the runtime can re-issue the command if the first attempt
     /// hits a stale cached host — one that hibernated (§10) or whose leader moved
-    /// (§8) since it was cached. The command did not commit in that case (§6), so
-    /// re-issuing is safe; the clone is of the caller's own small command value.
+    /// (§8). The command did not commit in that case (§6), so re-issuing is safe.
     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, GrainError>
     where
         G: GrainHandler<M>,
@@ -291,10 +270,9 @@ impl<G: Grain> GrainRef<G> {
         G: GrainHandler<M>,
         M: Message + Clone,
     {
-        // Attempt the cached host; only a `DeadLetter` (a hibernated host that
-        // never received the command, §10) is re-enqueued. An ambiguous failure is
-        // surfaced, not retried — a re-enqueue could double-apply (§2.2). Fire-and-
-        // forget never reports `Unavailable` (§6), so the budget is left unguarded.
+        // Only a `DeadLetter` is re-enqueued; an ambiguous failure is surfaced, not
+        // retried, since a re-enqueue could double-apply (§2.2). Fire-and-forget
+        // never reports `Unavailable` (§6), so the budget is left unguarded.
         let deadline = self.system.now() + DEFAULT_ASK_TIMEOUT;
         let retry = msg.clone();
         self.resolve_twice(
@@ -310,11 +288,10 @@ impl<G: Grain> GrainRef<G> {
         .await
     }
 
-    /// Subscribe to the grain's committed records (spec §7.9): resolve the shard
-    /// leader, spawn a local [`RecordSink`] to receive pushed batches, register
-    /// it, and return the committed `head` with the live stream. A framework
-    /// built-in, available for every grain type without a `GrainHandler` bound —
-    /// the push analogue of `load`/`head`.
+    /// Subscribe to the grain's committed records (spec §7.9), returning the
+    /// committed `head` with the live stream. A framework built-in, available for
+    /// every grain type without a `GrainHandler` bound — the push analogue of
+    /// `load`/`head`.
     ///
     /// Delivery is best-effort; the caller MUST reconcile by `Seq` (§7.9,
     /// **G16**): backfill `from`..`head` by reading the journal, then on each
@@ -322,10 +299,9 @@ impl<G: Grain> GrainRef<G> {
     /// closes — a move, a lag-drop, or hibernation — re-subscribe and backfill
     /// from the last seq.
     pub async fn subscribe(&self, from: Seq) -> Result<Subscription<G>, GrainError> {
-        // Resolve BEFORE spawning the sink: a failed resolution (an unelectable
-        // shard, a redirect that runs out its deadline) must not leave an orphan
-        // actor behind — the framework does not reap an actor merely because every
-        // external ref to it was dropped.
+        // Resolve BEFORE spawning the sink: a failed resolution must not leave an
+        // orphan actor behind — the framework does not reap an actor merely because
+        // every external ref to it was dropped.
         let host = self
             .resolve(false, self.system.now() + DEFAULT_ASK_TIMEOUT)
             .await?;
@@ -350,20 +326,18 @@ impl<G: Grain> GrainRef<G> {
 
     /// Resolve the name to its live host (§5.4). With `use_cache`, a cached handle
     /// is returned without touching the gateway (the steady-state fast path);
-    /// otherwise this drives the **client-side bounded redirect**: the single-shot
-    /// gateway answers `Ok(host)` if its node leads the shard, else
-    /// `NotLeader(hint)`; this follows the hint to that node's gateway (looked up
-    /// in the receptionist), backing off while the shard elects, until the leader
-    /// is found or the caller's deadline (`within`) expires (§5.4 step 4). A
-    /// transient miss — bootstrap not committed, an election in flight, a hint at a
-    /// just-crashed leader — is waited out rather than surfaced, so a remote call
-    /// stays observably identical to a local one across a failover (invariant
-    /// **G13**). Driving the loop here, not in the gateway's serial handler, keeps
-    /// one slow resolution from blocking another grain's activation on that node.
+    /// otherwise this drives the **client-side bounded redirect** (§5.4 step 4):
+    /// the single-shot gateway answers `Ok(host)` if its node leads the shard, else
+    /// `NotLeader(hint)`, which this follows to that node's gateway, backing off
+    /// while the shard elects, until the leader is found or `deadline` expires. A
+    /// transient miss is waited out rather than surfaced, so a remote call stays
+    /// observably identical to a local one across a failover (invariant **G13**).
+    /// Driving the loop here, not in the gateway's serial handler, keeps one slow
+    /// resolution from blocking another grain's activation on that node.
     ///
-    /// Bounded by the **caller's** `deadline`, not a per-attempt window: the caller
-    /// computes it once from its declared budget, so a dispatch that resolves,
-    /// fails, and re-resolves still returns within the one budget (§5.4).
+    /// Bounded by the **caller's** `deadline`, not a per-attempt window, so a
+    /// dispatch that resolves, fails, and re-resolves still returns within the one
+    /// budget (§5.4).
     async fn resolve(
         &self,
         use_cache: bool,
@@ -373,17 +347,15 @@ impl<G: Grain> GrainRef<G> {
         {
             return Ok(host);
         }
-        // Start at this ref's own gateway: local for a `Granary`-minted ref (the
-        // local fast path when this node leads), the source node's for a
-        // wire-arrived one. Hints and re-discovery move it toward the leader.
+        // Start at this ref's own gateway: local for a `Granary`-minted ref, the
+        // source node's for a wire-arrived one. Hints and re-discovery move it
+        // toward the leader.
         let mut target = self.gateway.clone();
         for _ in 0..RESOLVE_ATTEMPTS {
             let remaining = deadline.duration_since(self.system.now());
             if remaining.is_zero() {
                 break;
             }
-            // Cap each attempt so a dead target fails fast and we re-resolve,
-            // rather than spending the whole deadline on one unreachable gateway.
             let attempt = remaining.min(FORWARD_TIMEOUT);
             match target
                 .ask_timeout(Activate::new(self.name.clone()), attempt)
@@ -395,9 +367,9 @@ impl<G: Grain> GrainRef<G> {
                     }
                     return Ok(host);
                 }
-                // Follow the leader hint to that node's gateway. If it is not (yet)
-                // discoverable, keep the current target and back off — the shard is
-                // still electing or the gateway has not gossiped in.
+                // Follow the leader hint. If that gateway is not (yet) discoverable,
+                // keep the current target and back off — the shard is still electing
+                // or the gateway has not gossiped in.
                 Ok(Err(GrainError::NotLeader(hint))) => {
                     if let Some(gateway) = self.gateway_on(hint) {
                         target = gateway;
@@ -406,9 +378,7 @@ impl<G: Grain> GrainRef<G> {
                 // A genuine durability outcome (quorum loss / unhandled): surface it.
                 Ok(Err(other)) => return Err(other),
                 // The target gateway is unreachable (its node crashed): re-discover a
-                // gateway to redirect from — any but the one that just failed, else
-                // a stale receptionist entry for the crashed node (rank-first) would
-                // pin the loop on the dead gateway for the whole deadline.
+                // gateway to redirect from, excluding the one that just failed.
                 Err(_) => {
                     if let Some(gateway) = self.gateway_excluding(target.id().node()) {
                         target = gateway;
@@ -432,9 +402,8 @@ impl<G: Grain> GrainRef<G> {
     }
 
     /// A discovered gateway on any node but `failed` — used to escape a dead
-    /// target (§5.4) without re-selecting the very gateway that just timed out
-    /// (its registration may outlive the crash until the membership prunes it).
-    /// Falls back to whatever is registered when nothing else is.
+    /// target (§5.4) without re-selecting the very gateway that just timed out,
+    /// whose registration may outlive the crash until the membership prunes it.
     fn gateway_excluding(&self, failed: NodeId) -> Option<ActorRef<Gateway<G>>> {
         let gateways = self
             .system
@@ -448,8 +417,6 @@ impl<G: Grain> GrainRef<G> {
             .cloned()
     }
 
-    /// Drop the cached host handle for this name, so the next [`resolve`] goes back
-    /// through the gateway. Called when a cached host turns out to be stale.
     fn invalidate(&self) {
         if let Some(cache) = &self.cache {
             cache.remove(&self.name);
@@ -457,14 +424,11 @@ impl<G: Grain> GrainRef<G> {
     }
 
     /// Resolve the host and send the typed command, held until durable (§6). The
-    /// first attempt prefers the cache (straight to the host, off the gateway); if
-    /// that host turns out unusable, the cache entry is dropped and the command
-    /// re-issued — but **only when the first attempt provably did not run** (a
-    /// `NotLeader`, which never commits, §8; or a `DeadLetter` from a hibernated
-    /// host, §10). An ambiguous transport failure (`Unreachable`/`Timeout`) is
-    /// surfaced, never auto-retried, because the command may have committed before
-    /// the reply was lost — re-issuing a non-idempotent command would double-apply
-    /// (at-most-once, §2.2; reply-iff-durable, §6/G5).
+    /// first attempt prefers the cache; if that host turns out unusable, the cache
+    /// entry is dropped and the command re-issued — but **only when the first
+    /// attempt provably did not run** (a `NotLeader`, which never commits, §8; or a
+    /// `DeadLetter` from a hibernated host, §10). An ambiguous transport failure is
+    /// surfaced, never auto-retried (see [`is_retriable`]).
     async fn dispatch<M>(&self, msg: M, within: Duration) -> Result<M::Reply, GrainError>
     where
         G: GrainHandler<M>,
@@ -472,8 +436,7 @@ impl<G: Grain> GrainRef<G> {
     {
         // ONE deadline bounds the whole call — resolution and ask, across both
         // attempts — so the retry path never restarts the caller's budget (a
-        // per-step `within` could stack up to ~4× the declared timeout). Each
-        // attempt recomputes its `remaining` from the shared deadline.
+        // per-step `within` could stack up to ~4× the declared timeout).
         let deadline = self.system.now() + within;
         let retry = msg.clone();
         self.resolve_twice(
@@ -488,11 +451,10 @@ impl<G: Grain> GrainRef<G> {
                     Ok(Err(GrainError::NotLeader(_))) => Attempt::Retry,
                     // A genuine durability outcome (quorum loss / unhandled): terminal.
                     Ok(Err(other)) => Attempt::Done(Err(other)),
-                    // The cached host had hibernated and stopped, so the command
-                    // never reached a handler (§10): safe to refresh and re-issue.
+                    // The command provably never reached a handler (§10): re-issue.
                     Err(call) if is_retriable(&call) => Attempt::Retry,
-                    // Ambiguous (Unreachable/Timeout) or otherwise terminal: surface
-                    // it, never auto-retry a command that may have committed (§2.2).
+                    // Ambiguous or terminal: never auto-retry a command that may
+                    // have committed (§2.2).
                     Err(call) => Attempt::Done(Err(GrainError::Call(call))),
                 }
             },
@@ -509,16 +471,15 @@ impl<G: Grain> GrainRef<G> {
 
     /// The two-attempt resolve-retry both [`tell`](Self::tell) and
     /// [`dispatch`](Self::dispatch) layer over the [`resolve`](Self::resolve)
-    /// redirect engine, in one place. Resolve cache-preferring and run `first`
-    /// under the single `deadline`; if it reports [`Attempt::Retry`] — the command
-    /// provably never ran (a `DeadLetter`, §10; or a `NotLeader` reply, §8) — drop
-    /// the stale cache entry, resolve cache-bypassing, and run `again`, which is
-    /// terminal. Never a third attempt, so an effectful command that may have
-    /// committed is surfaced, never re-issued (at-most-once, §2.2). `guard_budget`
-    /// returns [`Unavailable`](GrainError::Unavailable) when the deadline is spent
-    /// before the retry — request/reply wants that; fire-and-forget must never
-    /// report `Unavailable` (§6), so it passes `false` and lets the second
-    /// resolution run out the deadline itself.
+    /// redirect engine. Resolve cache-preferring and run `first` under the single
+    /// `deadline`; on [`Attempt::Retry`] — the command provably never ran (§8,
+    /// §10) — drop the stale cache entry, resolve cache-bypassing, and run `again`,
+    /// which is terminal. Never a third attempt, so an effectful command that may
+    /// have committed is surfaced, never re-issued (at-most-once, §2.2).
+    ///
+    /// `guard_budget` returns [`Unavailable`](GrainError::Unavailable) when the
+    /// deadline is spent before the retry; fire-and-forget must never report
+    /// `Unavailable` (§6), so it passes `false`.
     async fn resolve_twice<T>(
         &self,
         deadline: actor_core::Instant,
@@ -541,9 +502,9 @@ impl<G: Grain> GrainRef<G> {
     }
 }
 
-/// The outcome of one attempt in the two-attempt resolve-retry
-/// ([`GrainRef::resolve_twice`]): a terminal `Done` result, or `Retry` — the
-/// attempt provably did not run (§2.2), so re-resolve and re-issue once.
+/// The outcome of one attempt in [`GrainRef::resolve_twice`]: a terminal `Done`
+/// result, or `Retry` — the attempt provably did not run (§2.2), so re-resolve
+/// and re-issue once.
 enum Attempt<T> {
     Done(Result<T, GrainError>),
     Retry,
@@ -556,10 +517,7 @@ enum Attempt<T> {
 /// eviction race). `Unreachable`/`Timeout` are **ambiguous** — the command may
 /// have committed on a leader that then crashed before replying — so they are NOT
 /// auto-retried for an effectful command; they surface to the caller, who makes
-/// the operation idempotent where a retry matters (§2.2). A stale cached host on a
-/// crashed leader is instead dropped *before* the send by the cache's leadership
-/// pre-send guard ([`HostCache::get`]), so a read still self-heals without relying
-/// on this ambiguous path.
+/// the operation idempotent where a retry matters (§2.2).
 fn is_retriable(call: &CallError) -> bool {
     matches!(call, CallError::DeadLetter)
 }
@@ -572,13 +530,10 @@ pub struct Granary<G: Grain> {
     /// default; a caller-supplied name under [`granary_named`](GranaryExt::granary_named).
     grain_type: &'static str,
     gateway: ActorRef<Gateway<G>>,
-    /// The number of shards the type's namespace is partitioned into (§7.1); used
-    /// to resolve a name to its shard for [`Granary::leader`]/[`Granary::replicas`].
+    /// The founding shard count (§7.1), the [`resolve_shard`] fallback.
     shards: usize,
     /// The consensus-agreed shard map (§7.6), read by [`Granary::replicas`].
     shard_map: Arc<dyn ShardMapSource>,
-    /// Resolved host handles shared by every [`GrainRef`] this handle hands out, so
-    /// repeated calls skip the gateway (§5.4).
     cache: Arc<HostCache<G>>,
 }
 
@@ -598,7 +553,7 @@ impl<G: Grain> Clone for Granary<G> {
 impl<G: Grain> Granary<G> {
     /// Address a grain of this type by key (spec Appendix A): a [`GrainRef`] with
     /// no activation yet — the first message activates it. The ref shares this
-    /// handle's host cache, so steady-state calls skip the gateway (§5.4).
+    /// handle's host cache (§5.4).
     pub fn grain(&self, key: impl Into<String>) -> GrainRef<G> {
         GrainRef::new(
             self.grain_type,
@@ -623,21 +578,18 @@ impl<G: Grain> Granary<G> {
     }
 
     /// Whether a live host handle is currently cached for `key` (spec §5.4). An
-    /// optimization/observability detail — exposed for metrics and tests — not a
-    /// statement about the grain's activation on its leader.
+    /// observability detail, not a statement about the grain's activation on its
+    /// leader.
     pub fn is_cached(&self, key: impl Into<String>) -> bool {
         self.cache.contains(&GrainName::new(self.grain_type, key))
     }
 
     /// Request a split of shard `index` at its range midpoint (spec §7.7) — the
     /// admin/test seam over [`ShardMapSource::request_split`]. Best-effort and
-    /// asynchronous: the split proposer validates against committed state (a
-    /// shard that is unknown, mid-migration, mid-split, or a single-point range
-    /// is silently skipped), the parent leader's driver transfers the moved
-    /// grains, and the committed flip is observable as a
-    /// [`ShardSplit`](crate::GrainEvent::ShardSplit) event and a changed
-    /// [`replicas`](Granary::replicas)/routing. A no-op on the `Local` tier and
-    /// on a routing-only client.
+    /// asynchronous: a shard that is unknown, mid-migration, mid-split, or a
+    /// single-point range is silently skipped, and the committed flip is
+    /// observable as a [`ShardSplit`](crate::GrainEvent::ShardSplit) event and
+    /// changed routing. A no-op on the `Local` tier and on a routing-only client.
     pub fn split_shard(&self, index: u32) {
         self.shard_map.request_split(index);
     }
@@ -645,22 +597,17 @@ impl<G: Grain> Granary<G> {
     /// Request a merge of shard `left` with its right neighbour (spec §7.7) —
     /// the mirror of [`split_shard`](Granary::split_shard), reclaiming a
     /// leader-election group (G7) when two adjacent ranges are cold. Best-effort
-    /// and asynchronous: the merge proposer validates against committed state
-    /// (unknown, non-adjacent, or busy shards are skipped), the right leader's
-    /// driver folds every grain into `left`'s keys, and the committed flip is
-    /// observable as a [`ShardMerged`](crate::GrainEvent::ShardMerged) event and
-    /// `left`'s extended [`replicas`](Granary::replicas)/routing. A no-op on the
-    /// `Local` tier and on a routing-only client.
+    /// and asynchronous on the same terms; unknown, non-adjacent, or busy shards
+    /// are skipped, and the committed flip is observable as a
+    /// [`ShardMerged`](crate::GrainEvent::ShardMerged) event.
     pub fn merge_shards(&self, left: u32) {
         self.shard_map.request_merge(left);
     }
 
     /// The nodes that replicate the shard a grain key maps to (spec §7.6) — the
     /// only nodes that hold its data and can lead it. Read live from the
-    /// consensus-agreed shard map (the `Quorum` tier rebalances it as membership
-    /// changes; the `Local` tier is the single node), so it reflects the latest
-    /// committed allocation, not a `granary()`-time snapshot. Exposed for metrics
-    /// and tests.
+    /// consensus-agreed shard map, so it reflects the latest committed allocation,
+    /// not a `granary()`-time snapshot.
     pub fn replicas(&self, key: impl Into<String>) -> Vec<NodeId> {
         let name = GrainName::new(self.grain_type, key);
         let index = resolve_shard(
@@ -679,9 +626,9 @@ impl<G: Grain> Granary<G> {
 /// returns a [`Granary`] handle.
 pub trait GranaryExt: GranarySystem {
     /// Start hosting grains of type `G` under its own `G::GRAIN_TYPE` (spec
-    /// Appendix A): spawn the type's gateway and return the handle. The grain
-    /// behavior is built by `G::default` on each activation (the runtime
-    /// instantiates the grain). The common case — one Rust type, one grain type.
+    /// Appendix A): spawn the type's gateway and return the handle. Each
+    /// activation's behavior is built by `G::default`. The common case — one Rust
+    /// type, one grain type.
     fn granary<G>(&self, config: GranaryConfig) -> Granary<G>
     where
         G: Grain<System = Self> + Default,
@@ -689,13 +636,11 @@ pub trait GranaryExt: GranarySystem {
         self.granary_named(G::GRAIN_TYPE, config, Arc::new(G::default))
     }
 
-    /// Address grains of type `G` as a routing-only **client** — the Orleans
-    /// cluster-client pattern. Unlike [`granary`](GranaryExt::granary) /
-    /// [`granary_named`](GranaryExt::granary_named) it hosts **nothing**: no
-    /// gateway, replica store, or shard-map group is started. The handle routes
-    /// through a *host's* gateway, discovered in the receptionist (§5.3) and
-    /// seeded here; `GrainRef`'s bounded redirect re-discovers a live gateway on
-    /// failover, so the seed only has to be reachable once.
+    /// Address grains of type `G` as a routing-only **client**: it hosts
+    /// **nothing** — no gateway, replica store, or shard-map group is started. The
+    /// handle routes through a *host's* gateway, discovered in the receptionist
+    /// (§5.3) and seeded here; `GrainRef`'s bounded redirect re-discovers a live
+    /// gateway on failover, so the seed only has to be reachable once.
     ///
     /// Returns `None` until at least one host's gateway for `grain_type` has
     /// gossiped into this client's receptionist — the caller polls, exactly as a
@@ -728,20 +673,14 @@ pub trait GranaryExt: GranarySystem {
     /// §5.1), with a caller-supplied **factory** for each activation's behavior.
     ///
     /// Two extension points over [`granary`](GranaryExt::granary), both for one
-    /// Rust grain that must be **many** grain types at runtime (e.g. the agentic
-    /// harness, where each *kind* is its own grain type but shares one loop):
+    /// Rust grain that must be **many** grain types at runtime:
     ///
     /// - `grain_type` overrides `G::GRAIN_TYPE`, so the same `G` hosts under
-    ///   several names — distinct gateways (one `gateway_key` each), distinct
-    ///   shard maps, distinct consensus groups (the `Quorum` tier). It MUST be stable
-    ///   cluster-wide and across runs, exactly as `G::GRAIN_TYPE` must be (§5.1);
-    ///   a `&'static str` makes that lifetime explicit (deployment leaks its
-    ///   bounded set of names if they are not literals).
+    ///   several names — distinct gateways, shard maps, and consensus groups. It
+    ///   MUST be stable cluster-wide and across runs, exactly as `G::GRAIN_TYPE`
+    ///   must be (§5.1); a `&'static str` makes that lifetime explicit.
     /// - `factory` replaces `G::default`, so the runtime can inject per-node seam
     ///   handles into each fresh activation (the grain needs no `Default`).
-    ///
-    /// `granary(config)` is exactly `granary_named(G::GRAIN_TYPE, config,
-    /// Arc::new(G::default))`.
     fn granary_named<G>(
         &self,
         grain_type: &'static str,
@@ -755,11 +694,9 @@ pub trait GranaryExt: GranarySystem {
     /// failover** (spec §16). Like [`granary_named`](GranaryExt::granary_named), but
     /// each host registers its pending [`Alarm`](crate::Alarm) deadline with the
     /// per-shard `index`, and a background driver re-activates due grains on the
-    /// shards this node leads — so an alarm fires even with no caller after the
-    /// grain's leader changed. The caller starts **one** shared `AlarmIndex` granary
-    /// (`system.granary::<AlarmIndex<_>>(..)`) and passes its handle to every
-    /// alarm-bearing type; a type without the [`Alarm`](crate::Alarm) facet gains
-    /// nothing from wiring it and should use [`granary_named`](GranaryExt::granary_named).
+    /// shards this node leads. The caller starts **one** shared `AlarmIndex`
+    /// granary and passes its handle to every alarm-bearing type; a type without
+    /// the [`Alarm`](crate::Alarm) facet gains nothing from wiring it.
     fn granary_named_with_alarms<G>(
         &self,
         grain_type: &'static str,
@@ -812,9 +749,6 @@ impl<T: GranarySystem> GranaryExt for T {
         let handle =
             build_granary::<Self, G>(self, grain_type, config, factory, Some(index.clone()));
         // Start this type's alarm driver (spec §16): the callerless-activation seam.
-        // A background loop that, for each shard this node leads, reads the shard's
-        // alarm index and re-activates every due grain — so an alarm survives its
-        // grain's hibernation and a node failover, not just a resident activation.
         self.launch(Box::pin(alarm_driver_loop::<Self, G>(
             self.clone(),
             handle.clone(),
@@ -828,15 +762,14 @@ impl<T: GranarySystem> GranaryExt for T {
 
 /// How often the alarm driver sweeps the shards it leads (spec §16). The exact
 /// deadline is honoured by the grain's own in-activation timer once re-activated;
-/// this cadence bounds only the *re-activation* latency after a failover, so it
-/// trades a little post-failover slack for a quiet steady state.
+/// this cadence bounds only the *re-activation* latency after a failover.
 const ALARM_DRIVE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Build the node-local hosting for a grain type (spec §7.4, Appendix A): the
-/// durable store, replica store, shard map, and gateway, returning the [`Granary`]
-/// handle. Shared by [`granary_named`](GranaryExt::granary_named) (no alarm index)
-/// and [`granary_named_with_alarms`](GranaryExt::granary_named_with_alarms) (which
-/// threads one in), so the two differ only by the `alarm_index` a host receives.
+/// durable store, replica store, shard map, and gateway. Shared by
+/// [`granary_named`](GranaryExt::granary_named) and
+/// [`granary_named_with_alarms`](GranaryExt::granary_named_with_alarms), which
+/// differ only by the `alarm_index` a host receives.
 fn build_granary<S, G>(
     system: &S,
     grain_type: &'static str,
@@ -853,8 +786,7 @@ where
     // This node's durable grain store (§7.4): the injected factory if a deployment
     // supplied one (so records survive a restart), else a fresh ephemeral in-memory
     // store. The replica-store actor makes it reachable from a shard leader's
-    // replicator (§7.2), registered under one key per type like the gateway (§5.3);
-    // the transport reaches the peers' stores by `ask`.
+    // replicator (§7.2), registered under one key per type like the gateway (§5.3).
     let store: Arc<dyn GrainStore> = match &config.grain_store {
         Some(factory) => factory(system.node()),
         None => Arc::new(MemoryGrainStore::new()),
@@ -867,8 +799,8 @@ where
         Arc::new(ActorReplicaTransport::<G>::new(system.clone(), grain_type));
     // Build the consensus-agreed shard map (§7.6): a per-type Raft group whose
     // committed log is the allocation, so every node agrees on each shard's replica
-    // set and only the replicas store it. The `Local` tier is a trivial single-node
-    // map. Keyed by the runtime `grain_type`, so two type names get separate maps.
+    // set and only the replicas store it. Keyed by the runtime `grain_type`, so two
+    // type names get separate maps.
     let shard_map = system.shard_map(
         grain_type,
         shards,
@@ -886,7 +818,7 @@ where
         alarm_index,
     ));
     // Register this node's gateway under the type's well-known key so other nodes
-    // route activations to it (§5.3), giving one gateway entry per node.
+    // route activations to it (§5.3).
     system
         .receptionist()
         .register(gateway_key::<G>(grain_type), &gateway);
@@ -910,18 +842,13 @@ where
 /// over `G`). A re-activated grain runs `on_activate`, which re-arms its own timer
 /// and fires immediately for a past deadline (**G3**). The index is a hint — the
 /// grain's alarm facet is the source of truth — so re-activating a grain whose alarm
-/// already cleared is harmless: it simply re-registers the correct state and the
-/// index entry is dropped. Only the leader activates (§5.4), so sweeping led shards
-/// is exactly the set this node may act on.
+/// already cleared is harmless.
 ///
 /// A split or merge (§7.7) moves a grain's key range to another shard, leaving a
 /// stale entry in the old shard's index. Re-activating a due grain routes to its
-/// **live** owner (the child of a split, the left of a merge), so the alarm
-/// still fires and the grain re-registers into its new shard's index there — the
-/// data transfer moves records and blobs, not activations, so the new index is
-/// empty until this re-activation seeds it. Only *after* that successful
-/// re-activation does the driver clear the stale entry in the old index, so it
-/// stops re-activating the moved grain every sweep without ever orphaning a wake.
+/// **live** owner, so the alarm still fires and the grain re-registers into its new
+/// shard's index there. The driver clears the stale entry in the old index only
+/// *after* that successful re-activation, so it never orphans a wake.
 async fn alarm_driver_loop<S, G>(
     system: S,
     granary: Granary<G>,
@@ -936,9 +863,8 @@ async fn alarm_driver_loop<S, G>(
         system.sleep(ALARM_DRIVE_INTERVAL).await;
         let now = system.now().as_nanos();
         // Sweep the committed partition's shards — a split/merge (§7.7) changes
-        // the shard set, and each shard has its own index grain. While the map
-        // is still bootstrapping (no committed allocation yet), fall back to the
-        // founding indices; nothing is led before the allocation commits anyway.
+        // the shard set, and each shard has its own index grain. While the map is
+        // still bootstrapping, fall back to the founding indices.
         let mut indices = granary.shard_map.shard_indices();
         if indices.is_empty() {
             indices = (0..shards as u32).collect();
@@ -961,22 +887,19 @@ async fn alarm_driver_loop<S, G>(
                 Err(_) => continue, // index shard unavailable this tick; retry next sweep
             };
             for name in due {
-                // Re-activate the grain: routing sends it to its live owner —
-                // this leader for a resident grain, or the child/left shard for
-                // one a split/merge moved — where `on_activate` re-arms and fires
-                // the due alarm. Drop the subscription immediately; activation is
-                // the only effect we want.
+                // Re-activate the grain: routing sends it to its live owner, where
+                // `on_activate` re-arms and fires the due alarm. The subscription
+                // is dropped immediately; activation is the only effect we want.
                 let reactivated = granary
                     .grain(name.key().to_string())
                     .subscribe(Seq::ZERO)
                     .await
                     .is_ok();
                 // If the grain has moved off this shard (§7.7), the re-activation
-                // above seeded its new shard's index and fired it there, so clear
-                // the stale entry here — with a max head, so the clear always
-                // wins — to stop re-driving it every sweep. Only after a
+                // above seeded its new shard's index, so clear the stale entry here
+                // — with a max head, so the clear always wins. Only after a
                 // successful re-activation, so a transient failure never orphans
-                // the wake. `shard_of` resolves the live committed partition.
+                // the wake.
                 let live = resolve_shard(
                     granary.shard_map.as_ref(),
                     grain_type,

@@ -12,16 +12,13 @@
 //! The gateway is also the **router** (§5.4), but **single-shot**: resolving a
 //! name is two levels — name→shard by the committed key-range partition (the
 //! shard map, §5.1; the founding [`shard_for`](crate::shard_for) while it
-//! bootstraps), shard→leader
-//! from the system (`leads_shard`/`shard_leader`). When this node leads the shard
-//! it activates the host locally and returns the handle; otherwise it returns
-//! `NotLeader(hint)` *immediately* (ordinary Raft client redirection, §5.4 step
-//! 4). The bounded redirect — following the hint, waiting out an election — is the
-//! **caller's** job, driven by [`GrainRef`](crate::GrainRef) and bounded by the
-//! caller's own deadline. Keeping the redirect off this serial handler is what
-//! holds the gateway off the hot path even *during* a failover: a slow resolution
-//! never blocks another grain's activation on this node (the prior in-handler loop
-//! could pin the serial gateway for tens of seconds).
+//! bootstraps), shard→leader from the system (`leads_shard`/`shard_leader`). When
+//! this node leads the shard it activates the host locally and returns the handle;
+//! otherwise it returns `NotLeader(hint)` *immediately* (§5.4 step 4). The bounded
+//! redirect — following the hint, waiting out an election — is the **caller's**
+//! job, driven by [`GrainRef`](crate::GrainRef) and bounded by the caller's own
+//! deadline, so a slow resolution never blocks another grain's activation on this
+//! node.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -59,17 +56,17 @@ use crate::system::ShardId;
 ///
 /// `grain_type` is the runtime type name (spec §5.1), `G::GRAIN_TYPE` by default
 /// but a caller-supplied name when one Rust grain is hosted under several type
-/// names ([`granary_named`](crate::GranaryExt::granary_named)). Two type names
-/// thus register distinct keys even though both are `Key<Gateway<G>>`.
+/// names ([`granary_named`](crate::GranaryExt::granary_named)) — two such names
+/// register distinct keys even though both are `Key<Gateway<G>>`.
 pub(crate) fn gateway_key<G: Grain>(grain_type: &'static str) -> Key<Gateway<G>> {
     Key::new(grain_type)
 }
 
 /// Get-or-activate the host for a name and return a handle to it (spec §5.4). The
 /// reply is the live `Host` activation — on this node when it leads the name's
-/// shard, otherwise the activation on the leader node (resolved by forwarding to
-/// that node's gateway). The caller then sends the command straight to it, keeping
-/// the serial gateway off the steady-state hot path.
+/// shard, otherwise the activation on the leader node. The caller then sends the
+/// command straight to it, keeping the serial gateway off the steady-state hot
+/// path.
 ///
 /// Registered for network dispatch (see [`Gateway::register`]) so a caller on
 /// another node can drive a remote activation; the returned `ActorRef<Host<G>>`
@@ -84,9 +81,6 @@ pub(crate) struct Activate<G: Grain> {
 }
 
 impl<G: Grain> Activate<G> {
-    /// An activation request. The receiving gateway answers **single-shot** (§5.4):
-    /// it activates if this node leads the name's shard, else returns
-    /// `NotLeader(hint)`. The caller follows the hint ([`GrainRef`](crate::GrainRef)).
     pub(crate) fn new(name: GrainName) -> Activate<G> {
         Activate {
             name,
@@ -104,24 +98,20 @@ impl<G: Grain> Message for Activate<G> {
 pub(crate) struct Gateway<G: Grain> {
     /// Names this node currently hosts, each with the shard index it activated
     /// under. The serial actor is the only writer, so no lock guards it (**G6**).
-    /// The stored index guards against a stale entry after a split/merge (§7.7):
-    /// a name that now resolves to a different shard must re-activate over the
-    /// new shard's journal, never reuse the old shard's host.
+    /// The stored index guards against a stale entry after a split/merge (§7.7).
     table: HashMap<GrainName, (u32, ActorRef<Host<G>>)>,
-    /// The runtime type name (spec §5.1), `G::GRAIN_TYPE` by default; a
-    /// caller-supplied name when one Rust grain is hosted under several type
-    /// names ([`granary_named`](crate::GranaryExt::granary_named)). Used to map a
-    /// name to its shard.
+    /// The runtime type name (spec §5.1), as passed to [`gateway_key`]. Used to
+    /// map a name to its shard.
     grain_type: &'static str,
     /// The shard map (§7.6): which nodes replicate each shard and this node's local
     /// store for the shards it replicates, read live as the consensus allocation
     /// commits.
     shard_map: Arc<dyn ShardMapSource>,
-    /// The number of shards the type's namespace is partitioned into (§7.1).
+    /// How many shards the type's namespace is partitioned into (§7.1).
     shards: usize,
     config: GranaryConfig,
-    /// How a fresh activation's behavior value is built (the runtime instantiates
-    /// the grain; the user supplies no value per `GrainName`).
+    /// How a fresh activation's behavior value is built: the runtime instantiates
+    /// the grain, the user supplies no value per `GrainName`.
     factory: Arc<dyn Fn() -> G + Send + Sync>,
     /// The per-shard alarm index handed to each host it activates (spec §16), or
     /// `None` when alarm-index wiring is off. Set by `granary_with_alarms`.
@@ -149,25 +139,21 @@ impl<G: Grain> Gateway<G> {
     }
 
     /// Get-or-activate the host for `name` on **this** node (its shard's leader),
-    /// returning a live handle. The serial actor makes this exactly-once per node
-    /// (**G6**): a concurrent caller for the same name finds the host the first one
-    /// activated. Called only when this node replicates and leads the shard, so the
-    /// shard's `journal` is present.
+    /// returning a live handle. Exactly-once per node by the serial actor
+    /// (**G6**, see module docs). Called only when this node replicates and leads
+    /// the shard, so the shard's `journal` is present.
     fn get_or_activate(
         &mut self,
         name: GrainName,
         shard: ShardId,
         ctx: &Ctx<Gateway<G>>,
     ) -> ActorRef<Host<G>> {
-        // Get: return the live host if the cached entry is still alive AND still
-        // activated under the shard the name currently resolves to. The liveness
-        // check closes the eviction race (§10): a host that hibernated but whose
-        // `Terminated` has not yet pruned the table is dropped here and
-        // re-activated afresh, rather than handing back a dead reference. The
-        // shard check closes the split/merge race (§7.7): a host activated over
-        // the old shard's journal must not serve the name once the partition
-        // moved it — it is dropped and the name re-activates over the new
-        // shard's journal (the old host steps down on its next fenced append).
+        // Reuse the cached host only if it is still alive AND still activated
+        // under the shard the name currently resolves to. The liveness check
+        // closes the eviction race (§10): a host that hibernated before its
+        // `Terminated` pruned the table must not be handed back. The shard check
+        // closes the split/merge race (§7.7): a host activated over the old
+        // shard's journal must not serve the name once the partition moved it.
         if let Some((activated_shard, host)) = self.table.get(&name) {
             if *activated_shard == shard.index
                 && ctx.system().resolve_local::<Host<G>>(host.id()).is_some()
@@ -177,10 +163,8 @@ impl<G: Grain> Gateway<G> {
             self.table.remove(&name);
         }
 
-        // Activate: spawn a restartable host that rehydrates from its shard's
-        // journal (§9). `spawn_with` keeps it restartable; the factory clones the
-        // seam handles per (re)construction. A leader replicates the shard, so the
-        // map has built its journal.
+        // Otherwise spawn a restartable host that rehydrates from its shard's
+        // journal (§9).
         let journal = self
             .shard_map
             .journal(shard.index)
@@ -221,10 +205,9 @@ impl<G: Grain> Gateway<G> {
 impl<G: Grain> Actor for Gateway<G> {
     type System = G::System;
 
-    /// Accept [`Activate`] over the network (spec §5.4): a caller on another node
-    /// drives a remote activation by asking this node's gateway, and gets back the
-    /// host handle. This is the gateway's whole network surface — the typed command
-    /// then travels straight to the host (`RunTyped`, registered on [`Host`]).
+    /// Accept [`Activate`] over the network (spec §5.4). This is the gateway's
+    /// whole network surface — the typed command then travels straight to the
+    /// host (`RunTyped`, registered on [`Host`]).
     fn register(registry: &mut HandlerRegistry<Gateway<G>>) {
         registry.accept::<Activate<G>>();
     }
@@ -233,11 +216,7 @@ impl<G: Grain> Actor for Gateway<G> {
 impl<G: Grain> Handler<Activate<G>> for Gateway<G> {
     /// Single-shot (§5.4): if this node replicates and leads the name's shard,
     /// get-or-activate the host and return it; otherwise return `NotLeader(hint)`
-    /// at once. The caller follows the hint — the redirect loop lives in
-    /// [`GrainRef`](crate::GrainRef), bounded by the caller's deadline — so this
-    /// serial handler never blocks another grain's activation while a shard
-    /// elects (the prior in-handler loop could pin the gateway for tens of
-    /// seconds, hanging concurrent activations).
+    /// at once, leaving the redirect loop to the caller.
     async fn handle(
         &mut self,
         msg: Activate<G>,
@@ -263,9 +242,8 @@ impl<G: Grain> Gateway<G> {
     /// The plausibility check matters after a rebalance (§7.7): a node evicted
     /// from the shard keeps its last local Raft view — often naming *itself*
     /// leader — since the reconfigured group no longer heartbeats it. Trusting
-    /// that stale view would hint every caller straight back to this gateway,
-    /// pinning them in a redirect loop for their whole deadline; the committed
-    /// replica set is the authority on who can lead at all.
+    /// that stale view would pin every caller in a redirect loop back to this
+    /// gateway for their whole deadline.
     fn redirect_hint(&self, shard: ShardId, ctx: &Ctx<Gateway<G>>) -> NodeId {
         let replicas = self.shard_map.replicas(shard.index).unwrap_or_default();
         if let Some(leader) = ctx.system().shard_leader(shard)
@@ -285,8 +263,7 @@ impl<G: Grain> Gateway<G> {
 
 impl<G: Grain> Handler<Terminated> for Gateway<G> {
     async fn handle(&mut self, signal: Terminated, _ctx: &Ctx<Gateway<G>>) {
-        // Drop the stopped host from the activation table; the next message for
-        // that name re-activates it (§10).
+        // The next message for that name re-activates it (§10).
         self.table.retain(|_, (_, host)| *host.id() != signal.id);
     }
 }

@@ -1,8 +1,7 @@
 //! The workspace file commands (machine §3): read and mutate the machine's
 //! `/workspace` **without booting it** — the last committed state while
-//! hibernated. A self-contained sub-concern of the grain: it touches the
-//! activation only through [`Machine::ws_command_guard`] (no live microVM —
-//! while one runs the guest owns `/workspace`).
+//! hibernated. These commands touch the activation only through
+//! [`Machine::ws_command_guard`].
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -29,8 +28,7 @@ pub const MAX_WS_FILE: usize = 1024 * 1024;
 
 /// Validate a workspace-relative path: non-empty, normal components only.
 /// The subsequent operations go through a capability handle over the facet's
-/// directory, so an escape is unrepresentable even past this check (S1's
-/// belt-and-suspenders, as in the sandbox's Workspace tier).
+/// directory, so an escape is unrepresentable even past this check (S1).
 fn ws_rel_path(path: &str) -> Result<&std::path::Path, MachineError> {
     let p = std::path::Path::new(path);
     if p.as_os_str().is_empty()
@@ -59,9 +57,7 @@ fn ws_open<S: GranarySystem, P: MachineVmProvider>(
 
 impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
     /// The shared guard of every workspace file command: the machine must be
-    /// provisioned, and no microVM may be live — while one runs the guest
-    /// owns `/workspace` (machine §3) and a host mutation would be clobbered
-    /// by the next pull.
+    /// provisioned, and no microVM may be live (see [`MachineError::VmLive`]).
     fn ws_command_guard(&self, state: &MachineState) -> Result<(), MachineError> {
         if !state.provisioned {
             return Err(MachineError::NotProvisioned);

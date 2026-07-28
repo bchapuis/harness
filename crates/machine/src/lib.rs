@@ -9,12 +9,7 @@
 //!
 //! - [`Machine`], the grain: `Facets = (Disk, Alarm, Ws)`, facet-0 state holding
 //!   only metadata (keys, host key, egress policy, sizing, intervals — machine
-//!   §3), and the session-grained durability discipline of machine §4: capture
-//!   at quiescent points driven by the checkpoint alarm, `can_passivate`
-//!   refusing eviction while the image holds uncaptured writes, and the
-//!   deposed side self-fencing (M5) because every alarm fire *is* a fenced
-//!   append — a non-committed outcome forces the step-down whose
-//!   `on_passivate` kills the microVM.
+//!   §3), and the session-grained durability discipline of machine §4.
 //! - [`MachineVmProvider`]/[`MachineVm`], the runtime binding seam: the grain
 //!   drives boot, pause-for-capture, resume, and kill through it, so the
 //!   deterministic simulation runs a [`FakeVmProvider`](vm::fake::FakeVmProvider)

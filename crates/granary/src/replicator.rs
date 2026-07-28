@@ -6,8 +6,7 @@
 //! reporting it durable once a quorum has stored it, fenced by the shard term (§8).
 //! On activation a fresh leader **recovers** each grain's head from a write quorum by
 //! read-repair — highest-term record per slot, written back under its own term — so
-//! no acknowledged write is lost across a leadership change (**G14**), in place of a
-//! shared log's leader-completeness.
+//! no acknowledged write is lost across a leadership change (**G14**).
 //!
 //! Two tiers (§7.4): [`LocalReplicator`] is one local store, no term, no quorum — the
 //! single-node `Local` journal; [`QuorumReplicator`] is the clustered `Quorum` path
@@ -46,11 +45,9 @@ type StoreAckFuture =
 /// This node's own store outcome as one more replica's ack, so a quorum is counted
 /// uniformly over all R replicas (the leader is a replica, §5.2).
 ///
-/// A refusal is already settled and wrote nothing, so it is reported with no wait — it
-/// never delayed the count before, and making a deposed leader wait a commit interval
-/// to learn it is deposed would be a regression. A `Stored` counts only once its bytes
-/// are stable: counting it earlier would tally a quorum for a write whose durability
-/// is below it (**G14**).
+/// A refusal is already settled and wrote nothing, so it is reported with no wait. A
+/// `Stored` counts only once its bytes are stable: counting it earlier would tally a
+/// quorum for a write whose durability is below it (**G14**).
 fn local_ack(node: NodeId, reserved: Reserved<StoreAck>) -> StoreAckFuture {
     match reserved.refusal() {
         Some(refused) => Box::pin(std::future::ready((node, Ok(refused)))),
@@ -59,9 +56,8 @@ fn local_ack(node: NodeId, reserved: Reserved<StoreAck>) -> StoreAckFuture {
 }
 
 /// A pending per-replica blob store from the [`ReplicaTransport`] blob fan-out: it
-/// resolves `Ok(())` once that peer has durably stored the blob (no ack variants —
-/// an immutable blob has nothing to fence or order). Tagged with the replica for
-/// joint-quorum attribution (§7.7).
+/// resolves `Ok(())` once that peer has durably stored the blob. Tagged with the
+/// replica for joint-quorum attribution (§7.7).
 type BlobAckFuture = actor_core::BoxFuture<'static, (NodeId, Result<(), actor_core::CallError>)>;
 
 /// The result of [`merge`]: the contiguous record prefix, its head, the best
@@ -70,9 +66,9 @@ type BlobAckFuture = actor_core::BoxFuture<'static, (NodeId, Result<(), actor_co
 type Merged = (Vec<Vec<u8>>, Seq, Option<(Seq, Term, Vec<u8>)>, bool);
 
 /// How long a quorum append/snapshot waits before reporting `Unavailable` (§11).
-/// Comfortably above a healthy quorum round-trip (milliseconds) yet short enough
-/// that a write to an unreachable shard fails fast rather than pinning the host's
-/// serial executor: a quorum not reached within it means the shard cannot reach one.
+/// Comfortably above a healthy quorum round-trip (milliseconds) yet short enough that
+/// a write to an unreachable shard fails fast rather than pinning the host's serial
+/// executor.
 const QUORUM_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long recovery waits for a read quorum before falling back to local state
@@ -87,10 +83,8 @@ const RECOVER_TIMEOUT: Duration = Duration::from_secs(2);
 /// The single-node `Local` replicator (spec §7.4): one [`GrainStore`], no term, no
 /// quorum. An append commits on the local store; recovery is a local head read.
 ///
-/// It deliberately mirrors [`QuorumReplicator`]'s shape so both journal tiers wrap a
-/// replicator behind the same seam, even though the local body is thin — the symmetry
-/// keeps [`LocalGrainJournal`](crate::LocalGrainJournal) and
-/// [`QuorumGrainJournal`](crate::QuorumGrainJournal) structurally identical.
+/// It mirrors [`QuorumReplicator`]'s shape so both journal tiers wrap a replicator
+/// behind the same seam.
 pub(crate) struct LocalReplicator {
     store: Arc<dyn GrainStore>,
     shard: u32,
@@ -313,8 +307,7 @@ fn majority(n: usize) -> usize {
 }
 
 /// Per-set ack counting toward a joint quorum (§7.7): an ack from a node counts
-/// toward every set that contains it; the quorum is satisfied when a majority of
-/// `current` AND (when migrating) a majority of `target` have acked.
+/// toward every set that contains it.
 struct JointCount<'a> {
     sets: &'a ReplicaSets,
     current: usize,
@@ -351,10 +344,9 @@ impl<'a> JointCount<'a> {
     }
 }
 
-/// The outcome of a recovery read phase (§7.2, §8): the fenced replies that
-/// survived the read fan-out, this node's local head taken before the reply was
-/// merged, and whether the acks reached a joint read quorum. Carries the three
-/// locals the merge/write-back spine needs out of [`fence_read`](QuorumReplicator::fence_read).
+/// The outcome of a recovery read phase (§7.2, §8): the fenced replies that survived
+/// the read fan-out, this node's local head taken before the reply was merged, and
+/// whether the acks reached a joint read quorum.
 struct ReadQuorum {
     replies: Vec<crate::store::ReadReply>,
     local_head: Seq,
@@ -370,10 +362,9 @@ pub(crate) struct QuorumReplicator<R: RaftConsensus> {
     local: Arc<dyn GrainStore>,
     transport: Arc<dyn ReplicaTransport>,
     /// The shard's live control state (§7.1, §7.7): the replica sets (the
-    /// write/recovery quorum domain), owned key range, and split/merge freeze.
-    /// The shard map's apply loop updates it in place as commands commit, so a
-    /// continuing replica's quorums always count over the committed allocation,
-    /// never a stale snapshot from construction time.
+    /// write/recovery quorum domain), owned key range, and split/merge freeze. The
+    /// shard map's apply loop updates it in place as commands commit, so quorums always
+    /// count over the committed allocation, never a snapshot from construction time.
     control: Arc<std::sync::Mutex<ShardControl>>,
     shard: u32,
     self_node: NodeId,
@@ -450,12 +441,10 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         if !self.election.is_leader() {
             return self.not_leader();
         }
-        // The split/merge gate (§7.7, G15): an append for a key this shard no
-        // longer owns (a committed split moved it) or that is frozen mid-move is
-        // refused BEFORE any store attempt, so it provably never ran and the
-        // caller's redirect can safely re-resolve against the committed map. The
-        // authoritative barrier is the replica stores' durable append bound; this
-        // is the leader-local fast path that spares the quorum round.
+        // The split/merge gate (§7.7, G15): an append for a key this shard no longer
+        // owns, or that is frozen mid-move, is refused BEFORE any store attempt, so it
+        // provably never ran and the caller can re-resolve against the committed map.
+        // The authoritative barrier is the replica stores' durable append bound.
         let sets = {
             let control = self.control.lock().expect("shard control poisoned");
             let hash = crate::system::name_hash(grain.grain_type(), grain.key());
@@ -466,9 +455,8 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         };
         let events_len = events.len();
         // Fan out to the remote peers first, each cloning the payload for its own wire
-        // message; then write this node's own replica directly, *moving* the payload in
-        // — the leader is a replica (§5.2), so its write needs no copy. The batch is
-        // deep-cloned R-1 times (once per peer), never R.
+        // message; then write this node's own replica, *moving* the payload in (§5.2).
+        // The batch is deep-cloned R-1 times, never R.
         let mut replicas: Vec<StoreAckFuture> = self
             .peers_of(&sets)
             .into_iter()
@@ -487,11 +475,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             })
             .collect();
         // The local write happens here, synchronously; only its *durability* joins the
-        // fan-out, as one more replica's ack. That is what it always was — the leader
-        // is a replica (§5.2) — but until the store could report durability separately
-        // from its outcome, the local ack had to be counted before the peers were even
-        // polled. Now all R acks are gathered the same way, and this node counts toward
-        // the quorum exactly when its own bytes are stable.
+        // fan-out, as one more replica's ack (the leader is a replica, §5.2). All R
+        // acks are gathered the same way, so this node counts toward the quorum exactly
+        // when its own bytes are stable.
         let local =
             self.local
                 .store_record(self.shard, grain, after, term, events, WriteKind::Append);
@@ -539,7 +525,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     }
 
     /// Recover a grain's head from a write quorum by read-repair (spec §8, **G14**) —
-    /// the rehydration barrier, in place of the old `catch_up`. Fence-read a quorum
+    /// the rehydration barrier. Fence-read a quorum
     /// (a Paxos prepare that bars a deposed leader from committing after we read),
     /// take the highest-term record per slot, write the recovered tail back under our
     /// own term so the adopted head is itself quorum-durable, and leave the records
@@ -592,9 +578,8 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // after a failed append's local write but before its rollback truncate can
         // leave an uncommitted record in the local store; a quorum-less recovery
         // adopts it into the served state until the next quorum recovery drops it.
-        // The record was never acknowledged, so no durability claim is violated —
-        // it is a transient dirty read on a partitioned minority leader, the same
-        // relaxed-read window §7.5 already documents.
+        // The record was never acknowledged, so no durability claim is violated (the
+        // relaxed-read window of §7.5).
         let (records, head, snapshot, any_below) = merge(read.replies, term);
         // The recovered head's compacted base — the seq of the best snapshot, which
         // the recovered tail records sit above (§9).
@@ -637,9 +622,8 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// Recovery read phase (§7.2, §8): fence-read the local store and every peer,
     /// awaiting all reads so no in-flight ask is dropped (no-silent-loss, §14).
     /// Each read is bounded by `RECOVER_TIMEOUT`, so an unreachable peer just falls
-    /// out of the quorum. Returns the surviving `Prepared` replies, this node's
-    /// local head, and whether the acks reached a joint read quorum; `Err` when the
-    /// local store or a peer has fenced us behind a higher term.
+    /// out of the quorum. `Err` when the local store or a peer has fenced us behind a
+    /// higher term.
     async fn fence_read(
         &self,
         grain: &GrainName,
@@ -666,7 +650,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         });
         // Take our local head before moving the reply into the quorum set, so the
         // write-back below can skip the network on a stable re-activation without a
-        // second read — and the recovery path never deep-clones the grain's records.
+        // second read and without deep-cloning the grain's records.
         let local_head = head_from_reply(&local_reply);
         let mut count = JointCount::new(sets);
         count.ack(self.self_node);
@@ -785,12 +769,10 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
 
     // --- The grain-native content-addressed blob store (clustered) ----------------
     //
-    // A grain's immutable blobs ride the *same* shard replica set as its records,
-    // but with no term and no order: a content hash names exactly one byte sequence,
-    // so there is nothing to fence and nothing to agree on (the immutable subset of
-    // the record path). The leader always keeps a local copy, so a `get` is a local,
-    // verified read in steady state; a fresh leader after a migration that lacks a
-    // block faults it from a peer and backfills locally (lazy hydration).
+    // A grain's immutable blobs ride the *same* shard replica set as its records, with
+    // no term and no order. The leader always keeps a local copy, so a `get` is a
+    // local, verified read in steady state; a fresh leader after a migration that
+    // lacks a block faults it from a peer and backfills locally (lazy hydration).
 
     /// Store an immutable blob on a write quorum of the grain's replicas, always
     /// including this local replica (so subsequent reads are local). No term, no
@@ -827,8 +809,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // Awaited *before* the peers are polled, rather than joining the fan-out as
         // one more ack the way the record path does: **G18** requires a blob's quorum
         // to always include the leader, because that is what makes a later `get` a
-        // local read (§7.10 colocation). Counting the leader only if its fsync happens
-        // to win the race would leave the property to chance.
+        // local read (§7.10 colocation).
         self.local
             .put_blob(self.shard, grain, id, bytes)
             .durable()
@@ -864,10 +845,10 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             // The local copy exists but is corrupt (on-disk bit-rot). Evict it so the
             // peer-sourced backfill below can replace it in place: a content-addressed
             // `put_blob` of an id already on disk writes nothing, so without this the
-            // bad copy would persist — forcing a network fetch on every future read
-            // and leaving this replica's durability margin permanently one short
-            // (§7.10 self-heal). It is safe to drop unconditionally: a copy that fails
-            // verification can never be returned, so it carries no value to lose.
+            // bad copy would persist, forcing a network fetch on every future read and
+            // leaving this replica's durability margin permanently one short (§7.10
+            // self-heal). Safe unconditionally: a copy that fails verification can
+            // never be returned.
             corrupt = true;
             self.local
                 .delete_blob(self.shard, grain, id)
@@ -1048,14 +1029,13 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// best snapshot on the joint quorum (a compacted grain's prefix exists only in
     /// the snapshot, so the records alone are not enough), then copy its blob area.
     ///
-    /// Uses the read-your-leader `recover` (not the quorum-required variant): a
-    /// migration only ever advances a `target` toward becoming `current`, gated
-    /// by the joint-quorum write-back and the final `Migrated` flip, so a pass
-    /// that runs on a possibly-stale local view still cannot flip the set without
-    /// a quorum — and it does not retry-storm against a partitioned peer, which
-    /// would leave in-flight recovery asks pending at quiescence (§14). The
-    /// stricter `recover_quorum` is reserved for split/merge, where a transfer
-    /// decision is irreversible before any consensus gate (G15).
+    /// Uses the read-your-leader `recover`, not the quorum-required variant: a
+    /// migration only ever advances a `target` toward becoming `current`, gated by the
+    /// joint-quorum write-back and the final `Migrated` flip, so a pass on a
+    /// possibly-stale local view still cannot flip the set without a quorum, and it
+    /// does not retry-storm against a partitioned peer (§14). `recover_quorum` is
+    /// reserved for split/merge, where a transfer decision is irreversible before any
+    /// consensus gate (G15).
     pub(crate) async fn migrate_grain(&self, grain: &GrainName) -> Result<(), GrainJournalError> {
         self.recover(grain).await?;
         if let Some((at, state)) = snapshot_of(self.local.read(self.shard, grain).durable().await)
@@ -1285,8 +1265,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let mut acked = 0usize;
         let need = majority(total);
         // As in `collect_store_quorum`, this node's copy counts through the same
-        // stream as the peers' — it is a destination replica like any other, and its
-        // ack means the same thing: the bytes are stable there.
+        // stream as the peers': it is a destination replica like any other.
         let mut replicas = peers;
         if let Some(local) = local {
             replicas.push(local_ack(self.self_node, local));
@@ -1304,9 +1283,8 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     }
 
     /// Fan a per-node `Transfer` store out to every destination replica but this
-    /// leader, tagging each ack with its node for the majority count. The one
-    /// differing store call is supplied as `mk`; the filter-self/box/collect
-    /// scaffolding is shared by the snapshot and records arms of `transfer_grain`.
+    /// leader, tagging each ack with its node for the majority count. The differing
+    /// store call is supplied as `mk`.
     fn fan_to_peers(
         &self,
         dest_replicas: &[NodeId],
@@ -1329,13 +1307,10 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// missing. Best-effort per destination node — an unreachable dest replica
     /// (a split's child inherits the parent's replicas, which may include a
     /// crashed one) is skipped rather than stalling the split; its copies heal
-    /// via recovery-on-access when it returns (the spec's blob-replication path,
-    /// proactive re-replication being deferred). The committed records and
-    /// snapshot already reached a majority (`transfer_to_majority`), and blobs
-    /// reach every reachable dest — a majority whenever one is reachable, which
-    /// is exactly when the split can commit at all. Idempotent
-    /// (content-addressed); requires this leader's own local copy to land, so
-    /// the child leader can always serve.
+    /// via recovery-on-access when it returns. The committed records and snapshot
+    /// already reached a majority (`transfer_to_majority`), and blobs reach every
+    /// reachable dest. Idempotent (content-addressed); requires this leader's own
+    /// local copy to land, so the child leader can always serve.
     async fn transfer_blobs(
         &self,
         grain: &GrainName,
@@ -1530,8 +1505,8 @@ fn merge(replies: Vec<crate::store::ReadReply>, our_term: Term) -> Merged {
     use std::collections::BTreeMap;
     let mut best: BTreeMap<u64, (Term, Vec<u8>)> = BTreeMap::new();
     let mut snapshot: Option<(Seq, Term, Vec<u8>)> = None;
-    // The replies are owned and used only here, so the record and snapshot bytes are
-    // moved into the merge, never cloned (recovery runs on every activation).
+    // The replies are owned and used only here, so record and snapshot bytes are moved
+    // into the merge, never cloned (recovery runs on every activation).
     for reply in replies {
         for (seq, term, bytes) in reply.slots {
             let slot = seq.value();
@@ -1579,8 +1554,7 @@ fn merge(replies: Vec<crate::store::ReadReply>, our_term: Term) -> Merged {
 fn head_from_reply(reply: &crate::store::ReadReply) -> Seq {
     let base = reply.snapshot.as_ref().map_or(0, |(s, _, _)| s.value());
     // `slots` is ascending by seq with the compacted prefix absent, so the leading
-    // gap-free run above the base ends at the first slot that is not the next seq —
-    // a single linear walk, no set to build.
+    // gap-free run above the base ends at the first slot that is not the next seq.
     let mut head = base;
     for (seq, _, _) in &reply.slots {
         if seq.value() != head + 1 {

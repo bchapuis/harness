@@ -8,10 +8,9 @@
 //! §2.2), injecting the node's model and sandbox seams into every activation
 //! through the factory.
 //!
-//! [`HarnessSystem`] is the one small thing the harness needs over
-//! [`GranarySystem`]: a way to emit its §10.4 events onto the same observability
-//! stream the grain's events ride. Everything else the agent needs — virtual
-//! time, task launching, placement, the journal — is granary's.
+//! [`HarnessSystem`] is what the harness needs over [`GranarySystem`]: a way to
+//! emit its §10.4 events onto the same observability stream the grain's events
+//! ride.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -68,8 +67,8 @@ static GRAIN_TYPE_IDS: LazyLock<Mutex<HashMap<String, &'static str>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A grain type name must be `&'static` (the `GrainName` tag, §5.1); kinds are a
-/// bounded deployment-time set, so interning one leaked `&'static str` per distinct
-/// kind name is sound (the same bounded-leak the runtime type name already permits).
+/// bounded deployment-time set, so interning one leaked `&'static str` per
+/// distinct kind name is sound.
 fn leak_grain_type(kind_id: &KindId) -> &'static str {
     let mut ids = GRAIN_TYPE_IDS
         .lock()
@@ -85,8 +84,6 @@ fn leak_grain_type(kind_id: &KindId) -> &'static str {
 /// What the harness needs from the actor system beyond [`GranarySystem`]: a way
 /// to emit its observability events (§10.4) onto the framework's stream — the
 /// same stream the grain's events ride, so checkers see one ordered sequence.
-/// One trait, two implementations, so the harness runs unchanged on a single
-/// node, a cluster, or the simulator.
 pub trait HarnessSystem: GranarySystem {
     /// Emit a harness event onto the observability stream (§10.4).
     fn emit_app(&self, event: Event);
@@ -129,8 +126,6 @@ impl Default for HarnessConfig {
         HarnessConfig {
             submit_deadline: Duration::from_secs(30),
             tool_timeout: Duration::from_secs(300),
-            // Don't issue a call that can't fit a full-size response: floor at
-            // the default per-call `max_tokens` so the two never drift.
             budget_floor: crate::ModelParams::default().max_tokens,
         }
     }
@@ -139,8 +134,7 @@ impl Default for HarnessConfig {
 /// The node-global addressing context shared by a [`Harness`] and every `Agent`
 /// activation it hosts (§7.4): the per-kind granary directory (for routing and
 /// delegation), the cluster-wide kind registry, and the harness tuning. It holds
-/// **no** activation seams — those live on the hosted kind's [`Seams`], present
-/// only where a grain actually activates.
+/// **no** activation seams — those live on the hosted kind's [`Seams`].
 pub(crate) struct Shared<S: HarnessSystem> {
     pub(crate) kinds: Kinds,
     pub(crate) config: HarnessConfig,
@@ -162,8 +156,8 @@ impl<S: HarnessSystem> Shared<S> {
 
 /// A hosted kind's activation seams (§4, §5.3): the node's model and sandbox,
 /// injected into each activation of that kind. An `Agent` exists only for a
-/// **hosted** kind, so the seams are always present — no `Option`, no host-only
-/// runtime check. A routing-only kind has no `Seams`: it never activates.
+/// **hosted** kind, so the seams are always present — no `Option`. A
+/// routing-only kind has no `Seams`: it never activates.
 #[derive(Clone)]
 pub(crate) struct Seams {
     pub(crate) model: Arc<dyn Model>,
@@ -282,8 +276,7 @@ pub struct HasRoutes;
 /// type — starting its gateway, replica store, and shard-map group and injecting
 /// the model/sandbox [`Seams`] into each activation — or only routes to a host of
 /// it (the Orleans cluster-client path: no hosting, the gateway discovered through
-/// the receptionist). Because the choice is per kind, one node can host some kinds
-/// and route others. See [`Harness::builder`].
+/// the receptionist). See [`Harness::builder`].
 pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
     system: S,
     kinds: Kinds,
@@ -430,8 +423,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
 }
 
 impl<S: HarnessSystem> HarnessBuilder<S, NoRoutes> {
-    /// Build the harness. Infallible: with no routed kinds there is nothing to
-    /// discover, so hosting always succeeds.
+    /// Build the harness. Infallible: there is nothing to discover.
     pub fn build(self) -> Harness<S> {
         self.assemble()
             .expect("a host-only build has no routed kinds to discover")
@@ -440,8 +432,8 @@ impl<S: HarnessSystem> HarnessBuilder<S, NoRoutes> {
 
 impl<S: HarnessSystem> HarnessBuilder<S, HasRoutes> {
     /// Build the harness, or `None` until every routed kind's host gateway has
-    /// gossiped into this node's receptionist (poll, exactly as a node waits for
-    /// its peers). Hosting side effects run only once all routed kinds resolve.
+    /// gossiped into this node's receptionist (poll). Hosting side effects run
+    /// only once all routed kinds resolve.
     pub fn build(self) -> Option<Harness<S>> {
         self.assemble()
     }
@@ -476,10 +468,10 @@ impl<S: HarnessSystem> SessionRef<S> {
     }
 
     /// Submit a turn and await its run's terminal outcome (harness spec §7.3,
-    /// §7.4): the blocking convenience composed at the edge — `Submit` (ack) plus
-    /// awaiting the one `RunCompleted` notification. The deadline bounds this
-    /// caller's **wait**, never the run: on a lapse it re-submits the same
-    /// `TurnId`, which re-attaches or returns the recorded outcome (H7).
+    /// §7.4): `Submit` (ack) plus awaiting the one `RunCompleted` notification.
+    /// The deadline bounds this caller's **wait**, never the run: on a lapse it
+    /// re-submits the same `TurnId`, which re-attaches or returns the recorded
+    /// outcome (H7).
     pub async fn prompt(&self, turn: Turn) -> Result<RunOutcome, GrainError> {
         self.submit(turn, None, self.config.submit_deadline).await
     }
@@ -545,12 +537,8 @@ impl<S: HarnessSystem> SessionRef<S> {
         self.grain.ask(Tail { from, limit }).await
     }
 
-    /// Follow the session's records live from `from` (granary §7.9): the
-    /// push-based replacement for poll-tailing. The returned [`Follower`] rides a
-    /// grain record subscription and reconciles by `Seq`, so it yields the exact
-    /// committed sequence in order — backfilling from the journal across a leader
-    /// move or hibernation (granary G16). Caller-driven: pull batches with
-    /// [`Follower::next`].
+    /// Follow the session's records live from `from` (granary §7.9). See
+    /// [`Follower`]; caller-driven, pull batches with [`Follower::next`].
     pub fn follow(&self, from: Seq) -> Follower<S> {
         Follower {
             grain: self.grain.clone(),
@@ -568,17 +556,14 @@ const FOLLOW_PAGE: u32 = 256;
 /// journal. A silent leader move or crash leaves the old sink alive but idle —
 /// the stream never closes and the new leader has no sink — so a periodic
 /// backfill is the liveness net that detects the move and re-subscribes (§7.9).
-/// During active streaming records arrive by push well within this, so it is a
-/// safety net, not the steady-state path.
 const FOLLOW_RESYNC: Duration = Duration::from_secs(2);
 
-/// A live follower over a session's journal (granary §7.9), the push-based
-/// replacement for poll-tailing. It rides a grain record subscription and
-/// reconciles by `Seq`: it backfills from the journal on first attach, on any
-/// gap, and after the stream closes (a leader move, a lag-drop, or hibernation),
-/// so [`next`](Self::next) yields the exact committed sequence — in order, with
-/// no gap or duplicate (granary G16). Push is the fast path; the journal is the
-/// authority.
+/// A live follower over a session's journal (granary §7.9). It rides a grain
+/// record subscription and reconciles by `Seq`: it backfills from the journal on
+/// first attach, on any gap, and after the stream closes (a leader move, a
+/// lag-drop, or hibernation), so [`next`](Self::next) yields the exact committed
+/// sequence — in order, with no gap or duplicate (granary G16). Push is the fast
+/// path; the journal is the authority.
 pub struct Follower<S: HarnessSystem> {
     grain: GrainRef<Agent<S>>,
     /// For the re-sync liveness timer (a silent move leaves the stream open).

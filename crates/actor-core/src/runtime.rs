@@ -2,8 +2,8 @@
 //!
 //! Time, randomness, and task spawning are the three capabilities the runtime
 //! needs from its host. Each is an ordinary trait, and **no subsystem may read
-//! any of them from the host directly**. This indirection is exactly what lets
-//! the same actor code run under the production runtime and under deterministic
+//! any of them from the host directly**. That indirection is what lets the same
+//! actor code run under the production runtime and under deterministic
 //! simulation (spec §18): only the trait implementations differ.
 //!
 //! The trait methods return `impl Future + Send` rather than using `async fn`
@@ -127,8 +127,8 @@ pub trait Entropy: Send + Sync + 'static {
     }
 }
 
-/// Task spawning (spec §4.6). Mailbox executors and, later, the gossip and
-/// failure-detector loops run through this.
+/// Task spawning (spec §4.6). Mailbox executors and the cluster's background
+/// loops run through this.
 pub trait Spawner: Send + Sync + 'static {
     /// Named `launch`, not `spawn`, so a raw task is never confused with
     /// spawning an actor (`ActorSystem::spawn` / `Ctx::spawn`).

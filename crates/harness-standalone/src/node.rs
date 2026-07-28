@@ -103,8 +103,8 @@ pub struct NodeOptions {
     pub bind_host: String,
     /// Each node's reachable host, from `--peer <id>=<host>`. A node advertises
     /// its own entry to peers and dials the others at theirs. Empty leaves every
-    /// node at `127.0.0.1` (single host); supplying the roster's hosts — pod DNS
-    /// names, say — is the whole of what makes the cluster multi-host.
+    /// node at `127.0.0.1` (single host); supplying the roster's hosts (pod DNS
+    /// names, say) is what makes the cluster multi-host.
     pub peer_hosts: BTreeMap<u64, String>,
     /// Clients to admit, from `--client <id>=<host>` (the HTTP gateway). Each id
     /// is outside `1..=nodes`: the client joins the transport and membership as a
@@ -124,8 +124,7 @@ pub struct NodeOptions {
     pub api_url: String,
     /// The sandbox provider; every node must agree (the kind digest covers
     /// the tool declarations and profile this choice selects). `None` fails
-    /// at startup: the operator names the confinement story explicitly, so
-    /// the unconfined `Local` mode cannot be selected by omission.
+    /// at startup (see [`NodeOptions`]).
     pub sandbox: Option<SandboxMode>,
     /// Container image for `--sandbox docker`; required there, and digest-
     /// covered like `--model`.
@@ -173,8 +172,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
             opts.nodes, opts.id
         ));
     }
-    // A client id must fall outside the voter roster: it is admitted to the
-    // transport and membership, never to Raft, so it never votes or hosts.
+    // A client id must fall outside the voter roster (see `NodeOptions::clients`).
     for id in opts.clients.keys() {
         if *id >= 1 && *id <= opts.nodes {
             return Err(format!(
@@ -192,9 +190,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     )?;
     let node = NodeId::new(opts.id);
     let roster: Vec<NodeId> = (1..=opts.nodes).map(NodeId::new).collect();
-    // Each node's reachable host: its `--peer` entry, or loopback if unset. With
-    // no `--peer` flags every host is 127.0.0.1 and the cluster is single-host,
-    // exactly as before.
+    // Each node's reachable host: its `--peer` entry, or loopback if unset.
     let host_of = |id: u64| -> &str {
         opts.peer_hosts
             .get(&id)
@@ -276,7 +272,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
             // builds one (system.rs). Voters are the full roster; the shard-map
             // and per-shard groups seed from these. Disk-backed storage under
             // --data keeps a restarted node's term/vote, so killing a node and
-            // re-attaching stays Raft-safe (the demo's `:retry` story).
+            // re-attaching stays Raft-safe.
             membership: MembershipMode::Leader(LeaderMode {
                 swim: SwimConfig::default(),
                 raft: {
@@ -290,8 +286,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         },
     );
     // Bring every voter and every admitted client into the membership view. A
-    // client is added here but never to the Raft roster above, so it receives the
-    // gossip (and the gateway refs it carries) without ever voting or hosting.
+    // client is added here but never to the Raft roster above.
     for peer in &roster {
         if *peer != node {
             system.add_member(*peer);
@@ -312,11 +307,8 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // the tenancy directory. Its factory caches per node, so every grain type shares
     // one on-disk store keyed by (shard, grain), the grain analogue of the Raft WAL.
     let grain_store = FileGrainStore::factory(opts.data.join("grains"));
-    // Every mode runs over the agent grain's own workspace facet (granary §7.11):
-    // the facet materializes each session's directory under the kinds' `data_dir`
-    // (see `kinds` below) and captures tool-call deltas into the session journal, so
-    // the workspace survives hibernation, migration, and node loss with no separate
-    // workspace grain. The provider just opens the supplied directory.
+    // Every mode runs over the agent grain's own workspace facet (see `SandboxMode`);
+    // the provider just opens the supplied directory.
     let sandboxes: Arc<dyn SandboxProvider> = match sandbox_mode {
         SandboxMode::Docker => {
             if opts.sandbox_image.is_empty() {
@@ -352,8 +344,8 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         // facet-owned workspace directory.
         SandboxMode::Durable => Arc::new(harness_sandbox::TieredSandboxes::new()),
     };
-    // Hosting the kinds is the point; the handle is bound for the node's life (it
-    // never returns) to keep the gateway actors alive, like `_directory` below.
+    // The handle is bound for the node's life (this function never returns) to keep
+    // the gateway actors alive, like `_directory` below.
     let node_kinds = kinds(&opts, sandbox_mode, grain_store.clone());
     let _harness = Harness::builder(system.clone(), &node_kinds)
         .config(harness_config())
@@ -361,9 +353,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         .build();
     // Host the tenancy ownership-index grain type (one grain per principal) so the
     // gateway's client `Granary<Directory>` can route `Record`/`List` to it. The
-    // node only *hosts* it now — the recording on each prompt happens at the
-    // gateway edge. Bound for the node's life to keep the handle (and thus the
-    // gateway actor's keepalive) alive alongside the kinds the harness holds.
+    // node only hosts it; the recording on each prompt happens at the gateway edge.
     let _directory: Granary<Directory<TcpCluster>> = system.granary(GranaryConfig {
         grain_store: Some(grain_store),
         ..GranaryConfig::default()
@@ -379,16 +369,15 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         "[{node}] hosting grains; the public edge is harness-gateway (a cluster client). \
          No client-facing listener on this node."
     );
-    // The node has no listener of its own: it hosts grains and serves the cluster
-    // over the transport. Park forever; the process exits on a signal.
+    // Park forever; the process exits on a signal.
     std::future::pending::<()>().await;
     Ok(())
 }
 
 /// Resolve node `id`'s address on `host` at port `base + id - 1`. An IP literal
-/// (the `127.0.0.1` default) passes straight through; a hostname — a container
-/// or pod DNS name like `harness-0.harness` — resolves through the system
-/// resolver, which is what lets the roster span machines instead of loopback.
+/// passes straight through; a hostname (a container or pod DNS name like
+/// `harness-0.harness`) resolves through the system resolver, which is what lets
+/// the roster span machines instead of loopback.
 fn resolve(host: &str, base: u16, id: u64) -> Result<SocketAddr, String> {
     let port = base + (id - 1) as u16;
     (host, port)
@@ -408,15 +397,13 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
         model: opts.model.to_string(),
         max_tokens: 4096,
     };
-    // The sandbox tools per mode: the same `shell` name and shape, but
-    // distinct declarations (and a profile image in docker/firecracker
-    // mode), so the digests differ — a mixed-mode cluster fails to agree
-    // instead of silently splitting confinement. Every mode offers the typed
-    // `Workspace` file tools (read/write/list/remove over the durable grain-backed
-    // workspace, §7.10), so the model can create and edit files directly without a
-    // container round-trip. The shell-capable modes add `shell` (the confined Native
-    // tier) and `run_js` (the hermetic QuickJS Compute tier, sandbox spec §3.2) on
-    // top, over the same workspace.
+    // The sandbox tools per mode: the same `shell` name and shape, but distinct
+    // declarations (and a profile image in docker/firecracker mode), so the digests
+    // differ — a mixed-mode cluster fails to agree instead of silently splitting
+    // confinement. Every mode offers the typed `Workspace` file tools over the
+    // durable grain-backed workspace (§7.10); the shell-capable modes add `shell`
+    // (the confined Native tier) and `run_js` (the hermetic QuickJS Compute tier,
+    // sandbox spec §3.2) on top, over the same workspace.
     let with_file_tools = |kind: Kind| -> Kind {
         harness_sandbox::workspace_tools()
             .into_iter()
@@ -430,9 +417,8 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
                     .sandbox(harness::SandboxProfile::image(&opts.sandbox_image)),
             ),
             // The microVM shell declaration differs from the docker one (sync
-            // semantics are model-visible), and the profile image carries
-            // the rootfs path — both digest-covered, so a cluster mixing
-            // realizations fails to agree instead of splitting confinement.
+            // semantics are model-visible), and the profile image carries the
+            // rootfs path; both are digest-covered.
             SandboxMode::Firecracker => with_file_tools(
                 kind.tool(harness_sandbox::fc_shell_tool())
                     .tool(harness_sandbox::run_js_tool())
@@ -447,11 +433,9 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
     // journal must outlive a process restart for a cold-restarted cluster to recover
     // the conversation. Without this, each node's grain store is in-memory and a full
     // restart loses every session (the records do NOT ride the Raft log — that log
-    // only carries leader election and the shard map, §7.1). The factory is built by
-    // the caller and shared with the tenancy directory: it caches per node, so every
-    // grain type shares one on-disk store keyed by (shard, grain) — the grain analogue
-    // of the Raft WAL one line up. `data_dir` places the workspace facet's per-session
-    // directory materializations (granary §7.11) under --data as well.
+    // only carries leader election and the shard map, §7.1). `data_dir` places the
+    // workspace facet's per-session directory materializations (granary §7.11) under
+    // --data as well.
     let data_dir = opts.data.join("workspaces");
     let grain = move |kind: Kind| -> Kind {
         kind.grain(GranaryConfig {
@@ -460,11 +444,8 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
             ..GranaryConfig::default()
         })
     };
-    // The Compute tier exists only behind TieredSandboxes; steer toward it
-    // for JavaScript exactly where it is offered, and nowhere it is not.
-    // Mode-aware tool guidance. Every mode has the typed file tools over a durable
-    // workspace that persists across turns; the shell-capable modes add `shell` and
-    // `run_js` on top. `durable` has no shell, so its guidance must not point at one.
+    // Mode-aware tool guidance: `durable` has no shell and no Compute tier, so its
+    // guidance must not point at either.
     let tool_guidance = if matches!(sandbox_mode, SandboxMode::Durable) {
         "Use the typed file tools (`read_file`, `write_file`, `edit_file`, `list_dir`, `remove`) to work \
          with files in your session's private workspace, which persists across your turns. \
@@ -515,13 +496,12 @@ fn harness_config() -> HarnessConfig {
 /// Hold startup open until the cluster has converged enough to serve: every peer
 /// is in the membership view and the control group has elected a leader (so
 /// granary's shard groups can elect too). granary's bounded redirect absorbs a
-/// prompt issued before the shard map converges (invariant G13), so this is a UX
-/// nicety, not a correctness requirement: it makes the first prompt of a fresh
-/// cluster prompt rather than bouncing off a still-electing shard.
+/// prompt issued before the shard map converges (invariant G13), so this is a
+/// convenience, not a correctness requirement.
 ///
 /// `expected` is the cluster size; `members()` reports peers only (never this
-/// node, membership.rs) and now also any admitted client, so the bar is the peer
-/// quorum `expected - 1` (a client joining only raises the count).
+/// node, membership.rs) plus any admitted client, so the bar is the peer quorum
+/// `expected - 1` (a client joining only raises the count).
 async fn wait_for_hosts(system: &TcpCluster, expected: usize) {
     let peers = expected.saturating_sub(1);
     for _ in 0..150 {
@@ -538,8 +518,8 @@ async fn wait_for_hosts(system: &TcpCluster, expected: usize) {
 }
 
 /// The observability stream on stderr (harness spec §10.4): membership and
-/// reachability transitions — the narration of the kill-a-node demo — and
-/// every harness event. Dispatch-level core events are swallowed as noise.
+/// reachability transitions, and every harness event. Dispatch-level core events
+/// are swallowed as noise.
 struct StderrEvents {
     node: NodeId,
 }

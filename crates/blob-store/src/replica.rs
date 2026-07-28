@@ -1,20 +1,16 @@
 //! The per-node `BlobReplica` actor and the [`BlobTransport`] seam (spec §6).
 //!
 //! The `Clustered` tier reuses the actor framework's transport, with no new wire
-//! protocol (actor §2.2), exactly as the grain Quorum replicator does (granary
-//! §7.2) — but minus everything fencing- and order-related. A per-node
-//! [`BlobReplica`] actor owns this node's on-disk [`LocalBlobStore`] and accepts
-//! four messages: [`StoreBlob`], [`FetchBlob`], [`HasBlob`], and
-//! [`DeleteNamespace`]. It is registered in the receptionist under one well-known
-//! key ([`blob_replica_key`]) so peers discover it, and [`ActorBlobTransport`]
-//! reaches a peer's replica by an ordinary `ask`.
+//! protocol (actor §2.2). A per-node [`BlobReplica`] actor owns this node's
+//! on-disk [`LocalBlobStore`] and accepts four messages: [`StoreBlob`],
+//! [`FetchBlob`], [`HasBlob`], and [`DeleteNamespace`]. It is registered in the
+//! receptionist under one well-known key ([`blob_replica_key`]) so peers discover
+//! it, and [`ActorBlobTransport`] reaches a peer's replica by an ordinary `ask`.
 //!
 //! Unlike granary's `StoreRecord`, [`StoreBlob`] carries **no shard, no `after`,
 //! no term, and no `repair` flag** (spec §6): nothing needs fencing and nothing
 //! needs ordering, so the only field beyond the bytes is the namespace the blob
-//! lives under. This message set makes the spec §4 thesis concrete in the wire
-//! contract: a verified write, a verified read, and a monotonic delete flag, with
-//! no order and no term.
+//! lives under.
 
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -44,17 +40,14 @@ use crate::tombstone::Tombstone;
 use crate::tombstone::TombstoneSet;
 
 /// The receptionist key every node's [`BlobReplica`] registers under: one
-/// well-known key, one entry per node (spec §6). Unlike granary's per-grain-type
-/// key, a blob store has a single replica type, so the key is a constant. The
-/// transport looks a peer's replica up here, then `ask`s it.
+/// well-known key, one entry per node (spec §6). The transport looks a peer's
+/// replica up here, then `ask`s it.
 pub fn blob_replica_key<S: BlobSystem>() -> Key<BlobReplica<S>> {
     Key::new("blob.replica")
 }
 
 /// Store one blob's bytes on a replica under `ns` (spec §6). The reply is a
-/// [`StoreAck`]. No shard, no `after`, no term, no `repair`: a content hash names
-/// exactly one byte sequence, so there is nothing to fence and nothing to order
-/// (spec §4).
+/// [`StoreAck`].
 #[derive(Serialize, Deserialize)]
 pub struct StoreBlob {
     pub ns: Namespace,
@@ -70,10 +63,8 @@ impl Message for StoreBlob {
 /// Fetch one blob's **whole** raw bytes from a replica (spec §6). The reply is
 /// `Some(bytes)` if the replica holds it, else `None` (absent or the namespace is
 /// tombstoned). The bytes are **not** verified by the replica — the caller
-/// re-hashes them after transfer (spec §4, §5.2, **B1**), so a non-verifying copy
-/// is distinguishable from an absent one. `range` is reserved for range-verified
-/// streaming (spec §10); v1 returns the whole blob, because a range cannot be
-/// verified against the id without it.
+/// re-hashes them after transfer (spec §4, §5.2, **B1**). `range` is reserved for
+/// range-verified streaming (spec §10); v1 returns the whole blob.
 #[derive(Serialize, Deserialize)]
 pub struct FetchBlob {
     pub ns: Namespace,
@@ -101,9 +92,8 @@ impl Message for HasBlob {
 
 /// Record a namespace tombstone on a replica and sweep its local bytes (spec §5.3,
 /// §6). Idempotent and monotonic: a redelivered, gossiped, or reconcile-driven
-/// delete is harmless. The reply is a [`DeleteAck`]. `deleted_at` is the
-/// anchoring stamp carried for diagnostics and forward compatibility; tombstone
-/// *presence*, not its stamp, makes a namespace gone (spec §5.3).
+/// delete is harmless. The reply is a [`DeleteAck`]; `deleted_at` is the anchoring
+/// stamp (see [`Tombstone`]).
 #[derive(Serialize, Deserialize)]
 pub struct DeleteNamespace {
     pub ns: Namespace,
@@ -118,10 +108,8 @@ impl Message for DeleteNamespace {
 /// Ask a replica for its whole tombstone awareness set (spec §5.3) — the
 /// **anti-entropy pull** the reconcile loop runs each pass so a node that was
 /// partitioned or down across a `delete_namespace` re-syncs the tombstones it
-/// missed *before* it serves or re-replicates a stale blob (**B7**). The initial
-/// `delete_namespace` fan-out (spec §5.3) reaches every *then-serving* node; this
-/// pull is the "thereafter by gossip" / "re-syncs the set from the anchor owners
-/// on rejoin" half, without which a rejoining holder resurrects the namespace.
+/// missed *before* it serves or re-replicates a stale blob (**B7**). Without it a
+/// rejoining holder resurrects the namespace the fan-out never reached it with.
 #[derive(Serialize, Deserialize)]
 pub struct SyncTombstones;
 
@@ -142,8 +130,7 @@ pub enum StoreAck {
 }
 
 /// A replica's response to [`DeleteNamespace`] (spec §6): the tombstone is durably
-/// recorded. A named unit type (rather than `()`) keeps the wire contract explicit
-/// and leaves room to grow.
+/// recorded.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeleteAck {
     /// The tombstone is durably recorded on this replica; its bytes are swept.
@@ -151,12 +138,10 @@ pub enum DeleteAck {
 }
 
 /// The node-local replica store (spec §6): a thin actor over this node's
-/// [`LocalBlobStore`], reachable across the cluster so the `Clustered` tier can
-/// replicate to it, read it back, probe it, and tombstone it. One per node,
-/// registered under [`blob_replica_key`].
+/// [`LocalBlobStore`], reachable across the cluster. One per node, registered
+/// under [`blob_replica_key`].
 ///
-/// It also updates this node's in-memory [`TombstoneSet`] on a `DeleteNamespace`,
-/// so the tier shares one source of delete-awareness with the replica: the
+/// A `DeleteNamespace` also updates this node's in-memory [`TombstoneSet`], so the
 /// on-disk tombstone (which refuses stores and survives restart) and the in-memory
 /// set (which the tier's `get`/`put` consult and gossip) move together (spec §5.3).
 pub struct BlobReplica<S: BlobSystem> {
@@ -167,7 +152,7 @@ pub struct BlobReplica<S: BlobSystem> {
 
 impl<S: BlobSystem> BlobReplica<S> {
     /// Wrap this node's on-disk store as a replica actor, updating `tombstones`
-    /// (the node's cluster-wide awareness set) alongside the durable store.
+    /// alongside it.
     pub fn new(store: LocalBlobStore, tombstones: TombstoneSet) -> BlobReplica<S> {
         BlobReplica {
             store,
@@ -201,12 +186,10 @@ impl<S: BlobSystem> Handler<StoreBlob> for BlobReplica<S> {
                 StoreAck::Stored
             }
             Err(BlobError::Deleted(_)) => StoreAck::Deleted,
-            // A non-tombstone store failure means this node's disk is broken; a
-            // replica cannot function without durable storage (as granary's
-            // `FileGrainStore` panics on store failure). The panic stops the actor,
-            // its registration is pruned, and reconcile re-replicates the blob to a
-            // healthy owner (B6) — so the failure surfaces to the caller as a
-            // non-ack and the put falls back to another owner.
+            // A non-tombstone store failure means this node's disk is broken, and a
+            // replica cannot function without durable storage. The panic stops the
+            // actor and prunes its registration, so the put falls back to another
+            // owner and reconcile re-replicates the blob to a healthy one (B6).
             Err(err) => panic!("blob replica failed to store {}: {err}", msg.id),
         }
     }
@@ -228,8 +211,7 @@ impl<S: BlobSystem> Handler<HasBlob> for BlobReplica<S> {
 impl<S: BlobSystem> Handler<DeleteNamespace> for BlobReplica<S> {
     async fn handle(&mut self, msg: DeleteNamespace, ctx: &Ctx<BlobReplica<S>>) -> DeleteAck {
         // Durable tombstone + sweep first (refuses later stores, survives restart),
-        // then in-memory awareness — both monotonic, so a redelivered, gossiped, or
-        // reconcile-driven delete is harmless (spec §5.3, §6).
+        // then in-memory awareness. Both are monotonic (spec §5.3, §6).
         self.store
             .tombstone(&msg.ns, msg.deleted_at)
             .expect("blob replica failed to record a namespace tombstone");
@@ -244,21 +226,19 @@ impl<S: BlobSystem> Handler<DeleteNamespace> for BlobReplica<S> {
 
 impl<S: BlobSystem> Handler<SyncTombstones> for BlobReplica<S> {
     async fn handle(&mut self, _msg: SyncTombstones, _ctx: &Ctx<BlobReplica<S>>) -> Vec<Tombstone> {
-        // The full awareness set, for a peer's reconcile-pass anti-entropy pull
-        // (spec §5.3, B7). Cheap: one tiny record per deleted namespace.
+        // Cheap: one tiny record per deleted namespace.
         self.tombstones.snapshot()
     }
 }
 
 /// The boxed result of a [`BlobTransport::store_blob`] — the future the
-/// `Clustered` tier collects for its `W`-of-`R` quorum and drains in the
-/// background (spec §5.2).
+/// `Clustered` tier collects for its `W`-of-`R` quorum (spec §5.2).
 pub type StoreAckFuture = BoxFuture<'static, Result<StoreAck, CallError>>;
 
 /// How the `Clustered` tier reaches a node's [`BlobReplica`] (spec §6). Object-safe
 /// (the analogue of granary's `ReplicaTransport`), so the tier and the reconcile
 /// loop stay free of the system's `Clock`/`Entropy`/`Spawner`/`Transport` type
-/// parameters; keeping it a seam preserves deterministic simulation (spec §8).
+/// parameters, and a simulation can substitute its own (spec §8).
 pub trait BlobTransport: Send + Sync + 'static {
     /// `StoreBlob` to `node`'s replica (spec §5.2). A `Stored` ack counts toward
     /// the `W` durability target; a `Deleted` ack surfaces the tombstone.
@@ -302,26 +282,23 @@ pub trait BlobTransport: Send + Sync + 'static {
     ) -> BoxFuture<'static, Result<DeleteAck, CallError>>;
 
     /// `SyncTombstones` on `node`'s replica (spec §5.3, **B7**): pull its awareness
-    /// set so a rejoining or lagging node learns the deletes it missed, the
-    /// "thereafter by gossip" half of tombstone dissemination.
+    /// set so a rejoining or lagging node learns the deletes it missed.
     fn sync_tombstones(
         &self,
         node: NodeId,
         within: Duration,
     ) -> BoxFuture<'static, Result<Vec<Tombstone>, CallError>>;
 
-    /// Launch a detached background task (spec §5.2, §7): draining the straggler
-    /// stores of a `put` that already reached `W`, so the commit returns at `W`
-    /// latency while every issued ask still runs to completion.
+    /// Launch a detached background task (spec §5.2, §7): the reconcile loop, and
+    /// the straggler drain of a `put` that already reached `W`.
     fn launch(&self, task: BoxFuture<'static, ()>);
 }
 
 /// The actor-messaging [`BlobTransport`] (spec §6: no new transport): it resolves a
 /// node's [`BlobReplica`] in the receptionist and `ask`s it. A replica on this node
 /// resolves to the local actor, so an owner's store to itself is a local call with
-/// no serialization (spec §5.2). Resolution is a local receptionist read each call
-/// — cheap, and never stale across a peer restart (a restarted node re-registers a
-/// fresh ref).
+/// no serialization (spec §5.2). Resolution is a local receptionist read on every
+/// call, so it is never stale across a peer restart.
 pub struct ActorBlobTransport<S: BlobSystem> {
     system: S,
 }
@@ -437,8 +414,7 @@ mod tests {
         T: Serialize + serde::de::DeserializeOwned,
     {
         // The replica messages cross node boundaries, so each must survive a codec
-        // round-trip (V&V checklist #1). serde_json stands in for the wire codec;
-        // the cross-node encoding is exercised end-to-end by the cluster sim.
+        // round-trip (V&V checklist #1); serde_json stands in for the wire codec.
         let bytes = serde_json::to_vec(value).expect("serialize");
         serde_json::from_slice(&bytes).expect("deserialize")
     }

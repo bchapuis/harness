@@ -1,14 +1,10 @@
 # Simulation testing
 
-How this repository uses deterministic simulation: the shapes a test can take,
-where each belongs, and how a run decides how many seeds to spend.
-
-The mechanism lives in `actor-simulation` (spec §18). This document is about the
-*conventions* around it — what to reach for, and why the choice matters.
+**Scope:** the conventions around deterministic simulation — the shapes a test
+can take, where each belongs, and how a run decides how many seeds to spend. The
+mechanism lives in `actor-simulation` (spec §18).
 
 ## The shapes
-
-Four, and picking the right one is most of the design work.
 
 ### 1. Scenario
 
@@ -58,7 +54,7 @@ Restart ends the old process for real: its scheduler domain is retired, so none
 of its tasks is ever polled again. That leaves brackets open — an actor stopped
 between `DispatchStart` and `DispatchEnd`, an `ask` issued and never answered, an
 identity assigned and never resigned — which is what dying looks like, not a
-violation. `NodeRestarted` is how a checker learns the boundary: the `Checker`
+violation. `NodeRestarted` is the boundary a checker learns from: the `Checker`
 calls `Invariant::forget_node` on every invariant before the successor's events
 arrive reusing the predecessor's identities. An invariant that accumulates
 per-node state overrides it; one whose claim survives a restart, like
@@ -74,8 +70,8 @@ assert!(stats.dropped > 0 && stats.duplicated > 0, ...);
 ```
 
 A sweep that *configures* faults but never *triggers* one gives false
-confidence. This is the output-side check against that. Because the assertion is
-about the whole declared range, `coverage_seeds` never narrows it (see below).
+confidence. Because the assertion is about the whole declared range,
+`coverage_seeds` never narrows it (see below).
 
 ### 4. Reproducibility sweep
 
@@ -89,15 +85,13 @@ if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..24)) {
 ```
 
 Everything else rests on this. A wall-clock read, an OS thread, an unseeded RNG,
-or `HashMap` iteration order anywhere in the system breaks it, and this is what
-notices.
+or `HashMap` iteration order anywhere in the system breaks it.
 
 ### Escape hatch: `scenario_sweep`
 
-Occasionally a scenario is worth sweeping but is too bespoke to fit `Workload` —
-it drives the cluster through a hand-written narrative rather than generating
-traffic. `scenario_sweep` gives such a loop the one thing it otherwise lacks, a
-name:
+For a scenario worth sweeping but too bespoke to fit `Workload` — it drives the
+cluster through a hand-written narrative rather than generating traffic.
+`scenario_sweep` gives such a loop the one thing it otherwise lacks, a name:
 
 ```rust
 scenario_sweep("partition-safety/split-brain", sweep_seeds(0..12), |seed| {
@@ -111,9 +105,8 @@ reproducibility sweeps as well as a name. Reach for this when it does not.
 
 ## Where things live
 
-**Sweeps go in `*swarm.rs`; scenarios go everywhere else.** Three clauses, and
-`tests/corpus_keys.rs` checks all three, so this is a rule rather than an
-aspiration:
+**Sweeps go in `*swarm.rs`; scenarios go everywhere else.** Three clauses, all
+checked by `tests/corpus_keys.rs`:
 
 1. A file that calls `run_swarm`, `run_cluster_swarm`, or
    `run_cluster_swarm_coverage` is named `*swarm.rs`.
@@ -122,10 +115,10 @@ aspiration:
    **or** `*determinism.rs`.
 3. `scenario_sweep` is unconstrained — it lives with the scenarios it sweeps.
 
-The split matters because the two kinds fail differently. A scenario failure
-names a sequence you can read; a sweep failure names a seed you have to replay.
-Keeping them in separate binaries keeps that distinction legible, and keeps a
-slow sweep from sitting between you and a fast scenario suite.
+The two kinds fail differently: a scenario failure names a sequence you can read,
+a sweep failure names a seed you have to replay. Separate binaries keep that
+distinction legible, and keep a slow sweep from sitting between you and a fast
+scenario suite.
 
 Two organizing axes are both allowed, which is what clause 2 is for. Most crates
 name a sweep file after its **area** — `grain_swarm.rs`, `sql_swarm.rs`,
@@ -136,15 +129,14 @@ file to point at and call the §18.1 determinism gate. Either is fine; mixing
 them within one crate is not.
 
 Clause 3 exists because a `scenario_sweep` has no workload to pair with and
-reads as narrative — splitting it from the scenarios it belongs to would cost
-more than the uniformity is worth. `partition_safety.rs` is the canonical case.
+reads as narrative, so it stays with the scenarios it belongs to.
+`partition_safety.rs` is the canonical case.
 
 ## Sizing: how many seeds a run spends
 
-Per-seed cost across these workloads spans roughly four orders of magnitude —
-about a millisecond for a local actor sweep, ten seconds for one that drives a
-machine. No single seed count fits both, so the call site declares a cost class
-and the *run* decides the width:
+Per-seed cost spans roughly four orders of magnitude, about a millisecond for a
+local actor sweep against ten seconds for one that drives a machine, so the call
+site declares a cost class and the *run* decides the width:
 
 | helper           | local width | use for                                        |
 |------------------|-------------|------------------------------------------------|
@@ -153,10 +145,9 @@ and the *run* decides the width:
 | `coverage_seeds` | declared    | coverage assertions — never narrowed           |
 
 Sizing is **deterministic on purpose**. Deciding width from a wall clock would
-make the seeds that ran depend on the machine that ran them, which is the
-property spec §18.1 exists to deny — and `clippy.toml` bans the call in this
-crate. Wall-time budgeting belongs to whatever drives the suite (`soak.yml`
-sizes per crate), never under a seed.
+make the seeds that ran depend on the machine that ran them, which spec §18.1
+denies; `clippy.toml` bans the call in this crate. Wall-time budgeting belongs to
+whatever drives the suite (`soak.yml` sizes per crate), never under a seed.
 
 Reclassify by measuring, not guessing:
 
@@ -191,25 +182,19 @@ width.
 ## Stopping at the first failure, or collecting them all
 
 A sweep stops at the first failing seed. That is right for CI — the build is
-already red, and proving the other 1,999 seeds also fail buys nothing — and
-wrong for a soak, whose whole job is to mine `(workload, seed)` pairs for the
-corpus. Stopping throws away the rest of the run.
-
-It compounds, too. Corpus seeds replay *ahead* of every sweep, so once a
-workload has a failing seed on record, that replay fails first and the workload
-stops exploring new ground entirely until someone fixes the bug — exactly the
-workload you would most like to keep mining.
+already red — and wrong for a soak, whose job is to mine `(workload, seed)` pairs
+for the corpus. It compounds: corpus seeds replay *ahead* of every sweep, so once
+a workload has a failing seed on record, that replay fails first and the workload
+stops exploring new ground until someone fixes the bug.
 
 - `SWARM_CONTINUE=1` — run the sweep to the end and report every seed that
   failed, printed as `corpus.txt` lines ready to paste. `soak.yml` sets it; CI
   leaves it unset.
 
 A collecting run also catches a panic *inside* a workload, attributes it to its
-seed, and carries on. Sweeps fail two ways — an invariant returns a violation,
-or the workload simply asserts (a `drive` that checks its own outcome, a
-`scenario_sweep` body) — and the second kind used to unwind straight out of the
-sweep, taking the remaining seeds with it and reporting no seed at all, since
-the panic message is the workload's own.
+seed, and carries on. Sweeps fail two ways: an invariant returns a violation, or
+the workload simply asserts (a `drive` that checks its own outcome, a
+`scenario_sweep` body).
 
 One seed reports once, even though the corpus replay and a wide sweep can both
 reach it.
@@ -217,16 +202,15 @@ reach it.
 ## Asserting at quiescence
 
 An at-quiescence assertion is a claim about a run that has stopped happening,
-and a run only stops happening if you let it. Two things get this wrong, and
-both have cost the corpus a hundred seeds.
+and a run only stops happening if you let it. Two things get this wrong.
 
 **Wait for the calls to close.** A call issued at the end of the drive carries
 its own deadline, and a subsystem may fan out more calls behind it — granary's
 quorum append returns at quorum latency and drains the slower replicas
 afterwards, each with a seconds-long timeout. `drive_cluster` therefore flushes
-and then keeps advancing while any `ask` is in flight, up to a cap. Nothing to
-do at the call site; the point is that "still pending at quiescence" now means
-what it says, so a workload should not paper over it with a sleep of its own.
+and then keeps advancing while any `ask` is in flight, up to a cap. So "still
+pending at quiescence" means what it says, and a workload should not paper over
+it with a sleep of its own.
 
 **A heal is not a quiet network.** `net.heal()` clears the nemesis's partitions.
 It does not stop the seeded loss, duplication, and latency, which run for the
@@ -252,10 +236,8 @@ singleton-chaos/leader 900006  # split-brain singleton after heal
 ```
 
 Recorded seeds replay on **every** run of that workload — local, CI, and soak
-alike, regardless of sizing. That is the ratchet: soak discovers a
-`(workload, seed)` pair, the pair is written down, and from then on it is
-checked forever at negligible cost. Corpus seeds are absolute, so
-`SWARM_SEED_BASE` moves sweeps but never the regressions.
+alike, regardless of sizing. Corpus seeds are absolute, so `SWARM_SEED_BASE`
+moves sweeps but never the regressions.
 
 Adding one is a copy from the failure message:
 
@@ -274,8 +256,7 @@ Two properties make the key meaningful, and `tests/corpus_keys.rs` enforces
 both: names are unique tree-wide (a shared name would make one workload replay
 another's regressions), and every corpus key names a real workload (a typo would
 otherwise silently guard nothing). The same file enforces the location rule
-above, for the same reason — a convention nothing checks is one the tree drifts
-away from.
+above.
 
 A corpus seed guards a bug only while that seed still drives the code down the
 same path, and any change to how much entropy anything draws re-randomizes what
@@ -304,10 +285,7 @@ Two kinds of state end up on a workload, and only one belongs there:
 Getting this wrong does not fail loudly, it fails *convincingly*: seed N's
 expectations are checked against seed N+1's freshly empty grains, so the sweep
 reports acknowledged writes that vanished — a textbook G14 violation, on a system
-that did nothing wrong. It reads like the most serious kind of find, which is
-exactly why it is worth knowing about. It cost this tree two false reports, in
-`tenancy-directory-swarm` and `blob-store-swarm`, before the event stream showed
-that the "lost" name had been acknowledged in the *previous* seed's run.
+that did nothing wrong.
 
 The tell, when a sweep claims a durability violation: check whether it fails on
 every seed *except the first*. Seed 0 has nothing to inherit.
@@ -334,8 +312,7 @@ every seed *except the first*. Seed 0 has nothing to inherit.
    - Something the *nemesis* draws is a property of the seed range, so it needs
      `coverage_seeds`, which never narrows. At `slow_seeds`' single local seed a
      six-round nemesis misses any one action about two runs in five, so the same
-     assertion on an invariant sweep is not stricter, only flaky. State it once
-     for the nemesis rather than once per workload.
+     assertion on an invariant sweep is not stricter, only flaky.
 5. If it needs a grain or actor a scenario suite already drives, take it from
    `tests/support/` rather than writing a second one.
 6. When soak finds a failing seed, add it to `corpus.txt` — and write the
@@ -345,8 +322,7 @@ every seed *except the first*. Seed 0 has nothing to inherit.
 
 Test code is shared rather than copied for one reason: an independently-
 maintained copy can drift, and a weakened one silently stops checking what its
-name claims. It has happened here — the same G6 predicate once existed in three
-places, two of them in crates that already imported the shared version.
+name claims.
 
 ### Where an invariant goes
 

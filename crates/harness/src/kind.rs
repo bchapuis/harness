@@ -2,14 +2,14 @@
 //!
 //! A [`Kind`] is a named agent definition — system prompt, toolset, sandbox
 //! profile, model parameters, default budget, delegation allowlist — plus the
-//! [`GranaryConfig`] for the grain type it hosts. Code-and-config, agreed
-//! cluster-wide like the codec: every node MUST register every kind (§7.1).
+//! [`GranaryConfig`] for the grain type it hosts. Every node MUST register every
+//! kind (§7.1).
 //!
-//! The inheritance made literal (§2.2): a `KindId` **is** a grain type. The
-//! harness hosts one `Agent` grain ([`crate::agent`]) under each kind's name via
-//! `granary_named` ([`crate::client::Harness::builder`]), so each kind is its own
-//! grain type — its own gateway, shard map, namespace, and `GranaryConfig` —
-//! while sharing one run loop. A session of a kind is one grain of that type.
+//! A `KindId` **is** a grain type (§2.2). The harness hosts one `Agent` grain
+//! ([`crate::agent`]) under each kind's name via `granary_named`
+//! ([`crate::client::Harness::builder`]), so each kind is its own grain type —
+//! its own gateway, shard map, namespace, and `GranaryConfig` — while sharing
+//! one run loop. A session of a kind is one grain of that type.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -72,8 +72,8 @@ impl Kind {
     /// safe dangling policy (`Interrupt`, §5.5): on a crash-resume boundary the
     /// model, not the harness, decides whether to retry the side effect. An
     /// idempotent tool opts into blind re-execution via [`Kind::tool`]. The tier
-    /// is explicit because it is digest-covered deployment configuration (§7.1):
-    /// visible at the declaration site, never defaulted.
+    /// is explicit, never defaulted: it is digest-covered deployment
+    /// configuration (§7.1).
     pub fn sandboxed(
         mut self,
         name: impl Into<String>,
@@ -98,9 +98,8 @@ impl Kind {
         self
     }
 
-    /// Permit delegation to the named kinds (§8.1): the allowlist a locked down
-    /// kind cannot escalate past (§5.2 — naming any other kind is a synthesized
-    /// `ToolError`).
+    /// Permit delegation to the named kinds (§8.1): naming any other kind is a
+    /// synthesized `ToolError` (§5.2).
     pub fn delegates_to(mut self, kinds: &[&str]) -> Kind {
         self.delegates = kinds.iter().map(|k| KindId::new(*k)).collect();
         self
@@ -118,8 +117,8 @@ impl Kind {
         self
     }
 
-    /// Set the grain type's configuration (§7.1, granary Appendix A): the kind
-    /// IS a grain type, so this is its shard/replication/idle/snapshot policy.
+    /// Set the grain type's shard/replication/idle/snapshot policy (§7.1,
+    /// granary Appendix A).
     pub fn grain(mut self, config: GranaryConfig) -> Kind {
         self.config = config;
         self
@@ -138,11 +137,10 @@ impl Kind {
     /// reader can tell whether a journal reconstruction is exact or merely
     /// indicative because a deployment changed the kind mid-session. Covers each
     /// tool's declared tier, the profile's effective cap (§5.6), and the grain
-    /// config: what a session may acquire — and how its type is sharded — is
-    /// cluster-wide agreement.
+    /// config.
     ///
     /// The canonical form is length-prefixed (netstring-style) with a count
-    /// before each variable-length list: no concatenation of two distinct
+    /// before each variable-length list, so no concatenation of two distinct
     /// definitions can collide, which bare juxtaposition cannot promise
     /// ("fo"+"obar" reads as "foo"+"bar").
     pub fn digest(&self) -> u64 {
@@ -213,10 +211,9 @@ impl Kinds {
     /// configuration time.
     ///
     /// Panics when a declared tool's tier falls outside the kind's tier cap
-    /// (§5.3 item 4): a deployment configuration error, surfaced here as loudly
-    /// as a duplicate tool name — never discovered at dispatch. The loop performs
-    /// no runtime cap check: the cap is unreachable by construction (§5.6,
-    /// sandbox spec S4).
+    /// (§5.3 item 4): a deployment configuration error, never discovered at
+    /// dispatch. The loop performs no runtime cap check — the cap is unreachable
+    /// by construction (§5.6, sandbox spec S4).
     pub fn register(mut self, name: &str, kind: Kind) -> Kinds {
         let cap = kind.tier_cap();
         for decl in kind.tools.iter() {

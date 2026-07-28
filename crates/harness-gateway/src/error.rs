@@ -5,9 +5,6 @@
 //! committing a command — a [`GrainError`] — becomes an HTTP status here; an
 //! *application outcome* the run itself produced ([`RunOutcome`]'s `RunError`) is
 //! **not** an error at this layer, it is a `200` whose body carries the outcome.
-//! A future ACP adapter maps the first onto a JSON-RPC error and the second onto
-//! a `session/prompt` stop reason, so keeping the split clean here keeps the
-//! adapter thin.
 //!
 //! Every error a client sees is `{ "error": { "code": <stable>, "message": <human> } }`.
 //! The `code` is a stable machine token; the `message` is the type's `Display`
@@ -26,9 +23,8 @@ use serde_json::json;
 
 /// A client-facing gateway error: a stable machine `code`, an HTTP `status`, and
 /// a human `message`. Built from the edge's own validation ([`bad_request`],
-/// [`unauthorized`]) and from a [`GrainError`] (the transport layer) — never from
-/// a run's own `RunError`, which is an application outcome, not a transport
-/// failure.
+/// [`unauthorized`]) and from a [`GrainError`] — never from a run's own
+/// `RunError` (see the module docs).
 ///
 /// [`bad_request`]: GatewayError::bad_request
 /// [`unauthorized`]: GatewayError::unauthorized

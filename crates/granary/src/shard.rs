@@ -9,11 +9,8 @@
 //!   grain's records to the shard's replicas, fenced by the shard term, and recovers
 //!   a grain's head from a quorum on activation by read-repair (§7.2, §8, **G14**).
 //!
-//! This replaces the earlier shared shard-log journal: a grain write is no longer a
-//! committed entry in one Raft log folded into a projection, but an independent
-//! per-grain quorum append (§7.2), so a write-heavy grain never queues behind its
-//! shard-mates and failover safety comes from quorum read-repair, not
-//! leader-completeness. Nothing above the seam changed (§7.3).
+//! A grain write is an independent per-grain quorum append (§7.2), not an entry in
+//! a shared shard log, so a write-heavy grain never queues behind its shard-mates.
 
 use std::sync::Arc;
 
@@ -93,7 +90,7 @@ impl<R: RaftConsensus> GrainJournal for QuorumGrainJournal<R> {
     async fn head(&self, grain: &GrainName) -> Result<Seq, GrainJournalError> {
         // On the `Quorum` tier `head` *is* the rehydration barrier (§8, §9): it
         // recovers the grain's head from a write quorum by read-repair, so a fresh
-        // leader never folds onto a stale head. This replaces the old `catch_up`.
+        // leader never folds onto a stale head.
         self.replicator.recover(grain).await
     }
 

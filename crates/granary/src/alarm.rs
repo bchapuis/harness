@@ -51,7 +51,6 @@ pub struct Alarm;
 impl Sealed for Alarm {}
 
 /// One alarm record (spec §16): the unit of durable change under the alarm tag.
-/// Encoded with `postcard` — facet payloads are runtime-internal (§7.12).
 #[derive(Serialize, Deserialize)]
 enum AlarmOp {
     /// Arm (or re-arm) the alarm for this deadline, in nanoseconds since the

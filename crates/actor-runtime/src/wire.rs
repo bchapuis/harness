@@ -4,7 +4,7 @@
 //! codec-encoded [`Wire`] bytes. Reading enforces a maximum size and surfaces a
 //! malformed or oversized message as an [`io::Error`]; the caller tears down the
 //! **association**, not the node (spec §7). The handshake [`Hello`] preamble uses
-//! the same framing, so the whole exchange is uniform.
+//! the same framing.
 //!
 //! [`Wire`] is the transport's own envelope: it carries either an actor
 //! [`Frame`] (handed up to the cluster) or an [`Endpoints`](Wire::Endpoints)
@@ -37,12 +37,9 @@ pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 /// codec it speaks, and a shared cluster secret. The receiver rejects the
 /// association on any mismatch (§7, §15) and learns the advertised address.
 ///
-/// `accepts` is a *range*, not the single version this build speaks, and that is
-/// the whole point: two builds settle on the highest revision both accept
-/// (`compat::Window::negotiate`), so a bump adds a revision to the range for one
-/// release before anything writes it, and a rolling upgrade never has to make two
-/// releases agree exactly. A single version compared for equality would partition
-/// the cluster into two halves that refuse each other on the first bump.
+/// `accepts` is a *range*, not the single version this build speaks: two builds
+/// settle on the highest revision both accept (`compat::Window::negotiate`). See
+/// [`WIRE`](crate::WIRE) for the release ordering that requires (**V4**).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hello {
     pub accepts: Accepted,
@@ -118,9 +115,8 @@ where
 }
 
 /// Write the handshake preamble. Always JSON-framed independent of the
-/// negotiated codec, so the `codec_name` and `accepts` fields can be read before
-/// any codec-specific decoding happens — neither the codec nor the wire revision
-/// is settled yet, so the preamble cannot depend on either.
+/// negotiated codec: neither the codec nor the wire revision is settled yet, so
+/// the preamble cannot depend on either.
 pub async fn write_hello<W>(stream: &mut W, hello: &Hello) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -138,10 +134,8 @@ where
     serde_json_from_slice(&bytes)
 }
 
-// The handshake is framed with a fixed codec (the bundled JSON codec) rather
-// than the negotiated one, because codec agreement is itself part of what the
-// handshake establishes. We go through the `Codec` trait to avoid a direct
-// serde_json dependency in this crate.
+// Framed with the bundled JSON codec, reached through the `Codec` trait to avoid
+// a direct serde_json dependency in this crate.
 fn serde_json_to_vec<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
     let codec = actor_serialization::JsonCodec;
     encode(&codec, value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))

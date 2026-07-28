@@ -3,15 +3,12 @@
 //! A grain's activation needs three runtime capabilities the bare
 //! [`ActorSystem`] trait does not expose: the virtual clock (for hibernation
 //! timing, §10), task launching (to drive the idle timer), and a typed channel
-//! for grain events (§13). Rather than thread the concrete `Clock`/`Entropy`/
-//! `Spawner` type parameters of [`LocalSystem`] through every grain type — which
-//! would leak them onto `GrainRef`, `Granary`, and the host — Granary requires a
-//! grain's system to implement this one **object-friendly** trait. The host,
-//! gateway, and ref are then generic over just `G: Grain`, and `G::System`
-//! supplies these capabilities.
-//!
-//! This is the seam the `Quorum` tier reuses: a clustered system that can host shards
-//! implements `GranarySystem` the same way, and no grain code changes.
+//! for grain events (§13). Threading the concrete `Clock`/`Entropy`/`Spawner`
+//! type parameters of [`LocalSystem`] through every grain type would leak them
+//! onto `GrainRef`, `Granary`, and the host, so a grain's system implements this
+//! one **object-friendly** trait instead: the host, gateway, and ref are generic
+//! over just `G: Grain`, and `G::System` supplies these capabilities. A clustered
+//! system that can host shards implements it the same way (the `Quorum` tier).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,8 +98,7 @@ pub(crate) fn name_hash(grain_type: &str, key: &str) -> u64 {
 /// Whether `grain`'s name-hash falls at or above the bound `from` (§7.7). The
 /// moving side of a split/merge boundary and the append-refusing side of a
 /// shard's seal are the same half-open test, so both stores' `sealed` check and
-/// the split driver's keep-predicate route through here — one place the
-/// comparison lives, like [`founding_index`].
+/// the split driver's keep-predicate route through here.
 pub(crate) fn name_at_or_above(grain: &crate::grain::GrainName, from: u64) -> bool {
     name_hash(grain.grain_type(), grain.key()) >= from
 }
@@ -195,8 +191,7 @@ pub(crate) fn select_replicas(
     // per-node constant leaves the high-order bits — which dominate the sort — fixed,
     // so every shard would rank the nodes identically and pile onto the same R
     // replicas with the same leader. Diffusing the id through `fnv1a` first spreads
-    // those low-bit differences across all 64 bits, so each shard gets an independent
-    // ranking and shards spread their replicas and leadership across the cluster.
+    // those low-bit differences across all 64 bits, so each shard ranks independently.
     let mut scored: Vec<(u64, NodeId)> = members
         .iter()
         .map(|&node| {
@@ -217,8 +212,8 @@ pub(crate) fn select_replicas(
 /// An [`ActorSystem`] that can host grains: it exposes virtual time, task
 /// launching, the grain event channel (§10, §13), and the shard seam that places
 /// a grain's durable storage and resolves its leader (§5.1, §5.2, §7). Implemented
-/// for [`LocalSystem`] (the `Local` tier, single-node) and [`ClusterSystem`] (the `Quorum` tier,
-/// sharded Raft); a grain is generic over just `G`, and `G::System` supplies these.
+/// for [`LocalSystem`] (the `Local` tier, single-node) and [`ClusterSystem`] (the
+/// `Quorum` tier, sharded Raft).
 pub trait GranarySystem: ActorSystem {
     /// The current virtual time (for the idle/hibernation clock, §10).
     fn now(&self) -> Instant;
@@ -399,12 +394,10 @@ mod tests {
 
     #[test]
     fn sequential_keys_spread_across_the_range_partition() {
-        // Regression for the high-bit avalanche bug: the partition is by key
-        // range (the hash's HIGH bits pick the shard), but raw FNV-1a barely
-        // avalanches a short key's final bytes into the high bits, so sequential
-        // keys piled into one range. The fmix64 finalizer restores the spread;
-        // this pins it with the least favourable input — short keys differing
-        // only in a trailing counter.
+        // The partition is by key range (the hash's HIGH bits pick the shard),
+        // and raw FNV-1a barely avalanches a short key's final bytes into the
+        // high bits. Pinned with the least favourable input — short keys
+        // differing only in a trailing counter.
         let shards = 8usize;
         let mut per_shard = vec![0usize; shards];
         for i in 0..800u64 {
@@ -480,14 +473,11 @@ mod tests {
 
     #[test]
     fn select_replicas_spreads_shards_across_the_cluster() {
-        // Regression for the rendezvous bug: the prior code XORed the raw group id
-        // into a per-node constant, but `group_id_for` derives a type's shard groups
-        // as `BASE ^ (index+1)` — differing only in the low ~4 bits — so every shard
-        // ranked the nodes identically and piled onto the SAME R replicas, leaving
-        // other nodes idle. Verified here with the *realistic* group ids (not the
-        // far-apart literals the deterministic test uses): distinct shards must land
-        // on more than one replica set, and every node must replicate some shard, or
-        // the §7.1/§7.8 load-spreading premise is broken.
+        // `group_id_for` derives a type's shard groups as `BASE ^ (index+1)`,
+        // differing only in the low ~4 bits, so this uses the *realistic* group
+        // ids (not the far-apart literals the deterministic test uses): distinct
+        // shards must land on more than one replica set, and every node must
+        // replicate some shard, or the §7.1/§7.8 load-spreading premise is broken.
         let members = nodes(&[1, 2, 3, 4, 5]);
         let mut sets = std::collections::BTreeSet::new();
         let mut covered = std::collections::BTreeSet::new();

@@ -1,16 +1,15 @@
 //! The in-memory simulated network (spec §7, §18.2, §18.3).
 //!
 //! [`SimNetwork`] routes [`Frame`]s between [`ClusterSystem`] nodes running on
-//! one simulation, implementing the real [`Transport`] trait — so a simulated
-//! cluster runs the real routing, dispatch, codec, and failure detection, with
+//! one simulation, implementing the real [`Transport`] trait, so a simulated
+//! cluster runs the real routing, dispatch, codec, and failure detection with
 //! only the wire in-memory. It also injects faults under seed control (spec
 //! §18.3): a blocked directed pair drops frames, which the SWIM detector then
 //! observes as unreachability.
 //!
-//! This module is the **wire** — routing, seeded loss/duplication/latency, and
+//! This module is the **wire**: routing, seeded loss/duplication/latency, and
 //! per-pair FIFO. Bringing nodes up and down, and the vocabulary that blocks
-//! those pairs in the first place, is the sibling [`cluster`](crate::cluster)
-//! module.
+//! those pairs, is the sibling [`cluster`](crate::cluster) module.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -46,9 +45,9 @@ use crate::coverage::FaultCounters;
 use crate::coverage::FaultStats;
 use crate::faults::FaultPolicy;
 
-/// **One** cluster node running under the simulator — the multi-node
-/// counterpart of [`SimSystem`](crate::SimSystem), which is one *local* system.
-/// A whole simulated cluster is a [`SimNetwork`] and the nodes joined to it.
+/// **One** cluster node running under the simulator, the multi-node counterpart
+/// of [`SimSystem`](crate::SimSystem). A whole simulated cluster is a
+/// [`SimNetwork`] and the nodes joined to it.
 pub type SimNode = ClusterSystem<SimClock, SimEntropy, SimSpawner, SimTransport>;
 
 pub(crate) struct NetInner {
@@ -69,10 +68,9 @@ pub(crate) struct NetInner {
 
 /// An in-memory network shared by the nodes of one simulation (spec §18.2).
 ///
-/// Fields are `pub(crate)` rather than module-private because the sibling
-/// `cluster` module implements the lifecycle and nemesis half of this same
-/// type. They stay crate-private: nothing outside `actor-simulation` can reach
-/// them.
+/// Fields are `pub(crate)` because the sibling `cluster` module implements the
+/// lifecycle and nemesis half of this same type; nothing outside
+/// `actor-simulation` can reach them.
 #[derive(Clone)]
 pub struct SimNetwork {
     pub(crate) inner: Arc<Mutex<NetInner>>,
@@ -87,14 +85,12 @@ pub struct SimNetwork {
     /// so [`quiesce`](SimNetwork::quiesce) reaches the routing path a node is
     /// already sending on.
     pub(crate) faults: Arc<Mutex<FaultPolicy>>,
-    /// A fixed minimum delivery latency applied to every frame (spec §18.2). It is
-    /// **not** a fault and draws no entropy — it exists so virtual time always
-    /// advances on delivery. Without it, zero-latency delivery completes
+    /// A fixed minimum delivery latency applied to every frame (spec §18.2).
+    /// **Not** a fault, and it draws no entropy: it exists so virtual time
+    /// always advances on delivery. Without it, zero-latency delivery completes
     /// synchronously at the current instant (`SimClock::sleep(0)` is immediately
-    /// ready), and a burst of same-instant traffic — e.g. simultaneous re-election
-    /// of every Raft group a crashed node led, plus concurrent routing — can pin
-    /// the clock and starve future election timers. A small floor (a realistic LAN
-    /// latency) keeps the run deterministic while guaranteeing progress.
+    /// ready), and a burst of same-instant traffic can pin the clock and starve
+    /// future timers.
     base_latency: Duration,
     stats: Arc<FaultCounters>,
 }
@@ -195,9 +191,9 @@ impl SimNetwork {
         self
     }
 
-    /// Run every node in the given membership [`mode`](MembershipMode) (spec §9.4)
-    /// — the general form of the per-mode builders, so a swarm can sweep the same
-    /// workload across all four control planes.
+    /// Run every node in the given membership [`mode`](MembershipMode) (spec
+    /// §9.4): the general form of the per-mode builders, so a swarm can sweep
+    /// one workload across all four control planes.
     pub fn with_mode(mut self, mode: MembershipMode) -> SimNetwork {
         self.mode = mode;
         self
@@ -243,9 +239,8 @@ impl SimNetwork {
         };
 
         // Fast synchronous path only when there is neither a fault nor a base
-        // latency to apply — the cheapest case (spec §18.2). This path draws no
-        // entropy, and neither does `reserve_pair_slot` on the base-latency-only
-        // path below (see its doc): the gate here and the draw there are conjoined.
+        // latency to apply (spec §18.2). It draws no entropy; see
+        // `reserve_pair_slot` for why that matters.
         if !faults.active() && self.base_latency.is_zero() {
             return sender
                 .try_send((from, frame))
@@ -253,9 +248,9 @@ impl SimNetwork {
         }
 
         // Drop/duplicate are applied **only when faults are configured**, so the
-        // base-latency-only default draws no entropy here — the seeded random
-        // stream stays byte-identical to a zero-latency run, only delivery timing
-        // shifts. (`buggify` always consumes entropy, so it must not run otherwise.)
+        // base-latency-only default draws no entropy here and the seeded stream
+        // stays byte-identical to a zero-latency run. (`buggify` always consumes
+        // a draw, so it must not run otherwise.)
         let copies = if faults.active() {
             // Seeded loss (also models corruption / association loss): the node
             // never sees the frame, so it cannot be wedged by it (spec §7.3).
@@ -298,14 +293,12 @@ impl SimNetwork {
     /// applying seeded latency. Strict monotonicity is what preserves per-pair
     /// FIFO under jitter: later-sent frames never get an earlier delivery time.
     ///
-    /// This draws entropy **only** when `max_latency` is set — the same condition
-    /// under which `route` skips its fast path. The two are conjoined: `route`'s
-    /// fast path (no faults, no base latency) returns before ever calling this, and
-    /// a base-latency-only run reaches here with `max_latency` zero, so neither path
-    /// draws. That is what keeps the seeded stream byte-identical across latency
-    /// configs. Drawing unconditionally here would silently break reproducibility —
-    /// there is no compile error to catch it, so keep the gate in lockstep with
-    /// `route`.
+    /// This draws entropy **only** when `max_latency` is set, which keeps the
+    /// seeded stream byte-identical across latency configs: `route`'s fast path
+    /// returns before calling this, and a base-latency-only run reaches here
+    /// with `max_latency` zero, so neither path draws. Drawing unconditionally
+    /// would silently break reproducibility with no compile error to catch it,
+    /// so keep this gate in lockstep with `route`'s.
     fn reserve_pair_slot(&self, from: NodeId, to: NodeId, max_latency: Duration) -> Instant {
         // Seeded jitter only when `max_latency` is set (drawing entropy); floored by
         // the fixed `base_latency` so every delivery is at least `now + base` — the

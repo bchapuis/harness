@@ -1,19 +1,16 @@
 //! Session identity, records, and the fold (harness spec §2, §6.3).
 //!
-//! One sentence carries the design: **the grain is the session; the activation
-//! and the sandbox are disposable; the seams are the only world** (§2.1). A
-//! session *is* a grain: its [`SessionId`] is the key half of a `GrainName`
-//! (`(KindId, SessionId)`, §2.2), each [`Record`] is the grain's `Event`, and
-//! [`SessionState`] is the grain's `State` — the pure, deterministic fold of the
-//! journal that granary rehydrates on activation (invariant H1). Anything not
-//! journaled is, by definition, lost on deactivation: a design constraint, not
-//! an accident to discover.
+//! A session *is* a grain (§2.1): its [`SessionId`] is the key half of a
+//! `GrainName` (`(KindId, SessionId)`, §2.2), each [`Record`] is the grain's
+//! `Event`, and [`SessionState`] is the grain's `State` — the pure,
+//! deterministic fold of the journal that granary rehydrates on activation
+//! (invariant H1). Anything not journaled is lost on deactivation.
 //!
-//! Identity is layered deliberately (§2.2), and the layering is now the grain's:
-//! `SessionId` (= the `GrainName` key: durable, application-chosen) → `ActorId`
-//! (one activation, system-assigned) → `TurnId` (one run). The `KindId` is the
-//! session's grain *type* (granary hosts one `Agent` grain under each kind's name
-//! via `granary_named`); granary owns name→shard→leader resolution.
+//! Identity is layered (§2.2): `SessionId` (= the `GrainName` key: durable,
+//! application-chosen) → `ActorId` (one activation, system-assigned) → `TurnId`
+//! (one run). The `KindId` is the session's grain *type* (granary hosts one
+//! `Agent` grain under each kind's name via `granary_named`); granary owns
+//! name→shard→leader resolution.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -153,8 +150,7 @@ impl Completion {
 /// `GrainError`. Exactly these three: "a tool misbehaved" is not a run failure
 /// (§5.4), and durability failure is not a run outcome at all — it is the
 /// grain's outer `GrainError::Unavailable`, which *pauses* the run rather than
-/// ending it (§3.1, §6.4), since a shard that cannot commit cannot record "I
-/// could not record".
+/// ending it (§3.1, §6.4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunError {
     /// The budget ran out (§9.1); recoverable by a new turn with a new budget.
@@ -200,7 +196,7 @@ pub struct Record {
 
 /// What a record says (harness spec §6.4, §10.1): records are durable and
 /// user-facing — the transcript, the calls and outcomes, the costs, the tree
-/// links. If an observer needs it, it is a record.
+/// links.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum RecordBody {
     /// The session exists: its kind, a digest of the kind's definition
@@ -251,19 +247,15 @@ pub enum RecordBody {
     /// the next model call after a mid-activation `EnvironmentLost`, and
     /// surfaced to the model with that request.
     ///
-    /// The workspace's durable subtree is the agent's own facet (granary
-    /// §7.11) and always survives — a routine reactivation never resets. What
-    /// this record narrows to is the activation's working state: regenerable
-    /// excluded trees (`target/`, `node_modules/`), running processes, and
-    /// held tiers — which the model rebuilds rather than re-deriving the
-    /// whole workspace.
+    /// The workspace's durable subtree is the agent's own facet (granary §7.11)
+    /// and always survives — a routine reactivation never resets. What this
+    /// record narrows to is the activation's working state: regenerable excluded
+    /// trees (`target/`, `node_modules/`), running processes, and held tiers.
     WorkspaceReset,
-    /// The activation's first call at `tier` is about to execute (§5.6):
-    /// the write-ahead discipline (§6.4) applied to capability acquisition,
-    /// intent journaled before effect. The audit trail — when did this
-    /// session first run guest code, first touch the network? — and the
-    /// future policy hook (§13). A record, not a §10.4 event: verified by
-    /// journal audit (sandbox spec S4), the way H2's quiescence audit works.
+    /// The activation's first call at `tier` is about to execute (§5.6): the
+    /// write-ahead discipline (§6.4) applied to capability acquisition, intent
+    /// journaled before effect. A record, not a §10.4 event: it is the audit
+    /// trail, verified by journal audit (sandbox spec S4).
     TierAcquired { turn: TurnId, tier: Tier },
     /// The run's exactly-one terminal outcome (§3.1, invariant H3).
     RunEnded { turn: TurnId, outcome: RunOutcome },
@@ -293,11 +285,10 @@ pub enum Entry {
 }
 
 /// Serde adapter for an `Arc<Vec<Entry>>`: encode the inner slice, rebuild a
-/// fresh `Arc` on decode. Lets the transcript be `Arc`-shared — so a model
-/// request clones a pointer, not the whole conversation, each step (§4.1) —
-/// without enabling serde's workspace-wide `rc` feature. A `SessionState` holds
-/// no second reference to its transcript `Arc`, so there is no cross-`Arc`
-/// sharing for a snapshot round-trip to lose: a fresh `Arc` per decode is exact.
+/// fresh `Arc` on decode. Lets the transcript be `Arc`-shared without enabling
+/// serde's workspace-wide `rc` feature. A `SessionState` holds no second
+/// reference to its transcript `Arc`, so there is no cross-`Arc` sharing for a
+/// snapshot round-trip to lose: a fresh `Arc` per decode is exact.
 pub(crate) mod arc_transcript {
     use std::sync::Arc;
 
@@ -319,9 +310,8 @@ pub(crate) mod arc_transcript {
     }
 }
 
-/// FNV-1a 64 over a string. Used for two things: the turn-content dedup, which
-/// compares re-submissions (§7.4) without holding a second copy of the content and
-/// is fold-local (rebuilt on every replay, never journaled); and
+/// FNV-1a 64 over a string. Used by the turn-content dedup (§7.4, fold-local:
+/// rebuilt on every replay, never journaled) and by
 /// [`Kind::digest`](crate::Kind::digest), which **is** journaled and compared
 /// cluster-wide. Because of that second use the algorithm must stay stable across
 /// versions — do not swap it for a different hash without re-versioning kind digests.
@@ -410,8 +400,7 @@ pub struct SessionState {
     /// Every committed record, in `Seq` order: the grain owns the journal, so
     /// the activation mirrors it here to serve `Tail` (§10.2) — the one read
     /// that needs the raw records, not the [`transcript`](Self::transcript)
-    /// projection. The grain commits one event per `Seq`, contiguously, so the
-    /// record at index `i` carries `Seq(i + 1)`.
+    /// projection. Index→`Seq` is [`seq_of`](Self::seq_of).
     pub records: Vec<Record>,
 }
 
@@ -426,8 +415,7 @@ impl SessionState {
     /// Fold one committed record — the grain's `apply` (granary §4.1), pure and
     /// deterministic, run on the live commit path and on every replay. Total: a
     /// record that fits no transition (a malformed journal) is ignored rather
-    /// than panicking — the journal is the authority, and the fold's job is to
-    /// read it, not police it.
+    /// than panicking.
     pub fn apply(&mut self, record: &Record) {
         self.records.push(record.clone());
         match &record.body {
@@ -535,11 +523,10 @@ impl SessionState {
             RecordBody::TierAcquired { .. } => {
                 // Held tiers are working state, scoped to the activation that
                 // journaled them (§5.6 item 3): the fold records nothing, so
-                // replay is harmless and nothing resurrects a tier across an
-                // activation boundary. The next activation restarts at
-                // `Workspace` and re-acquires under new records (§5.5). No
-                // transcript entry: acquisitions are audit, not something the
-                // model sees.
+                // nothing resurrects a tier across an activation boundary. The
+                // next activation restarts at `Workspace` and re-acquires under
+                // new records (§5.5). No transcript entry: acquisitions are
+                // audit, not something the model sees.
             }
             RecordBody::RunEnded { turn, outcome } => {
                 if self.live.as_ref().is_some_and(|l| &l.turn == turn) {

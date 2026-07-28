@@ -3,11 +3,11 @@
 //!
 //! The activation *is* a running microVM (machine §1), but the VM is one of
 //! the machine's two disposable things: stopping it loses no committed disk
-//! block. The grain therefore drives the VM through this narrow seam — boot
-//! against the rehydrated disk-facet image, pause for a capture's quiescent
-//! point (machine §4), resume, kill — and never owns VMM mechanics. The
-//! deterministic simulation binds [`fake::FakeVmProvider`]; production binds
-//! the Firecracker `Native` mechanics the sandbox proved (sandbox §3.5).
+//! block. The grain drives the VM through this seam — boot against the
+//! rehydrated disk-facet image, pause for a capture's quiescent point (machine
+//! §4), resume, kill — and never owns VMM mechanics. The deterministic
+//! simulation binds [`fake::FakeVmProvider`]; production binds Firecracker
+//! (sandbox §3.5).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,10 +23,9 @@ pub mod firecracker;
 pub mod ws_proto;
 
 /// A VM operation failed. An application-level outcome (the grain maps it
-/// into replies or retries), never a durability failure. The two variants
-/// carry the caller's policy split, mirroring the sandbox tier's
-/// `BracketError::{Agent, Transport}`: a guest refusal leaves a live VM the
-/// grain can keep serving; a transport failure means the guest may be gone.
+/// into replies or retries), never a durability failure. The split is the
+/// caller's policy split: a guest refusal leaves a live VM the grain can keep
+/// serving; a transport failure means the guest may be gone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VmError {
     /// The guest agent answered and refused (e.g. a non-zero status with its
@@ -62,7 +61,7 @@ pub struct VmSpec {
     pub machine: GrainName,
     /// The machine's journaled egress policy (machine §5.2, M6): what the guest
     /// may reach out to. The provider realizes exactly what it grants; the fake
-    /// provider ignores it (M6 is verified against the pure rule generator).
+    /// provider ignores it.
     pub egress: EgressPolicy,
 }
 

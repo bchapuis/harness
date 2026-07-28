@@ -1,9 +1,8 @@
 //! The production [`Spawner`]: tasks run on a tokio runtime (spec §4.6).
 //!
 //! Holds a [`tokio::runtime::Handle`] rather than the runtime itself, so the
-//! spawner can be cloned freely and handed to the cluster system while the
-//! runtime is owned elsewhere (typically by `#[tokio::main]` or a `Runtime` the
-//! caller keeps alive).
+//! spawner clones freely while the runtime is owned elsewhere (typically by
+//! `#[tokio::main]` or a `Runtime` the caller keeps alive).
 
 use actor_core::BoxFuture;
 use actor_core::Spawner;

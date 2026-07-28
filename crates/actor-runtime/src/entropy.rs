@@ -1,8 +1,8 @@
 //! The production [`Entropy`]: an OS-seeded PRNG (spec §4.6).
 //!
-//! The stream is a [`ChaCha8Rng`] seeded once from the operating system — fast
-//! and good enough for the framework's uses (peer selection, SWIM's `k`,
-//! backoff jitter); it is not a CSPRNG interface and is not used for secrets.
+//! The stream is a [`ChaCha8Rng`] seeded once from the operating system, for
+//! peer selection, SWIM's `k`, and backoff jitter. It is not a CSPRNG interface
+//! and MUST NOT be used for secrets.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -13,8 +13,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 /// A wall-entropy [`Entropy`] for the production runtime. Cheap to clone (shares
-/// the stream behind an `Arc<Mutex<_>>`), matching the interior-mutability
-/// contract of the trait.
+/// the stream behind an `Arc<Mutex<_>>`, the trait's interior-mutability
+/// contract).
 #[derive(Clone)]
 pub struct OsEntropy {
     rng: Arc<Mutex<ChaCha8Rng>>,

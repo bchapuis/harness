@@ -2,8 +2,7 @@
 //! definition** all three peers consume: the front door's channel relay
 //! (`machine-frontdoor`), the machine's workspace-sync driver
 //! (`machine::vm`), and the guest agent (`guest/machine-agent`, which path-
-//! depends on this crate from its own workspace). A tag renumbering or a new
-//! frame kind is one edit here, checked by the compiler at every peer.
+//! depends on this crate from its own workspace).
 //!
 //! One vsock stream carries one SSH channel. After the muxer handshake the
 //! host sends a single **header** frame naming the [`ChannelKind`], then the
@@ -13,9 +12,8 @@
 //! never blocks another's bytes.
 //!
 //! The async (tokio) realization of the same length-prefixed framing lives
-//! with the host's vsock transport (`microvm::vsock`), which also serves the
-//! sandbox agent's distinct port-52 protocol; this crate carries the sync
-//! (std) realization for the guest, so it stays free of an async runtime.
+//! with the host's vsock transport (`microvm::vsock`); this crate carries the
+//! sync (std) realization, so the guest stays free of an async runtime.
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -89,8 +87,7 @@ impl ChannelKind {
 
 /// One framed message after the header. The tag byte discriminates; the
 /// meaning of a tag is direction-dependent (host→guest input vs guest→host
-/// output), the way an SSH channel's data and extended-data are distinct
-/// streams over one channel.
+/// output).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
     /// Channel data. Host→guest: stdin / PTY input. Guest→host: stdout / PTY
@@ -149,9 +146,8 @@ impl Frame {
         out
     }
 
-    /// Encode a `Data` frame from a borrowed payload: the bulk path (workspace
-    /// sync, PTY output) copies a chunk once into an exact-sized frame buffer
-    /// instead of twice through an owning `Frame::Data(Vec)`.
+    /// Encode a `Data` frame from a borrowed payload: one copy into an
+    /// exact-sized buffer, instead of two through an owning `Frame::Data(Vec)`.
     pub fn encode_data(payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(1 + payload.len());
         out.push(Frame::DATA);
@@ -160,8 +156,7 @@ impl Frame {
     }
 
     /// The payload of a `Data` frame body, borrowed and undecoded, or `None` for
-    /// any other frame — lets the bulk reader append straight to its sink rather
-    /// than copy through a `Frame::Data(Vec)`.
+    /// any other frame, so a bulk reader appends straight to its sink.
     pub fn data_payload(body: &[u8]) -> Option<&[u8]> {
         match body.split_first() {
             Some((&Frame::DATA, rest)) => Some(rest),
@@ -190,8 +185,8 @@ impl Frame {
     }
 }
 
-/// Write one length-prefixed frame body (sync; the guest side and test
-/// fixtures — the host's async twin is `microvm::vsock::send_frame`).
+/// Write one length-prefixed frame body (sync; the host's async twin is
+/// `microvm::vsock::send_frame`).
 pub fn send_frame(stream: &mut impl std::io::Write, body: &[u8]) -> std::io::Result<()> {
     stream.write_all(&(body.len() as u32).to_le_bytes())?;
     stream.write_all(body)?;

@@ -8,12 +8,11 @@
 //! node-down cascade (spec §8.1): a node declared `down` completes its in-flight
 //! callers with `Unreachable` rather than letting them hang.
 //!
-//! It also disseminates membership by gossip with direct and **indirect** SWIM
-//! probing (spec §10), runs the configured membership **control plane** (spec
-//! §9.4) — the registry sync loop in registry-based mode, the Raft driver in
-//! leader-based mode, the coordinator lifecycle in gossip-based mode — prunes
-//! via death watch, and runs the receptionist with broadcast-on-change plus
-//! periodic anti-entropy (spec §12, §13).
+//! It runs the configured membership **control plane** (spec §9.4): the registry
+//! sync loop in registry-based mode, the Raft driver in leader-based mode, the
+//! coordinator lifecycle in gossip-based mode. It also prunes via death watch and
+//! runs the receptionist with broadcast-on-change plus periodic anti-entropy
+//! (spec §12, §13).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -141,8 +140,8 @@ struct Inner<C, E, S, T> {
     /// dispatch to the mode's authority.
     mode: MembershipMode,
     /// The multi-group consensus engine, in leader-based mode (spec §9.4.3);
-    /// `None` elsewhere. It hosts the membership control group ([`GroupId::CONTROL`])
-    /// and (for granary, later) a group per replicated shard.
+    /// `None` elsewhere. It hosts the membership control group
+    /// ([`GroupId::CONTROL`]) plus a group per replicated shard.
     raft: Option<Arc<MultiRaft>>,
     /// Resolved SWIM parameters, so loops spawned without the config (e.g. a
     /// relayed indirect probe) can still read `rtt`/`k` (spec §10).
@@ -157,16 +156,13 @@ struct Inner<C, E, S, T> {
     /// incarnation, so a relay can report it back to the requester (spec §10).
     pings: Correlator<u64, oneshot::Sender<u64>>,
     receptionist: Arc<ReceptionistState>,
-    /// Per-group subscribers to committed application entries (the [`RaftConsensus`]
-    /// seam, granary's sharded journal). A non-`CONTROL` group's committed
-    /// `(index, bytes)` are broadcast here in `apply_raft_output`; the control
-    /// group's entries drive membership instead and are never published.
-    ///
-    /// [`RaftConsensus`]: crate::RaftConsensus
+    /// Per-group subscribers to committed application entries (the
+    /// [`RaftConsensus`](crate::RaftConsensus) seam). A non-`CONTROL` group's
+    /// committed entries are broadcast here in `apply_raft_output`; the control
+    /// group's drive membership instead and are never published.
     commit_sinks: Mutex<BTreeMap<GroupId, Vec<CommitSink>>>,
     /// Set on a graceful stop (spec §9.3): the detector and receptionist gossip
-    /// loops return once they see it. Default `false`, so a system that never
-    /// stops (every simulation run) behaves exactly as before.
+    /// loops return once they see it.
     shutdown: std::sync::atomic::AtomicBool,
     /// Optional per-message authorization (spec §15).
     authorizer: Option<Arc<dyn Authorizer>>,
@@ -216,9 +212,8 @@ where
         let raft = match &mode {
             MembershipMode::Leader(leader) => {
                 // The cluster layer owns the decision that a control group exists
-                // (spec §9.4.3): build the generic engine, then create the well-known
-                // `GroupId::CONTROL` from the configured voter set. The engine itself
-                // names no group — same `now`, voters, and first tick as before.
+                // (spec §9.4.3): build the generic engine, then create the
+                // well-known `GroupId::CONTROL` from the configured voter set.
                 let engine = Arc::new(MultiRaft::new(node, &leader.raft));
                 engine.create_group(
                     GroupId::CONTROL,
@@ -268,8 +263,7 @@ where
                 swim.probe_interval,
             )));
         }
-        // Registry-based mode (spec §9.4.2): the sync loop watches the external
-        // registry and applies its revision-stamped state to the local view.
+        // Registry-based mode (spec §9.4.2).
         if let MembershipMode::Registry(registry) = &mode {
             system.inner.spawner.launch(Box::pin(registry_sync(
                 system.clone(),
@@ -277,8 +271,7 @@ where
                 registry.sync_interval,
             )));
         }
-        // Leader-based mode (spec §9.4.3): the Raft driver runs elections,
-        // replication, and the leader's control-plane duties.
+        // Leader-based mode (spec §9.4.3).
         if let MembershipMode::Leader(leader) = &mode {
             system
                 .inner
@@ -410,9 +403,7 @@ where
     /// §9.4): a registry mutation (registry-based) via `registry_op`, or a
     /// committed control-group entry (leader-based) — `command`, awaited until
     /// `done` observes its effect in the local view. Modes without an
-    /// authoritative control plane return `false`. The single home of the
-    /// operator-command dispatch [`admit`](Self::admit) / [`drain`](Self::drain)
-    /// / [`resume`](Self::resume) / [`decommission`](Self::decommission) share.
+    /// authoritative control plane return `false`.
     async fn apply_membership_op<Fut: Future<Output = bool>>(
         &self,
         command: MembershipCommand,
@@ -503,9 +494,8 @@ where
     /// Offer an encoded app command to `group`'s leader (spec §9.4.3 item 1):
     /// append locally when leading; otherwise forward one `RaftPropose` to the
     /// known leader; otherwise — no leader known yet — fan the proposal out to
-    /// `voters`, which forward it to theirs. The single home of the
-    /// propose/forward/fan-out rule (its degenerate inbound form is
-    /// [`handle_raft_propose`], which never fans out). `voters` is the caller's
+    /// `voters`, which forward it to theirs. The inbound counterpart is
+    /// [`handle_raft_propose`], which never fans out. `voters` is the caller's
     /// choice of quorum: the configured founding set for the control group, or a
     /// group's live voter set.
     async fn propose_or_forward(&self, group: GroupId, command: Vec<u8>, voters: &[NodeId]) {
@@ -538,8 +528,7 @@ where
 
     /// The Raft group `group` if this node runs the consensus engine and hosts
     /// that group (spec §9.4.3). The receive loop routes each group's frames
-    /// through it; an unknown group is dropped. Also the basis of the
-    /// [`RaftConsensus`](crate::RaftConsensus) seam (see `consensus.rs`).
+    /// through it; an unknown group is dropped.
     pub(crate) fn group(&self, group: GroupId) -> Option<Arc<RaftGroup>> {
         self.inner.raft.as_ref().and_then(|raft| raft.group(group))
     }
@@ -586,9 +575,8 @@ where
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Launch a background task on the system's spawner — the seam the
-    /// singleton manager (utilities spec §4) starts its tick loop through, and
-    /// the one layered runtimes (the agentic harness) launch their I/O on so a
+    /// Launch a background task on the system's spawner. The singleton manager
+    /// (utilities spec §4) and layered runtimes launch through this, so a
     /// simulated run stays on the seeded scheduler (spec §18.1).
     pub fn launch_task(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
         self.inner.spawner.launch(Box::pin(task));
@@ -635,9 +623,7 @@ where
     /// Apply the control group's committed entries as membership transitions (spec
     /// §9.2): decode each as a [`MembershipCommand`], stamp its `effect()` with the
     /// commit index, and run the node-down cascade (spec §8.1) for one that lands a
-    /// `Down`/`Leave`. This is the control group's *specialization* — the meaning of
-    /// its committed bytes — kept out of the generic `apply_raft_output` so that
-    /// applier carries no knowledge of membership.
+    /// `Down`/`Leave`.
     async fn apply_membership_commits(&self, committed: Vec<Committed>) {
         for observation in committed {
             // The control group never compacts, so it only ever applies commands.
@@ -820,10 +806,10 @@ where
 
     fn watch(&self, target: ActorId, watcher: ActorId, deliver: WatchDelivery) {
         // Watch-after-death (invariant #12): a local target that is gone, or a
-        // peer node already declared `down`, is reported immediately.
-        // Launch the immediate delivery rather than running it inline: delivery
-        // now applies mailbox backpressure, and a watcher calling `watch` from
-        // inside its own handler must not block on its own mailbox.
+        // peer node already declared `down`, is reported immediately. The
+        // delivery is launched, not run inline: it applies mailbox backpressure,
+        // and a watcher calling `watch` from inside its own handler must not
+        // block on its own mailbox.
         if self.is_local(&target) {
             if !self.inner.host.contains(&target) {
                 // Report the actual reason it died (Failed vs Stopped) when still
@@ -894,8 +880,8 @@ where
     }
 
     fn replicate_registration(&self, key: &str, origin: NodeId, id: ActorId) {
-        // Broadcast-on-change to every peer (spec §13). Periodic anti-entropy
-        // for nodes that join later or miss a frame is a follow-up.
+        // Broadcast-on-change to every peer (spec §13); nodes that join later or
+        // miss a frame converge through `receptionist_gossip` anti-entropy.
         for peer in self.inner.membership.members() {
             let frame = Frame::Receptionist {
                 key: key.to_string(),
@@ -933,9 +919,7 @@ async fn receive_loop<C, E, S, T>(
     }
 }
 
-/// Route one inbound frame to its handler (spec §4.4). A flat table: every arm is
-/// a single call, so a new frame kind is a new row here plus one `handle_*` fn —
-/// no surgery inside a monolith.
+/// Route one inbound frame to its handler (spec §4.4).
 async fn dispatch_frame<C, E, S, T>(system: &ClusterSystem<C, E, S, T>, from: NodeId, frame: Frame)
 where
     C: Clock,
@@ -988,9 +972,7 @@ where
         }
         Frame::ReceptionistSync { entries } => handle_receptionist_sync(system, entries),
         // Raft consensus traffic (leader-based mode, spec §9.4.3) rides the ordinary
-        // transport as system messages; a node not in leader mode ignores it. The
-        // five handler-driven arms share `drive_group` (below); each names only its
-        // handler and the frame fields it forwards.
+        // transport as system messages; a node not in leader mode ignores it.
         Frame::RaftVote {
             group,
             term,
@@ -1073,13 +1055,10 @@ where
     }
 }
 
-/// Run one group's Raft handler and apply its output (spec §9.4.3). Owns the shape
-/// every receive-side Raft arm shares — resolve the group, draw `clock.now()` +
-/// `entropy` once, invoke the handler, apply the committed/elected side effects —
-/// so each arm supplies only the handler call. Drawing `now` inside keeps the
-/// entropy/clock ordering identical across all five arms (the determinism seam,
-/// spec §18). Note `apply_raft_output` deliberately ignores `out.frames`: the
-/// receive path applies effects only; outbound Raft frames go out on the tick path.
+/// Run one group's Raft handler and apply its output (spec §9.4.3): resolve the
+/// group, draw `clock.now()` + `entropy` once, invoke the handler, apply the
+/// output. Drawing `now` inside keeps the entropy/clock ordering identical across
+/// every receive-side Raft arm (the determinism seam, spec §18).
 async fn drive_group<C, E, S, T, F>(system: &ClusterSystem<C, E, S, T>, group: GroupId, handle: F)
 where
     C: Clock,
@@ -1132,9 +1111,8 @@ async fn handle_envelope<C, E, S, T>(
     S: Spawner,
     T: Transport,
 {
-    // Authorization gate (spec §15): an unauthorized message is rejected as a
-    // system failure and never reaches the actor. An `ask` gets the failure as
-    // its reply; a `tell` is dropped.
+    // Authorization gate (spec §15). An `ask` gets the rejection as its reply;
+    // a `tell` is dropped.
     if let Some(authorizer) = &system.inner.authorizer
         && !authorizer.authorize(from, &recipient, &manifest)
     {
@@ -1417,7 +1395,6 @@ fn handle_receptionist_sync<C, E, S, T>(
 /// form of [`ClusterSystem::propose_or_forward`] — an already-inbound proposal is
 /// never fanned out to voters, and a `forwarded` one landing on a non-leader is
 /// dropped (the proposer's bounded re-submission handles the stale-leader case).
-/// The odd Raft arm out: it never calls `apply_raft_output`.
 async fn handle_raft_propose<C, E, S, T>(
     system: &ClusterSystem<C, E, S, T>,
     group: GroupId,
@@ -1455,8 +1432,6 @@ where
     }
 
     fn cluster_voters(&self) -> Vec<NodeId> {
-        // The control group's current voter set — the consensus-agreed cluster
-        // configuration, identical on every admitted node (spec §9.4.3).
         self.inner
             .raft
             .as_ref()
@@ -1466,8 +1441,6 @@ where
     }
 
     fn configured_voters(&self) -> Vec<NodeId> {
-        // The statically configured founding voter set — identical and unchanging
-        // on every node (spec §9.4.3), unlike the live `cluster_voters`.
         match &self.inner.mode {
             MembershipMode::Leader(leader) => leader.raft.voters.clone(),
             _ => Vec::new(),
@@ -1505,12 +1478,10 @@ where
 
     fn subscribe_commits(&self, group: GroupId) -> Receiver<Committed> {
         let (tx, rx) = async_channel::unbounded();
-        // Seed a subscriber that came up over a reloaded, compacted log with the
-        // snapshot it reloaded, as the first thing on its stream — so a node that
-        // restarts from a snapshot (not a full log) rebuilds its projection from
-        // it, the leaderless counterpart of a leader InstallSnapshot (spec §9).
-        // Sent before the sender is registered, so it strictly precedes any commit
-        // a later tick fans out to this sink. `None` for an uncompacted group.
+        // A subscriber over a reloaded, compacted log is seeded with the snapshot
+        // it reloaded (spec §9, `RaftGroup::snapshot_observation`). Sent before
+        // the sender is registered, so it strictly precedes any commit a later
+        // tick fans out to this sink.
         if let Some(snapshot) = self.group(group).and_then(|g| g.snapshot_observation()) {
             let _ = tx.try_send(snapshot);
         }
@@ -1566,11 +1537,7 @@ where
 
 /// Act on one group's Raft step (spec §9.4.3): emit the election event (tagged
 /// with `group`), apply the group's newly committed application commands, and
-/// send the produced consensus frames. For the control group, committed commands
-/// are membership transitions — decoded and merged into the local view, each
-/// stamped with its commit index (spec §9.2), running the node-down cascade
-/// (spec §8.1) for a committed `Down`/`Leave`. Other groups' committed entries
-/// belong to their owner (granary shards, later) and are not membership.
+/// send the produced consensus frames.
 async fn apply_raft_output<C, E, S, T>(
     system: &ClusterSystem<C, E, S, T>,
     group: GroupId,
@@ -1590,15 +1557,12 @@ async fn apply_raft_output<C, E, S, T>(
     }
     // Route the group's committed entries to whoever owns them. The control
     // group's are membership transitions the cluster layer applies in-process;
-    // every other group's belong to its subscribers. This `if` is the sole
-    // specialization boundary — the membership *knowledge* lives in
-    // `apply_membership_commits`, not inline in this generic applier.
+    // every other group's belong to its subscribers.
     //
-    // Membership is applied here, synchronously in the tick, rather than as just
-    // another `subscribe_commits` subscriber (which would make the path fully
-    // uniform): it runs `node_down_cascade` inline and must observe each commit in
-    // the same tick it lands, and routing through the async `commit_sinks` channel
-    // would shift that interleaving. Keeping it synchronous is deliberate.
+    // Membership is applied synchronously in the tick rather than through a
+    // `subscribe_commits` subscription: it runs `node_down_cascade` inline and
+    // must observe each commit in the same tick it lands, and the async
+    // `commit_sinks` channel would shift that interleaving.
     if group == GroupId::CONTROL {
         system.apply_membership_commits(out.committed).await;
     } else {
@@ -1884,8 +1848,7 @@ async fn registry_sync<C, E, S, T>(
     let mut registered: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
     loop {
         if let Ok(snapshot) = client.fetch().await {
-            // Skip stale reads: application must be monotonic in the registry's
-            // global revision (spec §9.4.2 item 1).
+            // Skip stale reads (spec §9.4.2 item 1).
             if last_revision.is_none_or(|last| snapshot.revision >= last) {
                 let advanced = last_revision != Some(snapshot.revision);
                 last_revision = Some(snapshot.revision);
@@ -1939,11 +1902,9 @@ async fn registry_sync<C, E, S, T>(
 }
 
 /// Receptionist anti-entropy (spec §13): every `interval`, push this node's full
-/// registry to a random member. Registrations replicate broadcast-on-change, so
-/// a node that joined late or missed a broadcast would otherwise never learn
-/// them; periodic push gossip converges the cluster without the registrant
-/// having to re-register. Down origins are skipped so a pruned registration is
-/// never resurrected (spec §8.1 step 5).
+/// registry to a random member, converging nodes that joined late or missed a
+/// broadcast. Down origins are skipped so a pruned registration is never
+/// resurrected (spec §8.1 step 5).
 async fn receptionist_gossip<C, E, S, T>(system: ClusterSystem<C, E, S, T>, interval: Duration)
 where
     C: Clock,

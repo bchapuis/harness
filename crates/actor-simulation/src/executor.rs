@@ -7,8 +7,8 @@
 //! until none remain, and only then advances virtual time to the next timer.
 //! Logical time therefore costs no wall-clock time.
 //!
-//! Everything is built on safe primitives — the waker uses [`std::task::Wake`]
-//! via `Arc`, so the crate honors the workspace `unsafe_code = "forbid"`.
+//! The waker uses [`std::task::Wake`] via `Arc`, so the crate honors the
+//! workspace `unsafe_code = "forbid"`.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -45,9 +45,9 @@ struct Task {
     /// Set from the spawning system's tagged spawner, and inherited by child
     /// tasks via [`CURRENT_DOMAIN`].
     ///
-    /// A domain is per incarnation rather than per node so that a restart can
-    /// retire the predecessor's tasks without touching the successor's, even
-    /// though both run under the same [`NodeId`](actor_core::NodeId).
+    /// Per incarnation rather than per node, so a restart can retire the
+    /// predecessor's tasks without touching the successor's, even though both
+    /// run under the same [`NodeId`](actor_core::NodeId).
     domain: Option<u64>,
 }
 
@@ -140,7 +140,7 @@ impl Inner {
         domain
     }
 
-    /// Forget every task belonging to `domain` — the scheduler half of a process
+    /// Forget every task belonging to `domain`, the scheduler half of a process
     /// death (spec §18.3). The tasks leave the ready set and the task table, so
     /// nothing in that incarnation is ever polled again.
     ///
@@ -220,16 +220,15 @@ impl Wake for TaskWaker {
 pub struct SimSpawner {
     shared: Shared,
     /// The node every task launched through this handle belongs to (pause/resume).
-    /// `None` for the bare `Simulation::spawner()` used by test drivers. Each node's
-    /// system is handed a `with_domain`-tagged clone, so all its tasks carry its id.
+    /// `None` for the bare `Simulation::spawner()` used by test drivers.
     domain: Option<u64>,
 }
 
 impl SimSpawner {
     /// A clone of this spawner tagged with a **fresh process incarnation**, whose
     /// id is returned alongside it so the caller can later freeze, thaw, or retire
-    /// that incarnation as a unit (spec §18.3). Clones of the result keep the tag,
-    /// so the whole subtree the incarnation spawns belongs to it.
+    /// that incarnation as a unit (spec §18.3). Clones keep the tag, so the whole
+    /// subtree the incarnation spawns belongs to it.
     pub(crate) fn with_fresh_domain(&self) -> (SimSpawner, u64) {
         let domain = self
             .shared
@@ -278,11 +277,7 @@ impl actor_core::Spawner for SimSpawner {
 }
 
 /// A deterministic simulation runtime: one seed drives time, randomness, task
-/// scheduling, and (later) the in-memory network.
-///
-/// Hand out [`clock`](Simulation::clock), [`entropy`](Simulation::entropy), and
-/// [`spawner`](Simulation::spawner) to construct a system, then drive it with
-/// [`run`](Simulation::run) or [`block_on`](Simulation::block_on).
+/// scheduling, and the in-memory network.
 pub struct Simulation {
     shared: Shared,
     entropy: SimEntropy,
@@ -340,10 +335,9 @@ impl Simulation {
         }
     }
 
-    /// Drive the runtime for `dur` of virtual time, then stop — even if tasks or
-    /// timers remain. Needed for perpetual workloads (a failure detector probes
-    /// forever and so never quiesces); a bounded run lets a test advance the
-    /// cluster a fixed span and then inspect it.
+    /// Drive the runtime for `dur` of virtual time, then stop, even if tasks or
+    /// timers remain. Needed for perpetual workloads: a failure detector probes
+    /// forever and so never quiesces.
     pub fn run_for(&self, dur: Duration) {
         let limit = self.now() + dur;
         self.run_until(limit);
@@ -406,9 +400,9 @@ impl Simulation {
     /// seed-randomized (spec §18.3) to surface ordering-dependent bugs.
     fn take_ready(&self) -> Option<u64> {
         let mut inner = self.shared.lock().expect("scheduler mutex poisoned");
-        // Fast path — no node is frozen. Identical to the pre-pause scheduler, so a
-        // run that never pauses draws entropy and orders tasks byte-for-byte as
-        // before (the reproducibility contract, spec §18.1).
+        // Fast path: no node is frozen. A run that never pauses draws entropy and
+        // orders tasks byte-for-byte as one with pause absent would (the
+        // reproducibility contract, spec §18.1).
         if inner.paused.is_empty() {
             return match inner.ready.len() {
                 0 => None,

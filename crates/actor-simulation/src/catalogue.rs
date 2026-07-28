@@ -1,11 +1,10 @@
 //! The §18.5 invariant catalogue (spec §17, §18.5, §18.6).
 //!
-//! The conformance-traceability concern, kept apart from the invariant
-//! *mechanism* in [`crate::invariant`]: a machine-readable table linking each of
-//! the 22 §18.5 invariants to *how* it is verified. The `conformance_catalogue`
-//! integration test asserts it stays consistent with
-//! [`default_invariants`](crate::default_invariants), so a checker added in code
-//! but not recorded here (or vice versa) fails the build.
+//! A machine-readable table linking each of the 22 §18.5 invariants to *how* it
+//! is verified; the invariant *mechanism* is [`crate::invariant`]. The
+//! `conformance_catalogue` integration test asserts this table stays consistent
+//! with [`default_invariants`](crate::default_invariants), so a checker added in
+//! code but not recorded here, or the reverse, fails the build.
 
 /// How a §18.5 invariant is verified — the machine-readable form of the §17
 /// conformance table's "Verified by" column.
@@ -48,11 +47,11 @@ pub fn core_catalogue() -> &'static [CatalogueEntry] {
     CATALOGUE
 }
 
-/// The cluster-utilities invariant catalogue (utilities spec §6): U1, U2, … —
+/// The cluster-utilities invariant catalogue (utilities spec §6): U1, U2, …,
 /// numbered apart from the core #1–#22 because the utilities are specified in
-/// their own document (`cluster-utilities-spec.md`) layered on the core spec.
-/// `invariant: n` here reads as "Un". Guarded by the same `conformance_catalogue`
-/// drift test as the core table.
+/// their own document (`cluster-utilities-spec.md`). `invariant: n` here reads
+/// as "Un". Guarded by the same `conformance_catalogue` drift test as the core
+/// table.
 pub fn utilities_catalogue() -> &'static [CatalogueEntry] {
     UTILITIES_CATALOGUE
 }

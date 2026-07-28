@@ -66,9 +66,8 @@ impl<A: Actor> Default for HandlerRegistry<A> {
 }
 
 impl<A: Actor> HandlerRegistry<A> {
-    /// Accept message type `M` over the network (spec §4.4). An ordinary generic
-    /// library function — the no-codegen registration primitive — that captures
-    /// the monomorphized dispatch entry for `(A, M)`.
+    /// Accept message type `M` over the network (spec §4.4), capturing the
+    /// monomorphized dispatch entry for `(A, M)`.
     pub fn accept<M>(&mut self)
     where
         A: Handler<M>,

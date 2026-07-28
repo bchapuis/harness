@@ -1,23 +1,12 @@
 //! Cluster lifecycle and the nemesis vocabulary (spec §9.3, §18.3).
 //!
-//! [`SimNetwork`](crate::SimNetwork) does two jobs that pull apart cleanly. The
-//! wire — routing, seeded loss/duplication/latency — lives in
-//! [`transport`](crate::transport). This is the other one: bringing nodes up and
-//! down, and the vocabulary a nemesis or a scenario uses to break them.
-//!
-//! - **Lifecycle** (§9.3): `join` pre-wires a founding roster, `join_seeded`
-//!   exercises the real gossip join, and `restart` models process death —
-//!   volatile state lost, durable state surviving through the mode's storage
-//!   seam.
-//! - **Faults** (§18.3): `partition` and `crash` block directed pairs;
-//!   `partition_one_way` expresses the asymmetric case symmetric partition
-//!   cannot; `pause`/`resume` freeze a node's tasks without touching the wire;
-//!   `heal` clears every block. `inject` bypasses routing entirely, for hostile
-//!   frames a well-behaved peer would never send.
+//! The wire half of [`SimNetwork`](crate::SimNetwork) (routing, seeded
+//! loss/duplication/latency) lives in [`transport`](crate::transport). This is
+//! the other half: bringing nodes up and down, and the vocabulary a nemesis or a
+//! scenario uses to break them.
 //!
 //! These are inherent methods on `SimNetwork` rather than a separate type: the
-//! nemesis needs the same `inner` the router does, and splitting the *state*
-//! would buy nothing. Splitting the *file* keeps `transport.rs` about the wire.
+//! nemesis needs the same `inner` the router does.
 
 use std::sync::Arc;
 
@@ -35,22 +24,13 @@ use crate::transport::SimTransport;
 /// A node's process was replaced by [`SimNetwork::restart`] — emitted on the
 /// event stream (actor §16) just before the old system is shut down.
 ///
-/// It exists because a successor process assigns actor *paths* from zero, so
-/// `node-2//user/0` names one actor before the restart and a different one after.
-/// A checker that accumulates per-actor state — the lifecycle invariant (#6) is
-/// the one that does — would otherwise read the successor's first actor as a
-/// second assignment of the predecessor's.
-///
-/// The ids themselves no longer collide: a host stamps its **process
-/// incarnation** onto every id it assigns
-/// ([`LocalHost::with_incarnation`](actor_core::LocalHost::with_incarnation)),
-/// which is what stops a stale ref from resolving to whatever now holds that path
-/// (`corpus.txt`, `tenancy-directory-swarm 9300730`). Paths still repeat, so a
-/// checker still needs the boundary; routing no longer does.
-///
-/// Restarts are a simulation fault, not a production event, which is why this
-/// rides [`Event::App`](actor_core::Event::App) rather than adding a variant to
-/// the framework's own enum.
+/// A successor process assigns actor *paths* from zero, so `node-2//user/0`
+/// names one actor before the restart and a different one after; without the
+/// boundary a checker that accumulates per-actor state (the lifecycle invariant,
+/// #6) reads the successor's first actor as a second assignment of the
+/// predecessor's. Routing needs no such marker: a host stamps its **process
+/// incarnation** onto every id it assigns (`LocalHost::with_incarnation`), so a
+/// stale ref cannot resolve to whatever now holds that path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeRestarted {
     pub node: NodeId,
@@ -78,9 +58,8 @@ impl SimNetwork {
             joining,
             authorizer: self.authorizer.clone(),
             // The scheduler domain is already one-per-incarnation and monotonic,
-            // so it is exactly the stamp actor ids need to stop colliding across a
-            // restart (`LocalHost::with_incarnation`). Reusing it keeps the two
-            // notions of "this process" from drifting apart.
+            // so it is exactly the stamp actor ids need to stop colliding across
+            // a restart (`LocalHost::with_incarnation`).
             incarnation: domain,
         };
         let system = ClusterSystem::start(
@@ -101,9 +80,9 @@ impl SimNetwork {
         system
     }
 
-    /// Bring up a founding node and return its running system, wiring it into
-    /// every existing node's roster as a full `Up` member (spec §9.3 join,
-    /// pre-wired — the simple path when the whole roster is known up front).
+    /// Bring up a founding node, wiring it into every existing node's roster as
+    /// a full `Up` member (spec §9.3 join, pre-wired: for when the whole roster
+    /// is known up front).
     pub fn join(&self, node: NodeId) -> SimNode {
         let system = self.bring_up(node, false);
         let mut inner = self.inner.lock().expect("network mutex poisoned");
@@ -116,9 +95,9 @@ impl SimNetwork {
     }
 
     /// Bring up a node as a *joiner* (spec §9.3): it starts `Joining` and is told
-    /// only its `seeds`, which it contacts to gossip itself into the cluster. The
-    /// cluster discovers it and the leader admits it to `Up` — no pre-wiring, so
-    /// this exercises the real join protocol.
+    /// only its `seeds`, which it contacts to gossip itself into the cluster.
+    /// The leader then admits it to `Up`. No pre-wiring, so this exercises the
+    /// real join protocol.
     pub fn join_seeded(&self, node: NodeId, seeds: &[NodeId]) -> SimNode {
         let system = self.bring_up(node, true);
         for &seed in seeds {
@@ -132,29 +111,26 @@ impl SimNetwork {
         system
     }
 
-    /// Restart `node` (spec §18.3, §9.4.3 item 2): stop its current system —
-    /// an **abrupt** stop, not a graceful leave — and bring up a fresh one
-    /// under the same identity and mode. Volatile state is lost exactly as a
-    /// process death loses it (actors, the membership view, Raft's role and
-    /// commit index); durable state survives through the mode's storage seam —
-    /// the per-node-cached [`RaftWAL`](actor_cluster::RaftWAL), the
-    /// external registry. Network blocks involving the node are cleared: the
-    /// new process comes up with working connectivity.
+    /// Restart `node` (spec §18.3, §9.4.3 item 2): stop its current system (an
+    /// **abrupt** stop, not a graceful leave) and bring up a fresh one under the
+    /// same identity and mode. Volatile state is lost exactly as a process death
+    /// loses it (actors, the membership view, Raft's role and commit index);
+    /// durable state survives through the mode's storage seam, the
+    /// per-node-cached [`RaftWAL`](actor_cluster::RaftWAL) or the external
+    /// registry. Network blocks involving the node are cleared: the new process
+    /// comes up with working connectivity.
     ///
-    /// The old process is **ended**, not merely disconnected, and that takes
-    /// three steps in order. [`ClusterSystem::shutdown`] sets the shutdown flag
-    /// and drops the transport; the inbound sender is dropped, so queued frames
-    /// die with the old receive loop; and the incarnation's scheduler domain is
-    /// retired, so every task it owns leaves the run and is never polled again.
-    /// Only then does the successor exist. Without the third step the
-    /// predecessor's actors would keep being polled alongside their replacement,
-    /// both live at once — a state no production restart can reach.
+    /// The old process is **ended**, not merely disconnected, in three steps that
+    /// must run in order. [`ClusterSystem::shutdown`] sets the shutdown flag and
+    /// drops the transport; the inbound sender is dropped, so queued frames die
+    /// with the old receive loop; and the incarnation's scheduler domain is
+    /// retired, so every task it owns leaves the run. Only then does the successor
+    /// exist, or the predecessor's actors would keep being polled alongside their
+    /// replacement.
     ///
-    /// Ending a process mid-flight leaves brackets open: an actor stopped between
-    /// `DispatchStart` and `DispatchEnd`, an `ask` issued and never answered, an
-    /// identity assigned and never resigned. That is what process death *is*, and
-    /// [`NodeRestarted`] is how a checker learns to stop expecting the other half
-    /// (see [`crate::default_invariants`]).
+    /// Ending a process mid-flight leaves brackets open, and [`NodeRestarted`] is
+    /// how a checker learns to stop expecting the other half (see
+    /// [`Invariant::forget_node`](crate::Invariant::forget_node)).
     pub fn restart(&self, node: NodeId) -> SimNode {
         let old = {
             let mut inner = self.inner.lock().expect("network mutex poisoned");
@@ -174,9 +150,9 @@ impl SimNetwork {
             inner.blocked.retain(|(a, b)| *a != node && *b != node);
             inner.domains.remove(&node)
         };
-        // End the process for real. Ordered after the shutdown and before the
-        // announcement, so the predecessor has emitted everything it will ever
-        // emit by the time a checker is told the boundary is here.
+        // Ordered after the shutdown and before the announcement, so the
+        // predecessor has emitted everything it will ever emit by the time a
+        // checker is told the boundary is here.
         if let Some(domain) = retiring {
             self.spawner.retire_domain(domain);
         }
@@ -185,8 +161,7 @@ impl SimNetwork {
         let system = self.bring_up(node, false);
         let mut inner = self.inner.lock().expect("network mutex poisoned");
         for existing in &inner.joined {
-            // Re-introduce the roster both ways; `add_member` is idempotent and
-            // never resurrects a terminal member.
+            // `add_member` is idempotent and never resurrects a terminal member.
             existing.add_member(node);
             system.add_member(existing.node());
         }
@@ -208,11 +183,8 @@ impl SimNetwork {
 
     /// Sever communication in **one direction only** (spec §18.3): frames from any
     /// node in `from` to any node in `to` are dropped, but the reverse direction
-    /// keeps flowing. This is the asymmetric ("one-way" / half-open) partition that
-    /// symmetric `partition` cannot express — the source of zombie leaders, where a
-    /// deposed leader still *receives* traffic (so it can be told it is stale) but
-    /// cannot *reach* a quorum, or the reverse, where it keeps heartbeating outward
-    /// but never hears the votes that would let it commit. `heal` clears it.
+    /// keeps flowing. The asymmetric ("one-way" / half-open) partition, and the
+    /// source of zombie leaders. `heal` clears it.
     pub fn partition_one_way(&self, from: &[NodeId], to: &[NodeId]) {
         let mut inner = self.inner.lock().expect("network mutex poisoned");
         for &f in from {
@@ -248,23 +220,20 @@ impl SimNetwork {
     }
 
     /// **Freeze a node** (spec §18.3): its tasks stop being polled, so it makes no
-    /// progress at all — a process pause / VM freeze / long GC stall. Unlike `crash`,
-    /// the node keeps its state and its inbound frames queue up, to be processed when
-    /// it resumes. Virtual time is global and keeps advancing, but while frozen no
-    /// task code runs: a paused leader does not climb its term, so when it wakes it
-    /// is cleanly behind and discovers it is deposed (§8.1, "a paused leader that
-    /// wakes is already deposed"). This is the case symmetric partition cannot make.
-    /// `resume` thaws it; the backlog then drains and any timers that came due in the
-    /// meantime fire at once.
+    /// progress at all (a process pause, VM freeze, or long GC stall). Unlike
+    /// `crash`, the node keeps its state and its inbound frames queue up, to be
+    /// processed when it resumes. Virtual time is global and keeps advancing, but
+    /// while frozen no task code runs: a paused leader does not climb its term, so
+    /// when it wakes it is cleanly behind and discovers it is deposed (§8.1).
     pub fn pause(&self, node: NodeId) {
         if let Some(domain) = self.domain_of(node) {
             self.spawner.set_paused(domain, true);
         }
     }
 
-    /// The scheduler domain of `node`'s live process, or `None` if it never
-    /// joined. Read through the registry rather than derived from the id, because
-    /// a restart gives the successor a different domain (see [`restart`]).
+    /// The scheduler domain of `node`'s live process. Read through the registry
+    /// rather than derived from the id, because a restart gives the successor a
+    /// different domain (see [`restart`]).
     ///
     /// [`restart`]: SimNetwork::restart
     fn domain_of(&self, node: NodeId) -> Option<u64> {
@@ -284,12 +253,12 @@ impl SimNetwork {
         }
     }
 
-    /// Clear all partitions/crashes — the network heals (spec §9.2).
+    /// Clear all partitions and crashes (spec §9.2).
     ///
-    /// This is about *blocks*, not about the wire's quality: seeded loss,
-    /// duplication, and latency keep running, because the nemesis heals between
-    /// rounds and a heal that retired fault injection would leave the rest of
-    /// the run unfaulted. [`quiesce`](SimNetwork::quiesce) is the other half.
+    /// This clears *blocks* only: seeded loss, duplication, and latency keep
+    /// running, because the nemesis heals between rounds and a heal that retired
+    /// fault injection would leave the rest of the run unfaulted.
+    /// [`quiesce`](SimNetwork::quiesce) is the other half.
     pub fn heal(&self) {
         self.inner
             .lock()
@@ -302,16 +271,13 @@ impl SimNetwork {
     /// duplicated, nor jittered (the fixed base latency stays — it is not a
     /// fault, spec §18.2).
     ///
-    /// This is what a workload needs to reach a genuinely **converged** cluster,
-    /// and [`heal`](SimNetwork::heal) alone does not get there. A healed network
-    /// that still loses a seeded share of frames keeps the SWIM detector firing:
-    /// probes go missing, peers flip to `suspect` and on to `unreachable`, and
-    /// every node's serving set (utilities spec §2.1) keeps changing under it. A
-    /// run can then end mid-divergence however long it waits, so an
-    /// at-quiescence assertion that presumes convergence — the singleton's
-    /// exactly-one (utilities spec §4 item 3) — has no ground to stand on.
-    /// Quiescing first gives the detector clean probes and lets the views
-    /// actually settle.
+    /// Reaching a **converged** cluster needs this, not just
+    /// [`heal`](SimNetwork::heal). A healed network that still loses a seeded
+    /// share of frames keeps the SWIM detector firing: probes go missing, peers
+    /// flip to `suspect` and on to `unreachable`, and every node's serving set
+    /// (utilities spec §2.1) keeps changing under it, so an at-quiescence
+    /// assertion that presumes convergence (the singleton's exactly-one,
+    /// utilities spec §4 item 3) has no ground to stand on.
     ///
     /// Faults already tallied stay counted, so a coverage assertion (spec §18.3)
     /// still sees what the run exercised.

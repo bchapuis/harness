@@ -5,8 +5,8 @@
 //! an erased *envelope* — a closure that, given `&mut A` and its [`Ctx`], runs
 //! the matching `Handler<M>` to completion. The local fast path enqueues the
 //! envelope **by value, with no serialization** (spec §4.3); the remote path
-//! (later) builds the same envelope after deserializing, routing the reply
-//! through a `ReplyHandle` instead of a oneshot.
+//! builds the same envelope after deserializing, routing the reply through a
+//! `ReplyHandle` instead of a oneshot.
 //!
 //! Because every actor has exactly one mailbox feeding one serial executor,
 //! `&mut self` in a handler is never aliased (spec §3.5, §6).
@@ -36,13 +36,11 @@ type Runner<A> = Box<dyn for<'a> FnOnce(&'a mut A, &'a Ctx<A>) -> BoxFuture<'a, 
 
 /// Sentinel manifest for the `when_local` closure (spec §3.5.1). That closure
 /// carries no message type, yet the by-value envelope still needs a manifest for
-/// the `Enqueue`/`Dispatch` event stream. Named, rather than a bare literal, so
-/// the one non-message rider on the mailbox is obvious where it appears.
+/// the `Enqueue`/`Dispatch` event stream.
 const WHEN_LOCAL_MANIFEST: &str = "core.when_local";
 
 /// The fire-and-forget runner shared by [`Mailbox::tell`] and
-/// [`Mailbox::try_tell`]: drives the handler to completion and discards the
-/// reply. The two methods differ only in how they enqueue it, not in the work.
+/// [`Mailbox::try_tell`]: drives the handler to completion and discards the reply.
 fn tell_runner<A, M>(msg: M) -> Runner<A>
 where
     A: Actor + Handler<M>,
@@ -57,9 +55,8 @@ where
 
 /// One unit of work queued on a mailbox: the message's manifest (for the
 /// `Dispatch` event) plus the runner that executes it. This is the **local,
-/// by-value** envelope (spec §6) — the in-memory counterpart of the cluster
-/// wire frame, holding a live closure rather than serialized bytes. The remote
-/// path rebuilds an equivalent `Envelope` after deserializing.
+/// by-value** envelope (spec §6), holding a live closure rather than serialized
+/// bytes; the remote path rebuilds an equivalent `Envelope` after deserializing.
 pub(crate) struct Envelope<A: Actor> {
     pub(crate) manifest: &'static str,
     pub(crate) run: Runner<A>,
@@ -214,19 +211,14 @@ impl<A: Actor> Mailbox<A> {
     /// receive loop. Used by the dispatch registry (see [`crate::registry`]).
     ///
     /// On a rejected enqueue the `reply` is resolved with the corresponding
-    /// `CallError` so the caller never hangs. The full/closed pre-check makes
-    /// the subsequent `try_send` infallible under the single-threaded simulator;
-    /// a multi-threaded transport will revisit this.
+    /// `CallError` so the caller never hangs.
     pub(crate) fn enqueue_remote<M>(&self, msg: M, reply: ReplyHandle) -> Result<(), CallError>
     where
         A: Handler<M>,
         M: Message,
     {
-        // Resolve `reply` explicitly on a rejected enqueue so the caller never
-        // hangs: once the runner below captures `reply`, a failed `try_send`
-        // would drop it silently. This pre-check makes the `try_send` inside
-        // `try_enqueue` infallible under the single-threaded simulator; a
-        // multi-threaded transport will revisit this.
+        // Resolve `reply` explicitly here: once the runner below captures it, a
+        // failed `try_send` would drop it silently.
         if self.sender.is_closed() {
             reply.fail(CallError::DeadLetter);
             return Err(CallError::DeadLetter);
@@ -268,18 +260,11 @@ impl<A: Actor> Mailbox<A> {
                 actor.handle(signal, ctx).await;
             })
         });
-        // Awaiting enqueue: a `Terminated` MUST reach its watcher exactly once
-        // for any cause (invariant #11), so it applies the §6 default
-        // backpressure policy rather than dropping under load. Only a *closed*
-        // mailbox lets it give up — that means the watcher itself is already
-        // gone, so there is no one left to notify.
         if self.enqueue(manifest, run).await.is_ok() {
-            // The signal has now reached this watcher's mailbox — the one and
-            // only point a `Terminated` is actually *delivered* (spec §12, §16).
-            // Recording it here, rather than where a node fans a signal out to
-            // remote watchers, keeps it one event per real delivery: a forward to
-            // another node is not a delivery (it is re-emitted there when the
-            // frame lands), and a watch-after-death delivery is still counted.
+            // The watcher's mailbox is the one and only point a `Terminated` is
+            // actually *delivered* (spec §12, §16), so the event is emitted here:
+            // a forward to another node is not a delivery, and a watch-after-death
+            // delivery is still counted.
             self.events.emit(Event::TerminatedDelivered {
                 target,
                 watcher: self.id.clone(),

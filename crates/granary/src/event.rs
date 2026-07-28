@@ -3,19 +3,10 @@
 //! Granary emits its events on the actor framework's single extensible `Event`
 //! stream (actor §16) as an application event ([`Event::app`](actor_core::Event)),
 //! so a grain run produces one totally-ordered stream interleaved with the core
-//! actor events, the seed-reproducibility contract covers grain events for free,
-//! and the simulator's invariant checkers (§14) read them with
+//! actor events and the simulator's invariant checkers (§14) read them with
 //! [`Event::as_app::<GrainEvent>`](actor_core::Event::as_app). `GrainEvent`
-//! qualifies as an `AppEvent` through the framework's blanket impl (it is
-//! `Debug + Clone + PartialEq + Send + Sync + 'static`); no hand-written impl is
-//! needed.
-//!
-//! This enum carries the grain-lifecycle events and the shard events of §13:
-//! `LeaderChanged` (emitted by the node that wins a shard's election, once per
-//! term it observes), and `ShardSplit`/`ShardMerged` (emitted by each node as it
-//! applies the committed partition change, §7.7). The split/merge events plus
-//! the `shard` on `Committed` are what let the simulator's checkers verify G15
-//! — a grain writable in exactly one shard — over the ordered stream.
+//! qualifies as an `AppEvent` through the framework's blanket impl; no
+//! hand-written impl is needed.
 
 use actor_core::NodeId;
 
@@ -43,9 +34,9 @@ pub enum GrainEvent {
     },
     /// A command's events committed at the grain's new head (§6, §7). The reply
     /// is released only after this (the output gate, invariant **G5**). Carries
-    /// the `shard` the activation serves under: the G15 checker's hook — across
-    /// a split, a moved grain's `shard` transitions parent→child exactly once,
-    /// with `seq` still strictly increasing.
+    /// the `shard` the activation serves under: across a split, a moved grain's
+    /// `shard` transitions parent→child exactly once, with `seq` still strictly
+    /// increasing (**G15**).
     Committed {
         node: NodeId,
         name: GrainName,

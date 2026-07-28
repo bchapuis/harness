@@ -44,8 +44,7 @@ pub enum InputMode {
 pub enum View {
     /// A chat transcript: turns, responses, tool calls, outcomes.
     Chat,
-    /// The raw journal: each record as the `/records` API returns it, so the
-    /// "the journal IS the session" shape is visible.
+    /// The raw journal: each record as the `/records` API returns it.
     Raw,
 }
 
@@ -85,8 +84,7 @@ pub struct App {
     pub input_mode: InputMode,
 
     /// The committed records, in sequence order: the source of truth the view
-    /// projects each frame, and the watermark a live batch dedups against (the
-    /// highest applied seq is just the last record's, see [`App::last_seq`]).
+    /// projects each frame, and the watermark a live batch dedups against.
     pub records: Vec<(Seq, Record)>,
     pub streaming: bool,
     /// A per-process nonce and an in-run counter together mint turn ids that are

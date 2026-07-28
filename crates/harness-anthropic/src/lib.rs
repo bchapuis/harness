@@ -11,12 +11,10 @@
 //! end on, never silently.
 //!
 //! The socket is a seam: [`HttpPost`] is the one operation the client needs
-//! from its host — POST these bytes to this path with these headers — the
-//! same move the core makes with `Transport` (core spec §7). The deployment
-//! supplies the two-liner over its HTTP stack of choice; everything that
-//! could be wrong about *talking to Anthropic* lives here, deterministic and
-//! tested, while the byte transport stays swappable (and the simulator's
-//! scripted model replaces this crate entirely, §12.1).
+//! from its host — POST these bytes to this path with these headers (the same
+//! move the core makes with `Transport`, core spec §7). The deployment supplies
+//! it over its HTTP stack of choice; the simulator's scripted model replaces
+//! this crate entirely (§12.1).
 
 use std::sync::Arc;
 use std::time::Duration;

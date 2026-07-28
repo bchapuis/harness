@@ -9,8 +9,7 @@
 //!
 //! The activated instance registers under the singleton's receptionist key, so
 //! discovery, draining filters, and pruning-on-termination all ride the
-//! existing receptionist machinery (core spec §13) — a [`SingletonProxy`] is
-//! just a typed view over that listing. When the view stops naming this node
+//! existing receptionist machinery (core spec §13). When the view stops naming this node
 //! anchor, the manager hands off by delivering the user-supplied **stop
 //! message** (there is deliberately no external kill: the actor winds down
 //! through its own handler, which SHOULD call `ctx.stop()` promptly).
@@ -71,8 +70,7 @@ where
     }
 
     /// A client-only handle to the singleton `name` (utilities spec §4): no
-    /// manager runs, this node never hosts. The proxy re-resolves through the
-    /// receptionist on every call, so it follows the instance across handoffs.
+    /// manager runs, this node never hosts.
     pub fn singleton_proxy<A>(&self, name: &'static str) -> SingletonProxy<A>
     where
         A: Actor<System = Self>,
@@ -86,7 +84,6 @@ where
 
 /// The manager's view of its local activation.
 enum State<A: Actor> {
-    /// Not anchor (or not yet activated): no local instance.
     Idle,
     /// This node activated the instance and still means to host it.
     Active(ActorRef<A>),
@@ -151,9 +148,9 @@ async fn manager<C, E, S, T, A, M, F>(
                 });
                 State::Idle
             }
-            // The view moved the anchor elsewhere: hand off. The instance winds
-            // down through its own handler; a local tell only fails when the
-            // instance is already gone, which the arm above then observes.
+            // Hand off: the instance winds down through its own handler; a local
+            // tell only fails when the instance is already gone, which the arm
+            // above then observes.
             State::Active(instance) if !is_anchor => {
                 let _ = instance.tell(stop.clone()).await;
                 State::Stopping(instance)
@@ -166,8 +163,7 @@ async fn manager<C, E, S, T, A, M, F>(
 
 /// A typed handle to a cluster singleton (utilities spec §4): a view over the
 /// singleton's receptionist listing that re-resolves on every call, following
-/// the instance across handoffs. During a handoff gap — no live registration,
-/// or a stale one — calls fail fast and are never buffered (core spec §14.2).
+/// the instance across handoffs.
 pub struct SingletonProxy<A: Actor> {
     key: Key<A>,
     system: A::System,

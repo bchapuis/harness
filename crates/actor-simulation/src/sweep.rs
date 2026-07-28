@@ -1,16 +1,10 @@
 //! Seed-sweep sizing for swarm tests (spec §18.6).
 //!
-//! A swarm sweep serves two different jobs, and they want different seeds.
-//!
-//! - **Regression.** A pinned corpus — the same seeds on every run — so a bug
-//!   once fixed cannot come back unnoticed. This is what CI runs, and its value
-//!   comes precisely from *not* varying.
-//! - **Discovery.** Fresh seeds nobody has run before, in bulk, to find the
-//!   corner cases the corpus does not contain yet. Every failure it turns up is
-//!   a `(base, seed)` pair that reproduces exactly and can then join the corpus.
-//!
-//! Neither job fits the edit loop, which wants an answer in seconds. So a sweep
-//! declares its range *and* what a seed costs it, and the run decides the rest:
+//! A sweep serves two jobs that want different seeds: **regression** against a
+//! pinned corpus, which is what CI runs, and **discovery** across fresh seeds in
+//! bulk, whose every failure is a `(base, seed)` pair that reproduces exactly
+//! and can then join the corpus. Neither fits the edit loop, so a sweep declares
+//! its range *and* what a seed costs it, and the run decides the rest:
 //!
 //! | run   | seeds                          | pinned            |
 //! |-------|--------------------------------|-------------------|
@@ -18,24 +12,16 @@
 //! | CI    | from 0, the declared width     | yes               |
 //! | soak  | from a fresh base, many        | by `(base, seed)` |
 //!
-//! Sizing is deliberately *deterministic* — a cost class, not a wall clock.
-//! Reading the host clock to decide how much to run would make the seeds that
-//! executed depend on the machine that ran them, which is the property spec
-//! §18.1 exists to deny, and `clippy.toml` bans the call outright in this crate.
-//! Wall-time budgeting belongs to whatever drives the suite (`soak.yml` sizes
-//! its sweeps per crate); it does not belong under a seed.
+//! Sizing is a cost class, not a wall clock: reading the host clock to decide
+//! how much to run would make the seeds that executed depend on the machine that
+//! ran them (spec §18.1), and `clippy.toml` bans the call in this crate. Seeds
+//! stay independent under all three sizings, so a narrow run is a smaller sample
+//! of the same corpus rather than a different one.
 //!
-//! Seeds stay independent under all three sizings, so a narrow run is a smaller
-//! sample of the same corpus rather than a different one — never something else.
-//!
-//! # Cost classes
-//!
-//! Per-seed cost spans about four orders of magnitude across these workloads —
-//! roughly a millisecond for a local actor sweep, seconds for one that touches
-//! the disk or drives a machine. One local width cannot fit both, so the call
-//! site says which it is: [`sweep_seeds`] for ordinary sweeps, [`slow_seeds`]
-//! where a single seed costs seconds. [`coverage_seeds`] is not a cost class but
-//! a correctness one — see its own note.
+//! Per-seed cost spans about four orders of magnitude across these workloads, so
+//! the call site says which class it is: [`sweep_seeds`] for ordinary sweeps,
+//! [`slow_seeds`] where a single seed costs seconds. [`coverage_seeds`] is a
+//! correctness class, not a cost one.
 //!
 //! # Environment
 //!
@@ -53,12 +39,10 @@
 use std::ops::Range;
 use std::sync::Once;
 
-/// Seeds per ordinary sweep in the edit loop.
 const LOCAL_SEEDS: u64 = 8;
 
-/// Seeds per expensive sweep in the edit loop. One seed is a smoke test — it
-/// proves the workload still runs and its invariants still hold somewhere. The
-/// corpus is CI's job, and the seed space is soak's.
+/// One seed is a smoke test: the workload still runs and its invariants still
+/// hold somewhere.
 const LOCAL_SLOW_SEEDS: u64 = 1;
 
 const ENV_WIDTH: &str = "SWARM_SEEDS";
@@ -67,19 +51,18 @@ const ENV_CONTINUE: &str = "SWARM_CONTINUE";
 
 /// The seeds to sweep for a declared range whose seeds are cheap.
 ///
-/// The declared range stays in the test as the corpus of record; this decides
-/// how much of it — or how far past it — the run in hand covers. Offsetting by
-/// `SWARM_SEED_BASE` keeps the range's shape, so a soak failure at
-/// `(base, seed)` replays by setting the same two variables.
+/// The declared range stays in the test as the corpus of record; offsetting by
+/// `SWARM_SEED_BASE` keeps its shape, so a soak failure at `(base, seed)`
+/// replays by setting the same two variables.
 pub fn sweep_seeds(declared: Range<u64>) -> Range<u64> {
     resolve(declared, LOCAL_SEEDS)
 }
 
-/// The seeds to sweep for a declared range whose seeds cost seconds apiece —
+/// The seeds to sweep for a declared range whose seeds cost seconds apiece:
 /// workloads that touch the filesystem, a database, or a machine binding.
 ///
 /// Same contract as [`sweep_seeds`]; only the local width differs, so one slow
-/// workload cannot dominate the edit loop. CI and soak treat the two alike.
+/// workload cannot dominate the edit loop.
 pub fn slow_seeds(declared: Range<u64>) -> Range<u64> {
     resolve(declared, LOCAL_SLOW_SEEDS)
 }
@@ -87,11 +70,9 @@ pub fn slow_seeds(declared: Range<u64>) -> Range<u64> {
 /// The seeds to sweep for a fault-coverage assertion.
 ///
 /// A coverage sweep asserts that each fault type fired at least once *across
-/// the declared width* (spec §18.3). The claim is about the whole range, so
-/// narrowing it would not weaken the assertion, it would make it mean something
-/// the test does not say. These run at their declared width everywhere; only an
-/// explicit `SWARM_SEEDS` can change that, and a soak that widens them is still
-/// asserting something true.
+/// the declared width* (spec §18.3), so narrowing it would change what the test
+/// claims. These run at their declared width everywhere; only an explicit
+/// `SWARM_SEEDS` changes that.
 pub fn coverage_seeds(declared: Range<u64>) -> Range<u64> {
     let declared_width = declared.end - declared.start;
     let width = match width_request() {
@@ -119,8 +100,8 @@ fn offset(start: u64, width: u64) -> Range<u64> {
 }
 
 /// What `SWARM_SEEDS` asked for. `Declared` and `Unset` are distinct: naming
-/// `full` pins the corpus width everywhere, while saying nothing leaves the
-/// choice to the run — the cost class locally, the corpus under CI.
+/// `full` pins the corpus width everywhere; saying nothing leaves the choice to
+/// the run, the cost class locally and the corpus under CI.
 enum Width {
     Explicit(u64),
     Declared,
@@ -131,9 +112,9 @@ fn width_request() -> Width {
     match std::env::var(ENV_WIDTH) {
         Ok(raw) => match raw.trim() {
             "full" | "0" => Width::Declared,
-            // A malformed value is a typo on a command line, not a request to
-            // silently drop to a narrower sweep: fall back to the declared
-            // width, the reading that cannot under-test.
+            // A malformed value is a typo on a command line, not a request for a
+            // narrower sweep: fall back to the declared width, which cannot
+            // under-test.
             other => other
                 .parse::<u64>()
                 .map_or(Width::Declared, Width::Explicit),
@@ -156,17 +137,11 @@ fn is_ci() -> bool {
 /// Whether a sweep runs to the end and reports **every** failing seed, rather
 /// than stopping at the first.
 ///
-/// The two runs want opposite things here. CI wants the first failure and wants
-/// it fast: the build is already red, and the seconds spent proving the other
-/// 1,999 seeds also fail buy nothing. A soak wants the opposite — it is mining
-/// the seed space for `(workload, seed)` pairs to write into `corpus.txt`, and a
-/// sweep that halts on the first one throws away the rest of the run. Worse, it
-/// compounds: once a corpus seed fails, the regression replay that runs *ahead*
-/// of every sweep (`corpus.txt`) fails first, and that workload stops exploring
-/// new ground entirely until someone fixes the bug.
+/// CI wants the first failure fast. A soak is mining the seed space for
+/// `(workload, seed)` pairs to write into `corpus.txt`, and halting on the first
+/// one throws away the rest of the run.
 ///
-/// So this is off by default — stop at the first failure, the behaviour every
-/// call site was written against — and `soak.yml` turns it on.
+/// Off by default (stop at the first failure); `soak.yml` turns it on.
 pub fn collect_all_failures() -> bool {
     match std::env::var(ENV_CONTINUE) {
         Ok(raw) => !matches!(raw.trim(), "" | "0" | "false" | "no"),
@@ -175,7 +150,7 @@ pub fn collect_all_failures() -> bool {
 }
 
 /// Say once per test binary how sweeps are sized, so a narrow run is never
-/// mistaken for the corpus. Visible with `--nocapture` and on failure.
+/// mistaken for the corpus.
 fn announce_once() {
     static ANNOUNCED: Once = Once::new();
     ANNOUNCED.call_once(|| {
@@ -206,15 +181,11 @@ fn announce_once() {
     });
 }
 
-// --- Naming a sweep that is not a `Workload` ----------------------------------
-
 /// Sweep a hand-built scenario across seeds under an explicit name.
 ///
-/// Most sweeps drive a [`Workload`](crate::Workload), whose `name()` is the
-/// corpus key. Some build a [`Simulation`](crate::Simulation) directly instead —
-/// a scenario too bespoke to fit the trait — and those have no name, so nothing
-/// could be recorded against them. This gives them one: the caller names the
-/// scenario, and from there it ratchets like any other sweep.
+/// A [`Workload`](crate::Workload)'s `name()` is its corpus key; a scenario that
+/// builds a [`Simulation`](crate::Simulation) directly has none, so the caller
+/// supplies one and it ratchets like any other sweep.
 ///
 /// ```ignore
 /// scenario_sweep("partition-safety/quorum-reads", sweep_seeds(0..12), |seed| {
@@ -223,11 +194,11 @@ fn announce_once() {
 /// });
 /// ```
 ///
-/// The body panics to fail, as a test body does; the sweep stops at the first
-/// seed that does — or, under [`collect_all_failures`], catches each panic, runs
-/// the rest of the seeds, and fails at the end naming every one. Prefer a
-/// `Workload` when the scenario fits one — the trait buys invariant checking and
-/// reproducibility sweeps as well as a name.
+/// The body panics to fail; the sweep stops at the first seed that does, or,
+/// under [`collect_all_failures`], catches each panic, runs the rest of the
+/// seeds, and fails at the end naming every one. Prefer a `Workload` when the
+/// scenario fits one: the trait buys invariant checking and reproducibility
+/// sweeps as well as a name.
 pub fn scenario_sweep(name: &str, seeds: impl IntoIterator<Item = u64>, mut run: impl FnMut(u64)) {
     let seeds = crate::corpus::regression_seeds(name).chain(seeds);
     if !collect_all_failures() {
@@ -236,9 +207,6 @@ pub fn scenario_sweep(name: &str, seeds: impl IntoIterator<Item = u64>, mut run:
         }
         return;
     }
-    // A scenario body reports by panicking and has no `RunFailure` to return, so
-    // collecting means catching the panic, keeping its message against the seed,
-    // and re-raising the lot once the sweep is done.
     let mut failed: Vec<(u64, String)> = Vec::new();
     let mut seeds_run = 0;
     for seed in seeds {

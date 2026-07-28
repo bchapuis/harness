@@ -7,11 +7,10 @@
 
 use std::time::Duration;
 
-/// Seed-controlled transport faults (spec §18.3). All zero by default — a
-/// no-fault run is the simplest case and must still pass. Per-pair FIFO is
-/// preserved even under latency (#3); loss surfaces as `Timeout`/`Unreachable`;
-/// duplication is tolerated (the framework gives at-most-once *at the caller*,
-/// not exactly-once delivery, §7.2).
+/// Seed-controlled transport faults (spec §18.3). All zero by default. Per-pair
+/// FIFO is preserved even under latency (#3); loss surfaces as
+/// `Timeout`/`Unreachable`; duplication is tolerated (the framework gives
+/// at-most-once *at the caller*, not exactly-once delivery, §7.2).
 #[derive(Clone, Copy)]
 pub struct FaultPolicy {
     /// Probability `drop_num / drop_den` that a frame is lost.
@@ -47,8 +46,8 @@ impl FaultPolicy {
 // --- The external registry (spec §9.4.2) --------------------------------------
 
 /// Seeded registry faults (spec §18.3: a stalled, lagging, or unavailable
-/// registry sync). All draws come from the run's single [`SimEntropy`](crate::SimEntropy), so a
-/// faulted run stays reproducible from its seed.
+/// registry sync). All draws come from the run's single
+/// [`SimEntropy`](crate::SimEntropy), so a faulted run replays from its seed.
 #[derive(Clone, Copy, Debug)]
 pub struct RegistryFaultPolicy {
     /// Each fetch sleeps a seeded duration in `[0, max_latency]` before

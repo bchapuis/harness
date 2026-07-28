@@ -11,28 +11,26 @@
 //! never image or workspace bytes.
 //!
 //! **File commands without a VM (machine §3).** [`WsWrite`], [`WsRead`],
-//! [`WsList`], and [`WsRemove`] operate on the workspace facet directly —
-//! activating the grain activates *no* microVM (boot is attach-driven) — so
-//! an agent or tool reads and writes a hibernated machine's `/workspace`
-//! durably without booting it. While a VM is live the guest owns
-//! `/workspace`, and mutating commands refuse with
+//! [`WsList`], and [`WsRemove`] operate on the workspace facet directly, and
+//! activating the grain activates *no* microVM (boot is attach-driven). While
+//! a VM is live the guest owns `/workspace`, and mutating commands refuse with
 //! [`MachineError::VmLive`]; the next boot's push delivers host-side writes.
 //!
 //! **The session is the command (machine §4).** Between captures the guest
 //! writes the image out of band; durability is capture-grained. The
 //! **checkpoint alarm** is the whole cadence: it fires every
-//! `min(checkpoint, lease)` while anything needs it, runs the capture command
-//! when a full checkpoint interval has elapsed, and — because a fired alarm
-//! always stages its consume/re-arm record — every fire is a **fenced
-//! append**, which makes the alarm the session lease too (M5): on a deposed
-//! or partitioned activation the append cannot commit, the host steps down,
-//! and `on_passivate` kills the microVM, bounding the doomed-session window
-//! to one alarm interval plus the append timeout.
+//! `min(checkpoint, lease)` while anything needs it, and captures when a full
+//! checkpoint interval has elapsed. Because a fired alarm always stages its
+//! consume/re-arm record, every fire is a **fenced append**, which makes the
+//! alarm the session lease too (M5): on a deposed or partitioned activation
+//! the append cannot commit, the host steps down, and `on_passivate` kills the
+//! microVM, bounding the doomed-session window to one alarm interval plus the
+//! append timeout.
 //!
 //! **Quiescent points (machine §4).** Mid-session the alarm pauses the guest,
 //! captures, resumes (M3's window is the checkpoint interval). When the last
-//! attachment detaches the alarm is re-armed to fire immediately: the final
-//! fire stops the guest, runs the last capture, and leaves the grain clean, so
+//! attachment detaches the alarm re-arms to fire immediately: the final fire
+//! stops the guest, runs the last capture, and leaves the grain clean, so
 //! `can_passivate` (which refuses while attached or dirty) lets the §10 idle
 //! path hibernate a machine whose disk is fully durable (M2).
 
@@ -146,9 +144,7 @@ pub struct MachineState {
     /// The machine's SSH host-key material (machine §3): the raw 32-byte
     /// ed25519 seed drawn from system entropy at provisioning, which the
     /// front door expands into the host key it presents at KEX (machine §5.1)
-    /// — one identity across hibernation, migration, and failover. Lives in
-    /// folded state, inside the cluster's own trust boundary, which already
-    /// holds the journal it travels in.
+    /// — one identity across hibernation, migration, and failover.
     pub host_key: Vec<u8>,
     pub egress: EgressPolicy,
     pub vcpus: u8,
@@ -231,7 +227,7 @@ pub enum MachineEvent {
     /// A workspace pull (or its staging) failed at a quiescent point, so the
     /// disk capture proceeded without a ws delta — machine §5.1's blessed
     /// degrade, journaled so "who lost workspace cadence, and since when" is
-    /// answerable from the journal alone (M4's stance).
+    /// answerable from the journal alone (M4).
     WsCaptureSkipped {
         at_nanos: u64,
         reason: String,
@@ -341,8 +337,7 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
     }
 
     /// Death-watch one front-door member idempotently (the `watched` set makes
-    /// a re-watch a no-op), so a rehydrated machine and a fresh attach share
-    /// one registration path.
+    /// a re-watch a no-op).
     fn watch_door(&self, door: &ActorId, ctx: &GrainCtx<Self>) {
         if self.lock().watched.insert(door.clone()) {
             ctx.watch(door.clone());
@@ -350,8 +345,7 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
     }
 
     /// Record a committed capture (advance the capture clock) and map its
-    /// stats to the journal event — nothing for a clean image (§7.5). Shared
-    /// by the mid-session and final capture paths.
+    /// stats to the journal event — nothing for a clean image (§7.5).
     fn capture_event(&self, stats: granary::DiskCaptureStats, now: Instant) -> Vec<MachineEvent> {
         self.lock().last_capture = Some(now);
         if stats.blocks == 0 {
@@ -370,14 +364,12 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
     /// with the disk manifest that follows (G19). Must run while the guest
     /// can still answer — before pause or kill (machine §4).
     ///
-    /// Degrades gracefully (machine §5.1: a broken agent severs access, not
-    /// the machine): a failed pull skips ws staging this cadence — journaled
-    /// as [`MachineEvent::WsCaptureSkipped`] — and the disk capture proceeds;
-    /// the ws delta simply waits for the next quiescent point. A
-    /// [`granary::WsError::TooLarge`] likewise stages nothing and self-heals at the
-    /// next under-cap capture.
+    /// Degrades gracefully (machine §5.1): a failed pull, or a
+    /// [`granary::WsError::TooLarge`], skips ws staging this cadence —
+    /// journaled as [`MachineEvent::WsCaptureSkipped`] — and the disk capture
+    /// proceeds; the ws delta waits for the next quiescent point.
     ///
-    /// Cost note: a pull rewrites every workspace file (fresh mtimes), so the
+    /// Cost: a pull rewrites every workspace file (fresh mtimes), so the
     /// capture's stat-prune never applies on this path — each checkpoint
     /// re-hashes the full pulled tree, accepted at the facet's 64 MiB cap.
     async fn pull_and_capture_ws(
@@ -432,12 +424,10 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
                 if let Some(vm) = &vm
                     && vm.pause().await.is_err()
                 {
-                    // A guest that cannot pause cannot be captured
-                    // consistently (grain §7.15: never capture a running
-                    // guest's image). Treat the VM as lost; the image keeps
-                    // its writes and stays dirty until the next capture,
-                    // exactly the M3 window. The staged ws delta still
-                    // commits — it reflects real pulled bytes.
+                    // Never capture a running guest's image (grain §7.15).
+                    // Treat the VM as lost; the image keeps its writes and
+                    // stays dirty until the next capture, the M3 window. The
+                    // staged ws delta still commits — it is real pulled bytes.
                     self.kill_vm().await;
                     return (events, false);
                 }
@@ -556,8 +546,6 @@ impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
     async fn on_activate(&mut self, _ctx: &GrainCtx<Self>) -> Result<(), actor_core::BoxError> {
         // The VM, dirty flag, and watch set are activation-local (G3): a fresh
         // activation has a freshly rehydrated — clean — image and no guest.
-        // Folded attachments are re-watched by `watch_attachments` on the first
-        // state-bearing entry point (the pending alarm's fire, or a command).
         *self.lock() = Activation::default();
         Ok(())
     }
@@ -572,9 +560,9 @@ impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
     }
 
     async fn on_passivate(&mut self, _ctx: &GrainCtx<Self>) {
-        // Every deactivation — idle hibernation after the final capture, or a
-        // forced step-down (the self-fence of M5: a failed fenced append ends
-        // the activation, and the guest must not outlive it) — kills the VM.
+        // Every deactivation kills the VM: idle hibernation after the final
+        // capture, or the forced step-down of M5, whose guest must not outlive
+        // the activation.
         self.kill_vm().await;
     }
 
@@ -592,18 +580,16 @@ impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
             if committed {
                 self.lock().dirty = false;
             } else {
-                // The capture could not complete (blob quorum, IO). Keep the
-                // dirty pin and retry on the next cadence tick. The staged ws
-                // delta still commits with this batch — it reflects real
-                // pulled bytes.
+                // The capture could not complete (blob quorum, IO): keep the
+                // dirty pin and retry on the next cadence tick.
                 ctx.alarm().set_after(state.alarm_cadence());
             }
             return events;
         }
 
         // Quiescent point 3 (machine §4): the mid-session checkpoint. Every
-        // fire re-arms, and the consume/re-arm record makes this a fenced
-        // append — the session lease (M5) — even when no capture is due.
+        // fire re-arms, which is the session lease's fenced append (M5), even
+        // when no capture is due.
         ctx.alarm().set_after(state.alarm_cadence());
         let checkpoint_due = match self.lock().last_capture {
             Some(last) => now.duration_since(last) >= Duration::from_nanos(state.checkpoint_nanos),
@@ -658,10 +644,8 @@ impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
 // --- Commands -----------------------------------------------------------------
 
 /// Provision the machine (machine §3): a journaled `Provisioned` event whose
-/// disk begins as the base image's full-coverage manifest (grain §7.15), and
-/// which carries the machine's freshly generated host key — 32 bytes of
-/// system entropy, journaled as the ed25519 seed the front door expands
-/// (machine §5.1).
+/// disk begins as the base image's full-coverage manifest (grain §7.15) and
+/// which carries the machine's freshly generated host key (machine §5.1).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Provision {
     pub owner: String,
@@ -696,14 +680,12 @@ impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Provision> for Machine
         {
             return (vec![], Err(MachineError::Disk(e.to_string())));
         }
-        // The host key is born here and nowhere else: 32 bytes drawn from the
-        // system's entropy stream, journaled as a raw ed25519 seed — any 32
-        // bytes are a valid seed (RFC 8032) — which the front door expands
-        // into the presented host key (machine §5.1). Drawing from the
-        // Entropy seam (actor §4.6) keeps both worlds right: production
-        // entropy is OS-seeded, so the key is fresh and secret (machine §3);
-        // the simulator's is run-seeded, so a replayed seed reproduces the
-        // same key (actor §18.1).
+        // The host key is born here and nowhere else: 32 bytes journaled as a
+        // raw ed25519 seed — any 32 bytes are a valid seed (RFC 8032). Drawing
+        // from the Entropy seam (actor §4.6) keeps both worlds right:
+        // production entropy is OS-seeded, so the key is fresh and secret; the
+        // simulator's is run-seeded, so a replayed seed reproduces the same
+        // key (actor §18.1).
         let host_key: Vec<u8> = (0..4)
             .flat_map(|_| ctx.system().next_random().to_le_bytes())
             .collect();
@@ -727,8 +709,7 @@ impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Provision> for Machine
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachReply {
     pub attachment: u64,
-    /// The machine's host-key material, so the front door presents one SSH
-    /// identity across hibernation, migration, and failover (M4).
+    /// The machine's host-key material (see `MachineState::host_key`, M4).
     pub host_key: Vec<u8>,
 }
 
@@ -738,8 +719,7 @@ pub struct AttachReply {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Attach {
     pub principal: String,
-    /// The front-door actor holding this connection — the death-watch target
-    /// (machine §5.1's attachment liveness).
+    /// The front-door actor holding this connection — the death-watch target.
     pub front_door: ActorId,
 }
 
@@ -763,8 +743,7 @@ impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Attach> for Machine<S,
         }
         self.watch_attachments(state, ctx);
         self.watch_door(&msg.front_door, ctx);
-        // The capture cadence while attached (machine §4): the checkpoint
-        // alarm, which doubles as the session lease's fenced append (M5).
+        // Start the capture cadence, which is also the session lease (M5).
         ctx.alarm().set_after(state.alarm_cadence());
         let id = state.next_attachment;
         (

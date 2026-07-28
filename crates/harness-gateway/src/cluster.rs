@@ -7,9 +7,9 @@
 //! hosts a grain. Its node id is OUTSIDE the voter roster `1..=nodes`, and each
 //! node must admit it with `--client <id>=<host>`.
 //!
-//! The transport is plaintext, guarded by the cluster secret, exactly as the node
-//! is; a deployment crossing untrusted links would provision a transport cert on
-//! both sides and set `TlsConfig` here and there.
+//! The transport is plaintext, guarded by the cluster secret; a deployment
+//! crossing untrusted links must provision a transport cert on both sides and set
+//! `TlsConfig`.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

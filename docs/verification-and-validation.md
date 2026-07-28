@@ -1,6 +1,6 @@
 # Verification & Validation
 
-**Scope:** How the distributed actor framework is tested. The companion to the [specification](distributed-actor-spec.md): §16 (events), §17 (conformance), and §18 (deterministic simulation) say *what* must hold and define the trait contract that makes testing possible; this document is the *how* — the strategies, the primitives, and the shape they take in `actor-simulation`. [Simulation testing](simulation-testing.md) is the third piece: the *conventions* around the mechanism — which shape of test to reach for, where it lives, and how a run decides how many seeds to spend. Where the two overlap, that document is the authority.
+**Scope:** How the distributed actor framework is tested — the strategies, the primitives, and the shape they take in `actor-simulation`. The [specification](distributed-actor-spec.md) says *what* must hold: §16 (events), §17 (conformance), §18 (deterministic simulation). [Simulation testing](simulation-testing.md) holds the conventions around the mechanism, and where the two overlap it is the authority.
 
 Three principles govern the strategy.
 
@@ -12,7 +12,7 @@ Three principles govern the strategy.
 
 Build the harness; do not import one. The spec routes every source of nondeterminism through four traits — `Clock`, `Entropy`, `Spawner` (§4.6), and `Transport` (§7) — and §18.2 mandates that simulation reuse *those same traits*, swapping only the implementations. A generic network or scheduler crate (`madsim`, `turmoil`, `shuttle`, `loom`, `stateright`) cannot satisfy that contract: it would test a model of the system, not the real `ActorSystem`, mailbox, SWIM, supervision, and receptionist code. So the simulator, the invariant checkers, the reproducibility harness, and the linearizability decision are all owned, in `actor-simulation`, atop `rand_chacha`.
 
-The one external test-only tool is **`trybuild`**, which drives the compile-fail cases for invariant #20 (an invalid `ask`/`tell` must not compile) — a property no runtime test can express. Data-race tooling (`loom`, Miri's race detector) is largely moot here: the workspace sets `unsafe_code = "forbid"`, and the simulator already explores interleavings deterministically (see *Interleaving*, below). Fuzzing has one valid home — the production transport's framing — noted under *Fuzzing*.
+The one external test-only tool is **`trybuild`**, which drives the compile-fail cases for invariant #20 (an invalid `ask`/`tell` must not compile) — a property no runtime test can express. Data-race tooling (`loom`, Miri's race detector) is largely moot here: the workspace sets `unsafe_code = "forbid"`, and the simulator already explores interleavings deterministically (see *Interleaving*, below).
 
 ## Primitives
 
@@ -46,11 +46,11 @@ sim.block_on(workload.run(system));
 // that injects seeded loss/dup/delay and partition/crash (§7, §18.2, §18.3).
 ```
 
-**Workloads (§18.4).** A test is a `Workload`: build actors and registrations, drive traffic through the **public API only** (never actor state — `when_local` excepted, §3.5.1), then let the runner check invariants. `run_swarm` / `run_cluster_swarm` sweep one workload across many seeds, sampling a `FaultConfig` / `FaultPolicy` from each seed's stream. Coverage is *cluster-time exercised per change*, not test count. A failing run is reported as a `RunFailure` carrying the `(workload, seed)` that replays it — the seed regenerates the run's faults, so there is nothing run-shaped to carry beyond it.
+**Workloads (§18.4).** A test is a `Workload`: build actors and registrations, drive traffic through the **public API only** (never actor state — `when_local` excepted, §3.5.1), then let the runner check invariants. `run_swarm` / `run_cluster_swarm` sweep one workload across many seeds, sampling a `FaultConfig` / `FaultPolicy` from each seed's stream. A failing run is reported as a `RunFailure` carrying the `(workload, seed)` that replays it — the seed regenerates the run's faults, so there is nothing run-shaped to carry beyond it.
 
 Note the asymmetry the checkers have to respect: a single-node run is driven to **quiescence**, but a cluster run is **time-bounded** (`run_for`) because the failure detector never quiesces. A property that must hold for both has to hold at every *prefix*.
 
-An at-quiescence check over a cluster run is therefore a claim about a state the run has to be *put into*, and getting that wrong is the single richest source of false failures this corpus has recorded. The driver does its half — after the traffic finishes it flushes, then keeps advancing while any `ask` is still in flight, so "pending at quiescence" is not just "pending inside its own deadline". A workload asserting something about a **converged** cluster has to do the rest: `heal()` clears the nemesis's partitions but leaves the seeded frame loss running, and a detector fed lossy probes never lets the views settle, so it calls `quiesce()` too. See [simulation testing](simulation-testing.md#asserting-at-quiescence).
+An at-quiescence check over a cluster run is therefore a claim about a state the run has to be *put into*. The driver does its half: after the traffic finishes it flushes, then keeps advancing while any `ask` is still in flight, so "pending at quiescence" is not just "pending inside its own deadline". A workload asserting something about a **converged** cluster does the rest, calling `quiesce()` alongside `heal()`, since `heal()` leaves the seeded frame loss running and a detector fed lossy probes never lets the views settle. See [simulation testing](simulation-testing.md#asserting-at-quiescence).
 
 The shapes a sweep can take, how many seeds a run spends, and where each kind of test file lives are conventions rather than mechanism: see [simulation testing](simulation-testing.md).
 
@@ -63,15 +63,15 @@ Promoting a *true* safety invariant from a targeted test to a continuous checker
 
 **Reference-model testing (linearizability).** For a stateful actor, record the client-observed `History` of operations (invoke → ok/info/fail) and decide it against a sequential reference `Model` — `Register` and `Counter` ship — with `check_linearizable`, a Wing & Gong search with `(used-bitmask, state)` memoization (`MAX_HISTORY = 128`). This is the state-machine strategy: generate concurrent operations, then prove the observed history is consistent with *some* serial order of the model.
 
-**Seed-reproducibility.** The determinism contract (§18.1 #1) is itself a tested property, enforced over the *real* event stream: a `Recorder` runs a workload twice under one seed and asserts byte-identical `Vec<Event>`, pinpointing any `Divergence`. This holds even under cluster nemesis and transport faults — `check_reproducible` / `replay_cluster_swarm`. A single leak (a wall-clock read, an OS thread, an unseeded RNG) breaks it, which is the point.
+**Seed-reproducibility.** The determinism contract (§18.1 #1) is itself a tested property, enforced over the *real* event stream: a `Recorder` runs a workload twice under one seed and asserts byte-identical `Vec<Event>`, pinpointing any `Divergence`. This holds even under cluster nemesis and transport faults — `check_reproducible` / `replay_cluster_swarm`. A single leak (a wall-clock read, an OS thread, an unseeded RNG) breaks it.
 
 **Fault coverage.** A sweep that *configures* faults but, by seed luck, never *triggers* one gives false confidence. `FaultStats` tallies the faults a run actually exercised (dropped, duplicated, delayed, blocked); `run_cluster_swarm_coverage` asserts, across the seed range, that each fault type fired at least once — so a green sweep provably covered loss, duplication, reordering, and partition/crash, not just the happy path.
 
 **Compile-fail testing.** Invariant #20 — an `ask`/`tell` of a message an actor has no `Handler` for must not compile — is asserted by `trybuild` cases under `actor-core/tests/compile_fail`, not at runtime.
 
-**Interleaving.** The simulator's single-thread cooperative scheduler selects among ready tasks with seeded randomness (§18.3), so it already explores message interleavings deterministically and reproducibly. A separate `loom` model-check of the executor across *all* interleavings is therefore an optional, complementary cross-check (§18.6) — not a prerequisite — and is not currently wired in.
+**Interleaving.** The simulator's single-thread cooperative scheduler selects among ready tasks with seeded randomness (§18.3), so it already explores message interleavings deterministically and reproducibly. A separate `loom` model-check of the executor across *all* interleavings is an optional cross-check (§18.6), not a prerequisite, and is not currently wired in.
 
-**Fuzzing.** Frame corruption is meaningful only where real bytes exist. The in-memory simulator carries *structured* frames (only the payload is codec-encoded, §18.2), so it has nothing to bit-flip; the "malformed frame tears down the association, not the node" requirement (§7) belongs to the **production** TCP transport's framing, tested against real wire bytes. A `cargo-fuzz` target over that framing and the codec is the natural place for byte-level fuzzing — a noted enhancement.
+**Fuzzing.** Frame corruption is meaningful only where real bytes exist. The in-memory simulator carries *structured* frames (only the payload is codec-encoded, §18.2), so it has nothing to bit-flip; the "malformed frame tears down the association, not the node" requirement (§7) belongs to the **production** TCP transport's framing, tested against real wire bytes. Not implemented: a `cargo-fuzz` target over that framing and the codec.
 
 ## Invariants to assert
 
@@ -99,4 +99,4 @@ For each component, write:
 7. **Seed-reproducibility** checks: the same `(workload, seed)` yields a byte-identical event stream (§18.1 #1).
 8. **Fault-coverage** assertions: the sweep actually fired each fault type (`FaultStats`), so a green run is not a silently happy-path run.
 
-Commit every failing `(workload, seed)` pair to `crates/actor-simulation/corpus.txt` and it replays permanently, on every run of that workload, however narrow the sweep. A sweep is a *sample* of the seed space, so a bug it once found is not one it keeps finding; the corpus is what closes that gap, and it is what makes the suite a ratchet. CI runs many seeds per change across fault configurations — the metric is cluster-hours exercised, not tests counted. The mechanics of sizing, seed bases, and adding a corpus entry are in [simulation testing](simulation-testing.md).
+Commit every failing `(workload, seed)` pair to `crates/actor-simulation/corpus.txt` and it replays permanently, on every run of that workload, however narrow the sweep. A sweep is a *sample* of the seed space, so a bug it once found is not one it keeps finding; the corpus closes that gap. CI runs many seeds per change across fault configurations — the metric is cluster-hours exercised, not tests counted. The mechanics of sizing, seed bases, and adding a corpus entry are in [simulation testing](simulation-testing.md).

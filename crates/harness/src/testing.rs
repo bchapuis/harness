@@ -1,14 +1,8 @@
 //! Shared simulation invariants over harness events (harness spec §11).
 //!
-//! These are the continuous H-checkers every harness swarm wants: the event
-//! grammar that bounds effects to a live activation (H6/H8), and run discipline
-//! over `(session, turn)` (H3/H7). They live here rather than in one test binary
-//! because they are claims about *the harness's* contract, not about any one
-//! suite — and because independently-maintained copies drift apart, so that one
-//! of them quietly stops checking what its name says.
-//!
-//! Behind the `testing` feature: this is test support, not part of the harness
-//! API, and it should not ship in a production build of the crate.
+//! The continuous H-checkers: the event grammar that bounds effects to a live
+//! activation (H6/H8), and run discipline over `(session, turn)` (H3/H7). Test
+//! support behind the `testing` feature, not part of the harness API.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

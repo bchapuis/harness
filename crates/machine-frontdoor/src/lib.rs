@@ -1,31 +1,28 @@
 //! The persistent machine's SSH front door (machine spec §5.1).
 //!
 //! A front door is a cluster member — the ingress analogue of the harness
-//! gateway (harness §7.3) — that **terminates SSH in-process** (with `russh`,
-//! a pure-Rust server) and bridges each authenticated channel to the
-//! machine's guest agent over vsock. It authenticates the connecting client
-//! by public key against the machine's journaled authorized-key set, presents
-//! the machine's own journaled host key so one SSH identity survives
-//! hibernation/migration/failover, and never lets guest-side material govern
-//! what it bridges — possession of the vsock channel *is* the host's
-//! authority (M4).
+//! gateway (harness §7.3) — that **terminates SSH in-process** (`russh`) and
+//! bridges each authenticated channel to the machine's guest agent over vsock.
+//! It authenticates the client by public key against the machine's journaled
+//! authorized-key set, presents the machine's own journaled host key so one SSH
+//! identity survives hibernation/migration/failover, and never lets guest-side
+//! material govern what it bridges — possession of the vsock channel *is* the
+//! host's authority (M4).
 //!
 //! Two seams keep the cluster and the transport out of the SSH code:
 //!
-//! - [`MachineAuthority`] — the grain-cluster half (production: a `GrainRef`
-//!   to the machine over its leader; tests: a fake). It supplies the host
-//!   key, the authorized-key check, and the journaled `Attach`/`Detach`.
-//! - [`ChannelBackend`] — the transport half. It opens one byte stream per
-//!   channel to the guest agent (production: [`bridge::VsockBackend`] over
-//!   the leader node's vsock; tests: an in-memory duplex to a fake agent).
+//! - [`MachineAuthority`] — the grain-cluster half: the host key, the
+//!   authorized-key check, and the journaled `Attach`/`Detach`. Production
+//!   wires it to a `GrainRef` over the machine's leader.
+//! - [`ChannelBackend`] — the transport half: one byte stream per channel to
+//!   the guest agent (production: [`bridge::VsockBackend`] over the leader
+//!   node's vsock).
 //!
-//! What is **not** here, because this sandbox cannot verify it end to end: the
-//! cross-node relay that carries a channel's bytes from the front-door member
-//! to the leader that owns the vsock socket (front door and leader may be
-//! different nodes). [`ChannelBackend`] is exactly that seam; the reference
-//! [`bridge::VsockBackend`] assumes the guest socket is reachable from this
-//! node (co-located, or the caller supplies a relayed stream). Credit-based
-//! flow control across the actor transport is future work (machine §8).
+//! Not implemented (machine §8): the cross-node relay that carries a channel's
+//! bytes from the front-door member to the leader that owns the vsock socket,
+//! and credit-based flow control across the actor transport. [`ChannelBackend`]
+//! is that seam; [`bridge::VsockBackend`] assumes the guest socket is reachable
+//! from this node.
 
 mod bridge;
 mod ssh;
@@ -58,10 +55,10 @@ impl std::error::Error for FrontDoorError {}
 /// Expand the machine's journaled host-key material into the SSH host key
 /// presented at KEX (machine §3, §5.1). The material — `MachineState::
 /// host_key`, carried on the attach reply — is the raw 32-byte ed25519 seed
-/// the machine drew from system entropy at provisioning; expanding it here,
-/// the one decoder of that encoding, keeps russh out of the machine crate.
-/// Pure: the same seed always yields the same key, so the client's
-/// `known_hosts` pin survives hibernation, migration, and failover.
+/// the machine drew from system entropy at provisioning; expanding it here
+/// keeps russh out of the machine crate. Pure: the same seed always yields the
+/// same key, so the client's `known_hosts` pin survives hibernation,
+/// migration, and failover.
 pub fn host_key_from_seed(seed: &[u8]) -> Result<PrivateKey, FrontDoorError> {
     let seed: &[u8; 32] = seed.try_into().map_err(|_| {
         FrontDoorError(format!(
@@ -82,12 +79,11 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Duplex for 
 
 /// The grain-cluster half of the front door (machine §5.1). Production wires
 /// this over a `GrainRef<Machine>` to the machine's leader; tests supply a
-/// fake. Every method is per-connection or per-channel, so nothing here holds
+/// fake. Every method is per-connection or per-channel: nothing here holds
 /// cluster state.
 pub trait MachineAuthority: Send + Sync + 'static {
-    /// The machine's journaled host key (machine §3), presented at KEX so the
-    /// client's `known_hosts` pin survives hibernation, migration, and
-    /// failover.
+    /// The machine's journaled host key (machine §3), presented at KEX (see
+    /// [`host_key_from_seed`]).
     fn host_key(
         &self,
         machine: &GrainName,

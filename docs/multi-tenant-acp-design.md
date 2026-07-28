@@ -1,23 +1,19 @@
 # Multi-tenant edge: the gateway as a cluster client
 
-This is the design for making `harness-standalone` multi-tenant. It is the
-deployment expression of the project's goal — a distributed, multi-tenant
-agentic runtime — built on the `tenancy` directory grain (`crates/tenancy`) and a
-single public edge: the **`harness-gateway`**, an Orleans-style cluster *client*.
+This is the design for making `harness-standalone` multi-tenant, built on the
+`tenancy` directory grain (`crates/tenancy`) and a single public edge: the
+**`harness-gateway`**, an Orleans-style cluster *client*.
 
-Decisions settled with the project owner: the trust boundary is the **gateway**;
-a request proves its principal with a **bearer token**; and the gateway reaches
-the cluster not over a bespoke control protocol but by joining the actor
+The trust boundary is the **gateway**; a request proves its principal with a
+**bearer token**; and the gateway reaches the cluster by joining the actor
 transport as a non-voting, non-hosting member and addressing session grains
-directly. (An earlier iteration put a line-delimited control protocol between a
-REPL/ACP front-end and the nodes, with the gateway forwarding over it; that whole
-layer was collapsed onto the cluster-client edge — see `.claude/plans/`.)
+directly, with no control protocol in between.
 
 ## The shape of the problem
 
-The runtime is already built for this. A session is a grain named
-`(KindId, SessionId)`, sharded by a blind hash; granary is deliberately
-tenant-blind (`crates/tenancy/src/lib.rs` opening docs). The `tenancy`
+A session is a grain named `(KindId, SessionId)`, sharded by a blind hash;
+granary is deliberately tenant-blind (`crates/tenancy/src/lib.rs` opening
+docs). The `tenancy`
 `Directory` grain records, per principal, which grain names that principal owns.
 What is missing lives entirely at the network edge:
 
@@ -26,11 +22,9 @@ What is missing lives entirely at the network edge:
    the caller sends. Nothing stops one caller from naming another's session
    unless the edge prevents it.
 
-Neither gap is in the core; both are at the edge — now the gateway.
-
 ## The key insight: isolation and enumeration are different jobs
 
-Only one of them is security-critical, and it is the smaller change.
+Only one of them is security-critical.
 
 - **Isolation comes from edge-side key prefixing.** If the gateway prepends the
   *authenticated* principal to the session key —
@@ -39,10 +33,7 @@ Only one of them is security-critical, and it is the smaller change.
   supplies the prefix; the gateway does. This is the load-bearing isolation.
 - **Enumeration and lifecycle come from the `Directory`.** "List my sessions",
   "drop my whole index when I leave" — the parts a client cannot derive from a
-  key. This is the richer feature layer; the `Directory` is the enumeration
-  primitive.
-
-So the work splits into a small security-critical core and a feature layer.
+  key.
 
 ## Identity model
 
@@ -59,8 +50,7 @@ client --(HTTP: Authorization: Bearer <token>)--> harness-gateway
 
 Because the gateway holds `GrainRef`s and rides the receptionist gossip, it sits
 **inside** the cluster's trust boundary (it presents the cluster secret on the
-transport). That is the Akka-`ClusterClient` tradeoff, accepted because the
-gateway is already where tenant auth terminates. Untrusted callers reach it only
+transport): the Akka-`ClusterClient` tradeoff. Untrusted callers reach it only
 over HTTP with a bearer token; the nodes have no client-facing listener.
 
 ## Touchpoints
@@ -92,8 +82,7 @@ authorization gate.
   session ids it supplied.
 - **Reads are not gated on `Contains`.** The principal prefix already isolates
   reads (a client cannot name a key outside its own principal), so a gate adds no
-  security. The gateway records on prompt and lists, and leaves reads to
-  prefix-isolation.
+  security.
 - **Later** — `session/delete` -> forget the entry and retire the grain.
 
 ## Security properties to bake in, not bolt on
@@ -121,11 +110,10 @@ authorization gate.
   each prompt and answers `GET /v1/sessions` from it.
 - **Gateway-as-cluster-client edge** — `harness-gateway` joins the transport as a
   non-voting member (`Harness::client` + `granary_client`), terminates tenant
-  auth, and addresses session grains directly — no control protocol, no
-  forwarding hop. SSE carries the live record stream.
-- **Optional, later** — per-tenant budgets and quotas, `session/delete` (forget
+  auth, and addresses session grains directly. SSE carries the live record stream.
+- **Not implemented** — per-tenant budgets and quotas, `session/delete` (forget
   plus grain retire), token introspection, signed (HMAC/JWT) tokens, a WebSocket
-  transport, and a re-introduced thin CLI as an HTTP client of the gateway.
+  transport, and a thin CLI as an HTTP client of the gateway.
 
 ## Tests
 
@@ -137,8 +125,7 @@ authorization gate.
 ## Token format
 
 The deployment ships the **static tokens file** (`StaticTokens`): opaque secrets
-mapped to principals, dependency-free so the build stays offline-clean. A
-stateless **signed-token** verifier (HMAC/JWT, subject = principal) is the next
-implementation of the same `TokenVerifier` seam, for a runtime that wants to
-scale the edge without a shared token store; it needs a crypto dependency, so it
-lands once that can be added.
+mapped to principals, dependency-free so the build stays offline-clean. Not
+implemented: a stateless **signed-token** verifier (HMAC/JWT, subject =
+principal) behind the same `TokenVerifier` seam, which would scale the edge
+without a shared token store but needs a crypto dependency.

@@ -8,17 +8,9 @@
 //! that principal by [`scoped_session`], so one tenant can never name another's
 //! grains.
 //!
-//! Two verifiers ship, both behind [`TokenVerifier`]:
-//!
-//! - [`StaticTokens`] — an operator-supplied map of opaque secret token →
-//!   principal, the secure mode (`--auth-tokens <file>`). A token is an API
-//!   key: secret, high-entropy, revoked by editing the file and restarting.
-//! - [`InsecureTokens`] — the token *is* the principal, unverified: the
-//!   loopback-only dev convenience, so the local demo and tests pick a tenant by
-//!   naming it.
-//!
-//! A stateless signed-token verifier (HMAC, JWT) is a future implementation of
-//! the same seam; it needs a crypto dependency and so is deferred.
+//! Two verifiers ship behind [`TokenVerifier`]: [`StaticTokens`] (the secure
+//! mode) and [`InsecureTokens`] (loopback-only dev). Not implemented: a stateless
+//! signed-token verifier (HMAC, JWT) behind the same seam.
 
 use std::collections::HashMap;
 use std::net::IpAddr;

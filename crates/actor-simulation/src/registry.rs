@@ -4,10 +4,8 @@
 //! [`SimRegistry`] implements the [`RegistryClient`] seam the registry-based
 //! control plane syncs against, with **seeded faults**: latency on every fetch,
 //! stale reads served from the snapshot history, and operator-controlled
-//! unavailability — the registry-mode rows of the spec's virtualized-trait and
-//! fault-injection tables. The same handle is the *operator's* side of the
-//! registry: tests register, drain, resume, and deregister members through it,
-//! and toggle availability.
+//! unavailability. The same handle is the *operator's* side: tests register,
+//! drain, resume, and deregister members through it, and toggle availability.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -32,10 +30,6 @@ use crate::Simulation;
 
 /// How many past snapshots a stale read may be served from.
 const HISTORY_DEPTH: usize = 32;
-
-// `RegistryFaultPolicy` — the *input* side of registry fault injection — lives
-// in `crate::faults` beside `FaultPolicy`, so every fault knob a run configures
-// is in one module and the coverage tally that answers it is in another.
 
 struct SimRegistryState {
     /// The global monotonic revision, bumped by every mutation.
@@ -78,11 +72,10 @@ impl SimRegistryState {
     }
 }
 
-/// The simulated external registry (spec §9.4.2, §18.2). Cloning shares the
-/// same registry; [`client`](SimRegistry::client) yields the
-/// [`RegistryClient`] handle a [`SimNetwork`](crate::SimNetwork) node syncs
-/// against, while the mutation methods are the operator/platform side a test
-/// drives directly.
+/// The simulated external registry (spec §9.4.2, §18.2). Cloning shares the same
+/// registry. [`client`](SimRegistry::client) yields the [`RegistryClient`] handle
+/// a [`SimNetwork`](crate::SimNetwork) node syncs against; the mutation methods
+/// are the operator side a test drives directly.
 #[derive(Clone)]
 pub struct SimRegistry {
     state: Arc<Mutex<SimRegistryState>>,
@@ -139,8 +132,8 @@ impl SimRegistry {
     }
 
     /// The registry faults this instance has exercised so far (spec §18.3), as
-    /// the registry rows of [`FaultStats`] — summed with the network's by the
-    /// cluster driver so a swarm can assert registry faults actually fired.
+    /// the registry rows of [`FaultStats`]. The cluster driver sums them with
+    /// the network's.
     pub fn fault_stats(&self) -> FaultStats {
         let state = self.state.lock().expect("registry mutex poisoned");
         FaultStats {

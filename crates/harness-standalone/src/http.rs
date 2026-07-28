@@ -2,11 +2,10 @@
 //! operation): a minimal HTTP/1.1 client over tokio, TLS from rustls with
 //! webpki trust anchors.
 //!
-//! One connection per request with `connection: close` — the simplest shape
-//! that is fully correct for a low-rate model client, and it lets the
-//! response be read to EOF and parsed in one pass. Retries, backoff, and the
-//! error taxonomy live above this seam in `harness-anthropic`; everything
-//! here maps onto `HttpError` and is retried as transport pressure.
+//! One connection per request with `connection: close`, so the response is
+//! read to EOF and parsed in one pass. Retries, backoff, and the error
+//! taxonomy live above this seam in `harness-anthropic`; everything here maps
+//! onto `HttpError` and is retried as transport pressure.
 //!
 //! A plain `http://` base skips TLS, so tests (and a scripted fake API)
 //! can point the client at a local listener.

@@ -1,14 +1,12 @@
 //! The shard map: a consensus-agreed record of which nodes replicate each shard
 //! (spec §7.6).
 //!
-//! Storage distribution needs every node to agree on a shard's replica set. The
-//! rendezvous-derived map (the prior step) snapshots that per node from its *live*
-//! membership view at `granary()` time, so nodes that join at different membership
-//! epochs compute divergent sets. This module replaces that with a **stored,
-//! consensus-agreed** map: a granary-owned Raft group per grain type whose
-//! committed log *is* the allocation. Every node applies the identical committed
-//! entries, so the cluster agrees on where each shard lives regardless of join
-//! order.
+//! Storage distribution needs every node to agree on a shard's replica set, and a
+//! per-node view of live membership at `granary()` time would diverge with join
+//! order. So the map is **stored and consensus-agreed**: a granary-owned Raft
+//! group per grain type whose committed log *is* the allocation. Every node
+//! applies the identical committed entries, so the cluster agrees on where each
+//! shard lives regardless of join order.
 //!
 //! Reached through the object-safe [`ShardMapSource`] seam — the map analogue of
 //! [`DynGrainJournal`](crate::journal::DynGrainJournal) — so the gateway and `Granary` stay
@@ -498,9 +496,8 @@ impl ShardMapSource for RaftShardMap {
     }
 
     fn shard_of(&self, hash: u64) -> Option<u32> {
-        // O(shards) scan of the committed ranges. Shard counts are dozens, not
-        // thousands (G7 bounds them), and the hot path caches its resolution, so
-        // a sorted-range index is not yet worth the bookkeeping.
+        // O(shards) scan of the committed ranges: shard counts are dozens, not
+        // thousands (G7 bounds them), and the hot path caches its resolution.
         self.inner
             .lock()
             .expect("shard map mutex poisoned")
@@ -539,18 +536,15 @@ impl ShardMapSource for RaftShardMap {
 
 /// Apply the map group's committed allocation records (spec §7.6, §7.7).
 ///
-/// The **founding** `Assign` for a shard records its replica set; every node in it
-/// creates the shard's leader-election group and builds its
-/// [`QuorumGrainJournal`]. A later `Assign` onto an already-allocated shard starts
-/// a **migration** (§7.7): it commits the `target` set — from that point every
-/// write and recovery uses the joint quorum (majority of current AND of target,
-/// enforced by the shared [`ReplicaSets`]) — and a node newly involved creates the
-/// shard group as a non-member over the *current* voters (no election disruption;
-/// the reconcile loop promotes it) and builds a journal so it can serve once
-/// leadership reaches it. `Migrated` — proposed by the shard leader's driver only
-/// after every grain is caught up on the target — flips `current = target`; nodes
-/// leaving the set drop their journal (an active `Host` keeps its own `Arc`, so an
-/// in-flight append still completes or fails cleanly as `NotLeader`).
+/// Each command's committed meaning is on [`ShardMapCommand`]; this loop performs
+/// the node-local half: creating and retiring shard groups, building and dropping
+/// [`QuorumGrainJournal`]s, and flipping the live [`ReplicaSets`] so every
+/// in-flight journal switches to the joint quorum (a majority of current AND of
+/// target) the moment a migration commits. A node newly involved creates the shard
+/// group as a non-member over the *current* voters, so it never disrupts an
+/// election; the reconcile loop promotes it. A node leaving a set drops its
+/// journal — an active `Host` keeps its own `Arc`, so an in-flight append still
+/// completes or fails cleanly as `NotLeader`.
 ///
 /// Runs until the map group's commit stream closes.
 #[allow(clippy::too_many_arguments)]
@@ -832,9 +826,8 @@ async fn apply_loop<R: RaftConsensus>(
                             control.range.end = plan.boundary - 1;
                             control.frozen_from = None;
                         }
-                        // One bound and one range reclamation, rather than a bound
-                        // plus a walk of every grain in the shard to re-derive the
-                        // same boundary the bound already states (§7.7).
+                        // One bound and one range reclamation, rather than a walk
+                        // of every grain in the shard (§7.7).
                         (
                             local.seal_range(parent, plan.boundary),
                             local.remove_range(parent, plan.boundary),
@@ -969,10 +962,9 @@ async fn apply_loop<R: RaftConsensus>(
                     .remove(&right)
                     .is_some();
                 if had_right {
-                    // The whole shard goes, so say that once rather than walking
-                    // its grains to remove them one at a time; `drop_shard` also
-                    // clears right's fence and bound, which the retired shard has
-                    // no further use for.
+                    // The whole shard goes, so drop it in one call rather than
+                    // walking its grains; `drop_shard` also clears right's fence
+                    // and bound.
                     local.drop_shard(right).durable().await;
                 }
                 handles
@@ -998,8 +990,8 @@ async fn apply_loop<R: RaftConsensus>(
 /// `upgrade` (one `Arc`, or a tuple for the loops that need both `inner` and
 /// `handles`) and its per-tick body. The leadership gate stays in the body: it
 /// varies loop to loop (whole-tick, per-shard-group, or per-term), and two loops
-/// run their proposer phase ungated — so a `tick` that returns early skips just
-/// that tick, exactly as a `continue` did.
+/// run their proposer phase ungated. A `tick` that returns early skips just that
+/// tick.
 async fn driver_loop<R, D, Fut>(
     consensus: &R,
     interval: Duration,
@@ -1118,8 +1110,7 @@ async fn allocator_loop<R: RaftConsensus>(
 ///
 /// `reconfigure_group` proposes the deltas as separate single-server changes and is
 /// leader-only, so only one node reconfigures a given group. Exits when the map is
-/// dropped. (Bounding the map group to fewer than all voters — learners for
-/// routing-only nodes — remains a refinement.)
+/// dropped.
 async fn reconcile_loop<R: RaftConsensus>(
     consensus: R,
     grain_type: &'static str,

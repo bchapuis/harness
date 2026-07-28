@@ -2,10 +2,9 @@
 //!
 //! A [`Checker`] wraps a set of [`Invariant`]s and acts as the system's
 //! [`EventSink`]: every emitted event is fed to each invariant, and any
-//! violation is recorded. Crucially it **never panics inside `emit`** — that
-//! would unwind through the actor executor's panic guard and be mistaken for a
-//! handler fault. Violations are collected and surfaced by the runner after the
-//! run completes.
+//! violation is recorded. It **never panics inside `emit`**: that would unwind
+//! through the actor executor's panic guard and be mistaken for a handler fault.
+//! Violations are collected and surfaced by the runner after the run completes.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -36,8 +35,7 @@ struct Inner {
 }
 
 /// Feeds the event stream to a set of invariants and collects their violations.
-/// Clone to obtain another handle to the same checker (it is its own
-/// [`EventSink`]).
+/// Clone for another handle to the same checker; it is its own [`EventSink`].
 #[derive(Clone)]
 pub struct Checker {
     inner: Arc<Mutex<Inner>>,
@@ -87,10 +85,9 @@ impl EventSink for Checker {
             invariants,
             violations,
         } = &mut *inner;
-        // A process ended. Every invariant gets the chance to drop what it knew
-        // about that node before the successor's events arrive reusing its
-        // identities — one place decides the semantics, rather than each
-        // invariant re-deriving it (see `Invariant::forget_node`).
+        // A process ended. Every invariant drops what it knew about that node
+        // before the successor's events arrive reusing its identities (see
+        // `Invariant::forget_node`).
         if let Some(crate::NodeRestarted { node }) = event.as_app() {
             for inv in invariants.iter_mut() {
                 inv.forget_node(*node);

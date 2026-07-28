@@ -1,17 +1,14 @@
 //! Tenancy: an ownership-index grain layered on granary.
 //!
 //! Granary is deliberately **tenant-blind** (granary spec; `research/durable-objects.md`):
-//! its storage core knows only opaque grain names, exactly as Cloudflare's storage
-//! relay knows only object ids. Multi-tenancy is assembled *above* it — a naming
-//! convention (the principal id rides in a grain's key), a capability boundary at
-//! each consumer's authenticating edge, and an application-level **directory** that
-//! records which grains a principal owns. This crate is that directory, and nothing
-//! else.
+//! its storage core knows only opaque grain names. Multi-tenancy is assembled *above*
+//! it — a naming convention (the principal id rides in a grain's key), a capability
+//! boundary at each consumer's authenticating edge, and an application-level
+//! **directory** that records which grains a principal owns. This crate is that
+//! directory.
 //!
 //! "Own" means more than "address": it means **enumerate** ("list my grains") and
-//! **bulk-forget** ("drop my whole index when I leave") — the parts a durable-object
-//! platform does not hand you for free (DO research §6: ownership is an
-//! application-maintained index, not a runtime feature). A [`Directory`] is one
+//! **bulk-forget** ("drop my whole index when I leave"). A [`Directory`] is one
 //! grain *per principal*, keyed `(grain_type, principal_id)`, whose journal records
 //! the [`GrainName`]s that principal owns, each with the [`Meta`] a listing page
 //! renders (a display label, a creation time, free-form attributes).
@@ -23,8 +20,6 @@
 //! the target grain's live state (its balance, its status): that would be a second
 //! source of truth that drifts the moment the grain changes, reintroducing the
 //! cross-grain consistency granary keeps out (each grain is its own boundary, §2.2).
-//! A consumer that wants a denormalized view maintains a separate read-model with
-//! idempotent updates; it is not the directory's job.
 //!
 //! Every field is **caller-supplied**, because the fold ([`Grain::apply`]) must be
 //! pure and deterministic — no clock, no entropy (granary §4.1). So `created_at` is
@@ -37,9 +32,9 @@
 //!   reverse; the storage core stays tenant-blind. The directory is an ordinary
 //!   grain — it introduces no new transport, journal, or consensus.
 //! - **Not the auth boundary.** *Who* may read or mutate a principal's directory is
-//!   decided at each consumer's authenticating edge (the Worker/binding analogue),
-//!   where the principal is actually known — never here. A `GrainRef<Directory>` is
-//!   an in-cluster capability among trusted peers, not a tenant-safe token.
+//!   decided at each consumer's authenticating edge, where the principal is actually
+//!   known — never here. A `GrainRef<Directory>` is an in-cluster capability among
+//!   trusted peers, not a tenant-safe token.
 //! - **Not a deleter of what it indexes.** The directory *forgets* names; it cannot
 //!   reach into another grain. Tearing a principal's grains down is driven by the
 //!   consumer: [`List`] the names, then tell each grain to retire, then [`Clear`].
@@ -50,8 +45,8 @@
 //! [`system.granary::<Directory<S>>(config)`](granary::GranaryExt::granary), all
 //! consumers share one directory namespace. A consumer that wants an isolated
 //! namespace hosts the same grain under its own runtime type name with
-//! [`granary_named`](granary::GranaryExt::granary_named) (e.g. `"app.Directory"`) —
-//! distinct gateways, shard maps, and consensus groups, no code change here.
+//! [`granary_named`](granary::GranaryExt::granary_named) (e.g. `"app.Directory"`):
+//! distinct gateways, shard maps, and consensus groups.
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
@@ -132,11 +127,8 @@ impl Ownership {
         self.entries.get(name)
     }
 
-    /// The names this principal owns of one grain type, in stable key order.
-    ///
-    /// A range scan, not a full scan: names sort by `(grain_type, key)` (the first
-    /// field of [`GrainName`]), so one type's names are contiguous — the scan starts
-    /// at the type's first name and stops when the type changes.
+    /// The names this principal owns of one grain type, in stable key order. A
+    /// range scan over the contiguous type (see [`Ownership`]), not a full scan.
     pub fn names_of_type<'a>(&'a self, grain_type: &'a str) -> impl Iterator<Item = &'a GrainName> {
         self.entries_of_type(grain_type).map(|(n, _)| n)
     }
@@ -291,9 +283,9 @@ impl Message for Get {
     const MANIFEST: Manifest = Manifest::new("tenancy.Get");
 }
 
-/// Enumerate the entries the principal owns — name and metadata (the read that
-/// ownership exists for, enough to render a listing without touching each grain).
-/// Emits no events; served locally from the activation (granary §7.5).
+/// Enumerate the entries the principal owns — name and metadata, enough to render a
+/// listing without touching each grain. Emits no events; served locally from the
+/// activation (granary §7.5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct List;
 impl Message for List {
@@ -302,8 +294,8 @@ impl Message for List {
 }
 
 /// Enumerate the entries the principal owns of one grain type — the query for "all
-/// my sessions" when a principal holds several grains per type. A range scan (names
-/// sort by `(grain_type, key)`), not a full scan. Emits no events.
+/// my sessions" when a principal holds several grains per type. A range scan, not a
+/// full scan. Emits no events.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ListByType {
     pub grain_type: String,

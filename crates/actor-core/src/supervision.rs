@@ -25,8 +25,7 @@ pub enum Fault {
 
 /// Delay between restarts (spec §11.2). Exponential with a cap is RECOMMENDED to
 /// avoid hot-restart loops; the executor adds equal-jitter to whatever delay this
-/// returns (`host::jittered`), so a wave of simultaneous restarts desynchronizes
-/// instead of retrying in lockstep.
+/// returns (`host::jittered`).
 #[derive(Clone, Copy, Debug)]
 pub enum Backoff {
     /// Restart immediately.

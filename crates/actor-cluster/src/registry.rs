@@ -3,12 +3,9 @@
 //! In registry-based mode the authoritative member set lives in an **external
 //! registry** — a platform API, a database, a coordination service — that the
 //! cluster reads but does not operate. [`RegistryClient`] is the trait the sync
-//! loop speaks, like [`Transport`](crate::Transport) (spec §9.4.2 item 7):
-//! production implements it against the real platform; the simulator supplies an
-//! in-memory registry with seeded latency, staleness, and unavailability (spec
-//! §18.2, §18.3). [`InMemoryRegistry`] is the plain, fault-free implementation —
-//! the production bootstrap and the substrate a faulted simulation wrapper
-//! delegates to.
+//! loop speaks (spec §9.4.2 item 7): production implements it against the real
+//! platform; the simulator supplies an in-memory registry with seeded latency,
+//! staleness, and unavailability (spec §18.2, §18.3).
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;

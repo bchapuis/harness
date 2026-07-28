@@ -1,10 +1,10 @@
 //! The transport trait (spec §7).
 //!
 //! A [`Transport`] is the pluggable *mechanism* that carries [`Frame`]s between
-//! nodes — the default TCP transport and the simulator's in-memory network are
-//! two implementations of one trait, indistinguishable from above (spec §7). The
-//! frames it carries — the wire *protocol* — live in [`crate::protocol`], so the
-//! carrier stays decoupled from any subsystem's payload.
+//! nodes (spec §7); the default TCP transport and the simulator's in-memory
+//! network are two implementations of the one trait. The frames it carries — the
+//! wire *protocol* — live in [`crate::protocol`], so the carrier stays decoupled
+//! from any subsystem's payload.
 
 use std::future::Future;
 
@@ -44,8 +44,7 @@ pub trait Transport: Clone + Send + Sync + 'static {
 
     /// Release the transport's resources — background tasks, listeners, and open
     /// associations — on a graceful node stop (spec §9.3). Closing the inbound
-    /// path also ends the system's receive loop. The default is a no-op, which
-    /// suits transports that hold nothing to release (e.g. the in-memory
-    /// simulator).
+    /// path also ends the system's receive loop. The default is a no-op, for a
+    /// transport that holds nothing to release.
     fn shutdown(&self) {}
 }

@@ -4,8 +4,7 @@
 //! operations under the kv tag, folded into an ordered map; its
 //! composite-snapshot contribution is the encoded map; its blob roots are the
 //! ids of **spilled** values. A grain declares it with `type Facets = (Kv, …)`
-//! and reaches it through [`GrainCtx::kv`](crate::GrainCtx::kv) — configuration,
-//! refs, cursors, indices, without designing an event vocabulary for them.
+//! and reaches it through [`GrainCtx::kv`](crate::GrainCtx::kv).
 //!
 //! **Staging (§7.12).** Writes stage in a per-command overlay: reads through the
 //! handle see committed-plus-staged (read-your-staged-writes), and the staged
@@ -18,13 +17,11 @@
 //! §7.10 discipline) and the map keeps only its [`BlobId`]; `get` fetches it
 //! back, verified by content (G17). Spilled ids are the facet's root set (F3),
 //! so a deleted or overwritten key's spilled bytes become orphans reclaimed by
-//! the next [`GrainBlobs::gc`](crate::GrainBlobs::gc) sweep — which unions the
-//! facet roots automatically, so a sweep can never drop a *live* spilled value.
+//! the next [`GrainBlobs::gc`](crate::GrainBlobs::gc) sweep, which unions the
+//! facet roots so a sweep can never drop a *live* spilled value.
 //!
-//! **Why native, not sugar over SQL (§7.13).** Durable Objects backs its KV API
-//! with the object's SQLite database; the facet model permits that convergence
-//! later without API change. A native logical facet adds no C dependency, holds
-//! its form in memory, and runs unchanged under deterministic simulation (§14).
+//! Native rather than sugar over SQL (§7.13): no C dependency, the form lives in
+//! memory, and it runs unchanged under deterministic simulation (§14).
 
 use actor_core::join_all_results;
 use std::collections::BTreeMap;
@@ -78,7 +75,6 @@ impl KvValue {
 }
 
 /// One kv record (spec §7.13): the unit of durable change under the kv tag.
-/// Encoded with `postcard` — facet payloads are runtime-internal (§7.12).
 #[derive(Serialize, Deserialize)]
 enum KvOp {
     Put { key: String, value: KvValue },

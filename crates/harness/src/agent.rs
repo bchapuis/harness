@@ -1,12 +1,11 @@
 //! The agent: an autonomous grain (harness spec §3).
 //!
 //! A session *is* a grain ([`granary`]). What the harness adds is **autonomy**:
-//! a plain grain waits for the next command, whereas an agent's activation drives
-//! itself forward — model→tools→model — until a run reaches a terminal outcome.
-//! The grain model is decide/apply: [`Grain::apply`] folds records into
-//! [`SessionState`], and each [`GrainHandler`] is a *pure decision* returning the
-//! records to journal plus a reply (granary §4.2). The loop rides three granary
-//! seams the spec leans on, none of which the harness re-implements:
+//! an agent's activation drives itself forward — model→tools→model — until a run
+//! reaches a terminal outcome. The grain model is decide/apply: [`Grain::apply`]
+//! folds records into [`SessionState`], and each [`GrainHandler`] is a *pure
+//! decision* returning the records to journal plus a reply (granary §4.2). The
+//! loop rides three granary seams, none of which the harness re-implements:
 //!
 //! - **The output gate** (granary §6): a handler's records commit before its
 //!   reply releases, so "intent before effect" (§6.4) is free — a handler that
@@ -22,11 +21,11 @@
 //!   a live run from hibernating (§7.2).
 //!
 //! Everything else — the journal, the single-writer fence, placement,
-//! activation, hibernation, lossless failover — is the grain's, consumed
-//! unchanged (§2.1). Ephemeral activation state (the sandbox handle, held tiers,
-//! the subscriber set, the launch-once guard — granary's workflow
-//! [`LaunchGuard`], granary §7.17) lives behind a [`Mutex`] on the grain
-//! behavior, rebuilt per activation and never journaled (§5.5, §5.6, §7.4).
+//! activation, hibernation, lossless failover — is the grain's (§2.1). Ephemeral
+//! activation state (the sandbox handle, held tiers, the subscriber set, the
+//! launch-once guard — granary's workflow [`LaunchGuard`], granary §7.17) lives
+//! behind a [`Mutex`] on the grain behavior, rebuilt per activation and never
+//! journaled (§5.5, §5.6, §7.4).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -152,8 +151,8 @@ pub enum SubmitStatus {
 /// Why a `Submit` was rejected (§7.4): a deterministic caller-contract
 /// violation, kept distinct from a transport `GrainError`. Both cases are
 /// **permanent** — the same submit always rejects the same way — so a caller
-/// must never retry one (unlike a transport failure, which a peer move could
-/// clear). Naming them lets the resume/delegation loops tell the two apart.
+/// must never retry one, unlike a transport failure, which a peer move could
+/// clear.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubmitReject {
     /// The submitted `kind` is not this grain's type: the address and the
@@ -307,22 +306,21 @@ struct SandboxState {
     /// activity (§5.5): false until a `WorkspaceReset` is journaled (or none is
     /// needed); flipped false again on environment loss.
     reconciled: bool,
-    /// Whether the workspace was actually lost *during* this activation — the
-    /// provider returned `EnvironmentLost` (§5.4). A durable provider survives
-    /// reactivation, so the harness suppresses the routine reactivation reset
-    /// for it; but a genuine loss mid-activation must still reset, durable or
-    /// not. Set on `EnvironmentLost`, cleared per activation in `on_activate`.
+    /// Whether the workspace was lost *during* this activation — the provider
+    /// returned `EnvironmentLost` (§5.4). The durable workspace survives
+    /// reactivation, so only a loss observed here resets. Set on
+    /// `EnvironmentLost`, cleared per activation in `on_activate`.
     lost_this_activation: bool,
 }
 
 /// One launched effect of the live run (§3.1): the claim key of the run's
 /// [`LaunchGuard`]. A model call is claimed under the step it answers
 /// (`own_steps` at issue, §3.1 step 2); a tool call or delegation under its
-/// `CallId` (§3.1 step 4). Claims are never released — supersession is
-/// structural: a committed response advances `own_steps`, so the next model
-/// claim is a fresh key, and a committed `ToolOutcome` removes the call from
-/// the pending set the dispatcher scans. A straggler therefore has nothing to
-/// "unlock" into a duplicate launch (§9.1.4, §9.2 item 4).
+/// `CallId` (§3.1 step 4). Claims are never released — a committed response
+/// advances `own_steps`, so the next model claim is a fresh key, and a committed
+/// `ToolOutcome` removes the call from the pending set the dispatcher scans. A
+/// straggler therefore has nothing to "unlock" into a duplicate launch (§9.1.4,
+/// §9.2 item 4).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum StepKey {
     /// The model call answering step `own_steps` (§3.1 step 2).
@@ -337,9 +335,9 @@ enum StepKey {
 struct RunScope {
     /// Effects this activation has launched: granary's workflow launch-once
     /// guard (granary §7.17), fold-external, so `Advance` does not relaunch an
-    /// effect whose outcome has not yet committed. A resume starts a fresh
-    /// guard and re-launches whatever the journal still shows unresolved
-    /// (§5.5) — the *outcome record*, not the launch, is the durable fact.
+    /// effect whose outcome has not yet committed. A resume starts a fresh guard
+    /// and re-launches whatever the journal still shows unresolved (§5.5): the
+    /// *outcome record*, not the launch, is the durable fact.
     launched: LaunchGuard<StepKey>,
     /// Calls whose outcome is journaled or synthesized: dedups a straggler
     /// (a timeout racing the real outcome, §9.2 item 4).
@@ -366,13 +364,11 @@ struct EventOutbox {
     started: Vec<TurnId>,
     /// Turns whose `RunEnded` just committed, awaiting `RunEnded` (§10.4, H3).
     ended: Vec<TurnId>,
-    /// Model calls whose `ModelResponse` just committed, awaiting `ModelCompleted`
-    /// — scoped to journaled spend, so an uncommitted response emits nothing and
-    /// a resume re-counts nothing (§10.4, §9.1.4): `(turn, tokens)`.
+    /// Model calls whose `ModelResponse` just committed, awaiting
+    /// `ModelCompleted` (§10.4, §9.1.4): `(turn, tokens)`.
     model: Vec<(TurnId, u64)>,
     /// Tool calls whose `ToolOutcome` just committed, awaiting `ToolCompleted`
-    /// (§10.4). Like `model`, populated only where a record is produced — a
-    /// discarded straggler emits nothing.
+    /// (§10.4).
     tools: Vec<TurnId>,
 }
 
@@ -429,10 +425,10 @@ impl<S: HarnessSystem> Default for Activation<S> {
 }
 
 /// The agent grain (harness spec §3): one `Agent` Rust type hosted under each
-/// kind's name (`granary_named`, §2.2), so a `KindId` is a grain type. The
-/// behavior is built fresh per activation by the harness's factory, which
-/// injects the node's seams via [`Shared`]; the folded [`SessionState`] is the
-/// grain's `State`, rebuilt from the journal by granary.
+/// kind's name (`granary_named`, §2.2). The behavior is built fresh per
+/// activation by the harness's factory, which injects the node's seams via
+/// [`Shared`]; the folded [`SessionState`] is the grain's `State`, rebuilt from
+/// the journal by granary.
 pub struct Agent<S: HarnessSystem> {
     shared: Arc<Shared<S>>,
     /// This grain's kind definition (§7.1). Captured by the factory, which hosts
@@ -440,8 +436,7 @@ pub struct Agent<S: HarnessSystem> {
     /// has `K`'s definition — kind resolution is infallible, no lookup needed.
     kind: Arc<Kind>,
     /// The model and sandbox seams for this hosted kind (§4, §5.3), captured by
-    /// the factory. An `Agent` only ever activates on a host, so the seams are
-    /// always present — no `Option`, no host-only runtime check.
+    /// the factory.
     seams: Seams,
     act: Arc<Mutex<Activation<S>>>,
 }
@@ -463,7 +458,7 @@ impl<S: HarnessSystem> Agent<S> {
         self.act.lock().expect("agent activation mutex poisoned")
     }
 
-    /// This grain's kind definition (§7.1): infallible by construction.
+    /// This grain's kind definition (§7.1).
     fn kind(&self) -> &Kind {
         &self.kind
     }
@@ -701,9 +696,9 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     fn on_tail(&self, state: &SessionState, msg: Tail) -> Vec<(Seq, Record)> {
-        // The grain owns the journal, so the activation mirrors committed records
-        // (§10.2). A read served from the activation, read-your-leader, never a
-        // write (§7.3). Record `i` carries `Seq(i + 1)`, so every record with
+        // A read served from the activation's mirror of the journal (§10.2),
+        // read-your-leader, never a write (§7.3). Record `i` carries
+        // `Seq(i + 1)` (`SessionState::seq_of`), so every record with
         // `Seq <= from` sits at index `< from` — skip that prefix instead of
         // scanning it.
         let from = msg.from.value() as usize;
@@ -729,9 +724,7 @@ impl<S: HarnessSystem> Agent<S> {
         let Some(live) = state.live.as_ref().filter(|l| l.turn == turn) else {
             // The run ended while the call was in flight (a cancel, §9.2):
             // discard, do not journal, emit nothing (§3.2, §10.4). The launch
-            // guard needs no touch-up: claims are never released, so this
-            // straggler cannot unlock a duplicate of the successor run's own
-            // call — the successor reset the guard and holds its own claims.
+            // guard needs no touch-up: claims are never released (`StepKey`).
             return Vec::new();
         };
         if live.spend.own_steps != step {
@@ -742,8 +735,6 @@ impl<S: HarnessSystem> Agent<S> {
             // belongs to the call answering it.
             return Vec::new();
         }
-        // No claim to release: this response's commit advances `own_steps`, so
-        // the next model call claims a fresh [`StepKey::Model`].
         match result {
             Ok(mut response) => {
                 // Assign ids the provider omitted (§5.2): deterministic in the
@@ -759,8 +750,7 @@ impl<S: HarnessSystem> Agent<S> {
                     .model
                     .push((turn.clone(), response.usage.total()));
                 // No requested tool calls ⇒ this assistant message ends the run
-                // (§3.1 step 3). The termination rule is the loop's, not a
-                // property of the model's reply.
+                // (§3.1 step 3).
                 let is_final = response.calls.is_empty();
                 if is_final {
                     act.events.ended.push(turn.clone());
@@ -873,15 +863,12 @@ impl<S: HarnessSystem> Agent<S> {
         };
         if let Err(ToolError::EnvironmentLost(_)) = &outcome {
             // The environment is lost (§5.5): drop the binding, release it, and
-            // require a `WorkspaceReset` before the next model call. The
-            // durable subtree survives in the journal; what is gone is the
-            // activation's working state (excluded trees, running processes).
+            // require a `WorkspaceReset` before the next model call.
             self.release_sandbox(&mut act, ctx);
             act.env.reconciled = false;
             act.env.lost_this_activation = true;
         }
-        // The outcome record is produced below, so its `ToolCompleted` is owed
-        // once it commits (drained by `emit_run_events`, §10.4).
+        // `ToolCompleted` is owed once the outcome record below commits (§10.4).
         act.events.tools.push(turn.clone());
         drop(act);
         self.schedule_advance(ctx);
@@ -967,7 +954,6 @@ impl<S: HarnessSystem> Agent<S> {
         if let Some((turn, parent)) = act.queue.pop_front() {
             return self.begin_turn(state, ctx, kind, act, turn, parent);
         }
-        // No queued turn: still clear the per-run flags as the grain goes idle.
         act.run.reset();
         Vec::new()
     }
@@ -1030,13 +1016,10 @@ impl<S: HarnessSystem> Agent<S> {
         }
         // Surface a lost workspace before the model acts on state that is gone
         // (§5.5). The workspace itself is durable — the agent's facet
-        // rematerializes it on every activation (granary §7.11) — so a routine
-        // reactivation is never a loss. Only a loss observed *this* activation
-        // (the provider returned `EnvironmentLost`) resets: the durable subtree
-        // survives in the journal, but the activation's working state (excluded
-        // trees, running processes, held tiers) is gone. A fresh environment
-        // resets every held tier to `Workspace`; later acquisitions re-journal,
-        // never silently inherited.
+        // rematerializes it on every activation (granary §7.11) — so only a loss
+        // observed *this* activation (the provider returned `EnvironmentLost`)
+        // resets. A fresh environment resets every held tier to `Workspace`;
+        // later acquisitions re-journal, never silently inherited.
         if !act.env.reconciled && act.env.lost_this_activation {
             act.env.reconciled = true;
             act.env.tiers_held = BTreeSet::from([Tier::Workspace]);
@@ -1322,9 +1305,9 @@ impl<S: HarnessSystem> Agent<S> {
         }
     }
 
-    /// Open the sandbox off the command path (§5.3). The opened handle is not
-    /// serializable, so the task fills the slot under the mutex and nudges
-    /// [`Advance`]; success emits `SandboxBound` (H8).
+    /// Open the sandbox off the command path (§5.3): the task fills the
+    /// [`SandboxSlot`] under the mutex and nudges [`Advance`]; success emits
+    /// `SandboxBound` (H8).
     fn launch_open(
         &self,
         ctx: &GrainCtx<Agent<S>>,
@@ -1563,9 +1546,9 @@ impl<S: HarnessSystem> Agent<S> {
 
     // -- sandbox lifecycle ---------------------------------------------------
 
-    /// Emit `SandboxReleased` for this session (H8) — the one place the event is
-    /// built, so [`release_sandbox`](Self::release_sandbox) and the passivation
-    /// teardown announce a release the same way.
+    /// Emit `SandboxReleased` for this session (H8): the one place the event is
+    /// built, shared by [`release_sandbox`](Self::release_sandbox) and the
+    /// passivation teardown.
     fn emit_sandbox_released(&self, ctx: &GrainCtx<Agent<S>>) {
         ctx.system().emit_app(
             HarnessEvent::SandboxReleased {
@@ -1791,9 +1774,9 @@ impl<S: HarnessSystem> GrainHandler<ToolDone> for Agent<S> {
 // Free helpers
 // ===========================================================================
 
-/// The outcome of one [`submit_and_attach`] attempt — the re-attach protocol's
-/// single mechanism, leaving the *policy* (when to give up, when to retry) to
-/// the caller's loop, since the two callers bound it differently (§7.4, §8.1).
+/// The outcome of one [`submit_and_attach`] attempt. The *policy* (when to give
+/// up, when to retry) is the caller's loop: the two callers bound it differently
+/// (§7.4, §8.1).
 pub(crate) enum AttachOutcome {
     /// The run finished and delivered its outcome.
     Completed(RunOutcome),
@@ -1808,9 +1791,8 @@ pub(crate) enum AttachOutcome {
 
 /// One submit-and-await-outcome attempt against a grain (§7.4): spawn an
 /// ephemeral reply mailbox, `Submit` the turn carrying it, and await the run's
-/// `RunCompleted` bounded by `within`. This is the whole re-attach mechanism;
-/// `prompt` and delegation each wrap it in their own retry policy (deadline- or
-/// attempt-bounded), safe because re-submitting the same `TurnId` is idempotent.
+/// `RunCompleted` bounded by `within`. Wrapping it in a retry loop is safe
+/// because re-submitting the same `TurnId` is idempotent (H7).
 pub(crate) async fn submit_and_attach<S: HarnessSystem>(
     system: &S,
     grain: &granary::GrainRef<Agent<S>>,
@@ -1903,8 +1885,8 @@ async fn run_child<S: HarnessSystem>(
     }
 }
 
-/// Exponential backoff for the delegation/cancel retry loops, capped — the
-/// framework's own backoff (core §11.2), reused rather than re-derived.
+/// Exponential backoff for the delegation/cancel retry loops, capped (core
+/// §11.2).
 fn propagation_backoff(attempt: u32) -> Duration {
     Backoff::Exponential {
         base: Duration::from_millis(200),

@@ -4,17 +4,14 @@
 //! **immutable content-addressed store** — a per-grain blob area replicated to the
 //! *same* shard replica set through the *same* [`ReplicaStore`](crate::replica_store)
 //! actor, but with the term, order, and read-repair removed: content addressing
-//! needs none of them, so this is the journal's durability half with its hard half
-//! gone (the same subset relationship the `blob-store` crate's replica draws to
-//! granary's). It is the colocated, zero-latency storage a Durable Object keeps on
-//! the machine where it runs (DO §2.3): a grain stores its bulk bytes here and
-//! references them by [`BlobId`] from the small foldable state in its journal.
+//! needs none of them. It is the colocated, zero-latency storage a Durable Object
+//! keeps on the machine where it runs (DO §2.3): a grain stores its bulk bytes
+//! here and references them by [`BlobId`] from the small foldable state in its
+//! journal.
 //!
-//! The grain reaches it through [`GrainCtx::blobs`](crate::GrainCtx::blobs), which
-//! returns a [`GrainBlobs`] scoped to the grain. Because the grain knows its own
-//! live id set, reclamation is a **per-blob mark-from-roots sweep**
-//! ([`GrainBlobs::gc`]) — something a liveness-blind shared blob store cannot do —
-//! plus a whole-area drop on destroy ([`GrainBlobs::destroy`]).
+//! Because the grain alone knows its own live id set, reclamation is a **per-blob
+//! mark-from-roots sweep** ([`GrainBlobs::gc`]) plus a whole-area drop on destroy
+//! ([`GrainBlobs::destroy`]).
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -34,12 +31,7 @@ use crate::journal::GrainJournalError;
 /// A `BlobId` is a pure function of the bytes: equal content yields the same id
 /// wherever it is stored, so a writer and a reader agree on a blob's name with no
 /// coordination, and a reader proves it received the right bytes by re-hashing them
-/// (the read path verifies before returning). BLAKE3 is chosen over SHA-256 because
-/// every fetch re-hashes to verify, so hashing throughput sits on the read path.
-///
-/// Granary defines its own id rather than depending on `blob-store`, which sits
-/// *beside* granary, not under it; the digest is the same BLAKE3 root either way.
-/// Rendered in lowercase hex for display.
+/// (the read path verifies before returning). Rendered in lowercase hex for display.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlobId([u8; 32]);
 
@@ -49,7 +41,6 @@ impl BlobId {
         BlobId(*blake3::hash(bytes).as_bytes())
     }
 
-    /// The raw 32-byte digest.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -61,8 +52,7 @@ impl BlobId {
     }
 
     /// Parse the hex form produced by [`Display`](fmt::Display) — 64 lowercase hex
-    /// chars — back into a [`BlobId`], or `None` if it is not that shape. Kept beside
-    /// the `Display` impl so the encoding lives in one place.
+    /// chars — back into a [`BlobId`], or `None` if it is not that shape.
     pub fn from_hex(hex: &str) -> Option<BlobId> {
         if hex.len() != 64 {
             return None;
@@ -75,7 +65,7 @@ impl BlobId {
     }
 
     /// Whether `bytes` hash to this id — the read-path integrity check (B1/G17),
-    /// named once so every fetch site re-hashes the same way and none can forget it.
+    /// named once so every fetch site re-hashes the same way.
     pub fn verifies(&self, bytes: &[u8]) -> bool {
         BlobId::of(bytes) == *self
     }
@@ -123,7 +113,6 @@ impl GrainBlobs {
         }
     }
 
-    /// The grain this handle is scoped to.
     pub(crate) fn grain(&self) -> &GrainName {
         &self.grain
     }
@@ -174,7 +163,7 @@ impl GrainBlobs {
     /// bytes are verified against `id` by the seam before return: an absent or
     /// irrecoverably-corrupt blob is [`GrainError::Unavailable`], never wrong bytes.
     /// A ranged request is served by obtaining and verifying the whole blob, then
-    /// slicing — efficient range streaming is a later refinement.
+    /// slicing. Not implemented: streaming a range.
     pub async fn get(&self, id: BlobId, range: Option<Range<u64>>) -> Result<Vec<u8>, GrainError> {
         let bytes = self
             .journal
@@ -205,15 +194,12 @@ impl GrainBlobs {
             .map_err(into_grain_error)
     }
 
-    /// Drop every blob of this grain **not** in `live` — a mark-from-roots sweep the
-    /// grain drives from its own metadata (the ids its state still references). The
-    /// grain alone knows liveness, so this reclaims blocks orphaned by overwrites
-    /// without any cluster-wide reference tracking. Best-effort and idempotent (so
-    /// it cannot fail — a missed replica keeps its garbage until the next sweep).
+    /// Drop every blob of this grain not in `live` ∪ the facets' roots (F3) — a
+    /// mark-from-roots sweep the grain drives from its own metadata (the ids its
+    /// state still references), reclaiming blocks orphaned by overwrites without any
+    /// cluster-wide reference tracking. Best-effort and idempotent (so it cannot
+    /// fail — a missed replica keeps its garbage until the next sweep).
     pub async fn gc(&self, live: &BTreeSet<BlobId>) {
-        // The retained set is the caller's roots ∪ the facets' roots (spec
-        // §7.12): only the host-built handle knows the facets, so the union
-        // lives here, not in any one facet or in application code.
         let mut retain: Vec<BlobId> = live.iter().copied().collect();
         retain.extend((self.facet_roots)());
         self.journal.retain_blobs(&self.grain, retain).await;
@@ -227,10 +213,9 @@ impl GrainBlobs {
     }
 }
 
-/// Map a seam-level blob failure onto the grain error model. The seam reports only
-/// `Unavailable` (a quorum could not be reached, or every reachable copy failed
-/// verification); the grain surfaces it as the same durability outcome a write pause
-/// uses (§11).
+/// The seam reports only `Unavailable` (a quorum could not be reached, or every
+/// reachable copy failed verification); the grain surfaces it as the same
+/// durability outcome a write pause uses (§11).
 fn into_grain_error(err: GrainJournalError) -> GrainError {
     match err {
         GrainJournalError::Unavailable(why) => GrainError::Unavailable(why),
@@ -255,9 +240,7 @@ mod tests {
     #[test]
     fn id_round_trips_through_hex_and_raw_bytes() {
         let id = BlobId::of(b"some bytes");
-        // The raw digest round-trips.
         assert_eq!(BlobId::from_bytes(*id.as_bytes()), id);
-        // Display is a 64-char lowercase hex string.
         let hex = id.to_string();
         assert_eq!(hex.len(), 64);
         assert!(

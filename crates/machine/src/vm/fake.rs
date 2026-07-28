@@ -13,8 +13,8 @@ use super::MachineVmProvider;
 use super::VmError;
 use super::VmSpec;
 
-/// Boots [`FakeVm`]s whose writer task ticks on the system's virtual
-/// clock: deterministic under simulation, quiescent under [`pause`]
+/// Boots [`FakeVm`]s whose writer task ticks on the system's virtual clock:
+/// deterministic under simulation, quiescent under [`pause`]
 /// (MachineVm::pause), and dead the moment the VM is killed or dropped.
 pub struct FakeVmProvider<S: GranarySystem> {
     system: S,
@@ -191,8 +191,8 @@ impl MachineVm for FakeVm {
             if self.killed.load(Ordering::Relaxed) {
                 return Err(VmError::Transport("fake vm killed".to_string()));
             }
-            // The write-out is all synchronous IO, so the guard is held
-            // across it — no clone of the file bytes.
+            // All synchronous IO, so the guard is held across it — no clone
+            // of the file bytes.
             let map = self.lock_ws();
             // Replace, never merge — the guest's view is authoritative
             // across a pull, as for the real agent.

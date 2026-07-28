@@ -11,19 +11,15 @@
 //! §4.3); a failure that survives the policy surfaces as `ModelError` for the
 //! run to end on, never silently.
 //!
-//! "OpenAI-compatible" is the point: the socket is a seam ([`HttpPost`]) and
-//! the host owns the base URL, so the same client speaks to OpenAI, xAI (Grok),
-//! OpenRouter, Together, Groq, vLLM, llama.cpp, Ollama, or any server that
-//! serves `/v1/chat/completions`. Everything that could be wrong about
-//! *talking* the protocol lives here, deterministic and tested, while the byte
-//! transport and the endpoint stay the deployment's choice ([`base_url`] lists
-//! the known ones).
+//! The socket is a seam ([`HttpPost`]) and the host owns the base URL, so the
+//! same client speaks to OpenAI, xAI (Grok), OpenRouter, Together, Groq, vLLM,
+//! llama.cpp, Ollama, or any server that serves `/v1/chat/completions`
+//! ([`base_url`] lists the known ones).
 //!
 //! The transport plumbing (`HttpPost`, `RetryPolicy`, the backoff curve) is
-//! duplicated from `harness-anthropic` rather than shared: the two providers
-//! only look alike, and each retry policy is part of its own protocol contract
-//! (Anthropic's `529`/`overloaded_error`, OpenAI's `context_length_exceeded`).
-//! A third provider is the trigger to lift the common half into a shared crate.
+//! duplicated from `harness-anthropic` rather than shared: each retry policy is
+//! part of its own protocol contract (Anthropic's `529`/`overloaded_error`,
+//! OpenAI's `context_length_exceeded`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,9 +46,8 @@ pub const COMPLETIONS_PATH: &str = "/v1/chat/completions";
 /// Base URLs of well-known OpenAI-compatible endpoints, for a host to point its
 /// [`HttpPost`] at. Each is the origin (plus any provider-specific prefix) that
 /// [`COMPLETIONS_PATH`] appends to; none ends in `/v1`, because the path already
-/// carries it — the one join easy to get wrong. The base URL is the
-/// deployment's to choose (§12.1); these are convenience data, not policy, and
-/// self-hosted servers (vLLM, llama.cpp, Ollama) supply their own.
+/// carries it. The base URL is the deployment's to choose (§12.1); these are
+/// convenience data, and self-hosted servers supply their own.
 pub mod base_url {
     /// OpenAI: `https://api.openai.com/v1/chat/completions`.
     pub const OPENAI: &str = "https://api.openai.com";

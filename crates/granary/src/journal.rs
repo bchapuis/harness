@@ -9,7 +9,7 @@
 //! [`LocalGrainJournal`](crate::memory::LocalGrainJournal) and the clustered `Quorum`
 //! [`QuorumGrainJournal`](crate::shard::QuorumGrainJournal). Because the methods
 //! return `impl Future`, the trait is not object-safe; it is threaded as a concrete
-//! type, the way the framework threads its other seams (actor §4.6).
+//! type (actor §4.6).
 
 use std::future::Future;
 
@@ -51,10 +51,8 @@ impl std::fmt::Display for Seq {
 /// The **shard term**: the single-writer fencing token every per-grain append
 /// carries (spec §8). It is the shard leader-election group's Raft term, so it only
 /// ever advances; the store refuses any write stamped below the highest term it has
-/// acknowledged. A newtype (not a bare `u64`) so it can never be confused with a
-/// [`Seq`], a shard index, or a count in the wide store signatures it travels
-/// through. `Ord` is the fence comparison. `Term::ZERO` is the single-node `Local`
-/// tier, which never elects and so never fences.
+/// acknowledged. `Ord` is the fence comparison. `Term::ZERO` is the single-node
+/// `Local` tier, which never elects and so never fences.
 #[derive(
     Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
 )]
@@ -174,10 +172,9 @@ pub trait GrainJournal: Clone + Send + Sync + 'static {
     // --- The grain-native content-addressed blob store (durable-workspace design) ---
     //
     // A grain's immutable blobs, replicated to the *same* shard replicas as its
-    // records but off the ordered/fenced path (no `Seq`, no term). Surfaced on the
-    // journal seam so the host needs no extra dependency to hand the grain a
-    // [`GrainBlobs`](crate::GrainBlobs) handle; the implementation routes to the same
-    // replicator the records use.
+    // records but off the ordered/fenced path (no `Seq`, no term). On the journal seam
+    // so the host needs no extra dependency to hand the grain a
+    // [`GrainBlobs`](crate::GrainBlobs) handle.
 
     /// Store an immutable blob for one grain, durable on a write quorum of its
     /// replicas (one local copy on `Local`). Idempotent and dedup'd by content.
@@ -218,22 +215,18 @@ pub trait GrainJournal: Clone + Send + Sync + 'static {
     fn delete_blobs(&self, grain: &GrainName) -> impl Future<Output = ()> + Send;
 }
 
-/// The object-safe form of [`GrainJournal`], so the runtime can hold a journal as
-/// `Arc<dyn DynGrainJournal>` and **select the durability tier at construction** —
-/// the `Local` [`LocalGrainJournal`](crate::memory::LocalGrainJournal) or the `Quorum`
-/// [`QuorumGrainJournal`](crate::shard::QuorumGrainJournal) — without threading a `J`
-/// type parameter through `Host`/`Gateway`/`GrainRef`/`Granary` (which would leak `J`
-/// into the user-facing `GrainCtx` and handler signatures).
-///
-/// `GrainJournal`'s `impl Future` returns are not object-safe; this mirror boxes them
-/// (`BoxFuture`). The blanket impl below adapts any [`GrainJournal`] — it clones the
-/// journal (a [`GrainJournal`] is `Clone`) and the grain name into each boxed future,
-/// so the returned future is `'static` and the caller borrows nothing.
 /// The boxed result of [`DynGrainJournal::load`].
 pub type LoadFuture = BoxFuture<'static, Result<Vec<(Seq, Vec<u8>)>, GrainJournalError>>;
 /// The boxed result of [`DynGrainJournal::load_snapshot`].
 pub type LoadSnapshotFuture = BoxFuture<'static, Result<Option<(Seq, Vec<u8>)>, GrainJournalError>>;
 
+/// The object-safe form of [`GrainJournal`], so the runtime can hold a journal as
+/// `Arc<dyn DynGrainJournal>` and **select the durability tier at construction**
+/// without threading a `J` type parameter through `Host`/`Gateway`/`GrainRef`/
+/// `Granary` (which would leak `J` into the user-facing `GrainCtx` and handler
+/// signatures). The blanket impl below clones the journal and the grain name into
+/// each boxed future, so the returned future is `'static` and the caller borrows
+/// nothing.
 pub trait DynGrainJournal: Send + Sync + 'static {
     fn append(
         &self,

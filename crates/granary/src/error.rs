@@ -1,15 +1,13 @@
 //! The grain error model (spec §12).
 //!
-//! Grain calls surface two failure layers, kept distinct exactly as the actor
-//! framework keeps [`CallError`] and `M::Reply` apart (actor §14): an
-//! *application* failure the handler deliberately produced lives **inside**
-//! `M::Reply` (e.g. `Result<T, E>`, §4.2), never here; [`GrainError`] carries
-//! only the transport and durability failures of *reaching and committing* a
-//! command.
+//! Grain calls surface two failure layers, kept distinct as the actor framework
+//! keeps [`CallError`] and `M::Reply` apart (actor §14): an *application*
+//! failure the handler deliberately produced lives **inside** `M::Reply` (e.g.
+//! `Result<T, E>`, §4.2), never here; [`GrainError`] carries only the transport
+//! and durability failures of *reaching and committing* a command.
 //!
 //! The variants are exhaustive (no `#[non_exhaustive]`) by design (invariant
-//! **G5** support): a caller must handle every real partial failure explicitly
-//! ("define errors out of existence" — keep only the real ones, actor §14).
+//! **G5** support): a caller must handle every real partial failure explicitly.
 
 use actor_core::CallError;
 use actor_core::NodeId;

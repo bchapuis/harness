@@ -3,25 +3,18 @@
 //! fold, the [`Alarm`](crate::Alarm) facet, and a grain's self-driving loop.
 //!
 //! **The durable core is memoization.** A workflow is a re-entrant decision the
-//! grain re-drives after every commit (the agentic harness's `advance` loop is the
-//! reference, harness §3). Each **step** runs an external effect *once*; its result
-//! is journaled under the workflow tag and folded into a `step id → bytes` map. On
-//! replay — a later drive, a re-activation, a failover — a completed step resolves
-//! from the map instead of re-running, so effects are at-most-once across crashes
-//! (the property manual bookkeeping gives the agent today, made a facet). `sleep`
-//! is a step whose effect is a durable [`Alarm`](crate::Alarm); `retry` is a step
-//! that re-launches after an alarm-backed backoff.
+//! grain re-drives after every commit (harness §3). Each **step** runs an external
+//! effect *once*; its result is journaled under the workflow tag and folded into a
+//! `step id → bytes` map. On replay — a later drive, a re-activation, a failover —
+//! a completed step resolves from the map instead of re-running, so effects are
+//! at-most-once across crashes. `sleep` is a step whose effect is a durable
+//! [`Alarm`](crate::Alarm); `retry` is a step that re-launches after an
+//! alarm-backed backoff.
 //!
 //! **What the grain still wires.** Launching a step's effect off the command path
 //! and self-`tell`ing its result back is grain-specific (the effect's type is), so
-//! the facet supplies the durable half — [`result`](WorkflowHandle::result) and
-//! [`record`](WorkflowHandle::record) — and [`StepDone`] plus
-//! [`complete_step`](complete_step) supply the generic command that journals a
-//! returned result. The ephemeral "already launched this activation" guard is a
-//! [`LaunchGuard`]. A linear `async` DSL over these is a later layer (§16).
-//!
-//! Step ids are the workflow's call-site ordinals: stable across re-drives and
-//! replay, exactly as the agent tags a model call with `live.spend.own_steps`.
+//! the facet supplies only the durable half. Not implemented: a linear `async` DSL
+//! over these (§16).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -115,9 +108,7 @@ impl Facet for Workflow {
 }
 
 /// The handler-facing workflow accessor (spec §16), obtained from
-/// [`GrainCtx::workflow`](crate::GrainCtx::workflow). Reads a step's memoized result
-/// (committed-plus-staged); recording a result stages it into the command's atomic
-/// batch (§7.12).
+/// [`GrainCtx::workflow`](crate::GrainCtx::workflow).
 pub struct WorkflowHandle<'a, G: Grain, I>
 where
     G::Facets: HasFacet<Workflow, I>,
@@ -148,8 +139,7 @@ where
     /// The memoized result of step `id`, decoded, or `None` if the step has not yet
     /// completed. Resolves a result recorded earlier this command over the committed
     /// map (read-your-staged-writes, §7.12). A completed step returns `Some` on every
-    /// re-drive and after any replay — the memoization that makes an effect
-    /// at-most-once.
+    /// re-drive and after any replay.
     pub fn result<T: DeserializeOwned>(&self, id: StepId) -> Result<Option<T>, GrainError> {
         let bytes = self
             .cell
@@ -178,8 +168,7 @@ where
 
     /// Record step `id`'s result, staged into this command's atomic batch (§7.12).
     /// Called from the handler that receives a step effect's outcome (typically the
-    /// [`StepDone`] handler via [`complete_step`]); the result is then memoized and
-    /// every later drive resolves it through [`result`](WorkflowHandle::result).
+    /// [`StepDone`] handler via [`complete_step`]).
     pub fn record<T: Serialize>(&self, id: StepId, value: &T) {
         let bytes = encode_payload(value);
         self.cell
@@ -195,13 +184,12 @@ where
 }
 
 /// The generic command a step's off-path effect self-`tell`s back with its encoded
-/// result (spec §16): the workflow analogue of the agent's `ModelDone`/`ToolDone`.
-/// The grain accepts it (`r.accept::<StepDone>()`) and its handler calls
-/// [`complete_step`] to journal the result, after which a re-drive resolves the step
-/// from the memo. A local self-`tell`, like the alarm and idle ticks.
+/// result (spec §16). The grain accepts it (`r.accept::<StepDone>()`) and its
+/// handler calls [`complete_step`] to journal the result, after which a re-drive
+/// resolves the step from the memo. A local self-`tell`, like the alarm and idle
+/// ticks.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StepDone {
-    /// The step this result completes.
     pub id: StepId,
     /// The step's `postcard`-encoded output (see [`WorkflowHandle::record`]).
     pub bytes: Vec<u8>,
@@ -209,8 +197,7 @@ pub struct StepDone {
 
 impl StepDone {
     /// Build a `StepDone` from a step id and its result value, `postcard`-encoding
-    /// the value the same way [`WorkflowHandle::result`] decodes it. Use this from a
-    /// step's off-path effect so it need not encode by hand.
+    /// the value the same way [`WorkflowHandle::result`] decodes it.
     pub fn new<T: Serialize>(id: StepId, value: &T) -> StepDone {
         StepDone {
             id,
@@ -241,11 +228,10 @@ where
 }
 
 /// An ephemeral, per-activation guard tracking which steps this activation has
-/// already launched (spec §16): the launch-once half of the workflow pattern,
-/// used directly by the harness agent's run loop (harness §3). Never journaled —
-/// a re-activation rebuilds it and re-launches any step still unresolved in the
-/// memo (at-most-once holds because the *result*, not the launch, is the durable
-/// fact). Kept beside the grain's other ephemeral activation state.
+/// already launched (spec §16), the launch-once half of the workflow pattern.
+/// Never journaled — a re-activation rebuilds it and re-launches any step still
+/// unresolved in the memo (at-most-once holds because the *result*, not the
+/// launch, is the durable fact).
 ///
 /// `K` is the consumer's step key. The default [`StepId`] fits an ordinal
 /// workflow; a grain whose steps carry richer identity substitutes its own
@@ -272,10 +258,8 @@ impl<K: Ord> LaunchGuard<K> {
         self.launched.insert(id)
     }
 
-    /// Whether step `id` is already claimed, without claiming it: the read for
-    /// a drive that scans its incomplete steps and must skip the in-flight ones
-    /// but may not launch the rest this round (e.g. when it journals intents
-    /// first and re-drives after the commit).
+    /// Whether step `id` is already claimed, without claiming it — for a drive that
+    /// scans its incomplete steps and must skip the in-flight ones.
     pub fn is_claimed(&self, id: &K) -> bool {
         self.launched.contains(id)
     }

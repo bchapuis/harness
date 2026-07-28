@@ -2,8 +2,7 @@
 //! a fake guest serves the module's wire protocol over a plain unix socket —
 //! including the muxer's `CONNECT` handshake, so the host-side client code
 //! path is byte-identical to production — and executes `/bin/sh` against a
-//! private "guest workspace" directory. The full push → exec → pull bracket
-//! is therefore exercised end to end; only the VMM lifecycle itself needs
+//! private "guest workspace" directory. Only the VMM lifecycle itself needs
 //! the KVM-gated suite (`tests/firecracker.rs`).
 
 use std::io::Read;
@@ -322,7 +321,7 @@ async fn a_dead_socket_is_transport_loss() {
 }
 
 // The codec itself (pack determinism, budgeting, round trips) is tested where
-// it lives: `microvm::ws_sync`. This suite covers the protocol around it.
+// it lives: `microvm::ws_sync`.
 
 #[test]
 fn the_config_document_pins_the_shape_firecracker_boots_from() {

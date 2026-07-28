@@ -7,24 +7,21 @@
 //! network (`--network none`), and nothing else, but the guest still speaks
 //! to the host kernel, so the guarantee is priced by kernel
 //! privilege-escalation bugs. Multi-tenant deployments SHOULD NOT rely on it
-//! alone. On macOS the container additionally sits behind Docker Desktop's
-//! Linux VM — an incidental layer, still not the per-environment microVM
-//! grade Firecracker gives.
+//! alone.
 //!
-//! Conduct notes, in the spec's vocabulary:
+//! Conduct:
 //!
 //! - **Timeouts bound the outcome, not the effect.** The harness enforces a
 //!   tool timeout by dropping the call future, which kills the `docker exec`
 //!   *client* only (`kill_on_drop`); the process inside the container
 //!   survives until [`NativeTier::release`]'s `rm -f`. That is the contract
 //!   `ToolError::Timeout` documents ("the call's effects may still land"),
-//!   and `--pids-limit` is the cheap fork-bomb guard in the meantime.
+//!   and `--pids-limit` is the fork-bomb guard in the meantime.
 //! - **The bind mount is composed, not opened.** The provider retains the
 //!   workspaces root as a host path solely to compose the `-v` argument it
-//!   hands to docker: the mount is performed by the docker daemon, an
-//!   external confinement mechanism, never an ambient filesystem operation
-//!   by this crate — the cap-std stance of S1 survives with this one
-//!   documented composition.
+//!   hands to docker: the mount is performed by the docker daemon, never an
+//!   ambient filesystem operation by this crate, so S1 survives with this
+//!   one documented composition.
 //! - **Loss is discriminated by stderr, not exit code.** `docker exec` uses
 //!   125/126/127 for its own failures, but a user command can exit 125 too;
 //!   a daemon-reported error (the `Error response from daemon:` prefix and
@@ -93,15 +90,12 @@ pub(crate) struct NativeTier {
     host_workspace: PathBuf,
     /// Deterministic container name. A name, not just an id: a provision
     /// future dropped after `docker run` succeeds would leak a container no
-    /// id records — the name keeps the orphan addressable, for the
-    /// pre-provision sweep and for release. Suffixed with a digest of the
-    /// host workspace path so two providers (or two deployments) holding the
-    /// same session id never contend for one name.
+    /// id records — the name keeps the orphan addressable. Suffixed with a
+    /// digest of the host workspace path so two providers holding the same
+    /// session id never contend for one name.
     container_name: String,
     /// The provisioned container id. tokio's mutex, deliberately:
-    /// provisioning awaits across the lock, and tokio mutexes cannot poison
-    /// — the same degrade-not-poison conduct the compute tier gets from
-    /// poison recovery.
+    /// provisioning awaits across the lock, and tokio mutexes cannot poison.
     container: tokio::sync::Mutex<Option<String>>,
     /// Whether provisioning was ever attempted. Lets `release` return before
     /// constructing any `tokio::process::Command` when no Native call ever
@@ -193,8 +187,7 @@ impl NativeTier {
     /// carries the tier — sandbox spec §2.3 item 2).
     async fn provision(&self) -> Result<String, ToolError> {
         self.attempted.store(true, Ordering::SeqCst);
-        // Sweep any leftover from a previously dropped provision: the
-        // deterministic name makes the orphan addressable. Best-effort.
+        // Best-effort sweep of the orphan a dropped provision may have left.
         let _ = docker(&self.cli, ["rm", "-f", &self.container_name]).await;
         let mount = format!("{}:/workspace", self.host_workspace.display());
         let mut args: Vec<String> = [
@@ -270,9 +263,6 @@ impl NativeTier {
     pub(crate) async fn release(&self) {
         self.container.lock().await.take();
         if !self.attempted.load(Ordering::SeqCst) {
-            // No Native call ever ran: nothing to remove, and constructing a
-            // tokio Command here would demand a runtime the caller may not
-            // have (struct docs).
             return;
         }
         let _ = docker(&self.cli, ["rm", "-f", &self.container_name]).await;
@@ -298,13 +288,11 @@ where
 }
 
 /// Container-level failure vs the command's own failure (module docs): the
-/// docker CLI reports daemon errors on stderr with a fixed prefix; a user
-/// command forging that exact shape *as its first stderr bytes* is contrived
-/// enough to accept. The looser phrases are real (CLIs vary the framing),
-/// but they appear anywhere in stderr, where an innocent command can echo
-/// them — so they count only alongside the CLI's own exit codes (125–127),
-/// which a user command rarely shares and never accidentally pairs with the
-/// phrase.
+/// docker CLI reports daemon errors on stderr with a fixed prefix, and a user
+/// command forging that exact shape *as its first stderr bytes* is accepted
+/// as loss. The looser phrases are real (CLIs vary the framing) but can
+/// appear anywhere in stderr, where an innocent command can echo them, so
+/// they count only alongside the CLI's own exit codes (125–127).
 fn daemon_error(code: Option<i32>, stderr: &str) -> bool {
     if stderr.starts_with("Error response from daemon:")
         || stderr.starts_with("Cannot connect to the Docker daemon")

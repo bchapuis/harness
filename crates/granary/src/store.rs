@@ -3,18 +3,16 @@
 //! In the per-grain quorum substrate (§7.2) the grains' records live **off** the
 //! leader-election group's Raft log: each replica persists, on its own, the records
 //! quorum-appended to it by the shard leader's [`Replicator`](crate::replicator).
-//! `GrainStore` is that per-node durable store — the granary analogue of the Raft
-//! WAL (actor §9.4.3), injected at construction and preserved across a process
-//! restart, so a full-cluster cold restart recovers each grain from a quorum of the
-//! replicas' reloaded stores (§8, **G14**).
+//! `GrainStore` is that per-node durable store, injected at construction and
+//! preserved across a process restart, so a full-cluster cold restart recovers each
+//! grain from a quorum of the replicas' reloaded stores (§8, **G14**).
 //!
 //! It keys records by `(shard index, GrainName)` and stamps each with the **shard
 //! term** under which it was written — the fencing token (§8) and the key to
-//! highest-term-per-slot read-repair on recovery. A single in-memory tier
-//! ([`MemoryGrainStore`]) is the reference implementation, used by the `Local`
-//! journal directly and by the `Quorum` replica store on each node; a deployment
-//! that must survive total power loss supplies a file-backed `GrainStore` through
-//! the same seam (the harness file-log prior art, §7.4).
+//! highest-term-per-slot read-repair on recovery. [`MemoryGrainStore`] is the
+//! reference implementation, used by the `Local` journal directly and by the
+//! `Quorum` replica store on each node; a deployment that must survive total power
+//! loss supplies a file-backed `GrainStore` through the same seam (§7.4).
 //!
 //! **Per-grain segmentation.** A grain's records are an independent **segment** —
 //! its own [`GrainRecords`] behind its own lock — so concurrent grains never
@@ -23,8 +21,7 @@
 //! is the **fence**: the highest shard term the store has acknowledged (§8). It sits
 //! behind its own leaf lock, taken *inside* a grain's segment lock, so a grain's
 //! write and that same grain's recovery `prepare` serialize on the segment lock
-//! (the only fencing-critical race, §8) while cross-grain fence bumps stay
-//! monotonic and contend on nothing else.
+//! (the only fencing-critical race, §8).
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -42,8 +39,7 @@ use crate::journal::Seq;
 use crate::journal::Term;
 
 /// One stored record: the opaque event bytes and the **shard term** under which it
-/// was committed. The term is what lets a recovering leader pick, per `Seq` slot,
-/// the record a higher term last won — the highest-term-per-slot read-repair of §8.
+/// was committed. The term is what a recovering leader picks by, per `Seq` slot (§8).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordSlot {
     /// The shard term under which this record was written (the fencing token, §8).
@@ -64,7 +60,7 @@ pub enum StoreAck {
     /// different committed record at the first target slot, so the leader's head is
     /// behind (it recovered from local state without a quorum, §7.5). Carries the
     /// replica's actual head so the leader steps down and re-recovers. Optimistic
-    /// concurrency on the head: it keeps a stale leader from overwriting a committed
+    /// concurrency on the head, keeping a stale leader from overwriting a committed
     /// record even though its term is current (§8).
     Stale(Seq),
     /// Refused: the append targets a key at or above the shard's **append bound**
@@ -87,12 +83,10 @@ pub struct ReadReply {
     pub snapshot: Option<(Seq, Term, Vec<u8>)>,
 }
 
-/// The outcome of a recovery `prepare` (spec §8): the replica's records, or a
-/// refusal because it has promised a higher term. `prepare` is a fenced read — a
-/// Paxos-style promise — so that once a new leader has read a quorum, a deposed
-/// leader can no longer commit on any of those replicas (closing the
-/// commit-after-read race, §8). An ordinary [`read`](GrainStore::read) does not
-/// fence and is used only for local replay.
+/// The outcome of a recovery [`prepare`](GrainStore::prepare) (spec §8): the
+/// replica's records, or a refusal because it has promised a higher term. An
+/// ordinary [`read`](GrainStore::read) does not fence and is used only for local
+/// replay.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReadOutcome {
     /// The replica's slots and snapshot; it has promised not to accept a lower term.
@@ -102,12 +96,10 @@ pub enum ReadOutcome {
 }
 
 /// Whether a record store is a normal append or a recovery write-back (§8) — the
-/// one bit that decides whether the optimistic head check applies. A named type
-/// rather than a bare `bool` so the intent is legible at every call site.
+/// one bit that decides whether the optimistic head check applies.
 ///
-/// The variant order is load-bearing: `Append` is the zero discriminant, matching
-/// the `false` it replaced, so a segment log written before this type reads back
-/// unchanged.
+/// The variant order is load-bearing: `Append` is the zero discriminant, so an
+/// already-written segment log reads back unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WriteKind {
     /// A normal append: applies the optimistic head check and may report `Stale`.
@@ -130,25 +122,21 @@ pub enum WriteKind {
 /// durable effect is enqueued — the outcome is settled, only its *stability* is
 /// pending.
 ///
-/// The two halves are separated because they belong to different places. The
-/// in-memory half must run under the grain's segment lock, synchronously, before the
-/// call returns: that is what serializes a write against the same grain's recovery
+/// The in-memory half must run under the grain's segment lock, synchronously, before
+/// the call returns: that is what serializes a write against the same grain's recovery
 /// `prepare` (the only fencing-critical race, §8). The durable half must **not** run
 /// under that lock, so many grains' writes can share one fsync.
 ///
-/// Note what this is not: a `BoxFuture<StoreAck>`. A `Box::pin(async move { … })`
-/// runs its body at first *poll*, which would defer the guard-and-apply to whenever
-/// the caller happened to poll — and a caller that polled two writes out of order, or
-/// polled a `prepare` before an append it had already issued, would see a history the
-/// segment lock never permitted. Returning a value whose effect has already occurred
-/// makes the eager phase un-skippable rather than merely conventional.
+/// Not a `BoxFuture<StoreAck>`: an async block runs its body at first *poll*, which
+/// would defer the guard-and-apply to whenever the caller happened to poll, admitting
+/// histories the segment lock never permitted. Returning a value whose effect has
+/// already occurred makes the eager phase un-skippable.
 ///
 /// **A `Stored` outcome is not an acknowledgement until [`durable`](Reserved::durable)
 /// resolves.** Reporting one earlier shrinks a write's durability below the quorum
-/// that was counted for it (**G14**). The type cannot prove a caller waited, so it
-/// makes waiting the path of least resistance: `durable` is the only way to obtain the
-/// outcome, and [`refusal`](Reserved::refusal) — the one way to answer without waiting
-/// — can only yield outcomes that changed nothing and so have nothing to sync.
+/// that was counted for it (**G14**). `durable` is the only way to obtain the outcome;
+/// [`refusal`](Reserved::refusal), the one way to answer without waiting, can only
+/// yield outcomes that changed nothing and so have nothing to sync.
 #[must_use = "a store outcome is not acknowledged until it is durable (G14)"]
 pub struct Reserved<T> {
     outcome: T,
@@ -169,10 +157,8 @@ impl<T: Send + 'static> Reserved<T> {
 
     /// An outcome settled in memory, stable once `durable` resolves. Crate-private:
     /// only a store may claim that something is pending, and only for work it has
-    /// actually enqueued.
-    ///
-    /// Both stores in this crate settle synchronously today, so outside a test build
-    /// nothing constructs a pending outcome yet; the packed store is what will.
+    /// actually enqueued. Both stores in this crate settle synchronously, so outside a
+    /// test build nothing constructs a pending outcome.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn pending(outcome: T, durable: BoxFuture<'static, ()>) -> Reserved<T> {
         Reserved {
@@ -198,9 +184,7 @@ impl Reserved<StoreAck> {
     /// The refusal this write already is, or `None` for a `Stored`.
     ///
     /// A refused write changed nothing, so there is nothing to sync and no reason to
-    /// make a deposed leader wait a whole commit interval to learn it is deposed. The
-    /// narrow shape is the point: this cannot hand back a `Stored`, so "acknowledge an
-    /// un-synced write" is not something a caller can express by accident.
+    /// make a deposed leader wait a whole commit interval to learn it is deposed.
     pub fn refusal(&self) -> Option<StoreAck> {
         match &self.outcome {
             StoreAck::Stored(_) => None,
@@ -227,9 +211,8 @@ impl Reserved<ReadOutcome> {
 /// ordered, term-fenced record path: content addressing needs no term (a stale leader
 /// re-storing a block writes identical bytes) and no order. Keyed by
 /// `(shard, grain, BlobId)`; reclamation is grain-scoped, the grain driving it from
-/// its own live id set. A separate trait from [`GrainStore`] because it is a separate
-/// secret — unfenced and unordered — that the fenced record log neither shares state
-/// with nor constrains; [`GrainStore`] requires it so one per-node handle serves both.
+/// its own live id set. A separate trait because it is unfenced and unordered;
+/// [`GrainStore`] requires it so one per-node handle serves both.
 pub trait GrainBlobStore: Send + Sync + 'static {
     /// Store an immutable, content-addressed blob for a grain. Idempotent: an `id`
     /// already present is kept (storing equal content writes nothing new). Unfenced.
@@ -283,13 +266,11 @@ pub trait GrainBlobStore: Send + Sync + 'static {
 /// Extends [`GrainBlobStore`]: a grain's content-addressed blob area lives in the
 /// same per-node store but off the fenced record path (see that trait). The
 /// enumeration and reclamation methods here — `grains`, `remove_grain`,
-/// `remove_range`, `drop_shard`, `shard_bytes` — span both areas, which is why they
-/// belong to the combining trait, not either half.
+/// `remove_range`, `drop_shard`, `shard_bytes` — span both areas.
 ///
 /// **Every method that changes durable state returns a [`Reserved`]**, whose outcome
-/// is settled but not yet stable; see there for why the split is a returned value
-/// rather than a future. `grains` and `shard_bytes` are the exceptions and stay
-/// plain: neither reports durability, and both are used where awaiting would be
+/// is settled but not yet stable. `grains` and `shard_bytes` are the exceptions and
+/// stay plain: neither reports durability, and both are used where awaiting would be
 /// wrong (`shard_bytes` from a size-trigger poll, `grains` from inside a held lock).
 pub trait GrainStore: GrainBlobStore {
     /// Store `records` for a grain beginning at the slot after `after`, fenced by
@@ -311,18 +292,16 @@ pub trait GrainStore: GrainBlobStore {
 
     /// Every occupied slot (with its term) and the latest snapshot for a grain —
     /// a non-fencing local read, used for recovery merge and replay (§9). Empty for a
-    /// grain this store has never seen.
-    ///
-    /// A [`Reserved`] because the reply may name records this store has applied but
-    /// not yet made stable; a caller that acted on those would count un-durable
-    /// records toward a quorum (**G14**).
+    /// grain this store has never seen. A [`Reserved`] because the reply may name
+    /// records this store has applied but not yet made stable, which a caller must not
+    /// count toward a quorum (**G14**).
     fn read(&self, shard: u32, grain: &GrainName) -> Reserved<ReadReply>;
 
     /// Up to `limit` records for a grain after `from` (exclusive), ascending by
-    /// `Seq`, as `(Seq, bytes)` — the `load` seam (§7.3). A ranged read so paging a
-    /// grain's tail on replay costs `O(limit)`, not `O(grain size)`: only the
-    /// returned window's bytes are cloned. Records the snapshot already subsumes
-    /// (`Seq <= base`) are absent, as in [`read`](GrainStore::read).
+    /// `Seq`, as `(Seq, bytes)` — the `load` seam (§7.3). Only the returned window's
+    /// bytes are cloned, so paging a grain's tail on replay costs `O(limit)`. Records
+    /// the snapshot already subsumes (`Seq <= base`) are absent, as in
+    /// [`read`](GrainStore::read).
     fn read_from(
         &self,
         shard: u32,
@@ -410,19 +389,15 @@ pub trait GrainStore: GrainBlobStore {
     /// the same half-open range [`seal_range`](GrainStore::seal_range) bounds, and the
     /// split driver's GC of the parent-keyed data a committed split moved away.
     ///
-    /// A distinct method rather than a `grains`-then-`remove_grain` loop because the
-    /// operation *is* a range: the loop costs work proportional to the shard's grain
-    /// count to express one boundary, which a store that keys by name hash can honour
-    /// by discarding whole files. Idempotent.
+    /// Stated as a range rather than a `grains`-then-`remove_grain` loop so a store
+    /// that keys by name hash can honour it by discarding whole files. Idempotent.
     fn remove_range(&self, shard: u32, from: u64) -> Reserved<()>;
 
     /// Drop everything this store holds under `shard` — every grain's records,
     /// snapshot, and blobs, and the shard's fence and append bound.
     ///
     /// The reclamation a committed merge performs on the retired shard, whose grains
-    /// now live under the surviving shard's keys (§7.7). Like
-    /// [`remove_range`](GrainStore::remove_range) this is a whole-range operation
-    /// stated once, so a store need not enumerate what it is discarding. Idempotent.
+    /// now live under the surviving shard's keys (§7.7). Idempotent.
     fn drop_shard(&self, shard: u32) -> Reserved<()>;
 
     /// An estimate of the bytes this store holds under `shard` — records,
@@ -435,8 +410,8 @@ pub trait GrainStore: GrainBlobStore {
 /// How the runtime obtains a node's [`GrainStore`] (spec §7.4). Supplied on
 /// [`GranaryConfig`](crate::GranaryConfig); a factory that **caches per node**, held
 /// by the deployment across a restart, is what makes a grain's records survive a
-/// full-cluster cold restart (the WAL-storage analogue, actor §9.4.3). The default
-/// is a fresh ephemeral [`MemoryGrainStore`] per node (lost on restart).
+/// full-cluster cold restart. The default is a fresh ephemeral [`MemoryGrainStore`]
+/// per node (lost on restart).
 pub type GrainStoreFactory = Arc<dyn Fn(NodeId) -> Arc<dyn GrainStore> + Send + Sync>;
 
 /// One grain's stored records and its latest snapshot — the per-grain **segment**
@@ -461,13 +436,12 @@ pub(crate) struct GrainRecords {
 /// A serializable checkpoint of one grain's segment (spec §9): the basis for the
 /// file store's per-grain, snapshot-driven log compaction. The file store rewrites a
 /// grain's segment to a single `Checkpoint` op holding this, folding away the record
-/// ops the grain's snapshot made redundant — so compaction touches one grain's file,
-/// never the whole node's store.
+/// ops the grain's snapshot made redundant.
 ///
-/// A distinct type from [`GrainRecords`] on purpose: this is the frozen on-disk
-/// contract (it must deserialize old segments), while `GrainRecords` is the live
-/// in-memory representation and stays free to change. [`export`](GrainRecords::export)
-/// and [`from_checkpoint`](GrainRecords::from_checkpoint) are the only bridge.
+/// Distinct from [`GrainRecords`] because this is the frozen on-disk contract (it must
+/// deserialize old segments), while `GrainRecords` is the live in-memory
+/// representation and stays free to change. [`export`](GrainRecords::export) and
+/// [`from_checkpoint`](GrainRecords::from_checkpoint) are the only bridge.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct GrainCheckpoint {
     base: Seq,
@@ -573,15 +547,14 @@ impl GrainRecords {
         //
         // The one occupied slot an append may proceed onto is a **re-delivery of the
         // very append that filled it** (§7.2: the wire may duplicate, and a drained
-        // straggler can arrive late). That is identified by the shard `term` as well
-        // as the bytes. Bytes alone are not an identity: two clients issuing the same
-        // command encode identically — `Deposit { cents: 1 }` twice is the same
-        // record twice — so a byte-only check reads a *different* append onto a stale
-        // head as a harmless duplicate, stores it into the slot the earlier one
-        // already committed, and acks. Both leaders then report their write durable
-        // while only one record exists, which is an acknowledged write lost (**G14**).
-        // A genuine re-delivery carries the term of the append that made it; a
-        // stale-head append from a newer leader never can.
+        // straggler can arrive late), identified by the shard `term` as well as the
+        // bytes. Bytes alone are not an identity — two clients issuing the same command
+        // encode identically — so a byte-only check would read a *different* append
+        // onto a stale head as a duplicate, store it over the record that slot already
+        // committed, and ack: two leaders report their write durable while one record
+        // exists, an acknowledged write lost (**G14**). A genuine re-delivery carries
+        // the term of the append that made it; a stale-head append from a newer leader
+        // never can.
         if kind == WriteKind::Append {
             if after.value() < base {
                 return StoreAck::Stale(self.head());
@@ -630,8 +603,7 @@ impl GrainRecords {
     ) -> (StoreAck, bool) {
         // A snapshot only ever advances (§9, G4). When it does it subsumes every
         // record up to `at`, so compact them: advance the base and drop the covered
-        // slots (records past `at`, if any, shift down behind the new base). This is
-        // the snapshot-driven compaction of the records the snapshot makes redundant.
+        // slots (records past `at`, if any, shift down behind the new base).
         let current = self.snapshot.as_ref().map_or(0, |(s, _, _)| s.value());
         if at.value() > current {
             let drop = at
@@ -662,13 +634,11 @@ impl GrainRecords {
         (records + snapshot) as u64
     }
 
-    /// Drop records past slot `after` whose term is at most `term` (the rollback of
-    /// an uncommitted tail, §7.2). Term-aware, per slot: a record above `after`
-    /// written under a **higher** term is a newer leader's — possibly committed —
-    /// write that landed on this replica while the rollback's append was in flight,
-    /// and MUST survive (G14). A slot at or below `term` above the roll-backer's own
-    /// head is by construction uncommitted (a committed slot there would have raised
-    /// the head its recovery adopted), so dropping it is safe.
+    /// Drop records past slot `after` whose term is at most `term` (the rollback of an
+    /// uncommitted tail, §7.2). Term-aware per slot: a higher-term record above `after`
+    /// is a newer leader's, possibly committed, and MUST survive (G14). A slot at or
+    /// below `term` above the roll-backer's own head is by construction uncommitted (a
+    /// committed slot there would have raised the head its recovery adopted).
     pub(crate) fn truncate(&mut self, after: Seq, term: Term) {
         // `after` is absolute; clear matching slots above it, behind the base.
         let keep = after.value().saturating_sub(self.base.value()) as usize;
@@ -752,13 +722,11 @@ impl MemoryGrainStore {
 }
 
 /// The per-shard write-guard every [`GrainStore`] shares (§7.7, §8): the append
-/// bound and the term fence, and — the load-bearing part — the *policy* that
-/// composes them. The stores differ only in how the two primitives persist
-/// ([`MemoryGrainStore`] keeps them in memory; the file store fsyncs each fence
-/// bump), so those stay per-store; the ordering and the which-write-kinds-bypass
-/// rules live here, in one place, so a change to which kinds skip the fence cannot
-/// silently diverge between the stores into a correctness bug the compiler will not
-/// catch.
+/// bound and the term fence, and the *policy* that composes them. How the two
+/// primitives persist is per-store ([`MemoryGrainStore`] keeps them in memory; the
+/// file store fsyncs each fence bump); the ordering and the
+/// which-write-kinds-bypass rules live here, in one place, so they cannot diverge
+/// between the stores.
 ///
 /// Every method is called *inside the grain's held segment lock* — the caller locks
 /// the segment, guards, then applies — so a write and that grain's recovery
@@ -799,10 +767,7 @@ pub(crate) trait WriteGuard {
 
     /// Guard a fenced store that the append bound does **not** cover — a snapshot
     /// (§9) is not an append to the moved range, so only the fence guards it. A
-    /// [`WriteKind::Transfer`] skips the fence: its destination keys have no
-    /// contesting leader (the copy is stamped `Term::ZERO` under keys no leader
-    /// serves yet, or a merge's disjoint range), and a merge destination's live
-    /// fence must not refuse the copy.
+    /// [`WriteKind::Transfer`] skips the fence, for the reason stated on that variant.
     fn guard_snapshot(&self, shard: u32, term: Term, kind: WriteKind) -> Result<(), StoreAck> {
         if kind != WriteKind::Transfer
             && let Err(fence) = self.bump_fence(shard, term)
@@ -941,8 +906,7 @@ impl GrainStore for MemoryGrainStore {
         kind: WriteKind,
     ) -> Reserved<StoreAck> {
         let segment = self.segment(shard, grain);
-        // Hold the segment lock across the guard and the apply, so a concurrent
-        // `prepare` for *this* grain cannot slip between them (the fencing race, §8).
+        // Guard and apply under the segment lock (the fencing race, §8).
         let mut records_guard = segment.lock().expect("grain segment poisoned");
         if let Err(ack) = self.guard_record(shard, grain, term, kind) {
             return Reserved::ready(ack);
@@ -979,8 +943,7 @@ impl GrainStore for MemoryGrainStore {
     fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> Reserved<ReadOutcome> {
         let segment = self.segment(shard, grain);
         let records_guard = segment.lock().expect("grain segment poisoned");
-        // Promise: bump the fence so a deposed leader at a lower term can no longer
-        // commit here (the Paxos-prepare half of recovery, §8).
+        // The promise, under the grain's segment lock (§8).
         if let Err(fence) = self.bump_fence(shard, term) {
             return Reserved::ready(ReadOutcome::Fenced(fence));
         }
@@ -1159,11 +1122,9 @@ mod tests {
         futures::executor::block_on(reserved.durable())
     }
 
-    /// `durable` must not resolve before the durability it stands for. This is the
-    /// property every caller's `.durable().await` leans on, and the one a store that
-    /// wired the future up wrongly would silently break — a `Stored` handed back
-    /// before its bytes are stable is exactly the **G14** hole the type exists to
-    /// close, and no higher-level test would catch it.
+    /// `durable` must not resolve before the durability it stands for: a `Stored`
+    /// handed back before its bytes are stable is the **G14** hole the type exists to
+    /// close.
     #[test]
     fn a_pending_outcome_is_withheld_until_its_durability_resolves() {
         use std::sync::Arc;
@@ -1233,9 +1194,9 @@ mod tests {
             )),
             StoreAck::Stored(_)
         ));
-        // Tighten the bound to cover the grain: appends refused at ANY term —
-        // including one above the fence — that is what stops a leader that has
-        // not yet applied the split (G15).
+        // Tighten the bound to cover the grain: appends refused at ANY term, including
+        // one above the fence, so a leader that has not applied the split is stopped
+        // (G15).
         now(store.seal_range(0, hash));
         assert_eq!(
             now(store.store_record(
@@ -1581,13 +1542,9 @@ mod tests {
 
     #[test]
     fn an_identical_record_from_a_newer_term_is_still_a_stale_head() {
-        // The bytes of a command are not its identity. Two clients issuing the
-        // same command — a `Deposit { cents: 1 }` twice — encode identically, so a
-        // check that compares only bytes reads a *different* append landing on an
-        // occupied slot as a harmless re-delivery. It stores it over the record
-        // that slot already committed and acks; both leaders then report their
-        // write durable while the grain holds one record, and one acknowledged
-        // write is gone (**G14**). The shard term is what tells them apart.
+        // The bytes of a command are not its identity; the shard term is what tells a
+        // re-delivery from a different append landing on a stale head (see
+        // `GrainRecords::store_record`, **G14**).
         let store = MemoryGrainStore::new();
         let n = name("a");
         now(store.store_record(
@@ -1839,11 +1796,9 @@ mod tests {
 
     #[test]
     fn truncate_spares_a_newer_leaders_committed_records() {
-        // The G14 regression (§7.2 rollback): a deposed leader's failed append
-        // rolls back at its own term while a NEW leader (higher term) has already
-        // written back and committed records above the same head on this replica.
-        // The rollback must drop only its own tentative slot, never the newer
-        // leader's records.
+        // The G14 regression (§7.2 rollback): a deposed leader's failed append rolls
+        // back at its own term while a NEW leader (higher term) has already committed
+        // records above the same head here. It must drop only its own tentative slot.
         let store = MemoryGrainStore::new();
         let n = name("a");
         now(store.store_record(
@@ -1951,8 +1906,7 @@ mod tests {
     #[test]
     fn delete_blob_evicts_one_and_lets_a_replacement_be_stored() {
         // The read path's corruption self-heal (§7.10): a content-addressed put of an
-        // id already on disk is a no-op, so a corrupt copy must be evicted with
-        // `delete_blob` before its good replacement can be re-stored.
+        // id already on disk is a no-op, so a corrupt copy must be evicted first.
         let store = MemoryGrainStore::new();
         let n = name("a");
         let id = BlobId::of(b"good");

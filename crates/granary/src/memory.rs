@@ -1,11 +1,9 @@
 //! The single-node `Local` journal (spec §7.4).
 //!
-//! One linearizable local store: a grain's records live in this node's
-//! [`GrainStore`](crate::store::GrainStore), each `append` "commits" immediately (the
-//! single-node analogue of a quorum append). CP trivially — one writer, one store —
-//! but not fault-tolerant to node loss. Its sweet spot is embedded use, tests, and
-//! the deterministic simulator (§14): it adds no network and no nondeterminism, so a
-//! grain's whole lifecycle runs under one seed.
+//! A grain's records live in this node's [`GrainStore`](crate::store::GrainStore) and
+//! each `append` commits immediately: one writer, one store, not fault-tolerant to
+//! node loss. It adds no network and no nondeterminism, so the deterministic
+//! simulator (§14) runs a grain's whole lifecycle under one seed.
 //!
 //! It never returns `NotLeader` or `Unavailable`: with a single store there is always
 //! a leader and always a quorum (those outcomes arise on the clustered

@@ -1,17 +1,15 @@
 //! Fault-injection coverage telemetry (spec §18.3).
 //!
-//! A sweep that *configures* faults but, by seed luck, never *triggers* one
-//! gives false confidence. [`FaultStats`] is the *output* side of fault
-//! injection: a tally of what a run actually exercised, so a swarm can assert
-//! each fault type fired at least once. The *input* side is [`crate::faults`].
+//! [`FaultStats`] is the *output* side of fault injection: a tally of what a run
+//! actually exercised, so a swarm can assert each fault type fired at least once
+//! rather than trusting that a configured fault triggered. The *input* side is
+//! [`crate::faults`].
 
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 /// A tally of the faults a run actually exercised (spec §18.3). A swarm asserts,
-/// across its seed range, that each fault type fired at least once — so a green
-/// sweep provably covered loss, duplication, reordering, and partition/crash,
-/// not just the happy path.
+/// across its seed range, that each fault type fired at least once.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FaultStats {
     /// Frames dropped by a seeded loss roll (excludes partition/crash blocking).
@@ -57,9 +55,8 @@ impl std::ops::Add for FaultStats {
     }
 }
 
-/// The live counters the network increments as it injects faults. Kept behind
-/// `record_*`/`snapshot` so the atomic representation stays this module's secret;
-/// the network records events, it does not reach into the counters.
+/// The live counters the network increments as it injects faults, behind
+/// `record_*`/`snapshot` so the atomic representation stays this module's.
 #[derive(Default)]
 pub(crate) struct FaultCounters {
     dropped: AtomicU64,

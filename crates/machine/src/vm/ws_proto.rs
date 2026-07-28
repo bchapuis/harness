@@ -5,7 +5,7 @@
 //! One connection per op. A push sends the header, `Data` chunks, `Eof`, and
 //! reads a status; a pull sends the header and reads `Data` chunks to `Eof`
 //! then a status, the accumulation capped at [`MAX_TAR`] before any byte
-//! sizes a host allocation (sandbox spec §3.2's stance).
+//! sizes a host allocation (sandbox spec §3.2).
 
 use std::path::Path;
 
@@ -20,8 +20,7 @@ use tokio::net::UnixStream;
 /// (and its per-frame syscalls) low for a full-size stream.
 const CHUNK: usize = 256 * 1024;
 
-/// A ws-channel op failed, split by what still works — the caller's policy
-/// hinges on it (mirroring the sandbox tier's `BracketError`): after a
+/// A ws-channel op failed, split by what still works: after a
 /// [`Guest`](SyncError::Guest) refusal the VM and its transport still serve;
 /// after a [`Transport`](SyncError::Transport) failure the guest may be gone.
 #[derive(Debug)]
@@ -129,8 +128,7 @@ mod tests {
     use super::*;
 
     /// A fake guest agent on a std thread: the muxer handshake, one header,
-    /// then the ws grammar — speaking [`machine_proto`], as the real agent
-    /// does.
+    /// then the ws grammar of [`machine_proto`].
     fn spawn_fake(
         behavior: fn(&mut std::os::unix::net::UnixStream, &ChannelKind),
     ) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -170,9 +168,8 @@ mod tests {
 
     /// The wire cap, the codec budget, and the ws facet's durable-tree cap
     /// agree only by convention across crates; a drift would make a
-    /// facet-legal workspace fail at the sync boundary — and the capture path
-    /// degrades silently, far from the constant that caused it. This is the
-    /// one crate that sees all three, so the pin lives here.
+    /// facet-legal workspace fail at the sync boundary, and the capture path
+    /// degrades silently. This is the one crate that sees all three.
     #[test]
     fn the_sync_caps_agree_across_the_crates() {
         assert_eq!(MAX_TAR as u64, granary::MAX_TREE_BYTES);

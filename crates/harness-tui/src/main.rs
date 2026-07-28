@@ -89,10 +89,8 @@ async fn run(args: Vec<String>) -> Result<(), String> {
 
     let client = GatewayClient::new(&url, token)?;
 
-    // A per-process nonce so freshly minted turn ids never collide with a prior
-    // run's persisted ids after a restart (which the grain would dedup, hanging
-    // the run's stream). The pid changes across restarts and needs no wall clock
-    // (§18.1 forbids reading it here).
+    // A per-process nonce for turn ids (see `App::turn_id`). The pid changes across
+    // restarts and needs no wall clock, which §18.1 forbids reading here.
     let nonce = u64::from(std::process::id());
 
     let (tx, mut rx) = mpsc::unbounded_channel();

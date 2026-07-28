@@ -7,7 +7,7 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, 
 
 Throughout, `wal` is the crate and namespace name. Sections of this document are cited as plain **§N**. Invariants defined here are numbered **W1, W2, …**.
 
-> **Design stance.** A file-backed durable store needs the same small machinery every time: frame a record, checksum it, fsync it, recover by scanning the valid prefix and discarding a torn tail, and rewrite the file atomically to compact. That logic is small but safety-critical, because the write path and the recovery path are one contract read from two ends: if they disagree about what a valid record is, a node mis-recovers — silently dropping a record it acknowledged, or replaying one it never finished writing. The danger is precisely that the two paths drift apart while each looks correct alone. So the machinery lives in one place, with the write path and the scan path enforcing the *same* bound (§4) and built from the *same* framing (§2). This crate decides only the bytes-and-durability contract; it takes no position on what the records mean or what a failure to persist them implies (§6).
+> **Design stance.** A file-backed durable store needs the same small machinery every time: frame a record, checksum it, fsync it, recover by scanning the valid prefix and discarding a torn tail, and rewrite the file atomically to compact. That logic is safety-critical, because the write path and the recovery path are one contract read from two ends: if they disagree about what a valid record is, a node mis-recovers — silently dropping a record it acknowledged, or replaying one it never finished writing, while each path looks correct alone. So the machinery lives in one place, with the write path and the scan path enforcing the *same* bound (§4) and built from the *same* framing (§2). This crate decides only the bytes-and-durability contract; it takes no position on what the records mean or what a failure to persist them implies (§6).
 
 ---
 
@@ -18,7 +18,7 @@ The crate sits **below** its callers and depends on none of them. It provides:
 - **`Wal<T>`** — an append-only log of `postcard`-encoded `T` records (§2, §3).
 - **Sidecar helpers** — `atomic_replace`, `checksum`, `sync_dir` — for durable state that is a single small file rather than a log (§5).
 
-It is **not** a database, an index, or a replication layer. It does no caching, holds no in-memory copy of the records after `open` returns them, and imposes no schema on `T` beyond `serde::Serialize + serde::de::DeserializeOwned`. Ordering, indexing, snapshotting, replication, and compaction *policy* all belong above the crate: a caller assigns whatever meaning its records carry and decides when to compact; the crate only frames, persists, and recovers the bytes.
+It is **not** a database, an index, or a replication layer. It does no caching, holds no in-memory copy of the records after `open` returns them, and imposes no schema on `T` beyond `serde::Serialize + serde::de::DeserializeOwned`. Ordering, indexing, snapshotting, replication, and compaction *policy* all belong above the crate; the crate only frames, persists, and recovers the bytes.
 
 The crate is **synchronous and single-handle**: one `Wal<T>` owns one open append handle to one file. Concurrent access to the same path from two `Wal<T>` instances is outside the contract; a caller serializes access through its own single-writer discipline.
 
@@ -50,15 +50,15 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
 2. `open` MUST admit the whole header — magic, then frame revision, then checksum kind, then record schema — **before scanning a single frame** ([compatibility](compatibility-spec.md) **V2**). A file this build cannot read is never partially interpreted.
 
-3. The header's **length and layout belong to the frame revision**, not to the format for all time. Revision 1 is the sixteen bytes above; a later revision may define a different header entirely, and is free to, because a revision-1 reader refuses a revision-2 file outright rather than trying to parse its header. Only the magic and the `u16` immediately after it are fixed across revisions — they are what a reader consults *before* it knows which layout applies. Nothing else in this crate may assume the header is sixteen bytes.
+3. The header's **length and layout belong to the frame revision**, not to the format for all time. Revision 1 is the sixteen bytes above; a later revision may define a different header entirely, because a revision-1 reader refuses a revision-2 file outright rather than parsing its header. Only the magic and the `u16` immediately after it are fixed across revisions — they are what a reader consults *before* it knows which layout applies. Nothing else in this crate may assume the header is sixteen bytes.
 
 4. **Frame revision** versions §2's framing; revision 1 is the layout above. **Checksum kind** identifies the digest, `1` being FNV-1a (§2 rule 2); it is compared for equality, being an identity rather than an ordering, and it is what makes the pluggable checksum of §Deferred a header change rather than a layout change. **Reserved** MUST be zero at frame revision 1, so every header byte is validated and no detectable damage passes silently. The header carries no checksum of its own; the reserved field is where one would go.
 
-5. **Record schema** belongs to the *caller*: `open` takes the caller's `compat::Window`, stamps its written revision into a new file, admits the field on an existing one, and never interprets it. This field is load-bearing rather than decorative — `Wal<T>`'s records are `postcard`, which is positional and has no field names, so `T` cannot gain or reorder a field within a revision and its revision has nowhere to live but outside the payload. An enum may still grow variants at its end, which no existing record can carry; that needs no bump.
+5. **Record schema** belongs to the *caller*: `open` takes the caller's `compat::Window`, stamps its written revision into a new file, admits the field on an existing one, and never interprets it. `Wal<T>`'s records are `postcard`, which is positional and has no field names, so `T` cannot gain or reorder a field within a revision and its revision has nowhere to live but outside the payload. An enum may still grow variants at its end, which no existing record can carry; that needs no bump.
 
 6. The check is part of `open` rather than an accessor a caller may consult, because an optional check is one a caller forgets, and the forgotten case is the misparse the header exists to prevent. `open` therefore returns `OpenError`, keeping a policy refusal distinct from the I/O failures §6 leaves to the caller.
 
-   `append` does **not** update the record-schema field, and `rewrite` stamps the revision this build writes. The two matter only once a caller's window spans more than one revision: appends then add frames at the newer revision to a file whose header still names the older one, so the stamp understates until a `rewrite` restamps it. The consequence is bounded and fail-closed — every frame in such a file *is* readable at the higher revision, so a later build whose window starts above the stale stamp refuses the file by name rather than misreading it. A caller widening its window SHOULD compact affected logs.
+   `append` does **not** update the record-schema field; `rewrite` stamps the revision this build writes. The two matter only once a caller's window spans more than one revision: appends then add frames at the newer revision to a file whose header still names the older one, so the stamp understates until a `rewrite` restamps it. This is fail-closed — every frame in such a file *is* readable at the higher revision, so a later build whose window starts above the stale stamp refuses the file by name rather than misreading it. A caller widening its window SHOULD compact affected logs.
 
 7. A file whose bytes are a **prefix** of the header `open` would write MUST be stamped in place rather than refused: the header is written and fsynced before any frame can follow it, so such a file holds no records and stamping it loses nothing. This covers a missing file, an empty one, and a header torn by a crash between creating the file and syncing it — which would otherwise make a benign crash a log that can never be opened. Any other file too short to hold a header MUST be refused, so the rule is not a licence to overwrite a foreign file.
 
@@ -102,7 +102,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
    - On **recovery** (§3.1 req 1), a scanned `length > max_record` is treated as corruption and ends the valid prefix.
    - On **write**, framing a payload larger than `max_record` MUST **panic** rather than write it.
 
-2. This two-ended enforcement is the crate's central safety property, stated as an invariant (W4). A record that recovery would reject for size MUST NOT be writable: otherwise `append` would acknowledge it and the next `open` would silently discard it — exactly the write-path/recovery-path divergence the crate exists to prevent. Failing loudly at the write keeps the asymmetry from becoming silent data loss. The panic is correct because an over-bound record is a caller bug (a mis-sized `max_record` or an unexpectedly large `T`), not a runtime condition to recover from.
+2. A record that recovery would reject for size MUST NOT be writable (**W4**): otherwise `append` would acknowledge it and the next `open` would silently discard it — the write-path/recovery-path divergence the crate exists to prevent. The panic is correct because an over-bound record is a caller bug (a mis-sized `max_record` or an unexpectedly large `T`), not a runtime condition to recover from.
 
 ---
 
@@ -120,7 +120,7 @@ Some durable state is not a log but a single small file rewritten in place: a ge
 
 ## 6. Failure policy
 
-1. Every fallible method MUST return `std::io::Result`. The crate **MUST NOT decide what an I/O failure means** — it neither retries, nor masks, nor panics on an I/O error (the §4 over-bound panic is a caller bug, not an I/O failure). The decision belongs to the caller: one that cannot persist a record it must not lose may have no safe way to continue and so panics with a domain-specific message; another might degrade or report. Keeping the policy in the caller is deliberate, and is why `path()` is exposed (§3.5) — for the caller's own failure message.
+1. Every fallible method MUST return `std::io::Result`. The crate **MUST NOT decide what an I/O failure means** — it neither retries, nor masks, nor panics on an I/O error (the §4 over-bound panic is a caller bug, not an I/O failure). The decision belongs to the caller: one that cannot persist a record it must not lose may have no safe way to continue and so panics with a domain-specific message; another might degrade or report. `path()` is exposed (§3.5) for the caller's own failure message.
 
 2. The crate masks no corruption: a checksum failure, a torn tail, and a parse failure all surface as a shortened valid prefix (§3.1), never as an error and never as a silently patched record.
 
@@ -137,8 +137,6 @@ Invariants are verified by the crate's own unit tests (`crates/wal/src/lib.rs`).
 | W3 | **Atomic whole-file replacement.** `rewrite` and `atomic_replace` leave, after any crash, either the whole prior file or the whole new file — never a torn intermediate. | §3.4, §5 | `rewrite_replaces_the_whole_file_and_reopens`, `atomic_replace_round_trips_a_sidecar` |
 | W4 | **Write/recovery bound agreement.** `max_record` bounds a frame's payload identically at both ends: a payload recovery would reject for size cannot be written — the write panics instead of acknowledging a record the next `open` would silently drop. | §4 | `appending_a_record_past_the_limit_panics_instead_of_losing_it` |
 
-W4 is the crate's reason to exist: it is the one place the write path and the recovery path are forced to agree, and the property every consumer would otherwise have to re-establish by hand-rolling the machinery.
-
 ---
 
 ## 8. Non-goals and future work
@@ -146,10 +144,10 @@ W4 is the crate's reason to exist: it is the one place the write path and the re
 Non-goals (today and by design):
 
 - **No concurrency.** One handle, one writer; the caller provides single-writer discipline. The crate adds no locking.
-- **No tamper resistance.** FNV-1a catches accidental corruption, not a malicious edit. A log on a trusted local disk needs no more.
+- **No tamper resistance.** FNV-1a catches accidental corruption, not a malicious edit.
 - **No segmentation or rotation.** A `Wal<T>` is one file. A caller that wants bounded files segments above the crate (§1) and compacts with `rewrite`.
 
 Possible future work, only if a caller needs it:
 
-- **Group commit across handles** — batching fsyncs for many small logs sharing a disk, trading a bounded latency for throughput. Today each `append_batch` already amortizes within one log.
-- **A pluggable checksum** — a stronger digest behind the same framing, were a caller ever to store a WAL on untrusted media. The framing reserves a fixed 8-byte trailer and the header a **checksum kind** field (§2.1), so this is now a matter of defining a second value for that field: no layout change, and a log written either way says which it is.
+- **Group commit across handles** — batching fsyncs for many small logs sharing a disk, trading a bounded latency for throughput.
+- **A pluggable checksum** — a stronger digest behind the same framing, were a caller ever to store a WAL on untrusted media. The framing reserves a fixed 8-byte trailer and the header a **checksum kind** field (§2.1), so this is a matter of defining a second value for that field: no layout change, and a log written either way says which it is.

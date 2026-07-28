@@ -1,10 +1,9 @@
 //! `ActorRef`: the only handle to an actor (spec §3.3).
 //!
-//! It holds exactly an [`ActorId`] plus a handle to the system, and carries
-//! **no** actor state. The `A: Handler<M>` bound on [`ask`](ActorRef::ask) /
-//! [`tell`](ActorRef::tell) is the dispatch mechanism: it proves at compile time
-//! that the target accepts `M`, so invalid sends do not compile (spec §3.3,
-//! invariant #20) and no runtime type check is needed.
+//! The `A: Handler<M>` bound on [`ask`](ActorRef::ask) / [`tell`](ActorRef::tell)
+//! is the dispatch mechanism: it proves at compile time that the target accepts
+//! `M`, so invalid sends do not compile (spec §3.3, invariant #20) and no
+//! runtime type check is needed.
 //!
 //! `ask`/`tell` are identical for local and remote targets (spec §3.3): the
 //! system classifies locality on each call. A **local** target enqueues by value
@@ -31,8 +30,7 @@ pub struct ActorRef<A: Actor> {
     system: A::System,
 }
 
-// Manual `Clone`: `A` itself need not be `Clone`; only the id and system handle
-// (a cheap `Arc` clone) are cloned.
+// Manual `Clone`: `A` itself need not be `Clone`.
 impl<A: Actor> Clone for ActorRef<A> {
     fn clone(&self) -> Self {
         ActorRef {
@@ -70,8 +68,7 @@ impl<A: Actor> serde::Serialize for ActorRef<A> {
 }
 
 // Deserializing rebinds the id to the *current decoding system* (set by the
-// runtime around a message decode, spec §4.4, invariant #10), so a ref embedded
-// in a message is usable on the node that receives it.
+// runtime around a message decode, spec §4.4, invariant #10).
 impl<'de, A: Actor> serde::Deserialize<'de> for ActorRef<A> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let id = <ActorId as serde::Deserialize>::deserialize(deserializer)?;
@@ -85,15 +82,11 @@ impl<'de, A: Actor> serde::Deserialize<'de> for ActorRef<A> {
 }
 
 /// Where a send to an [`ActorRef`] is delivered, classified once per call from
-/// the id alone (spec §4.3). Resolving locality and the live local mailbox in
-/// one place keeps the local-vs-remote branch out of every send method — the
-/// one secret of how a ref reaches its actor.
+/// the id alone (spec §4.3).
 enum Target<A: Actor> {
-    /// A live local actor: enqueue by value, no serialization (spec §4.3).
     Local(Mailbox<A>),
-    /// The id is local but no live actor owns it — it has resigned (spec §4.3).
+    /// The id is local but no live actor owns it — it has resigned.
     DeadLetter,
-    /// The id is owned by another node: encode and route over the transport.
     Remote,
 }
 
@@ -102,9 +95,6 @@ impl<A: Actor> ActorRef<A> {
         ActorRef { id, system }
     }
 
-    /// Classify where a send goes and resolve the local mailbox if any, in one
-    /// place (spec §4.3). Every send method dispatches on this rather than
-    /// re-deriving locality.
     fn locate(&self) -> Target<A> {
         if !self.system.is_local(&self.id) {
             return Target::Remote;
@@ -121,15 +111,12 @@ impl<A: Actor> ActorRef<A> {
     }
 
     /// The system this ref is bound to (the local system after decode, spec
-    /// §4.4). Lets a handle carrying an `ActorRef` recover the local system
-    /// without threading one separately — e.g. a deserialized `GrainRef`
-    /// recovering its routing system from its gateway ref.
+    /// §4.4).
     pub fn system(&self) -> &A::System {
         &self.system
     }
 
-    /// Request/response (spec §3.3), with the system default deadline. The
-    /// `A: Handler<M>` bound proves at compile time that this actor accepts `M`.
+    /// Request/response (spec §3.3), with the system default deadline.
     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, CallError>
     where
         A: Handler<M>,
@@ -149,10 +136,8 @@ impl<A: Actor> ActorRef<A> {
     }
 
     /// Request/response that collapses the two error levels into one (spec
-    /// §14.3). When the reply is itself a `Result<T, E>`, an outer transport or
-    /// system [`CallError`] is folded into the application error via
-    /// `E: From<CallError>`, so the caller handles a single `Result<T, E>`
-    /// instead of `Result<Result<T, E>, CallError>`. Use plain [`ask`](Self::ask)
+    /// §14.3): an outer transport or system [`CallError`] is folded into the
+    /// application error via `E: From<CallError>`. Use plain [`ask`](Self::ask)
     /// when the two levels must stay distinct.
     pub async fn ask_flat<M, T, E>(&self, msg: M) -> Result<T, E>
     where
@@ -189,10 +174,8 @@ impl<A: Actor> ActorRef<A> {
         M: Message,
     {
         match self.locate() {
-            // Local: enqueue by value and await the typed reply, no serialization.
             Target::Local(mailbox) => mailbox.ask(msg).await,
             Target::DeadLetter => Err(CallError::DeadLetter),
-            // Remote: encode, route over the transport, decode the reply.
             Target::Remote => {
                 let codec = self.system.codec();
                 let payload = actor_serialization::encode(&*codec, &msg)
@@ -250,8 +233,6 @@ impl<A: Actor> ActorRef<A> {
     }
 }
 
-// --- Fanning out calls --------------------------------------------------------
-
 /// Await **every** future, then report the first error — the non-abandoning
 /// counterpart to `futures::future::try_join_all`.
 ///
@@ -259,15 +240,7 @@ impl<A: Actor> ActorRef<A> {
 /// That is fine for pure computation and wrong for anything that has issued an
 /// [`ask`](ActorRef::ask): dropping the future abandons the call, which then
 /// never reaches a reply or a definite [`CallError`] — exactly what no-silent-
-/// loss forbids (spec §7.2, §18.5 #1). The recipient still handles the request,
-/// and its reply arrives for a caller that no longer exists. Under simulation
-/// the abandoned call shows up as an ask pending at quiescence; in production it
-/// is a leaked deadline and a reply nobody reads.
-///
-/// So: fan out with this. The futures are independent by construction — that is
-/// why they were joined — so letting the losers finish costs only the
-/// concurrency already in flight, and leaves the system in the state the
-/// successful ones actually reached.
+/// loss forbids (spec §7.2, §18.5 #1).
 ///
 /// ```ignore
 /// // not `try_join_all`: a failing chunk would drop its siblings' asks

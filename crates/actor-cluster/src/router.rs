@@ -6,20 +6,19 @@
 //! no frames, and adds no delivery guarantee beyond the underlying `ask`/`tell`
 //! (core spec §7.2).
 //!
-//! Decisions are made against a fresh [`lookup`](actor_core::Receptionist::lookup)
-//! snapshot rather than a subscription: the listing is replicated local state,
-//! so the lookup is a synchronous read with nothing to await, and a snapshot
-//! per decision needs no background pump. The listing's order is deterministic
-//! (the registry is an ordered set), so round-robin is seed-reproducible, and
-//! the random strategy draws from the system's seeded entropy (core spec
-//! §18.1) — never a host RNG.
+//! Each decision reads a fresh [`lookup`](actor_core::Receptionist::lookup)
+//! snapshot; the listing is replicated local state, so the read is synchronous
+//! and needs no background pump. The listing's order is deterministic (the
+//! registry is an ordered set), so round-robin is seed-reproducible, and the
+//! random strategy draws from the system's seeded entropy (core spec §18.1) —
+//! never a host RNG.
 //!
 //! Keyed (rendezvous-hashed) routing is the `*_by` family, available regardless
 //! of the keyless [`RouteStrategy`]: the caller supplies the routing key as
 //! bytes, and routees are ranked by their placement weight (utilities spec §2)
-//! over the routee's actor tag. The key is an explicit per-call parameter — a
-//! typed router serves many message types, so a stored extractor cannot be
-//! expressed; message-trait sugar can layer on later without breaking this.
+//! over the routee's actor tag. The key is an explicit per-call parameter,
+//! because a typed router serves many message types and so cannot express a
+//! stored extractor.
 //!
 //! An empty listing fails fast with [`CallError::DeadLetter`] — the router
 //! never buffers, queues, or retries (core spec §1.2, §14.2). Callers that
@@ -40,9 +39,8 @@ use actor_core::Message;
 
 use crate::placement;
 
-/// The keyless selection strategies (utilities spec §3). Rendezvous-hashed
-/// selection is the keyed [`route_by`](Router::route_by)/[`ask_by`](Router::ask_by)/
-/// [`tell_by`](Router::tell_by) family, available on every router.
+/// The keyless selection strategies (utilities spec §3); keyed selection is the
+/// [`route_by`](Router::route_by) family, available on every router.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteStrategy {
     /// Cycle through the listing in its deterministic order.

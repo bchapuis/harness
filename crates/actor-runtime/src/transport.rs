@@ -1,28 +1,25 @@
 //! The production TCP [`Transport`] (spec §7).
 //!
 //! Frames travel length-delimited over TCP (see [`crate::wire`]). Each *directed*
-//! pair of nodes uses its own connection — outbound traffic always goes over the
-//! connection this node dialed — so per-pair FIFO ordering holds end to end over
-//! one association (spec §6, §7.2). Accepted connections are receive-only: a
+//! pair of nodes uses its own connection, and outbound traffic always goes over
+//! the connection this node dialed, so per-pair FIFO ordering holds end to end
+//! over one association (spec §6, §7.2). Accepted connections are receive-only: a
 //! reply travels back over the replier's own dialed connection, not the request's
 //! socket.
 //!
 //! Before any actor traffic, the two ends exchange a [`Hello`] handshake (the
 //! accepted wire revisions, node identity, codec name, cluster secret) and reject
-//! the association on any mismatch (spec §7.1). The revision is *negotiated* to the
-//! highest both ends accept ([`WIRE`]) rather than compared for equality, so a
-//! rolling upgrade can run two releases side by side. When a [`TlsConfig`] is present the
-//! handshake runs over a mutually-authenticated TLS stream and the node
-//! allowlist is enforced (spec §15); the connection logic is generic over the
-//! byte stream, so it serves both plaintext and TLS unchanged.
+//! the association on any mismatch (spec §7.1). The revision is *negotiated* to
+//! the highest both ends accept ([`WIRE`]). When a [`TlsConfig`] is present the
+//! handshake runs over a mutually-authenticated TLS stream and the node allowlist
+//! is enforced (§15).
 //!
-//! Addresses live in a runtime book that is **seeded** from [`TcpConfig::peers`]
-//! and grown **dynamically** (spec §9.3): every handshake teaches both ends the
+//! Addresses live in a runtime book **seeded** from [`TcpConfig::peers`] and
+//! grown **dynamically** (spec §9.3): every handshake teaches both ends the
 //! peer's advertised address, and nodes periodically gossip their known
 //! `(node, address)` table, so addresses propagate to peers a node never
-//! directly contacted. A node therefore needs only enough seeds to reach the
-//! cluster once. An unknown peer, a failed dial, or a closed connection surfaces
-//! as [`TransportError::Unreachable`] (until the address is learned).
+//! directly contacted. An unknown peer, a failed dial, or a closed connection
+//! surfaces as [`TransportError::Unreachable`].
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -59,16 +56,15 @@ use crate::wire::write_wire;
 /// compatibility spec §3).
 ///
 /// The handshake settles on the highest revision both ends accept; a peer whose
-/// range does not overlap this one is refused by name. Bumping the wire format is
-/// therefore two releases, not one: widen the range first (`Window::new("actor.wire",
-/// 1, 2, 1)`, so this build *reads* v2 without writing it), and only once that
-/// release is everywhere move `writes` up. That ordering is invariant **V4**, and it
-/// is what keeps a rolling upgrade from needing two releases to agree exactly.
+/// range does not overlap this one is refused by name. Bumping the wire format
+/// takes two releases: widen the range first (`Window::new("actor.wire", 1, 2,
+/// 1)`, so this build *reads* v2 without writing it), and only once that release
+/// is everywhere move `writes` up. That ordering is invariant **V4**.
 pub const WIRE: compat::Window = compat::Window::at("actor.wire", 1);
 
 /// Default for [`TcpConfig::connect_timeout`]: how long to wait for a TCP
-/// connect before giving up (spec §7). Bounds a dial to a black-holed peer, so
-/// it cannot stall the detector or gossip.
+/// connect before giving up (spec §7), so a dial to a black-holed peer cannot
+/// stall the detector or gossip.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Default for [`TcpConfig::handshake_timeout`]: how long to wait for the (TLS +)
@@ -85,8 +81,7 @@ pub const DEFAULT_OUTBOUND_CAPACITY: usize = 1024;
 /// The TLS material for mutually-authenticated associations (spec §15). Both
 /// the acceptor and the connector require a peer certificate, so every
 /// association is mutually authenticated against the trusted roots baked into
-/// these configs. Constructing them (CA, certs, keys) is the caller's job; this
-/// crate stays policy-light and simply wraps each connection.
+/// these configs. Constructing them (CA, certs, keys) is the caller's job.
 #[derive(Clone)]
 pub struct TlsConfig {
     /// Wraps inbound (accepted) connections; configured to demand client auth.
@@ -107,7 +102,7 @@ pub struct TcpConfig {
     /// back (the bound address may be a wildcard or ephemeral port).
     pub advertised: SocketAddr,
     /// Seed addresses: enough peers to reach the cluster once. The runtime
-    /// address book starts here and grows by handshake + gossip (spec §9.3).
+    /// address book starts here and grows by handshake and gossip (spec §9.3).
     pub peers: BTreeMap<NodeId, SocketAddr>,
     /// How often to gossip the known endpoint table to peers (spec §9.3).
     pub endpoint_gossip_interval: Duration,
@@ -205,13 +200,8 @@ impl Shared {
     /// id. `expected` is `Some` when we dialed a specific peer and want to
     /// confirm we reached it.
     fn accept_hello(&self, hello: &Hello, expected: Option<NodeId>) -> Result<NodeId, String> {
-        // The negotiated revision is dropped: the live behavior this buys is the
-        // *refusal* — a peer outside our range is turned away by name instead of
-        // half-understood. Nothing yet varies its behavior by revision, and
-        // returning a value no caller reads would be a pass-through. The first
-        // consumer (a frame this build can only send to a peer at v2 or above, or
-        // the simulator driving a mixed-version cluster) is what should widen this
-        // signature.
+        // The negotiated revision is dropped; what this call buys is the refusal
+        // of a peer outside our range. Nothing yet varies behavior by revision.
         WIRE.negotiate(hello.accepts).map_err(|e| e.to_string())?;
         if hello.codec_name != self.config.codec.name() {
             return Err(format!("codec mismatch: {}", hello.codec_name));
@@ -245,7 +235,7 @@ pub struct TcpTransport {
 impl TcpTransport {
     /// Start the transport on an already-bound `listener` (binding separately
     /// lets a caller discover an ephemeral port before wiring the address book).
-    /// Spawns the accept loop and returns the handle plus the inbound frame
+    /// Spawns the accept loop; returns the handle plus the inbound frame
     /// receiver to hand to [`ClusterSystem::start`](actor_cluster::ClusterSystem).
     pub fn start(
         config: TcpConfig,
@@ -273,9 +263,8 @@ impl TcpTransport {
     }
 
     /// Get a sender to `peer`'s outbound queue, dialing and handshaking if no
-    /// live connection exists. The connect and handshake are bounded by timeouts
-    /// so a black-holed or silent peer surfaces as `Unreachable` instead of
-    /// hanging the caller (spec §7).
+    /// live connection exists. Connect and handshake are bounded by timeouts, so
+    /// an unresponsive peer surfaces as `Unreachable` (spec §7).
     async fn connection(&self, peer: NodeId) -> Result<mpsc::Sender<Wire>, TransportError> {
         // Fast path: reuse a live connection.
         if let Some(tx) = self.lookup(peer) {
@@ -297,8 +286,7 @@ impl TcpTransport {
         let handshake_timeout = self.shared.config.handshake_timeout;
 
         // Wrap in TLS if configured, then run the application handshake over the
-        // (possibly encrypted) stream — all under one handshake deadline. Either
-        // way the connection task is generic over the resulting stream type.
+        // (possibly encrypted) stream, all under one handshake deadline.
         match &self.shared.config.tls {
             Some(tls) => {
                 let handshake = async {
@@ -358,8 +346,8 @@ impl Transport for TcpTransport {
         let tx = self.connection(peer).await?;
         // Non-blocking enqueue with backpressure: a full queue (peer too slow) or
         // a closed one (connection died) both surface as `Unreachable`, and the
-        // dead/saturated entry is dropped so the next send re-dials. At-most-once
-        // — we never resend this frame (spec §7.2); a dropped frame an `ask` was
+        // dead/saturated entry is dropped so the next send re-dials. At-most-once:
+        // this frame is never resent (spec §7.2), and a dropped frame an `ask` was
         // awaiting completes it as `Unreachable`, so nothing is silently lost.
         tx.try_send(Wire::Frame(frame)).map_err(|_| {
             let mut conns = self.shared.conns.lock().expect("conns mutex poisoned");
@@ -406,8 +394,8 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
 /// A failed TLS or application handshake tears down the association, never the
 /// node (spec §7, §15).
 async fn serve_accepted(tcp: TcpStream, shared: Arc<Shared>) {
-    // Bound the whole accept-side handshake so a peer that connects but never
-    // speaks (slowloris) cannot tie up this task (spec §7, §15).
+    // Bound the whole accept-side handshake: a peer that connects but never
+    // speaks must not tie up this task (spec §7, §15).
     let handshake_timeout = shared.config.handshake_timeout;
     match shared.config.tls.clone() {
         Some(tls) => {
@@ -432,7 +420,7 @@ async fn serve_accepted(tcp: TcpStream, shared: Arc<Shared>) {
 
 /// A dialed connection, run as two independent halves over a split stream: a
 /// **writer** drains the outbound queue, and a **reader** consumes anything the
-/// peer sends (normally only its close — replies and gossip come over the peer's
+/// peer sends (normally only its close; replies and gossip come over the peer's
 /// own dialed connection). Splitting avoids a `select!` that would cancel a
 /// partially-read frame and desync the stream. The connection ends when either
 /// half finishes (queue closed, or socket error/EOF), and the peer is then
@@ -554,15 +542,13 @@ where
 
 /// Endpoint anti-entropy (spec §9.3): every `interval`, push the known
 /// `(node, address)` table to each known peer, dialing it if not already
-/// connected. A node that holds only a seed or two thereby learns the addresses
-/// of peers it never directly contacted, so the address book self-assembles
-/// across the cluster — gossip is the bootstrap, so it must be able to dial.
+/// connected. Gossip is the bootstrap, so it must be able to dial.
 ///
-/// The per-peer sends run **concurrently** (and each dial is bounded by
-/// [`CONNECT_TIMEOUT`]), so one black-holed peer can never stall gossip to the
-/// live ones; awaiting them together caps in-flight dials at one per peer, with
-/// no cross-interval pile-up. A non-blocking `try_send` keeps a slow but
-/// connected peer from stalling the loop.
+/// The per-peer sends run **concurrently** (each dial bounded by
+/// [`CONNECT_TIMEOUT`]), so one black-holed peer cannot stall gossip to the live
+/// ones; awaiting them together caps in-flight dials at one per peer, with no
+/// cross-interval pile-up. A non-blocking `try_send` keeps a slow but connected
+/// peer from stalling the loop.
 async fn endpoint_gossip(shared: Arc<Shared>, interval: Duration) {
     let transport = TcpTransport {
         shared: Arc::clone(&shared),
@@ -634,8 +620,7 @@ mod tests {
     fn a_peer_sharing_a_wire_revision_associates() {
         let shared = shared("secret");
         // Our own range, and a peer whose range is strictly wider on both sides —
-        // the rolling-upgrade case. The old equality check refused this, which is
-        // what made a wire bump a cluster-wide mutual partition (spec §7.1).
+        // the rolling-upgrade case (spec §7.1).
         for accepts in [WIRE.accepted(), Accepted::new(1, 9)] {
             assert_eq!(
                 shared.accept_hello(&hello(accepts), None),
@@ -664,8 +649,7 @@ mod tests {
     #[test]
     fn the_version_check_precedes_the_secret_check() {
         // An unreadable peer is turned away before its secret is compared, so a
-        // version skew is never reported as a security failure — the two have very
-        // different operator responses.
+        // version skew is never reported as a security failure.
         let shared = shared("secret");
         let mut peer = hello(Accepted::new(7, 9));
         peer.cluster_secret = "wrong".to_string();

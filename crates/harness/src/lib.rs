@@ -4,14 +4,14 @@
 //! else: identity, the journal, the single-writer fence, placement, activation,
 //! hibernation, and lossless failover are all inherited from the grain unchanged.
 //!
-//! One sentence carries the design (§2.1): **the grain is the session; the
-//! activation and the sandbox are disposable; the seams are the only world.** The
-//! loop runs as the grain's activation behavior — serial, journaled, effect-free
-//! outside its two seams (the [`Model`] and the [`Sandbox`]) and the grain's own
-//! journal — and every tool effect lands in one isolated environment per session
-//! (§5.1). Time, randomness, task spawning, transport, and the journal come from
-//! granary and the core seams, so deterministic simulation extends to the harness
-//! unchanged: one seed reproduces an entire multi-node agentic run (§12).
+//! The design in one sentence (§2.1): **the grain is the session; the activation
+//! and the sandbox are disposable; the seams are the only world.** The loop runs
+//! as the grain's activation behavior — serial, journaled, effect-free outside
+//! its two seams (the [`Model`] and the [`Sandbox`]) and the grain's own journal
+//! — and every tool effect lands in one isolated environment per session (§5.1).
+//! Time, randomness, task spawning, transport, and the journal come from granary
+//! and the core seams, so one seed reproduces an entire multi-node agentic run
+//! (§12).
 //!
 //! ```ignore
 //! let h = Harness::builder(system, &kinds).host_all(model, sandboxes).build();

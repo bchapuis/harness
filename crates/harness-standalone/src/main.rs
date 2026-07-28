@@ -4,8 +4,7 @@
 //! (tokio, TCP), its own file journal replicated to peers, the Anthropic model,
 //! and a workspace sandbox. A node hosts grains and votes in Raft; it has no
 //! client-facing listener. The public edge is the separate `harness-gateway`
-//! binary — a trusted cluster *client* that joins this transport as a non-voting
-//! member and drives sessions over `GrainRef`.
+//! binary.
 //!
 //! See `docs/standalone-deployment.md` for the walkthrough.
 

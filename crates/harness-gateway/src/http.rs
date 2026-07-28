@@ -5,13 +5,12 @@
 //! verifies it to a principal, then scopes the session key under it). Endpoints:
 //! `prompt`/`records`/`cancel`/`sessions` are request-response; `stream` (and a
 //! `prompt` with `Accept: text/event-stream`) ride a harness [`Follower`] as
-//! Server-Sent Events. SSE is the agentic-runtime norm (Anthropic/OpenAI, MCP
-//! streamable HTTP) and fits the harness's request-plus-server-stream shape.
+//! Server-Sent Events.
 //!
-//! Unlike the old forwarding gateway, there is no control protocol underneath:
-//! the handler holds a `GrainRef` and calls the grain directly
-//! ([`SessionRef::prompt_within`], [`SessionRef::tail`], [`SessionRef::follow`]),
-//! and records tenancy ownership through the client `Granary<Directory>`.
+//! There is no control protocol underneath: the handler holds a `GrainRef` and
+//! calls the grain directly ([`SessionRef::prompt_within`], [`SessionRef::tail`],
+//! [`SessionRef::follow`]), and records tenancy ownership through the client
+//! `Granary<Directory>`.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -94,9 +93,8 @@ async fn readyz<S: HarnessSystem>(State(gw): State<Arc<Gateway<S>>>) -> Response
 /// One concise line per request (method, path, status) to stderr. Skips the
 /// health probes so k8s liveness/readiness polling stays quiet. The path never
 /// carries the bearer token (it rides the `Authorization` header), so this cannot
-/// leak a secret. Request latency is deliberately omitted: timing must route
-/// through the `Clock` seam (§18.1, never the wall clock), so per-request latency
-/// belongs to a future metrics layer, not this edge log line.
+/// leak a secret. Latency is omitted: timing must route through the `Clock` seam
+/// (§18.1), never the wall clock.
 async fn log_request(req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -269,7 +267,7 @@ async fn stream<S: HarnessSystem>(
 
 /// The streaming `prompt`: submit the turn as a background task, stream the run's
 /// records off a [`Follower`], and emit the terminal outcome once the watched
-/// turn ends. Mirrors the old adapter's parked-prompt-plus-live-watch.
+/// turn ends.
 fn prompt_stream<S: HarnessSystem>(
     session_ref: harness::SessionRef<S>,
     body: PromptBody,
@@ -299,16 +297,15 @@ fn prompt_stream<S: HarnessSystem>(
 
 /// The terminal step after a [`SessionStream`]'s watched turn ends: the observe-only
 /// `stream` emits a payload-less `end`; the streaming `prompt` awaits its background
-/// task and emits the run's `outcome`. This tail is the *only* thing the two
-/// endpoints differ in — the record-forwarding half is shared.
+/// task and emits the run's `outcome`. The record-forwarding half before it is
+/// shared by both endpoints.
 enum Tail {
     End,
     Outcome(JoinHandle<Result<RunOutcome, GrainError>>),
 }
 
 /// A server-sent-event stream over a session's records: forward record batches off a
-/// [`Follower`] until the watched turn ends, then run the [`Tail`]. Both the observe
-/// (`stream`) and streaming-prompt (`prompt_stream`) endpoints are this one machine.
+/// [`Follower`] until the watched turn ends, then run the [`Tail`].
 enum SessionStream<S: HarnessSystem> {
     Streaming {
         follower: Follower<S>,

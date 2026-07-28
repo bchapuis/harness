@@ -76,7 +76,7 @@ One logical instance of an actor cluster-wide — for coordinators, schedulers, 
 
 ## 5. Events
 
-Utility events extend the core `Event` enum (core §16). Placement (§2) and routers (§3) define none: both are pure or node-local functions whose per-decision events would flood the stream without enabling any check their conformance tests do not already perform.
+Utility events extend the core `Event` enum (core §16). Placement (§2) and routers (§3) define none: per-decision events on pure or node-local functions would flood the stream without enabling any check their conformance tests do not already perform.
 
 The singleton (§4) defines two, emitted by the hosting node's manager:
 

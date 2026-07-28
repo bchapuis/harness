@@ -60,8 +60,7 @@ impl TierStats {
         self.compute_built.load(Ordering::SeqCst)
     }
 
-    /// Modules actually compiled (cache misses): the module cache makes a
-    /// repeated call compile nothing.
+    /// Modules actually compiled (cache misses).
     pub fn modules_compiled(&self) -> usize {
         self.modules_compiled.load(Ordering::SeqCst)
     }
@@ -84,20 +83,18 @@ impl TierStats {
 }
 
 /// The tiered sandbox provider (sandbox spec §3): `Workspace` by capability
-/// handle, `Compute` (feature `compute`) by hermetic wasmtime guests,
-/// `Native` (feature `native`) by an OCI container behind the docker CLI —
-/// or, configured via [`TieredSandboxes::with_firecracker`] (feature
-/// `firecracker`), by a Firecracker microVM — and nothing else; see the
-/// crate docs for the offered set.
+/// handle, `Compute` by hermetic wasmtime guests, `Native` by an OCI
+/// container or a Firecracker microVM, and nothing else. The crate docs hold
+/// the offered set.
 pub struct TieredSandboxes {
     /// Base seed for compute determinism (S2). The per-session seed is a
     /// digest of base and session id, so fixing the base fixes every guest.
     seed: u64,
     /// Deployment-registered compute modules (the QuickJS runner and kin):
     /// resolved by name before any workspace path, so a guest write can
-    /// never shadow them. Sharing them across sessions is pre-warming, which
-    /// sandbox spec §2.3 item 2 permits: a module is code, not working
-    /// state — every call still gets a fresh store.
+    /// never shadow them. Shared across sessions, which sandbox spec §2.3
+    /// item 2 permits: a module is code, not working state — every call
+    /// still gets a fresh store.
     modules: BTreeMap<String, Arc<[u8]>>,
     /// The container CLI binary for the native tier; `docker` by default.
     #[cfg(feature = "native")]
@@ -118,9 +115,8 @@ impl Default for TieredSandboxes {
 
 impl TieredSandboxes {
     /// Build the provider. Each session's workspace directory arrives at
-    /// [`open`](SandboxProvider::open) — owned by the caller (the agent's
-    /// workspace facet), opened here as a capability handle so every tier
-    /// after the open reaches the filesystem through that handle (S1).
+    /// [`open`](SandboxProvider::open), owned by the caller (the agent's
+    /// workspace facet) and opened there as a capability handle (S1).
     pub fn new() -> TieredSandboxes {
         TieredSandboxes {
             seed: 0,
@@ -133,16 +129,16 @@ impl TieredSandboxes {
         }
     }
 
-    /// Fix the base seed (S2): a deployment that pins it makes every guest's
-    /// injected entropy reproducible.
+    /// Fix the base seed (S2): pinning it makes every guest's injected
+    /// entropy reproducible.
     pub fn with_seed(mut self, seed: u64) -> TieredSandboxes {
         self.seed = seed;
         self
     }
 
-    /// Register a compute module under a name (the QuickJS runner, a future
-    /// Python runner). Registered names win over workspace paths in
-    /// `run_module`, and `run_js` requires its runner to be registered.
+    /// Register a compute module under a name. Registered names win over
+    /// workspace paths in `run_module`, and `run_js` requires its runner to
+    /// be registered.
     pub fn with_module(
         mut self,
         name: impl Into<String>,
@@ -182,8 +178,7 @@ impl TieredSandboxes {
         self
     }
 
-    /// Observable provider activity ([`TierStats`]) — the S-catalogue
-    /// accounting tests are the intended reader.
+    /// Observable provider activity ([`TierStats`]).
     pub fn stats(&self) -> &TierStats {
         &self.stats
     }
@@ -215,12 +210,11 @@ impl SandboxProvider for TieredSandboxes {
         // §2.2 of the sandbox spec: holding `Native` implies `Network`'s
         // grants. Neither native realization has a dataplane — the container
         // runs `--network none`, the microVM has no network device — so both
-        // deliver exactly an *empty* egress allowlist and nothing more. A
-        // profile that names egress (or explicitly caps in `Network`) asks
-        // for a dataplane this provider does not have: fail the open loudly,
-        // never silently withhold a granted capability. Unconditional — the
-        // rationale is true in every feature combination, and `open`'s
-        // contract must not vary with cargo features.
+        // deliver exactly an *empty* egress allowlist. A profile that names
+        // egress (or explicitly caps in `Network`) asks for a dataplane this
+        // provider does not have: fail the open loudly, never silently
+        // withhold a granted capability. Unconditional: `open`'s contract
+        // must not vary with cargo features.
         if !profile.egress.is_empty()
             || profile
                 .tier_cap
@@ -244,9 +238,8 @@ impl SandboxProvider for TieredSandboxes {
         };
         let stats = self.stats.clone();
         Box::pin(async move {
-            // The caller (the agent's workspace facet) owns the directory and
-            // usually materialized it already; a bare test caller may not
-            // have, so open creates-if-missing rather than demanding it. The
+            // The caller owns the directory and usually materialized it
+            // already; open creates-if-missing rather than demanding it. The
             // loss detector below is unaffected: it watches for the directory
             // *vanishing after* this open. Opening it as a capability handle
             // is this crate's only use of ambient authority — every tier
@@ -265,8 +258,7 @@ impl SandboxProvider for TieredSandboxes {
             let dir = Arc::new(dir);
             // The tier struct is cheap and eager; the *environment*
             // (container or microVM) is what stays lazy (sandbox spec §2.3
-            // item 2). Which realization — the cfg fork — is NativeEnv's
-            // secret, not this open path's.
+            // item 2).
             #[cfg(feature = "native")]
             let native = NativeEnv::build(spec, &dir, &host_path, &name, stats.clone());
             // Opening grants `Workspace` and nothing else (harness spec §5.6
@@ -328,8 +320,7 @@ struct NativeSpec {
 }
 
 /// Which realization answers `Native` for this sandbox (sandbox spec §3.5):
-/// the docker fallback, or — when the provider was configured with
-/// [`TieredSandboxes::with_firecracker`] — the microVM grade.
+/// the docker fallback, or the microVM grade.
 #[cfg(feature = "native")]
 #[derive(Clone)]
 enum NativeEnv {
@@ -340,8 +331,7 @@ enum NativeEnv {
 
 #[cfg(feature = "native")]
 impl NativeEnv {
-    /// Build the configured realization. The feature fork lives here — the
-    /// docker construction is written once, whatever else is compiled in.
+    /// Build the configured realization.
     fn build(
         spec: NativeSpec,
         dir: &Arc<Dir>,
@@ -412,12 +402,10 @@ pub(crate) fn capped(bytes: &[u8]) -> String {
 }
 
 /// Distinguish a lost environment from an ordinary outcome (harness spec
-/// §5.5): when the session's workspace directory no longer exists on disk —
-/// an external deletion, or a wiped scratch dir — the environment itself is
-/// gone, whatever the call reported. `EnvironmentLost` is the outcome that
-/// engages the harness's reset protocol (drop the binding, journal
-/// `WorkspaceReset`); anything else has the model retrying against state
-/// that no longer exists. The loss outranks even an `Ok`: the open handle
+/// §5.5): when the session's workspace directory no longer exists on disk
+/// the environment itself is gone, whatever the call reported.
+/// `EnvironmentLost` engages the harness's reset protocol (drop the binding,
+/// journal `WorkspaceReset`). The loss outranks even an `Ok`: the open handle
 /// keeps a deleted directory's fd alive, so a call can "succeed" against it
 /// (an empty listing, a tar sync of nothing) while its effects have no
 /// durable home — an ambient stat of the path, not a handle read, is the
@@ -501,8 +489,8 @@ impl Sandbox for TieredSandbox {
             }
             other => {
                 // Not offered by this provider (crate docs): a per-call
-                // failure the model reacts to (harness spec §5.4), and
-                // unreachable in a correctly capped deployment (§5.3 item 4).
+                // failure (harness spec §5.4), unreachable in a correctly
+                // capped deployment (§5.3 item 4).
                 let message = format!("tier {other:?} is not offered by this provider");
                 Box::pin(async move { Err(ToolError::Sandbox(message)) })
             }
@@ -514,9 +502,8 @@ impl Sandbox for TieredSandbox {
         // engine drops here; the native container is removed (a no-op
         // touching no tokio API when none was ever provisioned, so this
         // future stays pollable outside a tokio runtime for workspace-only
-        // sessions). The workspace directory is NOT removed — the caller owns
-        // it (the agent's workspace facet), and its durable content survives
-        // the activation by design.
+        // sessions). The workspace directory is NOT removed: the caller owns
+        // it, and its durable content survives the activation.
         #[cfg(feature = "compute")]
         {
             self.compute

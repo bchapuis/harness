@@ -1,34 +1,18 @@
 //! The node-local actor runtime — the implementor-facing seam (spec §4.2, §6, §12).
 //!
-//! [`LocalHost`] owns the actors running on one node: it assigns identities,
-//! stores each actor's mailbox plus its dispatch table, runs the serial
-//! executor, resolves ids to local mailboxes, dispatches inbound messages, and
-//! tracks death-watch subscriptions. It is the machinery an [`ActorSystem`]
-//! *implementor* builds on: the single-node [`LocalSystem`](crate::LocalSystem)
-//! is a thin wrapper over it, and the cluster runtime composes it with a
-//! transport to add the network boundary.
+//! **This module is not application API.** Programs use [`Actor`], [`ActorRef`],
+//! [`Ctx`], and the [`ActorSystem`] trait; only code implementing a *new*
+//! `ActorSystem` reaches for [`LocalHost`], [`WatchDelivery`], or
+//! [`ActorFactory`].
 //!
-//! **This module is not application API.** Programs use
-//! [`Actor`], [`ActorRef`], [`Ctx`], and the [`ActorSystem`] trait; only code
-//! implementing a
-//! *new* `ActorSystem` reaches for [`LocalHost`], [`WatchDelivery`], or
-//! [`ActorFactory`]. They are `pub` for exactly that reason but deliberately
-//! kept out of the crate's top-level prelude, so the user-facing surface stays
-//! the model, not its runtime. This is the one boundary the cluster crate
-//! crosses into core; the ~dozen methods below are its whole contract.
-//!
-//! **Death-watch is split across the boundary by design, not by accident.** The
-//! host owns *local* delivery: when a watched actor on this node stops, its local
-//! watchers receive a [`Terminated`] through their mailbox, and when a peer node
-//! is declared `down`,
+//! Death-watch is split across the boundary. The host owns *local* delivery:
+//! when a watched actor on this node stops, its local watchers receive a
+//! [`Terminated`] through their mailbox, and when a peer node is declared `down`,
 //! [`synthesize_node_down`](LocalHost::synthesize_node_down) manufactures a
 //! `Terminated { NodeDown }` for each local watcher of an actor on that node
-//! (spec §8.1 step 4) — no stop message can arrive from a dead node. Delivery to
-//! a *remote* watcher is the implementor's job: it supplies a [`WatchDelivery`]
-//! closure that forwards the signal over its transport, because the host is
-//! transport-agnostic and must not know how a frame reaches another node. The
-//! host stores and fires that closure ([`add_watch`](LocalHost::add_watch)); the
-//! implementor decides what crossing the network means.
+//! (spec §8.1 step 4), since no stop message can arrive from a dead node.
+//! Delivery to a *remote* watcher is the implementor's job: it supplies a
+//! [`WatchDelivery`] closure that forwards the signal over its transport.
 
 use std::any::Any;
 use std::any::TypeId;
@@ -79,7 +63,7 @@ pub type ActorFactory<A> = Box<dyn FnMut() -> Option<A> + Send>;
 
 /// Delivers a [`Terminated`] to one watcher by enqueuing it on the watcher's
 /// mailbox. Built in [`Ctx::watch`](crate::Ctx::watch), where the watcher type
-/// is known; stored type-erased in the watch registry.
+/// is still known.
 ///
 /// Returns a future because local delivery applies mailbox backpressure rather
 /// than dropping the signal (spec §6, §12 invariant #11): callers `.await` it so
@@ -93,9 +77,8 @@ struct ActorEntry<A: Actor> {
     dispatch: BTreeMap<&'static str, DispatchFn<A>>,
 }
 
-/// Type-erased view of a live actor, stored keyed by [`ActorId`]. Supports the
-/// local fast path (downcast to `Mailbox<A>`) and remote delivery (dispatch a
-/// payload), keeping storage heterogeneous while sends stay typed.
+/// Type-erased view of a live actor, so one map holds every actor type while
+/// sends stay typed: the local fast path downcasts back to `Mailbox<A>`.
 trait ErasedActor: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
 
@@ -123,12 +106,10 @@ impl<A: Actor> ErasedActor for ActorEntry<A> {
 /// watch placed *after* an actor is gone reports the true reason — `Failed`, not
 /// a blanket `Stopped` — to the watcher (spec §12, invariant #12).
 ///
-/// Watch-after-death has no live actor to ask, so without this the system can
-/// only guess. It is bounded (a FIFO of the last [`CAP`](Terminations::CAP)
-/// terminations): the watch-after-death race resolves within a few scheduler
-/// turns of the stop, so only *recent* deaths need fidelity, and ancient ones
-/// fall back to the `Stopped` default. Keyed lookups and insertion-ordered
-/// eviction only — no iteration — so it adds no observable nondeterminism (§4.6).
+/// Only the last [`CAP`](Terminations::CAP) terminations are kept; a death
+/// evicted from the FIFO falls back to the `Stopped` default. Keyed lookups and
+/// insertion-ordered eviction only, never iterated, so it adds no observable
+/// nondeterminism (§4.6).
 #[derive(Default)]
 struct Terminations {
     reason: BTreeMap<ActorId, TerminationReason>,
@@ -136,8 +117,6 @@ struct Terminations {
 }
 
 impl Terminations {
-    /// How many recent terminations to remember. Far above the handful of
-    /// in-flight watch-after-death races a run realistically has.
     const CAP: usize = 1024;
 
     fn record(&mut self, id: &ActorId, reason: TerminationReason) {
@@ -156,8 +135,7 @@ impl Terminations {
     }
 }
 
-/// Shared mutable state of one node's host. Held behind an `Arc` so the executor
-/// task can reach it on termination.
+/// Shared mutable state of one node's host.
 struct HostState {
     node: NodeId,
     events: Arc<dyn EventSink>,
@@ -165,16 +143,14 @@ struct HostState {
     actors: Mutex<BTreeMap<ActorId, Arc<dyn ErasedActor>>>,
     /// Death-watch subscriptions: watched target → its local watchers.
     watchers: Mutex<BTreeMap<ActorId, Vec<(ActorId, WatchDelivery)>>>,
-    /// Reasons recently-resigned local actors terminated with, for accurate
-    /// watch-after-death reporting (spec §12, invariant #12).
     terminations: Mutex<Terminations>,
     /// Escalation inboxes: actor id → a sender its children escalate failures to
     /// (spec §11.1). The value is the failed child's id, for context.
     escalators: Mutex<BTreeMap<ActorId, async_channel::Sender<ActorId>>>,
     /// Per-actor-type dispatch tables, built once on first spawn of each type so
     /// `Actor::register` runs at most once per type (spec §4.4), not per spawn.
-    /// The value is a type-erased `BTreeMap<&'static str, DispatchFn<A>>`. Keyed
-    /// lookups only (never iterated), so it adds no observable nondeterminism.
+    /// Keyed lookups only (never iterated), so it adds no observable
+    /// nondeterminism.
     dispatch_cache: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
     next_path: AtomicU64,
     /// This process incarnation's stamp on every actor id it assigns — see
@@ -207,12 +183,6 @@ impl HostState {
 
     /// Deliver `Terminated` to every watcher of `target`, then forget them — so
     /// each watcher is notified exactly once (invariant #11).
-    ///
-    /// Delivery itself emits the `TerminatedDelivered` event (at the watcher's
-    /// mailbox, see [`Mailbox::enqueue_signal`](crate::Mailbox)), so this only
-    /// fans out: a local watcher's closure enqueues onto its mailbox; a remote
-    /// watcher's closure forwards a frame, which is *not* a delivery and so is
-    /// re-emitted only when it lands on the remote node.
     async fn notify_terminated(&self, target: &ActorId, reason: TerminationReason) {
         // Drop the lock before awaiting delivery: the guard is released at the
         // end of this statement, so no lock is held across the `.await` below.
@@ -259,7 +229,6 @@ impl HostState {
             removed
         };
         if let Some(deliver) = deliver {
-            // Delivery emits `TerminatedDelivered` at the watcher's mailbox.
             deliver(Terminated {
                 id: target.clone(),
                 reason,
@@ -308,8 +277,7 @@ pub struct LocalHost {
 }
 
 impl LocalHost {
-    /// Create a host for `node`, emitting events to `events`, with the given
-    /// per-actor mailbox capacity.
+    /// Create a host for `node`, with `mailbox_capacity` slots per actor.
     pub fn new(node: NodeId, events: Arc<dyn EventSink>, mailbox_capacity: usize) -> LocalHost {
         LocalHost::with_incarnation(node, events, mailbox_capacity, 0)
     }
@@ -319,17 +287,12 @@ impl LocalHost {
     ///
     /// Paths are handed out by a counter that starts at zero, so a process that
     /// restarts under the same [`NodeId`] re-issues the very ids its predecessor
-    /// used. `ActorId` already has the field that separates them, and until now it
-    /// was always `0`, so a peer holding a ref from before the restart resolved it
-    /// against whatever actor now occupies that path — a *different* actor, since
-    /// spawn order does not survive a restart. Granary reproduced this as a grain
-    /// command applied to the wrong grain (`corpus.txt`,
-    /// `tenancy-directory-swarm 9300730`): the caller's cached host ref outlived
-    /// the node, and its `Record` landed on another principal's directory.
-    ///
-    /// Stamping the process incarnation makes such a ref fail to resolve instead,
-    /// which is a `DeadLetter` — the one outcome that proves the command never ran
-    /// (§2.2), so the caller re-resolves and re-issues safely.
+    /// used. Without the stamp, a peer holding a ref from before the restart
+    /// resolves it against whatever actor now occupies that path — a *different*
+    /// actor, since spawn order does not survive a restart. Stamping the process
+    /// incarnation makes such a ref fail to resolve instead, which is a
+    /// `DeadLetter`, the one outcome that proves the command never ran (§2.2), so
+    /// the caller re-resolves and re-issues safely.
     ///
     /// A single-node system passes `0`: it has no restart-under-the-same-identity
     /// path, and holding the value at zero keeps its ids byte-identical.
@@ -375,10 +338,8 @@ impl LocalHost {
     }
 
     /// The reason a recently-resigned local actor terminated with, if still
-    /// remembered. Used for accurate watch-after-death reporting: a watch placed
-    /// once the actor is gone reports `Failed` rather than a blanket `Stopped`
-    /// (spec §12, invariant #12). `None` once evicted (or never owned here), in
-    /// which case callers fall back to `Stopped`.
+    /// remembered (spec §12, invariant #12). `None` once evicted, or never owned
+    /// here, in which case callers fall back to `Stopped`.
     pub fn termination_reason(&self, id: &ActorId) -> Option<TerminationReason> {
         self.state
             .terminations
@@ -398,10 +359,8 @@ impl LocalHost {
         id
     }
 
-    /// The dispatch table for actor type `A`, building it once and caching it by
-    /// type (spec §4.4): `Actor::register` is invoked at most once per type — on
-    /// the first spawn — rather than on every spawn. The cached map is a `fn`
-    /// pointer table, so cloning it into each actor's entry is cheap.
+    /// The dispatch table for actor type `A`, built on first use and cached by
+    /// type, so `Actor::register` runs at most once per type (spec §4.4).
     fn dispatch_table<A: Actor>(&self) -> BTreeMap<&'static str, DispatchFn<A>> {
         let key = TypeId::of::<A>();
         let mut cache = self
@@ -456,7 +415,7 @@ impl LocalHost {
             .expect("actors mutex poisoned")
             .insert(id.clone(), Arc::new(entry));
 
-        // Escalation inbox: children escalate failures here (spec §11.1).
+        // Children escalate their failures here (spec §11.1).
         let (escalation_tx, escalation_rx) = async_channel::unbounded::<ActorId>();
         self.state
             .escalators
@@ -528,10 +487,8 @@ impl LocalHost {
     }
 
     /// Deliver an inbound `Terminated { reason }` frame to the single `watcher`
-    /// it is addressed to, removing only that subscription (spec §12). A frame
-    /// arrives once per remote watcher, so delivering to just that watcher keeps
-    /// each notified exactly once per `watch` and never lets one watcher's signal
-    /// spill onto another's subscription (invariant #11).
+    /// it is addressed to, removing only that subscription (spec §12,
+    /// invariant #11).
     pub async fn deliver_terminated_to(
         &self,
         target: &ActorId,
@@ -546,7 +503,7 @@ impl LocalHost {
 
 /// How one run of the message loop ended.
 enum Outcome {
-    /// Stopped gracefully (`Ctx::stop` or all senders gone).
+    /// `Ctx::stop`, or all senders gone.
     Stopped,
     /// A handler panicked.
     Faulted,
@@ -557,11 +514,8 @@ enum Outcome {
 /// What supervision decided for a fault (spec §11.2), after applying the restart
 /// window and backoff.
 enum Decision {
-    /// Keep the actor, drop the failed message, carry on.
     Resume,
-    /// Re-create the actor (after backoff).
     Restart,
-    /// Stop with `Failed`.
     StopFailed,
     /// Stop, and fail this actor's parent (spec §11.1).
     Escalate,
@@ -576,15 +530,12 @@ enum End<A> {
     Released(TerminationReason),
 }
 
-/// The executor's next step in an actor's life (spec §6, §11): (re)start the
-/// instance, run its message loop, or end it. The loop and [`handle_fault`] both
-/// speak this, so the start/run/terminate transitions live in one vocabulary.
+/// The executor's next step in an actor's life (spec §6, §11): run `started` on
+/// the instance (first start or a restart), process messages until the next stop
+/// or fault, or terminate.
 enum Step<A> {
-    /// Run `started` (first start or a restart), then process messages.
     Start(A),
-    /// Process messages until the next stop or fault.
     Run(A),
-    /// Terminate, via the shared end-of-life path.
     End(End<A>),
 }
 
@@ -618,11 +569,6 @@ async fn run_actor<A, C>(
     };
     let mut ever_started = false;
 
-    // The actor's life is a small state machine over `Step`: `Start` runs
-    // `started`, `Run` processes messages, and a fault from either phase flows
-    // through the one `handle_fault` procedure, which returns the next `Step` —
-    // re-start, keep running, or terminate. The supervision policy thus lives in
-    // exactly one place instead of once per phase.
     let mut step = Step::Start(actor);
     let end = loop {
         step = match step {
@@ -693,13 +639,11 @@ async fn run_actor<A, C>(
 }
 
 /// Apply supervision to one fault and report what the executor should do next
-/// (spec §11.2). Shared by the `started`-fault and message-loop-fault paths, so
-/// both resume, restart, escalate, and degrade through exactly one procedure.
+/// (spec §11.2). Shared by the `started`-fault and message-loop-fault paths.
 ///
-/// Takes the live `actor` by value: `Restart`/`Stop`/`Escalate` consume it
-/// (a restart runs its `stopped` hook first), while `Resume` hands it back
-/// unchanged. The `Restart` arm defers its event to [`resolve_restart`], which
-/// emits the *effective* decision once it knows whether a fresh instance exists.
+/// A restart runs the faulted instance's `stopped` hook before rebuilding, and
+/// defers its event to [`resolve_restart`], which emits the *effective* decision
+/// once it knows whether a fresh instance exists.
 #[allow(clippy::too_many_arguments)]
 async fn handle_fault<A, C>(
     fault: Fault,
@@ -736,9 +680,7 @@ where
             Step::End(End::Stop(actor, StopReason::Failed))
         }
         Decision::Restart => {
-            // The faulted instance stops with `Failed` (spec §11.2); then
-            // `resolve_restart` emits the effective decision — a real restart, or
-            // a degrade to stop when the factory is spent.
+            // The faulted instance stops with `Failed` first (spec §11.2).
             actor.stopped(StopReason::Failed).await;
             match resolve_restart(state, id, fault, factory) {
                 Some(fresh) => Step::Start(fresh),
@@ -753,13 +695,11 @@ where
 ///
 /// An actor spawned **by value** has an exhausted factory and cannot be
 /// reconstructed, so its `Restart` degrades to `Stop` (spec §11.2). The event
-/// stream MUST report that effective `Stop`, not the candidate `Restart`:
-/// `Supervised` always carries the effective decision (see [`emit_supervision`]),
-/// and an observer (or a continuous checker) that saw `Restart` here would expect
-/// a following `Restarted`, never the `ResignId` a degraded stop produces.
+/// stream MUST report that effective `Stop`, not the candidate `Restart`: an
+/// observer that saw `Restart` here would expect a following `Restarted`, never
+/// the `ResignId` a degraded stop produces.
 ///
-/// Returns the fresh instance to swap in on a real restart, or `None` when it
-/// degraded to a stop (the caller then terminates the actor with `Failed`).
+/// `None` means it degraded; the caller then terminates the actor with `Failed`.
 fn resolve_restart<A: Actor>(
     state: &HostState,
     id: &ActorId,
@@ -778,10 +718,9 @@ fn resolve_restart<A: Actor>(
     }
 }
 
-/// Emit the supervision decision for a faulted actor (spec §11.2, §16). The
-/// decision is the effective one — the restart window and backoff have already
-/// been applied, so an exhausted window surfaces here as `Stop`, and a `Restart`
-/// with no factory to rebuild from degrades to `Stop` (see [`resolve_restart`]).
+/// Emit the *effective* supervision decision for a faulted actor (spec §11.2,
+/// §16): the restart window and backoff have already been applied by the time
+/// this is called.
 fn emit_supervision(state: &HostState, id: &ActorId, fault: Fault, decision: &Decision) {
     let decision = match decision {
         Decision::Resume => SupervisionDecision::Resume,
@@ -844,8 +783,7 @@ async fn supervise<C: Clock>(
 }
 
 /// Apply equal-jitter to a backoff delay (spec §11.2): hold half the delay fixed
-/// and randomize the other half, so a wave of simultaneous restarts desynchronizes
-/// instead of retrying in lockstep. `rand` comes from the seeded `Entropy` (§4.6),
+/// and randomize the other half. `rand` comes from the seeded `Entropy` (§4.6),
 /// keeping a simulated run reproducible.
 fn jittered(base: std::time::Duration, rand: u64) -> std::time::Duration {
     let nanos = base.as_nanos() as u64;

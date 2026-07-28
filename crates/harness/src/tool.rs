@@ -1,19 +1,16 @@
 //! Tool declarations and the registry-as-allowlist (harness spec §5.2).
 //!
 //! Every tool is **declared**: the model and the loop need its interface
-//! regardless of where it executes. A kind's [`ToolRegistry`] is a hand-built
-//! list in the spirit of `HandlerRegistry` (core spec §4.4): explicit,
-//! inspectable, and the allowlist — a model's tool call dispatches by name
-//! against it and nothing else, so no path leads from model output to code
-//! outside the declared set. An unknown name or schema-rejected input is a
-//! synthesized [`ToolError`] outcome (§5.4), not a protocol failure: nothing
-//! was executed.
+//! regardless of where it executes. A kind's [`ToolRegistry`] is the allowlist —
+//! a model's tool call dispatches by name against it and nothing else, so no
+//! path leads from model output to code outside the declared set. An unknown
+//! name or schema-rejected input is a synthesized [`ToolError`] outcome (§5.4),
+//! not a protocol failure: nothing was executed.
 //!
 //! Every declared tool is sandboxed (§5.3). The single built-in exception is
-//! [`DELEGATE`] (§8): a delegation is control flow — a child `Submit`,
-//! confined to the seams — not an effect, so it executes in the loop. v1
-//! deliberately exposes no extension point for further loop-executing tools
-//! (§13).
+//! [`DELEGATE`] (§8): a delegation is control flow — a child `Submit`, confined
+//! to the seams — not an effect, so it executes in the loop. There is no
+//! extension point for further loop-executing tools (§13).
 
 use std::time::Duration;
 
@@ -44,8 +41,7 @@ pub enum OnDangling {
 /// One declared tool (harness spec §5.2).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolDecl {
-    /// Stable, author-chosen; the model selects by it (cf. manifests, core
-    /// spec §4.4).
+    /// Stable, author-chosen; the model selects by it.
     pub name: String,
     pub description: String,
     pub input_schema: Value,
@@ -84,8 +80,7 @@ impl ToolRegistry {
     }
 
     /// Declare a tool. Panics on a duplicate name: the registry is built once
-    /// at deployment configuration time, where a collision is a bug to surface
-    /// loudly, not handle.
+    /// at deployment configuration time, where a collision is a bug.
     pub fn declare(&mut self, decl: ToolDecl) {
         assert!(
             self.get(&decl.name).is_none(),
@@ -124,10 +119,9 @@ pub struct DelegateInput {
 }
 
 impl DelegateInput {
-    /// The JSON-Schema the model is shown for the `delegate` tool's input,
-    /// kept beside the struct it describes so the wire shape has one source of
-    /// truth (§8.1). `allowed` restricts `kind` to the parent's delegation
-    /// allowlist (§7.1); `budget` mirrors [`Budget`]'s `tokens`/`steps` (§9.1).
+    /// The JSON-Schema the model is shown for the `delegate` tool's input
+    /// (§8.1). `allowed` restricts `kind` to the parent's delegation allowlist
+    /// (§7.1); `budget` mirrors [`Budget`]'s `tokens`/`steps` (§9.1).
     pub fn input_schema(allowed: &[&str]) -> Value {
         serde_json::json!({
             "type": "object",
@@ -172,8 +166,7 @@ pub enum ToolError {
     EnvironmentLost(String),
     /// A delegation failed: the child run's terminal `RunError`, or the child
     /// staying unreachable past the retry bound — formatted for the parent's
-    /// model to react to (§8.2). A failed delegation is a tool outcome, never a
-    /// failure of the parent run (§5.4).
+    /// model to react to (§8.2).
     Delegation(String),
 }
 

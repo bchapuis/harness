@@ -1,11 +1,10 @@
 //! Record subscriptions: the journal follower (spec §7.9).
 //!
 //! A subscription is a live, best-effort push of a grain's committed records to
-//! a sink, layered over the durable `load` (§7.3). It is the push analogue of a
-//! §7.5 read: off the write path, bounded, and never authoritative. The host
-//! delivers each committed batch at the same point it emits `Committed` (§13),
-//! after the fold and the output gate (§6 step 4), so delivery cannot affect a
-//! write's outcome (**G5**).
+//! a sink, layered over the durable `load` (§7.3): off the write path, bounded,
+//! and never authoritative. The host delivers each committed batch at the same
+//! point it emits `Committed` (§13), after the fold and the output gate (§6
+//! step 4), so delivery cannot affect a write's outcome (**G5**).
 //!
 //! The contract is **reconcile by `Seq`** (§7.9, **G16**): a batch carries the
 //! `from` it begins after; a subscriber closes any gap with `load` and ignores
@@ -13,12 +12,12 @@
 //! drop, duplicate, or — across a re-subscribe — reorder; seq reconciliation
 //! absorbs all three, so correctness rests on the journal, not on delivery.
 //!
-//! This module is grain-type-agnostic: the wire batch ([`RecordBatch`]) carries
-//! opaque **tagged** record bytes — exactly what the host appended (§7.12) — so
-//! the always-on subscribe path imposes no `Clone` bound on a grain's `Event`.
-//! The sink ([`RecordSink`]) is the grain's **event projection**: it decodes
-//! facet-0 records to the typed `Event` and skips other facets' records, whose
-//! seqs appear as gaps the subscriber's seq-reconciliation already absorbs.
+//! The wire batch ([`RecordBatch`]) carries opaque **tagged** record bytes —
+//! exactly what the host appended (§7.12) — so the always-on subscribe path
+//! imposes no `Clone` bound on a grain's `Event`. The sink ([`RecordSink`]) is
+//! the grain's **event projection**: it decodes facet-0 records to the typed
+//! `Event` and skips other facets' records, whose seqs appear as gaps the
+//! subscriber's seq-reconciliation already absorbs.
 
 use actor_core::Actor;
 use actor_core::ActorRef;
@@ -70,9 +69,9 @@ pub struct Subscribed {
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Subscribe<G: Grain> {
-    /// The exclusive lower bound the subscriber wants live records after.
-    /// Carried for symmetry and future use; the head in [`Subscribed`] plus
-    /// `load` is what the subscriber backfills from today.
+    /// The exclusive lower bound the subscriber wants live records after. Not
+    /// consulted today: the subscriber backfills from the head in [`Subscribed`]
+    /// plus `load`.
     pub(crate) from: u64,
     /// Where committed batches are pushed.
     pub(crate) sink: ActorRef<RecordSink<G>>,
@@ -124,9 +123,8 @@ pub struct Subscription<G: Grain> {
 /// The sink actor a subscriber spawns and hands to the host (spec §7.9). It
 /// receives wire [`RecordBatch`]es (possibly from another node), decodes them to
 /// the grain's typed `Event`, and forwards them on a bounded channel to the
-/// subscriber. The concrete sink type the framework needs since `ActorRef` is
-/// typed (no erased recipient) — the journal analogue of the harness's
-/// `ReplyMailbox` (harness §7.4).
+/// subscriber. A concrete actor type, since `ActorRef` is typed (no erased
+/// recipient).
 pub struct RecordSink<G: Grain> {
     tx: async_channel::Sender<RecordStream<G::Event>>,
 }
@@ -153,10 +151,8 @@ impl<G: Grain> Handler<RecordBatch> for RecordSink<G> {
         let codec = ctx.system().codec();
         let mut records = Vec::with_capacity(msg.records.len());
         for (seq, bytes) in &msg.records {
-            // Every record wears its facet tag (spec §7.12). The typed sink is
-            // the grain's *event projection*: it decodes facet 0 and skips other
-            // facets' records — their seqs appear as gaps the subscriber's
-            // seq-reconciliation already absorbs (§7.9, G16).
+            // Every record wears its facet tag (spec §7.12); the event
+            // projection keeps facet 0 and skips the rest (see module docs).
             let Ok((tag, payload)) = crate::facet::split_record(bytes) else {
                 return;
             };
@@ -171,12 +167,12 @@ impl<G: Grain> Handler<RecordBatch> for RecordSink<G> {
                 Err(_) => return,
             }
         }
-        // try_send, not send: a slow subscriber is dropped on overflow rather
-        // than back-pressuring the host's forwarder (§7.9). It reconciles by seq.
-        // The subscriber dropped its receiver: nothing will ever read this
-        // channel again, so the sink stops rather than lingering until system
-        // shutdown (the framework does not reap actors on ref drop). A `Full`
-        // overflow keeps the sink alive — the subscriber reconciles by seq.
+        // try_send, not send: a slow subscriber loses batches on overflow rather
+        // than back-pressuring the host's forwarder (§7.9). A `Full` overflow
+        // keeps the sink alive; the subscriber reconciles by seq. A `Closed`
+        // channel will never be read again, so the sink stops rather than
+        // lingering until system shutdown (the framework does not reap actors on
+        // ref drop).
         if let Err(async_channel::TrySendError::Closed(_)) = self.tx.try_send(RecordStream {
             from: Seq::new(msg.from),
             records,

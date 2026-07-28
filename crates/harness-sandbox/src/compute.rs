@@ -5,11 +5,9 @@
 //! module and a fixed set of deterministic WASI stubs (seeded entropy, a
 //! frozen clock, discarded stdio — what wasi-libc needs to exist at all),
 //! and nothing else: instantiating a module that imports beyond that set
-//! fails as a `ToolError` outcome. Every capability a guest holds is one
-//! this module chose to expose; none is ambient. The filesystem a guest can
-//! touch is the workspace capability handle of §3.1 and nothing else, and
-//! its outputs are a function of the call, the workspace, and the injected
-//! seed (S2).
+//! fails as a `ToolError` outcome. The filesystem a guest can touch is the
+//! workspace capability handle of §3.1 and nothing else, and its outputs are
+//! a function of the call, the workspace, and the injected seed (S2).
 //!
 //! **Determinism config.** Fuel metering is the REQUIRED CPU bound (§3.2):
 //! it is deterministic, so a fuel-exhausted guest traps at the same
@@ -20,10 +18,10 @@
 //! compilation is off so no thread pool exists. One `Store` per call: no
 //! guest state survives between calls except through the workspace.
 //!
-//! **Modules.** A call names either a deployment-registered module (the
-//! QuickJS runner; registered names win, so a guest write never shadows
-//! them) or a workspace path. Compiled modules are cached per sandbox by
-//! content digest: code, not working state, so caching leaks nothing.
+//! **Modules.** A call names either a deployment-registered module
+//! (registered names win, so a guest write never shadows them) or a
+//! workspace path. Compiled modules are cached per sandbox by content
+//! digest: code, not working state, so caching leaks nothing.
 //!
 //! **Guest ABI v1** (frozen once a tool description teaches it):
 //!
@@ -73,9 +71,9 @@ use wasmtime::StoreLimitsBuilder;
 
 use crate::provider::TierStats;
 
-/// The registered name `run_js` routes to: the QuickJS runner module
-/// (feature `quickjs`, or any module a deployment registers under this name
-/// that honors the runner contract).
+/// The registered name `run_js` routes to: the QuickJS runner module, or any
+/// module a deployment registers under this name that honors the runner
+/// contract.
 pub(crate) const QJS_MODULE: &str = "qjs.wasm";
 
 /// The compute tool declaration, ready for [`harness::Kind::tool`]: guest
@@ -156,9 +154,9 @@ pub fn run_js_tool() -> ToolDecl {
 /// memory and CPU). Fuel meters execution and `StoreLimits` meters guest
 /// memory; these bound everything else a hostile module could size: the
 /// bytes handed to the compiler, the path and output lengths host functions
-/// materialize, and the table slots instantiation allocates host-side.
-/// Host functions never allocate guest-sized buffers at all — they stream
-/// through views of guest memory — so these caps are the residual surface.
+/// materialize, and the table slots instantiation allocates host-side. Host
+/// functions stream through views of guest memory rather than allocating
+/// guest-sized buffers, so these caps are the residual surface.
 const MAX_MODULE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_PATH_BYTES: i32 = 4096;
@@ -191,9 +189,8 @@ struct HostState {
 /// dropped on release (S5).
 pub(crate) struct ComputeTier {
     engine: Engine,
-    /// The host surface, defined once per tier: instantiation only ever
-    /// consults it, so every call shares one immutable linker instead of
-    /// re-registering a dozen host functions per call.
+    /// The host surface, defined once per tier: instantiation only consults
+    /// it, so every call shares one immutable linker.
     linker: Linker<HostState>,
     limits: ComputeLimits,
     /// Deployment-registered modules (provider.rs): resolved before any
@@ -218,8 +215,7 @@ impl ComputeTier {
         config.relaxed_simd_deterministic(true);
         // Threads and parallel compilation need no disabling: this crate
         // compiles wasmtime without the `threads` and `parallel-compilation`
-        // features, so neither capability exists to switch off — absence by
-        // construction, like the rest of the hermeticity story.
+        // features, so neither capability exists to switch off.
         let engine =
             Engine::new(&config).map_err(|e| ToolError::Sandbox(format!("compute engine: {e}")))?;
         let linker = host_linker(&engine)?;
@@ -271,8 +267,8 @@ impl ComputeTier {
     }
 
     /// A module's bytes: registered names first (unshadowable), then the
-    /// workspace path through the capability handle (S1 holds at the compute
-    /// tier: the guest's code, like its data, is workspace-confined).
+    /// workspace path through the capability handle (S1: the guest's code,
+    /// like its data, is workspace-confined).
     fn resolve(&self, dir: &Arc<Dir>, path: &str) -> Result<Arc<[u8]>, ToolError> {
         if let Some(bytes) = self.modules.get(path) {
             return Ok(Arc::clone(bytes));
@@ -423,8 +419,7 @@ fn js_source(dir: &Arc<Dir>, input: &Value) -> Result<String, ToolError> {
 
 /// The host surface a guest may import (§3.2): the `harness` capabilities
 /// over the workspace handle and the seed, plus deterministic WASI stubs for
-/// wasi-libc-linked guests. Every function below is a deliberate grant;
-/// nothing reaches the OS.
+/// wasi-libc-linked guests. Nothing below reaches the OS.
 fn host_linker(engine: &Engine) -> Result<Linker<HostState>, ToolError> {
     let mut linker: Linker<HostState> = Linker::new(engine);
     let wire = |e: wasmtime::Error| ToolError::Sandbox(format!("compute host: {e}"));
@@ -469,9 +464,9 @@ fn host_linker(engine: &Engine) -> Result<Linker<HostState>, ToolError> {
                 let path = guest_path(&mut caller, path_ptr, path_len)?;
                 let memory = guest_memory(&mut caller)?;
                 // Stream the file straight into the guest's own memory: the
-                // host never holds a file- or cap-sized buffer, so neither
-                // a large file nor a large `dst_cap` costs the host more
-                // than the guest's bounded memory already does.
+                // host never holds a file- or cap-sized buffer, so neither a
+                // large file nor a large `dst_cap` costs the host anything
+                // beyond the guest's already bounded memory.
                 let (data, state) = memory.data_and_store_mut(&mut caller);
                 let Ok(file) = state.dir.open(&path) else {
                     return Ok(-1);
@@ -533,10 +528,9 @@ fn host_linker(engine: &Engine) -> Result<Linker<HostState>, ToolError> {
 }
 
 /// Deterministic `wasi_snapshot_preview1` stubs: just enough for a
-/// wasi-libc-linked guest (the QuickJS runner) to initialize and run, every
-/// one a pure function of the call and the seed (S2). The artifact's
-/// imports-allowlist test pins this surface: a wasi-libc upgrade that wants
-/// more fails loudly there, never silently here.
+/// wasi-libc-linked guest to initialize and run, every one a pure function of
+/// the call and the seed (S2). The artifact's imports-allowlist test pins
+/// this surface, so a wasi-libc upgrade that wants more fails there.
 fn wasi_stubs(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     const WASI: &str = "wasi_snapshot_preview1";
     // errno values from the WASI spec.
@@ -704,8 +698,7 @@ fn guest_path(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> wasmtim
 }
 
 /// A `Sandbox` error tagged with the failing compute step and the full
-/// wasmtime cause chain (`{e:#}`). The closure form suits `Result::map_err`,
-/// where most of these arise.
+/// wasmtime cause chain (`{e:#}`).
 fn sandbox_err(step: &'static str) -> impl Fn(wasmtime::Error) -> ToolError {
     move |e| ToolError::Sandbox(format!("compute: {step}: {e:#}"))
 }

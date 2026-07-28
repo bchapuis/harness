@@ -1,14 +1,14 @@
 //! Shared Firecracker microVM plumbing (sandbox spec §3.5, machine spec §2.1).
 //!
-//! Two consumers boot Firecracker VMs and deliberately share the subtle
-//! process-hygiene code between them: the agent sandbox's `Native` tier
-//! (`harness-sandbox`, per-call tar sync over vsock) and the persistent
-//! machine (`crates/machine`, whose drive is the disk facet's image, grain
-//! §7.15). This crate owns exactly the mechanics that are identical for both
-//! and nothing protocol-shaped:
+//! Two consumers boot Firecracker VMs and share the process-hygiene code
+//! between them: the agent sandbox's `Native` tier (`harness-sandbox`,
+//! per-call tar sync over vsock) and the persistent machine
+//! (`crates/machine`, whose drive is the disk facet's image, grain §7.15).
+//! This crate owns the mechanics identical for both and nothing
+//! protocol-shaped:
 //!
 //! - the `--config-file` **document** ([`config_json`]): one PUT-free start,
-//!   no API client on the boot path, a pure function unit-tested as such;
+//!   no API client on the boot path;
 //! - the **process lifecycle** ([`MicroVm`]): spawn with `kill_on_drop` (a
 //!   dropped handle can never leak a running VM), a pid file plus a
 //!   `/proc`-cmdline guard so the *one* leak `kill_on_drop` cannot cover — a
@@ -24,10 +24,9 @@
 //!   machine's capture needs (machine §4) — the only post-boot use of the API
 //!   socket;
 //! - the **workspace tar codec** ([`ws_sync`], feature `ws`): the capped,
-//!   capability-confined pack/unpack both consumers move a workspace with —
-//!   the sandbox around every `Native` call, the machine at boot and at
-//!   capture quiescent points. The codec is shared; each consumer keeps its
-//!   own wire protocol around it.
+//!   capability-confined pack/unpack both consumers move a workspace with.
+//!   The codec is shared; each consumer keeps its own wire protocol around
+//!   it.
 //!
 //! Firecracker runs on Linux + `/dev/kvm` only; this crate *builds*
 //! everywhere, and launching where KVM is absent fails as an ordinary error.
@@ -78,8 +77,7 @@ pub struct NetIf {
 }
 
 /// Everything one boot needs. The consumer owns policy (which kernel, which
-/// drives, which boot args — the sandbox boots its agent as init, the machine
-/// boots the user rootfs's own init); this crate owns the mechanics.
+/// drives, which boot args); this crate owns the mechanics.
 #[derive(Clone, Debug)]
 pub struct VmConfig {
     /// The `firecracker` executable.
@@ -158,8 +156,7 @@ pub async fn control_dir(prefix: &str, key: &str) -> Result<PathBuf, MicroVmErro
 }
 
 /// The `--config-file` document Firecracker boots from: one PUT-free start.
-/// A pure function of its inputs, unit-tested as such. `control` locates the
-/// vsock socket when [`VmConfig::vsock`] is set.
+/// `control` locates the vsock socket when [`VmConfig::vsock`] is set.
 pub fn config_json(config: &VmConfig, control: &Path) -> Value {
     let mut document = json!({
         "boot-source": {

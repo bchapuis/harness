@@ -5,10 +5,9 @@
 //! `put` is durable once **W ≤ R** of them have stored it (spec §5.2). It has no
 //! leader and no quorum-intersection requirement: with immutable content, `W` and
 //! `R` are independent durability and availability knobs, not a correctness
-//! constraint (spec §4, contrast granary §8). It is the grain Quorum replicator
-//! (granary §7.2) with its hard half removed — a fan-out of immutable bytes, a
-//! verified rank-order read, and a monotonic delete flag, with no election, no
-//! term, and no write-time read-repair (**B4**).
+//! constraint (spec §4, contrast granary §8). A fan-out of immutable bytes, a
+//! verified rank-order read, and a monotonic delete flag: no election, no term,
+//! and no write-time read-repair (**B4**).
 //!
 //! A node running this tier owns its on-disk [`LocalBlobStore`], a [`BlobReplica`]
 //! actor over it (so peers can reach it), the node's [`TombstoneSet`] (shared with
@@ -16,9 +15,8 @@
 //! selection is the pure [`placement`] function of the serving set (**B5**), so a
 //! writer and a reader agree on where a blob lives with no directory lookup.
 //!
-//! The push-based reconcile loop that restores the `R` margin after a node departs
-//! (spec §7, **B6**) is a separate concern (`reconcile`); this module is the data
-//! and delete paths.
+//! This module is the data and delete paths; the reconcile loop that restores the
+//! `R` margin after a node departs (spec §7, **B6**) lives in `reconcile`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,9 +52,7 @@ const PUT_TIMEOUT: Duration = Duration::from_secs(2);
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The `Clustered` tier (spec §5.2). Clone is cheap (an `Arc<Inner>`), so it
-/// satisfies the [`BlobStore`] bound and the background reconcile loop can hold a
-/// handle.
+/// The `Clustered` tier (spec §5.2). Clone is cheap (an `Arc<Inner>`).
 pub struct ClusteredBlobStore<S: BlobSystem> {
     inner: Arc<Inner<S>>,
 }
@@ -70,8 +66,7 @@ impl<S: BlobSystem> Clone for ClusteredBlobStore<S> {
 }
 
 /// The shared state of a [`ClusteredBlobStore`] node. Crate-visible so the
-/// reconcile loop ([`crate::reconcile`]) can hold a `Weak` to it and read the
-/// node's capabilities each pass.
+/// reconcile loop can hold a `Weak` to it.
 pub(crate) struct Inner<S: BlobSystem> {
     pub(crate) system: S,
     pub(crate) config: BlobConfig,
@@ -81,8 +76,7 @@ pub(crate) struct Inner<S: BlobSystem> {
     /// This node's cluster-wide awareness set, shared with its [`BlobReplica`] so
     /// the durable store and the in-memory set move together (spec §5.3).
     pub(crate) tombstones: TombstoneSet,
-    /// Sweep tracking for namespaces this node anchors (spec §5.3, B7). Reclamation
-    /// is driven by the reconcile loop (spec §7).
+    /// Sweep tracking for namespaces this node anchors (spec §5.3, B7).
     pub(crate) anchors: AnchorTracker,
     /// How the tier reaches peers' replicas — a seam, for deterministic simulation
     /// (spec §6, §8).
@@ -93,13 +87,10 @@ pub(crate) struct Inner<S: BlobSystem> {
 impl<S: BlobSystem> ClusteredBlobStore<S> {
     /// Bring the `Clustered` tier up on `system` with this node's on-disk `local`
     /// store: spawn and register the node's [`BlobReplica`] so peers can reach it,
-    /// and wire the transport, tombstone awareness, and anchor tracker. The
-    /// reconcile loop is started separately (spec §7).
+    /// and wire the transport, tombstone awareness, and anchor tracker.
     ///
-    /// `local` is opened by the caller (one store per node), so the tier stays
-    /// agnostic to where bytes live on disk — the deviation from Appendix A's
-    /// path-less sketch that lets the deterministic simulator give each node its
-    /// own directory (spec §8).
+    /// `local` is opened by the caller (one store per node), so the deterministic
+    /// simulator can give each node its own directory (spec §8).
     pub fn start(system: S, config: BlobConfig, local: LocalBlobStore) -> ClusteredBlobStore<S> {
         let tombstones = TombstoneSet::new();
         let replica = system.spawn(BlobReplica::<S>::new(local.clone(), tombstones.clone()));
@@ -118,8 +109,7 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
             self_node,
         });
         // Drive rebalancing and tombstone reclamation in the background, holding a
-        // `Weak` so the loop exits once the last store handle is dropped (the
-        // granary `reconcile_loop` pattern, spec §7).
+        // `Weak` so the loop exits once the last store handle is dropped (spec §7).
         inner
             .system
             .launch(Box::pin(crate::reconcile::reconcile_loop(Arc::downgrade(
@@ -128,21 +118,19 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
         ClusteredBlobStore { inner }
     }
 
-    /// The node's tombstone awareness set (shared with its replica). Exposed for
-    /// the reconcile loop, which consults it before copying a blob (spec §7).
+    /// The node's tombstone awareness set (shared with its replica): consulted
+    /// before a reconcile copy (spec §7).
     pub fn tombstones(&self) -> &TombstoneSet {
         &self.inner.tombstones
     }
 
-    /// The node's anchor tracker. Exposed for the reconcile loop's reclamation pass
-    /// (spec §5.3, §7).
+    /// The node's anchor tracker, for the reclamation pass (spec §5.3, §7).
     pub fn anchors(&self) -> &AnchorTracker {
         &self.inner.anchors
     }
 
-    /// This node's on-disk store. Exposed for the reconcile loop, which enumerates
-    /// the blobs this node holds and re-pushes the under-replicated ones to their
-    /// current owners (spec §7, **B6**).
+    /// This node's on-disk store, which the reconcile loop enumerates to re-push
+    /// under-replicated blobs to their current owners (spec §7, **B6**).
     pub fn local(&self) -> &LocalBlobStore {
         &self.inner.local
     }
@@ -156,12 +144,10 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
     }
 
     async fn run_put(&self, ns: &Namespace, bytes: Vec<u8>) -> Result<BlobId, BlobError> {
-        // Enforce the size bound (spec §2: "an implementation SHOULD bound a blob's
-        // size and a consumer SHOULD chunk beyond that bound"). `max_blob_bytes` is
-        // the tier's one size lever; refuse past it rather than store an unbounded
-        // blob — the whole-blob verify and whole-blob fetch (B1) assume a bounded
-        // unit. The error is non-retryable, but the v1 error model has no dedicated
-        // variant, so it is surfaced as `Unavailable` with an explicit reason.
+        // Enforce the size bound (spec §2): the whole-blob verify and whole-blob
+        // fetch (B1) assume a bounded unit. The failure is non-retryable, but the
+        // error model has no dedicated variant, so it is surfaced as `Unavailable`
+        // with an explicit reason.
         if bytes.len() > self.inner.config.max_blob_bytes {
             return Err(BlobError::Unavailable(format!(
                 "blob of {} bytes exceeds max_blob_bytes {}",
@@ -177,11 +163,9 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
         let members = self.inner.system.serving_members();
         let owners = placement::owners(&members, ns, &id, self.r());
         // B3 / §5.2: a `put` acks only once at least W copies are stored, so the
-        // blob then survives the loss of any R − W owners. When the serving set is
-        // smaller than W there are fewer than W nodes that could ever hold a copy,
-        // so the durability target is unreachable — refuse now with `Unavailable`
-        // rather than ack at min(W, owners) copies, which would silently weaken the
-        // contract exactly when the cluster is under-provisioned.
+        // blob then survives the loss of any R − W owners. With fewer than W
+        // candidate owners the target is unreachable, so refuse now rather than ack
+        // at min(W, owners) copies, which would weaken the contract silently.
         let need = self.w();
         if owners.len() < need {
             return Err(BlobError::Unavailable(format!(
@@ -356,9 +340,8 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
                 if is_anchor {
                     anchored += 1;
                     if anchored >= need_anchor && result.is_err() {
+                        // Keep draining so the rest of the cluster sweeps too.
                         result = Ok(());
-                        // Keep draining so the rest of the cluster sweeps too; do not
-                        // return yet — the loop finishes the fan-out below.
                     }
                 }
             }

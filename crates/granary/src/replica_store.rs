@@ -4,11 +4,11 @@
 //! shard leader's [`QuorumReplicator`](crate::replicator::QuorumReplicator) fans a
 //! grain's records out to the shard's replicas and reports them durable once a
 //! quorum has stored them. This module is the replicas' side of that protocol and
-//! the leader's way of reaching them — both built on **actor messaging**, so
-//! granary adds no transport (spec §2.2): a per-node [`ReplicaStore`] actor,
-//! registered in the receptionist under one key per grain type, owns this node's
-//! [`GrainStore`], and [`ActorReplicaTransport`] reaches a replica's store by an
-//! ordinary `ask` to that node's actor (local on the leader's own replica, §5.2).
+//! the leader's way of reaching them, both built on actor messaging so granary adds
+//! no transport (spec §2.2): a per-node [`ReplicaStore`] actor, registered in the
+//! receptionist under one key per grain type, owns this node's [`GrainStore`], and
+//! [`ActorReplicaTransport`] reaches a replica's store by an ordinary `ask` to that
+//! node's actor (local on the leader's own replica, §5.2).
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -78,8 +78,7 @@ pub(crate) struct StoreRecord {
     pub(crate) after: Seq,
     pub(crate) term: Term,
     pub(crate) records: Vec<Vec<u8>>,
-    /// A recovery write-back (read-repair, §8) versus a normal append: a normal
-    /// append onto a stale head is rejected with `Stale`; a write-back is not.
+    /// A recovery write-back (read-repair, §8) versus a normal append.
     pub(crate) kind: WriteKind,
 }
 
@@ -140,11 +139,9 @@ impl Message for SealRange {
 }
 
 /// Store one immutable, content-addressed blob on a replica (durable-workspace
-/// design). No `after`, no `term`, no `repair`: nothing to fence or order, and so
-/// no ack variants — an immutable blob has no `Fenced`/`Stale` outcome to report (a
-/// content hash names exactly one byte sequence), so the reply is just `()`: the ask
-/// resolving is the durable acknowledgement (the blob path is the record path's
-/// immutable subset).
+/// design). No `after`, no `term`, no `repair`: a content hash names exactly one byte
+/// sequence, so there is nothing to fence or order and no `Fenced`/`Stale` outcome to
+/// report. The ask resolving is the durable acknowledgement.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct StoreBlob {
     pub(crate) shard: u32,
@@ -264,9 +261,9 @@ impl<G: Grain> Actor for ReplicaStore<G> {
 
 // Every handler's reply IS the peer's acknowledgement, so each awaits durability
 // before returning: a reply released early would let the leader count this replica
-// toward a quorum for something this node has not stored (**G14**). A refusal is the
-// one thing that needs no wait — it changed nothing — and short-circuiting it keeps a
-// deposed leader from waiting a commit interval to learn it is deposed.
+// toward a quorum for something this node has not stored (**G14**). A refusal needs no
+// wait — it changed nothing — and short-circuiting it keeps a deposed leader from
+// waiting a commit interval to learn it is deposed.
 impl<G: Grain> Handler<StoreRecord> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreRecord, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
         let stored = self.store.store_record(
@@ -488,8 +485,8 @@ pub trait ReplicaTransport: Send + Sync + 'static {
 /// resolves a node's [`ReplicaStore`] in the receptionist and `ask`s it. A store on
 /// this node resolves to the local actor, so the leader's append to its own replica
 /// is a local call with no serialization (§5.2). Resolution is a local receptionist
-/// read each call — cheap, and never stale across a peer restart (a restarted node
-/// re-registers a fresh ref).
+/// read each call, never stale across a peer restart (a restarted node re-registers a
+/// fresh ref).
 pub(crate) struct ActorReplicaTransport<G: Grain> {
     system: G::System,
     grain_type: &'static str,

@@ -4,10 +4,8 @@
 //! One channel is one vsock connection: the muxer handshake and framing the
 //! shared transport provides ([`microvm::vsock`]), then the channel's
 //! [`ChannelKind`](crate::ChannelKind) header, then [`machine_proto`] frames.
-//! This assumes the guest socket is reachable from this node — the machine's
-//! leader owns it, so a co-located front door reaches it directly; a front
-//! door on another node supplies a relayed stream instead (the cross-node
-//! relay is the seam's job, machine §8).
+//! This assumes the guest socket is reachable from this node; a front door on
+//! another node supplies a relayed stream instead (machine §8).
 
 use std::path::PathBuf;
 

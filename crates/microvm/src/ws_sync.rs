@@ -5,8 +5,8 @@
 //! a guest as a capped tar stream over vsock: the agent sandbox's `Native`
 //! tier brackets every call with it (sandbox spec §3.5), and the persistent
 //! machine syncs its workspace facet at boot and at capture quiescent points
-//! (machine spec §4). This module owns the codec — pack and unpack — while
-//! each consumer keeps its own wire protocol around it.
+//! (machine spec §4). This module owns the codec; each consumer keeps its own
+//! wire protocol around it.
 //!
 //! Every byte crosses through a `cap_std::fs::Dir` handle, so a path outside
 //! the workspace is unrepresentable, not merely rejected (S1). What does
@@ -109,7 +109,6 @@ fn append_dir(
 /// workspace untouched; that matters because both consumers durably capture
 /// the workspace (the sandbox after every tool call, the machine at every
 /// quiescent point), and a partial directory would be captured as deletions.
-/// The staging dance is this codec's secret; callers hold only the path.
 pub fn restore_workspace(ws: &Path, tar: &[u8]) -> Result<(), std::io::Error> {
     let mut name = ws.as_os_str().to_owned();
     name.push(".incoming");
@@ -126,7 +125,7 @@ pub fn restore_workspace(ws: &Path, tar: &[u8]) -> Result<(), std::io::Error> {
 
 /// Remove every child of the workspace, leaving the directory itself in
 /// place (it may be a mount point that must survive). The clear half of the
-/// replace-never-merge discipline every consumer shares.
+/// replace-never-merge discipline.
 fn clear_workspace(dir: &Dir) -> Result<(), std::io::Error> {
     for entry in dir.entries()? {
         let entry = entry?;

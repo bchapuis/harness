@@ -1,10 +1,10 @@
 //! The `Local` tier: a single-node, on-disk content-addressed store (spec §5.1).
 //!
-//! This is the embedded, test, and simulator tier, and it is also the per-node
-//! engine the `Clustered` tier's replica actor owns (spec §6) — so its mutating
-//! operations are exposed as plain synchronous methods ([`store`](LocalBlobStore::store),
-//! [`fetch`](LocalBlobStore::fetch), …) that both the [`BlobStore`] impl here and
-//! the replica wrap.
+//! The embedded, test, and simulator tier, and also the per-node engine the
+//! `Clustered` tier's replica actor owns (spec §6): its operations are plain
+//! synchronous methods ([`store`](LocalBlobStore::store),
+//! [`fetch`](LocalBlobStore::fetch), …) that both the [`BlobStore`] impl here
+//! and the replica wrap.
 //!
 //! A blob is written to `blobs/<ns>/<hh>/<hex>` via the `wal` atomic-replace
 //! discipline (wal §5): write a temp file, fsync, rename onto the final path,
@@ -12,9 +12,9 @@
 //! a torn one. `<ns>` is the namespace (the unit of deletion), and `<hh>` is the
 //! first hex byte of the content hash, fanning each namespace so no directory
 //! grows unbounded. Because the path *is* the namespace plus the content hash, a
-//! `put` of an already-present blob is a no-op (the file exists), giving B2 for
-//! free; a `get` verifies what it read (spec §4, B1), so on-disk bit-rot surfaces
-//! as [`BlobError::Corrupt`], never as wrong bytes.
+//! `put` of an already-present blob is a no-op (the file exists), which is B2; a
+//! `get` verifies what it read (spec §4, B1), so on-disk bit-rot surfaces as
+//! [`BlobError::Corrupt`], never as wrong bytes.
 //!
 //! Deletion is a **tombstone** plus a sweep (spec §5.3): `delete_namespace`
 //! records a tombstone for `<ns>` (so a later `put` into it is refused) and then
@@ -49,9 +49,8 @@ const TOMBSTONE_BYTES: usize = 16;
 
 /// A single-node, on-disk content-addressed store (spec §5.1).
 ///
-/// Clone is cheap — the handle is an `Arc<Inner>` — so it satisfies the
-/// [`BlobStore`] `Clone` bound and can be shared between the tier and the replica
-/// actor that owns one of these per node.
+/// Clone is cheap — the handle is an `Arc<Inner>` — so the tier and the node's
+/// replica actor share one store.
 #[derive(Clone)]
 pub struct LocalBlobStore {
     inner: Arc<Inner>,
@@ -68,11 +67,10 @@ struct Inner {
     /// tombstone and is refused (spec §5.3, B7). Reads stay lock-free — the atomic
     /// rename gives them a whole blob or none.
     write: Mutex<()>,
-    /// A process-local, monotonic stamp source for `Local` tombstones. The
-    /// `Clustered` tier supplies a clock-derived `deleted_at`; `Local` has no
-    /// injected clock, and the value is informational here (tombstone *presence*,
-    /// not its stamp, makes a namespace gone), so a counter keeps distinct deletes
-    /// distinct and the on-disk store deterministic.
+    /// A process-local, monotonic stamp source for `Local` tombstones. `Local`
+    /// has no injected clock, and the value is informational (tombstone
+    /// *presence*, not its stamp, makes a namespace gone), so a counter keeps
+    /// distinct deletes distinct and the on-disk store deterministic.
     deletes: AtomicU64,
 }
 
@@ -100,9 +98,6 @@ impl LocalBlobStore {
     /// `BLAKE3(bytes)` (the caller computed it). Idempotent and dedup'd within the
     /// namespace (**B2**): if the blob's file already exists this writes nothing.
     /// Refuses with [`BlobError::Deleted`] if `ns` is tombstoned (spec §5.3).
-    ///
-    /// This is the engine the replica actor's `StoreBlob` handler calls (spec §6),
-    /// and that [`BlobStore::put`] wraps after hashing.
     pub fn store(&self, ns: &Namespace, id: &BlobId, bytes: &[u8]) -> Result<(), BlobError> {
         let _guard = self.lock();
         if self.is_tombstoned(ns) {
@@ -153,14 +148,11 @@ impl LocalBlobStore {
     /// or `None` if the namespace is tombstoned or the blob is absent.
     ///
     /// This is what the replica actor's `FetchBlob` handler returns (spec §6): the
-    /// bytes may be locally corrupt, and the *caller* re-hashes them after the
-    /// network transfer (spec §4, §5.2, **B1**), so an owner that returned
-    /// non-verifying bytes is distinguishable from one that had none — the
-    /// distinction `get` needs to choose [`BlobError::Corrupt`] over
-    /// [`BlobError::Unavailable`]. (Contrast [`fetch`](Self::fetch), which verifies
-    /// for the single-node `Local` tier.) The `range` of a `FetchBlob` is reserved
-    /// for range-verified streaming (spec §10); v1 returns the whole blob, because
-    /// a range cannot be verified against the id without it.
+    /// *caller* re-hashes after the network transfer (spec §4, §5.2, **B1**), so
+    /// an owner that returned non-verifying bytes is distinguishable from one that
+    /// had none — the distinction `get` needs to choose [`BlobError::Corrupt`] over
+    /// [`BlobError::Unavailable`]. Contrast [`fetch`](Self::fetch), which verifies
+    /// for the single-node `Local` tier.
     pub fn read_raw(&self, ns: &Namespace, id: &BlobId) -> Option<Vec<u8>> {
         if self.is_tombstoned(ns) {
             return None;
@@ -401,8 +393,7 @@ mod tests {
 
     #[test]
     fn putting_the_same_bytes_twice_stores_once() {
-        // B2: equal content under one namespace yields one stored copy, and the
-        // second put writes nothing new while re-acknowledging the same id.
+        // B2: equal content under one namespace yields one stored copy.
         let (_dir, store) = store();
         let ns = ns();
         let bytes = b"dedup me".to_vec();
@@ -418,8 +409,7 @@ mod tests {
 
     #[test]
     fn a_corrupt_blob_is_detected_and_never_returned() {
-        // B1: on-disk bit-rot is caught on read and surfaced as Corrupt, never
-        // returned as valid bytes.
+        // B1: on-disk bit-rot is caught on read.
         let (_dir, store) = store();
         let ns = ns();
         let id = block_on(store.put(&ns, b"trust but verify".to_vec())).expect("put");
@@ -464,8 +454,7 @@ mod tests {
 
     #[test]
     fn a_deleted_namespace_stays_deleted() {
-        // B7 (single-node slice): after delete, the namespace resolves nowhere,
-        // its bytes are swept, and a put back into it is refused.
+        // B7 (single-node slice).
         let (_dir, store) = store();
         let ns = ns();
         let id = block_on(store.put(&ns, b"to be reclaimed".to_vec())).expect("put");
@@ -499,8 +488,6 @@ mod tests {
 
     #[test]
     fn distinct_namespaces_store_the_same_content_independently() {
-        // Across namespaces the same content is stored once per namespace, and
-        // deleting one leaves the other resolvable (spec §2).
         let (_dir, store) = store();
         let a = Namespace::new(b"a".to_vec());
         let b = Namespace::new(b"b".to_vec());

@@ -1,17 +1,16 @@
 //! The `Workspace` tier (sandbox spec §3.1): typed tools over a capability
 //! handle.
 //!
-//! Confinement is the [`Dir`] handle itself: every path in every tool
-//! resolves through cap-std, which re-resolves each component inside the
-//! handle — `../`, absolute paths, and out-pointing symlinks are
-//! *unrepresentable*, not filtered (S1). No string sanitization appears
-//! anywhere in this module, deliberately: sanitization filters a
+//! Confinement is the [`Dir`] handle itself: cap-std re-resolves each path
+//! component inside the handle, so `../`, absolute paths, and out-pointing
+//! symlinks are *unrepresentable*, not filtered (S1). No string sanitization
+//! appears anywhere in this module, deliberately: sanitization filters a
 //! representable escape, and the symlink/TOCTOU class survives filtering.
 //!
-//! The tools are pure functions of the call and the filesystem (S2's
-//! discipline applied one tier down): no ambient clock or entropy reaches an
-//! output — no mtimes, and `list_dir` is name-sorted — so they run
-//! unmodified under the deterministic simulator (core spec §18.1).
+//! The tools are pure functions of the call and the filesystem: no ambient
+//! clock or entropy reaches an output — no mtimes, and `list_dir` is
+//! name-sorted — so they run unmodified under the deterministic simulator
+//! (core spec §18.1).
 
 use std::path::Path;
 
@@ -150,17 +149,16 @@ fn edit_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
 }
 
 /// The result of one `edit_file` string replacement: the new content and how many
-/// occurrences were replaced. Factored out so every edit tool enforces identical
-/// match/uniqueness semantics.
+/// occurrences were replaced.
 pub(crate) struct Edit {
     pub text: String,
     pub replaced: usize,
 }
 
 /// Apply an `edit_file` call (`old_string` → `new_string`, optional `replace_all`)
-/// to `text`. A pure function of the content and the call: an absent or — without
-/// `replace_all` — non-unique `old_string` is an `InvalidArguments` error, so an
-/// ambiguous edit fails loudly rather than touching the wrong site.
+/// to `text`. An absent or — without `replace_all` — non-unique `old_string` is an
+/// `InvalidArguments` error, so an ambiguous edit fails loudly rather than
+/// touching the wrong site.
 pub(crate) fn edit_text(text: &str, input: &Value, path: &str) -> Result<Edit, ToolError> {
     let old = required_str(input, "old_string")?;
     let new = required_str(input, "new_string")?;
@@ -200,8 +198,7 @@ pub(crate) fn edit_text(text: &str, input: &Value, path: &str) -> Result<Edit, T
 
 /// Decode `bytes` as UTF-8, optionally to a 1-based line window (`offset`/`limit`,
 /// for paging past the cap), then apply the 256 KiB cap with clean truncation —
-/// the tier's `{content, truncated}` shape. Factored out so every read tool pages
-/// identically. Pure: a function of the bytes and the window.
+/// the tier's `{content, truncated}` shape.
 pub(crate) fn cap_and_decode(bytes: &[u8], offset: Option<u64>, limit: Option<u64>) -> Value {
     let text = String::from_utf8_lossy(bytes);
     // The requested line window, if any. `split_inclusive` keeps each line's

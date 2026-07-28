@@ -3,14 +3,14 @@
 //! [`FileRaftWAL`] is the production [`RaftWAL`]: a voter's term, vote, log, and
 //! state-machine snapshot survive a process restart, so a restarted voter can never
 //! grant a second vote in a term it already voted in (election safety, invariant
-//! #22) and comes back over its compacted log rather than a blank one. The layout
-//! matches the trait's write paths, each with the durability technique that fits it:
+//! #22) and comes back over its compacted log rather than a blank one. Each write
+//! path carries the durability technique that fits it:
 //!
-//! - **`term`** — one tiny JSON record `{term, voted_for}`, rewritten on every
+//! - **`term`** — one JSON record `{term, voted_for}`, rewritten on every
 //!   [`save_term_and_vote`](RaftWAL::save_term_and_vote) by atomic replace
 //!   ([`wal::atomic_replace`]). A torn write is impossible: a reader sees either the
-//!   old record or the new one. It stays JSON on purpose — its parse-failure is the
-//!   corruption check that protects election safety.
+//!   old record or the new one. It stays JSON so that its parse failure is the
+//!   corruption check protecting election safety.
 //! - **`log`** — a framed, checksummed append-only [`wal::Wal`] of `(absolute index,
 //!   entry)` records. Carrying the absolute index makes a crash mid-compaction
 //!   self-healing (below). Raft's truncate-then-append maps to
@@ -23,9 +23,8 @@
 //!
 //! **Recovery.** At [`open`](FileRaftWAL::open), the snapshot is loaded, then the log
 //! is recovered by [`Wal::open`](wal::Wal::open) (which discards a torn tail). Records
-//! whose absolute index is `≤` the snapshot index are discarded too — that is the
-//! self-heal for a crash between persisting a snapshot and rewriting the log: the
-//! stale prefix is dropped and the log rewritten to the retained suffix. A corrupt
+//! whose absolute index is `≤` the snapshot index are discarded too, the self-heal
+//! for a crash between persisting a snapshot and rewriting the log. A corrupt
 //! `term` or `snapshot` file is a hard error: silently resetting either could violate
 //! safety, so only the operator may resolve it.
 //!
@@ -36,9 +35,9 @@
 //! observe the node unreachable.
 //!
 //! **Single writer.** A storage directory must belong to one process at a time.
-//! Advisory locking (`File::try_lock`) needs a newer toolchain than the workspace
-//! MSRV, so this is documented, not enforced; the [`factory`](FileRaftWAL::factory)
-//! layout (one subdirectory per node) makes accidental sharing unlikely.
+//! Not enforced (advisory locking needs a newer toolchain than the workspace
+//! MSRV); the [`factory`](FileRaftWAL::factory) layout gives each node its own
+//! subdirectory.
 
 use std::fs;
 use std::io;
@@ -63,10 +62,9 @@ const MAX_RECORD: u32 = 1 << 20;
 /// The schema revision of this log's `(index, RaftEntry)` records, stamped into the
 /// log's header (compatibility spec §3).
 ///
-/// A Raft log is the strictest of the durable boundaries: its records are the
-/// consensus history, and a node that cannot read its own log cannot rejoin without
-/// losing committed state. Bumping this therefore follows **V4** without exception —
-/// widen the accepted range one release before anything writes the new revision.
+/// A node that cannot read its own log cannot rejoin without losing committed
+/// state, so bumping this follows **V4** without exception: widen the accepted
+/// range one release before anything writes the new revision.
 const LOG_RECORDS: compat::Window = compat::Window::at("actor.raft.log", 1);
 
 /// The `term` file's content (spec §9.4.3 item 2): the current term and the
@@ -178,8 +176,8 @@ impl FileRaftWAL {
             log.rewrite(&retained)?;
         }
         // No directory fsync here: every file in `dir` is written through a wal
-        // primitive (`Wal::open` for `log`, `atomic_replace` for `term`/`snapshot`) that
-        // makes its own entry durable, and this layout creates no subdirectory of its own.
+        // primitive (`Wal::open` for `log`, `atomic_replace` for `term`/`snapshot`)
+        // that makes its own entry durable, and this layout creates no subdirectory.
 
         Ok(FileRaftWAL {
             dir,
@@ -199,9 +197,8 @@ impl FileRaftWAL {
 
     /// A [`RaftConfig::storage`] factory rooted at `data_dir`: each
     /// `(group, node)`'s state lives in its own `data_dir/<group>/<node>/`
-    /// subdirectory, so a node's several Raft groups (the membership control
-    /// group plus, for granary, a group per shard) never share a log. Panics if
-    /// a directory cannot be opened — a voter without durable storage must not
+    /// subdirectory, so a node's several Raft groups never share a log. Panics if
+    /// a directory cannot be opened: a voter without durable storage must not
     /// start (spec §9.4.3 item 2).
     ///
     /// [`RaftConfig::storage`]: actor_cluster::RaftConfig
@@ -248,9 +245,7 @@ impl FileRaftWAL {
         inner.state.log.truncate(from);
 
         // Entry at local position `from + i` has absolute index
-        // `base + (from + i) + 1` (the log is 1-based above the snapshot). Clone each
-        // entry once into the indexed batch, append it durably, then move the entries
-        // out of the batch into the in-memory mirror — one clone per entry, not two.
+        // `base + (from + i) + 1` (the log is 1-based above the snapshot).
         let records: Vec<(u64, RaftEntry)> = entries
             .iter()
             .enumerate()
@@ -369,10 +364,8 @@ mod tests {
         RaftEntry { term, payload }
     }
 
-    /// A distinct opaque app payload (`tag` + node uid), standing in for the
-    /// membership commands these storage round-trip/truncation tests used to
-    /// carry — the engine treats `App` bytes opaquely, so any distinct,
-    /// comparable value exercises the log machinery.
+    /// A distinct opaque app payload (`tag` + node uid). The engine treats `App`
+    /// bytes opaquely, so any distinct, comparable value will do.
     fn app(tag: u8, uid: u64) -> EntryPayload {
         let mut bytes = vec![tag];
         bytes.extend_from_slice(&uid.to_le_bytes());
@@ -551,11 +544,10 @@ mod tests {
         );
     }
 
-    /// The differential workhorse: drive the same operation sequence through
-    /// `FileRaftWAL` — reopening from disk before every step — and
-    /// `InMemoryRaftWAL`; `load()` must agree at every step. Covers the
-    /// offset index, truncation, snapshot compaction, and reopen logic across
-    /// interleavings.
+    /// Drive the same operation sequence through `FileRaftWAL`, reopening from
+    /// disk before every step, and through `InMemoryRaftWAL`; `load()` must agree
+    /// at every step. Covers the offset index, truncation, snapshot compaction,
+    /// and reopen logic across interleavings.
     #[test]
     fn file_storage_matches_in_memory_storage_across_reopens() {
         enum Op {

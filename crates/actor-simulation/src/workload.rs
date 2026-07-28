@@ -3,11 +3,8 @@
 //! A [`Workload`] drives the cluster through its public API; the runner executes
 //! it under a seeded [`Simulation`], with a per-seed [`FaultConfig`] sampled from
 //! the same stream, while a [`Checker`] watches the event stream. A failing run
-//! is reported as a [`RunFailure`] carrying the `(seed, faults)` needed to
-//! replay it deterministically (spec §18.6).
-//!
-//! The swarm loop: define a few workloads and invariants, then sweep many
-//! seeds ([`run_swarm`]); coverage is cluster-time exercised, not test count.
+//! is reported as a [`RunFailure`] carrying the seed that replays it
+//! deterministically (spec §18.6).
 
 use std::sync::Arc;
 
@@ -56,8 +53,8 @@ pub trait Workload: Send + 'static {
 ///
 /// A single-node workload runs on a [`LocalSystem`] with no transport or
 /// membership, so the only fault dimension here is the bounded mailbox capacity,
-/// randomized so invariants are exercised across the backpressure spectrum.
-/// Transport faults (drop/duplicate/latency) are a *cluster* concern and live in
+/// randomized to exercise invariants across the backpressure spectrum. Transport
+/// faults (drop/duplicate/latency) live in
 /// [`FaultPolicy`](crate::FaultPolicy), applied to the in-memory network.
 #[derive(Clone, Copy, Debug)]
 pub struct FaultConfig {
@@ -76,10 +73,9 @@ impl FaultConfig {
     }
 }
 
-/// A failing run, with everything needed to replay it (spec §18.6). One type
-/// covers both single-node and cluster runs: the `(workload, seed)` pair alone
-/// replays either deterministically — the seed regenerates the run's faults — so
-/// there is nothing run-shaped to carry beyond it.
+/// A failing run, with everything needed to replay it (spec §18.6). The
+/// `(workload, seed)` pair alone replays a single-node or cluster run
+/// deterministically, since the seed regenerates the run's faults.
 #[derive(Clone, Debug)]
 pub struct RunFailure {
     pub workload: &'static str,
@@ -105,17 +101,15 @@ impl std::error::Error for RunFailure {}
 
 /// Every seed a sweep failed at, and how many it ran (spec §18.6).
 ///
-/// A sweep reports a *set* rather than a single seed because the two runs want
-/// different things from it: CI stops at the first failure, so this carries one
-/// [`RunFailure`] and prints exactly as one; a soak under
-/// [`collect_all_failures`](crate::collect_all_failures) runs to the end, so
-/// this carries every pair the run found and prints them ready to paste into
+/// CI stops at the first failure, so this carries one [`RunFailure`] and prints
+/// exactly as one; under [`collect_all_failures`](crate::collect_all_failures)
+/// it carries every failing seed and prints them ready to paste into
 /// `corpus.txt`.
 #[derive(Clone, Debug)]
 pub struct SweepFailure {
     pub workload: &'static str,
-    /// How many seeds ran, including the ones that failed. With the sweep
-    /// stopping at the first failure this is where it stopped, not the width.
+    /// How many seeds ran, including the ones that failed. When the sweep stops
+    /// at the first failure this is where it stopped, not the width.
     pub seeds_run: u64,
     /// The failing seeds, in the order the sweep reached them. Never empty.
     pub failures: Vec<RunFailure>,
@@ -123,9 +117,8 @@ pub struct SweepFailure {
 
 impl std::fmt::Display for SweepFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // One failure prints as the bare `RunFailure` it always did, so the
-        // stop-at-first output every call site was written against is unchanged
-        // and a failure message still names its own corpus key.
+        // One failure prints as the bare `RunFailure`, so it still names its own
+        // corpus key.
         if let [only] = self.failures.as_slice() {
             return write!(f, "{only}");
         }
@@ -139,8 +132,7 @@ impl std::fmt::Display for SweepFailure {
         for failure in &self.failures {
             writeln!(f, "{failure}")?;
         }
-        // The whole point of a collecting run: a block that goes straight into
-        // corpus.txt, in the format `<workload> <seed>` that file parses.
+        // In the `<workload> <seed>` format corpus.txt parses.
         writeln!(f, "corpus.txt lines for every seed above:\n")?;
         for failure in &self.failures {
             writeln!(f, "{} {}", failure.workload, failure.seed)?;
@@ -154,11 +146,8 @@ impl std::error::Error for SweepFailure {}
 /// Run one seed, turning a panic into a [`RunFailure`] against that seed.
 ///
 /// Sweeps fail two ways: an invariant returns a violation, or the workload
-/// simply asserts — a `drive` that checks its own outcome, a `scenario_sweep`
-/// body. The second kind used to unwind straight out of the sweep, which cost
-/// two things: the remaining seeds, and the seed number itself, since the
-/// panic message is the workload's and says nothing about which seed produced
-/// it. Catching here buys both back.
+/// itself asserts. Catching the second kind here keeps the remaining seeds
+/// running and names the seed, which the workload's own panic message does not.
 pub(crate) fn caught(
     workload: &'static str,
     seed: u64,
@@ -178,8 +167,7 @@ pub(crate) fn caught(
 }
 
 /// The message a caught panic carried, for the two payload types `panic!`
-/// produces. Anything else is reported by shape, which is still enough to name
-/// the seed that did it.
+/// produces. Anything else is reported by shape.
 pub(crate) fn panic_detail(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
@@ -193,8 +181,8 @@ pub(crate) fn panic_detail(payload: &(dyn std::any::Any + Send)) -> String {
 /// The sweep loop shared by every invariant runner: sweep the seeds, and decide
 /// whether a failure ends the run or joins a list.
 ///
-/// `collect` is passed in rather than read from the environment here so the loop
-/// is a pure function of its inputs — the runners read
+/// `collect` is a parameter rather than an environment read, so the loop is a
+/// pure function of its inputs; the runners read
 /// [`collect_all_failures`](crate::collect_all_failures) once, at the edge.
 pub(crate) fn sweep_collecting(
     workload: &'static str,
@@ -207,9 +195,8 @@ pub(crate) fn sweep_collecting(
     for seed in seeds {
         seeds_run += 1;
         if let Err(failure) = caught(workload, seed, || run(seed)) {
-            // The corpus replay runs ahead of the sweep, and a soak wide enough
-            // to reach a corpus seed runs it a second time. It is one case, so
-            // it earns one line.
+            // A seed the corpus replay and the sweep range both reach ran twice;
+            // it reports once.
             if !failures.iter().any(|seen| seen.seed == seed) {
                 failures.push(failure);
             }
@@ -232,7 +219,7 @@ pub(crate) fn sweep_collecting(
 /// Build and run a workload once under `seed`, routing its event stream to
 /// `events`. Shared by [`run_seed`] (which feeds a [`Checker`]) and the
 /// reproducibility harness (which feeds a [`Recorder`](crate::Recorder)), so both
-/// observe the *identical* run — the construction lives in exactly one place.
+/// observe the *identical* run.
 pub(crate) fn drive_local<W: Workload>(workload: &W, seed: u64, events: Arc<dyn EventSink>) {
     let sim = Simulation::new(seed);
     let faults = FaultConfig::sample(&sim.entropy());

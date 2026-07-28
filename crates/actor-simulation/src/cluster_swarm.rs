@@ -2,13 +2,10 @@
 //!
 //! Runs a [`ClusterWorkload`] over a multi-node [`SimNetwork`] while a seeded
 //! [`Nemesis`](nemesis) injects partitions (symmetric and one-way), crashes,
-//! process freezes, restarts, and heals, and a
-//! [`Checker`](crate::Checker) watches the event stream. Each run is bounded in
-//! virtual time (the failure detector never quiesces) and reproducible from its
-//! seed; a failure is reported with the seed for replay.
-//!
-//! This is the swarm loop applied to the distributed paths: faults across
-//! seeds, invariants attached, coverage measured in cluster-time exercised.
+//! process freezes, restarts, and heals, and a [`Checker`](crate::Checker)
+//! watches the event stream. Each run is bounded in virtual time (the failure
+//! detector never quiesces) and reproducible from its seed; a failure is
+//! reported with the seed for replay.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -45,10 +42,7 @@ use crate::registry::SimRegistry;
 use crate::workload::SweepFailure;
 use crate::workload::sweep_collecting;
 
-// Swarm intensity for the cluster harness (spec §18.3): how hard each run is
-// faulted and how long it may take. Collected here as named constants so the
-// driver reads as policy, not scattered magic numbers — and so the one place to
-// retune the sweep is obvious.
+// Swarm intensity for the cluster harness (spec §18.3).
 //
 /// Denominator of the per-frame drop and duplication probabilities.
 const CLUSTER_FAULT_DEN: u64 = 20;
@@ -69,9 +63,9 @@ const CLUSTER_STEP: Duration = Duration::from_millis(500);
 /// prunes) to flush.
 const CLUSTER_FLUSH: Duration = Duration::from_secs(2);
 /// Cap on the extra time [`drive_cluster`] will spend waiting for in-flight
-/// `ask`s to close after the flush window (see `AskTally`). Generous next to any
-/// per-call deadline a workload configures, and finite so a genuinely lost ask
-/// still reaches the no-silent-loss invariant instead of spinning here.
+/// `ask`s to close after the flush window (see `AskTally`). Finite, so a
+/// genuinely lost ask reaches the no-silent-loss invariant instead of spinning
+/// here.
 const CLUSTER_SETTLE_MAX: Duration = Duration::from_secs(30);
 
 /// The running cluster handed to a [`ClusterWorkload`].
@@ -102,15 +96,14 @@ impl ClusterCtx {
 }
 
 /// A workload's hook for putting a restarted node back to work, run by the
-/// driver on the fresh system the moment it is up — see
-/// [`ClusterWorkload::rehost`]. Shared and `'static` because the nemesis outlives
-/// the borrow of the workload that produced it.
+/// driver on the fresh system the moment it is up (see
+/// [`ClusterWorkload::rehost`]). Shared and `'static` because the nemesis
+/// outlives the borrow of the workload that produced it.
 pub type Rehost = Arc<dyn Fn(&SimNode) + Send + Sync>;
 
-/// A declarative membership-mode choice for a [`ClusterWorkload`] (spec §9.4).
-/// Declarative because the registry- and leader-based modes need per-run
-/// resources (the simulated registry, the voter set) that only the driver — with
-/// the run's [`Simulation`] in hand — can materialize.
+/// A membership-mode choice for a [`ClusterWorkload`] (spec §9.4). Declarative
+/// because the registry- and leader-based modes need per-run resources (the
+/// simulated registry, the voter set) only the driver can build.
 #[derive(Clone, Copy, Debug)]
 pub enum ClusterModeSpec {
     /// Fixed roster (spec §9.4.1); `detector` enables the observe-only SWIM loop.
@@ -182,22 +175,18 @@ pub trait ClusterWorkload {
     /// one (spec §18.3).
     ///
     /// A restart is process death: volatile state lost, durable state reloaded
-    /// through the storage seam. It is the fault that reaches
-    /// recovery-on-activation, where `crash` only isolates a process that keeps
-    /// running. But the fresh process comes up **empty**, so everything
-    /// [`setup`](Self::setup) installed on that node — a granary host, a spawned
-    /// actor, a receptionist registration — is gone. Left that way a restarted
-    /// node silently stops participating, and the run quietly shrinks its
-    /// cluster instead of faulting it. The hook is where a workload puts the
-    /// node back to work; a workload with nothing to re-install still opts in
-    /// with a hook that does nothing.
+    /// through the storage seam, where `crash` only isolates a process that keeps
+    /// running. The fresh process comes up **empty**, so everything
+    /// [`setup`](Self::setup) installed on that node is gone; left that way the
+    /// run shrinks its cluster instead of faulting it. A workload with nothing to
+    /// re-install still opts in with a hook that does nothing.
     ///
-    /// Two things a consenting workload must tolerate. A restart shuts the old
-    /// system down, so any [`SimNode`] cloned out of [`ClusterCtx::nodes`] for
-    /// that id is dead afterwards — the nemesis never restarts the first node,
-    /// so one handle always stays live. And every call should be bounded
-    /// (`ask_timeout`), so one issued into a shut-down node resolves as a
-    /// failure rather than sitting pending at quiescence.
+    /// Two things a consenting workload must tolerate. Any [`SimNode`] cloned out
+    /// of [`ClusterCtx::nodes`] for that id is dead once the restart shuts the old
+    /// system down (the nemesis never restarts the first node, so one handle
+    /// always stays live). And every call should be bounded (`ask_timeout`), so
+    /// one issued into a shut-down node resolves as a failure rather than sitting
+    /// pending at quiescence.
     fn rehost(&self) -> Option<Rehost> {
         None
     }
@@ -214,10 +203,7 @@ pub trait ClusterWorkload {
     }
 }
 
-/// One action in the nemesis's vocabulary (spec §18.3). Named rather than
-/// numbered because the vocabulary is now built per run — a registry-based run
-/// can open an outage, a restart-tolerant workload can lose a process — and
-/// modular arithmetic over a conditional tail stops reading as policy.
+/// One action in the nemesis's vocabulary (spec §18.3).
 #[derive(Clone, Copy)]
 enum Fault {
     /// Sever two random groups in both directions.
@@ -245,10 +231,9 @@ enum Fault {
     RegistryOutage,
 }
 
-/// The actions available to one run. The network-only ones — both partitions,
-/// crash, freeze, heal, quiet — are always in it, since every workload survives
-/// them by construction. The two that touch more than the wire are gated on the
-/// run saying it can take them.
+/// The actions available to one run. The network-only ones (both partitions,
+/// crash, freeze, heal, quiet) are always in it; the two that touch more than
+/// the wire are gated on the run saying it can take them.
 fn vocabulary(registry: bool, restarts: bool) -> Vec<Fault> {
     let mut faults = vec![
         Fault::Partition,
@@ -288,11 +273,11 @@ fn two_groups(entropy: &SimEntropy, nodes: &[NodeId]) -> Option<(Vec<NodeId>, Ve
 }
 
 /// A seeded fault injector (spec §18.3): over several rounds it draws from the
-/// run's [`vocabulary`] at random, so a run exercises the failure paths.
+/// run's [`vocabulary`] at random.
 ///
-/// Every action is either instantaneous or bounded within its own round. A pause
+/// Every action is either instantaneous or bounded within its own round: a pause
 /// that outlived the nemesis would stall the run rather than fault it, so the
-/// freeze and its thaw are one action, exactly as the registry outage is.
+/// freeze and its thaw are one action, as the registry outage is.
 async fn nemesis(
     net: SimNetwork,
     entropy: SimEntropy,
@@ -335,11 +320,9 @@ async fn nemesis(
                 }
             }
             Fault::Restart => {
-                // Never the first node. A restart shuts the old system down, so
-                // every `SimNode` a workload cloned out of `ClusterCtx::nodes()`
-                // for that id is dead afterwards; leaving node 1 alone leaves a
-                // workload one handle it can count on, which is the discipline
-                // `restart-churn` already keeps by hand.
+                // Never the first node: a restart shuts the old system down, so
+                // leaving node 1 alone leaves a workload one handle it can count
+                // on (`ClusterWorkload::rehost`).
                 if let Some(i) = entropy.pick_index(nodes.len() - 1) {
                     let system = net.restart(nodes[i + 1]);
                     // The fresh process is empty. Put it back to work before the
@@ -387,10 +370,8 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
         inner: events,
     });
     let sim = Simulation::new(seed);
-    // Seed-sampled transport faults: modest drop, duplication, and latency, so
-    // the run exercises loss, dups, and reordering on top of the nemesis's
-    // partitions/crashes (spec §18.3). Sampled from the run's entropy, so it
-    // stays deterministic per seed.
+    // Transport faults on top of the nemesis's partitions/crashes (spec §18.3),
+    // sampled from the run's entropy so they stay deterministic per seed.
     let entropy = sim.entropy();
     let faults = FaultPolicy {
         drop_num: entropy.next_u64() % CLUSTER_MAX_DROP_NUM,
@@ -399,9 +380,8 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
         duplicate_den: CLUSTER_FAULT_DEN,
         max_latency: Duration::from_millis(entropy.next_u64() % CLUSTER_MAX_LATENCY_MS),
     };
-    // Materialize the workload's mode spec into a concrete control plane: the
-    // registry- and leader-based modes need per-run resources (the simulated
-    // registry, the voter set) only the driver can build.
+    // Materialize the workload's mode spec into a concrete control plane (see
+    // `ClusterModeSpec`).
     let (mode, registry) = match workload.mode() {
         ClusterModeSpec::Static { detector } => (MembershipMode::Static { detector }, None),
         ClusterModeSpec::Gossip { swim, downing } => {
@@ -492,13 +472,10 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
         sim.run_for(CLUSTER_STEP);
     }
     // Let post-traffic signals (terminations, prunes) flush, then keep going
-    // while any `ask` is still in flight. A fixed window cannot be right here:
-    // the last call a workload issues carries its own deadline, and a subsystem
-    // may fan out further calls behind it — granary's quorum append returns at
-    // quorum latency and drains the slower replicas afterwards, each with a
-    // seconds-long timeout of its own. Stopping the clock inside that deadline
-    // and then asking "is anything still pending?" reports a live call as a lost
-    // one. Waiting for the answer is what makes the question meaningful.
+    // while any `ask` is still in flight. A fixed window cannot be right: a
+    // subsystem may fan out further calls behind the workload's last one, each
+    // with a deadline of its own, and stopping the clock inside that deadline
+    // reports a live call as a lost one.
     let settle_by = sim.now() + CLUSTER_SETTLE_MAX;
     sim.run_for(CLUSTER_FLUSH);
     while tally.in_flight() && sim.now() < settle_by {
@@ -567,9 +544,7 @@ pub fn run_cluster_swarm<W: ClusterWorkload>(
 
 /// Sweep a cluster workload across many seeds, checking invariants on each run
 /// and returning the *aggregate* fault activity the sweep exercised (spec
-/// §18.3). A test asserts each fault type fired at least once, so a green sweep
-/// provably covered loss, duplication, reordering, and partition/crash — not
-/// just the happy path (fault-injection coverage).
+/// §18.3). A test asserts each fault type fired at least once.
 pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
@@ -588,8 +563,8 @@ pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
                     violations,
                 });
             }
-            // Only a clean seed contributes coverage, so the fault totals stay a
-            // claim about runs that actually held their invariants.
+            // Only a clean seed contributes coverage: the totals are a claim
+            // about runs that held their invariants.
             total = total + faults;
             Ok(())
         },
@@ -597,12 +572,10 @@ pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
     Ok(total)
 }
 
-/// How many `ask`s the run has issued but not yet resolved.
-///
-/// The driver reads this to decide when the run has actually gone quiet (see
-/// [`drive_cluster`]). It is deliberately the same bracket the no-silent-loss
-/// invariant counts (spec §18.5 #1), so "the driver stopped waiting" and "the
-/// invariant is satisfied" cannot disagree about what pending means.
+/// How many `ask`s the run has issued but not yet resolved, read by
+/// [`drive_cluster`] to decide when the run has gone quiet. It counts the same
+/// bracket as the no-silent-loss invariant (spec §18.5 #1), so the driver and
+/// the invariant cannot disagree about what pending means.
 #[derive(Default)]
 struct AskTally {
     outstanding: std::sync::atomic::AtomicI64,

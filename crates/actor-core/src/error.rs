@@ -3,9 +3,8 @@
 //! [`CallError`] covers **transport and system** failures only — the failure to
 //! *complete* a call. Application failures a handler deliberately produces live
 //! inside `M::Reply` (spec §3.2), never here. The variants are exhaustive (no
-//! `#[non_exhaustive]`) by design: callers must handle every kind of partial
-//! failure explicitly, so the type system forces failure handling at each
-//! cross-actor boundary (spec §14.1).
+//! `#[non_exhaustive]`): callers MUST handle every kind of partial failure
+//! explicitly at each cross-actor boundary (spec §14.1).
 
 use serde::Deserialize;
 use serde::Serialize;

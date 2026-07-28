@@ -5,37 +5,24 @@ use std::time::Duration;
 use crate::store::GrainStoreFactory;
 
 /// Per-grain-type runtime configuration (spec Appendix A).
-///
-/// `shards` sets the type's namespace's **initial** partition into consensus
-/// groups (§7.1); `idle_after` drives hibernation (§10) and `snapshot_every`
-/// drives snapshotting (§9). `replication_factor` bounds a clustered shard's voter
-/// set (§7.6): the allocator selects this many replicas per shard by rendezvous
-/// hashing and the reconcile loop reconfigures the group as membership changes —
-/// a no-op on the `Local` tier (one local store). `shard_target_bytes` is the
-/// opt-in auto-split threshold (§7.7), `0` (the default) leaving elasticity to
-/// explicit [`Granary::split_shard`](crate::Granary::split_shard) /
-/// [`merge_shards`](crate::Granary::merge_shards).
 #[derive(Clone)]
 pub struct GranaryConfig {
     /// The number of shards this grain type's namespace is **initially**
     /// partitioned into (§7.1): `granary()` founds this many equal key ranges.
     /// Each shard is one consensus group; a name maps to a shard by a stable
     /// hash onto the range partition. The partition then grows and shrinks with
-    /// load through split/merge (§7.7), so this is the starting point, not a
-    /// fixed count.
+    /// load through split/merge (§7.7).
     pub shards: usize,
     /// Replicas per shard (§7.1): the allocator bounds each shard's voter set to
-    /// this many nodes by rendezvous hashing (§7.6). **No-op on the `Local` tier**
+    /// this many nodes by rendezvous hashing, and the reconcile loop reconfigures
+    /// the group as membership changes (§7.6). **No-op on the `Local` tier**
     /// (one local store).
     pub replication_factor: usize,
     /// Auto-split a shard once its durable footprint grows past this many bytes
     /// (§7.7): the shard leader measures its local store and requests a split,
     /// which divides the shard's key range in two. **`0` (the default) disables
-    /// the size trigger** — the elasticity mechanism is opt-in, since a type
-    /// whose grains are individually large (a VM image, a big database) wants a
-    /// higher threshold than a type of many small grains, and a shard leader
-    /// splitting on a workload's own inherent size is rarely what a deployment
-    /// wants without saying so. Split and merge are always available explicitly
+    /// the size trigger**, since a good threshold depends on how large a type's
+    /// grains are individually. Split and merge remain available explicitly
     /// ([`Granary::split_shard`](crate::Granary::split_shard) /
     /// [`Granary::merge_shards`](crate::Granary::merge_shards)). **No-op on the
     /// `Local` tier** (split/merge is `Quorum` elasticity).

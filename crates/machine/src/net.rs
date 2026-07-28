@@ -1,9 +1,7 @@
 //! Policy-bound, attributable, isolated egress (machine spec §5.2, M6).
 //!
-//! A development machine that cannot `git clone` or install a package is not a
-//! development machine, so a machine's guest gets an outbound path — unlike
-//! the agent sandbox, whose egress is default-deny per tool call. Three
-//! properties bind (M6):
+//! A machine's guest gets an outbound path, unlike the agent sandbox, whose
+//! egress is default-deny per tool call. Three properties bind (M6):
 //!
 //! - **Policy-bound.** The machine's journaled [`EgressPolicy`] grants egress;
 //!   nothing is ambient. `Open` is the fresh machine's default.
@@ -15,14 +13,11 @@
 //!   internet, the path MUST NOT reach another machine's guest, an
 //!   agent-sandbox environment, the host's own services, or the cluster's
 //!   control plane and node-internal addresses (link-local and metadata
-//!   endpoints included). A machine's network neighbor is the internet, never
-//!   the infrastructure it runs on.
+//!   endpoints included).
 //!
 //! [`nft_ruleset`] is a **pure function** — the mechanism M6 is verified
-//! against (golden tests below cover every policy and every forbidden
-//! destination class). Applying it (the tap device, the node NAT, invoking
-//! `nft`) is the Linux-only, `CAP_NET_ADMIN` realization behind
-//! [`feature = "net"`](apply); the obligation is the property, not the plumbing.
+//! against. Applying it (the tap device, the node NAT, invoking `nft`) is the
+//! Linux-only, `CAP_NET_ADMIN` realization behind [`feature = "net"`](apply).
 
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
@@ -64,8 +59,7 @@ const FORBIDDEN_V6: &[&str] = &[
 
 /// Generate the nftables ruleset for one machine's egress (machine §5.2). One
 /// chain per machine (named by [`tap_name`]): the forbidden-destination drops
-/// come first (isolation is not negotiable, whatever the policy grants), then
-/// the policy decides the rest, then NAT masquerade out the node uplink with a
+/// first, then the policy, then NAT masquerade out the node uplink with a
 /// counter for attribution.
 ///
 /// - `cluster_cidrs`: the cluster's own control-plane and node-internal ranges,
@@ -88,8 +82,8 @@ pub fn nft_ruleset(
     out.push_str(&format!("  chain {chain}_out {{\n"));
 
     // Isolation first (M6): no lateral movement, whatever the policy grants.
-    // The cluster's own ranges plus the universal private/link-local/metadata
-    // classes are dropped before the policy is consulted.
+    // The cluster's own ranges and the universal private/link-local/metadata
+    // classes drop before the policy is consulted.
     for cidr in cluster_cidrs {
         out.push_str(&format!(
             "    ip daddr {cidr} counter drop comment \"cluster-internal\"\n"
@@ -124,7 +118,7 @@ pub fn nft_ruleset(
     out.push_str("  }\n");
 
     // NAT masquerade out the node uplink, attributed by a per-machine counter
-    // (M6): the reference realization of per-machine flow accounting.
+    // (M6).
     out.push_str(&format!("  chain {chain}_nat {{\n"));
     out.push_str("    type nat hook postrouting priority 100; policy accept;\n");
     out.push_str(&format!(
@@ -138,10 +132,9 @@ pub fn nft_ruleset(
 /// Deployment-level egress configuration for a node (machine §5.2): the ranges
 /// the ruleset must fence off, the uplink it masquerades out, and the address
 /// pool per-machine guest /30s are carved from. The per-machine half — which
-/// slot, which policy — is decided per boot; this is the node-wide half the
-/// provider is constructed with. Its presence is what turns egress on: a
-/// provider built without it boots machines with no NIC (the pre-M6 posture),
-/// so a deployment that has not provisioned an uplink stays functional.
+/// slot, which policy — is decided per boot. Its presence is what turns egress
+/// on: a provider built without it boots machines with no NIC, so a deployment
+/// that has not provisioned an uplink stays functional.
 #[derive(Clone, Debug)]
 pub struct EgressConfig {
     /// The cluster's own control-plane and node-internal CIDRs, dropped by the
@@ -216,10 +209,9 @@ pub fn guest_ip_boot_arg(net: &GuestNet) -> String {
     format!("ip={}::{}:255.255.255.252::eth0:off", net.guest_ip, net.gateway)
 }
 
-/// A node-local allocator for per-machine guest /30 slots (machine §5.2's
-/// "a node-local pool allocates it"). One per node, held by the provider; a
-/// boot takes the lowest free slot and a kill returns it, so a machine that
-/// comes and goes never exhausts the pool.
+/// A node-local allocator for per-machine guest /30 slots (machine §5.2). One
+/// per node; a boot takes the lowest free slot and a kill returns it, so a
+/// machine that comes and goes never exhausts the pool.
 #[derive(Debug)]
 pub struct GuestPool {
     base: Ipv4Addr,
@@ -255,11 +247,10 @@ impl GuestPool {
     }
 }
 
-/// Apply a machine's egress plumbing (machine §5.2's reference realization):
-/// create the tap device, address it, and load the nftables ruleset. Linux +
-/// `CAP_NET_ADMIN` only; shells out to `ip` and `nft`. Returns an error the
-/// caller logs and degrades on (boot without a NIC), so a node lacking the
-/// capability refuses egress gracefully rather than failing the machine.
+/// Apply a machine's egress plumbing (machine §5.2): create the tap device,
+/// address it, and load the nftables ruleset. Linux + `CAP_NET_ADMIN` only;
+/// shells out to `ip` and `nft`. Returns an error the caller logs and degrades
+/// on, booting the machine without a NIC rather than failing it.
 #[cfg(all(feature = "net", target_os = "linux"))]
 pub mod apply {
     use super::*;
@@ -360,8 +351,7 @@ mod tests {
     #[test]
     fn open_policy_accepts_the_internet_after_the_drops() {
         let rules = nft_ruleset(&machine(), &EgressPolicy::Open, CLUSTER, "eth0");
-        // The accept must come AFTER the forbidden drops (order matters: a drop
-        // above the accept is what makes isolation hold under Open).
+        // The accept must come AFTER the forbidden drops.
         let accept = rules.find("policy: open").expect("open accept");
         let cluster_drop = rules.find("cluster-internal").expect("cluster drop");
         assert!(cluster_drop < accept, "drops precede the open accept");
@@ -436,8 +426,7 @@ mod tests {
 
     #[test]
     fn the_masquerade_counter_attributes_flows_per_machine() {
-        // M6 attributable: the tap name is the key, and the NAT rule carries a
-        // counter joined to it.
+        // M6 attributable: the tap name is the key the NAT counter joins to.
         let rules = nft_ruleset(&machine(), &EgressPolicy::Open, CLUSTER, "wan0");
         let tap = tap_name(&machine());
         assert!(rules.contains(&format!(

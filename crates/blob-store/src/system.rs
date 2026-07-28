@@ -3,16 +3,14 @@
 //! The `Clustered` tier and its background loops need capabilities the bare
 //! [`ActorSystem`] trait does not expose: virtual time (for reconcile and tombstone
 //! intervals), task launching (to drain stragglers and run the reconcile loop), and
-//! the **serving set** that places a blob's owners (spec §5.2). Rather than thread
-//! the concrete `Clock`/`Entropy`/`Spawner`/`Transport` type parameters of
-//! [`ClusterSystem`] through the replica transport, the tier, and the reconcile
-//! loop — which would leak them everywhere — the store requires its system to
-//! implement this one object-friendly trait, exactly as Granary requires
-//! `GranarySystem`.
+//! the **serving set** that places a blob's owners (spec §5.2). Requiring this one
+//! object-friendly trait keeps [`ClusterSystem`]'s
+//! `Clock`/`Entropy`/`Spawner`/`Transport` type parameters out of the replica
+//! transport, the tier, and the reconcile loop.
 //!
-//! It is implemented for [`LocalSystem`] (the `Local` tier: a single node, itself
-//! the only serving member) and [`ClusterSystem`] (the `Clustered` tier: the SWIM
-//! serving set), so the same store code runs on both without naming either.
+//! Implemented for [`LocalSystem`] (a single node, itself the only serving
+//! member) and [`ClusterSystem`] (the SWIM serving set), so the same store code
+//! runs on both without naming either.
 
 use std::time::Duration;
 

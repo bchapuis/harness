@@ -3,14 +3,12 @@
 //! [`RaftConsensus`] is the narrow capability a layer built *on* the cluster — granary's
 //! sharded journal — needs from a Raft-hosting [`ClusterSystem`](crate::ClusterSystem):
 //! create an application group, propose opaque command bytes to its leader, and
-//! observe the committed stream. It is the consensus analogue of granary's own
-//! `GranarySystem` seam: it lets that crate stay generic over `R: RaftConsensus`
-//! instead of naming the concrete `ClusterSystem<C, E, S, T>` and its four type
-//! parameters.
+//! observe the committed stream. A consumer stays generic over `R: RaftConsensus`
+//! instead of naming the concrete `ClusterSystem<C, E, S, T>`.
 //!
-//! It is used as a **generic bound** (`R: RaftConsensus`), never as `dyn RaftConsensus`, so
-//! the `impl Future` / concrete-`Receiver` return types are fine — no object
-//! safety is required and the futures are never boxed on the hot path.
+//! It is used as a **generic bound** (`R: RaftConsensus`), never as
+//! `dyn RaftConsensus`: no object safety is required, so the `impl Future` /
+//! concrete-`Receiver` return types are permitted.
 
 use std::future::Future;
 use std::time::Duration;
@@ -38,19 +36,17 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
 
     /// The cluster's **statically configured** voter set (the founding
     /// `RaftConfig.voters`, spec §9.4.3) — identical on every node and unchanging,
-    /// regardless of when the node joined. A layer above uses it as the **creation
-    /// seed** for a metadata group so every node forms the *same* group no matter
-    /// when it calls in (a late joiner that seeded from the live `cluster_voters`
-    /// would form a divergent group and disrupt elections). Empty outside
+    /// regardless of when the node joined. It, not the live `cluster_voters`, is
+    /// the **creation seed** for a metadata group: a late joiner seeding from the
+    /// live set would form a divergent group and disrupt elections. Empty outside
     /// leader-based mode.
     fn configured_voters(&self) -> Vec<NodeId>;
 
     /// Drive `group`'s voter set toward `voters` (spec §9.4.3 item 2): if this node
     /// leads `group`, propose the `AddVoter`/`RemoveVoter` deltas between the
     /// group's current voters and `voters`. A no-op on a non-leader. The engine
-    /// replicates the full committed log to a newly added voter, which then catches
-    /// up — so a layer above can keep an application group's membership in sync with
-    /// the cluster's.
+    /// replicates the full committed log to a newly added voter, which then
+    /// catches up.
     fn reconfigure_group(&self, group: GroupId, voters: Vec<NodeId>);
 
     /// Create an application Raft group with `voters` and non-voting `learners`
@@ -64,17 +60,17 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     fn create_group(&self, group: GroupId, voters: Vec<NodeId>, learners: Vec<NodeId>);
 
     /// Retire an application Raft group (spec §7.7, G7): stop running it so it no
-    /// longer elects, heartbeats, or commits. For a group that holds no data — a
-    /// granary shard's leader-election group is placement only (§7.1) — a merged-
-    /// away shard's group is reclaimed with no in-group consensus, each node
-    /// dropping it as it applies the committed merge. Idempotent; a no-op on a
-    /// group this node never ran and outside leader-based mode.
+    /// longer elects, heartbeats, or commits. A group that holds no data — a
+    /// granary shard's leader-election group is placement only (§7.1) — needs no
+    /// in-group consensus to retire: each node drops it as it applies the
+    /// committed merge. Idempotent; a no-op on a group this node never ran and
+    /// outside leader-based mode.
     fn remove_group(&self, group: GroupId);
 
     /// Subscribe to `group`'s committed observation stream ([`Committed`]). The
     /// receiver observes every entry committed **after** this call (a late
-    /// subscriber misses earlier commits — replay-from-index is a future
-    /// extension), interleaved in commit order with any state-machine snapshot
+    /// subscriber misses earlier commits; there is no replay-from-index),
+    /// interleaved in commit order with any state-machine snapshot
     /// installed on this node (`Committed::Snapshot`), which the consumer applies
     /// by replacing its state.
     fn subscribe_commits(&self, group: GroupId) -> Receiver<Committed>;
@@ -105,11 +101,11 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     fn group_leader(&self, group: GroupId) -> Option<NodeId>;
 
     /// A draw from the system's entropy source (the same deterministic seam used
-    /// for membership timing, spec §13). A layer above uses it to mint an identity
-    /// that must be unique across process restarts of the *same* node — e.g. a
-    /// per-instance epoch tagging proposals, so a re-started, re-elected node never
-    /// reuses a prior incarnation's proposal id (granary §7.2). Deterministic under
-    /// simulation, so seeded runs stay reproducible.
+    /// for membership timing, spec §13). Used to mint an identity that must be
+    /// unique across process restarts of the *same* node, e.g. the per-instance
+    /// epoch tagging proposals so a re-started, re-elected node never reuses a
+    /// prior incarnation's proposal id (granary §7.2). Deterministic under
+    /// simulation.
     fn next_u64(&self) -> u64;
 
     /// A future that completes after `dur` of the system's (virtual) time —

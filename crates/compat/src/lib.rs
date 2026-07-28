@@ -1,42 +1,25 @@
 //! The compatibility-boundary vocabulary (compatibility spec §2).
 //!
 //! A **compatibility boundary** is any place bytes produced by one build are
-//! consumed by another: an association during a rolling upgrade, a journal record
-//! read back next quarter, a snapshot restored on a node running a different
-//! release. Every boundary needs the same three things and no more — a **stamp**
-//! (the bytes, or the peer, say which revision they are), a **window** (this build
-//! declares which revisions it accepts and which it writes), and a **verdict**
-//! (outside the window it refuses, by name, without parsing).
+//! consumed by another. Every boundary needs the same three things and no more —
+//! a **stamp** (the bytes, or the peer, say which revision they are), a **window**
+//! (this build declares which revisions it accepts and which it writes), and a
+//! **verdict** (outside the window it refuses, by name, without parsing).
 //!
-//! The verdict carries the safety. A misparse is the failure worth engineering
-//! against: it turns a version skew, which an operator diagnoses in a minute, into
-//! silent corruption, which they cannot.
+//! The verdict carries the safety: a misparse turns a version skew, which an
+//! operator diagnoses in a minute, into silent corruption, which they cannot.
 //!
-//! This crate is that vocabulary and nothing else. It owns no format, reads no
-//! file, and depends on nothing in the tree — it sits below `wal`, which is itself
-//! below its callers, so every boundary in the workspace can share one definition
-//! of "compatible" and one wording for the refusal.
-//!
-//! Three types, because a boundary has three separable concerns:
+//! This crate owns no format, reads no file, and depends on nothing in the tree, so
+//! every boundary in the workspace shares one definition of "compatible" and one
+//! wording for the refusal.
 //!
 //! - [`Window`] is the **policy**: which revisions this build accepts, which one it
 //!   writes. Used alone by a boundary with no bytes at rest, such as the
-//!   association handshake, whose stamp travels in its own handshake fields.
+//!   association handshake.
 //! - [`Stamp`] is the **byte layout**: a magic and a revision written ahead of a
-//!   body, for a boundary that puts bytes on disk. Pairing the magic with the
-//!   window in one value is what makes a writer/reader magic mismatch unwritable
-//!   rather than merely unlikely.
+//!   body, for a boundary that puts bytes on disk.
 //! - [`Extensions`] is **headroom**: a tagged area a durable envelope carries so it
 //!   can grow without a revision bump at all.
-//!
-//! That last one exists because negotiated and durable boundaries need different
-//! things, and treating them alike is what makes a format ossify. A negotiated
-//! boundary can afford a strict format: both ends are present, and either may
-//! refuse. A durable one cannot — its reader is a build that does not exist yet, and
-//! its writer is gone — so it needs room to grow *in band*, or every added field
-//! becomes a revision with two decoders to keep, until changing the format is
-//! expensive enough that people work around it instead. A revision says *this is a
-//! different format*; an extension says *this is the same format, carrying more*.
 
 use std::fmt;
 
@@ -66,10 +49,8 @@ impl fmt::Display for Version {
 
 /// An inclusive range of accepted revisions — one side of a compatibility check.
 ///
-/// Kept apart from [`Window`] because a `Window` also carries the revision its
-/// build *writes*, and that choice is neither knowable nor trustworthy across a
-/// boundary: a peer announces what it can read, never what it will write. The same
-/// type therefore describes what a peer announced and what a refusal reports.
+/// Kept apart from [`Window`], which also carries the revision its build *writes*:
+/// a peer announces what it can read, never what it will write.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Accepted {
     pub lo: Version,
@@ -133,8 +114,7 @@ impl Window {
     /// what it writes must not link.
     ///
     /// `boundary` is a stable, dotted name for the format (`"actor.wire"`,
-    /// `"granary.record"`). It lives here rather than in each call so that no
-    /// refusal can be raised without it and no caller has to remember to supply it.
+    /// `"granary.record"`).
     pub const fn new(boundary: &'static str, lo: u16, hi: u16, writes: u16) -> Window {
         assert!(lo <= writes, "a window must accept the revision it writes");
         assert!(writes <= hi, "a window must accept the revision it writes");
@@ -146,11 +126,6 @@ impl Window {
     }
 
     /// The window at a single revision: accepts only `revision`, writes it.
-    ///
-    /// The state every boundary is in between changes, and worth its own
-    /// constructor because [`new`](Window::new) otherwise reads as three bare
-    /// numbers in a row — the form that invites a transposition when someone edits
-    /// it under pressure, which is exactly when a boundary gets bumped.
     ///
     /// A bump replaces this with `new`: widen to accept both revisions for a
     /// release, move `writes` in a later one (**V4**), and return here once the old
@@ -195,10 +170,8 @@ impl Window {
     /// The two-sided verdict, for a live peer: the highest revision both ends
     /// accept, or a refusal when the two ranges do not overlap.
     ///
-    /// This is the negotiation rule, defined once. Both ends compute it from the
-    /// same two ranges and so reach the same answer, which is why the handshake
-    /// needs no confirmation round: each side announces, each side decides, and
-    /// they cannot disagree.
+    /// Both ends compute it from the same two ranges and so reach the same answer,
+    /// which is why the handshake needs no confirmation round.
     ///
     /// # Errors
     ///
@@ -221,14 +194,9 @@ impl Window {
 /// A magic-prefixed revision stamp for bytes at rest, and the window that judges
 /// it (compatibility spec §2).
 ///
-/// The stamp sits **outside** the body's own encoding, which is the whole point: a
-/// positional format such as postcard cannot version itself, because there is no
-/// field name to make optional and no discriminant to grow. Reading the revision
-/// before any decoder runs is what lets a wrong-format input be refused instead of
-/// misparsed (**V2**).
-///
-/// The magic and the window travel together so a writer and a reader cannot
-/// disagree about the magic — an error the two-argument form would leave available.
+/// The stamp sits **outside** the body's own encoding, because a positional format
+/// such as postcard cannot version itself. Reading the revision before any decoder
+/// runs is what lets a wrong-format input be refused instead of misparsed (**V2**).
 #[derive(Clone, Copy, Debug)]
 pub struct Stamp {
     magic: &'static [u8],
@@ -288,14 +256,6 @@ impl Stamp {
 /// A tagged extension area, for a durable envelope that must be able to grow
 /// without a revision bump (compatibility spec §2.1).
 ///
-/// The problem it solves is specific to *durable* boundaries. A negotiated boundary
-/// can afford a strict format, because both ends are known at the moment they speak
-/// and either can refuse. A durable one has no such partner: the reader is some
-/// build in the future, and the writer is gone. Under a positional encoding like
-/// `postcard` — no field names, no discriminants to grow — that means every added
-/// field is a full revision with two decoders to maintain, which is the cost that
-/// makes people avoid changing formats at all, and then work around them instead.
-///
 /// An extension area is only sound if unknown entries can be *safely* ignored, and
 /// that is not true of every change. So criticality is carried in the key:
 ///
@@ -304,9 +264,8 @@ impl Stamp {
 /// - any other key MAY be ignored, so a reader that predates it behaves exactly as
 ///   it did before.
 ///
-/// This is PNG's ancillary/critical chunk rule, and it is what keeps the area from
-/// becoming a way to smuggle meaning past an old reader. A change that alters how
-/// existing bytes are interpreted is not an extension at all: bump the revision.
+/// This is PNG's ancillary/critical chunk rule. A change that alters how existing
+/// bytes are interpreted is not an extension at all: bump the revision.
 ///
 /// An empty area costs one byte.
 #[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -336,8 +295,7 @@ impl Extensions {
 
     /// Store `value` under `key`, replacing any previous entry. Entries are kept in
     /// key order so an envelope's bytes depend on its content and not on the order
-    /// its fields happened to be written — durable bytes that differ run to run are
-    /// a poor foundation for content addressing and for byte-comparison in tests.
+    /// its fields happened to be written.
     pub fn insert(&mut self, key: u16, value: Vec<u8>) {
         match self.0.binary_search_by_key(&key, |(k, _)| *k) {
             Ok(at) => self.0[at].1 = value,
@@ -370,14 +328,11 @@ impl Extensions {
 /// build can read.
 ///
 /// Every variant carries both sides, so the message tells an operator which end to
-/// move rather than only that something is wrong. This is the error's whole job —
-/// no caller branches on the variant, they propagate it and report it — so the
-/// wording lives here, once, instead of at each boundary.
+/// move rather than only that something is wrong.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Incompatible {
     /// Not this format at all: the magic did not match, or the input was too short
-    /// to carry a stamp. A misdirected file, or bytes predating the boundary's
-    /// first stamped revision.
+    /// to carry a stamp.
     Unstamped {
         boundary: &'static str,
         accepted: Accepted,
@@ -397,10 +352,6 @@ pub enum Incompatible {
     },
     /// The revision is one this build reads, but the input carries an extension its
     /// writer marked as one a reader must understand ([`Extensions::CRITICAL`]).
-    ///
-    /// Distinct from [`Version`](Incompatible::Version) because the remedy differs:
-    /// the format is right and a *feature* within it is not supported, so the fix is
-    /// a build with that feature rather than a different revision.
     UnknownCritical { boundary: &'static str, key: u16 },
 }
 
@@ -462,8 +413,6 @@ mod tests {
         assert_eq!(WIRE.admit(Version(3)), Ok(Version(3)));
         let err = WIRE.admit(Version(4)).unwrap_err();
         assert!(matches!(err, Incompatible::Version { found, .. } if found == Version(4)));
-        // The message names the boundary and both sides: an operator reading it
-        // knows which end to move.
         assert_eq!(
             err.to_string(),
             "test.wire: found v4, but this build reads v1..=v3"
@@ -517,7 +466,6 @@ mod tests {
     #[test]
     fn a_stamp_refuses_a_foreign_or_truncated_input() {
         const STAMP: Stamp = Stamp::new(b"TESTMG", WIRE);
-        // Another format's bytes, and a body with no room for a stamp.
         for input in [&b"OTHERMG\x01\x00body"[..], &b"TES"[..], &b""[..]] {
             assert!(matches!(
                 STAMP.unstamp(input),
@@ -530,7 +478,6 @@ mod tests {
     fn a_stamp_refuses_an_unreadable_revision_without_exposing_the_body() {
         const STAMP: Stamp = Stamp::new(b"TESTMG", WIRE);
         let mut bytes = STAMP.stamp(b"payload");
-        // A revision from a future release, above the window.
         bytes[6..8].copy_from_slice(&9u16.to_le_bytes());
         let err = STAMP.unstamp(&bytes).unwrap_err();
         assert!(matches!(err, Incompatible::Version { found, .. } if found == Version(9)));
@@ -576,7 +523,6 @@ mod tests {
             err.to_string(),
             "test.ext: carries required extension 0x8012, which this build does not implement"
         );
-        // Known to this build, it is admitted.
         assert_eq!(ext.admit("test.ext", &[0x8012]), Ok(()));
     }
 
@@ -591,7 +537,6 @@ mod tests {
         b.insert(0x0010, vec![1]);
         b.insert(0x0020, vec![2]);
         assert_eq!(a, b);
-        // And a replaced entry does not duplicate.
         a.insert(0x0010, vec![7]);
         assert_eq!(a.get(0x0010), Some(&[7][..]));
         assert_eq!(a.0.len(), 2);

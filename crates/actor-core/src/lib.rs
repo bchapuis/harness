@@ -4,8 +4,8 @@
 //! single-node [`LocalSystem`] live here, with no required macros (serde's
 //! derives in user code are the only ones). The cluster runtime is a separate
 //! crate (`actor-cluster`); the deterministic simulator is another
-//! (`actor-simulation`). Both are built on the same traits defined here, which
-//! is what makes simulation run the real code rather than a model of it.
+//! (`actor-simulation`). Both build on the traits defined here, so simulation
+//! runs the real code rather than a model of it.
 
 pub mod actor;
 pub mod context;

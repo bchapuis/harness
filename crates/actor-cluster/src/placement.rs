@@ -8,17 +8,16 @@
 //! no state, no clock, no entropy (core spec §18.1).
 //!
 //! The hash is normative and version-stable (utilities spec §2.2 item 3):
-//! FNV-1a 64 over `tag ‖ key`, finished with the splitmix64 mixer. `std::hash`
-//! and other unstable hashers are ruled out because two framework versions (or
-//! platforms) must agree on every owner; the finalizer compensates for FNV-1a's
-//! weak avalanche on short inputs. The constants are pinned by known-answer
+//! FNV-1a 64 over `tag ‖ key`, finished with the splitmix64 mixer, which
+//! compensates for FNV-1a's weak avalanche on short inputs. Two framework
+//! versions and platforms must agree on every owner, so `std::hash` and other
+//! unstable hashers are ruled out. The constants are pinned by known-answer
 //! tests below so an accidental change fails the build.
 //!
 //! Candidates come from [`Membership::serving_members`](crate::Membership::serving_members)
-//! (utilities spec §2.1): `up` and not confirmed `unreachable` (a merely
-//! suspected member still serves), including the local node iff `up`.
-//! Callers with divergent views may disagree on an owner until views converge —
-//! placement is a routing function, not a lease (utilities spec §2.3).
+//! (utilities spec §2.1). Callers with divergent views may disagree on an owner
+//! until those views converge: placement is a routing function, not a lease
+//! (utilities spec §2.3).
 
 use actor_core::ActorId;
 use actor_core::NodeId;

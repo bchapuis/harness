@@ -1,17 +1,16 @@
 //! The model seam (harness spec §4): one inference request, one response.
 //!
-//! The harness core depends only on the [`Model`] trait, exactly as it depends
-//! on `Transport` (core spec §7): `harness-anthropic` implements it over the
-//! Anthropic Messages API in production, and the simulator supplies a scripted
-//! model — a deterministic function of the request and the run's seed (§12.2).
-//! A completion request is side-effect-free, so an implementation MAY retry
-//! internally with backoff from `Clock`/`Entropy` without violating the core
-//! no-transparent-retry rule (core spec §1.2); a failure that survives the
-//! policy ends the run as `RunError::Model` (§4.3), never silently.
+//! The harness core depends only on the [`Model`] trait: `harness-anthropic`
+//! implements it over the Anthropic Messages API in production, and the
+//! simulator supplies a scripted model — a deterministic function of the request
+//! and the run's seed (§12.2). A completion request is side-effect-free, so an
+//! implementation MAY retry internally with backoff from `Clock`/`Entropy`
+//! without violating the core no-transparent-retry rule (core spec §1.2); a
+//! failure that survives the policy ends the run as `RunError::Model` (§4.3),
+//! never silently.
 //!
 //! The trait returns a [`BoxFuture`] rather than using `async fn` so it stays
-//! object-safe: the harness injects seams as `Arc<dyn Model>`, the same shape
-//! the core gives its codec (core spec §5).
+//! object-safe: the harness injects seams as `Arc<dyn Model>`.
 
 use std::sync::Arc;
 
