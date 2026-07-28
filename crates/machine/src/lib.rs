@@ -30,6 +30,8 @@ pub use grain::AttachReply;
 pub use grain::Attachment;
 pub use grain::Detach;
 pub use grain::DetachReason;
+pub use grain::DoorPolicy;
+pub use grain::DoorPolicyReply;
 pub use grain::EgressPolicy;
 pub use grain::MACHINE_TYPE;
 pub use grain::MAX_WS_FILE;

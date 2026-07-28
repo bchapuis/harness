@@ -536,6 +536,7 @@ impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
         r.accept::<AddKey>();
         r.accept::<RevokeKey>();
         r.accept::<SetEgress>();
+        r.accept::<DoorPolicy>();
         r.accept::<Status>();
         r.accept::<WsWrite>();
         r.accept::<WsRead>();
@@ -878,6 +879,52 @@ impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<SetEgress> for Machine
         _ctx: &GrainCtx<Self>,
     ) -> (Vec<MachineEvent>, ()) {
         (vec![MachineEvent::EgressChanged { policy: msg.policy }], ())
+    }
+}
+
+/// What the front door must know *before* it can serve a connection (machine
+/// §5.1), read in one command because SSH needs both at the same moment: the
+/// host key is presented at KEX, and the authorized-key set decides the
+/// publickey method that immediately follows — both before any `Attach`.
+///
+/// The reply carries the machine's private host-key material, the same bytes
+/// [`AttachReply`] already returns: a front door is a cluster member inside
+/// the trust boundary (machine §5.1), and no key material ever crosses into
+/// the guest. Reading the set per connection is what makes revocation take
+/// effect on the *next* attach (M4).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DoorPolicy;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoorPolicyReply {
+    /// See [`MachineState::host_key`]: the raw 32-byte ed25519 seed.
+    pub host_key: Vec<u8>,
+    /// `fingerprint → public key`, the current folded set (machine §3).
+    pub authorized_keys: BTreeMap<String, String>,
+}
+
+impl Message for DoorPolicy {
+    type Reply = Result<DoorPolicyReply, MachineError>;
+    const MANIFEST: Manifest = Manifest::new("machine.DoorPolicy");
+}
+
+impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<DoorPolicy> for Machine<S, P> {
+    async fn handle(
+        &self,
+        state: &MachineState,
+        _msg: DoorPolicy,
+        _ctx: &GrainCtx<Self>,
+    ) -> (Vec<MachineEvent>, Result<DoorPolicyReply, MachineError>) {
+        if !state.provisioned {
+            return (vec![], Err(MachineError::NotProvisioned));
+        }
+        (
+            vec![],
+            Ok(DoorPolicyReply {
+                host_key: state.host_key.clone(),
+                authorized_keys: state.authorized_keys.clone(),
+            }),
+        )
     }
 }
 

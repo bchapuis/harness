@@ -1,0 +1,35 @@
+[package]
+name = "machine-standalone"
+description = "A standalone multi-process deployment of persistent machines (machine spec): TCP nodes hosting machine grains over a shared file journal, each with an in-process SSH front door."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["firecracker"]
+# The real VM binding (machine §2.1). Builds everywhere; `--vm firecracker`
+# needs Linux and /dev/kvm at runtime, so the binding is selected by flag, not
+# by target: one build serves the Linux demo and the macOS dry run alike.
+firecracker = ["machine/firecracker"]
+# Policy-bound egress (machine §5.2, M6): the per-machine tap and node NAT.
+# Linux with CAP_NET_ADMIN; without it a machine boots with no NIC.
+net = ["machine/net"]
+
+[dependencies]
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-runtime.workspace = true
+actor-serialization.workspace = true
+granary.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+machine.workspace = true
+machine-frontdoor.workspace = true
+russh.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "signal"] }
+
+[lints]
+workspace = true

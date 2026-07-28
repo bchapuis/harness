@@ -139,6 +139,14 @@ pub fn control_path(prefix: &str, key: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{key}"))
 }
 
+/// The host-side vsock socket inside a VM's control directory. Derived from
+/// the directory alone, so a caller that knows *where* a VM runs can dial its
+/// guest without holding the [`MicroVm`] — what a front door bridging to a
+/// co-located guest needs (machine spec §5.1).
+pub fn vsock_socket(control: &Path) -> PathBuf {
+    control.join(VSOCK_SOCK)
+}
+
 /// Prepare the [`control_path`] directory for a launch: sweep the previous
 /// activation's contents and (re)create it empty.
 ///

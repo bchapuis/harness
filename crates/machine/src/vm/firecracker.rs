@@ -111,7 +111,11 @@ impl FirecrackerMachineProvider {
     /// installed — in which case the machine boots with no NIC rather than
     /// failing the boot over egress.
     #[cfg(all(feature = "net", target_os = "linux"))]
-    fn wire_egress(&self, spec: &VmSpec, vm_config: &mut microvm::VmConfig) -> Option<EgressHandle> {
+    fn wire_egress(
+        &self,
+        spec: &VmSpec,
+        vm_config: &mut microvm::VmConfig,
+    ) -> Option<EgressHandle> {
         let pool = self.pool.as_ref()?;
         let egress = self.config.egress.as_ref()?;
         let index = match pool.lock().expect("guest pool").allocate() {
@@ -146,13 +150,21 @@ impl FirecrackerMachineProvider {
         vm_config
             .boot_args
             .push_str(&crate::net::guest_ip_boot_arg(&net));
-        Some(EgressHandle::new(spec.machine.clone(), Arc::clone(pool), index))
+        Some(EgressHandle::new(
+            spec.machine.clone(),
+            Arc::clone(pool),
+            index,
+        ))
     }
 
     /// Egress is a Linux + `CAP_NET_ADMIN` realization behind `feature = "net"`
     /// (net.rs); without it a machine boots with no NIC and no handle.
     #[cfg(not(all(feature = "net", target_os = "linux")))]
-    fn wire_egress(&self, _spec: &VmSpec, _vm_config: &mut microvm::VmConfig) -> Option<EgressHandle> {
+    fn wire_egress(
+        &self,
+        _spec: &VmSpec,
+        _vm_config: &mut microvm::VmConfig,
+    ) -> Option<EgressHandle> {
         None
     }
 }
@@ -200,13 +212,41 @@ impl EgressHandle {
     }
 }
 
+/// The control-directory prefix every machine's VMM sockets live under.
+const CONTROL_PREFIX: &str = "harness-machine";
+
+/// A machine's control-directory key: a digest of its name, so the directory
+/// is stable per machine (a relaunch sweeps the previous activation's debris)
+/// and distinct across machines on one node.
+fn control_key(machine: &GrainName) -> String {
+    format!("{:.16}", BlobId::of(machine.to_string().as_bytes()))
+}
+
+/// The host-side vsock socket `machine`'s guest listens on, on the node
+/// running it (machine §5.1).
+///
+/// [`FirecrackerMachineVm::vsock_path`] is this same path held by the live VM;
+/// this derives it from the name alone, for a front door that must dial the
+/// guest without holding the VM object. Node-local: the socket exists only
+/// where the activation is.
+pub fn vsock_socket_path(machine: &GrainName) -> PathBuf {
+    microvm::vsock_socket(&microvm::control_path(
+        CONTROL_PREFIX,
+        &control_key(machine),
+    ))
+}
+
 impl MachineVmProvider for FirecrackerMachineProvider {
     fn boot(&self, spec: VmSpec) -> BoxFuture<'static, Result<Arc<dyn MachineVm>, VmError>> {
         let config = Arc::clone(&self.config);
         // The disk facet's image, in place: the guest's writes land in the
         // materialization the capture command scans (grain §7.15).
-        let mut vm_config =
-            microvm::VmConfig::rooted(&config.binary, &config.kernel, &config.boot_args, &spec.image);
+        let mut vm_config = microvm::VmConfig::rooted(
+            &config.binary,
+            &config.kernel,
+            &config.boot_args,
+            &spec.image,
+        );
         vm_config.vcpus = spec.vcpus.max(1) as u32;
         vm_config.mem_mib = spec.mem_mib;
         // Realize egress (M6) before launch: firecracker opens the tap by name,
@@ -214,11 +254,9 @@ impl MachineVmProvider for FirecrackerMachineProvider {
         let egress = self.wire_egress(&spec, &mut vm_config);
         Box::pin(async move {
             let fail = |e: String| VmError::Transport(format!("firecracker boot: {e}"));
-            let digest = BlobId::of(spec.machine.to_string().as_bytes());
-            let control =
-                microvm::control_dir("harness-machine", &format!("{:.16}", digest.to_string()))
-                    .await
-                    .map_err(|e| fail(e.to_string()));
+            let control = microvm::control_dir(CONTROL_PREFIX, &control_key(&spec.machine))
+                .await
+                .map_err(|e| fail(e.to_string()));
             let boot = async {
                 let control = control?;
                 let mut vm = MicroVm::launch(&vm_config, &control)

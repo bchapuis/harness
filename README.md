@@ -72,6 +72,34 @@ authenticated form with opaque per-tenant tokens.
   ownership-index grain (`tenancy`, itself another journaled actor). The gateway
   is where auth terminates, so it joins inside the cluster's trust boundary;
   untrusted callers reach it only over HTTP with a bearer token.
+- **Persistent machines** (`crates/machine`, `crates/machine-frontdoor`): the
+  agent's sibling. Same grain, different consumer — a lightweight VM you address
+  by name and reach over SSH, whose *whole rootfs* is the durable state. Not an
+  agent: no run loop, no model, no autonomy, just a box that survives.
+
+## The other demo: a machine you SSH into
+
+```sh
+./machine-demo.sh
+```
+
+Same cluster, different thing on top of it: three nodes, a machine named
+`dev-box`, and an SSH front door on each node. `ssh alice@127.0.0.1 -p 2222`
+lands you in a Firecracker microVM whose disk is a grain — installed packages
+and all — so it outlives disconnection, idle hibernation, and the node it was
+running on. The front door authenticates your key against the machine's
+*journaled* key set and presents the machine's own journaled host key, so your
+`known_hosts` pin survives every move the machine makes.
+
+The failure drill is the same shape as the harness's: kill the node holding your
+session, reconnect through another node's door, and find your files where you
+left them — rewound at most to the last capture, never forked.
+
+A real guest needs Linux with `/dev/kvm` and the assets
+`guest/machine-rootfs/build.sh` produces. Elsewhere (macOS included) the script
+picks `--vm fake` by itself and says so: everything durable still runs —
+provisioning, the journal, attachments, the capture cadence, failover — and only
+the shell is missing, because there is no guest to bridge to.
 
 ## Going deeper
 
@@ -85,6 +113,9 @@ authenticated form with opaque per-tenant tokens.
   silos, with the gateway joining it as a cluster client.
 - [docs/agentic-harness-spec.md](docs/agentic-harness-spec.md): why the journal
   is the session.
+- [docs/machine-spec.md](docs/machine-spec.md): why a machine is a grain plus
+  durable storage and a network seam — the disk facet, the session-grained
+  capture cadence, the self-fencing lease, and the SSH front door.
 - [docs/distributed-actor-spec.md](docs/distributed-actor-spec.md) and
   [docs/cluster-utilities-spec.md](docs/cluster-utilities-spec.md): the framework
   underneath.
