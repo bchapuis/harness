@@ -52,6 +52,7 @@ impl TierStats {
         self.released.fetch_add(1, Ordering::SeqCst);
     }
 
+    #[cfg(feature = "compute")]
     pub(crate) fn count_compute_built(&self) {
         self.compute_built.fetch_add(1, Ordering::SeqCst);
     }
