@@ -16,9 +16,9 @@ use machine_frontdoor::Duplex;
 use machine_frontdoor::FrontDoorError;
 use machine_frontdoor::MachineAuthority;
 use machine_frontdoor::host_key_from_seed;
+use machine_frontdoor::serve_connection;
 use machine_proto::Frame;
 use microvm::vsock::send_frame;
-use machine_frontdoor::serve_connection;
 use russh::keys::PrivateKey;
 use russh::keys::PrivateKeyWithHashAlg;
 use russh::keys::PublicKey;
@@ -96,6 +96,23 @@ impl ChannelBackend for FakeBackend {
     ) -> std::io::Result<Box<dyn Duplex>> {
         let (front, agent) = tokio::io::duplex(64 * 1024);
         tokio::spawn(fake_agent(agent, kind));
+        Ok(Box::new(front))
+    }
+}
+
+/// A backend whose guest end vanishes the moment the channel opens: a killed
+/// VM, a crashed agent, a severed vsock. It reports no exit status, because
+/// there is no longer anything there to report one.
+struct DeadBackend;
+
+impl ChannelBackend for DeadBackend {
+    async fn open(
+        &self,
+        _machine: &GrainName,
+        _kind: ChannelKind,
+    ) -> std::io::Result<Box<dyn Duplex>> {
+        let (front, agent) = tokio::io::duplex(64 * 1024);
+        drop(agent);
         Ok(Box::new(front))
     }
 }
@@ -237,6 +254,43 @@ async fn an_authorized_key_attaches_and_bridges_an_exec_channel() {
         1,
         "detach on close"
     );
+}
+
+/// A guest that dies without reporting must not leave the client waiting. The
+/// exit status is the guest's to send, so when the guest is gone the door owes
+/// the client the close itself — otherwise an exec whose agent vanished hangs
+/// until some unrelated timeout severs the connection.
+#[tokio::test]
+async fn a_guest_that_dies_without_a_status_closes_the_channel() {
+    let authority = authority();
+    let machine = GrainName::new("machine", "dev-box");
+    let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+
+    let server = tokio::spawn(serve_connection(
+        server_side,
+        machine,
+        Arc::clone(&authority),
+        Arc::new(DeadBackend),
+    ));
+
+    let key = PrivateKey::from_openssh(AUTHORIZED_KEY).expect("client key");
+    let (authed, _stdout, exit, _host_key) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_client(client_side, key),
+    )
+    .await
+    .expect("the client must not be left waiting on a guest that will never report");
+
+    assert!(
+        authed,
+        "the key is authorized: the guest's death is not an auth failure"
+    );
+    assert_eq!(
+        exit,
+        Some(255),
+        "a severed guest must reach the client as SSH's connection-failed status"
+    );
+    let _ = server.await;
 }
 
 #[tokio::test]

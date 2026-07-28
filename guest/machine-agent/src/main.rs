@@ -250,11 +250,14 @@ fn serve_piped<S: Read + Write + AsRawFd + Send + 'static>(
         }
     };
     let reader = split_reader(&stream);
+    let conn = stream.as_raw_fd();
     let writer: SharedWriter<S> = Arc::new(Mutex::new(stream));
 
     let mut stdin = child.stdin.take();
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
+    // Kept for the signal path: `child` moves into the reaper below.
+    let pid = child.id() as i32;
 
     // stdout → host Data.
     let out_writer = Arc::clone(&writer);
@@ -263,7 +266,24 @@ fn serve_piped<S: Read + Write + AsRawFd + Send + 'static>(
     let err_writer = Arc::clone(&writer);
     let err = std::thread::spawn(move || pump(&mut stderr, &err_writer, Frame::Stderr));
 
-    // host frames → stdin / signals, until Eof or the stream closes.
+    // The child's own death ends the channel — never the host falling quiet.
+    // The host closes its end only *after* it reads the exit status (the front
+    // door turns that frame into SSH's `exit-status` and closes the channel),
+    // so waiting for the host to close before reporting deadlocks the pair:
+    // the client hangs on a finished command until some unrelated timeout
+    // tears the connection down, and every exit code is lost.
+    let exit_writer = Arc::clone(&writer);
+    let reaper = std::thread::spawn(move || {
+        let status = child.wait().map(exit_code).unwrap_or(255);
+        // Drain both pumps first: the mutex orders frames, but the *status*
+        // must be the channel's last one.
+        let _ = out.join();
+        let _ = err.join();
+        let _ = write_frame(&exit_writer, &Frame::ExitStatus(status));
+        end_reads(conn);
+    });
+
+    // host frames → stdin / signals, until the child exits or the host closes.
     let mut reader = reader;
     while let Ok(body) = recv_frame(&mut reader, MAX_FRAME) {
         match Frame::decode(&body) {
@@ -277,14 +297,12 @@ fn serve_piped<S: Read + Write + AsRawFd + Send + 'static>(
             Some(Frame::Eof) => {
                 stdin.take();
             }
-            Some(Frame::Signal(name)) => signal_group(child.id() as i32, &name),
+            Some(Frame::Signal(name)) => signal_group(pid, &name),
             _ => {}
         }
     }
-    let status = child.wait().map(exit_code).unwrap_or(255);
-    let _ = out.join();
-    let _ = err.join();
-    write_frame(&writer, &Frame::ExitStatus(status))
+    let _ = reaper.join();
+    Ok(())
 }
 
 /// Serve a `Pty` channel: `forkpty` a login shell, relay the master fd both
@@ -307,14 +325,22 @@ fn serve_pty<S: Read + Write + AsRawFd + Send + 'static>(
     };
     let master = Arc::new(master);
     let reader = split_reader(&stream);
+    let conn = stream.as_raw_fd();
     let writer: SharedWriter<S> = Arc::new(Mutex::new(stream));
 
-    // master → host Data.
+    // master → host Data, and then the exit status: the shell's death is what
+    // ends the channel, never the host falling quiet. The master reads EIO
+    // once the last slave fd closes, which *is* the shell exiting, so the pump
+    // returning is the signal — see `serve_piped` for why waiting on the host
+    // instead would deadlock the pair.
     let out_master = Arc::clone(&master);
     let out_writer = Arc::clone(&writer);
     let out = std::thread::spawn(move || {
         let mut file = unsafe { std::fs::File::from_raw_fd(dup_fd(out_master.as_raw_fd())) };
         pump(&mut file, &out_writer, Frame::Data);
+        let status = wait_pid(pid);
+        let _ = write_frame(&out_writer, &Frame::ExitStatus(status));
+        end_reads(conn);
     });
 
     // host frames → master / winsize / signal.
@@ -339,9 +365,8 @@ fn serve_pty<S: Read + Write + AsRawFd + Send + 'static>(
             _ => {}
         }
     }
-    let status = wait_pid(pid);
     let _ = out.join();
-    write_frame(&writer, &Frame::ExitStatus(status))
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -379,6 +404,21 @@ fn split_reader<S: AsRawFd>(stream: &S) -> std::fs::File {
 
 fn dup_fd(fd: RawFd) -> RawFd {
     unsafe { libc::dup(fd) }
+}
+
+/// Wake the channel's host-facing reader once the exit status is written, so
+/// the serving thread unwinds instead of blocking in `recv_frame` for input
+/// that will never come. `shutdown` acts on the connection rather than on one
+/// descriptor, so the dup'd read half returns EOF even though the write half
+/// stays open long enough for the status frame to land.
+///
+/// Best-effort by design: a stream that is not a socket refuses this and the
+/// thread lingers until the host drops its end. The status has already been
+/// sent by then, so the client is never the one left waiting.
+fn end_reads(fd: RawFd) {
+    unsafe {
+        libc::shutdown(fd, libc::SHUT_RD);
+    }
 }
 
 fn exit_code(status: std::process::ExitStatus) -> i32 {
@@ -532,6 +572,71 @@ mod tests {
     fn send_header(stream: &mut impl Write, kind: &ChannelKind) {
         let json = serde_json::to_vec(kind).expect("header");
         send_frame(stream, &json).expect("send header");
+    }
+
+    /// Read frames until the exit status, collecting stdout on the way.
+    /// Bounded by a read timeout: the failure this guards against is a channel
+    /// that never reports, and a hung test reports nothing at all.
+    fn read_exec_status(stream: &mut std::os::unix::net::UnixStream) -> (i32, Vec<u8>) {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .expect("read timeout");
+        let mut stdout = Vec::new();
+        loop {
+            let body = recv_frame(stream, MAX_FRAME)
+                .expect("the channel must report an exit status without the host closing first");
+            match Frame::decode(&body).expect("decode") {
+                Frame::ExitStatus(code) => return (code, stdout),
+                Frame::Data(bytes) => stdout.extend_from_slice(&bytes),
+                Frame::Stderr(_) => {}
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+    }
+
+    /// A finished command reports its status while the host is still holding
+    /// the channel open. The host cannot close first: it closes *because* the
+    /// status arrived, so an agent that waits for the close deadlocks the pair
+    /// and every exit code through the front door is lost.
+    #[test]
+    fn an_exec_channel_reports_its_status_to_a_silent_host() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sock = spawn_agent(workspace.path());
+        let mut stream = connect(&sock);
+        send_header(
+            &mut stream,
+            &ChannelKind::Exec {
+                argv: vec!["/bin/sh".into(), "-c".into(), "echo hi; exit 7".into()],
+                env: Vec::new(),
+            },
+        );
+        // Not one further byte from this end, and no shutdown: exactly what an
+        // SSH client does while it waits for `exit-status`.
+        let (code, stdout) = read_exec_status(&mut stream);
+        assert_eq!(code, 7, "the command's own exit code must reach the host");
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hi");
+    }
+
+    /// The same contract for a terminal: leaving the shell ends the channel.
+    /// This is the demo's `exit`, which hung the client before the shell's
+    /// death — not the host's silence — became what closes a PTY channel.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pty_channel_reports_its_status_when_the_shell_exits() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sock = spawn_agent(workspace.path());
+        let mut stream = connect(&sock);
+        send_header(
+            &mut stream,
+            &ChannelKind::Pty {
+                term: "xterm".into(),
+                cols: 80,
+                rows: 24,
+                argv: vec!["/bin/sh".into(), "-c".into(), "exit 3".into()],
+            },
+        );
+        let (code, _) = read_exec_status(&mut stream);
+        assert_eq!(code, 3);
     }
 
     fn read_status(stream: &mut impl Read) -> (i32, Vec<u8>) {

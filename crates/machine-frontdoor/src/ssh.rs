@@ -135,7 +135,17 @@ impl<A: MachineAuthority, B: ChannelBackend> FrontDoorHandler<A, B> {
             loop {
                 let body = match recv_frame(&mut reader, MAX_FRAME).await {
                     Ok(body) => body,
-                    Err(_) => break,
+                    Err(_) => {
+                        // The guest end went away without reporting an exit —
+                        // a killed VM, a crashed agent, a severed vsock. The
+                        // client is waiting on `exit-status` and would hang
+                        // until some unrelated timeout, so say what happened:
+                        // 255 is what SSH itself reports for a connection that
+                        // failed rather than a command that ran.
+                        let _ = handle.exit_status_request(channel, 255).await;
+                        let _ = handle.close(channel).await;
+                        break;
+                    }
                 };
                 match Frame::decode(&body) {
                     Some(Frame::Data(bytes)) => {
