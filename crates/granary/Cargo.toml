@@ -35,6 +35,11 @@ granary = { path = ".", features = ["testing"] }
 actor-simulation.workspace = true
 trybuild.workspace = true
 tempfile.workspace = true
+divan.workspace = true
+
+[[bench]]
+name = "store"
+harness = false
 
 [features]
 # The SQL facet (spec §7.14): a private on-disk SQLite database per grain.

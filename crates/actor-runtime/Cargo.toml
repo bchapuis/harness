@@ -35,3 +35,8 @@ erased-serde.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+divan.workspace = true
+
+[[bench]]
+name = "dispatch"
+harness = false

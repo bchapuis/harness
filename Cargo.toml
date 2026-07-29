@@ -32,6 +32,12 @@ compat = { path = "crates/compat", version = "0.1.0" }
 # file-backed Raft WAL and grain store.
 wal = { path = "crates/wal", version = "0.1.0" }
 
+# The `wal` crate's frame digest. A log verifies every frame in the file on open, so
+# the digest's throughput is the floor on a node's recovery latency; the byte-at-a-time
+# FNV-1a this replaced ran at ~0.6 GB/s, a serial multiply chain. XXH3 is also the
+# stronger check of the two — 64 bits of avalanche against a torn write.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
 # Granary: durable objects ("grains") built on the actor framework (granary spec).
 granary = { path = "crates/granary", version = "0.1.0" }
 
@@ -136,6 +142,15 @@ trybuild = "1"
 tempfile = "3"
 # Dev-only: compile WebAssembly text fixtures for the compute-tier tests.
 wat = "1"
+# Dev-only: the benchmark harness. Rust's own `#[bench]` is nightly-gated and
+# `rust-toolchain.toml` pins stable, so a `harness = false` target driven by the
+# stable `cargo bench` is the only option that keeps the trybuild snapshots
+# meaningful. Divan over criterion for `AllocProfiler`: the costs this tree needs
+# to watch are allocation *counts* per message and per append, which it reports
+# beside the timings instead of leaving them to be inferred from wall-clock.
+# It also reads the clock inside the dependency, so `clippy.toml`'s ban on
+# `Instant::now` needs no hole punched in it for benchmarks.
+divan = "0.1"
 
 # Full DWARF for every artifact is the dominant cost in both link time and disk:
 # the workspace's ~80 integration-test binaries each carry it, and cargo keeps
@@ -143,6 +158,21 @@ wat = "1"
 # (file/line, symbol names) and drop the variable/type debuginfo a debugger
 # needs — raise this to `true` on the crate you are stepping through.
 [profile.dev]
+debug = "line-tables-only"
+
+# The workspace shipped without a release profile, so release builds — and the
+# benchmarks, which inherit from it — ran at cargo's defaults: sixteen codegen
+# units and no cross-unit inlining. The hot paths here are small functions called
+# across crate boundaries (`checksum`, `Mailbox::enqueue`, the codec's erased
+# entry points), which is exactly what those defaults leave on the table.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Benchmarks measure the release configuration, so they must be built with it.
+# The line tables are what let a sampling profiler symbolize a run.
+[profile.bench]
+inherits = "release"
 debug = "line-tables-only"
 
 [workspace.lints.rust]

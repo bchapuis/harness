@@ -802,11 +802,18 @@ async fn message_loop<A: Actor>(
     state: &HostState,
     id: &ActorId,
 ) -> Outcome {
+    // Built once and polled across every iteration, rather than rebuilt per message.
+    // Awaiting a channel registers a listener on it; a fresh future each time round
+    // meant registering and deregistering on the escalation channel for every message
+    // an actor handled, to watch for something that arrives at most once — and when it
+    // does arrive, this loop returns rather than coming back for another. Holding one
+    // future keeps that registration in place instead of churning it.
+    let escalated = escalation.recv();
+    futures::pin_mut!(escalated);
     loop {
         let next = inbox.recv();
-        let escalated = escalation.recv();
-        futures::pin_mut!(next, escalated);
-        match futures::future::select(next, escalated).await {
+        futures::pin_mut!(next);
+        match futures::future::select(next, escalated.as_mut()).await {
             futures::future::Either::Left((Err(_), _)) => return Outcome::Stopped,
             futures::future::Either::Left((Ok(envelope), _)) => {
                 let manifest = envelope.manifest;

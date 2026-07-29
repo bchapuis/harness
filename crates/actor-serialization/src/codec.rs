@@ -159,6 +159,29 @@ mod tests {
     }
 
     #[test]
+    fn json_inflates_a_byte_vector_by_roughly_the_documented_multiple() {
+        // [`JsonCodec`]'s doc warns that a `Vec<u8>` costs about 3.6 characters per byte
+        // because JSON has no byte-string form. The warning steers a deployment's codec
+        // choice, so the number is pinned here rather than left as prose that could
+        // quietly stop being true. Bounded loosely: the claim is an order of magnitude,
+        // not a constant, and the exact ratio moves with the byte values chosen.
+        let value = vec![0x5a_u8; 1024];
+        let json = encode(&JsonCodec, &value).unwrap();
+        let postcard = encode(&PostcardCodec, &value).unwrap();
+        let ratio = json.len() as f64 / value.len() as f64;
+        assert!(
+            (3.0..4.5).contains(&ratio),
+            "JSON should cost roughly 3.6 chars per byte, measured {ratio:.2}",
+        );
+        assert!(
+            postcard.len() <= value.len() + 8,
+            "postcard should add only a length prefix, measured {} for {} bytes",
+            postcard.len(),
+            value.len(),
+        );
+    }
+
+    #[test]
     fn decode_reports_malformed_input() {
         let codec = JsonCodec;
         let err = decode::<Sample>(&codec, b"not json");

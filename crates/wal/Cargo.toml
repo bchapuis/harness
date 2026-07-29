@@ -15,7 +15,13 @@ workspace = true
 compat.workspace = true
 serde = { workspace = true }
 postcard.workspace = true
+xxhash-rust.workspace = true
 
 [dev-dependencies]
 serde = { workspace = true }
 tempfile.workspace = true
+divan.workspace = true
+
+[[bench]]
+name = "wal"
+harness = false

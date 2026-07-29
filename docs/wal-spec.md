@@ -34,7 +34,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
    where `payload` is the `postcard` encoding of the record and `length` is the payload's byte length.
 
-2. The checksum MUST be **FNV-1a, 64-bit**, over the payload bytes only: offset basis `0xcbf29ce484222325`, prime `0x100000001b3`. It detects torn and partial writes, **not** adversarial tampering — all a local log needs. The function MUST be stable: it MUST NOT vary across platforms, crate versions, or process runs, so a file written by one build recovers identically under another. (`std::hash` and other unstable hashers are therefore ruled out.)
+2. The checksum MUST be 64 bits over the payload bytes only, computed with the digest the file's header names (§2.1): kind `1` is **FNV-1a** (offset basis `0xcbf29ce484222325`, prime `0x100000001b3`), kind `2` is **XXH3-64**. A build MUST scan a file with the digest that file records, never with the one it prefers, and MUST NOT append to a file in a digest other than its own header's — a file is one digest throughout, and a log moves to another only through `rewrite`, which replaces the header with the frames. New logs are stamped kind `2`; kind `1` is read but not stamped. Either digest detects torn and partial writes, **not** adversarial tampering — all a local log needs. Each MUST be stable: a given kind MUST NOT vary across platforms, crate versions, or process runs, so a file written by one build recovers identically under another. (`std::hash` and other unstable hashers are therefore ruled out.)
 
 3. The log file is a **header** (§2.1) followed by the concatenation of zero or more such frames in append order. There is no trailer and no global checksum: past the header, the file's meaning is the maximal sequence of valid frames (§3.1).
 
@@ -52,7 +52,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
 3. The header's **length and layout belong to the frame revision**, not to the format for all time. Revision 1 is the sixteen bytes above; a later revision may define a different header entirely, because a revision-1 reader refuses a revision-2 file outright rather than parsing its header. Only the magic and the `u16` immediately after it are fixed across revisions — they are what a reader consults *before* it knows which layout applies. Nothing else in this crate may assume the header is sixteen bytes.
 
-4. **Frame revision** versions §2's framing; revision 1 is the layout above. **Checksum kind** identifies the digest, `1` being FNV-1a (§2 rule 2); it is compared for equality, being an identity rather than an ordering, and it is what makes the pluggable checksum of §Deferred a header change rather than a layout change. **Reserved** MUST be zero at frame revision 1, so every header byte is validated and no detectable damage passes silently. The header carries no checksum of its own; the reserved field is where one would go.
+4. **Frame revision** versions §2's framing; revision 1 is the layout above. **Checksum kind** identifies the digest (§2 rule 2); it is matched, not compared, being an identity rather than an ordering, and a kind this build cannot compute is refused by name rather than left to fail every frame as though the file were corrupt. Every 64-bit digest shares the frame layout, which is what let kind `2` join kind `1` as a header change rather than a layout one, and what lets both be read. **Reserved** MUST be zero at frame revision 1, so every header byte is validated and no detectable damage passes silently. The header carries no checksum of its own; the reserved field is where one would go.
 
 5. **Record schema** belongs to the *caller*: `open` takes the caller's `compat::Window`, stamps its written revision into a new file, admits the field on an existing one, and never interprets it. `Wal<T>`'s records are `postcard`, which is positional and has no field names, so `T` cannot gain or reorder a field within a revision and its revision has nowhere to live but outside the payload. An enum may still grow variants at its end, which no existing record can carry; that needs no bump.
 
@@ -112,7 +112,7 @@ Some durable state is not a log but a single small file rewritten in place: a ge
 
 1. `atomic_replace(dir, name, bytes)` MUST write `dir/<name>.tmp`, fsync it, rename it onto `dir/<name>`, then fsync `dir`. A reader MUST therefore see either the old file or the whole new one, never a torn mix. The caller supplies already-serialized bytes, so the encoding (JSON, postcard, fixed-width) stays the caller's choice. This is the same discipline `rewrite` (§3.4) builds on.
 
-2. `checksum(bytes)` MUST be the §2 FNV-1a function, exposed so a caller that frames its own sidecar bytes (e.g. a fixed-width `[u64 value][u64 checksum]` record) checksums them the same way the log does.
+2. `checksum(bytes)` MUST be FNV-1a, 64-bit, exposed so a caller can frame its own sidecar bytes (e.g. a fixed-width `[u64 value][u64 checksum]` record). **Its output is frozen**, and unlike a frame's digest (§2 rule 2) it MUST NOT change: a sidecar carries no header, so a reader cannot ask which digest wrote it and can only recompute and compare, and callers read a mismatch as *torn or absent* rather than as a refusal. Changing it would make every existing sidecar read as missing — a durable fence would come back as no fence — which is a safety failure, not a compatibility one. A digest behind a version field may change; a digest without one may not.
 
 3. `sync_dir(dir)` MUST make a directory entry durable: on unix, fsync the directory; elsewhere (where directories cannot be opened for sync) the rename is itself the durability point and the call is a no-op. Exposed for a caller that creates its own subdirectories to hold logs.
 
@@ -136,6 +136,7 @@ Invariants are verified by the crate's own unit tests (`crates/wal/src/lib.rs`).
 | W2 | **Acknowledged-record durability.** A record acknowledged by a returned `append`/`append_batch`/`rewrite` is recovered byte-identically across a reopen, unless a later `truncate` or `rewrite` removes it; each such call fsyncs its effect (and the directory entry on file creation) before returning. | §3.2–§3.4 | `records_round_trip_across_a_reopen`, `truncate_drops_a_conflicting_suffix`, `rewrite_replaces_the_whole_file_and_reopens` |
 | W3 | **Atomic whole-file replacement.** `rewrite` and `atomic_replace` leave, after any crash, either the whole prior file or the whole new file — never a torn intermediate. | §3.4, §5 | `rewrite_replaces_the_whole_file_and_reopens`, `atomic_replace_round_trips_a_sidecar` |
 | W4 | **Write/recovery bound agreement.** `max_record` bounds a frame's payload identically at both ends: a payload recovery would reject for size cannot be written — the write panics instead of acknowledging a record the next `open` would silently drop. | §4 | `appending_a_record_past_the_limit_panics_instead_of_losing_it` |
+| W5 | **A file is read at the digest it records.** A log opens, scans, and continues to be appended with the checksum kind its own header names, whichever kind this build prefers; a kind the build cannot compute is refused by name. A file is never a mix of two digests, and only `rewrite` restamps one. | §2 rule 2, §2.1 rule 4 | `a_log_at_an_older_digest_still_opens_and_keeps_its_digest`, `a_foreign_checksum_kind_is_refused_by_name` |
 
 ---
 
@@ -144,10 +145,9 @@ Invariants are verified by the crate's own unit tests (`crates/wal/src/lib.rs`).
 Non-goals (today and by design):
 
 - **No concurrency.** One handle, one writer; the caller provides single-writer discipline. The crate adds no locking.
-- **No tamper resistance.** FNV-1a catches accidental corruption, not a malicious edit.
+- **No tamper resistance.** Both digests catch accidental corruption, not a malicious edit.
 - **No segmentation or rotation.** A `Wal<T>` is one file. A caller that wants bounded files segments above the crate (§1) and compacts with `rewrite`.
 
 Possible future work, only if a caller needs it:
 
 - **Group commit across handles** — batching fsyncs for many small logs sharing a disk, trading a bounded latency for throughput.
-- **A pluggable checksum** — a stronger digest behind the same framing, were a caller ever to store a WAL on untrusted media. The framing reserves a fixed 8-byte trailer and the header a **checksum kind** field (§2.1), so this is a matter of defining a second value for that field: no layout change, and a log written either way says which it is.

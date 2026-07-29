@@ -302,6 +302,20 @@ impl FileGrainStore {
         self.segment(shard, grain, false)
     }
 
+    /// Project a known grain's records under its segment lock, or `None` if the grain is
+    /// unknown. The shared body of every read this store answers, so the lookup, the lock,
+    /// and its poison message are written once rather than per accessor.
+    fn with_records<R>(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        project: impl FnOnce(&GrainRecords) -> R,
+    ) -> Option<R> {
+        self.segment_existing(shard, grain).map(|segment| {
+            project(&segment.inner.lock().expect("grain segment poisoned").records)
+        })
+    }
+
     /// The segment id for `(shard, grain)`: the existing assignment, or — when
     /// `create` — a freshly allocated one, durably appended to the manifest first.
     fn segment_id(&self, shard: u32, grain: &GrainName, create: bool) -> Option<u64> {
@@ -706,18 +720,28 @@ impl GrainStore for FileGrainStore {
     }
 
     fn read(&self, shard: u32, grain: &GrainName) -> Reserved<ReadReply> {
-        Reserved::ready(match self.segment_existing(shard, grain) {
-            Some(segment) => segment
-                .inner
-                .lock()
-                .expect("grain segment poisoned")
-                .records
-                .read(),
-            None => ReadReply {
-                slots: Vec::new(),
-                snapshot: None,
-            },
-        })
+        Reserved::ready(
+            self.with_records(shard, grain, GrainRecords::read)
+                .unwrap_or_else(|| ReadReply {
+                    slots: Vec::new(),
+                    snapshot: None,
+                }),
+        )
+    }
+
+    // Answered from the segment directly, not through `read` — see the note on
+    // `MemoryGrainStore`'s pair. Activation asks for both before a grain serves anything,
+    // and through `read` each cloned the grain's whole record set to reach one field.
+
+    fn head(&self, shard: u32, grain: &GrainName) -> Reserved<Seq> {
+        Reserved::ready(
+            self.with_records(shard, grain, GrainRecords::head)
+                .unwrap_or(Seq::ZERO),
+        )
+    }
+
+    fn snapshot(&self, shard: u32, grain: &GrainName) -> Reserved<Option<(Seq, Vec<u8>)>> {
+        Reserved::ready(self.with_records(shard, grain, GrainRecords::snapshot).flatten())
     }
 
     fn read_from(

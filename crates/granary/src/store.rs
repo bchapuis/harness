@@ -83,6 +83,31 @@ pub struct ReadReply {
     pub snapshot: Option<(Seq, Term, Vec<u8>)>,
 }
 
+impl ReadReply {
+    /// The head this reply describes: the snapshot's seq (or zero) plus the leading
+    /// gap-free run of records above it.
+    ///
+    /// A committed prefix is gap-free (quorum intersection, §8), so a gap marks an
+    /// uncommitted tail and correctly ends the run. Defined here, beside the reply it
+    /// folds, so the local tier and a recovering leader read a reply the same way.
+    pub fn head(&self) -> Seq {
+        let mut head = self.snapshot.as_ref().map_or(0, |(seq, _, _)| seq.value());
+        for (seq, _, _) in &self.slots {
+            if seq.value() != head + 1 {
+                break;
+            }
+            head += 1;
+        }
+        Seq::new(head)
+    }
+
+    /// The latest snapshot as `(seq, state)` — what the `load_snapshot` seam needs,
+    /// without the committing term (§9).
+    pub fn into_snapshot(self) -> Option<(Seq, Vec<u8>)> {
+        self.snapshot.map(|(seq, _term, state)| (seq, state))
+    }
+}
+
 /// The outcome of a recovery [`prepare`](GrainStore::prepare) (spec §8): the
 /// replica's records, or a refusal because it has promised a higher term. An
 /// ordinary [`read`](GrainStore::read) does not fence and is used only for local
@@ -164,6 +189,18 @@ impl<T: Send + 'static> Reserved<T> {
         Reserved {
             outcome,
             durable: Some(durable),
+        }
+    }
+
+    /// Narrow the outcome, keeping its durability marker.
+    ///
+    /// For a caller that wants one part of a reply: the projection happens where the
+    /// reply is produced, so the parts it drops are never carried further, while what
+    /// remains is still gated on the same stability (**G14**).
+    pub fn map<U: Send + 'static>(self, f: impl FnOnce(T) -> U) -> Reserved<U> {
+        Reserved {
+            outcome: f(self.outcome),
+            durable: self.durable,
         }
     }
 
@@ -296,6 +333,30 @@ pub trait GrainStore: GrainBlobStore {
     /// records this store has applied but not yet made stable, which a caller must not
     /// count toward a quorum (**G14**).
     fn read(&self, shard: u32, grain: &GrainName) -> Reserved<ReadReply>;
+
+    /// A grain's head alone (§7.3) — what activation needs before it can serve.
+    ///
+    /// Separate from [`read`](GrainStore::read) because the two differ by everything the
+    /// grain holds: `read` clones every occupied slot's bytes, and a caller after the head
+    /// then discards all of them to keep one integer. A grain with a long uncompacted tail
+    /// paid that on every activation, growing with its history.
+    ///
+    /// The default answers through `read` and is always correct; a store that can reach
+    /// its head without materializing the records overrides it. Defaulted rather than
+    /// required so a store with nothing to gain — an immutable test double — need not
+    /// restate it.
+    fn head(&self, shard: u32, grain: &GrainName) -> Reserved<Seq> {
+        self.read(shard, grain).map(|reply| reply.head())
+    }
+
+    /// A grain's latest snapshot as `(seq, state)`, without its records.
+    ///
+    /// The [`head`](GrainStore::head) argument applies unchanged: rehydration asks for
+    /// this immediately after the head, and through `read` it cloned the whole record set
+    /// a second time to reach one field.
+    fn snapshot(&self, shard: u32, grain: &GrainName) -> Reserved<Option<(Seq, Vec<u8>)>> {
+        self.read(shard, grain).map(ReadReply::into_snapshot)
+    }
 
     /// Up to `limit` records for a grain after `from` (exclusive), ascending by
     /// `Seq`, as `(Seq, bytes)` — the `load` seam (§7.3). Only the returned window's
@@ -482,6 +543,14 @@ impl GrainRecords {
             }
         }
         Seq::new(self.base.value() + run)
+    }
+
+    /// The latest snapshot as `(seq, state)`, cloning the snapshot's bytes and nothing
+    /// else — the records stay where they are.
+    pub(crate) fn snapshot(&self) -> Option<(Seq, Vec<u8>)> {
+        self.snapshot
+            .as_ref()
+            .map(|(seq, _term, state)| (*seq, state.clone()))
     }
 
     /// `(seq, term, bytes)` for each occupied slot, ascending — `seq = base + i + 1`.
@@ -719,6 +788,19 @@ impl MemoryGrainStore {
             .expect("grain store segments poisoned");
         segments.get(&(shard, grain.clone())).map(Arc::clone)
     }
+
+    /// Project a known grain's records under its segment lock, or `None` if the grain is
+    /// unknown — the shared body of every read this store answers, so the lookup, the
+    /// lock, and its poison message are written once rather than per accessor.
+    fn with_records<R>(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        project: impl FnOnce(&GrainRecords) -> R,
+    ) -> Option<R> {
+        self.existing(shard, grain)
+            .map(|segment| project(&segment.lock().expect("grain segment poisoned")))
+    }
 }
 
 /// The per-shard write-guard every [`GrainStore`] shares (§7.7, §8): the append
@@ -915,13 +997,30 @@ impl GrainStore for MemoryGrainStore {
     }
 
     fn read(&self, shard: u32, grain: &GrainName) -> Reserved<ReadReply> {
-        Reserved::ready(match self.existing(shard, grain) {
-            Some(segment) => segment.lock().expect("grain segment poisoned").read(),
-            None => ReadReply {
-                slots: Vec::new(),
-                snapshot: None,
-            },
-        })
+        Reserved::ready(
+            self.with_records(shard, grain, GrainRecords::read)
+                .unwrap_or_else(|| ReadReply {
+                    slots: Vec::new(),
+                    snapshot: None,
+                }),
+        )
+    }
+
+    // `head` and `snapshot` read the segment directly rather than through `read`, whose
+    // reply would clone every record the grain holds only for the caller to drop them.
+    // `GrainRecords::head` counts the same leading gap-free run over the snapshot's seq
+    // that `ReadReply::head` folds — `base` equals that seq whenever a snapshot exists —
+    // so the answer is unchanged and nothing is copied to reach it.
+
+    fn head(&self, shard: u32, grain: &GrainName) -> Reserved<Seq> {
+        Reserved::ready(
+            self.with_records(shard, grain, GrainRecords::head)
+                .unwrap_or(Seq::ZERO),
+        )
+    }
+
+    fn snapshot(&self, shard: u32, grain: &GrainName) -> Reserved<Option<(Seq, Vec<u8>)>> {
+        Reserved::ready(self.with_records(shard, grain, GrainRecords::snapshot).flatten())
     }
 
     fn read_from(

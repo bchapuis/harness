@@ -127,9 +127,7 @@ impl LocalReplicator {
     }
 
     pub(crate) async fn head(&self, grain: &GrainName) -> Result<Seq, GrainJournalError> {
-        Ok(head_from_reply(
-            &self.store.read(self.shard, grain).durable().await,
-        ))
+        Ok(self.store.head(self.shard, grain).durable().await)
     }
 
     pub(crate) async fn load(
@@ -171,9 +169,7 @@ impl LocalReplicator {
         &self,
         grain: &GrainName,
     ) -> Result<Option<(Seq, Vec<u8>)>, GrainJournalError> {
-        Ok(snapshot_of(
-            self.store.read(self.shard, grain).durable().await,
-        ))
+        Ok(self.store.snapshot(self.shard, grain).durable().await)
     }
 
     // --- The grain-native content-addressed blob store (single-node) --------------
@@ -651,7 +647,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // Take our local head before moving the reply into the quorum set, so the
         // write-back below can skip the network on a stable re-activation without a
         // second read and without deep-cloning the grain's records.
-        let local_head = head_from_reply(&local_reply);
+        let local_head = local_reply.head();
         let mut count = JointCount::new(sets);
         count.ack(self.self_node);
         let mut replies = vec![local_reply];
@@ -762,9 +758,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         &self,
         grain: &GrainName,
     ) -> Result<Option<(Seq, Vec<u8>)>, GrainJournalError> {
-        Ok(snapshot_of(
-            self.local.read(self.shard, grain).durable().await,
-        ))
+        Ok(self.local.snapshot(self.shard, grain).durable().await)
     }
 
     // --- The grain-native content-addressed blob store (clustered) ----------------
@@ -1038,7 +1032,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// consensus gate (G15).
     pub(crate) async fn migrate_grain(&self, grain: &GrainName) -> Result<(), GrainJournalError> {
         self.recover(grain).await?;
-        if let Some((at, state)) = snapshot_of(self.local.read(self.shard, grain).durable().await)
+        if let Some((at, state)) = self.local.snapshot(self.shard, grain).durable().await
             && let AppendOutcome::NotLeader(_) | AppendOutcome::Unavailable(_) =
                 self.save_snapshot(grain, at, state).await
         {
@@ -1175,7 +1169,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     ) -> Result<(), GrainJournalError> {
         self.recover_quorum(grain).await?;
         let reply = self.local.read(self.shard, grain).durable().await;
-        let head = head_from_reply(&reply);
+        let head = reply.head();
         let base = reply.snapshot.as_ref().map_or(Seq::ZERO, |(s, _, _)| *s);
         // The committed prefix: the snapshot plus the contiguous records above
         // it, up to the recovered head — never the uncommitted tail beyond it.
@@ -1547,26 +1541,3 @@ fn merge(replies: Vec<crate::store::ReadReply>, our_term: Term) -> Merged {
     (records, head, snapshot, any_below)
 }
 
-/// A store reply's committed head: the snapshot's seq (the compacted base, `0` if
-/// none) plus the leading gap-free run of records above it. Measures both a Local
-/// store's head and a recovering leader's local head, each of which may sit over a
-/// compacted prefix (§9).
-fn head_from_reply(reply: &crate::store::ReadReply) -> Seq {
-    let base = reply.snapshot.as_ref().map_or(0, |(s, _, _)| s.value());
-    // `slots` is ascending by seq with the compacted prefix absent, so the leading
-    // gap-free run above the base ends at the first slot that is not the next seq.
-    let mut head = base;
-    for (seq, _, _) in &reply.slots {
-        if seq.value() != head + 1 {
-            break;
-        }
-        head += 1;
-    }
-    Seq::new(head)
-}
-
-/// A store reply's latest snapshot as `(seq, state)` — the `load_snapshot` seam needs
-/// only the seq and the state, not the committing term (§9).
-fn snapshot_of(reply: crate::store::ReadReply) -> Option<(Seq, Vec<u8>)> {
-    reply.snapshot.map(|(seq, _term, state)| (seq, state))
-}
