@@ -1,7 +1,7 @@
 //! The machine guest-agent wire protocol (machine spec §5.1) — the **single
 //! definition** all three peers consume: the front door's channel relay
 //! (`machine-frontdoor`), the machine's workspace-sync driver
-//! (`machine::vm`), and the guest agent (`guest/machine-agent`, which path-
+//! (`machine_grain::runtime`), and the guest agent (`guest/machine-agent`, which path-
 //! depends on this crate from its own workspace).
 //!
 //! One vsock stream carries one SSH channel. After the muxer handshake the
@@ -12,7 +12,7 @@
 //! never blocks another's bytes.
 //!
 //! The async (tokio) realization of the same length-prefixed framing lives
-//! with the host's vsock transport (`microvm::vsock`); this crate carries the
+//! with the host's vsock transport (`machine_host::vsock`); this crate carries the
 //! sync (std) realization, so the guest stays free of an async runtime.
 
 use serde::Deserialize;
@@ -30,8 +30,8 @@ pub const MAX_FRAME: usize = 1024 * 1024;
 
 /// Cap on one workspace tar stream, either direction, accumulated across its
 /// [`Frame::Data`] chunks (machine §4). Pinned to the workspace codec's
-/// budget (`microvm::ws_sync::MAX_TAR`) and the ws facet's durable-tree cap
-/// (`granary::MAX_TREE_BYTES`) by a test in the `machine` crate, the one
+/// budget (`machine_host::ws_sync::MAX_TAR`) and the ws facet's durable-tree cap
+/// (`granary::MAX_TREE_BYTES`) by a test in the `machine-grain` crate, the one
 /// consumer that sees all three.
 pub const MAX_TAR: usize = 64 * 1024 * 1024;
 
@@ -186,7 +186,7 @@ impl Frame {
 }
 
 /// Write one length-prefixed frame body (sync; the host's async twin is
-/// `microvm::vsock::send_frame`).
+/// `machine_host::vsock::send_frame`).
 pub fn send_frame(stream: &mut impl std::io::Write, body: &[u8]) -> std::io::Result<()> {
     stream.write_all(&(body.len() as u32).to_le_bytes())?;
     stream.write_all(body)?;

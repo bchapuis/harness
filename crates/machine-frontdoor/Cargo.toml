@@ -14,9 +14,9 @@ workspace = true
 [dependencies]
 actor-core.workspace = true
 granary.workspace = true
-machine.workspace = true
+machine-grain.workspace = true
 machine-proto.workspace = true
-microvm.workspace = true
+machine-host.workspace = true
 russh.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "io-util", "macros", "sync"] }
 serde_json.workspace = true

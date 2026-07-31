@@ -17,7 +17,7 @@ use super::Machine;
 use super::MachineError;
 use super::MachineEvent;
 use super::MachineState;
-use crate::vm::MachineVmProvider;
+use crate::runtime::MachineRuntimeProvider;
 
 // --- Workspace file commands (machine §3) --------------------------------------
 
@@ -44,7 +44,7 @@ fn ws_rel_path(path: &str) -> Result<&std::path::Path, MachineError> {
 }
 
 /// Open the workspace facet's directory as a capability handle.
-fn ws_open<S: GranarySystem, P: MachineVmProvider>(
+fn ws_open<S: GranarySystem, P: MachineRuntimeProvider>(
     ctx: &GrainCtx<Machine<S, P>>,
 ) -> Result<cap_std::fs::Dir, MachineError> {
     let root = ctx
@@ -55,15 +55,15 @@ fn ws_open<S: GranarySystem, P: MachineVmProvider>(
         .map_err(|e| MachineError::Ws(format!("open workspace: {e}")))
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> Machine<S, P> {
     /// The shared guard of every workspace file command: the machine must be
-    /// provisioned, and no microVM may be live (see [`MachineError::VmLive`]).
+    /// provisioned, and no guest may be live (see [`MachineError::Running`]).
     fn ws_command_guard(&self, state: &MachineState) -> Result<(), MachineError> {
         if !state.provisioned {
             return Err(MachineError::NotProvisioned);
         }
-        if self.lock().vm.is_some() {
-            return Err(MachineError::VmLive);
+        if self.lock().runtime.is_some() {
+            return Err(MachineError::Running);
         }
         Ok(())
     }
@@ -99,7 +99,7 @@ impl Message for WsWrite {
     const MANIFEST: Manifest = Manifest::new("machine.WsWrite");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<WsWrite> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<WsWrite> for Machine<S, P> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -142,7 +142,7 @@ impl Message for WsRead {
     const MANIFEST: Manifest = Manifest::new("machine.WsRead");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<WsRead> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<WsRead> for Machine<S, P> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -188,7 +188,7 @@ impl Message for WsList {
     const MANIFEST: Manifest = Manifest::new("machine.WsList");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<WsList> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<WsList> for Machine<S, P> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -238,7 +238,7 @@ impl Message for WsRemove {
     const MANIFEST: Manifest = Manifest::new("machine.WsRemove");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<WsRemove> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<WsRemove> for Machine<S, P> {
     async fn handle(
         &self,
         state: &MachineState,

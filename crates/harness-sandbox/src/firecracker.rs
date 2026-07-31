@@ -36,7 +36,7 @@
 //! Regular files, directories, relative symlinks, and the executable bit
 //! round-trip; absolute symlink targets, hard links, device and fifo nodes,
 //! and the suid/sgid/sticky bits deliberately do not. The codec, and the
-//! full list, is the shared [`microvm::ws_sync`] module.
+//! full list, is the shared [`machine_host::ws_sync`] module.
 //!
 //! ## The wire protocol (v1), mirrored by `guest/fc-agent`
 //!
@@ -76,10 +76,10 @@ use harness::OnDangling;
 use harness::Tier;
 use harness::ToolDecl;
 use harness::ToolError;
-use microvm::MicroVm;
-use microvm::vsock;
-use microvm::ws_sync::MAX_TAR;
-use microvm::ws_sync::tar_workspace;
+use machine_host::microvm::MicroVm;
+use machine_host::vsock;
+use machine_host::ws_sync::MAX_TAR;
+use machine_host::ws_sync::tar_workspace;
 use serde_json::Value;
 use serde_json::json;
 use tokio::net::UnixStream;
@@ -90,7 +90,7 @@ use crate::provider::capped;
 /// The vsock port the guest agent listens on; part of the protocol version.
 const VSOCK_PORT: u32 = 52;
 
-/// The control-directory prefix ([`microvm::control_path`]) for this tier's
+/// The control-directory prefix ([`machine_host::microvm::control_path`]) for this tier's
 /// VMs, distinct from the machine's `harness-machine`.
 const CONTROL_PREFIX: &str = "harness-fc";
 
@@ -165,12 +165,16 @@ impl FirecrackerConfig {
     }
 }
 
-/// The shared boot document's inputs ([`microvm::config_json`]) for this
+/// The shared boot document's inputs ([`machine_host::microvm::config_json`]) for this
 /// tier: the agent as init over one root drive, vsock on, no network (a
 /// sandboxed guest has no NIC by construction, sandbox spec §1.1).
-fn vm_config(config: &FirecrackerConfig, rootfs: &Path) -> microvm::VmConfig {
-    let mut vm =
-        microvm::VmConfig::rooted(&config.binary, &config.kernel, &config.boot_args, rootfs);
+fn vm_config(config: &FirecrackerConfig, rootfs: &Path) -> machine_host::microvm::VmConfig {
+    let mut vm = machine_host::microvm::VmConfig::rooted(
+        &config.binary,
+        &config.kernel,
+        &config.boot_args,
+        rootfs,
+    );
     vm.vcpus = config.vcpus;
     vm.mem_mib = config.mem_mib;
     vm
@@ -187,10 +191,10 @@ pub(crate) struct FirecrackerTier {
     /// the walk goes through it (S1).
     dir: Arc<Dir>,
     /// The workspace's host path, for the staged restore
-    /// ([`microvm::ws_sync::restore_workspace`]).
+    /// ([`machine_host::ws_sync::restore_workspace`]).
     ws: PathBuf,
     /// The digest key naming this VM's control directory
-    /// ([`microvm::control_path`]), so two providers holding the same
+    /// ([`machine_host::microvm::control_path`]), so two providers holding the same
     /// session id never contend.
     control_key: String,
     /// The VM slot. tokio's mutex, held across the whole call: provisioning
@@ -265,7 +269,7 @@ impl FirecrackerTier {
     async fn provision(&self) -> Result<MicroVm, ToolError> {
         self.attempted.store(true, Ordering::SeqCst);
         let fail = |e: String| ToolError::Sandbox(format!("firecracker: provision: {e}"));
-        let control = microvm::control_dir(CONTROL_PREFIX, &self.control_key)
+        let control = machine_host::microvm::control_dir(CONTROL_PREFIX, &self.control_key)
             .await
             .map_err(|e| fail(e.to_string()))?;
         // Each VM boots a private copy of the base rootfs: the guest writes
@@ -308,8 +312,11 @@ impl FirecrackerTier {
         }
         let mut slot = self.vm.lock().await;
         self.teardown(&mut slot).await;
-        let _ = tokio::fs::remove_dir_all(microvm::control_path(CONTROL_PREFIX, &self.control_key))
-            .await;
+        let _ = tokio::fs::remove_dir_all(machine_host::microvm::control_path(
+            CONTROL_PREFIX,
+            &self.control_key,
+        ))
+        .await;
     }
 }
 
@@ -350,7 +357,7 @@ async fn exec_bracket(
     let tar = vsock::recv_frame(&mut stream, MAX_TAR).await?;
     // Staged, two-phase: the workspace is durably captured after every call,
     // so a truncated guest tar must leave it untouched, never half-cleared.
-    microvm::ws_sync::restore_workspace(ws, &tar)
+    machine_host::ws_sync::restore_workspace(ws, &tar)
         .map_err(|e| BracketError::Transport(format!("unpack: {e}")))?;
     // A nonzero exit is an outcome the model reacts to, not an error.
     Ok(json!({

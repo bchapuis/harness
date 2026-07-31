@@ -321,12 +321,12 @@ async fn a_dead_socket_is_transport_loss() {
 }
 
 // The codec itself (pack determinism, budgeting, round trips) is tested where
-// it lives: `microvm::ws_sync`.
+// it lives: `machine_host::ws_sync`.
 
 #[test]
 fn the_config_document_pins_the_shape_firecracker_boots_from() {
     let config = FirecrackerConfig::new("/usr/bin/firecracker", "/k/vmlinux");
-    let document = microvm::config_json(
+    let document = machine_host::microvm::config_json(
         &vm_config(&config, std::path::Path::new("/ctl/rootfs.ext4")),
         std::path::Path::new("/ctl"),
     );

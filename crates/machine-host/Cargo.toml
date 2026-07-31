@@ -1,6 +1,6 @@
 [package]
-name = "microvm"
-description = "Shared Firecracker microVM plumbing: config document, process lifecycle, vsock transport, API-socket pause/resume (sandbox spec §3.5, machine spec §2.1)."
+name = "machine-host"
+description = "The host side of a machine: the Firecracker microVM and OCI container mechanisms behind one seam (sandbox spec §3.4, §3.5; machine spec §2.1)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

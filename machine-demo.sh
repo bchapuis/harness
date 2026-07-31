@@ -8,14 +8,20 @@
 # rootfs is durable state, so it survives disconnection, idle hibernation, and
 # the death of the node it was running on. See docs/machine-spec.md.
 #
-# Two modes, chosen for you:
+# Three mechanisms; the best one this host can run is chosen for you, or set
+# MACHINE_KIND=firecracker|docker|fake to choose yourself:
 #
-#   --vm firecracker  Linux with /dev/kvm. A real microVM per machine; you get a
-#                     shell inside it over SSH. The full story.
-#   --vm fake         everywhere else (macOS included). No guest, so no shell —
-#                     but every durable property is real: provisioning, the
-#                     journal, captures, hibernation, failover. What a host
-#                     without KVM can honestly show.
+#   --machine firecracker  Linux with /dev/kvm. A real microVM per machine; you
+#                          get a shell inside it over SSH. The full story.
+#   --machine docker       any host with docker, macOS included. The machine's
+#                          own rootfs, loop-mounted inside a privileged
+#                          container and chrooted into: a real shell, and the
+#                          whole rootfs really does persist. Shared-kernel
+#                          isolation, not the microVM boundary, and the
+#                          rootfs's own init never runs.
+#   --machine fake         no docker either. No guest, so no shell — but every
+#                          durable property is real: provisioning, the journal,
+#                          captures, hibernation, failover.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -35,46 +41,113 @@ echo "▸ building"
 cargo build -q -p machine-standalone
 BIN=target/debug/machine-standalone
 
-# --- Which binding can this host actually run? -----------------------------------
-# Firecracker needs Linux, /dev/kvm, and the assets guest/machine-rootfs/build.sh
-# produces. Anything missing drops us to the fake binding rather than failing:
-# the durability half of the demo runs anywhere.
-VM=fake
-FC_ARGS=()
+# --- Which mechanism holds the guest? --------------------------------------------
+# `--machine` is the node's flag and this script fills it in. Set MACHINE_KIND to choose
+# yourself (firecracker|docker|fake) and the script obeys or explains why it
+# cannot; leave it unset and the best mechanism this host can run wins.
+#
+# Firecracker needs Linux, /dev/kvm, and all three assets
+# guest/machine-rootfs/build.sh produces. The container mechanism needs only the
+# rootfs among them, and no KVM: it loop-mounts that same image, privileged, and
+# chroots into it. Neither available leaves the fake binding, whose durability
+# half runs anywhere.
+ROOTFS="$ASSETS/machine.ext4"
+KERNEL="$ASSETS/vmlinux"
+FC_BIN="$ASSETS/firecracker"
+# Both mechanisms provision from the same rootfs; only --machine fake substitutes its
+# own (a file of the right shape is all it dirties).
+BASE_IMAGE="$ROOTFS"
+RUNNER=${MACHINE_RUNNER_IMAGE:-harness-machine-runner:1}
+WANT=${MACHINE_KIND:-auto}
+KIND=fake
+KIND_ARGS=()
+
+docker_ok() { docker version >/dev/null 2>&1; }
+fc_ready()  { [ "$kvm" = yes ] && [ -f "$FC_BIN" ] && [ -f "$KERNEL" ] && [ -f "$ROOTFS" ]; }
+docker_ready() { [ -f "$ROOTFS" ] && docker_ok; }
+# The rootfs is always needed; the kernel and VMM only where they can be used.
+assets_missing() {
+  [ ! -f "$ROOTFS" ] && return 0
+  [ "$kvm" = yes ] && { [ ! -f "$FC_BIN" ] || [ ! -f "$KERNEL" ]; }
+}
+
+use_firecracker() {
+  KIND=firecracker
+  KIND_ARGS=(--fc-binary "$FC_BIN" --fc-kernel "$KERNEL")
+}
+
+use_docker() {
+  # A container holding the machine's *own* rootfs: the runner loop-mounts the
+  # disk-facet image and chroots into it, so the shell, the files, and their
+  # persistence are real. What it is not: an isolation boundary (the container is
+  # privileged), a booted system (no init, so the rootfs's services never start),
+  # or networked (no NIC).
+  if ! docker image inspect "$RUNNER" >/dev/null 2>&1; then
+    echo "▸ building the runner image ($RUNNER)"
+    MACHINE_RUNNER_IMAGE="$RUNNER" guest/machine-docker/build.sh
+  fi
+  KIND=docker
+  KIND_ARGS=(--docker-image "$RUNNER")
+}
+
+kvm=no
 if [ "$(uname -s)" != "Linux" ]; then
-  echo "  Not Linux, so there is no KVM and no microVM to boot: using --vm fake."
-  echo "  Everything durable still runs; the SSH shell does not (see the end of this script)."
+  [ "$WANT" = docker ] || echo "  Not Linux, so there is no KVM and no microVM to boot."
 elif [ ! -e /dev/kvm ]; then
-  echo "  Linux, but no /dev/kvm (a VM without nested virtualization, perhaps): using --vm fake."
+  [ "$WANT" = docker ] || echo "  Linux, but no /dev/kvm (a VM without nested virtualization, perhaps)."
 elif [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
   # Worth its own branch: this is the one failure a Linux user hits that is
   # entirely fixable, and silently degrading would hide the fix from them.
   echo "  /dev/kvm exists but this user cannot open it. Firecracker needs read+write:" >&2
   echo "      sudo usermod -aG kvm \$USER    # then log out and back in" >&2
-  echo "  Falling back to --vm fake for now." >&2
 else
-  if [ ! -f "$ASSETS/firecracker" ] || [ ! -f "$ASSETS/vmlinux" ] || [ ! -f "$ASSETS/machine.ext4" ]; then
-    echo "  /dev/kvm is usable but the guest assets are missing ($ASSETS)."
-    if [ "${MACHINE_BUILD_ASSETS:-1}" = "1" ] && docker version >/dev/null 2>&1; then
-      # Built at demo size, not the script's 1 GiB default: provisioning
-      # imports the whole image into the disk facet as 1 MiB blocks and
-      # replicates them, so image size is the dominant cost of `create`.
-      echo "▸ building guest assets (docker; a few minutes the first time)"
-      MACHINE_MB=${MACHINE_MB:-512} guest/machine-rootfs/build.sh
-    else
-      echo "  Run guest/machine-rootfs/build.sh to get a real microVM (needs docker)."
-      echo "  Falling back to --vm fake."
-    fi
-  fi
-  if [ -f "$ASSETS/firecracker" ] && [ -f "$ASSETS/vmlinux" ] && [ -f "$ASSETS/machine.ext4" ]; then
-    VM=firecracker
-    FC_ARGS=(--fc-binary "$ASSETS/firecracker" --fc-kernel "$ASSETS/vmlinux")
-    BASE_IMAGE="$ASSETS/machine.ext4"
+  kvm=yes
+fi
+
+# The guest assets. Both mechanisms boot the same rootfs; the kernel and the VMM
+# are Firecracker's alone, so a host that cannot use them does not download them
+# (VMM_ASSETS=0). Building needs docker and no KVM, so any host that can run
+# either mechanism can make them.
+if [ "$WANT" != fake ] && assets_missing; then
+  echo "  Guest assets missing or incomplete ($ASSETS)."
+  if [ "${MACHINE_BUILD_ASSETS:-1}" = "1" ] && docker_ok; then
+    # Built at demo size, not the script's 1 GiB default: provisioning
+    # imports the whole image into the disk facet as 1 MiB blocks and
+    # replicates them, so image size is the dominant cost of `create`.
+    echo "▸ building guest assets (docker; a few minutes the first time)"
+    if [ "$kvm" = yes ]; then vmm=1; else vmm=0; fi
+    MACHINE_MB=${MACHINE_MB:-512} VMM_ASSETS=$vmm guest/machine-rootfs/build.sh
+  else
+    echo "  Run guest/machine-rootfs/build.sh to get a real guest (needs docker)."
   fi
 fi
 
+case "$WANT" in
+  auto)
+    if fc_ready; then
+      use_firecracker
+    elif docker_ready; then
+      echo "  No microVM here, but docker can hold the machine's own rootfs: using --machine docker."
+      use_docker
+    else
+      echo "  No usable mechanism: falling back to --machine fake."
+      echo "  Everything durable still runs; the SSH shell does not (see the end of this script)."
+    fi
+    ;;
+  firecracker)
+    fc_ready || { echo "MACHINE_KIND=firecracker, but this host has no usable /dev/kvm or is missing $FC_BIN/$KERNEL/$ROOTFS." >&2; exit 1; }
+    use_firecracker
+    ;;
+  docker)
+    docker_ready || { echo "MACHINE_KIND=docker, but docker is not running or $ROOTFS is missing." >&2; exit 1; }
+    use_docker
+    ;;
+  fake) ;;
+  *) echo "MACHINE_KIND=$WANT: expected firecracker, docker, or fake." >&2; exit 1 ;;
+esac
+
 mkdir -p "$DATA"
-if [ "$VM" = "fake" ]; then
+if [ "$KIND" = "fake" ]; then
   # The fake binding has no guest, so the base image is only ever imported and
   # dirtied — any file of the right shape does. 64 MiB of zeros, made once.
   # `bs=1048576` rather than `bs=1m`/`bs=1M`: BSD and GNU dd disagree on the
@@ -118,7 +191,7 @@ trap cleanup EXIT INT TERM
 echo "▸ booting three nodes (logs in $DATA/node*.log)"
 for i in 1 2 3; do
   "$BIN" node --id "$i" --nodes 3 --data "$DATA/node$i" --secret "$SECRET" \
-    --port-base "$PORT_BASE" --vm "$VM" ${FC_ARGS[@]+"${FC_ARGS[@]}"} \
+    --port-base "$PORT_BASE" --machine "$KIND" ${KIND_ARGS[@]+"${KIND_ARGS[@]}"} \
     --door "$((DOOR_BASE + i - 1))=$MACHINE" \
     --admin "127.0.0.1:$((ADMIN_BASE + i - 1))" \
     > "$DATA/node$i.log" 2>&1 &
@@ -147,7 +220,7 @@ SSH_OPTS="-i $KEY -o UserKnownHostsFile=$DATA/known_hosts -o StrictHostKeyChecki
 cat <<EOF
 
   cluster up — node 1: pid ${PIDS[0]}, node 2: pid ${PIDS[1]}, node 3: pid ${PIDS[2]}
-  machine \`$MACHINE\` provisioned, vm binding: $VM
+  machine \`$MACHINE\` provisioned, machine binding: $KIND
 
   Inspect it (the journal is the machine):
 
@@ -155,7 +228,7 @@ cat <<EOF
 
 EOF
 
-if [ "$VM" = "firecracker" ]; then
+if [ "$KIND" = "firecracker" ]; then
 cat <<EOF
   SSH in. The first connection activates the grain and boots the microVM against
   the rehydrated disk, so expect a few seconds; the username is recorded as the
@@ -185,9 +258,49 @@ cat <<EOF
 
     cat \${TMPDIR:-/tmp}/harness-machine-*/console.log
 EOF
+elif [ "$KIND" = "docker" ]; then
+cat <<EOF
+  SSH in. The first connection activates the grain, loop-mounts the rehydrated
+  disk image in a container and chroots into it, so expect a second or two; the
+  username is recorded as the principal (machine §5.1), and the host key you pin
+  is the machine's own journaled identity:
+
+    ssh $SSH_OPTS -p $DOOR_BASE alice@127.0.0.1
+
+  Write something into the rootfs — a file in /root, a user, a config. Then
+  disconnect and reconnect: it is still there. That is the disk facet, not a
+  container layer; nothing in the container's own image survives, and everything
+  in the machine's does.
+
+  What this binding does not give you, being a container and not a VM:
+
+    - shared-kernel isolation only. It runs \`--privileged\` to loop-mount the
+      image, which is a root-equivalent grant on this host. Firecracker is the
+      binding that isolates; this one is for developing without KVM.
+    - no init, so the rootfs's own services never start (the guest agent is the
+      container's only process). Shells and files are unaffected.
+    - no network (\`--network none\`), like a node that cannot realize the
+      journaled egress policy (machine §5.2), so \`apk add\` will not work.
+
+  Failure drill (a machine outlives its node):
+
+    kill ${PIDS[0]}        the node holding your session dies; the connection drops
+    ssh $SSH_OPTS -p $((DOOR_BASE + 1)) alice@127.0.0.1
+
+  The survivors detect the death, placement moves the machine, and the next
+  attach mounts the last *captured* disk on another node. Your files are there,
+  rewound at most to the last capture — 30s here (--checkpoint-secs), and the
+  same host key, so ssh does not warn. Nothing forks and nothing corrupts.
+
+  If a boot fails, the runner's own output is the place to look — the loop mount
+  and the chroot report there, and nothing else in this stack sees them:
+
+    docker ps -a --filter name=harness-machine
+    docker logs \$(docker ps -aq --filter name=harness-machine | head -1)
+EOF
 else
 cat <<EOF
-  What you can drive here (--vm fake — no guest, so no shell):
+  What you can drive here (--machine fake — no guest, so no shell):
 
   Hold a session open. SSH authenticates against the machine's journaled key,
   pins its host key, and journals the attachment with your username as the
@@ -210,9 +323,11 @@ cat <<EOF
   and its disk comes back from the last committed capture — same image digest,
   no fork. That is the property SSH would be riding on.
 
-  For the SSH half you need Linux with /dev/kvm:
-    guest/machine-rootfs/build.sh     builds the guest rootfs, kernel, and VMM
-    ./machine-demo.sh                 then picks --vm firecracker by itself
+  For the SSH half you need a guest, which means one of:
+    docker running                    then this script picks --machine docker
+    Linux with /dev/kvm               then it picks --machine firecracker
+  Either way \`guest/machine-rootfs/build.sh\` builds the rootfs (it needs docker
+  too), and re-running this script chooses for you.
 EOF
 fi
 

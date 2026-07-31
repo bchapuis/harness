@@ -10,10 +10,13 @@
 //! - [`Machine`], the grain: `Facets = (Disk, Alarm, Ws)`, facet-0 state holding
 //!   only metadata (keys, host key, egress policy, sizing, intervals — machine
 //!   §3), and the session-grained durability discipline of machine §4.
-//! - [`MachineVmProvider`]/[`MachineVm`], the runtime binding seam: the grain
-//!   drives boot, pause-for-capture, resume, and kill through it, so the
-//!   deterministic simulation runs a [`FakeVmProvider`](vm::fake::FakeVmProvider)
-//!   while production binds Firecracker (machine §2.1, sandbox §3.5).
+//! - [`MachineRuntimeProvider`]/[`MachineRuntime`], the runtime binding seam:
+//!   the grain drives boot, pause-for-capture, resume, and kill through it, so
+//!   the deterministic simulation runs a
+//!   [`FakeRuntimeProvider`](runtime::fake::FakeRuntimeProvider) while
+//!   production runs a [`HostedRuntimeProvider`](runtime::hosted::HostedRuntimeProvider)
+//!   over whichever mechanism the node's `machine_host::MachineHost` is — a
+//!   microVM or a container (machine §2.1, sandbox §3.5).
 //!
 //! The network seam — the SSH front door (machine §5.1, M4) and policy-bound
 //! egress (machine §5.2, M6) — lives in its own crates; this one defines the
@@ -22,7 +25,7 @@
 
 mod grain;
 mod net;
-mod vm;
+mod runtime;
 
 pub use grain::AddKey;
 pub use grain::Attach;
@@ -57,10 +60,10 @@ pub use net::guest_mac;
 pub use net::guest_net;
 pub use net::nft_ruleset;
 pub use net::tap_name;
-pub use vm::MachineVm;
-pub use vm::MachineVmProvider;
-pub use vm::VmError;
-pub use vm::VmSpec;
-pub use vm::fake;
-#[cfg(feature = "firecracker")]
-pub use vm::firecracker;
+pub use runtime::BootSpec;
+pub use runtime::MachineRuntime;
+pub use runtime::MachineRuntimeProvider;
+pub use runtime::RuntimeError;
+pub use runtime::fake;
+#[cfg(feature = "host")]
+pub use runtime::hosted;

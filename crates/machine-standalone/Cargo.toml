@@ -9,14 +9,17 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["firecracker"]
-# The real VM binding (machine §2.1). Builds everywhere; `--vm firecracker`
-# needs Linux and /dev/kvm at runtime, so the binding is selected by flag, not
-# by target: one build serves the Linux demo and the macOS dry run alike.
-firecracker = ["machine/firecracker"]
+default = ["host"]
+# A real guest (machine §2.1), held by either mechanism: `--machine firecracker`
+# (a microVM; Linux with /dev/kvm) or `--machine docker` (the same rootfs in a
+# privileged container; anywhere docker runs). Both build everywhere and are
+# selected by flag rather than by target, so one build serves a Linux host with
+# KVM, a Linux host without, and macOS. Without this feature only
+# `--machine fake` remains.
+host = ["machine-grain/host"]
 # Policy-bound egress (machine §5.2, M6): the per-machine tap and node NAT.
 # Linux with CAP_NET_ADMIN; without it a machine boots with no NIC.
-net = ["machine/net"]
+net = ["machine-grain/net"]
 
 [dependencies]
 actor-core.workspace = true
@@ -26,7 +29,8 @@ actor-serialization.workspace = true
 granary.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
-machine.workspace = true
+machine-host.workspace = true
+machine-grain.workspace = true
 machine-frontdoor.workspace = true
 russh.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "signal"] }

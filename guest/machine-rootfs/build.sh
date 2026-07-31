@@ -8,6 +8,10 @@
 #   vmlinux         a firecracker-ci kernel (vsock-enabled)
 #   firecracker     the VMM release binary
 #
+# The last two are the Firecracker binding's; the docker binding (machine §2.1)
+# runs the same machine.ext4 under the host's own kernel, so a host that will
+# only ever run `--machine docker` can skip them with VMM_ASSETS=0.
+#
 # Unlike guest/fc-rootfs (the sandbox's host-owned agent-as-init image), this
 # is the *user's own rootfs*: the agent is an ordinary service the rootfs's
 # own init (openrc) starts, not pid 1 (machine §2.1). The whole image persists
@@ -25,6 +29,7 @@
 #   KERNEL      kernel series prefix to pick           (default 5.10)
 #   MACHINE_MB  image size in MiB                       (default 1024)
 #   USER_NAME   the default login user                  (default dev)
+#   VMM_ASSETS  1 | 0: fetch vmlinux + firecracker      (default 1)
 set -eu
 cd "$(dirname "$0")"
 
@@ -34,6 +39,7 @@ CI_VERSION=${CI_VERSION:-v1.10}
 KERNEL=${KERNEL:-5.10}
 MACHINE_MB=${MACHINE_MB:-1024}
 USER_NAME=${USER_NAME:-dev}
+VMM_ASSETS=${VMM_ASSETS:-1}
 ARCH=${ARCH:-$(docker run --rm alpine:"$ALPINE" uname -m)}
 case "$ARCH" in
   x86_64) PLATFORM=linux/amd64 ;;
@@ -103,6 +109,13 @@ EOF
     mkfs.ext4 -q -d /rootfs /out/machine.ext4.tmp
     mv /out/machine.ext4.tmp /out/machine.ext4
   '
+
+if [ "$VMM_ASSETS" = 0 ]; then
+  echo "--- vmlinux + firecracker: skipped (VMM_ASSETS=0)"
+  echo "--- done"
+  ls -lh out/
+  exit 0
+fi
 
 echo "--- vmlinux: latest firecracker-ci $KERNEL kernel for $ARCH"
 docker run --rm --platform "$PLATFORM" -v "$(pwd)/out":/out alpine:"$ALPINE" sh -ec '

@@ -30,14 +30,14 @@ use granary::GrainName;
 use granary::GranaryConfig;
 use granary::GranaryExt;
 use granary::testing::ActivationSingletonPerNode;
-use machine::Attach;
-use machine::Detach;
-use machine::Machine;
-use machine::Provision;
-use machine::Status;
-use machine::fake::FakeVmProvider;
+use machine_grain::Attach;
+use machine_grain::Detach;
+use machine_grain::Machine;
+use machine_grain::Provision;
+use machine_grain::Status;
+use machine_grain::fake::FakeRuntimeProvider;
 
-type ClusterMachine = Machine<SimNode, FakeVmProvider<SimNode>>;
+type ClusterMachine = Machine<SimNode, FakeRuntimeProvider<SimNode>>;
 
 #[derive(Default)]
 struct DoorStub;
@@ -134,12 +134,12 @@ impl ClusterWorkload for Narrative {
             let granaries: Vec<_> = nodes
                 .iter()
                 .map(|s| {
-                    let provider = std::sync::Arc::new(FakeVmProvider::new(
+                    let provider = std::sync::Arc::new(FakeRuntimeProvider::new(
                         s.clone(),
                         Duration::from_millis(50),
                     ));
                     s.granary_named::<ClusterMachine>(
-                        machine::MACHINE_TYPE,
+                        machine_grain::MACHINE_TYPE,
                         config.clone(),
                         std::sync::Arc::new(move || Machine::new(std::sync::Arc::clone(&provider))),
                     )

@@ -72,10 +72,11 @@ authenticated form with opaque per-tenant tokens.
   ownership-index grain (`tenancy`, itself another journaled actor). The gateway
   is where auth terminates, so it joins inside the cluster's trust boundary;
   untrusted callers reach it only over HTTP with a bearer token.
-- **Persistent machines** (`crates/machine`, `crates/machine-frontdoor`): the
-  agent's sibling. Same grain, different consumer — a lightweight VM you address
-  by name and reach over SSH, whose *whole rootfs* is the durable state. Not an
-  agent: no run loop, no model, no autonomy, just a box that survives.
+- **Persistent machines** (`crates/machine-grain`, `crates/machine-host`,
+  `crates/machine-frontdoor`): the agent's sibling. Same grain, different
+  consumer — a lightweight VM you address by name and reach over SSH, whose
+  *whole rootfs* is the durable state. Not an agent: no run loop, no model, no
+  autonomy, just a box that survives.
 
 ## The other demo: a machine you SSH into
 
@@ -95,11 +96,16 @@ The failure drill is the same shape as the harness's: kill the node holding your
 session, reconnect through another node's door, and find your files where you
 left them — rewound at most to the last capture, never forked.
 
-A real guest needs Linux with `/dev/kvm` and the assets
-`guest/machine-rootfs/build.sh` produces. Elsewhere (macOS included) the script
-picks `--vm fake` by itself and says so: everything durable still runs —
-provisioning, the journal, attachments, the capture cadence, failover — and only
-the shell is missing, because there is no guest to bridge to.
+Which mechanism holds the guest is the node's `--machine` flag, and the script
+fills it in (set `MACHINE_KIND` to choose yourself). A microVM per machine needs
+Linux with `/dev/kvm` and the assets `guest/machine-rootfs/build.sh` produces;
+elsewhere — macOS included — `--machine docker` holds the machine's *own* rootfs
+in a privileged container that loop-mounts the disk image and chroots into it,
+so the shell and the whole-rootfs persistence are real. It gives shared-kernel
+isolation rather than the microVM boundary, it runs no init inside the rootfs,
+and it has no network: a development mechanism, not the one to put untrusted
+guests behind. With neither available the script picks `--machine fake` and says
+so — everything durable still runs, and only the shell is missing.
 
 ## Going deeper
 

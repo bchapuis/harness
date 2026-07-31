@@ -2,12 +2,12 @@
 //!
 //! A front door is a cluster member — the ingress analogue of the harness
 //! gateway (harness §7.3) — that **terminates SSH in-process** (`russh`) and
-//! bridges each authenticated channel to the machine's guest agent over vsock.
+//! bridges each authenticated channel to the machine's guest agent.
 //! It authenticates the client by public key against the machine's journaled
 //! authorized-key set, presents the machine's own journaled host key so one SSH
 //! identity survives hibernation/migration/failover, and never lets guest-side
-//! material govern what it bridges — possession of the vsock channel *is* the
-//! host's authority (M4).
+//! material govern what it bridges — possession of the channel *is* the host's
+//! authority (M4).
 //!
 //! Two seams keep the cluster and the transport out of the SSH code:
 //!
@@ -15,19 +15,16 @@
 //!   authorized-key check, and the journaled `Attach`/`Detach`. Production
 //!   wires it to a `GrainRef` over the machine's leader.
 //! - [`ChannelBackend`] — the transport half: one byte stream per channel to
-//!   the guest agent (production: [`bridge::VsockBackend`] over the leader
-//!   node's vsock).
+//!   the guest agent. Production supplies the node's `machine_host::MachineHost`,
+//!   which reaches the guest however that node holds it.
 //!
 //! Not implemented (machine §8): the cross-node relay that carries a channel's
-//! bytes from the front-door member to the leader that owns the vsock socket,
-//! and credit-based flow control across the actor transport. [`ChannelBackend`]
-//! is that seam; [`bridge::VsockBackend`] assumes the guest socket is reachable
-//! from this node.
+//! bytes from the front-door member to the leader that holds the guest, and
+//! credit-based flow control across the actor transport. [`ChannelBackend`] is
+//! that seam; a backend assumes the guest is reachable from this node.
 
-mod bridge;
 mod ssh;
 
-pub use bridge::VsockBackend;
 pub use machine_proto::AGENT_PORT;
 pub use machine_proto::ChannelKind;
 pub use ssh::serve_connection;
@@ -73,9 +70,11 @@ pub fn host_key_from_seed(seed: &[u8]) -> Result<PrivateKey, FrontDoorError> {
 /// A bidirectional byte stream to a guest agent for one channel (the header
 /// already sent by [`ChannelBackend::open`]). The front door writes and reads
 /// [`machine_proto`] frames on it.
-pub trait Duplex: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
-
-impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Duplex for T {}
+///
+/// One definition, `machine-host`'s: a channel comes from whichever mechanism holds
+/// the guest, and a second identical trait here would make every backend box its
+/// stream twice to cross the seam.
+pub use machine_host::Duplex;
 
 /// The grain-cluster half of the front door (machine §5.1). Production wires
 /// this over a `GrainRef<Machine>` to the machine's leader; tests supply a

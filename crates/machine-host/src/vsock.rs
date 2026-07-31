@@ -17,6 +17,19 @@ use tokio::net::UnixStream;
 /// the muxer's `CONNECT <port>` line handshake, then frames.
 pub async fn connect(uds: &Path, port: u32) -> Result<UnixStream, std::io::Error> {
     let mut stream = UnixStream::connect(uds).await?;
+    handshake(&mut stream, port).await?;
+    Ok(stream)
+}
+
+/// The muxer handshake alone, over an already-connected stream: `CONNECT
+/// <port>` out, one `OK <port>` line back. Generic over the stream because the
+/// muxer's grammar is what a guest agent answers, not what carries it — the
+/// docker binding (machine §2.1) reaches the same agent through a relayed pipe
+/// rather than a vsock socket, and must not fork the handshake to do it.
+pub async fn handshake<S>(stream: &mut S, port: u32) -> Result<(), std::io::Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     stream
         .write_all(format!("CONNECT {port}\n").as_bytes())
         .await?;
@@ -39,7 +52,7 @@ pub async fn connect(uds: &Path, port: u32) -> Result<UnixStream, std::io::Error
             String::from_utf8_lossy(&line)
         )));
     }
-    Ok(stream)
+    Ok(())
 }
 
 /// Send one frame: a `u32` little-endian length, then the bytes. Generic over

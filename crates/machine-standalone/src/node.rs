@@ -1,7 +1,7 @@
 //! One node of the standalone machine deployment: the production runtime wired
 //! to the machine grain (machine spec).
 //!
-//! A node hosts `machine` grains, votes in Raft, and runs an **in-process SSH
+//! A node hosts machine grains, votes in Raft, and runs an **in-process SSH
 //! front door** (machine §5.1). The front door is in-process rather than a
 //! separate tier — the shape `harness-gateway` takes for sessions — for one
 //! reason: a bridged channel ends at a node-local vsock socket, and the
@@ -10,7 +10,7 @@
 //! node currently leads, and a client reconnects (machine §6) when leadership
 //! moves.
 //!
-//! Every node is identical: same grain type, same seams, same VM binding. A
+//! Every node is identical: same grain type, same seams, same runtime binding. A
 //! machine is a grain, so durability, placement, and the single-writer fence
 //! are granary's; this file only chooses the bindings and opens the ports.
 
@@ -50,22 +50,23 @@ use granary::GrainName;
 use granary::Granary;
 use granary::GranaryConfig;
 use granary::GranaryExt;
-use machine::MACHINE_TYPE;
-use machine::Machine;
-use machine::fake::FakeVmProvider;
 use machine_frontdoor::serve_connection;
+use machine_grain::MACHINE_TYPE;
+use machine_grain::Machine;
+use machine_grain::fake::FakeRuntimeProvider;
 
 use crate::authority::FrontDoor;
 use crate::authority::GrainAuthority;
 use crate::authority::NodeMachine;
-use crate::backend::LocalVsockBackend;
-use crate::provider::NodeVmProvider;
+use crate::backend::LocalBackend;
+use crate::provider::NodeRuntimeProvider;
 
-/// Which VM binding the node runs (see [`NodeVmProvider`]).
+/// Which kind of machine this node runs (see [`NodeRuntimeProvider`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VmMode {
+pub enum MachineKind {
     Fake,
     Firecracker,
+    Docker,
 }
 
 /// Everything `node` takes from the command line.
@@ -93,13 +94,19 @@ pub struct NodeOptions {
     /// Shards the machine grain type is spread over; every node must agree, and
     /// so must any cluster client (a name must hash to the same shard).
     pub shards: usize,
-    /// The VM binding. No default: an operator who does not say gets told,
-    /// rather than silently getting the fake guest.
-    pub vm: Option<VmMode>,
-    /// The firecracker executable, for `--vm firecracker`.
+    /// The kind of machine this node runs. No default: an operator who does not
+    /// say gets told, rather than silently getting the fake guest.
+    pub machine: Option<MachineKind>,
+    /// The firecracker executable, for `--machine firecracker`.
     pub fc_binary: String,
-    /// The vmlinux kernel, for `--vm firecracker`.
+    /// The vmlinux kernel, for `--machine firecracker`.
     pub fc_kernel: String,
+    /// The container CLI, for `--machine docker`. Podman's compatible CLI works
+    /// too.
+    pub docker_cli: String,
+    /// The runner image `guest/machine-docker/build.sh` builds, for `--machine
+    /// docker`.
+    pub docker_image: String,
     /// SSH front doors to open: `port → machine name`, from `--door
     /// <port>=<machine>`. One machine per port, because SSH fixes the host key
     /// at KEX — before a username exists to name a machine with.
@@ -118,9 +125,11 @@ impl Default for NodeOptions {
             port_base: 7601,
             secret: "machine-standalone".to_string(),
             shards: GranaryConfig::default().shards,
-            vm: None,
+            machine: None,
             fc_binary: "firecracker".to_string(),
             fc_kernel: String::new(),
+            docker_cli: "docker".to_string(),
+            docker_image: "harness-machine-runner:1".to_string(),
             doors: BTreeMap::new(),
         }
     }
@@ -139,9 +148,10 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     }
     // Resolved before any port is bound: a missing binding is a configuration
     // error the operator fixes, not a half-booted node.
-    let vm_mode = opts.vm.ok_or(
-        "--vm is required: `firecracker` (a real microVM per machine; Linux + /dev/kvm) or \
-         `fake` (no guest — durability only, machine §7)",
+    let machine_kind = opts.machine.ok_or(
+        "--machine is required: `firecracker` (a real microVM per machine; Linux + /dev/kvm), \
+         `docker` (the rootfs in a privileged container; any host with docker, shared-kernel \
+         isolation), or `fake` (no guest — durability only, machine §7)",
     )?;
     let node = NodeId::new(opts.id);
     let roster: Vec<NodeId> = (1..=opts.nodes).map(NodeId::new).collect();
@@ -242,7 +252,11 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         }
     }
 
-    let provider = Arc::new(vm_provider(&opts, vm_mode, &system)?);
+    // The mechanism this node holds guests with, built from `--machine` before
+    // anything durable starts: a mechanism the operator named but this build or
+    // host cannot supply is a configuration error, not a half-booted node.
+    let host = machine_host(&opts, machine_kind)?;
+    let provider = Arc::new(runtime_provider(&host, node, &system));
     let grain_store = FileGrainStore::factory(opts.data.join("grains"));
     let config = GranaryConfig {
         shards: opts.shards,
@@ -269,8 +283,15 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         alarms,
     );
 
+    // The grade, not just the flag: what confinement a machine actually gets is
+    // the one thing about the mechanism an operator should read at startup
+    // (sandbox §3.4 — the two grades are not interchangeable).
+    let grade = match &host {
+        None => " (no guest: durability only)".to_string(),
+        Some(mechanism) => format!(" ({} grade)", mechanism.isolation()),
+    };
     eprintln!(
-        "[{node}] transport {advertised}, data {}, vm {vm_mode:?}",
+        "[{node}] transport {advertised}, data {}, machine {machine_kind:?}{grade}",
         opts.data.display()
     );
     wait_for_hosts(&system, opts.nodes as usize).await;
@@ -302,7 +323,8 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
             machine,
             Arc::clone(&authority),
             node,
-            vm_mode,
+            host.clone(),
+            node.to_string(),
         ));
     }
     if opts.doors.is_empty() {
@@ -320,9 +342,10 @@ async fn serve_door(
     machine: GrainName,
     authority: Arc<GrainAuthority>,
     node: NodeId,
-    vm_mode: VmMode,
+    host: Option<Arc<dyn machine_host::MachineHost>>,
+    scope: String,
 ) {
-    let backend = Arc::new(LocalVsockBackend::new(vm_mode == VmMode::Firecracker));
+    let backend = Arc::new(LocalBackend::new(host, scope));
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -344,40 +367,78 @@ async fn serve_door(
     }
 }
 
-/// Build the node's VM binding from `--vm` and its assets.
-fn vm_provider(
-    opts: &NodeOptions,
-    mode: VmMode,
+/// Bind the grain factory's provider to what this node holds guests with.
+fn runtime_provider(
+    host: &Option<Arc<dyn machine_host::MachineHost>>,
+    node: NodeId,
     system: &TcpCluster,
-) -> Result<NodeVmProvider, String> {
-    match mode {
-        VmMode::Fake => Ok(NodeVmProvider::Fake(FakeVmProvider::new(
+) -> NodeRuntimeProvider {
+    match host {
+        None => NodeRuntimeProvider::Fake(FakeRuntimeProvider::new(
             system.clone(),
-            Duration::from_millis(50),
-        ))),
-        #[cfg(feature = "firecracker")]
-        VmMode::Firecracker => {
+            FAKE_WRITE_INTERVAL,
+        )),
+        #[cfg(feature = "host")]
+        Some(mechanism) => {
+            NodeRuntimeProvider::Hosted(machine_grain::hosted::HostedRuntimeProvider::new(
+                Arc::clone(mechanism),
+                machine_grain::hosted::HostedRuntimeConfig::new(node.to_string()),
+            ))
+        }
+        // Unreachable: `machine_host` answers `None` for every mode this build
+        // can serve.
+        #[cfg(not(feature = "host"))]
+        Some(_) => {
+            let _ = node;
+            unreachable!("no mechanism is built without the `host` feature")
+        }
+    }
+}
+
+/// The same, for a build without the binding: only the fake guest remains, and
+/// naming any other mechanism is a configuration error rather than a silent
+/// downgrade to it.
+#[cfg(not(feature = "host"))]
+fn machine_host(
+    _opts: &NodeOptions,
+    mode: MachineKind,
+) -> Result<Option<Arc<dyn machine_host::MachineHost>>, String> {
+    match mode {
+        MachineKind::Fake => Ok(None),
+        other => Err(format!(
+            "--machine {other:?} needs the `host` feature; this binary was built without it"
+        )),
+    }
+}
+
+/// How fast the fake guest dirties blocks: fast enough that a demo's captures
+/// have real content, slow enough not to swamp a debug-build cluster.
+const FAKE_WRITE_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Build the mechanism this node holds guests with, from `--machine` and its assets.
+/// `None` is `--machine fake`: no mechanism, and no guest to reach.
+#[cfg(feature = "host")]
+fn machine_host(
+    opts: &NodeOptions,
+    mode: MachineKind,
+) -> Result<Option<Arc<dyn machine_host::MachineHost>>, String> {
+    let mechanism = match mode {
+        MachineKind::Fake => return Ok(None),
+        MachineKind::Firecracker => {
             if opts.fc_kernel.is_empty() {
                 return Err(
-                    "--vm firecracker requires --fc-kernel (guest/machine-rootfs/build.sh \
-                            produces one)"
+                    "--machine firecracker requires --fc-kernel (guest/machine-rootfs/build.sh \
+                     produces one)"
                         .to_string(),
                 );
             }
-            Ok(NodeVmProvider::Firecracker(
-                machine::firecracker::FirecrackerMachineProvider::new(
-                    machine::firecracker::FirecrackerMachineConfig::new(
-                        &opts.fc_binary,
-                        &opts.fc_kernel,
-                    ),
-                ),
-            ))
+            machine_grain::hosted::microvm_host(&opts.fc_binary, &opts.fc_kernel)
         }
-        #[cfg(not(feature = "firecracker"))]
-        VmMode::Firecracker => {
-            Err("this binary was built without the `firecracker` feature".to_string())
+        MachineKind::Docker => {
+            machine_grain::hosted::container_host(&opts.docker_cli, &opts.docker_image)
         }
-    }
+    };
+    Ok(Some(mechanism))
 }
 
 /// Resolve node `id`'s address on `host` at port `base + id - 1`.

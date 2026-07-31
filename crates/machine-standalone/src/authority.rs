@@ -13,21 +13,21 @@ use actor_core::ActorId;
 use actor_runtime::TcpCluster;
 use granary::GrainName;
 use granary::Granary;
-use machine::Attach;
-use machine::Detach;
-use machine::DoorPolicy;
-use machine::DoorPolicyReply;
-use machine::Machine;
 use machine_frontdoor::FrontDoorError;
 use machine_frontdoor::MachineAuthority;
 use machine_frontdoor::host_key_from_seed;
+use machine_grain::Attach;
+use machine_grain::Detach;
+use machine_grain::DoorPolicy;
+use machine_grain::DoorPolicyReply;
+use machine_grain::Machine;
 use russh::keys::PrivateKey;
 use russh::keys::PublicKey;
 
-use crate::provider::NodeVmProvider;
+use crate::provider::NodeRuntimeProvider;
 
 /// The grain type this node hosts and this authority addresses.
-pub type NodeMachine = Machine<TcpCluster, NodeVmProvider>;
+pub type NodeMachine = Machine<TcpCluster, NodeRuntimeProvider>;
 
 /// A [`MachineAuthority`] backed by the cluster (machine §5.1).
 pub struct GrainAuthority {

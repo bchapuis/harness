@@ -1,10 +1,11 @@
-//! Shared Firecracker microVM plumbing (sandbox spec §3.5, machine spec §2.1).
+//! The Firecracker mechanism (sandbox spec §3.5, machine spec §2.1): the microVM
+//! half of this crate's two [`MachineHost`] implementations.
 //!
 //! Two consumers boot Firecracker VMs and share the process-hygiene code
 //! between them: the agent sandbox's `Native` tier (`harness-sandbox`,
 //! per-call tar sync over vsock) and the persistent machine
-//! (`crates/machine`, whose drive is the disk facet's image, grain §7.15).
-//! This crate owns the mechanics identical for both and nothing
+//! (`crates/machine-grain`, whose drive is the disk facet's image, grain §7.15).
+//! This module owns the mechanics identical for both and nothing
 //! protocol-shaped:
 //!
 //! - the `--config-file` **document** ([`config_json`]): one PUT-free start,
@@ -15,7 +16,7 @@
 //!   killed harness process — is swept by the next launch, the boot console
 //!   captured to a file for diagnosis, and a readiness poll that fails fast
 //!   with the console tail when the VMM exits during boot;
-//! - the **vsock transport** ([`vsock`]): the Firecracker muxer's
+//! - the **vsock transport** ([`vsock`](crate::vsock)): the Firecracker muxer's
 //!   `CONNECT <port>\n` → `OK <port>\n` line handshake, then `u32`
 //!   little-endian length-prefixed frames, every receive capped *before* it
 //!   sizes anything (a frame header's claim never becomes an allocation);
@@ -23,16 +24,23 @@
 //!   `PATCH /vm` over the `api.sock`, the quiescent-point mechanism the
 //!   machine's capture needs (machine §4) — the only post-boot use of the API
 //!   socket;
-//! - the **workspace tar codec** ([`ws_sync`], feature `ws`): the capped,
+//! - the **workspace tar codec** ([`ws_sync`](crate::ws_sync), feature `ws`): the capped,
 //!   capability-confined pack/unpack both consumers move a workspace with.
 //!   The codec is shared; each consumer keeps its own wire protocol around
 //!   it.
 //!
-//! Firecracker runs on Linux + `/dev/kvm` only; this crate *builds*
-//! everywhere, and launching where KVM is absent fails as an ordinary error.
+//! [`MicroVmHost`] wraps all of it as one of the crate's two
+//! [`MachineHost`] implementations; a consumer that wants
+//! the raw lifecycle (the sandbox's tier boots a private rootfs copy with its
+//! agent as init) holds [`MicroVm`] directly.
+//!
+//! Firecracker runs on Linux + `/dev/kvm` only; this module *builds* everywhere,
+//! and launching where KVM is absent fails as an ordinary error.
 
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -41,9 +49,15 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
-pub mod vsock;
-#[cfg(feature = "ws")]
-pub mod ws_sync;
+use crate::BoxFuture;
+use crate::Duplex;
+use crate::GuestError;
+use crate::GuestKey;
+use crate::GuestSpec;
+use crate::MachineGuest;
+use crate::MachineHost;
+use crate::MachineIsolation;
+use crate::Network;
 
 /// A VM lifecycle operation failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,23 +301,6 @@ impl MicroVm {
         }
     }
 
-    /// [`wait_ready`](MicroVm::wait_ready) with the commonest probe: the
-    /// guest accepting a vsock connection on `port`. A consumer whose
-    /// readiness needs a protocol exchange keeps the closure form.
-    pub async fn wait_ready_vsock(
-        &mut self,
-        port: u32,
-        timeout: Duration,
-        poll: Duration,
-    ) -> Result<(), MicroVmError> {
-        let vsock = self.vsock_path();
-        self.wait_ready(timeout, poll, || {
-            let vsock = vsock.clone();
-            async move { vsock::connect(&vsock, port).await.is_ok() }
-        })
-        .await
-    }
-
     /// Whether the VMM exited behind the caller's back (single-tier loss is
     /// the caller's policy; this is the observation).
     pub fn try_exited(&mut self) -> Option<std::process::ExitStatus> {
@@ -371,21 +368,27 @@ impl MicroVm {
         let _ = self.child.wait().await;
     }
 
-    /// The last bytes of the boot console, for diagnosis.
+    /// The last bytes of the boot console, for diagnosis; a phrase when there
+    /// were none, because this lands inside this module's error messages.
     pub fn console_tail(&self) -> String {
-        console_tail(&self.control)
+        console_tail(&self.control).unwrap_or_else(|| "no console output".to_string())
     }
 }
 
-/// The last bytes of `control/console.log`.
-fn console_tail(control: &Path) -> String {
+/// The last bytes of `control/console.log`, or `None` when the guest wrote
+/// nothing: absence stated as absence, so a caller folds it into a message only
+/// when it says something.
+fn console_tail(control: &Path) -> Option<String> {
     const TAIL: usize = 2048;
     match std::fs::read(control.join("console.log")) {
         Ok(bytes) if !bytes.is_empty() => {
             let start = bytes.len().saturating_sub(TAIL);
-            format!("console tail: {}", String::from_utf8_lossy(&bytes[start..]))
+            Some(format!(
+                "console tail: {}",
+                String::from_utf8_lossy(&bytes[start..])
+            ))
         }
-        _ => "no console output".to_string(),
+        _ => None,
     }
 }
 
@@ -419,6 +422,181 @@ fn kill_stale_vm(control: &Path) {
 /// Firecracker runs on Linux only; elsewhere there is no orphan to kill.
 #[cfg(not(target_os = "linux"))]
 fn kill_stale_vm(_control: &Path) {}
+
+/// This node's Firecracker mechanism: the VMM assets every guest it starts
+/// boots with. The per-guest half — the disk, the sizing, the NIC — arrives in
+/// each [`GuestSpec`].
+#[derive(Clone, Debug)]
+pub struct MicroVmHost {
+    binary: PathBuf,
+    kernel: PathBuf,
+    boot_args: String,
+    /// Distinguishes this consumer's control directories from another's on one
+    /// host ([`control_path`]).
+    prefix: String,
+}
+
+impl MicroVmHost {
+    /// `boot_args` is the consumer's: the sandbox boots its agent as init over a
+    /// host-owned image, a machine boots the user rootfs's own init (machine
+    /// §5.1), and only the consumer knows which it is handing over.
+    pub fn new(
+        binary: impl Into<PathBuf>,
+        kernel: impl Into<PathBuf>,
+        boot_args: impl Into<String>,
+        prefix: impl Into<String>,
+    ) -> MicroVmHost {
+        MicroVmHost {
+            binary: binary.into(),
+            kernel: kernel.into(),
+            boot_args: boot_args.into(),
+            prefix: prefix.into(),
+        }
+    }
+
+    /// The host-side vsock socket of `key`'s guest, derived from the key alone —
+    /// what [`MachineHost::connect_by_key`] dials, and node-local because the
+    /// socket exists only where the guest runs.
+    fn vsock_socket_path(&self, key: &GuestKey) -> PathBuf {
+        vsock_socket(&control_path(&self.prefix, &key.slug()))
+    }
+}
+
+impl MachineHost for MicroVmHost {
+    fn isolation(&self) -> MachineIsolation {
+        MachineIsolation::MicroVm
+    }
+
+    fn accepts_tap(&self) -> bool {
+        true
+    }
+
+    fn start(
+        &self,
+        spec: GuestSpec,
+    ) -> BoxFuture<'static, Result<Arc<dyn MachineGuest>, GuestError>> {
+        let host = self.clone();
+        Box::pin(async move {
+            let mut config =
+                VmConfig::rooted(&host.binary, &host.kernel, &host.boot_args, &spec.disk);
+            config.vcpus = spec.vcpus.max(1) as u32;
+            config.mem_mib = spec.mem_mib;
+            if let Network::Tap {
+                interface,
+                boot_arg,
+            } = &spec.network
+            {
+                config.net = Some(interface.clone());
+                // The guest configures its NIC from the kernel command line, so
+                // the image needs no DHCP client.
+                config.boot_args.push(' ');
+                config.boot_args.push_str(boot_arg);
+            }
+            let control = control_dir(&host.prefix, &spec.key.slug())
+                .await
+                .map_err(|e| GuestError::Host(e.to_string()))?;
+            let vm = MicroVm::launch(&config, &control)
+                .await
+                .map_err(|e| GuestError::Host(e.to_string()))?;
+            let vsock = vm.vsock_path();
+            Ok(Arc::new(MicroVmGuest {
+                vm: tokio::sync::Mutex::new(vm),
+                vsock,
+                control,
+            }) as Arc<dyn MachineGuest>)
+        })
+    }
+
+    fn connect_by_key<'a>(
+        &'a self,
+        key: &'a GuestKey,
+        port: u32,
+    ) -> BoxFuture<'a, Result<Box<dyn Duplex>, GuestError>> {
+        Box::pin(async move {
+            let socket = self.vsock_socket_path(key);
+            if !socket.exists() {
+                return Err(GuestError::Gone(format!(
+                    "no guest socket at {}",
+                    socket.display()
+                )));
+            }
+            dial(&socket, port).await
+        })
+    }
+}
+
+/// One live microVM.
+pub struct MicroVmGuest {
+    /// The VMM handle. A mutex because the lifecycle calls need `&mut`, and
+    /// because one guest serves one lifecycle operation at a time.
+    vm: tokio::sync::Mutex<MicroVm>,
+    /// Held beside the handle so a channel can be opened without taking the
+    /// lifecycle lock: a paused guest still has its socket, and a capture must
+    /// not deadlock against a channel.
+    vsock: PathBuf,
+    /// Likewise for the console: a diagnostic must be readable while another
+    /// task holds the lifecycle lock, which is exactly when one is wanted.
+    control: PathBuf,
+}
+
+impl MachineGuest for MicroVmGuest {
+    fn alive(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async move { self.vm.lock().await.try_exited().is_none() })
+    }
+
+    fn connect(&self, port: u32) -> BoxFuture<'_, Result<Box<dyn Duplex>, GuestError>> {
+        Box::pin(async move { dial(&self.vsock, port).await })
+    }
+
+    fn pause(&self) -> BoxFuture<'_, Result<(), GuestError>> {
+        Box::pin(async move {
+            self.vm
+                .lock()
+                .await
+                .pause()
+                .await
+                .map_err(|e| GuestError::Host(e.to_string()))
+        })
+    }
+
+    fn resume(&self) -> BoxFuture<'_, Result<(), GuestError>> {
+        Box::pin(async move {
+            self.vm
+                .lock()
+                .await
+                .resume()
+                .await
+                .map_err(|e| GuestError::Host(e.to_string()))
+        })
+    }
+
+    fn stop(&self) -> BoxFuture<'_, ()> {
+        // No `Drop` needed beside this: `MicroVm` spawns with `kill_on_drop`,
+        // so a dropped guest's VMM dies with it.
+        Box::pin(async move { self.vm.lock().await.kill().await })
+    }
+
+    fn console_tail(&self) -> BoxFuture<'_, String> {
+        let control = self.control.clone();
+        Box::pin(async move { console_tail(&control).unwrap_or_default() })
+    }
+}
+
+/// Connect to a guest listener over a host-side vsock socket, mapping the
+/// mechanism's failures onto the seam's two arms: a socket that is not there (or
+/// refuses) is a guest that is gone, everything else is this host's problem.
+async fn dial(socket: &Path, port: u32) -> Result<Box<dyn Duplex>, GuestError> {
+    match crate::vsock::connect(socket, port).await {
+        Ok(stream) => Ok(Box::new(stream)),
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => Err(
+            GuestError::Gone(format!("vsock {} port {port}: {e}", socket.display())),
+        ),
+        Err(e) => Err(GuestError::Host(format!(
+            "vsock {} port {port}: {e}",
+            socket.display()
+        ))),
+    }
+}
 
 #[cfg(test)]
 mod tests {

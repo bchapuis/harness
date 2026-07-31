@@ -1,32 +1,35 @@
 //! The workspace-sync channels, host side (machine spec §4): `WsPush`,
 //! `WsPull`, and `Sync` drivers over the guest agent's channel protocol
-//! ([`machine_proto`]) and the shared vsock transport ([`microvm::vsock`]).
+//! ([`machine_proto`]) and the shared frame codec ([`machine_host::vsock`]).
 //!
 //! One connection per op. A push sends the header, `Data` chunks, `Eof`, and
 //! reads a status; a pull sends the header and reads `Data` chunks to `Eof`
 //! then a status, the accumulation capped at [`MAX_TAR`] before any byte
 //! sizes a host allocation (sandbox spec §3.2).
+//!
+//! The drivers take an opened channel, not a socket path: the same three ops run
+//! over a microVM's vsock and over a container's relayed pipe, because what
+//! differs between the mechanisms is how the guest agent is reached
+//! (`machine_host::Guest::connect`), not what it is told.
 
-use std::path::Path;
-
-use machine_proto::ChannelKind;
+use machine_host::Duplex;
+use machine_host::vsock;
+use machine_host::ws_sync::MAX_TAR;
 use machine_proto::Frame;
 use machine_proto::MAX_FRAME;
-use microvm::vsock;
-use microvm::ws_sync::MAX_TAR;
-use tokio::net::UnixStream;
 
 /// Data chunks stay well under [`MAX_FRAME`] while keeping the frame count
 /// (and its per-frame syscalls) low for a full-size stream.
 const CHUNK: usize = 256 * 1024;
 
 /// A ws-channel op failed, split by what still works: after a
-/// [`Guest`](SyncError::Guest) refusal the VM and its transport still serve;
-/// after a [`Transport`](SyncError::Transport) failure the guest may be gone.
+/// [`Refused`](SyncError::Refused) refusal the guest and its transport still
+/// serve; after a [`Transport`](SyncError::Transport) failure the guest may be
+/// gone.
 #[derive(Debug)]
 pub enum SyncError {
     /// The agent answered with a non-zero status; its stderr is folded in.
-    Guest(String),
+    Refused(String),
     /// The vsock stream itself failed.
     Transport(std::io::Error),
 }
@@ -34,7 +37,7 @@ pub enum SyncError {
 impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SyncError::Guest(e) => write!(f, "guest agent: {e}"),
+            SyncError::Refused(e) => write!(f, "guest agent: {e}"),
             SyncError::Transport(e) => write!(f, "vsock: {e}"),
         }
     }
@@ -46,17 +49,10 @@ impl From<std::io::Error> for SyncError {
     }
 }
 
-/// Open one channel: connect, muxer handshake, send the header.
-async fn open(uds: &Path, port: u32, kind: &ChannelKind) -> std::io::Result<UnixStream> {
-    let mut stream = vsock::connect(uds, port).await?;
-    vsock::send_frame(&mut stream, &kind.header()).await?;
-    Ok(stream)
-}
-
 /// Read frames until a terminal `ExitStatus`, folding `Data` into `tar`
 /// (capped) and `Stderr` into the error message.
 async fn read_to_status(
-    stream: &mut UnixStream,
+    stream: &mut impl Duplex,
     mut tar: Option<&mut Vec<u8>>,
 ) -> Result<(), SyncError> {
     let mut stderr = Vec::new();
@@ -79,7 +75,7 @@ async fn read_to_status(
             Some(Frame::Eof) => {}
             Some(Frame::ExitStatus(code)) => {
                 if code != 0 {
-                    return Err(SyncError::Guest(format!(
+                    return Err(SyncError::Refused(format!(
                         "status {code}: {}",
                         String::from_utf8_lossy(&stderr)
                     )));
@@ -95,9 +91,9 @@ async fn read_to_status(
     }
 }
 
-/// `WsPush`: replace the guest's `/workspace` with `tar`.
-pub async fn push(uds: &Path, port: u32, tar: &[u8]) -> Result<(), SyncError> {
-    let mut stream = open(uds, port, &ChannelKind::WsPush).await?;
+/// `WsPush`: replace the guest's `/workspace` with `tar`, over an opened
+/// `WsPush` channel.
+pub async fn push(mut stream: impl Duplex, tar: &[u8]) -> Result<(), SyncError> {
     for chunk in tar.chunks(CHUNK) {
         vsock::send_frame(&mut stream, &Frame::encode_data(chunk)).await?;
     }
@@ -105,9 +101,9 @@ pub async fn push(uds: &Path, port: u32, tar: &[u8]) -> Result<(), SyncError> {
     read_to_status(&mut stream, None).await
 }
 
-/// `WsPull`: pack the guest's `/workspace` and return the tar.
-pub async fn pull(uds: &Path, port: u32) -> Result<Vec<u8>, SyncError> {
-    let mut stream = open(uds, port, &ChannelKind::WsPull).await?;
+/// `WsPull`: pack the guest's `/workspace` and return the tar, over an opened
+/// `WsPull` channel.
+pub async fn pull(mut stream: impl Duplex) -> Result<Vec<u8>, SyncError> {
     let mut tar = Vec::new();
     read_to_status(&mut stream, Some(&mut tar)).await?;
     Ok(tar)
@@ -115,8 +111,7 @@ pub async fn pull(uds: &Path, port: u32) -> Result<Vec<u8>, SyncError> {
 
 /// `Sync`: flush the guest's page cache (machine §2.2), so the pause that
 /// follows a pull sees a filesystem-clean image.
-pub async fn sync(uds: &Path, port: u32) -> Result<(), SyncError> {
-    let mut stream = open(uds, port, &ChannelKind::Sync).await?;
+pub async fn sync(mut stream: impl Duplex) -> Result<(), SyncError> {
     read_to_status(&mut stream, None).await
 }
 
@@ -124,8 +119,21 @@ pub async fn sync(uds: &Path, port: u32) -> Result<(), SyncError> {
 mod tests {
     use std::io::Read;
     use std::io::Write;
+    use std::path::Path;
+
+    use machine_proto::ChannelKind;
+    use tokio::net::UnixStream;
 
     use super::*;
+
+    /// Open a channel the way a mechanism would, against the fake socket below:
+    /// connect, muxer handshake, header. The real bindings get their stream from
+    /// `machine_host::Guest::connect`, which does the first two.
+    async fn open_vsock(uds: &Path, port: u32, kind: &ChannelKind) -> std::io::Result<UnixStream> {
+        let mut stream = vsock::connect(uds, port).await?;
+        vsock::send_frame(&mut stream, &kind.header()).await?;
+        Ok(stream)
+    }
 
     /// A fake guest agent on a std thread: the muxer handshake, one header,
     /// then the ws grammar of [`machine_proto`].
@@ -193,7 +201,10 @@ mod tests {
             assert_eq!(got.len(), 100_000, "chunks reassemble");
             write_frame(stream, &Frame::ExitStatus(0));
         });
-        push(&sock, 62, &vec![7u8; 100_000]).await.expect("push");
+        let channel = open_vsock(&sock, 62, &ChannelKind::WsPush)
+            .await
+            .expect("open");
+        push(channel, &vec![7u8; 100_000]).await.expect("push");
     }
 
     #[tokio::test]
@@ -206,7 +217,10 @@ mod tests {
             write_frame(stream, &Frame::Eof);
             write_frame(stream, &Frame::ExitStatus(0));
         });
-        let tar = pull(&sock, 62).await.expect("pull");
+        let channel = open_vsock(&sock, 62, &ChannelKind::WsPull)
+            .await
+            .expect("open");
+        let tar = pull(channel).await.expect("pull");
         assert_eq!(tar, vec![9u8; 70_000]);
     }
 
@@ -216,7 +230,10 @@ mod tests {
             write_frame(stream, &Frame::Stderr(b"tmpfs full".to_vec()));
             write_frame(stream, &Frame::ExitStatus(1));
         });
-        let err = pull(&sock, 62).await.expect_err("must fail");
+        let channel = open_vsock(&sock, 62, &ChannelKind::WsPull)
+            .await
+            .expect("open");
+        let err = pull(channel).await.expect_err("must fail");
         assert!(err.to_string().contains("tmpfs full"), "{err}");
     }
 
@@ -232,7 +249,10 @@ mod tests {
                 }
             }
         });
-        let err = pull(&sock, 62).await.expect_err("must refuse");
+        let channel = open_vsock(&sock, 62, &ChannelKind::WsPull)
+            .await
+            .expect("open");
+        let err = pull(channel).await.expect_err("must refuse");
         assert!(err.to_string().contains("cap"), "{err}");
     }
 }

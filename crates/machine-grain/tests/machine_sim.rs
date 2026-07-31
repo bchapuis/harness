@@ -24,21 +24,21 @@ use granary::GrainEvent;
 use granary::GranaryConfig;
 use granary::GranaryExt;
 use granary::GranarySystem;
-use machine::Attach;
-use machine::Detach;
-use machine::Machine;
-use machine::MachineError;
-use machine::Provision;
-use machine::Status;
-use machine::WsList;
-use machine::WsRead;
-use machine::WsRemove;
-use machine::WsWrite;
-use machine::fake::FakeVmProvider;
+use machine_grain::Attach;
+use machine_grain::Detach;
+use machine_grain::Machine;
+use machine_grain::MachineError;
+use machine_grain::Provision;
+use machine_grain::Status;
+use machine_grain::WsList;
+use machine_grain::WsRead;
+use machine_grain::WsRemove;
+use machine_grain::WsWrite;
+use machine_grain::fake::FakeRuntimeProvider;
 use serde::Deserialize;
 use serde::Serialize;
 
-type SimMachine = Machine<SimSystem, FakeVmProvider<SimSystem>>;
+type SimMachine = Machine<SimSystem, FakeRuntimeProvider<SimSystem>>;
 
 /// A stand-in for the front-door member holding an attachment (machine §5.1):
 /// the machine death-watches this actor's id.
@@ -113,12 +113,12 @@ fn fixture(seed: u64) -> Fixture {
     let sim = Simulation::new(seed);
     let recorder = Recorder::new();
     let system = sim_system(&sim, &recorder);
-    let provider = Arc::new(FakeVmProvider::new(
+    let provider = Arc::new(FakeRuntimeProvider::new(
         system.clone(),
         Duration::from_millis(10),
     ));
     let machines = system.granary_named::<SimMachine>(
-        machine::MACHINE_TYPE,
+        machine_grain::MACHINE_TYPE,
         GranaryConfig {
             idle_after: Duration::from_millis(200),
             snapshot_every: 100,
@@ -165,7 +165,7 @@ fn attach_capture_detach_hibernate_reattach_round_trips() {
         let status = grain.ask(Status).await.expect("status");
         assert!(status.provisioned);
         assert_eq!(status.image_bytes, image_len);
-        assert!(!status.vm_running);
+        assert!(!status.running);
 
         // Attach: boots the VM; the guest (fake) starts writing.
         let reply = grain
@@ -177,7 +177,7 @@ fn attach_capture_detach_hibernate_reattach_round_trips() {
             .expect("ask")
             .expect("attach");
         let status = grain.ask(Status).await.expect("status");
-        assert!(status.vm_running);
+        assert!(status.running);
         assert_eq!(status.attachments, vec![(reply.attachment, "alice".into())]);
 
         // Three checkpoint intervals of dirtying guest writes: the alarm
@@ -200,7 +200,7 @@ fn attach_capture_detach_hibernate_reattach_round_trips() {
             .expect("detach");
         sys.sleep(Duration::from_millis(50)).await;
         let status = grain.ask(Status).await.expect("status");
-        assert!(!status.vm_running, "the final capture stops the guest");
+        assert!(!status.running, "the final capture stops the guest");
         assert!(status.attachments.is_empty());
         status.image_digest.expect("digest of the settled image")
     });
@@ -225,7 +225,7 @@ fn attach_capture_detach_hibernate_reattach_round_trips() {
             Some(digest_after_final),
             "rehydration reproduces the final captured image byte-identically (M2)",
         );
-        assert!(!status.vm_running);
+        assert!(!status.running);
     });
 }
 
@@ -267,7 +267,7 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
             })
             .await
             .expect("ask")
-            .expect("ws write without a vm");
+            .expect("ws write without a guest");
         assert_eq!(
             grain
                 .ask(WsRead {
@@ -275,7 +275,7 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
                 })
                 .await
                 .expect("ask")
-                .expect("ws read without a vm"),
+                .expect("ws read without a guest"),
             b"written while hibernated".to_vec()
         );
         assert!(matches!(
@@ -307,7 +307,7 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
                 })
                 .await
                 .expect("ask"),
-            Err(MachineError::VmLive)
+            Err(MachineError::Running)
         ));
         assert!(matches!(
             grain
@@ -316,7 +316,7 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
                 })
                 .await
                 .expect("ask"),
-            Err(MachineError::VmLive)
+            Err(MachineError::Running)
         ));
 
         // Checkpoint intervals pass: the cadence pulls the guest's workspace
@@ -341,7 +341,7 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
             .expect("detach");
         sys.sleep(Duration::from_millis(50)).await;
         let status = grain.ask(Status).await.expect("status");
-        assert!(!status.vm_running);
+        assert!(!status.running);
         let log = grain
             .ask(WsRead {
                 path: "guest.log".into(),
@@ -559,7 +559,7 @@ fn front_door_death_folds_detached_and_releases_the_pin() {
             status.attachments.is_empty(),
             "front-door death must fold Detached for its attachments",
         );
-        assert!(!status.vm_running, "the final capture stops the guest");
+        assert!(!status.running, "the final capture stops the guest");
     });
 
     // With the pin released, the machine hibernates.

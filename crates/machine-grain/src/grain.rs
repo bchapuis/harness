@@ -10,11 +10,11 @@
 //! host key, egress policy, sizing, intervals, and the live attachment set —
 //! never image or workspace bytes.
 //!
-//! **File commands without a VM (machine §3).** [`WsWrite`], [`WsRead`],
+//! **File commands without a guest (machine §3).** [`WsWrite`], [`WsRead`],
 //! [`WsList`], and [`WsRemove`] operate on the workspace facet directly, and
-//! activating the grain activates *no* microVM (boot is attach-driven). While
-//! a VM is live the guest owns `/workspace`, and mutating commands refuse with
-//! [`MachineError::VmLive`]; the next boot's push delivers host-side writes.
+//! activating the grain activates *no* guest (boot is attach-driven). While
+//! a guest is live it owns `/workspace`, and mutating commands refuse with
+//! [`MachineError::Running`]; the next boot's push delivers host-side writes.
 //!
 //! **The session is the command (machine §4).** Between captures the guest
 //! writes the image out of band; durability is capture-grained. The
@@ -24,7 +24,7 @@
 //! consume/re-arm record, every fire is a **fenced append**, which makes the
 //! alarm the session lease too (M5): on a deposed or partitioned activation
 //! the append cannot commit, the host steps down, and `on_passivate` kills the
-//! microVM, bounding the doomed-session window to one alarm interval plus the
+//! guest, bounding the doomed-session window to one alarm interval plus the
 //! append timeout.
 //!
 //! **Quiescent points (machine §4).** Mid-session the alarm pauses the guest,
@@ -57,9 +57,9 @@ use granary::Ws;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::vm::MachineVm;
-use crate::vm::MachineVmProvider;
-use crate::vm::VmSpec;
+use crate::runtime::BootSpec;
+use crate::runtime::MachineRuntime;
+use crate::runtime::MachineRuntimeProvider;
 
 /// The machine's stable grain type (machine §1: `MachineId` is a `GrainName`
 /// with this type and the machine's name as the key).
@@ -72,12 +72,12 @@ pub enum MachineError {
     AlreadyProvisioned,
     NotProvisioned,
     Disk(String),
-    Vm(String),
-    /// A workspace file command arrived while the microVM is running: the
+    Runtime(String),
+    /// A workspace file command arrived while the machine is running: the
     /// guest owns `/workspace` while live (machine §3), and a host write
     /// would be clobbered by the next pull. Detach (or wait for hibernation)
     /// and retry.
-    VmLive,
+    Running,
     /// A workspace file operation failed (a bad path, a cap, an IO error).
     Ws(String),
 }
@@ -88,11 +88,11 @@ impl std::fmt::Display for MachineError {
             MachineError::AlreadyProvisioned => write!(f, "machine already provisioned"),
             MachineError::NotProvisioned => write!(f, "machine not provisioned"),
             MachineError::Disk(e) => write!(f, "machine disk: {e}"),
-            MachineError::Vm(e) => write!(f, "machine vm: {e}"),
-            MachineError::VmLive => {
+            MachineError::Runtime(e) => write!(f, "machine runtime: {e}"),
+            MachineError::Running => {
                 write!(
                     f,
-                    "machine vm is running: the guest owns /workspace while live"
+                    "machine is running: the guest owns /workspace while live"
                 )
             }
             MachineError::Ws(e) => write!(f, "machine workspace: {e}"),
@@ -234,11 +234,11 @@ pub enum MachineEvent {
     },
 }
 
-/// Ephemeral activation state (machine §1: the live microVM is one of the two
+/// Ephemeral activation state (machine §1: the live guest is one of the two
 /// disposable things). Reset on every activation (**G3**).
 #[derive(Default)]
 struct Activation {
-    vm: Option<Arc<dyn MachineVm>>,
+    runtime: Option<Arc<dyn MachineRuntime>>,
     /// The guest has run since the last committed capture — the conservative
     /// dirty flag of grain §7.15: the host cannot observe guest block writes,
     /// so "has run" over-approximates "has written", which is safe (an extra
@@ -252,15 +252,15 @@ struct Activation {
     watched: std::collections::BTreeSet<ActorId>,
 }
 
-/// The machine grain (machine §1). `P` is the node's VM binding, injected per
+/// The machine grain (machine §1). `P` is the node's runtime binding, injected per
 /// activation through the `granary_named` factory; `S` is the hosting system.
-pub struct Machine<S: GranarySystem, P: MachineVmProvider> {
+pub struct Machine<S: GranarySystem, P: MachineRuntimeProvider> {
     provider: Arc<P>,
     act: Mutex<Activation>,
     _system: PhantomData<fn() -> S>,
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> Machine<S, P> {
     pub fn new(provider: Arc<P>) -> Machine<S, P> {
         Machine {
             provider,
@@ -273,17 +273,17 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
         self.act.lock().expect("machine activation lock")
     }
 
-    /// Boot the microVM if it is not running (machine §6: activation on
+    /// Boot the guest if it is not running (machine §6: activation on
     /// attach; boot touches no consensus), then push the workspace facet's
     /// directory into the guest's `/workspace` (machine §4). A failed push is
     /// hard: the guest must never serve against a silently stale workspace,
-    /// so the VM is killed and the command fails.
+    /// so the guest is killed and the command fails.
     async fn ensure_vm(
         &self,
         state: &MachineState,
         ctx: &GrainCtx<Self>,
     ) -> Result<(), MachineError> {
-        if self.lock().vm.is_some() {
+        if self.lock().runtime.is_some() {
             return Ok(());
         }
         let image = ctx
@@ -294,9 +294,9 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
             .ws()
             .dir_path()
             .map_err(|e| MachineError::Ws(e.to_string()))?;
-        let vm = self
+        let runtime = self
             .provider
-            .boot(VmSpec {
+            .boot(BootSpec {
                 image,
                 vcpus: state.vcpus,
                 mem_mib: state.mem_mib,
@@ -304,23 +304,23 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
                 egress: state.egress.clone(),
             })
             .await
-            .map_err(|e| MachineError::Vm(e.to_string()))?;
-        if let Err(e) = vm.push_ws(ws_dir).await {
-            vm.kill().await;
-            return Err(MachineError::Vm(format!("workspace push: {e}")));
+            .map_err(|e| MachineError::Runtime(e.to_string()))?;
+        if let Err(e) = runtime.push_ws(ws_dir).await {
+            runtime.kill().await;
+            return Err(MachineError::Runtime(format!("workspace push: {e}")));
         }
         let mut act = self.lock();
-        act.vm = Some(vm);
+        act.runtime = Some(runtime);
         act.dirty = true;
         Ok(())
     }
 
-    /// Stop the microVM (idempotent; machine §1: stopping it loses no
+    /// Stop the guest (idempotent; machine §1: stopping it loses no
     /// committed block).
     async fn kill_vm(&self) {
-        let vm = self.lock().vm.take();
-        if let Some(vm) = vm {
-            vm.kill().await;
+        let runtime = self.lock().runtime.take();
+        if let Some(runtime) = runtime {
+            runtime.kill().await;
         }
     }
 
@@ -374,11 +374,13 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
     /// re-hashes the full pulled tree, accepted at the facet's 64 MiB cap.
     async fn pull_and_capture_ws(
         &self,
-        vm: Option<&Arc<dyn MachineVm>>,
+        runtime: Option<&Arc<dyn MachineRuntime>>,
         ctx: &GrainCtx<Self>,
         now: Instant,
     ) -> Vec<MachineEvent> {
-        let Some(vm) = vm else { return vec![] };
+        let Some(runtime) = runtime else {
+            return vec![];
+        };
         let skipped = |reason: String| {
             vec![MachineEvent::WsCaptureSkipped {
                 at_nanos: now.as_nanos(),
@@ -389,7 +391,7 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
             Ok(dir) => dir,
             Err(e) => return skipped(format!("workspace facet: {e}")),
         };
-        if let Err(e) = vm.pull_ws(ws_dir).await {
+        if let Err(e) = runtime.pull_ws(ws_dir).await {
             return skipped(e.to_string());
         }
         match ctx.ws().capture() {
@@ -416,16 +418,16 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
         now: Instant,
         quiesce: Quiesce,
     ) -> (Vec<MachineEvent>, bool) {
-        let vm = self.lock().vm.clone();
-        let mut events = self.pull_and_capture_ws(vm.as_ref(), ctx, now).await;
+        let runtime = self.lock().runtime.clone();
+        let mut events = self.pull_and_capture_ws(runtime.as_ref(), ctx, now).await;
         match quiesce {
             Quiesce::Stop => self.kill_vm().await,
             Quiesce::Pause => {
-                if let Some(vm) = &vm
-                    && vm.pause().await.is_err()
+                if let Some(runtime) = &runtime
+                    && runtime.pause().await.is_err()
                 {
                     // Never capture a running guest's image (grain §7.15).
-                    // Treat the VM as lost; the image keeps its writes and
+                    // Treat the guest as lost; the image keeps its writes and
                     // stays dirty until the next capture, the M3 window. The
                     // staged ws delta still commits — it is real pulled bytes.
                     self.kill_vm().await;
@@ -435,9 +437,9 @@ impl<S: GranarySystem, P: MachineVmProvider> Machine<S, P> {
         }
         let out = ctx.disk().capture().await;
         if quiesce == Quiesce::Pause
-            && let Some(vm) = &vm
+            && let Some(runtime) = &runtime
         {
-            let _ = vm.resume().await;
+            let _ = runtime.resume().await;
         }
         match out {
             Ok(stats) => {
@@ -458,7 +460,7 @@ enum Quiesce {
     Pause,
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> Grain for Machine<S, P> {
     type System = S;
     type State = MachineState;
     type Event = MachineEvent;
@@ -545,7 +547,7 @@ impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
     }
 
     async fn on_activate(&mut self, _ctx: &GrainCtx<Self>) -> Result<(), actor_core::BoxError> {
-        // The VM, dirty flag, and watch set are activation-local (G3): a fresh
+        // The runtime, dirty flag, and watch set are activation-local (G3): a fresh
         // activation has a freshly rehydrated — clean — image and no guest.
         *self.lock() = Activation::default();
         Ok(())
@@ -561,7 +563,7 @@ impl<S: GranarySystem, P: MachineVmProvider> Grain for Machine<S, P> {
     }
 
     async fn on_passivate(&mut self, _ctx: &GrainCtx<Self>) {
-        // Every deactivation kills the VM: idle hibernation after the final
+        // Every deactivation kills the guest: idle hibernation after the final
         // capture, or the forced step-down of M5, whose guest must not outlive
         // the activation.
         self.kill_vm().await;
@@ -664,7 +666,7 @@ impl Message for Provision {
     const MANIFEST: Manifest = Manifest::new("machine.Provision");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Provision> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<Provision> for Machine<S, P> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -715,7 +717,7 @@ pub struct AttachReply {
 }
 
 /// Attach a connection (machine §5.1): journaled with its principal (M4),
-/// boots the microVM lazily, death-watches the holding front-door member, and
+/// boots the guest lazily, death-watches the holding front-door member, and
 /// starts the checkpoint/lease cadence (machine §4).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Attach {
@@ -729,7 +731,7 @@ impl Message for Attach {
     const MANIFEST: Manifest = Manifest::new("machine.Attach");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Attach> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<Attach> for Machine<S, P> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -777,7 +779,7 @@ impl Message for Detach {
     const MANIFEST: Manifest = Manifest::new("machine.Detach");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Detach> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<Detach> for Machine<S, P> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -814,7 +816,7 @@ impl Message for AddKey {
     const MANIFEST: Manifest = Manifest::new("machine.AddKey");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<AddKey> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<AddKey> for Machine<S, P> {
     async fn handle(
         &self,
         _state: &MachineState,
@@ -843,7 +845,7 @@ impl Message for RevokeKey {
     const MANIFEST: Manifest = Manifest::new("machine.RevokeKey");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<RevokeKey> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<RevokeKey> for Machine<S, P> {
     async fn handle(
         &self,
         _state: &MachineState,
@@ -871,7 +873,7 @@ impl Message for SetEgress {
     const MANIFEST: Manifest = Manifest::new("machine.SetEgress");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<SetEgress> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<SetEgress> for Machine<S, P> {
     async fn handle(
         &self,
         _state: &MachineState,
@@ -908,7 +910,7 @@ impl Message for DoorPolicy {
     const MANIFEST: Manifest = Manifest::new("machine.DoorPolicy");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<DoorPolicy> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<DoorPolicy> for Machine<S, P> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -944,7 +946,7 @@ pub struct StatusReply {
     /// [`MachineEvent::WsCaptureSkipped`]).
     pub ws_capture_skips: u64,
     pub image_bytes: u64,
-    pub vm_running: bool,
+    pub running: bool,
     /// BLAKE3 of the live image (verification surface for tests and
     /// operators; reads the activation-local materialization).
     pub image_digest: Option<BlobId>,
@@ -955,7 +957,7 @@ impl Message for Status {
     const MANIFEST: Manifest = Manifest::new("machine.Status");
 }
 
-impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Status> for Machine<S, P> {
+impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<Status> for Machine<S, P> {
     async fn handle(
         &self,
         state: &MachineState,
@@ -981,7 +983,7 @@ impl<S: GranarySystem, P: MachineVmProvider> GrainHandler<Status> for Machine<S,
                 ws_captures: state.ws_captures,
                 ws_capture_skips: state.ws_capture_skips,
                 image_bytes,
-                vm_running: self.lock().vm.is_some(),
+                running: self.lock().runtime.is_some(),
                 image_digest,
             },
         )

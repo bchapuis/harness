@@ -206,7 +206,10 @@ pub fn guest_net(machine: &GrainName, pool_base: Ipv4Addr, index: u32) -> GuestN
 /// DHCP client: `ip=<guest>::<gateway>:<netmask>::eth0:off`. Appended to the
 /// boot args when a machine boots with a NIC.
 pub fn guest_ip_boot_arg(net: &GuestNet) -> String {
-    format!("ip={}::{}:255.255.255.252::eth0:off", net.guest_ip, net.gateway)
+    format!(
+        "ip={}::{}:255.255.255.252::eth0:off",
+        net.guest_ip, net.gateway
+    )
 }
 
 /// A node-local allocator for per-machine guest /30 slots (machine §5.2). One
@@ -384,7 +387,11 @@ mod tests {
         assert_eq!(a.host_cidr, "172.31.0.1/30");
         assert_eq!(a.gateway, "172.31.0.1");
         assert_eq!(a.guest_ip, "172.31.0.2");
-        assert_eq!(a.tap, tap_name(&machine()), "the tap is the attribution key");
+        assert_eq!(
+            a.tap,
+            tap_name(&machine()),
+            "the tap is the attribution key"
+        );
 
         // The next slot is the next /30 — four addresses on.
         let b = guest_net(&machine(), base, 1);

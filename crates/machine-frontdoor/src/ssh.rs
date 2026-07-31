@@ -23,10 +23,10 @@ use russh::server::Msg;
 use russh::server::Session;
 use tokio::sync::mpsc;
 
+use machine_host::vsock::recv_frame;
+use machine_host::vsock::send_frame;
 use machine_proto::Frame;
 use machine_proto::MAX_FRAME;
-use microvm::vsock::recv_frame;
-use microvm::vsock::send_frame;
 
 use crate::ChannelBackend;
 use crate::ChannelKind;
@@ -137,7 +137,7 @@ impl<A: MachineAuthority, B: ChannelBackend> FrontDoorHandler<A, B> {
                     Ok(body) => body,
                     Err(_) => {
                         // The guest end went away without reporting an exit —
-                        // a killed VM, a crashed agent, a severed vsock. The
+                        // a killed guest, a crashed agent, a severed vsock. The
                         // client is waiting on `exit-status` and would hang
                         // until some unrelated timeout, so say what happened:
                         // 255 is what SSH itself reports for a connection that

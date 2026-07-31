@@ -22,12 +22,12 @@
 use std::time::Duration;
 
 use granary::Granary;
-use machine::AddKey;
-use machine::MachineError;
-use machine::Provision;
-use machine::RevokeKey;
-use machine::Status;
-use machine::StatusReply;
+use machine_grain::AddKey;
+use machine_grain::MachineError;
+use machine_grain::Provision;
+use machine_grain::RevokeKey;
+use machine_grain::Status;
+use machine_grain::StatusReply;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncBufReadExt;

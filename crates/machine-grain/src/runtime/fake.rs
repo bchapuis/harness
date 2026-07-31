@@ -8,35 +8,35 @@ use std::time::Duration;
 
 use granary::GranarySystem;
 
-use super::MachineVm;
-use super::MachineVmProvider;
-use super::VmError;
-use super::VmSpec;
+use super::BootSpec;
+use super::MachineRuntime;
+use super::MachineRuntimeProvider;
+use super::RuntimeError;
 
-/// Boots [`FakeVm`]s whose writer task ticks on the system's virtual clock:
+/// Boots [`FakeRuntime`]s whose writer task ticks on the system's virtual clock:
 /// deterministic under simulation, quiescent under [`pause`]
-/// (MachineVm::pause), and dead the moment the VM is killed or dropped.
-pub struct FakeVmProvider<S: GranarySystem> {
+/// (MachineRuntime::pause), and dead the moment the guest is killed or dropped.
+pub struct FakeRuntimeProvider<S: GranarySystem> {
     system: S,
     /// Virtual time between guest writes.
     tick: Duration,
 }
 
-impl<S: GranarySystem> FakeVmProvider<S> {
-    pub fn new(system: S, tick: Duration) -> FakeVmProvider<S> {
-        FakeVmProvider { system, tick }
+impl<S: GranarySystem> FakeRuntimeProvider<S> {
+    pub fn new(system: S, tick: Duration) -> FakeRuntimeProvider<S> {
+        FakeRuntimeProvider { system, tick }
     }
 }
 
-impl<S: GranarySystem> MachineVmProvider for FakeVmProvider<S> {
+impl<S: GranarySystem> MachineRuntimeProvider for FakeRuntimeProvider<S> {
     fn boot(
         &self,
-        spec: VmSpec,
-    ) -> actor_core::BoxFuture<'static, Result<Arc<dyn MachineVm>, VmError>> {
+        spec: BootSpec,
+    ) -> actor_core::BoxFuture<'static, Result<Arc<dyn MachineRuntime>, RuntimeError>> {
         let system = self.system.clone();
         let tick = self.tick;
         Box::pin(async move {
-            let vm = Arc::new(FakeVm {
+            let runtime = Arc::new(FakeRuntime {
                 image: spec.image.clone(),
                 paused: AtomicBool::new(false),
                 killed: AtomicBool::new(false),
@@ -49,41 +49,41 @@ impl<S: GranarySystem> MachineVmProvider for FakeVmProvider<S> {
                 .try_into()
                 .map(u64::from_le_bytes)
                 .expect("eight bytes");
-            let weak: Weak<FakeVm> = Arc::downgrade(&vm);
+            let weak: Weak<FakeRuntime> = Arc::downgrade(&runtime);
             let clock = system.clone();
             system.launch(Box::pin(async move {
                 loop {
                     clock.sleep(tick).await;
-                    let Some(vm) = weak.upgrade() else { break };
-                    if vm.killed.load(Ordering::Relaxed) {
+                    let Some(runtime) = weak.upgrade() else { break };
+                    if runtime.killed.load(Ordering::Relaxed) {
                         break;
                     }
-                    if vm.paused.load(Ordering::Relaxed) {
+                    if runtime.paused.load(Ordering::Relaxed) {
                         continue;
                     }
                     lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    vm.write_once(lcg);
-                    vm.ws_write_once(lcg);
+                    runtime.write_once(lcg);
+                    runtime.ws_write_once(lcg);
                 }
             }));
-            Ok(vm as Arc<dyn MachineVm>)
+            Ok(runtime as Arc<dyn MachineRuntime>)
         })
     }
 }
 
-/// See [`FakeVmProvider`].
-pub struct FakeVm {
+/// See [`FakeRuntimeProvider`].
+pub struct FakeRuntime {
     image: std::path::PathBuf,
     paused: AtomicBool,
     killed: AtomicBool,
     /// The guest's `/workspace` tmpfs, as an in-memory `path → bytes`
-    /// map: [`push_ws`](MachineVm::push_ws) fills it from the host
+    /// map: [`push_ws`](MachineRuntime::push_ws) fills it from the host
     /// directory, the writer task dirties `guest.log` seed-stably, and
-    /// [`pull_ws`](MachineVm::pull_ws) writes it back.
+    /// [`pull_ws`](MachineRuntime::pull_ws) writes it back.
     guest_ws: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
 }
 
-impl FakeVm {
+impl FakeRuntime {
     /// One deterministic guest write: 64 bytes derived from `n`, at an
     /// offset derived from `n`, within the current image. The write is
     /// synchronous and the writer task holds no await between the pause
@@ -112,7 +112,7 @@ impl FakeVm {
 
     /// One deterministic guest *workspace* write: `guest.log` becomes 32
     /// bytes derived from `n`, under the same pause/kill guards as
-    /// [`write_once`](FakeVm::write_once), so a quiescent point sees a
+    /// [`write_once`](FakeRuntime::write_once), so a quiescent point sees a
     /// settled workspace too.
     fn ws_write_once(&self, n: u64) {
         let mut bytes = Vec::with_capacity(32);
@@ -159,13 +159,13 @@ impl FakeVm {
     }
 }
 
-impl MachineVm for FakeVm {
-    fn pause(&self) -> actor_core::BoxFuture<'_, Result<(), VmError>> {
+impl MachineRuntime for FakeRuntime {
+    fn pause(&self) -> actor_core::BoxFuture<'_, Result<(), RuntimeError>> {
         self.paused.store(true, Ordering::Relaxed);
         Box::pin(async { Ok(()) })
     }
 
-    fn resume(&self) -> actor_core::BoxFuture<'_, Result<(), VmError>> {
+    fn resume(&self) -> actor_core::BoxFuture<'_, Result<(), RuntimeError>> {
         self.paused.store(false, Ordering::Relaxed);
         Box::pin(async { Ok(()) })
     }
@@ -175,46 +175,55 @@ impl MachineVm for FakeVm {
         Box::pin(async {})
     }
 
-    fn push_ws(&self, ws: std::path::PathBuf) -> actor_core::BoxFuture<'_, Result<(), VmError>> {
+    fn push_ws(
+        &self,
+        ws: std::path::PathBuf,
+    ) -> actor_core::BoxFuture<'_, Result<(), RuntimeError>> {
         Box::pin(async move {
             if self.killed.load(Ordering::Relaxed) {
-                return Err(VmError::Transport("fake vm killed".to_string()));
+                return Err(RuntimeError::Transport("fake runtime killed".to_string()));
             }
-            let map = FakeVm::read_dir_map(&ws).map_err(|e| VmError::Transport(e.to_string()))?;
+            let map = FakeRuntime::read_dir_map(&ws)
+                .map_err(|e| RuntimeError::Transport(e.to_string()))?;
             *self.lock_ws() = map;
             Ok(())
         })
     }
 
-    fn pull_ws(&self, ws: std::path::PathBuf) -> actor_core::BoxFuture<'_, Result<(), VmError>> {
+    fn pull_ws(
+        &self,
+        ws: std::path::PathBuf,
+    ) -> actor_core::BoxFuture<'_, Result<(), RuntimeError>> {
         Box::pin(async move {
             if self.killed.load(Ordering::Relaxed) {
-                return Err(VmError::Transport("fake vm killed".to_string()));
+                return Err(RuntimeError::Transport("fake runtime killed".to_string()));
             }
             // All synchronous IO, so the guard is held across it — no clone
             // of the file bytes.
             let map = self.lock_ws();
             // Replace, never merge — the guest's view is authoritative
             // across a pull, as for the real agent.
-            for entry in std::fs::read_dir(&ws).map_err(|e| VmError::Transport(e.to_string()))? {
-                let entry = entry.map_err(|e| VmError::Transport(e.to_string()))?;
+            for entry in
+                std::fs::read_dir(&ws).map_err(|e| RuntimeError::Transport(e.to_string()))?
+            {
+                let entry = entry.map_err(|e| RuntimeError::Transport(e.to_string()))?;
                 let kind = entry
                     .file_type()
-                    .map_err(|e| VmError::Transport(e.to_string()))?;
+                    .map_err(|e| RuntimeError::Transport(e.to_string()))?;
                 let result = if kind.is_dir() {
                     std::fs::remove_dir_all(entry.path())
                 } else {
                     std::fs::remove_file(entry.path())
                 };
-                result.map_err(|e| VmError::Transport(e.to_string()))?;
+                result.map_err(|e| RuntimeError::Transport(e.to_string()))?;
             }
             for (rel, bytes) in map.iter() {
                 let path = ws.join(rel);
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
-                        .map_err(|e| VmError::Transport(e.to_string()))?;
+                        .map_err(|e| RuntimeError::Transport(e.to_string()))?;
                 }
-                std::fs::write(&path, bytes).map_err(|e| VmError::Transport(e.to_string()))?;
+                std::fs::write(&path, bytes).map_err(|e| RuntimeError::Transport(e.to_string()))?;
             }
             Ok(())
         })
@@ -224,10 +233,10 @@ impl MachineVm for FakeVm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::MachineVm;
+    use crate::runtime::MachineRuntime;
 
-    fn fake() -> FakeVm {
-        FakeVm {
+    fn fake() -> FakeRuntime {
+        FakeRuntime {
             image: std::path::PathBuf::new(),
             paused: AtomicBool::new(false),
             killed: AtomicBool::new(false),
@@ -237,17 +246,23 @@ mod tests {
 
     #[tokio::test]
     async fn push_then_pull_round_trips_nested_files() {
-        let vm = fake();
+        let runtime = fake();
         let host = tempfile::tempdir().expect("host ws");
         std::fs::create_dir_all(host.path().join("d")).expect("mkdir");
         std::fs::write(host.path().join("d/f.txt"), b"deep").expect("write");
         std::fs::write(host.path().join("top.txt"), b"tip").expect("write");
-        vm.push_ws(host.path().to_path_buf()).await.expect("push");
+        runtime
+            .push_ws(host.path().to_path_buf())
+            .await
+            .expect("push");
 
         // The guest dirties its log; the host files survive beside it.
-        vm.ws_write_once(7);
+        runtime.ws_write_once(7);
         std::fs::remove_file(host.path().join("top.txt")).expect("hide");
-        vm.pull_ws(host.path().to_path_buf()).await.expect("pull");
+        runtime
+            .pull_ws(host.path().to_path_buf())
+            .await
+            .expect("pull");
 
         assert_eq!(
             std::fs::read(host.path().join("d/f.txt")).expect("f"),
@@ -271,10 +286,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_killed_vm_refuses_the_sync() {
-        let vm = fake();
-        vm.kill().await;
+        let runtime = fake();
+        runtime.kill().await;
         let host = tempfile::tempdir().expect("host ws");
-        assert!(vm.push_ws(host.path().to_path_buf()).await.is_err());
-        assert!(vm.pull_ws(host.path().to_path_buf()).await.is_err());
+        assert!(runtime.push_ws(host.path().to_path_buf()).await.is_err());
+        assert!(runtime.pull_ws(host.path().to_path_buf()).await.is_err());
     }
 }

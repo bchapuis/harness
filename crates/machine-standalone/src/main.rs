@@ -2,7 +2,7 @@
 //! lightweight VMs you address by name, reach over SSH, and cannot lose.
 //!
 //! ```text
-//! machine-standalone node   --id 1 --vm firecracker --fc-kernel … \
+//! machine-standalone node   --id 1 --machine firecracker --fc-kernel … \
 //!                           --door 2222=dev-box --admin 127.0.0.1:7701
 //! machine-standalone create dev-box --admin 127.0.0.1:7701 --base-image … \
 //!                           --key ~/.ssh/id_ed25519.pub
@@ -26,14 +26,16 @@ use std::collections::BTreeMap;
 
 use crate::admin::AdminReply;
 use crate::admin::AdminRequest;
+use crate::node::MachineKind;
 use crate::node::NodeOptions;
-use crate::node::VmMode;
 
 const USAGE: &str = "\
 machine-standalone — persistent lightweight VMs as grains (machine spec)
 
-  node    --id <n> --vm <firecracker|fake> [--nodes 3] [--data DIR]
-          [--fc-binary PATH] [--fc-kernel PATH] [--door <port>=<machine>]…
+  node    --id <n> --machine <firecracker|docker|fake> [--nodes 3] [--data DIR]
+          [--fc-binary PATH] [--fc-kernel PATH]
+          [--docker-cli docker] [--docker-image harness-machine-runner:1]
+          [--door <port>=<machine>]…
           [--admin ADDR] [--peer <id>=<host>]… [--bind-host H]
           [--port-base 7601] [--secret S] [--shards N]
 
@@ -80,13 +82,20 @@ async fn run_node(args: &[String]) -> Result<(), String> {
             "--shards" => opts.shards = parse(flag, &next(&mut rest, flag)?)?,
             "--fc-binary" => opts.fc_binary = next(&mut rest, flag)?,
             "--fc-kernel" => opts.fc_kernel = next(&mut rest, flag)?,
+            "--docker-cli" => opts.docker_cli = next(&mut rest, flag)?,
+            "--docker-image" => opts.docker_image = next(&mut rest, flag)?,
             "--admin" => opts.admin = Some(next(&mut rest, flag)?),
-            "--vm" => {
+            "--machine" => {
                 let value = next(&mut rest, flag)?;
-                opts.vm = Some(match value.as_str() {
-                    "firecracker" => VmMode::Firecracker,
-                    "fake" => VmMode::Fake,
-                    other => return Err(format!("--vm {other}: expected firecracker|fake")),
+                opts.machine = Some(match value.as_str() {
+                    "firecracker" => MachineKind::Firecracker,
+                    "docker" => MachineKind::Docker,
+                    "fake" => MachineKind::Fake,
+                    other => {
+                        return Err(format!(
+                            "--machine {other}: expected firecracker|docker|fake"
+                        ));
+                    }
                 });
             }
             "--peer" => {
@@ -231,7 +240,7 @@ async fn run_status(args: &[String]) -> Result<(), String> {
     println!("provisioned    {}", status.provisioned);
     println!("owner          {}", status.owner);
     println!("egress         {:?}", status.egress);
-    println!("vm running     {}", status.vm_running);
+    println!("running        {}", status.running);
     println!("image bytes    {}", status.image_bytes);
     println!(
         "image digest   {}",

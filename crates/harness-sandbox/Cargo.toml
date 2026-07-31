@@ -22,18 +22,18 @@ compute = ["workspace", "dep:wasmtime"]
 # from a fresh checkout until that artifact is built and committed.
 quickjs = ["compute"]
 # The Native tier (sandbox spec §3.4, the development fallback of §3.5): OS
-# processes inside an OCI container driven through the `docker` CLI. The
-# container sees the §3.1 workspace as a bind mount, so the feature implies
+# processes inside an OCI container, driven through `machine_host::container`.
+# The container sees the §3.1 workspace as a bind mount, so the feature implies
 # `workspace`.
-native = ["workspace", "dep:tokio", "dep:rustix"]
+native = ["workspace", "dep:tokio", "dep:rustix", "dep:machine-host"]
 # The Native tier at the microVM grade (sandbox spec §3.4's stronger grade,
 # §3.5's reference choice): OS processes inside a Firecracker microVM, the
 # workspace carried in and out as a tar stream over vsock. Linux + /dev/kvm
 # only at runtime; the code builds everywhere. Implies `native` (the docker
 # fallback shares the provider's Native routing and refusal conduct). The VM
 # lifecycle, vsock transport, and workspace tar codec live in the shared
-# `microvm` crate.
-firecracker = ["native", "dep:microvm", "microvm/ws", "tokio/fs"]
+# `machine-host` crate, as the container mechanics do.
+firecracker = ["native", "machine-host/ws", "tokio/fs"]
 
 [dependencies]
 actor-core.workspace = true
@@ -43,7 +43,7 @@ serde_json.workspace = true
 cap-std = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["process"] }
-microvm = { workspace = true, optional = true }
+machine-host = { workspace = true, optional = true }
 
 # uid/gid for the container's `--user` (unix-only API; the call site is
 # `#[cfg(unix)]`).

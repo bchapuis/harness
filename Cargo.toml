@@ -50,22 +50,23 @@ blob-store = { path = "crates/blob-store", version = "0.1.0" }
 # enumerate their grains without granary itself becoming tenant-aware.
 tenancy = { path = "crates/tenancy", version = "0.1.0" }
 
+# The host side of a machine (machine spec §2.1, sandbox spec §3.4, §3.5): the
+# Firecracker microVM and OCI container mechanisms behind one seam, plus the
+# vsock transport and workspace tar codec they share. Held by harness-sandbox's
+# native and firecracker tiers and by machine-grain's runtime binding.
+machine-host = { path = "crates/machine-host", version = "0.1.0" }
+
 # Persistent machines: a durable lightweight VM as a grain (machine spec).
-machine = { path = "crates/machine", version = "0.1.0" }
+machine-grain = { path = "crates/machine-grain", version = "0.1.0" }
 
 # The machine guest-agent channel protocol (machine spec §5.1): one definition
-# of the channel kinds, frame grammar, and caps, consumed by machine,
+# of the channel kinds, frame grammar, and caps, consumed by machine-grain,
 # machine-frontdoor, and guest/machine-agent (as a path dependency).
 machine-proto = { path = "crates/machine-proto", version = "0.1.0" }
 
 # The machine's SSH front door (machine spec §5.1): terminates SSH against the
 # journaled key set and bridges channels to the guest over vsock.
 machine-frontdoor = { path = "crates/machine-frontdoor", version = "0.1.0" }
-
-# Shared Firecracker microVM plumbing (config document, process lifecycle,
-# vsock transport, API-socket pause/resume), used by harness-sandbox's
-# firecracker tier and the machine's VM binding.
-microvm = { path = "crates/microvm", version = "0.1.0" }
 
 # The agentic harness (Appendix B layout of the agentic harness spec).
 harness = { path = "crates/harness", version = "0.1.0" }
@@ -94,7 +95,7 @@ rand = "0.8"
 rand_chacha = "0.3"
 
 # The tokio-backed deployment layer: actor-runtime's production seam, the
-# gateway, standalone, the tui, the sandbox tiers, and the machine's VM
+# gateway, standalone, the tui, the sandbox tiers, and the machine's runtime
 # binding. Kept out of the runtime-agnostic core/cluster crates.
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync"] }
 getrandom = "0.2"
@@ -121,12 +122,12 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 webpki-roots = "1"
 
 # The capability-handle filesystem of sandbox spec §3.1, held by
-# `harness-sandbox`, `machine`, and `microvm`'s workspace codec.
+# `harness-sandbox`, `machine-grain`, and `machine-host`'s workspace codec.
 cap-std = "3"
 # Compute engine of sandbox spec §3.2 (`harness-sandbox` only) — the
 # reference realization's product choice (sandbox spec §3.5).
 wasmtime = { version = "33", default-features = false, features = ["runtime", "cranelift"] }
-# The tar stream that carries a workspace over vsock (`microvm`'s ws codec,
+# The tar stream that carries a workspace over vsock (`machine-host`'s ws codec,
 # feature `ws`; mirrored by the guest agents, which pin the same major).
 tar = "0.4"
 # Native tier (`harness-sandbox`, feature `native`) only: uid/gid without
