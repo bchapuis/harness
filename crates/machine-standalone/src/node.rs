@@ -237,8 +237,22 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
                 raft: {
                     let mut raft = RaftConfig::new(roster.clone());
                     raft.storage = FileRaftWAL::factory(opts.data.join("raft"));
-                    raft.election_timeout = Duration::from_secs(4);
-                    raft.heartbeat_interval = Duration::from_secs(1);
+                    // Patient enough to outlast a *capture*, which is the one thing
+                    // this deployment does that stalls a node for seconds: the disk
+                    // facet scans the whole image synchronously — 512 MiB here, read
+                    // and hashed block by block on the runtime — so the node serves no
+                    // heartbeat while it runs. Measured at 7-14s on one laptop, which
+                    // sailed past a 4s timeout: the checkpoint elected a new leader for
+                    // the very shard whose machine it was capturing, deposing the
+                    // activation and killing the guest under a live SSH session. Every
+                    // group inherits this timeout (`RaftEngine::create_group`), shard
+                    // groups included, so it is the knob that governs that race.
+                    //
+                    // The scan belongs off the executor; until it is, a demo's timings
+                    // have to cover it. A real deployment with a non-blocking capture
+                    // tightens these back down.
+                    raft.election_timeout = Duration::from_secs(20);
+                    raft.heartbeat_interval = Duration::from_secs(4);
                     raft
                 },
                 downing: DowningPolicy::Conservative,
