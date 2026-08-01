@@ -520,3 +520,168 @@ fn granary_named_hosts_one_grain_under_many_type_names() {
         assert_eq!(summarizers.grain("c/0").ask(ReadCount).await.unwrap(), 10);
     });
 }
+
+// --- G4: a snapshot never shortens the log -----------------------------------
+//
+// G4 has two halves, and they are upheld in different places.
+//
+// The load-bearing half is **structural**: a head is *defined* as the best
+// snapshot's seq plus the contiguous run of records above it — `ReadReply::head`
+// on the `Local` tier, `merge`'s `base` during a `Quorum` recovery. A snapshot can
+// therefore never outrun the head it is measured against, on either tier. That is
+// what actually keeps a snapshot from shortening a log, and it is what the first
+// test below pins.
+//
+// The second half is the `s_seq <= head` guard in the host's rehydrate. Given the
+// identity above it is **unreachable through any real code path** — defence in
+// depth against a future store whose head and snapshot could disagree. It is still
+// worth pinning the direction it fails in, which the second test does with a store
+// double that reports an impossible seq: the host must take the journal's
+// authority rather than fold a state no committed prefix supports.
+//
+// Note what the guard cannot do, and why the structural half carries the
+// invariant. Once a snapshot is taken the records it subsumes are compacted away —
+// "a compacted grain's prefix exists only in the snapshot" (`replicator.rs`,
+// `migrate_grain`) — so replaying from `ZERO` after discarding the snapshot yields
+// a *truncated* state, not the true head. Ignoring a snapshot is the safe
+// direction (a short state that no longer claims to be complete) but it is not a
+// recovery. G4 holds because the head always covers the snapshot, never because
+// the guard could rebuild what the snapshot alone still held.
+
+/// The structural half of **G4**: a head is the snapshot's seq plus the run above
+/// it, so `snapshot.seq <= head` is an identity, not a condition to be checked.
+#[test]
+fn a_snapshot_never_outruns_the_head_it_is_measured_against() {
+    use granary::GrainStore;
+
+    let store = granary::MemoryGrainStore::new();
+    let name = granary::GrainName::new("test.Counter", "g4/structural");
+    let shard = 0u32;
+
+    let head_of = |store: &granary::MemoryGrainStore| {
+        futures::executor::block_on(store.head(shard, &name).durable())
+    };
+    let snapshot_seq_of = |store: &granary::MemoryGrainStore| {
+        futures::executor::block_on(store.snapshot(shard, &name).durable()).map(|(seq, _)| seq)
+    };
+
+    // Interleave appends and snapshots the way a live grain does, checking the
+    // identity after every step — including right after a snapshot, which is the
+    // moment a seq could outrun the head if the base were computed any other way.
+    for round in 0..6u64 {
+        let after = granary::Seq::new(round * 2);
+        futures::executor::block_on(
+            store
+                .store_record(
+                    shard,
+                    &name,
+                    after,
+                    granary::Term::ZERO,
+                    vec![vec![round as u8], vec![round as u8]],
+                    granary::WriteKind::Append,
+                )
+                .durable(),
+        );
+
+        let head = head_of(&store);
+        if let Some(seq) = snapshot_seq_of(&store) {
+            assert!(
+                seq <= head,
+                "round {round}: snapshot at {seq:?} outran head {head:?} after an append",
+            );
+        }
+
+        // Snapshot at the current head, as the host does (§9).
+        futures::executor::block_on(
+            store
+                .store_snapshot(
+                    shard,
+                    &name,
+                    head,
+                    granary::Term::ZERO,
+                    vec![round as u8],
+                    granary::WriteKind::Append,
+                )
+                .durable(),
+        );
+
+        let head = head_of(&store);
+        let seq = snapshot_seq_of(&store).expect("a snapshot was just stored");
+        assert!(
+            seq <= head,
+            "round {round}: snapshot at {seq:?} outran head {head:?} after a snapshot",
+        );
+        assert_eq!(
+            seq, head,
+            "round {round}: a snapshot taken at the head compacts to exactly it",
+        );
+    }
+}
+
+/// The guard's half of **G4**: given a snapshot seq the head does not cover — a
+/// state the identity above makes unreachable — the host takes the journal's
+/// authority (**G3**) instead of folding a state no committed prefix supports.
+#[test]
+fn a_snapshot_beyond_the_committed_head_is_refused_in_favour_of_the_journal() {
+    fn run(ahead: u64, recorder: &Recorder, sim: &Simulation) {
+        let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());
+        let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
+            .events(sink)
+            .build();
+        let counters = system.granary::<CounterGrain>(GranaryConfig {
+            idle_after: Duration::from_millis(10),
+            snapshot_every: 4,
+            // `ahead: 0` is the plain memory store, wrapped identically, so the two
+            // runs differ in the reported seq and in nothing else.
+            grain_store: Some(granary::testing::SnapshotAheadOfHeadStore::factory(ahead)),
+            ..GranaryConfig::default()
+        });
+
+        let counter = counters.grain("counter/g4");
+        sim.block_on(async move {
+            for _ in 0..10 {
+                counter.ask(Add(1)).await.expect("add commits");
+            }
+        });
+        sim.run(); // snapshot, then hibernate
+        assert!(
+            recorder.events().iter().any(|e| matches!(
+                e.as_app::<GrainEvent>(),
+                Some(GrainEvent::Snapshotted { .. })
+            )),
+            "a snapshot must actually be taken, or the rule is never consulted",
+        );
+        let reread = counters.grain("counter/g4");
+        sim.block_on(async move { reread.ask(ReadCount).await.expect("read after rehydrate") });
+    }
+
+    fn rehydrations(recorder: &Recorder) -> Vec<bool> {
+        recorder
+            .events()
+            .into_iter()
+            .filter_map(|e| match e.as_app::<GrainEvent>() {
+                Some(GrainEvent::Rehydrated { from_snapshot, .. }) => Some(*from_snapshot),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Control: an honest seq. The reactivation seeds from the snapshot — so the
+    // refusal below is a real refusal, not an absent snapshot.
+    let control = Recorder::new();
+    run(0, &control, &Simulation::new(23));
+    assert_eq!(
+        rehydrations(&control),
+        vec![false, true],
+        "with an honest snapshot seq, reactivation seeds from the snapshot",
+    );
+
+    // A seq 100 slots past a ten-record head: refused, and the journal replayed.
+    let overstated = Recorder::new();
+    run(100, &overstated, &Simulation::new(23));
+    assert_eq!(
+        rehydrations(&overstated),
+        vec![false, false],
+        "a snapshot beyond the committed head must be ignored, not folded (G4)",
+    );
+}

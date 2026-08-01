@@ -23,6 +23,8 @@
 // drives, so unused items and re-exports here are the normal case, not a smell.
 #![allow(dead_code, unused_imports)]
 
+pub mod catalogue;
+
 pub mod counter;
 pub use counter::*;
 

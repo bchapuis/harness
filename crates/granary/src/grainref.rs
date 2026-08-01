@@ -691,7 +691,7 @@ pub trait GranaryExt: GranarySystem {
         G: Grain<System = Self>;
 
     /// Host grains of type `G` **with durable-alarm firing across hibernation and
-    /// failover** (spec §16). Like [`granary_named`](GranaryExt::granary_named), but
+    /// failover** (spec §7.16). Like [`granary_named`](GranaryExt::granary_named), but
     /// each host registers its pending [`Alarm`](crate::Alarm) deadline with the
     /// per-shard `index`, and a background driver re-activates due grains on the
     /// shards this node leads. The caller starts **one** shared `AlarmIndex`
@@ -748,7 +748,7 @@ impl<T: GranarySystem> GranaryExt for T {
         let shards = config.shards.max(1);
         let handle =
             build_granary::<Self, G>(self, grain_type, config, factory, Some(index.clone()));
-        // Start this type's alarm driver (spec §16): the callerless-activation seam.
+        // Start this type's alarm driver (spec §7.16): the callerless-activation seam.
         self.launch(Box::pin(alarm_driver_loop::<Self, G>(
             self.clone(),
             handle.clone(),
@@ -760,7 +760,7 @@ impl<T: GranarySystem> GranaryExt for T {
     }
 }
 
-/// How often the alarm driver sweeps the shards it leads (spec §16). The exact
+/// How often the alarm driver sweeps the shards it leads (spec §7.16). The exact
 /// deadline is honoured by the grain's own in-activation timer once re-activated;
 /// this cadence bounds only the *re-activation* latency after a failover.
 const ALARM_DRIVE_INTERVAL: Duration = Duration::from_millis(500);
@@ -832,7 +832,7 @@ where
     }
 }
 
-/// The per-type alarm driver (spec §16): the callerless-activation seam that makes a
+/// The per-type alarm driver (spec §7.16): the callerless-activation seam that makes a
 /// durable alarm fire across a grain's hibernation and a node failover, not only
 /// while it is resident.
 ///

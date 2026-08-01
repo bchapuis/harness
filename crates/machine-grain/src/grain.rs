@@ -13,7 +13,7 @@
 //! **File commands without a guest (machine §3).** [`WsWrite`], [`WsRead`],
 //! [`WsList`], and [`WsRemove`] operate on the workspace facet directly, and
 //! activating the grain activates *no* guest (boot is attach-driven). While
-//! a guest is live it owns `/workspace`, and mutating commands refuse with
+//! a guest is live it owns `/workspace`, and all four refuse with
 //! [`MachineError::Running`]; the next boot's push delivers host-side writes.
 //!
 //! **The session is the command (machine §4).** Between captures the guest

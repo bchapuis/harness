@@ -1,4 +1,4 @@
-//! The per-shard alarm index (spec §16): a durable directory of the pending
+//! The per-shard alarm index (spec §7.16): a durable directory of the pending
 //! [`Alarm`](crate::Alarm) deadlines of one grain type's grains, so a node that
 //! acquires a shard's leadership can re-activate the grains that owe a callerless
 //! wake — **without** scanning every grain or holding them all resident.
@@ -119,7 +119,7 @@ impl Pending {
 }
 
 /// A per-shard alarm index for one target grain type — a durable `GrainName → due`
-/// directory (spec §16). Generic over the hosting system so it runs on either
+/// directory (spec §7.16). Generic over the hosting system so it runs on either
 /// durability tier; the activation's state is the folded [`Pending`] map, rebuilt
 /// from the journal (granary §1).
 pub struct AlarmIndex<S>(PhantomData<fn() -> S>);
@@ -163,7 +163,7 @@ impl<S: GranarySystem> Grain for AlarmIndex<S> {
     }
 }
 
-/// Sync a grain's alarm state into the index at a journal head (spec §16). `due` is
+/// Sync a grain's alarm state into the index at a journal head (spec §7.16). `due` is
 /// `Some(ns)` while an alarm is pending, `None` once it clears. Applied only if
 /// `head` is at least the entry's last head, so an out-of-order pair from one
 /// activation resolves to the higher head (see [`Slot`]). Idempotent: an

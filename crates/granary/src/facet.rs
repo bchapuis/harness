@@ -370,7 +370,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     /// issues `retain_blobs` itself, so one facet's GC can never drop another's.
     fn roots(form: &Self::Form) -> BTreeSet<BlobId>;
 
-    /// The runtime hook for durable alarms (spec §16): the pending deadline this
+    /// The runtime hook for durable alarms (spec §7.16): the pending deadline this
     /// facet holds, in nanoseconds since the clock epoch, or `None`. Only the
     /// [`Alarm`](crate::Alarm) facet returns a deadline; every other facet keeps
     /// the default. The host reads it through [`FacetSet::alarm_due`] to arm the
@@ -385,7 +385,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
         None
     }
 
-    /// Stage the consumption of a fired alarm (spec §16): before invoking
+    /// Stage the consumption of a fired alarm (spec §7.16): before invoking
     /// `on_alarm`, the host stages a cancel so a fired alarm clears atomically
     /// unless the handler re-arms it (last write wins in the shared stage, the DO
     /// consume-on-fire semantic). Only the [`Alarm`](crate::Alarm) facet acts;
@@ -454,12 +454,12 @@ pub trait FacetSet: sealed::Sealed + Send + Sync + 'static {
     /// The union of every facet's blob roots (§7.12).
     fn roots(forms: &Self::Forms) -> BTreeSet<BlobId>;
 
-    /// The pending alarm deadline of whichever facet holds one (spec §16), or
+    /// The pending alarm deadline of whichever facet holds one (spec §7.16), or
     /// `None`. At most one facet in a set is the [`Alarm`](crate::Alarm) facet, so
     /// the first non-`None` is the grain's single alarm.
     fn alarm_due(forms: &Self::Forms) -> Option<u64>;
 
-    /// Stage the consumption of a fired alarm across the set (spec §16). Only the
+    /// Stage the consumption of a fired alarm across the set (spec §7.16). Only the
     /// [`Alarm`](crate::Alarm) facet's stage is touched.
     fn stage_clear_alarm(stages: &mut Self::Stages);
 }
@@ -779,14 +779,14 @@ impl<FS: FacetSet> FacetCell<FS> {
         FS::roots(&self.forms.lock().expect("facet forms lock"))
     }
 
-    /// The grain's pending alarm deadline (spec §16), in nanoseconds since the
+    /// The grain's pending alarm deadline (spec §7.16), in nanoseconds since the
     /// clock epoch, or `None`. Read by the host after each commit and on
     /// activation to arm the callerless timer.
     pub(crate) fn alarm_due(&self) -> Option<u64> {
         FS::alarm_due(&self.forms.lock().expect("facet forms lock"))
     }
 
-    /// Stage the consumption of a fired alarm into the armed command (spec §16).
+    /// Stage the consumption of a fired alarm into the armed command (spec §7.16).
     /// Called by the host before `on_alarm`, so the deadline clears atomically
     /// unless the handler re-arms it. Panics outside a command, exactly as the
     /// other stage writers — the host only calls it inside the alarm protocol.

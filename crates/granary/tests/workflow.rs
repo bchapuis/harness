@@ -81,7 +81,7 @@ impl Pipeline {
         }));
     }
 
-    /// The re-entrant workflow body (spec §16): re-run after every commit, it
+    /// The re-entrant workflow body (spec §7.17): re-run after every commit, it
     /// resolves completed steps from the memo and drives the first incomplete one.
     fn drive(&self, state: &PipelineState, ctx: &GrainCtx<Self>) -> Vec<PipelineEvent> {
         if state.finished.is_some() {

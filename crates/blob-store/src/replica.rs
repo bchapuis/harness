@@ -1,7 +1,7 @@
 //! The per-node `BlobReplica` actor and the [`BlobTransport`] seam (spec §6).
 //!
 //! The `Clustered` tier reuses the actor framework's transport, with no new wire
-//! protocol (actor §2.2). A per-node [`BlobReplica`] actor owns this node's
+//! protocol (actor §7.1). A per-node [`BlobReplica`] actor owns this node's
 //! on-disk [`LocalBlobStore`] and accepts four messages: [`StoreBlob`],
 //! [`FetchBlob`], [`HasBlob`], and [`DeleteNamespace`]. It is registered in the
 //! receptionist under one well-known key ([`blob_replica_key`]) so peers discover

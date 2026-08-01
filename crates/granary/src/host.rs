@@ -92,7 +92,7 @@ impl Message for CheckIdle {
     const MANIFEST: Manifest = Manifest::new("granary.CheckIdle");
 }
 
-/// An internal self-tick that fires a durable alarm (spec §16): the host runs the
+/// An internal self-tick that fires a durable alarm (spec §7.16): the host runs the
 /// grain's [`on_alarm`](crate::Grain::on_alarm) with no caller present. `epoch` is
 /// the arm generation this timer was launched for; a re-arm bumps it, so a
 /// superseded timer's tick is ignored — a cancellation without a channel. Local
@@ -173,12 +173,12 @@ pub struct Host<G: Grain> {
     /// per-command stage, shared with the [`GrainCtx`] accessors. Rebuilt from the
     /// composite snapshot plus tagged records on rehydration (**G3**).
     facets: Arc<FacetCell<G::Facets>>,
-    /// The durable-alarm arm generation (spec §16). Bumped on every (re)arm so a
+    /// The durable-alarm arm generation (spec §7.16). Bumped on every (re)arm so a
     /// stale timer task's [`AlarmDue`] is ignored — a cancellation without a
     /// channel. Ephemeral activation state, reset per activation (**G3**).
     alarm_epoch: u64,
     /// The per-shard alarm index this host registers its pending deadline with
-    /// (spec §16), so a new leader can re-activate this grain after a failover.
+    /// (spec §7.16), so a new leader can re-activate this grain after a failover.
     /// `None` when alarm-index wiring is off — alarms then fire only while
     /// resident.
     alarm_index: Option<Granary<AlarmIndex<G::System>>>,
@@ -308,6 +308,14 @@ impl<G: Grain> Host<G> {
             }
             // No snapshot, or one beyond the committed head (**G4**): the journal
             // is the authority, so replay the whole log from the empty head.
+            //
+            // The second case is defence in depth, not a live path: a head *is* the
+            // best snapshot's seq plus the contiguous run above it (`ReadReply::head`
+            // on `Local`, the recovery merge's base on `Quorum`), so `s_seq > head`
+            // cannot arise from either tier. It is also not a recovery — a compacted
+            // prefix exists only in the snapshot, so replaying from `ZERO` after
+            // discarding one yields a truncated state. It is simply the safe direction
+            // to fail in, and `grains.rs` pins that direction with a store double.
             // Restore still runs — a physical facet materializes its empty form
             // here (§7.14).
             _ => {
@@ -385,7 +393,7 @@ impl<G: Grain> Host<G> {
             name: self.name.clone(),
         });
         self.schedule_idle_check(ctx);
-        // Re-arm the durable alarm from the rehydrated form (spec §16), so firing
+        // Re-arm the durable alarm from the rehydrated form (spec §7.16), so firing
         // survives deactivation (**G3**).
         self.arm_alarm(ctx);
         Ok(())
@@ -444,7 +452,7 @@ impl<G: Grain> Host<G> {
         .await
     }
 
-    /// The callerless alarm protocol (spec §16): fire the grain's
+    /// The callerless alarm protocol (spec §7.16): fire the grain's
     /// [`on_alarm`](Grain::on_alarm) through the same §6 durability barrier. Before
     /// the handler runs, stage a cancel of the fired alarm, so the deadline clears
     /// atomically unless `on_alarm` re-arms it (consume-on-fire).
@@ -574,7 +582,7 @@ impl<G: Grain> Host<G> {
                     self.deliver_records(from, new_head, bytes);
                 }
                 self.maybe_snapshot(ctx).await;
-                // Re-arm the durable alarm from the just-folded form (spec §16): a
+                // Re-arm the durable alarm from the just-folded form (spec §7.16): a
                 // fresh timer supersedes any prior one (the epoch bump inside
                 // `arm_alarm` cancels it).
                 self.arm_alarm(ctx);
@@ -698,7 +706,7 @@ impl<G: Grain> Host<G> {
         }));
     }
 
-    /// Arm the durable-alarm timer (spec §16) from the folded [`Alarm`](crate::Alarm)
+    /// Arm the durable-alarm timer (spec §7.16) from the folded [`Alarm`](crate::Alarm)
     /// form. Every call supersedes any prior timer: it bumps [`alarm_epoch`], so a
     /// still-sleeping earlier timer's [`AlarmDue`] is ignored — a cancellation
     /// without a channel, and the sole disarm when the form carries no deadline.
@@ -840,7 +848,7 @@ impl<G: Grain> Handler<Subscribe<G>> for Host<G> {
 impl<G: Grain> Handler<AlarmDue> for Host<G> {
     async fn handle(&mut self, msg: AlarmDue, ctx: &Ctx<Host<G>>) {
         // Ignore a superseded timer: a re-arm (a later commit, or a re-activation)
-        // bumped the epoch, so this tick is from a cancelled deadline (spec §16).
+        // bumped the epoch, so this tick is from a cancelled deadline (spec §7.16).
         if msg.epoch != self.alarm_epoch {
             return;
         }

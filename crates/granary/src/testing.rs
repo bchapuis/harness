@@ -319,3 +319,201 @@ impl crate::GrainStore for StaticGrainStore {
         0
     }
 }
+
+/// A [`GrainStore`](crate::GrainStore) wrapper that reports its snapshot at a seq
+/// `ahead` slots **beyond** the one it was saved at, leaving records, head, and
+/// snapshot bytes untouched.
+///
+/// The deterministic stand-in for the state **G4** exists to survive: a grain whose
+/// latest durable snapshot names a seq past its committed head. In production that is
+/// the `Quorum` tier's doing — `head` is recovered from a write quorum (§8, **G14**)
+/// while the snapshot is read from whichever replica holds the newest one, so a
+/// snapshot saved by a former leader can outrun the head a quorum will admit. A
+/// single-node store can never disagree with itself that way, and reaching it through
+/// a cluster would take a fault injector timed between the two reads. Overstating the
+/// seq reproduces exactly the disagreement the rule decides, with nothing else moved.
+///
+/// The host must ignore such a snapshot and replay the whole log from `Seq::ZERO`: the
+/// journal is the authority (**G3**), and seeding from a snapshot the head does not
+/// cover would fold a state no committed prefix supports.
+pub struct SnapshotAheadOfHeadStore {
+    inner: std::sync::Arc<dyn crate::GrainStore>,
+    ahead: u64,
+}
+
+impl SnapshotAheadOfHeadStore {
+    /// Wrap `inner`, reporting every snapshot `ahead` slots past its real seq.
+    pub fn new(
+        inner: std::sync::Arc<dyn crate::GrainStore>,
+        ahead: u64,
+    ) -> SnapshotAheadOfHeadStore {
+        SnapshotAheadOfHeadStore { inner, ahead }
+    }
+
+    /// A factory giving every node its own wrapped [`MemoryGrainStore`](crate::MemoryGrainStore),
+    /// for [`GranaryConfig::grain_store`](crate::GranaryConfig).
+    pub fn factory(ahead: u64) -> crate::GrainStoreFactory {
+        std::sync::Arc::new(move |_| {
+            std::sync::Arc::new(SnapshotAheadOfHeadStore::new(
+                std::sync::Arc::new(crate::MemoryGrainStore::new()),
+                ahead,
+            )) as std::sync::Arc<dyn crate::GrainStore>
+        })
+    }
+}
+
+impl crate::GrainBlobStore for SnapshotAheadOfHeadStore {
+    fn put_blob(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        id: crate::BlobId,
+        bytes: Vec<u8>,
+    ) -> crate::Reserved<()> {
+        self.inner.put_blob(shard, grain, id, bytes)
+    }
+
+    fn get_blob(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        id: crate::BlobId,
+    ) -> crate::Reserved<Option<Vec<u8>>> {
+        self.inner.get_blob(shard, grain, id)
+    }
+
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: crate::BlobId) -> crate::Reserved<bool> {
+        self.inner.has_blob(shard, grain, id)
+    }
+
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: crate::BlobId) -> crate::Reserved<()> {
+        self.inner.delete_blob(shard, grain, id)
+    }
+
+    fn delete_blobs(&self, shard: u32, grain: &GrainName) -> crate::Reserved<()> {
+        self.inner.delete_blobs(shard, grain)
+    }
+
+    fn retain_blobs(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        retain: &BTreeSet<crate::BlobId>,
+    ) -> crate::Reserved<()> {
+        self.inner.retain_blobs(shard, grain, retain)
+    }
+
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> crate::Reserved<Vec<crate::BlobId>> {
+        self.inner.blob_ids(shard, grain)
+    }
+}
+
+impl crate::GrainStore for SnapshotAheadOfHeadStore {
+    fn store_record(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        after: crate::Seq,
+        term: crate::Term,
+        records: Vec<Vec<u8>>,
+        kind: crate::WriteKind,
+    ) -> crate::Reserved<crate::StoreAck> {
+        self.inner
+            .store_record(shard, grain, after, term, records, kind)
+    }
+
+    /// Forwarded whole. `read` feeds recovery and the `ReadReply::head` computation,
+    /// which the snapshot's seq participates in — overstating it here would move the
+    /// head too, and the disagreement being modelled would vanish.
+    fn read(&self, shard: u32, grain: &GrainName) -> crate::Reserved<crate::ReadReply> {
+        self.inner.read(shard, grain)
+    }
+
+    /// The honest head: this is the authority the overstated snapshot is measured
+    /// against (**G3**).
+    fn head(&self, shard: u32, grain: &GrainName) -> crate::Reserved<crate::Seq> {
+        self.inner.head(shard, grain)
+    }
+
+    /// The one method that lies, and the whole point of the double.
+    fn snapshot(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+    ) -> crate::Reserved<Option<(crate::Seq, Vec<u8>)>> {
+        let ahead = self.ahead;
+        self.inner
+            .snapshot(shard, grain)
+            .map(move |snap| snap.map(|(seq, bytes)| (crate::Seq::new(seq.value() + ahead), bytes)))
+    }
+
+    fn read_from(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        from: crate::Seq,
+        limit: usize,
+    ) -> crate::Reserved<Vec<(crate::Seq, Vec<u8>)>> {
+        self.inner.read_from(shard, grain, from, limit)
+    }
+
+    fn prepare(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        term: crate::Term,
+    ) -> crate::Reserved<crate::ReadOutcome> {
+        self.inner.prepare(shard, grain, term)
+    }
+
+    fn store_snapshot(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        at: crate::Seq,
+        term: crate::Term,
+        state: Vec<u8>,
+        kind: crate::WriteKind,
+    ) -> crate::Reserved<crate::StoreAck> {
+        self.inner
+            .store_snapshot(shard, grain, at, term, state, kind)
+    }
+
+    fn truncate(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        after: crate::Seq,
+        term: crate::Term,
+    ) -> crate::Reserved<()> {
+        self.inner.truncate(shard, grain, after, term)
+    }
+
+    fn grains(&self, shard: u32) -> Vec<GrainName> {
+        self.inner.grains(shard)
+    }
+
+    fn seal_range(&self, shard: u32, from: u64) -> crate::Reserved<()> {
+        self.inner.seal_range(shard, from)
+    }
+
+    fn unseal(&self, shard: u32) -> crate::Reserved<()> {
+        self.inner.unseal(shard)
+    }
+
+    fn remove_grain(&self, shard: u32, grain: &GrainName) -> crate::Reserved<()> {
+        self.inner.remove_grain(shard, grain)
+    }
+
+    fn remove_range(&self, shard: u32, from: u64) -> crate::Reserved<()> {
+        self.inner.remove_range(shard, from)
+    }
+
+    fn drop_shard(&self, shard: u32) -> crate::Reserved<()> {
+        self.inner.drop_shard(shard)
+    }
+
+    fn shard_bytes(&self, shard: u32) -> u64 {
+        self.inner.shard_bytes(shard)
+    }
+}

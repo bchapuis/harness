@@ -618,6 +618,9 @@ harness/                # the agentic harness (this spec): an agent is a grain (
                         #     ephemeral reply-to actor behind the blocking `prompt` convenience (§7.4)
   budget.rs             #   Budget, spend accounting, carve-outs, cancellation (§9)
   event.rs              #   the harness's checker-facing Event vocabulary (§10.4)
+  testing.rs            #   the continuous H-checkers over that stream — run discipline
+                        #     (H3/H7) and effect containment (H6/H8) — behind the
+                        #     `testing` feature, not part of the harness API (§11)
 
 harness-anthropic/      # production Model: Anthropic Messages API client;
                         #   backoff via Clock/Entropy; HTTP kept out of core (§12.1)
@@ -632,4 +635,4 @@ harness-sandbox/        # tiered SandboxProvider (sandbox §3): Workspace by cap
                         #   container or a Firecracker microVM (feature-gated); ships s_catalogue()
 ```
 
-`harness` depends on `granary` (the grain: identity, journal, fence, placement, activation, hibernation), and through it on `actor-core`, `actor-cluster`, and `actor-serialization`. It defines **no journal, no placement function, no fence, and no resume protocol** of its own; each is consumed from granary. The single durable thing the harness names is the `Record` type (the grain's event) and its `apply` fold. Test-only pieces (the scripted model, the scripted sandbox, `harness_catalogue()`, the conformance suites) live with the harness's tests, dev-depending on `actor-simulation` and granary's simulation seam. The crate observes the workspace conventions: edition 2024, `unsafe_code = "forbid"`, `clippy::all = "warn"`, serde derives only.
+`harness` depends on `granary` (the grain: identity, journal, fence, placement, activation, hibernation), and through it on `actor-core`, `actor-cluster`, and `actor-serialization`. It defines **no journal, no placement function, no fence, and no resume protocol** of its own; each is consumed from granary. The single durable thing the harness names is the `Record` type (the grain's event) and its `apply` fold. Test-only pieces (the scripted model, the scripted sandbox, `harness_catalogue()`, the conformance suites) live with the harness's tests, dev-depending on `actor-simulation` and granary's simulation seam; the continuous checkers are the exception, shipping in `testing.rs` behind the `testing` feature because they are claims about the *harness's* contract that any consumer's swarm can mount, as granary's own `testing.rs` does for the grain. The crate observes the workspace conventions: edition 2024, `unsafe_code = "forbid"`, `clippy::all = "warn"`, serde derives only.

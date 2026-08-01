@@ -288,7 +288,7 @@ over HTTP — and needs no API key.
 | the gateway's `GrainRef` reaches any session | placement is routing, not a lease (utilities spec §2.3); exclusivity lives in the fence |
 | `--data/workspaces/<session>` | the sandbox seam (§5.3); working state, not session state (§5.5) |
 | `assistant` → `delegate` → `worker` | delegation with budget carve-outs (§8, §9.1) |
-| stderr `RunStarted`/`SessionActivated`/… | the observability stream (§10.4) |
+| stderr `RunStarted`/`ModelCompleted`/`RunEnded`/… plus membership transitions | the observability stream (§10.4) |
 
 ## Limitations
 

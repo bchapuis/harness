@@ -143,7 +143,7 @@ pub trait Grain: Sized + Send + 'static {
         true
     }
 
-    /// Called when the grain's durable alarm fires (spec §16), with no caller
+    /// Called when the grain's durable alarm fires (spec §7.16), with no caller
     /// present. Like a [`GrainHandler`] minus the reply: a **decision** returning
     /// the events to journal, and it MAY re-arm or cancel the alarm through
     /// [`ctx.alarm()`](GrainCtx::alarm) (staged into the same atomic batch).

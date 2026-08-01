@@ -29,7 +29,7 @@
 //! # Durable alarms and workflows
 //!
 //! The [`Alarm`] facet stores a single per-grain deadline; when it passes the
-//! runtime fires [`Grain::on_alarm`] with **no caller present** (spec §16). The
+//! runtime fires [`Grain::on_alarm`] with **no caller present** (spec §7.16). The
 //! [`Workflow`] step memo builds on it: each step's effect runs at most once
 //! across crashes because its result is journaled and memoized. An alarm fires
 //! while its grain is resident and re-arms on re-activation. To fire

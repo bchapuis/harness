@@ -63,7 +63,7 @@ impl Grain for AlarmGrain {
     }
 
     // Fire once; return no re-arm, so the consume-on-fire cancel stands and the
-    // alarm does not repeat (spec §16).
+    // alarm does not repeat (spec §7.16).
     async fn on_alarm(&self, _state: &AlarmState, _ctx: &GrainCtx<Self>) -> Vec<AlarmEvent> {
         vec![AlarmEvent::Fired]
     }
@@ -198,7 +198,7 @@ fn alarm_fires_once_past_due() {
         fired, 1,
         "the alarm fires exactly once with no caller present"
     );
-    assert!(!pending, "firing consumes the alarm (spec §16)");
+    assert!(!pending, "firing consumes the alarm (spec §7.16)");
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! The alarm facet (spec §16, "durable alarms"): a stored timer that
+//! The alarm facet (spec §7.16): a stored timer that
 //! re-activates a grain to run its [`on_alarm`](crate::Grain::on_alarm) handler
 //! with no caller present — the basis for retries, timeouts, batch flushes, and
 //! the durable-step [`workflow`](crate::workflow) API.
@@ -42,7 +42,7 @@ use crate::grain::Grain;
 use crate::grain::GrainCtx;
 use crate::system::GranarySystem;
 
-/// The alarm facet marker (spec §16): declare `type Facets = (Alarm, …)` and
+/// The alarm facet marker (spec §7.16): declare `type Facets = (Alarm, …)` and
 /// reach the timer through [`GrainCtx::alarm`](crate::GrainCtx::alarm), pairing it
 /// with the [`on_alarm`](crate::Grain::on_alarm) handler the runtime invokes when
 /// the alarm fires.
@@ -50,7 +50,7 @@ pub struct Alarm;
 
 impl Sealed for Alarm {}
 
-/// One alarm record (spec §16): the unit of durable change under the alarm tag.
+/// One alarm record (spec §7.16): the unit of durable change under the alarm tag.
 #[derive(Serialize, Deserialize)]
 enum AlarmOp {
     /// Arm (or re-arm) the alarm for this deadline, in nanoseconds since the
@@ -127,7 +127,7 @@ impl Facet for Alarm {
     }
 }
 
-/// The handler-facing alarm accessor (spec §16), obtained from
+/// The handler-facing alarm accessor (spec §7.16), obtained from
 /// [`GrainCtx::alarm`](crate::GrainCtx::alarm). Reads see committed-plus-staged;
 /// arming or cancelling stages into the current command's atomic batch (§7.12).
 pub struct AlarmHandle<'a, G: Grain, I>
@@ -140,7 +140,7 @@ where
 }
 
 impl<G: Grain> GrainCtx<G> {
-    /// The grain's durable alarm (spec §16). Compiles exactly when the grain
+    /// The grain's durable alarm (spec §7.16). Compiles exactly when the grain
     /// declares the [`Alarm`] facet (`type Facets = (Alarm, …)`) — the G10
     /// discipline applied to the timer. Arming is valid only inside a command or
     /// [`on_alarm`](crate::Grain::on_alarm) handler (§7.12); reads are valid

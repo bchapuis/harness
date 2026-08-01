@@ -113,7 +113,7 @@ pub(crate) struct Gateway<G: Grain> {
     /// How a fresh activation's behavior value is built: the runtime instantiates
     /// the grain, the user supplies no value per `GrainName`.
     factory: Arc<dyn Fn() -> G + Send + Sync>,
-    /// The per-shard alarm index handed to each host it activates (spec §16), or
+    /// The per-shard alarm index handed to each host it activates (spec §7.16), or
     /// `None` when alarm-index wiring is off. Set by `granary_with_alarms`.
     alarm_index: Option<Granary<AlarmIndex<G::System>>>,
 }

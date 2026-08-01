@@ -1,4 +1,4 @@
-//! The workflow facet (spec §16): durable **step memoization** for the
+//! The workflow facet (spec §7.17): durable **step memoization** for the
 //! Cloudflare-Workflows-style `step`/`sleep`/`retry` pattern, layered on the event
 //! fold, the [`Alarm`](crate::Alarm) facet, and a grain's self-driving loop.
 //!
@@ -39,17 +39,17 @@ use crate::grain::Grain;
 use crate::grain::GrainCtx;
 
 /// A workflow step's identity: its stable call-site ordinal within the workflow
-/// (spec §16). Must be assigned deterministically across re-drives and replay, so
+/// (spec §7.17). Must be assigned deterministically across re-drives and replay, so
 /// a completed step resolves to the same memoized result every time.
 pub type StepId = u32;
 
-/// The workflow facet marker (spec §16): declare `type Facets = (Workflow, Alarm, …)`
+/// The workflow facet marker (spec §7.17): declare `type Facets = (Workflow, Alarm, …)`
 /// and reach the memoized steps through [`GrainCtx::workflow`](crate::GrainCtx::workflow).
 pub struct Workflow;
 
 impl Sealed for Workflow {}
 
-/// One workflow record (spec §16): a step's memoized result under the workflow tag.
+/// One workflow record (spec §7.17): a step's memoized result under the workflow tag.
 /// `bytes` is the caller's `postcard`-encoded step output — opaque to the facet.
 #[derive(Serialize, Deserialize)]
 struct StepRecord {
@@ -107,7 +107,7 @@ impl Facet for Workflow {
     }
 }
 
-/// The handler-facing workflow accessor (spec §16), obtained from
+/// The handler-facing workflow accessor (spec §7.17), obtained from
 /// [`GrainCtx::workflow`](crate::GrainCtx::workflow).
 pub struct WorkflowHandle<'a, G: Grain, I>
 where
@@ -118,7 +118,7 @@ where
 }
 
 impl<G: Grain> GrainCtx<G> {
-    /// The grain's workflow step memo (spec §16). Compiles exactly when the grain
+    /// The grain's workflow step memo (spec §7.17). Compiles exactly when the grain
     /// declares the [`Workflow`] facet (`type Facets = (Workflow, …)`). Recording is
     /// valid only inside a command handler (§7.12); reads are valid anywhere.
     pub fn workflow<I>(&self) -> WorkflowHandle<'_, G, I>
@@ -184,7 +184,7 @@ where
 }
 
 /// The generic command a step's off-path effect self-`tell`s back with its encoded
-/// result (spec §16). The grain accepts it (`r.accept::<StepDone>()`) and its
+/// result (spec §7.17). The grain accepts it (`r.accept::<StepDone>()`) and its
 /// handler calls [`complete_step`] to journal the result, after which a re-drive
 /// resolves the step from the memo. A local self-`tell`, like the alarm and idle
 /// ticks.
@@ -228,7 +228,7 @@ where
 }
 
 /// An ephemeral, per-activation guard tracking which steps this activation has
-/// already launched (spec §16), the launch-once half of the workflow pattern.
+/// already launched (spec §7.17), the launch-once half of the workflow pattern.
 /// Never journaled — a re-activation rebuilds it and re-launches any step still
 /// unresolved in the memo (at-most-once holds because the *result*, not the
 /// launch, is the durable fact).
