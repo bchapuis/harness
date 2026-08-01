@@ -140,16 +140,19 @@ fn leader_net(sim: &Simulation) -> SimNetwork {
     SimNetwork::new(sim).with_leader(swim(), raft(), DowningPolicy::Conservative)
 }
 
-/// A per-node grain store that **survives a restart**: the factory hands a restarted
-/// node the same store it had before (the WAL-storage analogue, §7.4). Without this,
-/// a full-cluster cold restart would lose every grain's records.
+/// A per-`(grain_type, node)` grain store that **survives a restart**: the factory
+/// hands a restarted node the same store it had before (the WAL-storage analogue,
+/// §7.4). Without this, a full-cluster cold restart would lose every grain's records.
+/// Keyed by type as well as node, like every real factory: a shard index names a
+/// different leader-election group under each type, so its fence cannot be shared
+/// (§8.2).
 fn durable_stores() -> GrainStoreFactory {
-    let stores: Arc<Mutex<HashMap<NodeId, Arc<MemoryGrainStore>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    Arc::new(move |node: NodeId| {
+    type Stores = Mutex<HashMap<(String, NodeId), Arc<MemoryGrainStore>>>;
+    let stores: Arc<Stores> = Arc::new(Mutex::new(HashMap::new()));
+    Arc::new(move |grain_type: &str, node: NodeId| {
         let mut stores = stores.lock().expect("store map poisoned");
         let store = stores
-            .entry(node)
+            .entry((grain_type.to_string(), node))
             .or_insert_with(|| Arc::new(MemoryGrainStore::new()))
             .clone();
         store as Arc<dyn GrainStore>

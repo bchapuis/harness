@@ -788,7 +788,10 @@ where
     // store. The replica-store actor makes it reachable from a shard leader's
     // replicator (§7.2), registered under one key per type like the gateway (§5.3).
     let store: Arc<dyn GrainStore> = match &config.grain_store {
-        Some(factory) => factory(system.node()),
+        // Per `(grain_type, node)`, never per node alone: the store's fence is keyed by
+        // shard index and holds this type's leader-election term, which another type's
+        // term would fence out of its own shards (§8.2, [`GrainStoreFactory`]).
+        Some(factory) => factory(grain_type, system.node()),
         None => Arc::new(MemoryGrainStore::new()),
     };
     let replica_store = system.spawn(ReplicaStore::<G>::new(Arc::clone(&store)));

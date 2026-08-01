@@ -161,7 +161,7 @@ impl StaticGrainStore {
     /// A factory handing this store to every node, for
     /// [`GranaryConfig::grain_store`](crate::GranaryConfig).
     pub fn factory(refusal: crate::StoreAck) -> crate::GrainStoreFactory {
-        std::sync::Arc::new(move |_| {
+        std::sync::Arc::new(move |_, _| {
             std::sync::Arc::new(StaticGrainStore::new(refusal.clone()))
                 as std::sync::Arc<dyn crate::GrainStore>
         })
@@ -350,10 +350,10 @@ impl SnapshotAheadOfHeadStore {
         SnapshotAheadOfHeadStore { inner, ahead }
     }
 
-    /// A factory giving every node its own wrapped [`MemoryGrainStore`](crate::MemoryGrainStore),
+    /// A factory giving every store its own wrapped [`MemoryGrainStore`](crate::MemoryGrainStore),
     /// for [`GranaryConfig::grain_store`](crate::GranaryConfig).
     pub fn factory(ahead: u64) -> crate::GrainStoreFactory {
-        std::sync::Arc::new(move |_| {
+        std::sync::Arc::new(move |_, _| {
             std::sync::Arc::new(SnapshotAheadOfHeadStore::new(
                 std::sync::Arc::new(crate::MemoryGrainStore::new()),
                 ahead,

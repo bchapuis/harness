@@ -469,11 +469,22 @@ pub trait GrainStore: GrainBlobStore {
 }
 
 /// How the runtime obtains a node's [`GrainStore`] (spec §7.4). Supplied on
-/// [`GranaryConfig`](crate::GranaryConfig); a factory that **caches per node**, held
-/// by the deployment across a restart, is what makes a grain's records survive a
-/// full-cluster cold restart. The default is a fresh ephemeral [`MemoryGrainStore`]
-/// per node (lost on restart).
-pub type GrainStoreFactory = Arc<dyn Fn(NodeId) -> Arc<dyn GrainStore> + Send + Sync>;
+/// [`GranaryConfig`](crate::GranaryConfig); a factory that **caches per
+/// `(grain_type, node)`**, held by the deployment across a restart, is what makes a
+/// grain's records survive a full-cluster cold restart. The default is a fresh
+/// ephemeral [`MemoryGrainStore`] per store (lost on restart).
+///
+/// The `grain_type` is not decoration: a store's fence and append bound are keyed by
+/// shard *index*, while a shard's identity — and the leader-election group whose term
+/// the fence holds — is `(grain_type, index)` (§8.2). Two types are two independent
+/// groups whose terms advance independently, so one store shared across types would
+/// let the type electing more often raise the fence past the other's term, and every
+/// append and recovery read of the quieter type is then refused forever: `NotLeader`
+/// on the append (a live activation steps down), `Unavailable` on the read (the next
+/// activation cannot rehydrate, so the grain never comes back). A deployment that
+/// hosts several types therefore MUST give each its own store, and a factory that
+/// keys its cache by both cannot do otherwise.
+pub type GrainStoreFactory = Arc<dyn Fn(&str, NodeId) -> Arc<dyn GrainStore> + Send + Sync>;
 
 /// One grain's stored records and its latest snapshot — the per-grain **segment**
 /// (§7.2). Shared by [`MemoryGrainStore`] and the file-backed store, which each wrap

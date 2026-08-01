@@ -634,10 +634,20 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // adopted head and then never re-written anywhere — a crash here would lose a
         // record already reported committed (**G14**).
         let local = self.local.prepare(self.shard, grain, term);
-        let ReadOutcome::Prepared(local_reply) = local.durable().await else {
-            return Err(GrainJournalError::Unavailable(
-                "fenced by a higher term".into(),
-            ));
+        // Naming both terms, because the interesting failure is not the ordinary one.
+        // A higher term from a *peer* is a deposed leader learning it lost an election,
+        // and the next activation on the winner recovers. A higher term in our **own**
+        // store is the pathological one — the local fence outran this shard's group, so
+        // no leader of it can ever read again — and only the two numbers tell them
+        // apart.
+        let local_reply = match local.durable().await {
+            ReadOutcome::Prepared(reply) => reply,
+            ReadOutcome::Fenced(fence) => {
+                return Err(GrainJournalError::Unavailable(format!(
+                    "local store fenced shard {} at {fence:?}, above our {term:?}",
+                    self.shard
+                )));
+            }
         };
         let peer_nodes = self.peers_of(sets);
         let peer_reads = peer_nodes.iter().map(|&node| {

@@ -193,9 +193,12 @@ as JSON (`{"outcome":{"Ok":{…}}}`). The endpoints:
 Re-issuing the **same** `turn` id is the resume primitive: a completed run
 returns its recorded outcome, a live run re-attaches, never run twice (H7).
 
-The records *are* the session: each is a line in
-`./harness-data/grains/<shard>/<session>/`, and folding them back is how any
-node reconstructs the session — there is no other session state.
+The records *are* the session: each is a line in that session's own segment under
+`./harness-data/grains/<grain_type>/<node>/segments/`, and folding them back is how
+any node reconstructs the session — there is no other session state. The grain type
+comes first because a store is per hosted type: its fence is keyed by shard index,
+and the same index is a different leader-election group under each type (granary
+§8.2).
 
 Sessions are durable and named: prompt `demo` again days later (any gateway
 replica, any node) and it resumes the same transcript.

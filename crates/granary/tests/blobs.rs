@@ -414,6 +414,14 @@ fn cluster_cfg(
     (net, systems, granaries)
 }
 
+/// One node's store directory under a [`FileGrainStore::factory`] root: the hosted
+/// grain type, then the node (§8.2 — a store is per type, so its shard-keyed fence
+/// belongs to exactly one leader-election group).
+fn store_dir(root: &std::path::Path, node: NodeId) -> std::path::PathBuf {
+    root.join(BlobGrain::<SimSystem>::GRAIN_TYPE)
+        .join(node.to_string())
+}
+
 /// Overwrite, with non-matching bytes, every on-disk blob file named `id` anywhere
 /// under `root` — the file-store names a blob file by its content hash (hex), so
 /// this tampers exactly the targeted blob's stored copies. Returns how many it hit.
@@ -571,7 +579,7 @@ fn a_tampered_replica_copy_falls_through_to_a_good_one() {
 
     // Corrupt only the shard leader's on-disk copy, forcing the read to fall through.
     let leader = granary.leader(key).expect("the shard elected a leader");
-    let hits = corrupt_blob_files(&dir.path().join(leader.to_string()), id);
+    let hits = corrupt_blob_files(&store_dir(dir.path(), leader), id);
     assert!(hits >= 1, "the leader must hold a local copy to corrupt");
 
     let got = drive(&sim, Duration::from_secs(8), async move {
@@ -614,7 +622,7 @@ fn a_tampered_local_copy_is_healed_in_place_from_a_peer() {
 
     // Corrupt only the shard leader's on-disk copy; it no longer verifies.
     let leader = granary.leader(key).expect("the shard elected a leader");
-    let leader_dir = dir.path().join(leader.to_string());
+    let leader_dir = store_dir(dir.path(), leader);
     assert!(
         corrupt_blob_files(&leader_dir, id) >= 1,
         "the leader must hold a local copy to corrupt"

@@ -212,7 +212,9 @@ fn cluster(sim: &Simulation, cfg: GranaryConfig) -> (SimNetwork, Vec<SimNode>, V
 }
 
 /// Whether node `node`'s on-disk store holds a blob named `id` (the file-store
-/// names a blob file by its content-hash hex).
+/// names a blob file by its content-hash hex). The store sits under the hosted grain
+/// type, then the node: one store per type, so its shard-keyed fence belongs to
+/// exactly one leader-election group (§8.2).
 fn blob_on_node(root: &Path, node: NodeId, id: BlobId) -> bool {
     fn walk(dir: &Path, name: &str) -> bool {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -230,7 +232,12 @@ fn blob_on_node(root: &Path, node: NodeId, id: BlobId) -> bool {
         }
         false
     }
-    walk(&root.join(node.to_string()), &id.to_string())
+    walk(
+        &root
+            .join(Studio::<SimNode>::GRAIN_TYPE)
+            .join(node.to_string()),
+        &id.to_string(),
+    )
 }
 
 #[test]

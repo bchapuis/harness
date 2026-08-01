@@ -115,6 +115,11 @@ use crate::store::WriteKind;
 /// grain's record bytes and a whole-segment `Checkpoint` record can be large.
 const MAX_RECORD: u32 = 1 << 30;
 
+/// A [`factory`](FileGrainStore::factory)'s open stores, keyed by the pair that names
+/// one store: the hosted grain type and the node. Two hostings of the same pair share
+/// an instance (the directory admits one writer); two types never do (§8.2).
+type StoreCache = Mutex<HashMap<(String, NodeId), Arc<FileGrainStore>>>;
+
 /// The schema revisions of this store's two log record types, stamped into each log's
 /// header (compatibility spec §3). They are separate boundaries because the two logs
 /// evolve independently: adding a field to [`SegOp`] says nothing about
@@ -236,21 +241,28 @@ impl FileGrainStore {
         })
     }
 
-    /// A [`GrainStoreFactory`] rooted at `root`: each node's records live in its own
-    /// `root/<node>/` directory. Caches per node so repeated hostings in one process
-    /// share a single instance (single writer); a restart constructs a fresh factory
-    /// and reopens from disk. Panics if a node's store cannot be opened — a replica
-    /// without durable storage must not start (spec §7.4).
+    /// A [`GrainStoreFactory`] rooted at `root`: each hosted grain type's records live
+    /// in its own `root/<grain_type>/<node>/` directory. Caches per `(grain_type,
+    /// node)` so repeated hostings in one process share a single instance (single
+    /// writer); a restart constructs a fresh factory and reopens from disk. Panics if a
+    /// store cannot be opened — a replica without durable storage must not start (spec
+    /// §7.4).
+    ///
+    /// The grain type is a directory of its own rather than a key inside one store
+    /// because the whole store is shard-indexed: the fence (`fences/<shard>`), the
+    /// append bound (`seals/<shard>`), and the migration driver's grain enumeration all
+    /// take a bare index, which names a different consensus group under each type
+    /// (§8.2). Separate roots make that mismatch unrepresentable instead of leaving it
+    /// to every caller to remember.
     pub fn factory(root: impl Into<PathBuf>) -> GrainStoreFactory {
         let root = root.into();
-        let cache: Arc<Mutex<HashMap<NodeId, Arc<FileGrainStore>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        Arc::new(move |node: NodeId| {
+        let cache: Arc<StoreCache> = Arc::new(Mutex::new(HashMap::new()));
+        Arc::new(move |grain_type: &str, node: NodeId| {
             let mut cache = cache.lock().expect("grain store cache poisoned");
             let store = cache
-                .entry(node)
+                .entry((grain_type.to_string(), node))
                 .or_insert_with(|| {
-                    let dir = root.join(node.to_string());
+                    let dir = root.join(grain_type).join(node.to_string());
                     Arc::new(FileGrainStore::open(&dir).unwrap_or_else(|err| {
                         panic!("cannot open grain store at {}: {err}", dir.display())
                     }))
@@ -312,7 +324,13 @@ impl FileGrainStore {
         project: impl FnOnce(&GrainRecords) -> R,
     ) -> Option<R> {
         self.segment_existing(shard, grain).map(|segment| {
-            project(&segment.inner.lock().expect("grain segment poisoned").records)
+            project(
+                &segment
+                    .inner
+                    .lock()
+                    .expect("grain segment poisoned")
+                    .records,
+            )
         })
     }
 
@@ -1294,6 +1312,58 @@ mod tests {
                 WriteKind::Append
             )),
             StoreAck::Fenced(Term::new(5))
+        );
+    }
+
+    /// The fence is keyed by shard *index*, but a shard is `(grain_type, index)` and
+    /// each pair is its own leader-election group with its own term (§8.2). A factory
+    /// that handed both types one store would let the type that elects more often push
+    /// `fences/<index>` past the other's term, and the quieter type's appends and
+    /// recovery reads are then refused for good — its grains stop activating at all.
+    #[test]
+    fn two_grain_types_do_not_share_a_shards_fence() {
+        let root = tempfile::tempdir().unwrap();
+        let factory = FileGrainStore::factory(root.path().to_path_buf());
+        let node = NodeId::new(1);
+        let busy = factory("busy.Type", node);
+        let quiet = factory("quiet.Type", node);
+
+        // The busy type's shard 0 reaches term 9 and fences its own store there.
+        assert!(matches!(
+            now(busy.prepare(0, &GrainName::new("busy.Type", "a"), Term::new(9))),
+            ReadOutcome::Prepared(_)
+        ));
+        // The quiet type's shard 0 is a different group, still at term 2. Its append
+        // must land: the busy type's term says nothing about who leads this shard.
+        assert_eq!(
+            now(quiet.store_record(
+                0,
+                &GrainName::new("quiet.Type", "a"),
+                Seq::ZERO,
+                Term::new(2),
+                vec![b"mine".to_vec()],
+                WriteKind::Append
+            )),
+            StoreAck::Stored(Seq::new(1))
+        );
+        // And its leader can still recover the grain on the next activation.
+        assert!(matches!(
+            now(quiet.prepare(0, &GrainName::new("quiet.Type", "a"), Term::new(2))),
+            ReadOutcome::Prepared(_)
+        ));
+    }
+
+    /// Same node, same type: one store, so a restart in-process keeps the single-writer
+    /// rule (a second `open` of one directory is refused).
+    #[test]
+    fn one_store_per_grain_type_and_node() {
+        let root = tempfile::tempdir().unwrap();
+        let factory = FileGrainStore::factory(root.path().to_path_buf());
+        let first = factory("a.Type", NodeId::new(1));
+        let second = factory("a.Type", NodeId::new(1));
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a repeated hosting of one type on one node must share its store"
         );
     }
 
