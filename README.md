@@ -109,26 +109,38 @@ so — everything durable still runs, and only the shell is missing.
 
 ## Going deeper
 
+[docs/README.md](docs/README.md) indexes everything — the nine specifications,
+the guides, and the testing conventions. The paths worth taking first:
+
 - [docs/standalone-deployment.md](docs/standalone-deployment.md): the full
   deployment guide, with configuration, the failure drill step by step, and
   limits.
-- [docs/multi-tenant-acp-design.md](docs/multi-tenant-acp-design.md): the
+- [docs/multi-tenant-edge.md](docs/multi-tenant-edge.md): the
   multi-tenant edge, covering bearer-token auth, per-tenant isolation, the
   tenancy directory, and the gateway-as-cluster-client trust model.
 - [k8s/README.md](k8s/README.md): the cluster as a Kubernetes StatefulSet of
   silos, with the gateway joining it as a cluster client.
 - [docs/agentic-harness-spec.md](docs/agentic-harness-spec.md): why the journal
   is the session.
+- [docs/granary-spec.md](docs/granary-spec.md): the substrate under all of it —
+  what a grain is, the fenced journal, shards and snapshots, and the facet model
+  every storage feature is built from.
 - [docs/machine-spec.md](docs/machine-spec.md): why a machine is a grain plus
   durable storage and a network seam — the disk facet, the session-grained
   capture cadence, the self-fencing lease, and the SSH front door.
+- [docs/sandbox-spec.md](docs/sandbox-spec.md): the execution tiers a tool call
+  runs at, what each grants and withholds, and what a provider must guarantee.
 - [docs/distributed-actor-spec.md](docs/distributed-actor-spec.md) and
   [docs/cluster-utilities-spec.md](docs/cluster-utilities-spec.md): the framework
   underneath.
 - [docs/wal-spec.md](docs/wal-spec.md): the framed, checksummed write-ahead log
   primitive for file-backed durable stores.
-- [docs/verification-and-validation.md](docs/verification-and-validation.md): how
-  the simulation testing earns the claims above.
+- [docs/compatibility-spec.md](docs/compatibility-spec.md): how a format says
+  which revision it is, and why a skew is a refusal rather than a misparse.
+- [docs/simulation-testing.md](docs/simulation-testing.md): how the deterministic
+  simulation earns the claims above.
+- [design-principles.md](design-principles.md): the rubric the specs were written
+  against, and the defaults for writing or reviewing code here.
 
 No API key handy? `crates/harness-standalone/smoke.sh` runs the same story
 against a canned fake model.

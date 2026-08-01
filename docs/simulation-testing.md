@@ -1,8 +1,181 @@
 # Simulation testing
 
-**Scope:** the conventions around deterministic simulation — the shapes a test
-can take, where each belongs, and how a run decides how many seeds to spend. The
-mechanism lives in `actor-simulation` (spec §18).
+**Scope:** how the framework and everything above it is verified — the
+strategies, the primitives, the shapes a test can take, where each belongs, and
+how a run decides how many seeds to spend. The mechanism lives in
+`actor-simulation`. The [specification](distributed-actor-spec.md) says *what*
+must hold: §16 (events), §17 (conformance), §18 (deterministic simulation); this
+document says how it is held up.
+
+Three principles govern the strategy.
+
+- **Determinism.** Replay every failure from a `(workload, seed)` pair alone
+  (§18.1, §18.6). One seed drives time, randomness, scheduling, *and* the run's
+  sampled fault configuration, so an entire multi-node run reproduces exactly —
+  there is nothing else to carry.
+- **Specification.** Assert the invariants of §18.5, not chosen outputs.
+  Correctness is a small set of properties checked over the §16 event stream,
+  not a pile of example assertions.
+- **Fault injection.** Bugs hide in the failure paths. Inject partitions,
+  crashes, loss, duplication, delay, and reordering under seed control (§18.3),
+  and prove the injection actually fired.
+
+## The harness is owned, not imported
+
+Build the harness; do not import one. The spec routes every source of
+nondeterminism through four traits — `Clock`, `Entropy`, `Spawner` (§4.6), and
+`Transport` (§7) — and §18.2 mandates that simulation reuse *those same traits*,
+swapping only the implementations. A generic network or scheduler crate
+(`madsim`, `turmoil`, `shuttle`, `loom`, `stateright`) cannot satisfy that
+contract: it would test a model of the system, not the real `ActorSystem`,
+mailbox, SWIM, supervision, and receptionist code. So the simulator, the
+invariant checkers, the reproducibility harness, and the linearizability
+decision are all owned, in `actor-simulation`, atop `rand_chacha`.
+
+The one external test-only tool is **`trybuild`**, which drives the compile-fail
+cases for invariant #20 (an invalid `ask`/`tell` must not compile) — a property
+no runtime test can express. Data-race tooling (`loom`, Miri's race detector) is
+largely moot here: the workspace sets `unsafe_code = "forbid"`, and the
+simulator already explores interleavings deterministically (see *Interleaving*,
+below).
+
+## Primitives
+
+**One seeded stream.** `Entropy` is the single source of randomness in the
+system (§4.6); every draw — application randomness, gossip peer selection,
+SWIM's `k` members, backoff jitter, and the scheduler's own tie-breaks — comes
+from it. Production seeds it from the OS (`OsEntropy`); simulation seeds one
+`ChaCha8` stream from the run seed (`SimEntropy`), and cloning a handle shares
+the *same* stream, which is what makes a run reproducible.
+
+```rust
+pub trait Entropy: Send + Sync + 'static {
+    fn next_u64(&self) -> u64;
+    fn pick_index(&self, len: usize) -> Option<usize> { /* uniform over 0..len */ }
+}
+```
+
+**Fault gating lives on `SimEntropy`, not on the production trait.**
+`SimEntropy::buggify(num, den)` fires with probability `num/den` from the seeded
+stream, and it is deliberately *not* an `Entropy` method: fault injection is a
+simulation-only concern, so nothing outside `actor-simulation` can turn a fault
+on and the production seam carries no trace of it. The gate **always** consumes
+one draw whether or not it fires, so call sites must guard it behind "are faults
+configured?" — otherwise a fault-free run stops being byte-identical to one with
+the gate absent (see `SimNetwork::route`).
+
+**Quiescence-driven time.** The simulator's `Clock`, `Spawner`, and run loop
+share one scheduler. It polls every ready task until none remain, and only then
+advances virtual time to the next registered timer (§18.1 #2). A timeout, a SWIM
+interval, or a backoff therefore costs no wall-clock time — a run covers hours
+of cluster time per CPU-second — and ready-task selection is seed-randomized, so
+scheduling itself is a fault dimension.
+
+## Strategies
+
+**Deterministic simulation (the core).** A whole cluster runs in one process, on
+one logical thread, over virtual time, network, and randomness (§18). Construct
+a `Simulation` from a seed, hand its `clock()`, `entropy()`, and `spawner()` to
+a system, and drive it to quiescence. Because these are the *same* traits
+production uses (§18.2), the codec stays real and every cross-node hop tests the
+wire encoding.
+
+```rust
+// Single-node: the real LocalSystem on virtual time/entropy/scheduling.
+let sim = Simulation::new(seed);
+let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
+    .mailbox_capacity(cap)
+    .events(sink)            // §16 stream, the substrate every check reads
+    .build();
+sim.block_on(workload.run(system));
+
+// Cluster: real ClusterSystem nodes over an in-memory Transport (SimNetwork)
+// that injects seeded loss/dup/delay and partition/crash (§7, §18.2, §18.3).
+```
+
+**Workloads (§18.4).** A test is a `Workload`: build actors and registrations,
+drive traffic through the **public API only** (never actor state — `when_local`
+excepted, §3.5.1), then let the runner check invariants. `run_swarm` /
+`run_cluster_swarm` sweep one workload across many seeds, sampling a
+`FaultConfig` / `FaultPolicy` from each seed's stream. A failing run is reported
+as a `RunFailure` carrying the `(workload, seed)` that replays it — the seed
+regenerates the run's faults, so there is nothing run-shaped to carry beyond it.
+
+Note the asymmetry the checkers have to respect: a single-node run is driven to
+**quiescence**, but a cluster run is **time-bounded** (`run_for`) because the
+failure detector never quiesces. A property that must hold for both has to hold
+at every *prefix*. Getting an end-of-run claim to mean anything takes more than
+waiting; see "Asserting at quiescence" below.
+
+**Continuous invariant checking.** Rather than bespoke per-scenario assertions,
+a small set of always-on `Invariant`s observe the event stream live through a
+`Checker`, on every run and at final quiescence. Seven ship as continuous
+checkers today — `NoSilentLoss` (#1), `SerialExecution` (#4),
+`LifecycleExactlyOnce` (#6), `SignalInBand` (#13), `DownIsTerminal` (#15),
+`OneLeaderPerTerm` (#22), and `SingletonAtMostOnePerNode` (utilities U2) —
+chosen because each is a safety property ("a bad thing never happens")
+expressible over the existing §16 events. `SignalInBand` (#13) holds the line
+that a `Terminated` is delivered *through the watcher's mailbox*, never out of
+band: since a signal flows through `enqueue_signal` (an `Enqueue` of the
+`Terminated` manifest) before the serial loop dispatches it, a `DispatchStart`
+of that signal with no matching prior `Enqueue` is an out-of-band delivery,
+caught live. It is a *per-event* (prefix) property, so it is sound for both
+quiescence-driven single-node runs and the time-bounded cluster runs (`run_for`)
+that stop mid-flight.
+
+Promoting a *true* safety invariant from a targeted test to a continuous checker
+is always sound — but not every §18.5 invariant is one, and two are deliberately
+left as targeted tests:
+
+- **Death-watch exactly-once (#11)** is *not* "at most one `Terminated` per
+  `(target, watcher)`": a watcher may legitimately `watch` the same target
+  again, and watching an already-terminated actor yields a fresh `Terminated`
+  (§12, #12) — the receptionist does exactly this under anti-entropy. The event
+  stream carries no per-`watch` identity, so "exactly one *per watch*" is not
+  expressible as a continuous safety property; #11 stays targeted.
+- **Bounded, non-dropping mailbox (#5)** is structural and per-call, not
+  emergent: the mailbox is a fixed-capacity channel (the bound cannot be
+  exceeded), and backpressure is an API contract (`tell` awaits, `try_tell`
+  returns `MailboxFull`). A depth checker would need per-actor capacity on the
+  stream, and "depth 0 at quiescence" is unsound for `run_for` cluster runs. So
+  #5 stays targeted.
+
+**Reference-model testing (linearizability).** For a stateful actor, record the
+client-observed `History` of operations (invoke → ok/info/fail) and decide it
+against a sequential reference `Model` — `Register` and `Counter` ship — with
+`check_linearizable`, a Wing & Gong search with `(used-bitmask, state)`
+memoization (`MAX_HISTORY = 128`). This is the state-machine strategy: generate
+concurrent operations, then prove the observed history is consistent with *some*
+serial order of the model. Keep such a workload small and single-key: the search
+is exponential in the number of *pending* operations, and under a full nemesis a
+large share of calls end unknown, so breadth comes from the seeds rather than
+from any one history.
+
+**Compile-fail testing.** Invariant #20 — an `ask`/`tell` of a message an actor
+has no `Handler` for must not compile — is asserted by `trybuild` cases under
+`actor-core/tests/compile_fail`, not at runtime.
+
+**Interleaving.** The simulator's single-thread cooperative scheduler selects
+among ready tasks with seeded randomness (§18.3), so it already explores message
+interleavings deterministically and reproducibly. A separate `loom` model-check
+of the executor across *all* interleavings is an optional cross-check (§18.6),
+not a prerequisite, and is not currently wired in.
+
+**Fuzzing.** Frame corruption is meaningful only where real bytes exist. The
+in-memory simulator carries *structured* frames (only the payload is
+codec-encoded, §18.2), so it has nothing to bit-flip; the "malformed frame tears
+down the association, not the node" requirement (§7) belongs to the
+**production** TCP transport's framing, tested against real wire bytes. Not
+implemented: a `cargo-fuzz` target over that framing and the codec.
+
+**Exhaustive enumeration, where the state space allows it.** A seeded sweep is a
+*sample*; where the space is small enough to enumerate, enumerate instead.
+`wal`'s `tests/crash_points.rs` is the case: a log of a few records is a few
+hundred bytes, so recovery is checked at every truncation offset and against
+every single-byte corruption, for four properties (the recovered records are a
+prefix of what was appended; truncating further never recovers more; the torn
+tail is dropped durably so a reopen agrees; the recovered log still accepts an
+append that lands after the prefix). A sweep would be strictly weaker there.
 
 ## The shapes
 
@@ -60,6 +233,12 @@ arrive reusing the predecessor's identities. An invariant that accumulates
 per-node state overrides it; one whose claim survives a restart, like
 `OneLeaderPerTerm` over a reloaded term and vote, does not.
 
+`NoSilentLoss` needs more than a reset there: an ask issued *by* a dead caller
+(never to be answered, since nothing is left waiting) has to be told apart from
+one issued *to* the dead node by a live caller, which must still resolve with
+`Unreachable` (#2). `Event::AskIssued` and `AskOutcome` carry the issuing
+`caller` alongside the target, and the count is per calling node.
+
 ### 3. Coverage sweep
 
 An invariant sweep that additionally asserts fault injection actually fired:
@@ -70,8 +249,11 @@ assert!(stats.dropped > 0 && stats.duplicated > 0, ...);
 ```
 
 A sweep that *configures* faults but never *triggers* one gives false
-confidence. Because the assertion is about the whole declared range,
-`coverage_seeds` never narrows it (see below).
+confidence. `FaultStats` tallies the faults a run actually exercised (dropped,
+duplicated, delayed, blocked), so a green sweep provably covered loss,
+duplication, reordering, and partition/crash, not just the happy path. Because
+the assertion is about the whole declared range, `coverage_seeds` never narrows
+it (see below).
 
 ### 4. Reproducibility sweep
 
@@ -85,7 +267,10 @@ if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..24)) {
 ```
 
 Everything else rests on this. A wall-clock read, an OS thread, an unseeded RNG,
-or `HashMap` iteration order anywhere in the system breaks it.
+or `HashMap` iteration order anywhere in the system breaks it. A `Recorder` runs
+the workload twice under one seed and pinpoints any `Divergence`; it holds even
+under cluster nemesis and transport faults (`check_reproducible` /
+`replay_cluster_swarm`).
 
 ### Escape hatch: `scenario_sweep`
 
@@ -177,7 +362,8 @@ Controlled by two environment variables:
   per run from the run id, so successive soaks explore disjoint ground.
 
 CI pins `SWARM_SEEDS: full`. Local runs, with neither set, take the cost-class
-width.
+width. CI runs many seeds per change across fault configurations — the metric is
+cluster-hours exercised, not tests counted.
 
 ## Stopping at the first failure, or collecting them all
 
@@ -225,6 +411,11 @@ Related: judge liveness by the event that states it. `SingletonConverged` counts
 an activation as over at `SingletonStopped` *or* `ResignId`, because the first is
 the manager's report on its next tick and the second is the actor's own identity
 being released. Between them sits a window a run can end inside.
+
+And bound the check itself. An end-of-run verification that retries per name can
+overrun the driver's time budget on a degraded cluster, failing the seed for
+liveness rather than for anything observed. Bound it in total, so a seed that
+runs out of budget makes no claim rather than a false one.
 
 ## The regression corpus
 
@@ -289,6 +480,23 @@ that did nothing wrong.
 
 The tell, when a sweep claims a durability violation: check whether it fails on
 every seed *except the first*. Seed 0 has nothing to inherit.
+
+## What counts as an acknowledgement
+
+A durability claim is only as good as the reply it trusts, and three mistakes
+recur in workloads that assert one:
+
+- **A no-op commits nothing.** Granary's `Unchanged` reports what the serving
+  activation believed; it journals no record, so the output gate never held a
+  reply for it and a quorum-less recovery may have seeded that belief with an
+  uncommitted record (§7.5). Only outcomes that journal — `Created`, `Updated` —
+  are acknowledgements.
+- **A read is not a probe.** Granary's read contract is read-your-leader
+  (relaxed), *not* linearizable under partition (§7.5). To observe committed
+  state, issue a trivial *writing* command rather than a query.
+- **A mutating command needs an idempotency key.** At-most-once delivery means a
+  duplicated frame runs the command twice (§7.2); a deposit without a key
+  deposits twice, and the sweep blames durability for a test bug.
 
 ## Adding a sweep
 
@@ -361,3 +569,91 @@ both drive, and `support::CounterGrain` is what `grains.rs` and `grain_swarm.rs`
 share — so a sweep covers the same grain the scenarios specify. A crate with no
 `testing` feature may also keep suite-local invariants here; the moment a second
 crate wants one, it has become a contract claim and moves up a tier.
+
+## Invariants to assert
+
+§18.5 is the catalogue — twenty-two numbered invariants, each a MUST stated
+inline in the spec. The [cluster utilities](cluster-utilities-spec.md) carry
+their own, separately numbered catalogue (U1, U2, …; machine-readable as
+`utilities_catalogue()`), held to the same drift discipline, as do the layers
+above: granary (G1–G20, plus the facet contract F1–F4), the harness (H1–H8), the
+sandbox (S1–S5), the machine (M1–M6), the blob store (B1–B7), and format
+compatibility (V1–V6). Assert them; do not re-derive them.
+
+The core catalogue's properties are framework ones, not database ones: there is
+no durability, serializability, or lost-update notion at that layer (the actor
+model is in-memory, at-most-once, eventually consistent — §1.2, §7.2). The shape
+worth internalizing:
+
+- **Messaging & execution (#1, #3–#5, #9).** No silent loss; per-pair FIFO under
+  reordering; serial, non-reentrant dispatch; bounded non-dropping mailbox;
+  local sends skip serialization yet match the remote result.
+- **Identity & dispatch (#6–#8, #10).** Lifecycle order and exactly-once;
+  `resolve` classifies locality with no round-trip; unregistered
+  `(type, manifest)` → `Unhandled`; `ActorRef`s rebind on decode.
+- **Failure & monitoring (#2, #11–#13, #18).** A downed node completes in-flight
+  `ask`s with `Unreachable`, never hangs; death-watch exactly-once including
+  `NodeDown`; watch-after-death fires immediately; signal ordering; supervision
+  contains panics (default `Stop`, restarts back off).
+- **Membership (#14–#17, #19, #22).** Convergence after partitions heal; `down`
+  is terminal; a partition alone never downs a member; SWIM refutation via
+  incarnation; receptionist pruned on node `down`; the leader-based control
+  plane is quorum-gated with at most one leader per term.
+- **Type-safety & transparency (#20, #21).** Invalid sends do not compile; local
+  vs remote targets produce identical replies and ordering.
+- **Cluster utilities (U1, U2).** Placement is a pure, version-stable function
+  of the serving set with minimal movement; singleton activations never overlap
+  on one node, a healed converged cluster runs exactly one per name, and an
+  anchor failure re-activates.
+
+Verification is **layered**, not uniform (§18.6). The safety core runs
+continuously; the rest are verified by the method that fits — a liveness or
+scenario property by a targeted conformance test, #20 by a compile-fail case,
+#21 by a differential local-vs-remote run. The machine-readable
+`core_catalogue()` records, per invariant, which method applies, and the
+`conformance_catalogue` test fails the build if a continuous checker and its
+catalogue entry drift apart — so the §17 "Verified by" column stays mechanically
+true.
+
+## Checklist
+
+For each component, write:
+
+1. **Roundtrip** tests for every codec encode/decode pair, and for `ActorRef`
+   rebinding across the wire (§5, §4.4; #10).
+2. **Idempotency / duplicate-tolerance** tests: at-most-once delivery means a
+   retried or transport-duplicated message can arrive twice (§7.2); a retriable
+   operation must carry an explicit idempotency key and survive a duplication
+   fault.
+3. **Reference-model** tests for stateful actors: a `History` decided against a
+   `Model` (§18.4).
+4. **Simulation workloads** that assert the §18.5 invariants under the §18.3
+   faults — partition, crash, loss, duplication, delay, reordering — not just
+   the happy path.
+5. **Node-crash** tests that abruptly crash a node mid-run and verify the
+   cascade (§8.1): `Terminated { NodeDown }` to watchers, `Unreachable` to
+   in-flight callers, receptionist pruning. (There is no durability to verify at
+   the actor layer — a restart constructs fresh state, §11.2.)
+6. **Compile-fail** tests (`trybuild`) for invalid sends (#20).
+7. **Seed-reproducibility** checks: the same `(workload, seed)` yields a
+   byte-identical event stream (§18.1 #1).
+8. **Fault-coverage** assertions: the sweep actually fired each fault type
+   (`FaultStats`), so a green run is not a silently happy-path run.
+
+## Where the sweeps do not yet reach
+
+Known gaps between what the sweeps exercise and what the specs mandate. Each is
+a place a bug could live undetected today.
+
+- **Granary alarms have no continuous sweep.** `alarm-cluster/leader-crash`
+  sweeps 24 seeds — which node leads the shard, which survivor wins the
+  re-election, and where the deadline falls relative to the driver's sweep are
+  all seed-dependent — but there is no `ClusterWorkload` for alarms under the
+  continuous nemesis with at-most-once firing as a checker. That needs the
+  alarm-index wiring (`granary_with_alarms`) threaded through a workload.
+- **Granary workflows have no sweep at all.** "A step's effect runs at most once
+  across passivation" is a natural continuous invariant and nothing asserts it.
+- **`harness-sandbox`, `harness-gateway`, and `machine-frontdoor` have no
+  sweep.** These are I/O-boundary crates rather than distributed ones, so the
+  simulator reaches them only indirectly; what a sweep would look like there is
+  itself unsettled.

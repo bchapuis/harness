@@ -2,7 +2,7 @@
 //! the harness. A node hosts grains and votes in Raft; it has no client-facing
 //! listener. The public edge is `harness-gateway`, a trusted cluster *client*
 //! that joins this transport as a non-voting member and addresses the grains
-//! directly (design: `docs/multi-tenant-acp-design.md`).
+//! directly (design: `docs/multi-tenant-edge.md`).
 //!
 //! Every node is identical (harness spec §7.1): same kinds, same seams. A
 //! session is a grain, so durability, placement, and the single-writer fence are

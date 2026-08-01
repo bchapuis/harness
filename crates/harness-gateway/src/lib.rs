@@ -1,7 +1,7 @@
 //! The harness gateway: the public HTTP/SSE edge, an Orleans-style cluster
 //! **client** of the harness cluster.
 //!
-//! It is the public multi-tenant edge (design: `docs/multi-tenant-acp-design.md`).
+//! It is the public multi-tenant edge (design: `docs/multi-tenant-edge.md`).
 //! A caller presents a bearer token; the gateway verifies it to a [`PrincipalId`]
 //! (it **terminates** tenant auth), scopes the caller's session key under that
 //! principal, and drives the session by addressing its grain **directly** — no

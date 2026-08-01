@@ -1,10 +1,12 @@
 # Software Design Principles
 
 Distilled from John Ousterhout, *A Philosophy of Software Design*. Use these as defaults
-when writing or reviewing code. The [specification](distributed-actor-spec.md) was written
-against them, so the examples below are drawn from the framework itself and cite the spec
-section that embodies the principle — read them as both guidance and a map of why the
-design is shaped the way it is.
+when writing or reviewing code anywhere in this tree. The actor framework's
+[specification](docs/distributed-actor-spec.md) was written against them, so the examples
+below are drawn from the framework itself and cite the spec section that embodies the
+principle — read them as both guidance and a map of why the design is shaped the way it
+is. Bare **§N** citations throughout refer to that specification; the layers above it
+([docs/README.md](docs/README.md)) were written against the same defaults.
 
 Project conventions are part of "obvious code": edition 2024, `unsafe_code = "forbid"`,
 `clippy::all = "warn"`, and no framework macros of its own (serde derives only, §1.1).

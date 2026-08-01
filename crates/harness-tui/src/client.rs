@@ -1,5 +1,5 @@
 //! The gateway client: a minimal HTTP/1.1 client that speaks the `harness-gateway`
-//! REST/SSE surface (`docs/multi-tenant-acp-design.md`).
+//! REST/SSE surface (`docs/multi-tenant-edge.md`).
 //!
 //! Two shapes of call:
 //!

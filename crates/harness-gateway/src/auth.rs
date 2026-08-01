@@ -1,5 +1,5 @@
 //! Tenant authentication at the gateway edge: a bearer token names the principal
-//! a request acts as (design: `docs/multi-tenant-acp-design.md`).
+//! a request acts as (design: `docs/multi-tenant-edge.md`).
 //!
 //! The trust boundary is the gateway. A request presents a token in its
 //! `Authorization: Bearer` header; the gateway verifies it here — at the edge,

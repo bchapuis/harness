@@ -125,9 +125,10 @@ struct BlobSwarm {
     reread: Arc<AtomicUsize>,
     /// Whether to make the **B6** re-replication claim at the end of the run.
     ///
-    /// Off by default, because the claim does not hold yet and it is not settled
-    /// whether that is B6 or the claim. See `check_rereplication` below and
-    /// `docs/simulation-hardening.md` §6.
+    /// Off by default: the end check needs a healed, quiesced cluster and a
+    /// settle, which the other sweeps have no reason to pay for. See
+    /// `check_rereplication` below and the one test that turns this on,
+    /// `acknowledged_blobs_are_re_replicated_after_a_heal`.
     check_rereplication: bool,
 }
 
