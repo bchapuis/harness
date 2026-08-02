@@ -30,8 +30,8 @@
 //!   deployment's storage it is **not** the binding one: an fsync of a small append is
 //!   tens of microseconds against a quorum round trip in the hundreds, so amortizing
 //!   flushes across grains buys nothing worth a shared-log redesign
-//!   (`docs/hardware-envelope.md` §3.1, §3.5, and I3 for the arithmetic; `audit.md`
-//!   finding 9 for the group-commit proposal this retired). What *does* bind is
+//!   (`docs/hardware-envelope.md` §3.1, §3.5, and I3 for the arithmetic; the
+//!   group-commit proposal this retired is in the history). What *does* bind is
 //!   filesystem metadata — inodes, directory size, and the descriptor budget below.
 //!   Network-attached storage would reverse this (hw §6).
 //! - `manifest` — an append-only map from `(shard, GrainName)` to a small integer

@@ -82,7 +82,7 @@ Defaults, each overridable by a measurement.
 
 ## 4. Where this already decided something
 
-The decisions this envelope settled — group commit withdrawn, `sync_all` over `sync_data`, whole-log verification on open, XXH3 and BLAKE3, chunked content-addressed blobs, the manifest held whole, local replay reads — each carry their reasoning in the code that implements them. `audit.md` and `hardware-review.md` hold the working.
+The decisions this envelope settled — group commit withdrawn, `sync_all` over `sync_data`, whole-log verification on open, XXH3 and BLAKE3, chunked content-addressed blobs, the manifest held whole, local replay reads — each carry their reasoning in the code that implements them. What it has *not* settled is in [TODO.md](../TODO.md); the reviews that produced both are in the history.
 
 ## 5. What this does not license
 

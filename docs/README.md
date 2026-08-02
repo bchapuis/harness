@@ -58,6 +58,8 @@ Two layers have a design note rather than a spec:
 
 - [../design-principles.md](../design-principles.md) — the design rubric the
   specs were written against; defaults for writing and reviewing code here.
+- [../TODO.md](../TODO.md) — work that survived a review with a reason to exist
+  and no fix yet, each entry saying what would close it. Not a bug list.
 - [../research/](../research/) — background notes the specs cite as `DO §N`:
   [durable-objects](../research/durable-objects.md) and
   [durable-sqlite-and-filesystem](../research/durable-sqlite-and-filesystem.md).
