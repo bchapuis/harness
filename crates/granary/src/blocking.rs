@@ -31,6 +31,27 @@
 //! order, just on a different thread. Two concurrent appends contend for that lock
 //! exactly as they do today.
 //!
+//! **Which calls come through here.** Everything that writes the device:
+//! `store_record`, `store_snapshot`, `prepare` (it rewrites the shard's fence file
+//! whenever the term advances), `seal_range`, `put_blob`, and the reclamation calls
+//! `delete_blob`, `retain_blobs` and `delete_blobs` — a sweep is not an fsync but it
+//! unlinks one file per reclaimed blob, so a grain that has churned a large disk
+//! image makes thousands of synchronous unlinks against the device the durability
+//! path needs. Reads do not — `head`, `read`, `snapshot`, `get_blob`, `has_blob`,
+//! `blob_ids`, `grains` — and that is a deliberate line rather than an omission. The argument above is about a device
+//! stalling *while a durability barrier is open*; a read has no barrier to hold, is
+//! usually served from the store's loaded segment without touching the device at all,
+//! and sits on the activation-latency path where an extra hop between threads is a
+//! cost with nothing to buy. A deployment that finds its reads stalling should move
+//! them across too, but that is a decision to take on evidence, not a gap to close on
+//! symmetry.
+//!
+//! Call it through [`on_store`] rather than [`offload`] directly, so the line above is
+//! one a reader can check by grep instead of by reading every call site. It has not
+//! always been checkable: `put_blob` on the leader's own quorum path was inline until
+//! the disk facet's capture path was measured, which meant a machine create fsynced
+//! five hundred blobs on the async worker, one per block, with the heartbeats.
+//!
 //! **Why a seam and not just a thread pool.** The deterministic simulator (§14) runs
 //! the *production* store — `raft_journal.rs` cold-restarts a real
 //! [`FileGrainStore`](crate::FileGrainStore) under virtual time — and a real thread
@@ -86,6 +107,34 @@ where
          flight, so this write cannot be made durable",
     );
     rx.await.expect("an accepted job always sends its value")
+}
+
+/// Run one [`GrainStore`] call on `io` and await its outcome — [`offload`] in the
+/// shape every replication seam wants, and **the** way a store call reaches the pool.
+///
+/// The `Arc::clone` is here rather than at each call site because it is not a choice:
+/// the job must own everything it touches to be `'static`, so every caller was
+/// writing the same two lines ahead of the same `offload`. Collapsing them matters
+/// less for the lines saved than for what the name does — a reader can now tell, at a
+/// glance and by grep, which store calls run on the pool and which run inline, which
+/// is a policy question (see the module docs) rather than an accident of how each
+/// site happened to be written.
+///
+/// The outcome comes back as whatever the call returns, `Reserved` and all: the
+/// durability marker is the caller's to discharge where it means something, and a
+/// helper that unwrapped it here would move that decision away from the site that
+/// makes it.
+pub(crate) async fn on_store<T, F>(
+    io: &Arc<dyn BlockingIo>,
+    store: &Arc<dyn crate::store::GrainStore>,
+    call: F,
+) -> T
+where
+    T: Send + 'static,
+    F: FnOnce(&dyn crate::store::GrainStore) -> T + Send + 'static,
+{
+    let store = Arc::clone(store);
+    offload(io, move || call(store.as_ref())).await
 }
 
 /// Run the job on the calling thread — the default, and the only implementation the

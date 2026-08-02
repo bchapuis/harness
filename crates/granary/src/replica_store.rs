@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use crate::blobs::BlobId;
 use crate::blocking::BlockingIo;
-use crate::blocking::offload;
+use crate::blocking::on_store;
 use crate::grain::Grain;
 use crate::grain::GrainName;
 use crate::journal::Seq;
@@ -278,8 +278,7 @@ impl<G: Grain> Actor for ReplicaStore<G> {
 // own — there is nothing further to await here.
 impl<G: Grain> Handler<StoreRecord> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreRecord, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
-        let store = Arc::clone(&self.store);
-        let stored = offload(&self.io, move || {
+        on_store(&self.io, &self.store, move |store| {
             store.store_record(
                 msg.shard,
                 &msg.grain,
@@ -289,30 +288,28 @@ impl<G: Grain> Handler<StoreRecord> for ReplicaStore<G> {
                 msg.kind,
             )
         })
-        .await;
-        stored.durable()
+        .await
+        .durable()
     }
 }
 
 impl<G: Grain> Handler<ReadGrain> for ReplicaStore<G> {
     async fn handle(&mut self, msg: ReadGrain, _ctx: &Ctx<ReplicaStore<G>>) -> ReadOutcome {
-        let store = Arc::clone(&self.store);
-        let prepared = offload(&self.io, move || {
+        on_store(&self.io, &self.store, move |store| {
             store.prepare(msg.shard, &msg.grain, msg.term)
         })
-        .await;
-        prepared.durable()
+        .await
+        .durable()
     }
 }
 
 impl<G: Grain> Handler<StoreSnapshot> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreSnapshot, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
-        let store = Arc::clone(&self.store);
-        let stored = offload(&self.io, move || {
+        on_store(&self.io, &self.store, move |store| {
             store.store_snapshot(msg.shard, &msg.grain, msg.at, msg.term, msg.state, msg.kind)
         })
-        .await;
-        stored.durable()
+        .await
+        .durable()
     }
 }
 
@@ -320,17 +317,17 @@ impl<G: Grain> Handler<SealRange> for ReplicaStore<G> {
     async fn handle(&mut self, msg: SealRange, _ctx: &Ctx<ReplicaStore<G>>) {
         // The bound must be durable before this ask resolves, or a majority could
         // report itself sealed while a restart would forget the promise (**G15**).
-        let store = Arc::clone(&self.store);
-        offload(&self.io, move || store.seal_range(msg.shard, msg.from))
-            .await
-            .durable();
+        on_store(&self.io, &self.store, move |store| {
+            store.seal_range(msg.shard, msg.from)
+        })
+        .await
+        .durable();
     }
 }
 
 impl<G: Grain> Handler<StoreBlob> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreBlob, _ctx: &Ctx<ReplicaStore<G>>) -> BlobAck {
-        let store = Arc::clone(&self.store);
-        offload(&self.io, move || {
+        on_store(&self.io, &self.store, move |store| {
             store.put_blob(msg.shard, &msg.grain, msg.id, msg.bytes)
         })
         .await
@@ -352,13 +349,17 @@ impl<G: Grain> Handler<HasBlob> for ReplicaStore<G> {
 
 impl<G: Grain> Handler<SweepBlobs> for ReplicaStore<G> {
     async fn handle(&mut self, msg: SweepBlobs, _ctx: &Ctx<ReplicaStore<G>>) {
-        match msg.retain {
-            None => self.store.delete_blobs(msg.shard, &msg.grain),
-            Some(ids) => self
-                .store
-                .retain_blobs(msg.shard, &msg.grain, &ids.into_iter().collect()),
-        }
-        .durable();
+        // Offloaded like the writes: a sweep unlinks one file per reclaimed blob, so
+        // a grain that has churned a large disk image makes this thousands of
+        // synchronous unlinks against the same device the durability path needs.
+        on_store(&self.io, &self.store, move |store| {
+            match msg.retain {
+                None => store.delete_blobs(msg.shard, &msg.grain),
+                Some(ids) => store.retain_blobs(msg.shard, &msg.grain, &ids.into_iter().collect()),
+            }
+            .durable()
+        })
+        .await;
     }
 }
 

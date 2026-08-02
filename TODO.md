@@ -81,7 +81,17 @@ costs something like forty times what its parts do, and nothing in the tree expl
 it yet. Instrument `QuorumReplicator::put_blob` on the demo and split it: transport
 framing and encode, time on the wire, the peer's store call, the quorum wait. Suspect
 queueing behind the shard's other traffic and per-frame codec cost on a 1 MiB payload
-before suspecting the device. **Still larger than everything else here combined.**
+before suspecting the device.
+
+**Re-run the demo before instrumenting anything**, because one input to that number
+has already changed. The leader's own blob write was inline on the async worker until
+the seam was made uniform (see `blocking.rs`), so a create fsynced ~11 ms per block on
+the same thread driving that node's Raft heartbeats and every other shard's quorum
+wait — 512 times, which is precisely the feedback loop `blocking.rs` exists to
+prevent. That does not by itself account for 470 ms a round, but heartbeats missed
+under it produce elections, step-downs and rehydration, and those do compound. Get the
+new wall-clock number first; instrument what is left. **Still larger than everything
+else here combined.**
 
 **Flush distribution on the actual drives.** `blocking.rs` justifies the I/O pool by
 tail isolation, which is right, but the median matters for sizing and nothing records
@@ -118,11 +128,6 @@ the seed sweeps run deliberately rather than incidentally.
 
 ## Quality, when the code is next opened
 
-- The `offload` prelude (`Arc::clone` the store, clone the name and shard, call, unwrap)
-  is written out at eleven sites across `replicator.rs` and `replica_store.rs`. A
-  sibling of `blocking::offload` would collapse each to one expression — and would make
-  it readable which store calls reach the pool, which today is neither uniform nor
-  stated.
 - `blocking_io` and `metrics` are node-scoped but live in the per-grain-type
   `GranaryConfig`, so every deployment threads them by hand into every type's config and
   the accessors allocate a fresh `Arc` per call. `GranarySystem` is where the node's
