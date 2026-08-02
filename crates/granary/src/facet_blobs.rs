@@ -25,7 +25,6 @@ impl RootSet {
     /// Adopt the durable manifest's ids wholesale — the restore path, the one
     /// place the union may shrink (a fresh activation starts from the durable
     /// truth, so nothing live is dropped).
-    #[cfg(feature = "sql")]
     pub(crate) fn reset(&mut self, ids: impl IntoIterator<Item = BlobId>) {
         self.0 = ids.into_iter().collect();
     }

@@ -18,9 +18,16 @@
 //! stored (§7.10); on this deployment its larger effect is that the region is not
 //! *sent*. A byte costs roughly fifty times more to move to a replica than to write
 //! locally, and a replicated byte is billed once per peer, so a chunk that dedups is
-//! the cheapest byte in the system (`docs/hardware-envelope.md` §3.9, I2). The
-//! corollary is a gap worth knowing about: every payload that goes through this area
-//! gets that benefit, and a snapshot's own state bytes, which do not, get none of it.
+//! the cheapest byte in the system (`docs/hardware-envelope.md` §3.9, I2).
+//!
+//! Note where that saving actually comes from: [`put`](GrainBlobs::put) itself does
+//! **not** negotiate — it sends the bytes to every peer, and a holder simply writes
+//! nothing new. The bandwidth is saved by the *caller* declining to put at all,
+//! having recognized the content as one it already holds. Every writer into this
+//! area is built that way: the workspace facet caches each file's chunk ids, the
+//! disk facet captures only dirty blocks, and facet 0's state checks its own root
+//! set before putting a chunk (§7.12). A future writer that skips that check gets
+//! the space saving and none of the bandwidth one.
 
 use std::collections::BTreeSet;
 use std::fmt;

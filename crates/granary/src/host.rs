@@ -42,6 +42,7 @@ use crate::facet::EVENT_TAG;
 use crate::facet::FacetCell;
 use crate::facet::FacetEnv;
 use crate::facet::FacetSet;
+use crate::facet::StatePayload;
 use crate::facet::split_record;
 use crate::facet::tag_record;
 use crate::gateway::Gateway;
@@ -306,9 +307,14 @@ impl<G: Grain> Host<G> {
                 // to it as a whole; a part that will not restore aborts the
                 // activation rather than serving a half-rebuilt grain.
                 let composite = CompositeSnapshot::decode(&bytes, codec.name()).map_err(boxed)?;
-                self.state =
-                    actor_serialization::decode(&*codec, &composite.state).map_err(boxed)?;
-                let forms = G::Facets::restore(&composite.facets, &self.facet_env(ctx))
+                let env = self.facet_env(ctx);
+                // Adopt facet 0's chunks as its roots before fetching them: from
+                // here they are the durable manifest's, and the previous
+                // activation's are gone (**F3**).
+                self.facets.adopt_state_chunks(composite.state.chunks());
+                let state = composite.state.load(env.blobs()).await.map_err(boxed)?;
+                self.state = actor_serialization::decode(&*codec, &state).map_err(boxed)?;
+                let forms = G::Facets::restore(&composite.facets, &env)
                     .await
                     .map_err(boxed)?;
                 self.facets.install(forms);
@@ -688,6 +694,12 @@ impl<G: Grain> Host<G> {
     /// The payload is the **composite** (spec §7.12): facet 0's `State` plus one
     /// contribution per declared facet, all at this head. Facet contributions run
     /// against a forms *clone*, so no lock spans the (possibly blob-putting) await.
+    ///
+    /// Facet 0's state goes through the blob area too once it is large enough
+    /// ([`StatePayload`]), which is what keeps a snapshot proportional to what
+    /// changed rather than to what the grain has accumulated. Its chunks are rooted
+    /// the moment they are durable and before the record naming them is written, so
+    /// no ordering leaves a live manifest pointing at sweepable bytes (**F3**).
     async fn snapshot_now(&mut self, ctx: &Ctx<Host<G>>) {
         if self.head <= self.last_snapshot {
             return;
@@ -696,8 +708,14 @@ impl<G: Grain> Host<G> {
         let Ok(state) = actor_serialization::encode(&*codec, &self.state) else {
             return;
         };
+        let env = self.facet_env(ctx);
+        let Ok(state) = StatePayload::store(state, env.blobs(), &self.facets.state_roots()).await
+        else {
+            return;
+        };
+        self.facets.keep_state_chunks(state.chunks());
         let forms = self.facets.forms();
-        let Ok(facets) = G::Facets::snapshot(&forms, &self.facet_env(ctx)).await else {
+        let Ok(facets) = G::Facets::snapshot(&forms, &env).await else {
             return;
         };
         let Ok(bytes) = (CompositeSnapshot { state, facets }).encode(codec.name()) else {
@@ -724,14 +742,16 @@ impl<G: Grain> Host<G> {
     /// The snapshot goes through the **same** threshold as the write path
     /// ([`maybe_snapshot`](Host::maybe_snapshot)), not unconditionally. One policy
     /// decides when a snapshot is worth taking, and the reason it must be a policy
-    /// rather than a reflex is what a snapshot costs on the `Quorum` tier: it is a
-    /// *full-state broadcast* to every replica (§7.3), so an unconditional snapshot
-    /// here turns any grain that is written once and then left alone into a
-    /// whole-state replication every idle window — the amplification is O(state) for
-    /// O(1) of change, billed R−1 times to the uplink (`docs/hardware-envelope.md`
-    /// §3.9, I2). Skipping it costs a longer replay on the next activation, and
-    /// replay reads come from the *local* store (§9), so that cost stays on the side
-    /// of the machine with capacity to spare (hw §3.1).
+    /// rather than a reflex is what a snapshot costs on the `Quorum` tier: it goes
+    /// to every replica (§7.3), so an unconditional snapshot here would replicate
+    /// something for every grain that is written once and then left alone, every
+    /// idle window, billed R−1 times to the uplink (`docs/hardware-envelope.md`
+    /// §3.9, I2). Chunking facet 0's state (§7.12) makes that *something*
+    /// proportional to what changed rather than to the whole state, which lowers the
+    /// cost without removing it — an idle window still buys a round of puts and a
+    /// record. Skipping it costs a longer replay on the next activation, and replay
+    /// reads come from the *local* store (§9), so that cost stays on the side of the
+    /// machine with capacity to spare (hw §3.1).
     async fn passivate(&mut self, ctx: &Ctx<Host<G>>) {
         let gctx = self.grain_ctx(ctx);
         self.grain.on_passivate(&gctx).await;

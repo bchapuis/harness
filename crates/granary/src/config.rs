@@ -49,12 +49,14 @@ pub struct GranaryConfig {
     ///
     /// The trigger for **both** snapshot paths, the write path and idle hibernation
     /// (§10), so this one number decides how often a grain pays what a snapshot
-    /// costs — and on the `Quorum` tier that cost is a *full-state broadcast* to
-    /// every replica (§7.3), O(state) on the wire for whatever changed since the last
-    /// one, billed R−1 times (`docs/hardware-envelope.md` §3.9). What it buys is a
-    /// shorter replay, and replay reads are **local** (§9). So the default is set
-    /// high: on this hardware the thing being saved is cheap and the thing being
-    /// spent is not.
+    /// costs — and on the `Quorum` tier that cost lands on every replica (§7.3),
+    /// billed R−1 times to the uplink (`docs/hardware-envelope.md` §3.9). It is no
+    /// longer O(state): past 64 KiB facet 0's state travels as content-defined
+    /// chunks and only the chunks that changed are sent (§7.12), so a snapshot is
+    /// roughly O(delta) plus a manifest. What it buys is a shorter replay, and
+    /// replay reads are **local** (§9). The default stays high — the thing being
+    /// saved is still cheap and a snapshot is still not free — but the penalty for
+    /// lowering it is far smaller for a grain whose state grows by accretion.
     ///
     /// The counter-pressure is failover, not steady state: a new leader recovers the
     /// records above the last snapshot from a quorum (§8), so a larger gap means a

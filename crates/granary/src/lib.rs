@@ -93,6 +93,7 @@ mod alarm;
 mod alarm_index;
 mod blobs;
 mod blocking;
+mod cdc;
 mod config;
 mod disk;
 mod election;

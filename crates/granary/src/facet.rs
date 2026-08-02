@@ -47,6 +47,7 @@ use serde::Serialize;
 
 use crate::blobs::BlobId;
 use crate::blobs::GrainBlobs;
+use crate::facet_blobs::RootSet;
 
 /// The record tag of facet 0 — the grain's own event fold (spec §7.12).
 pub(crate) const EVENT_TAG: u8 = 0;
@@ -169,14 +170,14 @@ pub(crate) const SNAPSHOT: compat::Stamp =
 /// stamp.
 #[derive(Serialize, Deserialize)]
 struct SnapshotBody {
-    /// The codec that encoded `snapshot.state`.
+    /// The codec that encoded facet 0's state.
     ///
     /// Recorded because facet 0's contribution is the only part of a snapshot that
     /// is **not** codec-independent: it is a user type encoded with the
     /// deployment's codec (§4.1, §5), while facet payloads are deliberately
     /// `postcard`. Without it, a codec change reads as a corrupt grain.
     codec: String,
-    snapshot: CompositeSnapshot,
+    parts: SnapshotParts,
     /// Room to grow without a revision bump (compatibility spec §2.1).
     ///
     /// This body is `postcard`, which is positional: it cannot gain a field, so
@@ -186,22 +187,146 @@ struct SnapshotBody {
     ext: compat::Extensions,
 }
 
-/// The critical extension keys this build implements — none yet.
+/// The body's positional payload: facet 0's inline state and the facet
+/// contributions, in facet-set order. The wire shape, fixed by revision 1; how the
+/// host handles the same snapshot is [`CompositeSnapshot`].
+#[derive(Serialize, Deserialize)]
+struct SnapshotParts {
+    /// Facet 0's state when it travels inline, **empty** when
+    /// [`EXT_STATE_CHUNKS`] carries it instead.
+    state: Vec<u8>,
+    facets: Vec<(u8, Vec<u8>)>,
+}
+
+/// Facet 0's state travels as content-addressed chunks, and this entry is the
+/// [`StateManifest`] naming them ([`StatePayload`]).
+///
+/// **Critical.** A reader that skipped it would find [`SnapshotParts::state`]
+/// empty and rebuild the grain with a default `State` — a silent, total misread of
+/// a grain's history, which is precisely the case the criticality bit exists for
+/// (compatibility spec §2.1). It is an extension rather than a revision because it
+/// reinterprets no byte already defined: a snapshot without the entry means what it
+/// has always meant.
+const EXT_STATE_CHUNKS: u16 = compat::Extensions::CRITICAL | 0x0001;
+
+/// The critical extension keys this build implements.
 ///
 /// A snapshot carrying a critical key outside this list is refused (**V2**): its
 /// writer marked that entry as one a reader must understand, so skipping it would be
 /// exactly the silent misread the stamp exists to prevent.
-const SNAPSHOT_EXT_KNOWN: &[u16] = &[];
+const SNAPSHOT_EXT_KNOWN: &[u16] = &[EXT_STATE_CHUNKS];
+
+/// Where facet 0's encoded `State` lives in a snapshot (spec §7.12).
+///
+/// Small states ride inline in the snapshot record, as they always have. Past
+/// [`INLINE_MAX`] the state is cut into content-defined chunks ([`crate::cdc`]),
+/// stored in the grain's blob area (§7.10), and the record carries only their ids —
+/// so a snapshot of a grain that grew by one turn puts one or two chunks instead of
+/// broadcasting the whole folded transcript to every replica (`docs/hardware-envelope.md`
+/// §3.9).
+pub(crate) enum StatePayload {
+    Inline(Vec<u8>),
+    Chunked(StateManifest),
+}
+
+/// The chunked form of facet 0's state: the ids to concatenate, and the length the
+/// result must have.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct StateManifest {
+    /// Total encoded length. The chunks reproduce it exactly; carrying it lets a
+    /// restore refuse a manifest that does not, rather than handing a truncated
+    /// value to the codec.
+    bytes: u64,
+    chunks: Vec<BlobId>,
+}
+
+/// Below this many bytes facet 0's state stays inline.
+///
+/// The chunked form trades bytes for round trips: the chunk puts are one quorum
+/// round of their own, ahead of the snapshot record's. That is the right trade only
+/// when the bytes are worth a round trip. Under 64 KiB they are not — a state that
+/// size costs about half a millisecond of a 125 MB/s uplink even re-sent whole
+/// (hw §3.3) — and staying inline also keeps a small grain's snapshot free of blobs
+/// to root, fetch, and sweep.
+const INLINE_MAX: usize = 64 * 1024;
+
+impl StatePayload {
+    /// Choose a carriage for `state` and make it durable: inline under
+    /// [`INLINE_MAX`], else chunked into the grain's blob area.
+    ///
+    /// `rooted` is the ids this grain already holds durably — the host's live root
+    /// set (**F3**). A chunk already in it is *not* put again, and that skip is the
+    /// whole mechanism: without it every snapshot re-sends every chunk and the
+    /// chunked form is strictly worse than inline. The ids are pure functions of
+    /// the bytes, so the check needs no round trip.
+    ///
+    /// The puts complete before this returns, so the snapshot record the caller
+    /// writes next can never reference a chunk that is not already durable.
+    pub(crate) async fn store(
+        state: Vec<u8>,
+        blobs: &GrainBlobs,
+        rooted: &BTreeSet<BlobId>,
+    ) -> Result<StatePayload, FacetError> {
+        if state.len() <= INLINE_MAX {
+            return Ok(StatePayload::Inline(state));
+        }
+        let bytes = state.len() as u64;
+        let parts = crate::cdc::split(&state);
+        let chunks: Vec<BlobId> = parts.iter().map(|part| BlobId::of(part)).collect();
+        let fresh: Vec<Vec<u8>> = parts
+            .iter()
+            .zip(&chunks)
+            .filter(|(_, id)| !rooted.contains(*id))
+            .map(|(part, _)| part.to_vec())
+            .collect();
+        crate::facet_blobs::put_chunked(blobs, fresh, "snapshot state").await?;
+        Ok(StatePayload::Chunked(StateManifest { bytes, chunks }))
+    }
+
+    /// The blob ids this payload depends on — empty when it travels inline. The
+    /// host keeps them alive for as long as the snapshot naming them is the durable
+    /// one (**F3**).
+    pub(crate) fn chunks(&self) -> Vec<BlobId> {
+        match self {
+            StatePayload::Inline(_) => Vec::new(),
+            StatePayload::Chunked(manifest) => manifest.chunks.clone(),
+        }
+    }
+
+    /// Facet 0's state bytes, fetching and reassembling the chunks if that is how
+    /// they travelled. A chunk no replica can serve fails here rather than yielding
+    /// a short state: the composite restores whole or aborts the activation (**G4**).
+    pub(crate) async fn load(self, blobs: &GrainBlobs) -> Result<Vec<u8>, FacetError> {
+        match self {
+            StatePayload::Inline(bytes) => Ok(bytes),
+            StatePayload::Chunked(manifest) => {
+                let state =
+                    crate::facet_blobs::get_concat(blobs, &manifest.chunks, "snapshot state")
+                        .await?;
+                if state.len() as u64 != manifest.bytes {
+                    return Err(FacetError(format!(
+                        "granary.snapshot: state manifest names {} bytes, its {} chunks \
+                         reassemble to {}",
+                        manifest.bytes,
+                        manifest.chunks.len(),
+                        state.len()
+                    )));
+                }
+                Ok(state)
+            }
+        }
+    }
+}
 
 /// The composite snapshot (spec §7.12): facet 0's codec-encoded `State` plus one
 /// contribution per declared facet, all at one `Seq`. G4 applies to the composite
 /// as a whole. Encoded with `postcard` — facet payloads and this envelope are
 /// runtime-internal, deliberately independent of the deployment's user codec.
-#[derive(Serialize, Deserialize)]
 pub(crate) struct CompositeSnapshot {
     /// Facet 0's contribution: the grain's `State`, encoded with the system codec
-    /// (it is a user type; the codec is the system's, §4.1).
-    pub state: Vec<u8>,
+    /// (it is a user type; the codec is the system's, §4.1), and carried either
+    /// inline or by blob ([`StatePayload`]).
+    pub state: StatePayload,
     /// One `(tag, contribution)` per declared facet, in facet-set order.
     pub facets: Vec<(u8, Vec<u8>)>,
 }
@@ -211,10 +336,21 @@ impl CompositeSnapshot {
     /// encoded [`state`](CompositeSnapshot::state), recorded so a later read can
     /// tell a codec change from a corrupt grain.
     pub(crate) fn encode(self, codec: &str) -> Result<Vec<u8>, FacetError> {
+        let mut ext = compat::Extensions::new();
+        let state = match self.state {
+            StatePayload::Inline(bytes) => bytes,
+            StatePayload::Chunked(manifest) => {
+                ext.insert(EXT_STATE_CHUNKS, encode_payload(&manifest));
+                Vec::new()
+            }
+        };
         let body = SnapshotBody {
             codec: codec.to_string(),
-            snapshot: self,
-            ext: compat::Extensions::new(),
+            parts: SnapshotParts {
+                state,
+                facets: self.facets,
+            },
+            ext,
         };
         postcard::to_allocvec(&body)
             .map(|bytes| SNAPSHOT.stamp(&bytes))
@@ -224,6 +360,9 @@ impl CompositeSnapshot {
     /// Admit the stamp, decode the body, and confirm it was encoded with `codec` —
     /// in that order, so nothing downstream sees bytes from a revision or a codec
     /// this build cannot read (compatibility **V2**).
+    ///
+    /// Facet 0's state comes back as a [`StatePayload`]; the caller resolves it
+    /// against the grain's blob area, which is why that is not done here.
     pub(crate) fn decode(bytes: &[u8], codec: &str) -> Result<CompositeSnapshot, FacetError> {
         let (_revision, body) = SNAPSHOT.unstamp(bytes).map_err(|e| FacetError(e.to_string()))?;
         let body: SnapshotBody =
@@ -238,7 +377,24 @@ impl CompositeSnapshot {
                 body.codec
             )));
         }
-        Ok(body.snapshot)
+        let state = match body.ext.get(EXT_STATE_CHUNKS) {
+            None => StatePayload::Inline(body.parts.state),
+            Some(entry) => {
+                // Both forms at once is a writer this build cannot reconcile: it
+                // would have to guess which one is the state.
+                if !body.parts.state.is_empty() {
+                    return Err(FacetError(
+                        "granary.snapshot: carries both an inline state and a chunk manifest"
+                            .into(),
+                    ));
+                }
+                StatePayload::Chunked(decode_payload("snapshot state manifest", entry)?)
+            }
+        };
+        Ok(CompositeSnapshot {
+            state,
+            facets: body.parts.facets,
+        })
     }
 }
 
@@ -680,6 +836,13 @@ has_facet!((A, B, C, D), D, 3, There<There<There<Here>>>);
 pub(crate) struct FacetCell<FS: FacetSet> {
     forms: Mutex<FS::Forms>,
     stages: Mutex<Option<FS::Stages>>,
+    /// Facet 0's blob roots: the chunks the latest snapshot carried its state in
+    /// ([`StatePayload`]), union-kept under the same **F3** discipline the
+    /// checkpointing facets keep theirs under. They live here rather than beside
+    /// the host's other activation state because this cell is what supplies
+    /// [`GrainBlobs::gc`](crate::GrainBlobs::gc) its roots — a set kept anywhere
+    /// else would be swept by the grain's own sweep.
+    state_roots: Mutex<RootSet>,
 }
 
 impl<FS: FacetSet> FacetCell<FS> {
@@ -708,6 +871,7 @@ impl<FS: FacetSet> FacetCell<FS> {
         FacetCell {
             forms: Mutex::new(FS::Forms::default()),
             stages: Mutex::new(None),
+            state_roots: Mutex::new(RootSet::default()),
         }
     }
 
@@ -773,10 +937,38 @@ impl<FS: FacetSet> FacetCell<FS> {
         FS::discard(&mut forms);
     }
 
-    /// The union of every facet's blob roots (§7.12) — what the host adds to any
-    /// [`GrainBlobs::gc`](crate::GrainBlobs::gc) sweep.
+    /// The union of every facet's blob roots **and facet 0's** (§7.12) — what the
+    /// host adds to any [`GrainBlobs::gc`](crate::GrainBlobs::gc) sweep.
     pub(crate) fn roots(&self) -> BTreeSet<BlobId> {
-        FS::roots(&self.forms.lock().expect("facet forms lock"))
+        let mut roots = FS::roots(&self.forms.lock().expect("facet forms lock"));
+        roots.extend(self.state_roots());
+        roots
+    }
+
+    /// Facet 0's blob roots alone — the chunk ids the durable snapshot's state was
+    /// carried in. Read on the snapshot path to skip re-putting a chunk this grain
+    /// already holds ([`StatePayload::store`]).
+    pub(crate) fn state_roots(&self) -> BTreeSet<BlobId> {
+        self.state_roots.lock().expect("state roots lock").ids()
+    }
+
+    /// Union `ids` into facet 0's roots — a snapshot's chunks, kept from the moment
+    /// they are durable and never pruned mid-activation (**F3**).
+    pub(crate) fn keep_state_chunks(&self, ids: impl IntoIterator<Item = BlobId>) {
+        self.state_roots
+            .lock()
+            .expect("state roots lock")
+            .extend(ids);
+    }
+
+    /// Adopt the restored snapshot's chunks as facet 0's roots, discarding the
+    /// previous activation's — the one place the set may shrink, because a fresh
+    /// activation starts from the durable manifest (**F3**).
+    pub(crate) fn adopt_state_chunks(&self, ids: impl IntoIterator<Item = BlobId>) {
+        self.state_roots
+            .lock()
+            .expect("state roots lock")
+            .reset(ids);
     }
 
     /// The grain's pending alarm deadline (spec §7.16), in nanoseconds since the
@@ -917,6 +1109,21 @@ mod tests {
 
     fn composite() -> CompositeSnapshot {
         CompositeSnapshot {
+            state: StatePayload::Inline(vec![9, 9]),
+            facets: vec![(1, vec![4]), (2, vec![])],
+        }
+    }
+
+    /// The inline bytes of a payload that did not travel by blob.
+    fn inline(payload: StatePayload) -> Vec<u8> {
+        match payload {
+            StatePayload::Inline(bytes) => bytes,
+            StatePayload::Chunked(_) => panic!("expected an inline state"),
+        }
+    }
+
+    fn parts() -> SnapshotParts {
+        SnapshotParts {
             state: vec![9, 9],
             facets: vec![(1, vec![4]), (2, vec![])],
         }
@@ -927,8 +1134,100 @@ mod tests {
         let bytes = composite().encode("json").unwrap();
         assert!(bytes.starts_with(b"GRSNAP"), "the stamp leads the body");
         let back = CompositeSnapshot::decode(&bytes, "json").unwrap();
-        assert_eq!(back.state, vec![9, 9]);
+        assert_eq!(inline(back.state), vec![9, 9]);
         assert_eq!(back.facets, vec![(1, vec![4]), (2, vec![])]);
+    }
+
+    #[test]
+    fn a_chunked_state_round_trips_as_a_manifest() {
+        let ids = vec![BlobId::of(b"one"), BlobId::of(b"two")];
+        let composite = CompositeSnapshot {
+            state: StatePayload::Chunked(StateManifest {
+                bytes: 7,
+                chunks: ids.clone(),
+            }),
+            facets: vec![(1, vec![4])],
+        };
+        let bytes = composite.encode("json").unwrap();
+        let back = CompositeSnapshot::decode(&bytes, "json").unwrap();
+        assert_eq!(back.state.chunks(), ids);
+        assert_eq!(back.facets, vec![(1, vec![4])]);
+    }
+
+    #[test]
+    fn a_chunked_state_costs_the_record_only_its_manifest() {
+        // The point of the whole mechanism: the snapshot record's size follows the
+        // number of chunks, not the size of the state.
+        let ids: Vec<BlobId> = (0u8..8).map(|i| BlobId::of(&[i])).collect();
+        let chunked = CompositeSnapshot {
+            state: StatePayload::Chunked(StateManifest {
+                bytes: 8 * 64 * 1024,
+                chunks: ids,
+            }),
+            facets: Vec::new(),
+        }
+        .encode("json")
+        .unwrap();
+        assert!(
+            chunked.len() < 512,
+            "a manifest for 512 KiB of state took {} bytes",
+            chunked.len()
+        );
+    }
+
+    #[test]
+    fn a_snapshot_carrying_both_state_forms_is_refused() {
+        // Neither form can be preferred without guessing, so the reader refuses
+        // rather than rebuilding a grain from the wrong one.
+        let mut ext = compat::Extensions::new();
+        ext.insert(
+            EXT_STATE_CHUNKS,
+            encode_payload(&StateManifest {
+                bytes: 3,
+                chunks: vec![BlobId::of(b"x")],
+            }),
+        );
+        let body = SnapshotBody {
+            codec: "json".into(),
+            parts: parts(),
+            ext,
+        };
+        let bytes = SNAPSHOT.stamp(&postcard::to_allocvec(&body).unwrap());
+
+        let err = CompositeSnapshot::decode(&bytes, "json")
+            .err()
+            .expect("an ambiguous state carriage must not decode");
+        assert!(
+            err.0.contains("both an inline state and a chunk manifest"),
+            "the refusal must say what is ambiguous: {err}"
+        );
+    }
+
+    #[test]
+    fn a_build_without_the_chunk_extension_refuses_a_chunked_snapshot() {
+        // What a downgrade sees. `EXT_STATE_CHUNKS` is critical, so a reader whose
+        // known-key list predates it refuses the whole snapshot instead of
+        // rebuilding the grain from the empty inline state beside the manifest.
+        let bytes = CompositeSnapshot {
+            state: StatePayload::Chunked(StateManifest {
+                bytes: 3,
+                chunks: vec![BlobId::of(b"x")],
+            }),
+            facets: Vec::new(),
+        }
+        .encode("json")
+        .unwrap();
+        let (_revision, body) = SNAPSHOT.unstamp(&bytes).unwrap();
+        let body: SnapshotBody = postcard::from_bytes(body).unwrap();
+
+        let err = body
+            .ext
+            .admit(SNAPSHOT.window().boundary(), &[])
+            .expect_err("a build that predates the key must refuse");
+        assert!(
+            format!("{err}").contains("0x8001"),
+            "the refusal must name the key: {err}"
+        );
     }
 
     #[test]
@@ -977,21 +1276,21 @@ mod tests {
     fn an_unknown_ancillary_snapshot_extension_is_ignored() {
         let mut body = SnapshotBody {
             codec: "json".into(),
-            snapshot: composite(),
+            parts: parts(),
             ext: compat::Extensions::new(),
         };
         body.ext.insert(0x0001, vec![1, 2, 3]);
         let bytes = SNAPSHOT.stamp(&postcard::to_allocvec(&body).unwrap());
 
         let back = CompositeSnapshot::decode(&bytes, "json").expect("an ancillary entry is skipped");
-        assert_eq!(back.state, vec![9, 9]);
+        assert_eq!(inline(back.state), vec![9, 9]);
     }
 
     #[test]
     fn an_unknown_critical_snapshot_extension_is_refused() {
         let mut body = SnapshotBody {
             codec: "json".into(),
-            snapshot: composite(),
+            parts: parts(),
             ext: compat::Extensions::new(),
         };
         body.ext.insert(compat::Extensions::CRITICAL | 0x7, vec![]);
@@ -1009,9 +1308,8 @@ mod tests {
     #[test]
     fn the_extension_area_costs_one_byte_while_empty() {
         let stamped = composite().encode("json").unwrap();
-        let bare = SNAPSHOT.stamp(
-            &postcard::to_allocvec(&(String::from("json"), composite())).unwrap(),
-        );
+        let bare =
+            SNAPSHOT.stamp(&postcard::to_allocvec(&(String::from("json"), parts())).unwrap());
         assert_eq!(stamped.len(), bare.len() + 1);
     }
 }

@@ -78,7 +78,7 @@ Defaults, each overridable by a measurement.
 
 **hw §3.8 — Below a millisecond on the session path is invisible; above a hundred is not.** From I4: no saved microseconds justify a weaker bound or a harder-to-read module. Conversely, failover windows, cold starts, capture and restore, and uplink saturation are real user-visible latency and deserve the effort microseconds do not.
 
-**hw §3.9 — Every replicated byte is billed R−1 times to the uplink.** Dedup, delta encoding, and compression pay R−1 times over; so does write amplification, in the wrong direction. A snapshot that ships whole state, a checkpoint that re-sends unchanged blocks, a rebalance that copies a shard: each costs 8 ms per megabyte per peer.
+**hw §3.9 — Every replicated byte is billed R−1 times to the uplink.** Dedup, delta encoding, and compression pay R−1 times over; so does write amplification, in the wrong direction. A snapshot that ships whole state, a checkpoint that re-sends unchanged blocks, a rebalance that copies a shard: each costs 8 ms per megabyte per peer. This is the arithmetic that put facet 0's state through content-defined chunking (granary §7.12): a 2 MB transcript snapshotted whole cost 16 ms of uplink per peer for one appended turn, and now costs what the turn changed.
 
 ## 4. Where this already decided something
 

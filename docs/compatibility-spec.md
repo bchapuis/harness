@@ -140,6 +140,12 @@ The body also records the **codec that encoded facet 0's contribution**, which i
 
 The body carries an **extension area** (§2.1). The composite is `postcard`, so without one a single added field — a compression marker, a provenance note, a per-facet digest — would be a revision bump.
 
+| Key | Criticality | Meaning |
+| --- | --- | --- |
+| `0x8001` | critical | Facet 0's state travelled as content-addressed chunks; the value is the manifest naming them, and the body's inline state is empty (granary §7.12). |
+
+The one entry defined so far shows why the criticality bit is carried per key rather than per format. Chunking the state adds a *carriage* and reinterprets no byte already defined, so it is an extension, not a revision — a snapshot without the entry means exactly what it always meant, and a build that predates the key still reads every snapshot written before it. But a reader that *skipped* the entry would find the inline state empty and rebuild the grain from a default `State`: total, silent data loss that no later check would catch. So the key is critical, and a build without it refuses the whole snapshot and aborts the activation. That is the shape every future entry should be judged against: ancillary if ignoring it leaves the reader where it was, critical if ignoring it changes what the bytes mean.
+
 ---
 
 ## 4. What holds the policy up

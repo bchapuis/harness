@@ -10,22 +10,22 @@ Nothing here is a bug. Bugs get fixed, not listed.
 
 ## Build
 
-**Chunk the composite snapshot's state payload.** `host.rs::snapshot_now` encodes facet
-0's `State` whole and, on the `Quorum` tier, ships it to every replica. The bulk facets
-(ws, sql, disk) already put their bytes through `facet_blobs::put_chunked`, so an
-unchanged region costs nothing on the wire; the grain's own state — an agent's whole
-folded transcript — goes through none of it. Applying the existing mechanism to the one
-payload that lacks it makes a snapshot proportional to what changed rather than to what
-accumulated. Touches a durable format and the `granary.store.segment` compatibility
-boundary, so it needs a design step. Consider content-defined chunking over fixed
-offsets, since re-encoded state shifts every fixed boundary. **The largest single win
-available on the target hardware.**
-
 **Compression on the replication path.** Nothing in the tree compresses. Against a
 125 MB/s uplink, LZ4 buys ~40 bytes of link per byte of CPU (hw §3.3), collected R−1
 times (hw §3.9). It must sit *below* the blob id — a `BlobId` is BLAKE3 of the
 plaintext, and hashing compressed bytes would break dedup and every durable manifest.
-Do it after the chunking above, and measure the ratio on real transcripts first.
+Now unblocked: the snapshot state payload it was to be sequenced behind is chunked
+(`cdc.rs`, §7.12). Measure the ratio on real transcripts first.
+
+**Skip the bytes for a blob the peer already holds.** `QuorumReplicator::put_blob`
+sends every chunk to every peer; the peer recognizes the id and writes nothing. Dedup
+is therefore a *disk* saving in the substrate, and a bandwidth saving only because
+every writer above it declines to put at all — the ws facet caches per-file chunk ids,
+the disk facet captures dirty blocks, facet 0's state checks its root set. That works,
+but it puts the same discipline in four places and gets nothing for a chunk two
+*different* grains or a re-import produced. An offer round (`has` the ids, put the
+absent ones) would move it under the seam once. It costs an extra RTT on a cold put,
+so it wants the numbers from the disk-capture benchmark below before it is written.
 
 **A bare-metal deployment path.** `docs/standalone-deployment.md` now carries sizing,
 `LimitNOFILE`, timeouts by topology, and a failure-domain mapping, but the only
