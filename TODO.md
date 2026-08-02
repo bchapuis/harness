@@ -45,6 +45,22 @@ already handles the ordering and the don't-abandon-in-flight-work discipline. It
 worth up to `IN_FLIGHT_CHUNKS`-fold on the create path, and `disk_rounds.rs` is the
 before it gets measured against — that test is written to fail low when this lands.
 
+**Tell the wire codec that a blob is bytes.** A `Vec<u8>` goes through serde's default
+sequence path, one element at a time: `actor-serialization`'s bench prices a 1 MiB
+payload at 3.76 ms to encode and 12.2 ms to decode, 279 MB/s and 86 MB/s where a
+length prefix and a memcpy would run at several GB/s, and the decode's allocation
+profile shows it growing the vector as it goes rather than reserving. Every replicated
+blob pays an encode on the leader and a decode on each peer, so this is ~16 ms of the
+~33 ms a 1 MiB peer round trip costs (see "Measure") — the largest single piece of it
+anyone has named.
+
+`serde_bytes` on the payload fields is the mechanism. It is not a free change, which
+is why it is here rather than done: under postcard a `Vec<u8>` and a byte string
+serialize to the *same* bytes — varint length then the payload — so a postcard
+deployment can adopt it without a format revision, but under JSON it moves an array of
+decimal numbers to a base64 string, and `harness-standalone` runs `JsonCodec`. That is
+a compatibility-window question (`docs/compatibility-spec.md` §2), not a refactor.
+
 **A bare-metal deployment path.** `docs/standalone-deployment.md` now carries sizing,
 `LimitNOFILE`, timeouts by topology, and a failure-domain mapping, but the only
 production-shaped artifact in the tree is still a Kubernetes StatefulSet. Bare metal
@@ -84,15 +100,26 @@ in that ~33 s is the disk facet; it is cluster and control-plane warm-up, and wi
 per-block cost is 11.0 ms, which is the file store's 11.4 ms cold put and nothing
 else** — the local path is fully explained by the bench, with no gap left in it.
 
-So the remaining question is small and precise, which is the point of having measured:
-each additional replica adds ~25 ms per block, linearly. Linearly is the surprise —
-`put_blob` fans peers out through `FuturesUnordered` and should overlap them, so a
-second replica ought to cost roughly what one does. It does not, which points at the
-fan-out not actually overlapping; the "local fsync is serialized ahead of the peer
-fan-out" item under "Decide" is very likely the same root cause seen from the other
-side. Nagle is already ruled out — the transport sets `TCP_NODELAY` on both ends.
-Instrument `QuorumReplicator::put_blob` and split it: framing and encode, time on the
-wire, the peer's own store call, the quorum wait.
+The fan-out is not the problem, and an earlier draft of this entry said it was. That
+draft read a per-replica cost off the *random* image, where each added replica also
+adds a replica's worth of cold `atomic_replace` on a laptop where all three nodes
+share one device — disk work, not coordination. Re-run against an all-zero image,
+where every block after the first is a dedup hit at every replica and no node writes
+anything, the shape is different: **1 node 0.9 ms per block, 2 nodes 33.8, 3 nodes
+40.5.** The first peer costs ~33 ms; the second costs ~7 ms more. Peers overlap.
+
+So the question is a single one: **a peer round trip carrying a 1 MiB blob costs
+~33 ms on loopback, with the peer's disk work deduplicated away entirely.** Half of
+that is now accounted for. `actor-serialization`'s codec bench prices postcard on a
+1 MiB `Vec<u8>` at 3.76 ms to encode and **12.2 ms to decode** — 279 MB/s and 86 MB/s,
+against a memcpy's several GB/s — so encode on the leader plus decode on the peer is
+~16 ms of the ~33 before a byte reaches the wire or the store. The allocation profile
+says why: the decode grows its vector as it goes, one `u8` at a time through serde's
+default sequence path, because nothing tells the codec these are bytes rather than a
+sequence that happens to hold them.
+
+That leaves ~17 ms in the transport and the peer's actor hop, which is where to
+instrument next, and it is now a small enough number to instrument honestly.
 
 Scale it before prioritizing it. At ~65 ms per block a 512 MB create is ~33 s of
 blocks on top of a one-time warm-up — so the headline "four minutes" was mostly the

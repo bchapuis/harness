@@ -101,8 +101,10 @@ for mib in "${SIZES[@]}"; do
     eval "t$n=\$(python3 -c \"print($end - $start)\")"
   done
 
+  # `wait` reports each killed node as "Terminated", which is noise here: the kill is
+  # this script's own teardown, not a failure worth printing between measurements.
   kill ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true
-  wait 2>/dev/null || true
+  wait ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true
 
   python3 -c "
 mib, first, second = $mib, $t1, $t2

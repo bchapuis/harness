@@ -89,6 +89,21 @@ fn bytes_json<const N: usize>(bencher: Bencher) {
     encode_bench(bencher, &JsonCodec, &vec![0x5a_u8; N], N);
 }
 
+/// Decoding a `Vec<u8>` through postcard — the other half of a round trip.
+///
+/// Here because a replicated blob pays both directions and neither is free: the leader
+/// encodes the payload into each peer's message and the peer decodes it before its
+/// store ever sees it, so a quorum put costs one encode and one decode per replica
+/// before any device is touched. A blob is a mebibyte, which makes this the largest
+/// single thing the codec is asked to do, and the granary measurement in `TODO.md`
+/// found a peer round trip carrying one costs ~33 ms on loopback with the peer's disk
+/// work deduplicated away entirely. Encode plus decode is how much of that the codec
+/// can account for.
+#[divan::bench(consts = [1024, 65_536, 1_048_576])]
+fn bytes_postcard_decode<const N: usize>(bencher: Bencher) {
+    decode_bench(bencher, &PostcardCodec, &vec![0x5a_u8; N]);
+}
+
 // The wire-size half of the `JsonCodec` warning is asserted in the crate's own tests
 // (`json_inflates_a_byte_vector_by_roughly_the_documented_multiple`), not here: `cargo
 // test` does not run bench targets, so a test living in this file would compile in CI and
