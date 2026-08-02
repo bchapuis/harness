@@ -1,12 +1,18 @@
 //! What a disk-facet capture costs, block by block.
 //!
-//! Creating a 512 MB machine takes roughly four minutes. Every constant anyone has
-//! reached for says it should not: the uplink floor for 512 MB is ~8 seconds and
-//! assumes nothing deduplicates, while a fresh image is mostly zeros that all hash
-//! to one blob, and local BLAKE3 over 512 MB is ~170 ms. Almost all of that four
-//! minutes is unexplained, and until it is attributed there is no honest way to
-//! choose a block size or an in-flight bound — either would be tuned against a cost
-//! nobody has located.
+//! Creating a 512 MB machine was observed to take roughly four minutes. Every
+//! constant anyone reached for said it should not: the uplink floor for 512 MB is ~8
+//! seconds and assumes nothing deduplicates, while a fresh image is mostly zeros that
+//! all hash to one blob, and local BLAKE3 over 512 MB is ~170 ms. Almost all of that
+//! four minutes was unexplained, and until it was attributed there was no honest way
+//! to choose a block size or an in-flight bound — either would have been tuned
+//! against a cost nobody had located.
+//!
+//! It has since been attributed, and this file is the layer that did it: what these
+//! numbers established is that the single-node path costs what its parts cost and no
+//! more, which is what made the rest of the time findable elsewhere (a one-time
+//! cluster warm-up, and a per-replica cost in the fan-out — see TODO.md). Keep them
+//! honest; they are the floor every later claim is checked against.
 //!
 //! So this file does not benchmark a knob. It measures the capture path in three
 //! layers, cheapest first, so the layer that holds the time can be named:

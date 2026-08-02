@@ -3,8 +3,9 @@
 //! `benches/disk_capture.rs` measured the single-node half of a machine create and
 //! ruled it out: ~0.7 s to scan 512 MB, under 2 s to import it, everything flat in
 //! the block count, and a trip through the journal seam costing 0.58 µs against
-//! 1.4 ms of bytes per block. A create takes ~240 s, so over 99% of it is above the
-//! store — the quorum fan-out, its transport, or the sequencing of the two.
+//! 1.4 ms of bytes per block. Against the four minutes a create was observed to take,
+//! that left the whole question above the store — the quorum fan-out, its transport,
+//! or the sequencing of the two.
 //!
 //! Sequencing is measurable here, and it needs no cluster and no hardware. The
 //! simulation's clock is virtual and its transport applies a fixed minimum delivery
@@ -30,10 +31,11 @@
 //!
 //! So a 512-block image is 512 serialized quorum rounds, and pipelining them is worth
 //! up to `IN_FLIGHT_CHUNKS`-fold. What these tests do *not* say is what one round
-//! costs on real hardware: virtual time counts rounds, it does not price them. A
-//! create's 240 s over 512 rounds implies ~470 ms each, which is far more than the
-//! link or a peer's fsync can account for — so a second finding is still waiting in
-//! the transport, and the demo is where it gets settled.
+//! costs on real hardware: virtual time counts rounds, it does not price them. That
+//! price has since been taken on a real three-node cluster and is ~63 ms per block
+//! against ~12 ms on a single node, rising linearly with each replica added — see
+//! TODO.md, which also records that a create's headline cost turned out to be mostly
+//! a one-time cluster warm-up rather than anything per block.
 //!
 //! The assertions are bands rather than equalities, and the one on the slope is a
 //! characterization: it describes what the path costs *today* so the pipelining

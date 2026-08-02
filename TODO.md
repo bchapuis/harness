@@ -52,46 +52,58 @@ wants a systemd unit and a disk layout.
 
 ## Measure before changing
 
-**Where a machine create's four minutes actually go.** The local half is now measured
-and it is not the answer. `crates/granary/benches/disk_capture.rs` takes the capture
-path apart in three layers on one node. Per 1 MiB block, medians: read 33 µs, write
-94 µs, BLAKE3 568 µs, a cold put into the memory store 0.3 µs, a cold put into the file
-store 11.4 ms, and a put the file store already holds — the dedup hit, which is most of
-a fresh image — 17 µs. Whole path through a real grain: a clean capture scans at
-746 MB/s, an import runs at 454 MB/s into memory and 299 MB/s onto disk, and all three
-are flat across 4, 16 and 64 MiB, so nothing in the path is super-linear. Extrapolated
-to 512 MB that is ~0.7 s to scan and under 2 s to import, against the ~240 s a create
-takes. **Over 99% of a create is above the store**, and neither `IN_FLIGHT_CHUNKS` nor
-the block size is the lever: `puts` shows a trip through the seam costs 0.58 µs, four
-thousand times less than the bytes it carries, so the per-block work is per-byte and
-already near its floor.
+**What a machine create costs, and where the four minutes went.** Measured, on all
+three layers, and the premise this item started from was wrong: the time was never
+in the capture path, and it was never one number.
 
-Half of what was left is now settled too, and without a cluster.
-`tests/disk_rounds.rs` measures the `Quorum` tier in *virtual* time, which counts
-round trips instead of pricing them: a block costs 2 ms — one frame out, one
-acknowledgement back — and a four-byte blob costs the same 2 ms, so a create's cost
-is the round trips and not the payload, and a 512-block image is 512 of them in
-series. That is the serialization now named under "Build", and it is a real
-multiplier, but it is a *count*, and a count alone does not make 240 s.
+`benches/disk_capture.rs` takes the single-node path apart. Per 1 MiB block, medians:
+read 33 µs, write 94 µs, BLAKE3 568 µs, a cold put into the memory store 0.3 µs, a
+cold put into the file store 11.4 ms, and a put the store already holds — the dedup
+hit, which is most of a fresh image — 17 µs. `tests/disk_rounds.rs` counts the
+`Quorum` tier in virtual time: one round trip per block, the same for a four-byte
+blob as for a mebibyte, so the cost is rounds and not payload.
 
-What is still open is the price of one round, and that does need real hardware.
-240 s over 512 rounds is ~470 ms each, against ~8 ms of link for 1 MiB to two peers
-at 125 MB/s and the 11 ms a peer's own `atomic_replace` measured above — so a round
-costs something like forty times what its parts do, and nothing in the tree explains
-it yet. Instrument `QuorumReplicator::put_blob` on the demo and split it: transport
-framing and encode, time on the wire, the peer's store call, the quorum wait. Suspect
-queueing behind the shard's other traffic and per-frame codec cost on a 1 MiB payload
-before suspecting the device.
+Then the cluster itself, on real nodes over loopback. `./machine-cost.sh` is the
+harness — it boots a cluster the way `machine-demo.sh` does and times two creates
+against it, because the first and the second answer different questions. Slopes
+between two image sizes, release build, `--machine fake`:
 
-**Re-run the demo before instrumenting anything**, because one input to that number
-has already changed. The leader's own blob write was inline on the async worker until
-the seam was made uniform (see `blocking.rs`), so a create fsynced ~11 ms per block on
-the same thread driving that node's Raft heartbeats and every other shard's quorum
-wait — 512 times, which is precisely the feedback loop `blocking.rs` exists to
-prevent. That does not by itself account for 470 ms a round, but heartbeats missed
-under it produce elections, step-downs and rehydration, and those do compound. Get the
-new wall-clock number first; instrument what is left. **Still larger than everything
-else here combined.**
+| replicas | ms per block |
+|---------:|-------------:|
+| 1        | 11.0 |
+| 2        | ~40  |
+| 3        | 63–71 |
+
+Two things fall out. **A create is a large fixed cost plus a small per-block one.**
+The first create after a cluster starts takes ~33 s on one node and ~40–57 s on
+three *regardless of image size* — 1 block and 128 blocks cost the same — while the
+second create on the same live cluster costs 0.06 s and 8.8 s respectively. Nothing
+in that ~33 s is the disk facet; it is cluster and control-plane warm-up, and with
+`machine-standalone`'s deliberately patient timings (SWIM probe 2 s, Raft heartbeat
+4 s, election timeout 20 s) that is where to look for it first. **And the single-node
+per-block cost is 11.0 ms, which is the file store's 11.4 ms cold put and nothing
+else** — the local path is fully explained by the bench, with no gap left in it.
+
+So the remaining question is small and precise, which is the point of having measured:
+each additional replica adds ~25 ms per block, linearly. Linearly is the surprise —
+`put_blob` fans peers out through `FuturesUnordered` and should overlap them, so a
+second replica ought to cost roughly what one does. It does not, which points at the
+fan-out not actually overlapping; the "local fsync is serialized ahead of the peer
+fan-out" item under "Decide" is very likely the same root cause seen from the other
+side. Nagle is already ruled out — the transport sets `TCP_NODELAY` on both ends.
+Instrument `QuorumReplicator::put_blob` and split it: framing and encode, time on the
+wire, the peer's own store call, the quorum wait.
+
+Scale it before prioritizing it. At ~65 ms per block a 512 MB create is ~33 s of
+blocks on top of a one-time warm-up — so the headline "four minutes" was mostly the
+warm-up plus a debug build, which costs ~2.4x release. Both of those are worth more
+than the block path is.
+
+*A correction to what this file said before:* the earlier entry divided 240 s by 512
+blocks to get "~470 ms per round" and went looking for a round trip that expensive.
+There is no such round trip. The division was wrong because it spread a large fixed
+cost across the blocks — the same intercept error `disk_rounds.rs` was restructured
+to avoid, made here in prose.
 
 **Flush distribution on the actual drives.** `blocking.rs` justifies the I/O pool by
 tail isolation, which is right, but the median matters for sizing and nothing records
