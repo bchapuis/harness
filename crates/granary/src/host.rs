@@ -50,6 +50,7 @@ use crate::grain::GrainCtx;
 use crate::grain::GrainHandler;
 use crate::grain::GrainName;
 use crate::grain::GrainRegistry;
+use crate::metrics::CommitOutcome;
 use std::sync::Arc;
 
 use crate::alarm_index::AlarmIndex;
@@ -162,6 +163,9 @@ pub struct Host<G: Grain> {
     shard: u32,
     journal: Arc<dyn DynGrainJournal>,
     config: GranaryConfig,
+    /// The operator-facing sink (§13), lifted out of `config` because it is read on
+    /// every commit.
+    metrics: Arc<dyn crate::GrainMetrics>,
     gateway: ActorRef<Gateway<G>>,
     /// Virtual time of the last *command* (not a tick), for idle eviction (§10).
     last_active: actor_core::Instant,
@@ -221,6 +225,7 @@ impl<G: Grain> Host<G> {
             name,
             shard,
             journal,
+            metrics: config.metrics(),
             config,
             gateway,
             last_active: actor_core::Instant::ZERO,
@@ -277,6 +282,10 @@ impl<G: Grain> Host<G> {
     /// the journal's authority (**G3**); a snapshot whose seq exceeds that head is
     /// ignored and replay starts from `ZERO` (**G4**).
     async fn rehydrate(&mut self, ctx: &Ctx<Host<G>>) -> Result<(), BoxError> {
+        // Timed from here, before the barrier: the quorum head recovery is usually
+        // the largest part of a cold activation, so a measurement that skipped it
+        // would report the cheap half (§13).
+        let rehydrate_started = ctx.system().now();
         let codec = ctx.system().codec();
         // `head` is the rehydration barrier (spec §8, §9, invariant G3/G14): on the
         // `Quorum` tier it recovers the grain's head from a write quorum by
@@ -392,6 +401,15 @@ impl<G: Grain> Host<G> {
             node,
             name: self.name.clone(),
         });
+        // What a cold access cost, and one more grain resident (§13). The pair with
+        // the `Passivated` decrement below is what makes the gauge track the working
+        // set hibernation is meant to bound (§10).
+        self.metrics.rehydrated(
+            self.grain_type,
+            ctx.system().now().duration_since(rehydrate_started),
+            replayed,
+        );
+        self.metrics.activation_delta(self.grain_type, 1);
         self.schedule_idle_check(ctx);
         // Re-arm the durable alarm from the rehydrated form (spec §7.16), so firing
         // survives deactivation (**G3**).
@@ -541,7 +559,22 @@ impl<G: Grain> Host<G> {
         let from = self.head;
         let to_deliver = (!self.sinks.is_empty()).then(|| encoded.clone());
 
-        match self.journal.append(&self.name, self.head, encoded).await {
+        // The commit measurement (§13): the latency the caller actually waited and the
+        // outcome it actually got, recorded on every arm below. Kept here rather than
+        // in the journal because this is the only place that sees both, and because a
+        // latency without its outcome averages a fast failure into the good samples.
+        let started = ctx.system().now();
+        let appended = self.journal.append(&self.name, self.head, encoded).await;
+        self.metrics.commit(
+            self.grain_type,
+            match &appended {
+                AppendOutcome::Committed(_) => CommitOutcome::Committed,
+                AppendOutcome::NotLeader(_) => CommitOutcome::NotLeader,
+                AppendOutcome::Unavailable(_) => CommitOutcome::Unavailable,
+            },
+            ctx.system().now().duration_since(started),
+        );
+        match appended {
             // 5. Durable on a quorum: fold AFTER durability, advance head, reply.
             AppendOutcome::Committed(new_head) => {
                 // The grain is its shard's single writer (§8), so its head MUST
@@ -611,6 +644,7 @@ impl<G: Grain> Host<G> {
     /// `Activated` gets a matching `Passivated`/`NodeDown`, the basis of the
     /// **G6** singleton checker.
     fn step_down(&self, ctx: &Ctx<Host<G>>) {
+        self.metrics.activation_delta(self.grain_type, -1);
         ctx.system().emit_grain_event(GrainEvent::Passivated {
             node: ctx.system().node(),
             name: self.name.clone(),
@@ -633,7 +667,9 @@ impl<G: Grain> Host<G> {
     }
 
     /// Persist a snapshot once enough events have accumulated past the last one
-    /// (spec §9). The trigger is configuration, not part of the model.
+    /// (spec §9). The trigger is configuration, not part of the model, and it is the
+    /// *only* trigger — the idle path comes through here too
+    /// ([`passivate`](Host::passivate)).
     async fn maybe_snapshot(&mut self, ctx: &Ctx<Host<G>>) {
         if self.config.snapshot_every == 0 {
             return;
@@ -681,13 +717,25 @@ impl<G: Grain> Host<G> {
         }
     }
 
-    /// Hibernate on idle (spec §10): run `on_passivate`, snapshot to bound the
-    /// next replay, and stop. The gateway prunes the name via death watch, and
-    /// the next message reactivates and rehydrates (invariant **G12**).
+    /// Hibernate on idle (spec §10): run `on_passivate`, snapshot if enough has
+    /// accumulated to be worth one, and stop. The gateway prunes the name via death
+    /// watch, and the next message reactivates and rehydrates (invariant **G12**).
+    ///
+    /// The snapshot goes through the **same** threshold as the write path
+    /// ([`maybe_snapshot`](Host::maybe_snapshot)), not unconditionally. One policy
+    /// decides when a snapshot is worth taking, and the reason it must be a policy
+    /// rather than a reflex is what a snapshot costs on the `Quorum` tier: it is a
+    /// *full-state broadcast* to every replica (§7.3), so an unconditional snapshot
+    /// here turns any grain that is written once and then left alone into a
+    /// whole-state replication every idle window — the amplification is O(state) for
+    /// O(1) of change, billed R−1 times to the uplink (`docs/hardware-envelope.md`
+    /// §3.9, I2). Skipping it costs a longer replay on the next activation, and
+    /// replay reads come from the *local* store (§9), so that cost stays on the side
+    /// of the machine with capacity to spare (hw §3.1).
     async fn passivate(&mut self, ctx: &Ctx<Host<G>>) {
         let gctx = self.grain_ctx(ctx);
         self.grain.on_passivate(&gctx).await;
-        self.snapshot_now(ctx).await;
+        self.maybe_snapshot(ctx).await;
         self.step_down(ctx); // emit Passivated + stop, the one deactivation seam
     }
 

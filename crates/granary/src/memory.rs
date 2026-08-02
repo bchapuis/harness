@@ -33,14 +33,25 @@ pub struct LocalGrainJournal {
 impl LocalGrainJournal {
     /// A journal over a fresh, empty in-memory store for shard 0.
     pub fn new() -> LocalGrainJournal {
-        LocalGrainJournal::over(Arc::new(MemoryGrainStore::new()), 0)
+        LocalGrainJournal::over(
+            Arc::new(MemoryGrainStore::new()),
+            0,
+            Arc::new(crate::InlineIo),
+        )
     }
 
     /// A journal over `store`, keying its records under shard index `shard` (so a
     /// single node can back several shards from one store, §7.6).
-    pub(crate) fn over(store: Arc<dyn GrainStore>, shard: u32) -> LocalGrainJournal {
+    /// `io` is where the store's blocking writes run (§7.4): the single-node tier's
+    /// fsync IS its commit, so it is the whole latency of an append and the worst
+    /// thing to run on an async worker (see [`crate::blocking`]).
+    pub(crate) fn over(
+        store: Arc<dyn GrainStore>,
+        shard: u32,
+        io: Arc<dyn crate::BlockingIo>,
+    ) -> LocalGrainJournal {
         LocalGrainJournal {
-            replicator: Arc::new(LocalReplicator::new(store, shard)),
+            replicator: Arc::new(LocalReplicator::new(store, shard, io)),
         }
     }
 }

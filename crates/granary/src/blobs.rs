@@ -12,6 +12,15 @@
 //! Because the grain alone knows its own live id set, reclamation is a **per-blob
 //! mark-from-roots sweep** ([`GrainBlobs::gc`]) plus a whole-area drop on destroy
 //! ([`GrainBlobs::destroy`]).
+//!
+//! **Dedup is a bandwidth mechanism, not only a space one.** Content addressing was
+//! adopted so an unchanged region of a checkpointed facet hashes to something already
+//! stored (§7.10); on this deployment its larger effect is that the region is not
+//! *sent*. A byte costs roughly fifty times more to move to a replica than to write
+//! locally, and a replicated byte is billed once per peer, so a chunk that dedups is
+//! the cheapest byte in the system (`docs/hardware-envelope.md` §3.9, I2). The
+//! corollary is a gap worth knowing about: every payload that goes through this area
+//! gets that benefit, and a snapshot's own state bytes, which do not, get none of it.
 
 use std::collections::BTreeSet;
 use std::fmt;

@@ -182,7 +182,7 @@ pub fn tcp_config(node: NodeId, peers: BTreeMap<NodeId, SocketAddr>) -> TcpConfi
         codec: Arc::new(JsonCodec),
         cluster_secret: SECRET.to_string(),
         allowlist: None,
-        tls: None,
+        encryption: actor_runtime::Encryption::PlaintextTrusted,
     }
 }
 

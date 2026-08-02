@@ -52,6 +52,7 @@ use harness::TurnId;
 
 use crate::Gateway;
 use crate::auth::PrincipalId;
+use crate::auth::is_valid_session;
 use crate::auth::unscope_session;
 use crate::error::GatewayError;
 
@@ -72,6 +73,18 @@ pub fn router<S: HarnessSystem>(gateway: Arc<Gateway<S>>) -> Router {
         .layer(DefaultBodyLimit::max(max_body))
         .layer(axum::middleware::from_fn(log_request))
         .with_state(gateway)
+}
+
+/// Reject a client-supplied session id the edge will not scope (see
+/// [`is_valid_session`]). A `400`, not a `404`: the id is malformed, and answering
+/// `404` would imply the name was merely unused.
+fn reject_bad_session(session: &str) -> Result<(), GatewayError> {
+    if is_valid_session(session) {
+        return Ok(());
+    }
+    Err(GatewayError::bad_request(
+        "session id must be non-empty and must not contain '/'",
+    ))
 }
 
 /// Liveness: the process is up and serving. Unauthenticated, always `200`.
@@ -163,6 +176,7 @@ async fn prompt<S: HarnessSystem>(
     body: Result<Json<PromptBody>, JsonRejection>,
 ) -> Result<Response, GatewayError> {
     let principal = principal(&gw, &headers)?;
+    reject_bad_session(&session)?;
     // A malformed body is the edge's own `400`, in the structured envelope (not
     // axum's default plain-text rejection).
     let Json(body) = body.map_err(|e| GatewayError::bad_request(e.body_text()))?;
@@ -198,6 +212,7 @@ async fn records<S: HarnessSystem>(
     headers: HeaderMap,
 ) -> Result<Response, GatewayError> {
     let principal = principal(&gw, &headers)?;
+    reject_bad_session(&session)?;
     let session_ref = gw.session(&principal, &kind, &session);
     let records = session_ref.tail(Seq::new(q.from), q.limit).await?;
     Ok(Json(json!({ "records": records })).into_response())
@@ -211,6 +226,7 @@ async fn cancel<S: HarnessSystem>(
     headers: HeaderMap,
 ) -> Result<Response, GatewayError> {
     let principal = principal(&gw, &headers)?;
+    reject_bad_session(&session)?;
     let session_ref = gw.session(&principal, &kind, &session);
     session_ref.cancel(&TurnId::new(q.turn)).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -250,6 +266,7 @@ async fn stream<S: HarnessSystem>(
     headers: HeaderMap,
 ) -> Result<Response, GatewayError> {
     let principal = principal(&gw, &headers)?;
+    reject_bad_session(&session)?;
     let session_ref = gw.session(&principal, &kind, &session);
     let follower = session_ref.follow(Seq::new(resume_from(&headers, q.from)));
     let body = futures::stream::unfold(

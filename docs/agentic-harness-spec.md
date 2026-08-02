@@ -577,7 +577,7 @@ let researcher = Kind::new("You are a research agent.")
     .sandbox(SandboxProfile::image("workspace:base"))
     .grain(GranaryConfig {                  // the kind IS a grain type's config (§7.1, grain App. A)
         shards: 16, replication_factor: 3,
-        idle_after: Duration::from_secs(10), snapshot_every: 256,
+        idle_after: Duration::from_secs(300), snapshot_every: 4096,
     })
     .budget(Budget { tokens: 200_000, steps: 50 });
 

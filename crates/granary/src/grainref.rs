@@ -64,6 +64,85 @@ const RESOLVE_ATTEMPTS: usize = 200;
 /// fails fast instead of stalling the redirect for the full deadline.
 const FORWARD_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// The cached handles, in two generations so the cache stays **bounded** without an
+/// intrusive recency list (spec §5.4).
+///
+/// Bounding it is not housekeeping. A `GrainRef` is handed out per name, and the
+/// gateway is one long-lived process fronting every tenant, so an unbounded map grows
+/// with the number of *distinct names the process has ever addressed* — unbounded in
+/// exactly the deployment that is scaled horizontally and expected to stay up. Worse,
+/// most of what accumulates is dead weight: a grain hibernates after `idle_after`
+/// (§10) and its host stops, but the handle to it lingers until some later call fails
+/// against it.
+///
+/// A hit is served from either generation and promotes into `hot`; when `hot` fills,
+/// it becomes `cold` and a fresh `hot` starts, dropping whatever `cold` held. That
+/// keeps the whole structure to `2 × capacity` entries with O(1) work per operation
+/// and no per-entry bookkeeping. It approximates LRU rather than implementing it —
+/// which is the right trade here, because a miss is not an error: it costs one
+/// gateway round-trip, the path §5.4 specifies anyway.
+struct Generations<V: Clone> {
+    hot: HashMap<GrainName, V>,
+    cold: HashMap<GrainName, V>,
+    capacity: usize,
+}
+
+/// The generation a rotation retired, handed back to the caller **to drop**.
+///
+/// Freeing it is `capacity` deallocations — tens of thousands at the default — and the
+/// lock this map sits behind is taken on every grain dispatch, so the free must not
+/// happen under it. Returning it rather than dropping it in place is what moves that
+/// work outside the guard.
+type Displaced<V> = Option<HashMap<GrainName, V>>;
+
+impl<V: Clone> Generations<V> {
+    fn new(capacity: usize) -> Generations<V> {
+        Generations {
+            hot: HashMap::new(),
+            cold: HashMap::new(),
+            // A zero capacity would make every insert evict and every lookup miss,
+            // turning the fast path off entirely; one entry is the smallest cache
+            // that is still a cache.
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn get(&mut self, name: &GrainName) -> (Option<V>, Displaced<V>) {
+        if let Some(host) = self.hot.get(name) {
+            return (Some(host.clone()), None);
+        }
+        // A hit in the older generation is still a live handle: promote it so a name
+        // in steady use is never dropped just because it was cached a while ago.
+        let Some(host) = self.cold.remove(name) else {
+            return (None, None);
+        };
+        let displaced = self.insert(name.clone(), host.clone());
+        (Some(host), displaced)
+    }
+
+    fn insert(&mut self, name: GrainName, host: V) -> Displaced<V> {
+        let displaced = if self.hot.len() >= self.capacity && !self.hot.contains_key(&name) {
+            Some(std::mem::replace(
+                &mut self.cold,
+                std::mem::take(&mut self.hot),
+            ))
+        } else {
+            None
+        };
+        self.hot.insert(name, host);
+        displaced
+    }
+
+    fn remove(&mut self, name: &GrainName) {
+        self.hot.remove(name);
+        self.cold.remove(name);
+    }
+
+    fn contains(&self, name: &GrainName) -> bool {
+        self.hot.contains_key(name) || self.cold.contains_key(name)
+    }
+}
+
 /// A node-local cache of resolved host handles, shared by every [`GrainRef`] a
 /// [`Granary`] hands out (spec §5.4). A cache hit lets a call go **straight to the
 /// host actor**, skipping the serial gateway on the steady-state hot path.
@@ -73,6 +152,9 @@ const FORWARD_TIMEOUT: Duration = Duration::from_millis(500);
 /// keeps a cache hit from dispatching to a **deposed** leader: a write to a crashed
 /// leader can time out, and a timeout is not safe to auto-retry (the command may
 /// have committed — at-most-once, §6, §2.2).
+///
+/// Bounded by [`Generations`], so a long-lived process that addresses many distinct
+/// names does not grow one entry per name for its whole lifetime.
 pub(crate) struct HostCache<G: Grain> {
     system: G::System,
     grain_type: &'static str,
@@ -82,7 +164,7 @@ pub(crate) struct HostCache<G: Grain> {
     /// The committed partition (§5.1), the authority on name→shard once ranges
     /// have committed (a split/merge moves names between shards).
     shard_map: Arc<dyn ShardMapSource>,
-    hosts: Mutex<HashMap<GrainName, ActorRef<Host<G>>>>,
+    hosts: Mutex<Generations<ActorRef<Host<G>>>>,
 }
 
 impl<G: Grain> HostCache<G> {
@@ -91,13 +173,14 @@ impl<G: Grain> HostCache<G> {
         grain_type: &'static str,
         shards: usize,
         shard_map: Arc<dyn ShardMapSource>,
+        capacity: usize,
     ) -> Arc<HostCache<G>> {
         Arc::new(HostCache {
             system,
             grain_type,
             shards,
             shard_map,
-            hosts: Mutex::new(HashMap::new()),
+            hosts: Mutex::new(Generations::new(capacity)),
         })
     }
 
@@ -109,27 +192,38 @@ impl<G: Grain> HostCache<G> {
     /// it and re-resolves). The leadership read is a local lock read, off the
     /// network and off the control plane (invariant **G9**).
     fn get(&self, name: &GrainName) -> Option<ActorRef<Host<G>>> {
-        let mut hosts = self.hosts.lock().expect("host cache mutex poisoned");
-        let host = hosts.get(name)?.clone();
-        match self.system.shard_leader(resolve_shard(
-            self.shard_map.as_ref(),
-            self.grain_type,
-            name.key(),
-            self.shards,
-        )) {
-            Some(leader) if host.id().node() != leader => {
-                hosts.remove(name);
-                None
-            }
-            _ => Some(host),
-        }
+        let (found, displaced) = {
+            let mut hosts = self.hosts.lock().expect("host cache mutex poisoned");
+            let (host, displaced) = hosts.get(name);
+            let found = host.filter(|host| {
+                match self.system.shard_leader(resolve_shard(
+                    self.shard_map.as_ref(),
+                    self.grain_type,
+                    name.key(),
+                    self.shards,
+                )) {
+                    Some(leader) if host.id().node() != leader => {
+                        hosts.remove(name);
+                        false
+                    }
+                    _ => true,
+                }
+            });
+            (found, displaced)
+        };
+        drop(displaced); // outside the guard, see `Displaced`
+        found
     }
 
     fn put(&self, name: GrainName, host: ActorRef<Host<G>>) {
-        self.hosts
+        // The guard is a temporary of this statement, so it is released before
+        // `displaced` is dropped at the end of the next one (see `Displaced`).
+        let displaced = self
+            .hosts
             .lock()
             .expect("host cache mutex poisoned")
             .insert(name, host);
+        drop(displaced);
     }
 
     fn remove(&self, name: &GrainName) {
@@ -143,7 +237,7 @@ impl<G: Grain> HostCache<G> {
         self.hosts
             .lock()
             .expect("host cache mutex poisoned")
-            .contains_key(name)
+            .contains(name)
     }
 }
 
@@ -604,6 +698,28 @@ impl<G: Grain> Granary<G> {
         self.shard_map.request_merge(left);
     }
 
+    /// Hand every shard this node leads to another of its replicas before the node
+    /// departs (spec §8.3), returning how many were still led when the attempt gave
+    /// up — `0` when they all moved.
+    ///
+    /// Call this from a graceful shutdown, after the node stops accepting new work
+    /// and before the process exits. Skipping it is *safe* but expensive: each shard
+    /// this node led then waits a full leader-election timeout before its replicas
+    /// elect, and every grain on those shards rehydrates on the new leader. A node
+    /// leading many shards therefore turns an ordinary rolling restart into that many
+    /// simultaneous failovers, which is the single most common way a healthy cluster
+    /// is made to look unhealthy.
+    ///
+    /// Best-effort: a shard whose other replicas are all lagging or unreachable keeps
+    /// its leader here and fails over the slow way. A non-zero return is information
+    /// for the operator, not an error to retry — the node is leaving regardless.
+    ///
+    /// A no-op on the `Local` tier (there are no other replicas) and on a
+    /// routing-only client (it leads nothing).
+    pub async fn hand_off_leadership(&self) -> usize {
+        self.shard_map.hand_off_leadership().await
+    }
+
     /// The nodes that replicate the shard a grain key maps to (spec §7.6) — the
     /// only nodes that hold its data and can lead it. Read live from the
     /// consensus-agreed shard map, so it reflects the latest committed allocation,
@@ -665,7 +781,16 @@ pub trait GranaryExt: GranarySystem {
             gateway,
             shards,
             shard_map: Arc::clone(&shard_map),
-            cache: HostCache::new(self.clone(), grain_type, shards, shard_map),
+            // A routing-only client has no `GranaryConfig` to read, so it takes the
+            // default bound. This is the path that most needs one: the gateway is a
+            // client, long-lived, and addresses every tenant's names.
+            cache: HostCache::new(
+                self.clone(),
+                grain_type,
+                shards,
+                shard_map,
+                GranaryConfig::default().host_cache_capacity,
+            ),
         })
     }
 
@@ -794,7 +919,8 @@ where
         Some(factory) => factory(grain_type, system.node()),
         None => Arc::new(MemoryGrainStore::new()),
     };
-    let replica_store = system.spawn(ReplicaStore::<G>::new(Arc::clone(&store)));
+    let io = config.blocking_io();
+    let replica_store = system.spawn(ReplicaStore::<G>::new(Arc::clone(&store), Arc::clone(&io)));
     system
         .receptionist()
         .register(replica_store_key::<G>(grain_type), &replica_store);
@@ -811,7 +937,15 @@ where
         config.shard_target_bytes,
         store,
         transport,
+        Arc::clone(&io),
+        crate::replicator::Deadlines {
+            quorum: config.quorum_timeout,
+            recover: config.recover_timeout,
+        },
+        config.failure_domains.clone(),
     );
+    // Read before `config` moves into the gateway.
+    let host_cache_capacity = config.host_cache_capacity;
     let gateway = system.spawn(Gateway::new(
         grain_type,
         Arc::clone(&shard_map),
@@ -831,7 +965,13 @@ where
         gateway,
         shards,
         shard_map: Arc::clone(&shard_map),
-        cache: HostCache::new(system.clone(), grain_type, shards, shard_map),
+        cache: HostCache::new(
+            system.clone(),
+            grain_type,
+            shards,
+            shard_map,
+            host_cache_capacity,
+        ),
     }
 }
 
@@ -921,5 +1061,76 @@ async fn alarm_driver_loop<S, G>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name(key: &str) -> GrainName {
+        GrainName::new("test.Grain", key)
+    }
+
+    /// The property the bound exists for: addressing an unbounded stream of distinct
+    /// names must not grow the cache without limit. Before this, the gateway — one
+    /// long-lived process fronting every tenant — kept an entry per name it had ever
+    /// addressed, most of them stale handles to grains that had since hibernated.
+    #[test]
+    fn the_cache_stays_bounded_across_unboundedly_many_names() {
+        let mut cache: Generations<u32> = Generations::new(16);
+        for i in 0..10_000 {
+            cache.insert(name(&format!("grain-{i}")), i);
+        }
+        assert!(
+            cache.hot.len() + cache.cold.len() <= 32,
+            "two generations of {} cap the cache at 2x, not {} entries",
+            16,
+            cache.hot.len() + cache.cold.len()
+        );
+    }
+
+    /// A name in steady use must survive eviction, or the bound would trade a memory
+    /// leak for a permanently cold hot path.
+    #[test]
+    fn a_name_in_steady_use_is_retained() {
+        let mut cache: Generations<u32> = Generations::new(4);
+        let hot = name("hot");
+        cache.insert(hot.clone(), 1);
+        for i in 0..100 {
+            cache.insert(name(&format!("other-{i}")), i);
+            // Touching it each round promotes it back into the young generation.
+            assert_eq!(
+                cache.get(&hot).0,
+                Some(1),
+                "a touched name is never dropped"
+            );
+        }
+    }
+
+    /// An untouched name is eventually dropped — the eviction actually happens rather
+    /// than the cache silently growing.
+    #[test]
+    fn an_untouched_name_is_evicted() {
+        let mut cache: Generations<u32> = Generations::new(2);
+        cache.insert(name("cold"), 1);
+        for i in 0..10 {
+            cache.insert(name(&format!("other-{i}")), i);
+        }
+        assert_eq!(cache.get(&name("cold")).0, None);
+    }
+
+    /// Invalidation must clear both generations: a handle left in the older one would
+    /// come back on the next lookup, which is exactly the deposed-leader dispatch the
+    /// invalidation exists to prevent (§5.4).
+    #[test]
+    fn removal_clears_both_generations() {
+        let mut cache: Generations<u32> = Generations::new(1);
+        let stale = name("stale");
+        cache.insert(stale.clone(), 1);
+        cache.insert(name("push"), 2); // ages `stale` into `cold`
+        cache.remove(&stale);
+        assert_eq!(cache.get(&stale).0, None);
+        assert!(!cache.contains(&stale));
     }
 }

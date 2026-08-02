@@ -25,6 +25,15 @@
 //!   one grain's snapshot compaction rewrites only that grain's file, never the whole
 //!   node's store. The cost: a grain owns a file, so a node's file count tracks its
 //!   grain count, and no two grains' appends can share an fsync.
+//!
+//!   That second cost is the classic objection to file-per-object, and on this
+//!   deployment's storage it is **not** the binding one: an fsync of a small append is
+//!   tens of microseconds against a quorum round trip in the hundreds, so amortizing
+//!   flushes across grains buys nothing worth a shared-log redesign
+//!   (`docs/hardware-envelope.md` §3.1, §3.5, and I3 for the arithmetic; `audit.md`
+//!   finding 9 for the group-commit proposal this retired). What *does* bind is
+//!   filesystem metadata — inodes, directory size, and the descriptor budget below.
+//!   Network-attached storage would reverse this (hw §6).
 //! - `manifest` — an append-only map from `(shard, GrainName)` to a small integer
 //!   segment **id**, so segment filenames are collision-free whatever a grain's key
 //!   contains. A grain's segment is opened and replayed **lazily**, on first access,
@@ -32,6 +41,14 @@
 //!   the manifest itself is replayed and held whole, and only ever grows: an id
 //!   assignment outlives the grain it names, which is why *presence* is the files',
 //!   not the manifest's, to answer ([`grains`](GrainStore::grains)).
+//!
+//!   Held whole, and deliberately not compacted. An entry is a shard, a name, and a
+//!   `u64` — on the order of 64 bytes resident, so ten million grains is a few hundred
+//!   megabytes against a node sized in the hundreds of gigabytes, and the file itself
+//!   replays at read plus digest throughput (hw §3.2). **Revisit past roughly a million
+//!   grains on one node**, where the growth starts to mean something and granary §7.8's
+//!   *"limited only by the shards' storage"* stops being a rounding error; until then a
+//!   compaction pass would add a second format and a rewrite path for nothing.
 //! - `fences/<shard>` — the per-shard **fence**: the highest shard term this node has
 //!   acknowledged (§8), the one piece of state shared across a shard's grains. It is
 //!   rewritten (atomically) only when the term advances — on failover and recovery
@@ -59,10 +76,28 @@
 //! deterministically: a `Checkpoint` loads the whole segment state, every other op is
 //! re-applied in log order.
 //!
-//! **Failure policy.** [`GrainStore`]'s methods are infallible by signature; a replica
-//! that cannot make a write durable cannot safely acknowledge it. Like
-//! [`FileRaftWAL`](actor_runtime), this panics on an I/O error after open rather than
-//! risk announcing un-persisted state; peers observe the node unreachable.
+//! **Failure policy.** A replica that cannot make a write durable cannot safely
+//! acknowledge it — so it says so. An I/O error after open **poisons** the store: the
+//! cause is recorded (readable through [`FileGrainStore::failure`]) and every
+//! subsequent operation refuses, [`StoreAck::Failed`] for a write,
+//! [`ReadOutcome::Failed`] for a recovery read, [`BlobAck::Failed`] for a blob. Those
+//! refusals do not count toward any quorum, so the node simply drops out of its
+//! shards' write and recovery quorums, which their existing majority logic already
+//! covers.
+//!
+//! Poisoning is store-wide and one-way. Store-wide because the failures it catches — a
+//! full volume, a lost mount, a failing device — belong to the directory rather than to
+//! the grain whose write happened to notice first, and because a store that answered
+//! for one area while unable to serve another would be lying by omission. One-way
+//! because nothing here can establish that the volume recovered; a poisoned store is a
+//! node to replace.
+//!
+//! The alternative, panicking, is what this replaced: it converts one bad volume into
+//! the loss of every shard the node leads, all of which then re-elect and rehydrate
+//! elsewhere — a cluster-wide event caused by a local fault. Only [`open`](
+//! FileGrainStore::open) failure is still fatal at the [`factory`](
+//! FileGrainStore::factory), because a replica with no storage at all has nothing to
+//! degrade *from*.
 //!
 //! **Single writer.** A node's directory belongs to one store at a time, enforced by
 //! an advisory `flock` on `LOCK` held for the store's lifetime — so a second
@@ -74,10 +109,11 @@
 //! behind its own short leaf lock.
 //!
 //! **Durability reporting.** Every mutating method returns a
-//! [`Reserved`](crate::store::Reserved): the outcome is settled under the grain's
-//! segment lock before the call returns, and its stability is awaited separately.
-//! This store fsyncs inside the call, so every `Reserved` it hands back is already
-//! ready.
+//! [`Reserved`](crate::store::Reserved): the guard, the in-memory apply, and the fsync
+//! all happen under the grain's segment lock before the call returns, so the outcome
+//! the wrapper carries is already durable. The wrapper is what keeps it that way — a
+//! store shaped as an `async fn` would run its body at first poll, moving the
+//! fencing-critical apply out from under the lock (§8).
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -98,6 +134,8 @@ use crate::blobs::BlobId;
 use crate::grain::GrainName;
 use crate::journal::Seq;
 use crate::journal::Term;
+use crate::store::BlobAck;
+use crate::store::BumpRefusal;
 use crate::store::GrainBlobStore;
 use crate::store::GrainCheckpoint;
 use crate::store::GrainRecords;
@@ -114,6 +152,29 @@ use crate::store::WriteKind;
 /// length above this is treated as corruption, not an allocation. Generous, since a
 /// grain's record bytes and a whole-segment `Checkpoint` record can be large.
 const MAX_RECORD: u32 = 1 << 30;
+
+/// How many grain segments a store keeps open by default.
+///
+/// Each is an open file descriptor, so this is really a descriptor budget. The number
+/// is derived from the deployment's own limits, not inherited: a current Linux host
+/// caps `fs.nr_open` at 1,048,576 and a service unit routinely raises `LimitNOFILE`
+/// into the same range, and a descriptor costs a few hundred bytes of kernel memory —
+/// so 65536 of them is tens of megabytes on a node sized in the hundreds of gigabytes
+/// (`docs/hardware-envelope.md` §3.2, §3.6). It leaves room for the transport's
+/// connections and the blob area's transient opens, and stays far above the grains a
+/// node has *active* at once, which hibernation keeps to the working set (§10).
+///
+/// **A deployment MUST raise `LimitNOFILE` to at least ~70000.** This budget bounds
+/// what the store keeps; it cannot bound what the kernel allows, and against the
+/// traditional 1024 or 65536 default the process would hit the kernel's limit — as an
+/// `EMFILE` on some unrelated open — before this cap ever evicted anything. See
+/// `docs/standalone-deployment.md`.
+///
+/// The cap itself is not an optimization but a bound (hw §5): it is what keeps a node
+/// that has *served* millions of grains from holding a descriptor for each. A miss
+/// costs a reopen and replay of one grain's segment, bounded by compaction to a
+/// checkpoint plus the records above it (§9).
+const DEFAULT_SEGMENT_CAPACITY: usize = 65536;
 
 /// A [`factory`](FileGrainStore::factory)'s open stores, keyed by the pair that names
 /// one store: the hosted grain type and the node. Two hostings of the same pair share
@@ -205,6 +266,14 @@ pub struct FileGrainStore {
     /// Loaded grain segments, keyed `(shard, grain)`. Populated lazily on first access.
     segments: Mutex<HashMap<(u32, GrainName), Arc<Segment>>>,
     manifest: Mutex<Manifest>,
+    /// How many grain segments — and so how many open file descriptors — this store
+    /// keeps loaded (see [`FileGrainStore::evict_idle_segments`]).
+    segment_capacity: usize,
+    /// Why this store stopped being usable, once it has (see [`FileGrainStore::fail`]).
+    /// `None` while healthy. One flag for the whole store because the failures it
+    /// catches — a full volume, a lost mount, a failing device — belong to the
+    /// directory, not to the grain whose write happened to notice first.
+    poison: Mutex<Option<String>>,
 }
 
 impl FileGrainStore {
@@ -238,7 +307,48 @@ impl FileGrainStore {
             seals: Mutex::new(seals),
             segments: Mutex::new(HashMap::new()),
             manifest: Mutex::new(manifest),
+            segment_capacity: DEFAULT_SEGMENT_CAPACITY,
+            poison: Mutex::new(None),
         })
+    }
+
+    /// Record that this store's storage is unusable, and return `()` so a caller can
+    /// tail-call it from an error arm.
+    ///
+    /// Poisoning is **one-way and store-wide**. A replica that cannot make a write
+    /// durable cannot honestly acknowledge it (the module's failure policy), but the
+    /// honest answer is [`StoreAck::Failed`], not a panic: panicking converts one bad
+    /// volume into the loss of every shard this node leads, and those shards then
+    /// re-elect and rehydrate elsewhere — a cluster event caused by a local fault.
+    /// Refusing instead leaves the node running, dropping out of its quorums, where
+    /// its peers' existing majority logic already covers it.
+    ///
+    /// The first cause is kept and later ones ignored: the first is the one that
+    /// explains the rest.
+    fn fail(&self, why: String) {
+        let mut poison = self.poison.lock().expect("grain store poison mutex");
+        if poison.is_none() {
+            *poison = Some(why);
+        }
+    }
+
+    /// Whether this store has been poisoned — checked before any operation touches
+    /// the disk, so a failed store does no further I/O and answers uniformly.
+    fn poisoned(&self) -> bool {
+        self.poison
+            .lock()
+            .expect("grain store poison mutex")
+            .is_some()
+    }
+
+    /// Why this store is unusable, or `None` while healthy. The deployment's health
+    /// probe reads this: a poisoned store is a node to replace, and nothing recovers
+    /// it in place (the flag is one-way).
+    pub fn failure(&self) -> Option<String> {
+        self.poison
+            .lock()
+            .expect("grain store poison mutex")
+            .clone()
     }
 
     /// A [`GrainStoreFactory`] rooted at `root`: each hosted grain type's records live
@@ -278,6 +388,9 @@ impl FileGrainStore {
     /// `create` is false the read path gets `None` for a grain it has not seen, rather
     /// than allocating a segment for it.
     fn segment(&self, shard: u32, grain: &GrainName, create: bool) -> Option<Arc<Segment>> {
+        if self.poisoned() {
+            return None;
+        }
         let mut segments = self.segments.lock().expect("grain store segments poisoned");
         if let Some(segment) = segments.get(&(shard, grain.clone())) {
             return Some(Arc::clone(segment));
@@ -291,9 +404,64 @@ impl FileGrainStore {
         if !create && !self.segment_path(id).exists() {
             return None;
         }
-        let segment = Arc::new(open_segment(&self.dir, id));
+        // A segment that will not open poisons the store: the file is there (or should
+        // be) and unreadable, which is the disk failing, not the grain being absent.
+        // Returning `None` alone would read as "no such grain" and answer an empty
+        // history for a grain that has one.
+        let segment = match open_segment(&self.dir, id) {
+            Ok(segment) => Arc::new(segment),
+            Err(err) => {
+                self.fail(format!(
+                    "cannot open grain segment {}: {err}",
+                    self.segment_path(id).display()
+                ));
+                return None;
+            }
+        };
         segments.insert((shard, grain.clone()), Arc::clone(&segment));
+        Self::evict_idle_segments(&mut segments, self.segment_capacity);
         Some(segment)
+    }
+
+    /// Close segments the store is no longer using, once the loaded set exceeds
+    /// `capacity`.
+    ///
+    /// Every loaded segment holds an **open file descriptor** (a `Wal` owns its
+    /// `File`), and until this existed nothing ever closed one: a segment entered the
+    /// map on first access and left only when its grain was explicitly deleted. A
+    /// grain hibernating (§10) does not touch the store, so a node accumulated one fd
+    /// per distinct grain it had *ever* served, for its whole lifetime — a hard
+    /// ceiling at the process's descriptor limit, reached at a grain count far below
+    /// anything else here is sized for, and with no back pressure before it.
+    ///
+    /// Closing one costs only a reopen-and-replay on the next access, which
+    /// compaction bounds to a checkpoint plus the records above it (§9).
+    ///
+    /// **Only entries the map alone holds are evicted.** A `Segment` handed to a
+    /// caller is an `Arc`, and dropping the map's copy would not close the file — but
+    /// it would let the next access open a *second* `Wal` on the same path, and two
+    /// appending handles on one file interleave into corruption. `strong_count == 1`
+    /// under the map lock is exactly the condition that cannot happen, since the lock
+    /// is the only way to obtain a clone. If every entry is in use the map is left
+    /// over capacity rather than made unsafe; the callers are transient, so the next
+    /// insert finds them idle.
+    fn evict_idle_segments(
+        segments: &mut HashMap<(u32, GrainName), Arc<Segment>>,
+        capacity: usize,
+    ) {
+        if segments.len() <= capacity {
+            return;
+        }
+        let excess = segments.len() - capacity;
+        let idle: Vec<(u32, GrainName)> = segments
+            .iter()
+            .filter(|(_, segment)| Arc::strong_count(segment) == 1)
+            .map(|(key, _)| key.clone())
+            .take(excess)
+            .collect();
+        for key in idle {
+            segments.remove(&key);
+        }
     }
 
     /// The on-disk path of one grain's segment log, `segments/<segment id>`.
@@ -303,9 +471,9 @@ impl FileGrainStore {
 
     /// The loaded segment for `(shard, grain)`, allocating one if the grain is unknown
     /// — the write path, where a segment is always available.
-    fn segment_or_create(&self, shard: u32, grain: &GrainName) -> Arc<Segment> {
+    /// `None` only when the store is poisoned — allocation itself always succeeds.
+    fn segment_or_create(&self, shard: u32, grain: &GrainName) -> Option<Arc<Segment>> {
         self.segment(shard, grain, true)
-            .expect("create allocates a segment")
     }
 
     /// The loaded segment for `(shard, grain)`, or `None` if the grain is unknown —
@@ -336,7 +504,17 @@ impl FileGrainStore {
 
     /// The segment id for `(shard, grain)`: the existing assignment, or — when
     /// `create` — a freshly allocated one, durably appended to the manifest first.
+    ///
+    /// The poison check lives here rather than only in the callers because this is the
+    /// one gate every area of the store passes through — records, snapshots, and the
+    /// blob area alike. A poisoned store must not answer for the blob area either just
+    /// because that subtree happens to still be writable: the failure it saw belongs
+    /// to the volume, and a replica that cannot serve a grain's records has no
+    /// business acknowledging its blobs.
     fn segment_id(&self, shard: u32, grain: &GrainName, create: bool) -> Option<u64> {
+        if self.poisoned() {
+            return None;
+        }
         let mut manifest = self.manifest.lock().expect("grain store manifest poisoned");
         if let Some(id) = manifest.ids.get(&(shard, grain.clone())) {
             return Some(*id);
@@ -345,21 +523,23 @@ impl FileGrainStore {
             return None;
         }
         let id = manifest.next;
-        manifest.next += 1;
         let path = manifest.path.clone();
-        manifest
-            .log
-            .append(&ManifestEntry {
-                shard,
-                grain: grain.clone(),
-                id,
-            })
-            .unwrap_or_else(|err| {
-                panic!(
-                    "grain store manifest persistence failed at {}: {err}",
-                    path.display()
-                )
-            });
+        if let Err(err) = manifest.log.append(&ManifestEntry {
+            shard,
+            grain: grain.clone(),
+            id,
+        }) {
+            // The id is not consumed and the mapping is not published: an unrecorded
+            // assignment must not survive in memory, or this store would use an id its
+            // manifest never named and a restart would lose the grain's segment.
+            drop(manifest);
+            self.fail(format!(
+                "grain store manifest persistence failed at {}: {err}",
+                path.display()
+            ));
+            return None;
+        }
+        manifest.next += 1;
         manifest.ids.insert((shard, grain.clone()), id);
         Some(id)
     }
@@ -391,16 +571,26 @@ impl FileGrainStore {
     /// Rewrite a grain's segment to a single `Checkpoint` of its current state, folding
     /// away the record ops a snapshot made redundant (§9), and swap in the fresh append
     /// handle. Called under the held segment lock so no append races the rewrite.
-    fn checkpoint(&self, segment: &Segment, inner: &mut SegmentInner) {
-        inner
+    ///
+    /// Returns whether the rewrite succeeded. A failure poisons the store: the
+    /// rewrite is atomic (the old segment survives on any error), so nothing is
+    /// corrupt — but the volume that could not take a compaction cannot take the
+    /// next append either, and the write that triggered this must not report itself
+    /// durable.
+    fn checkpoint(&self, segment: &Segment, inner: &mut SegmentInner) -> bool {
+        match inner
             .log
             .rewrite(&[SegOp::Checkpoint(inner.records.export())])
-            .unwrap_or_else(|err| {
-                panic!(
+        {
+            Ok(()) => true,
+            Err(err) => {
+                self.fail(format!(
                     "grain store compaction failed at {}: {err}",
                     segment.path.display()
-                )
-            });
+                ));
+                false
+            }
+        }
     }
 }
 
@@ -479,10 +669,10 @@ fn load_manifest(dir: &Path) -> io::Result<Manifest> {
 
 /// Open and replay a grain's segment file, truncating any torn tail. A `Checkpoint`
 /// loads the whole segment state; every other op is re-applied to it in log order.
-fn open_segment(dir: &Path, id: u64) -> Segment {
+fn open_segment(dir: &Path, id: u64) -> io::Result<Segment> {
     let path = dir.join("segments").join(id.to_string());
-    let (log, ops) = Wal::<SegOp>::open(&path, MAX_RECORD, &SEGMENT_RECORDS)
-        .unwrap_or_else(|err| panic!("cannot open grain segment {}: {err}", path.display()));
+    let (log, ops) =
+        Wal::<SegOp>::open(&path, MAX_RECORD, &SEGMENT_RECORDS).map_err(wal::OpenError::into_io)?;
     let mut records = GrainRecords::default();
     for op in ops {
         match op {
@@ -501,10 +691,10 @@ fn open_segment(dir: &Path, id: u64) -> Segment {
             SegOp::Truncate { after, term } => records.truncate(after, term),
         }
     }
-    Segment {
+    Ok(Segment {
         path,
         inner: Mutex::new(SegmentInner { records, log }),
-    }
+    })
 }
 
 /// Load every `seals/<shard>` file into a shard→bound map (eager, like the
@@ -577,19 +767,23 @@ impl WriteGuard for FileGrainStore {
 
     /// Persists the bump before returning. The fence file is rewritten only when the
     /// term actually advances, so a steady-state append (same term) never touches it.
-    fn bump_fence(&self, shard: u32, term: Term) -> Result<(), Term> {
+    fn bump_fence(&self, shard: u32, term: Term) -> Result<(), BumpRefusal> {
         let mut fences = self.fences.lock().expect("grain store fences poisoned");
         let fence = *fences.get(&shard).unwrap_or(&Term::ZERO);
         if term < fence {
-            return Err(fence);
+            return Err(BumpRefusal::Fenced(fence));
         }
         if term > fence {
-            write_fence(&self.dir, shard, term).unwrap_or_else(|err| {
-                panic!(
+            // The in-memory fence advances only after the file does. A bump kept only
+            // in memory would be forgotten on restart, and this replica would then
+            // accept a term it had already refused (§8).
+            if let Err(err) = write_fence(&self.dir, shard, term) {
+                self.fail(format!(
                     "grain store fence persistence failed at {}: {err}",
                     self.dir.display()
-                )
-            });
+                ));
+                return Err(BumpRefusal::Failed);
+            }
             fences.insert(shard, term);
         }
         Ok(())
@@ -599,29 +793,40 @@ impl WriteGuard for FileGrainStore {
 // Every reply is `Reserved::ready`: this store fsyncs synchronously inside each call,
 // so an outcome it settles is already stable when it returns.
 impl GrainBlobStore for FileGrainStore {
-    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) -> Reserved<()> {
+    fn put_blob(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+    ) -> Reserved<BlobAck> {
         // One content-addressed file per blob, persisted with the same atomic
         // write-and-fsync the fence uses: no ack for a blob that is not durable.
-        let seg_id = self
-            .segment_id(shard, grain, true)
-            .expect("create allocates an id");
+        let Some(seg_id) = self.segment_id(shard, grain, true) else {
+            return Reserved::ready(BlobAck::Failed); // poisoned; `segment_id` said why
+        };
         let dir = self.blob_dir(seg_id);
         let name = id.to_string();
         // Idempotent: equal content under the same id is already durable (B2).
         if dir.join(&name).exists() {
-            return Reserved::ready(());
+            return Reserved::ready(BlobAck::Stored);
         }
-        fs::create_dir_all(&dir).unwrap_or_else(|err| {
-            panic!("grain store blob dir failed at {}: {err}", dir.display())
-        });
-        wal::atomic_replace(&dir, &name, &bytes).unwrap_or_else(|err| {
-            panic!(
+        if let Err(err) = fs::create_dir_all(&dir) {
+            self.fail(format!(
+                "grain store blob dir failed at {}: {err}",
+                dir.display()
+            ));
+            return Reserved::ready(BlobAck::Failed);
+        }
+        if let Err(err) = wal::atomic_replace(&dir, &name, &bytes) {
+            self.fail(format!(
                 "grain store blob persistence failed at {}: {err} — a replica that \
                  cannot persist a blob cannot safely acknowledge it",
                 dir.display()
-            )
-        });
-        Reserved::ready(())
+            ));
+            return Reserved::ready(BlobAck::Failed);
+        }
+        Reserved::ready(BlobAck::Stored)
     }
 
     fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Reserved<Option<Vec<u8>>> {
@@ -632,7 +837,17 @@ impl GrainBlobStore for FileGrainStore {
         Reserved::ready(match fs::read(&path) {
             Ok(bytes) => Some(bytes),
             Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-            Err(err) => panic!("grain store blob read failed at {}: {err}", path.display()),
+            // Unreadable is not absent, but the read path cannot tell the caller so:
+            // it answers `None`, and the caller falls through to a verifying replica
+            // (**G17**). Poisoning is what keeps that honest — this store stops
+            // claiming to hold anything rather than reporting a blob it cannot serve.
+            Err(err) => {
+                self.fail(format!(
+                    "grain store blob read failed at {}: {err}",
+                    path.display()
+                ));
+                None
+            }
         })
     }
 
@@ -712,28 +927,32 @@ impl GrainStore for FileGrainStore {
         records: Vec<Vec<u8>>,
         kind: WriteKind,
     ) -> Reserved<StoreAck> {
-        let segment = self.segment_or_create(shard, grain);
+        let Some(segment) = self.segment_or_create(shard, grain) else {
+            return Reserved::ready(StoreAck::Failed);
+        };
         // Guard and apply under the segment lock, durable fence bump included, so a
         // concurrent `prepare` cannot slip between them (the fencing race, §8).
         let mut inner = segment.inner.lock().expect("grain segment poisoned");
         if let Err(ack) = self.guard_record(shard, grain, term, kind) {
             return Reserved::ready(ack);
         }
-        inner
-            .log
-            .append(&SegOp::Record {
-                after,
-                term,
-                records: records.clone(),
-                kind,
-            })
-            .unwrap_or_else(|err| {
-                panic!(
-                    "grain store persistence failed at {}: {err} — a replica that cannot \
-                     persist a record cannot safely acknowledge it",
-                    segment.path.display()
-                )
-            });
+        // Durable before in-memory, so a record this store reports is one it holds. On
+        // a write failure the in-memory apply is skipped and the store is poisoned:
+        // refusing is the only honest answer, since acknowledging a record that is not
+        // on disk shrinks a committed write's durability below its quorum (**G14**).
+        if let Err(err) = inner.log.append(&SegOp::Record {
+            after,
+            term,
+            records: records.clone(),
+            kind,
+        }) {
+            self.fail(format!(
+                "grain store persistence failed at {}: {err} — a replica that cannot \
+                 persist a record cannot safely acknowledge it",
+                segment.path.display()
+            ));
+            return Reserved::ready(StoreAck::Failed);
+        }
         Reserved::ready(inner.records.store_record(after, term, records, kind))
     }
 
@@ -759,7 +978,10 @@ impl GrainStore for FileGrainStore {
     }
 
     fn snapshot(&self, shard: u32, grain: &GrainName) -> Reserved<Option<(Seq, Vec<u8>)>> {
-        Reserved::ready(self.with_records(shard, grain, GrainRecords::snapshot).flatten())
+        Reserved::ready(
+            self.with_records(shard, grain, GrainRecords::snapshot)
+                .flatten(),
+        )
     }
 
     fn read_from(
@@ -787,12 +1009,17 @@ impl GrainStore for FileGrainStore {
         // and the read is what makes the promise and the returned view atomic against a
         // concurrent first append — a lock-free empty reply could miss a lower-term
         // record stored and acked in the window.
-        let segment = self.segment_or_create(shard, grain);
+        let Some(segment) = self.segment_or_create(shard, grain) else {
+            return Reserved::ready(ReadOutcome::Failed);
+        };
         let inner = segment.inner.lock().expect("grain segment poisoned");
-        if let Err(fence) = self.bump_fence(shard, term) {
-            return Reserved::ready(ReadOutcome::Fenced(fence));
+        match self.bump_fence(shard, term) {
+            Ok(()) => Reserved::ready(ReadOutcome::Prepared(inner.records.read())),
+            Err(BumpRefusal::Fenced(fence)) => Reserved::ready(ReadOutcome::Fenced(fence)),
+            // The promise could not be made durable, so it was not made: answering
+            // `Prepared` would offer a fence this store forgets on restart (§8).
+            Err(BumpRefusal::Failed) => Reserved::ready(ReadOutcome::Failed),
         }
-        Reserved::ready(ReadOutcome::Prepared(inner.records.read()))
     }
 
     fn store_snapshot(
@@ -804,7 +1031,9 @@ impl GrainStore for FileGrainStore {
         state: Vec<u8>,
         kind: WriteKind,
     ) -> Reserved<StoreAck> {
-        let segment = self.segment_or_create(shard, grain);
+        let Some(segment) = self.segment_or_create(shard, grain) else {
+            return Reserved::ready(StoreAck::Failed);
+        };
         let mut inner = segment.inner.lock().expect("grain segment poisoned");
         if let Err(ack) = self.guard_snapshot(shard, term, kind) {
             return Reserved::ready(ack);
@@ -813,8 +1042,8 @@ impl GrainStore for FileGrainStore {
         // A snapshot that advanced the base just compacted the records it subsumes
         // (§9): rewrite this grain's segment to a single checkpoint that embeds the
         // snapshot. One that did *not* advance writes nothing durable (module docs).
-        if advanced {
-            self.checkpoint(&segment, &mut inner);
+        if advanced && !self.checkpoint(&segment, &mut inner) {
+            return Reserved::ready(StoreAck::Failed);
         }
         Reserved::ready(ack)
     }
@@ -827,15 +1056,16 @@ impl GrainStore for FileGrainStore {
             return Reserved::ready(());
         };
         let mut inner = segment.inner.lock().expect("grain segment poisoned");
-        inner
-            .log
-            .append(&SegOp::Truncate { after, term })
-            .unwrap_or_else(|err| {
-                panic!(
-                    "grain store persistence failed at {}: {err}",
-                    segment.path.display()
-                )
-            });
+        // A truncate that is not durable must not be applied in memory either: the
+        // rollback exists so a later quorum-less recovery does not fold an uncommitted
+        // record (§7.2), and dropping it only in memory would restore it on restart.
+        if let Err(err) = inner.log.append(&SegOp::Truncate { after, term }) {
+            self.fail(format!(
+                "grain store persistence failed at {}: {err}",
+                segment.path.display()
+            ));
+            return Reserved::ready(());
+        }
         inner.records.truncate(after, term);
         Reserved::ready(())
     }
@@ -874,13 +1104,20 @@ impl GrainStore for FileGrainStore {
         // leader could assemble a majority for the moved range afterward (G15).
         let bound = seals.get(&shard).map_or(from, |&cur| cur.min(from));
         if seals.get(&shard) != Some(&bound) {
-            write_seal(&self.dir, shard, bound).unwrap_or_else(|err| {
-                panic!(
+            // In memory only after the file: a bound this replica forgets on restart
+            // would let a stale leader assemble a majority for the moved range (G15).
+            // `seal_range` has no refusal to report, but the seal's majority stays
+            // sound anyway: poisoning makes this store answer `Failed` to *every*
+            // subsequent append, which refuses strictly more than the bound would, so
+            // counting it toward the seal cannot let a moved-range write through.
+            if let Err(err) = write_seal(&self.dir, shard, bound) {
+                self.fail(format!(
                     "grain store seal persistence failed at {}: {err} — a replica \
                      that cannot persist the bound cannot safely promise it",
                     self.dir.display()
-                )
-            });
+                ));
+                return Reserved::ready(());
+            }
             seals.insert(shard, bound);
         }
         Reserved::ready(())
@@ -935,6 +1172,15 @@ impl GrainStore for FileGrainStore {
     fn shard_bytes(&self, shard: u32) -> u64 {
         // File sizes, not in-memory sizes: segments load lazily, and the trigger
         // needs the durable footprint anyway.
+        //
+        // Restating the filesystem each time, rather than maintaining a counter. A
+        // `stat` served from the dentry cache is around a microsecond, so a shard
+        // holding 100k grains costs ~100 ms of one core per sweep — and the sweep runs
+        // every SPLIT_TRIGGER_INTERVAL (30 s) on a node with cores to spare
+        // (`docs/hardware-envelope.md` §3.3). A maintained counter would be a number
+        // that can drift from the filesystem, on the one path whose job is to describe
+        // it. **Revisit when a sweep exceeds a second**, which is the point where the
+        // trade turns.
         let ids: Vec<u64> = {
             let manifest = self.manifest.lock().expect("grain store manifest poisoned");
             manifest
@@ -973,12 +1219,13 @@ mod tests {
         GrainName::new("test.Grain", key)
     }
 
-    /// Drive a store call to its durable outcome. These tests are synchronous by
-    /// design — `a_prepare_append_race_never_hides_a_stored_record` races the store's
-    /// own lock discipline (§18.1), which an async task cannot exercise — so they
-    /// block rather than run a runtime.
+    /// Read a store call's durable outcome. The call fsynced before it returned, so
+    /// this only unwraps the settled value —
+    /// `a_prepare_append_race_never_hides_a_stored_record` depends on that being true
+    /// synchronously, since it races the store's own lock discipline (§18.1) from
+    /// threads rather than from tasks.
     fn now<T: Send + 'static>(reserved: Reserved<T>) -> T {
-        futures::executor::block_on(reserved.durable())
+        reserved.durable()
     }
 
     /// The single-writer rule, enforced rather than documented.
@@ -1605,5 +1852,225 @@ mod tests {
                 "snapshot diverged after step {step}"
             );
         }
+    }
+
+    /// The descriptor bound: serving unboundedly many distinct grains must not leave
+    /// unboundedly many segments — and so file descriptors — open.
+    ///
+    /// Before this, a segment entered the loaded set on first access and left only
+    /// when its grain was deleted, so a long-lived node accumulated one open fd per
+    /// grain it had ever touched. Hibernation does not help: it stops the grain's
+    /// host, which never touches the store.
+    #[test]
+    fn the_loaded_segment_set_stays_bounded_across_many_grains() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = FileGrainStore::open(dir.path()).expect("open");
+        store.segment_capacity = 16;
+        for i in 0..500 {
+            let grain = name(&format!("grain-{i}"));
+            now(store.store_record(
+                0,
+                &grain,
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"x".to_vec()],
+                WriteKind::Append,
+            ));
+        }
+        let loaded = store.segments.lock().expect("segments").len();
+        assert!(
+            loaded <= 16,
+            "500 grains left {loaded} segments open against a capacity of 16"
+        );
+    }
+
+    /// Eviction must never close a segment a caller still holds: two `Wal` handles
+    /// appending to one file interleave into corruption, which is what a second
+    /// `open_segment` on an evicted-but-live path would produce.
+    #[test]
+    fn a_segment_in_use_is_never_evicted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = FileGrainStore::open(dir.path()).expect("open");
+        store.segment_capacity = 1;
+        let held = name("held");
+        now(store.store_record(
+            0,
+            &held,
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"a".to_vec()],
+            WriteKind::Append,
+        ));
+        // Hold it the way a caller does, then push far past capacity.
+        let live = store.segment(0, &held, false).expect("the held segment");
+        for i in 0..50 {
+            let grain = name(&format!("other-{i}"));
+            now(store.store_record(
+                0,
+                &grain,
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"y".to_vec()],
+                WriteKind::Append,
+            ));
+        }
+        let same = store.segment(0, &held, false).expect("still resolvable");
+        assert!(
+            Arc::ptr_eq(&live, &same),
+            "a held segment stayed the same instance — a second Wal on its file would corrupt it"
+        );
+        drop(live);
+        drop(same);
+        // Once released it becomes evictable like any other, so holding one entry
+        // does not defeat the bound.
+        for i in 50..120 {
+            let grain = name(&format!("other-{i}"));
+            now(store.store_record(
+                0,
+                &grain,
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"z".to_vec()],
+                WriteKind::Append,
+            ));
+        }
+        assert!(
+            store.segments.lock().expect("segments").len() <= 2,
+            "a released segment is evictable again"
+        );
+    }
+
+    /// An evicted segment must reopen to exactly the state it had: eviction is a
+    /// cache decision, and the file is the truth (**G3**).
+    #[test]
+    fn an_evicted_segment_reopens_with_its_records_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = FileGrainStore::open(dir.path()).expect("open");
+        store.segment_capacity = 1;
+        let grain = name("survivor");
+        now(store.store_record(
+            0,
+            &grain,
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"one".to_vec(), b"two".to_vec()],
+            WriteKind::Append,
+        ));
+        // Push it out of the loaded set.
+        for i in 0..20 {
+            now(store.store_record(
+                0,
+                &name(&format!("filler-{i}")),
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"f".to_vec()],
+                WriteKind::Append,
+            ));
+        }
+        let reply = now(store.read(0, &grain));
+        assert_eq!(
+            reply.slots.len(),
+            2,
+            "the reopened segment holds both records"
+        );
+        assert_eq!(reply.head(), Seq::new(2));
+    }
+
+    /// The failure policy: a store that cannot write **refuses**, and keeps refusing.
+    ///
+    /// The alternative this replaced was a panic, which took the whole process — and
+    /// with it every other shard the node led — down for one bad volume. Refusing
+    /// leaves the node up and simply outside its shards' quorums, which the peers'
+    /// majority logic already handles.
+    #[test]
+    fn a_store_that_cannot_write_refuses_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileGrainStore::open(dir.path()).expect("open");
+        let healthy = name("healthy");
+        assert!(matches!(
+            now(store.store_record(
+                0,
+                &healthy,
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"a".to_vec()],
+                WriteKind::Append
+            )),
+            StoreAck::Stored(_)
+        ));
+        assert_eq!(store.failure(), None, "a working store is not poisoned");
+
+        // Take the segment area away: the next grain needs a segment file and cannot
+        // get one. Standing in for the full volume or failing device this guards.
+        fs::remove_dir_all(dir.path().join("segments")).unwrap();
+
+        let doomed = name("doomed");
+        assert_eq!(
+            now(store.store_record(
+                0,
+                &doomed,
+                Seq::ZERO,
+                Term::new(1),
+                vec![b"b".to_vec()],
+                WriteKind::Append
+            )),
+            StoreAck::Failed,
+            "a record that cannot be persisted must not be acknowledged"
+        );
+        assert!(store.failure().is_some(), "the failure is recorded");
+    }
+
+    /// Poisoning is store-wide and one-way: after the first failure the store stops
+    /// claiming anything, including for grains it had already served successfully.
+    /// A store that answered `Stored` again here would be acknowledging writes it can
+    /// no longer persist.
+    #[test]
+    fn a_poisoned_store_refuses_every_later_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileGrainStore::open(dir.path()).expect("open");
+        let grain = name("served");
+        now(store.store_record(
+            0,
+            &grain,
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"a".to_vec()],
+            WriteKind::Append,
+        ));
+        fs::remove_dir_all(dir.path().join("segments")).unwrap();
+        now(store.store_record(
+            0,
+            &name("other"),
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"b".to_vec()],
+            WriteKind::Append,
+        ));
+        assert!(store.failure().is_some(), "poisoned by the failed write");
+
+        assert_eq!(
+            now(store.store_record(
+                0,
+                &grain,
+                Seq::new(1),
+                Term::new(1),
+                vec![b"c".to_vec()],
+                WriteKind::Append
+            )),
+            StoreAck::Failed,
+            "a previously served grain is refused too — the volume is the unit"
+        );
+        // The promise, not just the view: a replica that cannot durably record the
+        // term it promised could accept a lower one after a restart (§8, G14).
+        assert_eq!(
+            now(store.prepare(0, &grain, Term::new(2))),
+            ReadOutcome::Failed,
+            "a fence it cannot persist is a fence it has not promised"
+        );
+        assert_eq!(
+            now(store.put_blob(0, &grain, BlobId::of(b"x"), b"x".to_vec())),
+            BlobAck::Failed,
+            "a blob copy it cannot store must not count toward a quorum"
+        );
     }
 }

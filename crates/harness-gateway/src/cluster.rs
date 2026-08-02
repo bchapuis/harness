@@ -27,6 +27,7 @@ use actor_core::NodeId;
 use actor_runtime::DEFAULT_CONNECT_TIMEOUT;
 use actor_runtime::DEFAULT_HANDSHAKE_TIMEOUT;
 use actor_runtime::DEFAULT_OUTBOUND_CAPACITY;
+use actor_runtime::Encryption;
 use actor_runtime::OsEntropy;
 use actor_runtime::TcpCluster;
 use actor_runtime::TcpConfig;
@@ -110,7 +111,9 @@ pub async fn join(opts: ClusterOptions) -> Result<TcpCluster, String> {
             codec: Arc::new(JsonCodec),
             cluster_secret: opts.secret.clone(),
             allowlist: Some(admitted),
-            tls: None,
+            // The gateway joins inside the cluster's trust boundary (see
+            // `docs/multi-tenant-edge.md`); the same plaintext caveat applies.
+            encryption: Encryption::PlaintextTrusted,
         },
         listener,
     );

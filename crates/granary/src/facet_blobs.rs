@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use actor_core::join_all_results;
+use futures::StreamExt;
 
 use crate::blobs::BlobId;
 use crate::blobs::GrainBlobs;
@@ -42,39 +42,77 @@ impl RootSet {
     }
 }
 
-/// Store `chunks` in the grain's blob area, returning their ids in order. The
-/// puts are independent and issue concurrently; dedup makes a chunk already
-/// stored ~free (§7.10). `what` labels a failure (e.g. `"sql checkpoint"`).
+/// How many chunk transfers a facet keeps in flight at once.
+///
+/// The transfers are not free-floating work: each is a quorum round carrying a whole
+/// chunk to every replica, so the bytes in flight are roughly
+/// `IN_FLIGHT_CHUNKS × chunk size × replicas`. Unbounded, a large artifact issues one
+/// per chunk — a 16 GiB disk image at 1 MiB blocks is over sixteen thousand
+/// concurrent quorum puts — and the resulting buffers and sockets are what fails,
+/// long before the device does. The point of a bound is that past the width that
+/// keeps the link busy, more concurrency adds queueing rather than throughput, so
+/// this costs nothing on small artifacts and is the difference between working and
+/// OOM on large ones.
+const IN_FLIGHT_CHUNKS: usize = 16;
+
+/// Await every future in `work` with at most [`IN_FLIGHT_CHUNKS`] outstanding,
+/// returning their values **in the original order**.
+///
+/// Every future is polled to completion even after one fails — the reason
+/// `join_all_results` was chosen over `try_join_all` here. A short-circuiting
+/// combinator drops the transfers still in flight and abandons the peer `ask`s they
+/// had already issued (core spec §18.5 #1); the transfers are independent and
+/// content-addressed, so finishing them costs nothing and leaves more of the
+/// checkpoint durable. Buffering preserves that: it only declines to *start* work,
+/// which is not the same as abandoning work already issued.
+async fn bounded_in_order<F, T>(work: Vec<F>, what: &str) -> Result<Vec<T>, FacetError>
+where
+    F: std::future::Future<Output = Result<T, crate::error::GrainError>>,
+{
+    // Tagged with its position, because completion order is not submission order.
+    let mut done: Vec<(usize, Result<T, crate::error::GrainError>)> = futures::stream::iter(
+        work.into_iter()
+            .enumerate()
+            .map(|(i, f)| async move { (i, f.await) }),
+    )
+    .buffer_unordered(IN_FLIGHT_CHUNKS)
+    .collect()
+    .await;
+    done.sort_by_key(|(i, _)| *i);
+    done.into_iter()
+        .map(|(_, r)| r.map_err(|e| FacetError(format!("{what}: {e:?}"))))
+        .collect()
+}
+
+/// Store `chunks` in the grain's blob area, returning their ids in order. The puts
+/// are independent and issue concurrently, [`IN_FLIGHT_CHUNKS`] at a time; dedup
+/// makes a chunk already stored ~free (§7.10). `what` labels a failure (e.g.
+/// `"sql checkpoint"`).
 pub(crate) async fn put_chunked(
     blobs: &GrainBlobs,
     chunks: Vec<Vec<u8>>,
     what: &str,
 ) -> Result<Vec<BlobId>, FacetError> {
-    // `join_all_results`, not `try_join_all`: the latter returns on the first
-    // failure and drops the puts still in flight, abandoning the peer `ask`s they
-    // had already issued (core spec §18.5 #1). The puts are independent and
-    // content-addressed, so finishing them costs nothing and leaves more of the
-    // checkpoint durable.
-    join_all_results(chunks.into_iter().map(|chunk| blobs.put(chunk)))
-        .await
-        .map_err(|e| FacetError(format!("{what} put: {e:?}")))
+    let work: Vec<_> = chunks.into_iter().map(|chunk| blobs.put(chunk)).collect();
+    bounded_in_order(work, &format!("{what} put")).await
 }
 
 /// Fetch `ids` from the grain's blob area and concatenate them in order — the
-/// restore half of [`put_chunked`]. The gets are independent and issue
-/// concurrently; each verifies by content (G17). The caller applies its own
-/// length discipline to the result (the manifest, not the chunks, carries the
-/// exact byte count).
+/// restore half of [`put_chunked`]. The gets issue [`IN_FLIGHT_CHUNKS`] at a time and
+/// each verifies by content (G17). The caller applies its own length discipline to
+/// the result (the manifest, not the chunks, carries the exact byte count).
+///
+/// Note this materializes the whole artifact in memory, so it suits facets whose
+/// manifests are themselves bounded (the workspace tree's 64 MiB cap). A facet
+/// restoring something larger should write chunk by chunk into its target instead,
+/// as the disk facet's `apply_manifest` does.
 pub(crate) async fn get_concat(
     blobs: &GrainBlobs,
     ids: &[BlobId],
     what: &str,
 ) -> Result<Vec<u8>, FacetError> {
-    // See `put_chunked`: a short-circuiting join would abandon the fetches still
-    // in flight along with their asks.
-    let parts = join_all_results(ids.iter().map(|id| blobs.get(*id, None)))
-        .await
-        .map_err(|e| FacetError(format!("{what} get: {e:?}")))?;
+    let work: Vec<_> = ids.iter().map(|id| blobs.get(*id, None)).collect();
+    let parts = bounded_in_order(work, &format!("{what} get")).await?;
     Ok(parts.concat())
 }
 

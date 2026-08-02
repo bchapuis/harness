@@ -168,6 +168,40 @@ pub enum Frame {
         learners: Vec<NodeId>,
         data: Vec<u8>,
     },
+    /// Many groups' heartbeats in one frame, from one leader to one follower
+    /// (spec §9.4.3).
+    ///
+    /// A heartbeat is an empty [`RaftAppend`](Frame::RaftAppend), and a node that
+    /// leads `G` groups sends one to each of `R-1` followers every heartbeat
+    /// interval. Sent individually that is `G × (R-1)` frames — each its own
+    /// serialization, its own transport send — repeated several times a second, for
+    /// traffic that carries no data at all. Since granary runs one Raft group per
+    /// shard (grain §8.2) and shard count is the elasticity knob (grain §7.7), `G`
+    /// grows with the cluster, and this becomes the ceiling on how far a node can be
+    /// packed long before storage or CPU does.
+    ///
+    /// Coalescing costs nothing in semantics: each beat is dispatched to its own
+    /// group exactly as a lone `RaftAppend` would be, so every group's state machine
+    /// sees the identical sequence. Only the framing changes.
+    RaftHeartbeats { beats: Vec<RaftBeat> },
+    /// The replies to a [`RaftHeartbeats`](Frame::RaftHeartbeats), batched the same
+    /// way and for the same reason: one reply per beat would undo half the saving.
+    RaftHeartbeatReplies { replies: Vec<RaftBeatReply> },
+    /// A leadership handoff: `leader` asks the recipient to stand for election in
+    /// `group` **now**, without waiting out its election timeout (Raft §3.10).
+    ///
+    /// Sent only to a voter the leader has confirmed is caught up to its own last
+    /// index, so the recipient can win immediately rather than being rejected for a
+    /// stale log. It is safe by construction — it starts an ordinary election, which
+    /// still requires a quorum of votes, so it can move leadership but never split
+    /// it. Its purpose is to make a *planned* departure cheap: without it a draining
+    /// node's groups each wait a full election timeout, which for a node leading many
+    /// shards is a failover storm on every rolling restart.
+    RaftTimeoutNow {
+        group: GroupId,
+        term: u64,
+        leader: NodeId,
+    },
     /// An application command offered to `group`'s leader (spec §9.4.3 item 1):
     /// a non-leader node sends it to a voter, which forwards it to its leader.
     /// The command is the opaque app payload (the engine's `EntryPayload::App`
@@ -179,4 +213,30 @@ pub enum Frame {
         command: Vec<u8>,
         forwarded: bool,
     },
+}
+
+/// One group's heartbeat inside a [`Frame::RaftHeartbeats`] — the fields of an
+/// empty [`Frame::RaftAppend`], minus the `entries` that make it empty.
+///
+/// `leader` is carried per beat rather than once per frame because a node can lead
+/// some groups and merely follow others; only the groups it leads produce beats, but
+/// nothing in the wire format should assume the sender leads all of them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaftBeat {
+    pub group: GroupId,
+    pub term: u64,
+    pub leader: NodeId,
+    pub prev_index: u64,
+    pub prev_term: u64,
+    pub commit: u64,
+}
+
+/// One group's reply inside a [`Frame::RaftHeartbeatReplies`] — the fields of a
+/// [`Frame::RaftAppendReply`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaftBeatReply {
+    pub group: GroupId,
+    pub term: u64,
+    pub ok: bool,
+    pub match_index: u64,
 }

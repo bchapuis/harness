@@ -240,6 +240,91 @@ The journal's fenced append means even a *not actually dead* node (a partition,
 a pause) cannot fork the transcript: the old owner's next append loses the fence
 and deactivates. Re-submitting a turn id is always safe (invariant H7).
 
+## Sizing the host
+
+The defaults across the tree are set against one machine, described in
+[hardware-envelope](hardware-envelope.md): a dedicated server with directly
+attached NVMe, tens of cores, 128–256 GB, and — the binding constraint — a
+**1 Gbps uplink** that cluster replication and public serving share. Read that
+document before changing a number here; this section is only the operator's end
+of it.
+
+**Per node.** Eight or more cores, 32 GB and up, and local NVMe. Two things
+break first if you undershoot: the store holds its manifest whole in memory and
+caches segment handles and resolved host handles by the thousand, so memory is
+consumed by grain *count* rather than by concurrency; and the replication path
+is the uplink, so a node's sustainable ingest of new data is roughly
+`link ÷ (replication_factor − 1)` — about 60 MB/s at 1 Gbps and R=3, against a
+device that would take gigabytes per second. If replication throughput is the
+constraint you hit, the 10 Gbps uplink upgrade buys more than any tuning here.
+
+**Descriptors.** The grain store keeps up to 65536 segment files open
+(`DEFAULT_SEGMENT_CAPACITY`), plus transport connections and transient blob
+opens. Raise the limit to at least **70000** or the process hits the kernel's
+before the store's cache ever evicts anything:
+
+```ini
+# /etc/systemd/system/harness-node.service
+[Service]
+LimitNOFILE=131072
+```
+
+**Storage.** One filesystem per node, not shared, on local NVMe. Network
+attached block storage (EBS, Persistent Disk, Ceph) puts a durable flush back
+near a millisecond and reverses an assumption the storage layer is built on
+(hardware-envelope §6); it will work and it will be slower than the design
+expects.
+
+### Timeouts by topology
+
+`quorum_timeout` and `recover_timeout` (`GranaryConfig`) default to 2 s, which
+is safe everywhere and derived for nowhere. Set them from the p99.9 commit
+latency you measure, never from a median — the tail is what they exist for. As
+starting points, against the round trips in hardware-envelope §2:
+
+| topology | round trip | commit p99.9 (expect) | timeouts |
+|---|---|---|---|
+| one datacenter | ~0.2 ms | single-digit ms | 250 ms |
+| two nearby datacenters (~150 km) | ~3 ms | tens of ms | 500 ms–1 s |
+| across a continent | ~25 ms | ~100 ms | 2 s (the default) |
+| across continents | ~90 ms+ | hundreds of ms | 5 s+ |
+
+Too low is worse than too slow: every timeout here is *ambiguous* (the append
+may still commit), so it steps the activation down and forces a rehydration,
+turning transient slowness into activation churn.
+
+### Failure domains
+
+`GranaryConfig::failure_domains` defaults to `None`, which treats every node as
+its own domain — replicas spread across the cluster, but nothing stops all *R*
+of a shard landing in one rack. Since every durability claim rests on quorum
+intersection over those *R*, a concentrated shard turns one rack loss into an
+unavailable shard on a cluster that still looks healthy.
+
+There are no availability zones on dedicated hardware: the domains are racks
+and datacenter sites. Supply the mapping from whatever static metadata you
+already have per host — the site, or the rack if your provider exposes it:
+
+```rust
+// `FailureDomains` is `Arc<dyn Fn(NodeId) -> u64>`, and the mapping MUST be a
+// pure function every node evaluates identically — static deployment metadata,
+// never anything read from the local host.
+let racks: granary::FailureDomains = std::sync::Arc::new(|node: NodeId| match node.uid() {
+    1 | 2 => 0, // site A, rack 1
+    3 | 4 => 1, // site A, rack 2
+    _ => 2,     // site B
+});
+let config = GranaryConfig {
+    failure_domains: Some(racks),
+    ..GranaryConfig::default()
+};
+```
+
+The allocator then takes at most `ceil(R / domains)` replicas per domain,
+falling back to the remaining rendezvous order when a lopsided layout cannot
+meet the cap — an imperfectly spread shard is strictly better than an
+under-replicated one.
+
 ## Configuration
 
 ```

@@ -67,11 +67,10 @@ impl Rng {
     }
 }
 
-/// Drive a store call to its durable outcome. The seam settles an outcome
-/// synchronously and reports its stability separately; an oracle comparing outcomes
-/// wants the settled value, so it blocks.
+/// Read a store call's durable outcome. The seam completes the write before it
+/// returns, so this only unwraps the value the store already made stable.
 fn now<T: Send + 'static>(reserved: Reserved<T>) -> T {
-    futures::executor::block_on(reserved.durable())
+    reserved.durable()
 }
 
 fn grain(i: u64) -> GrainName {

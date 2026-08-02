@@ -23,6 +23,13 @@
 //! acknowledged, so dropping it is correct. Whatever higher-level recovery runs on top
 //! operates on the returned records.
 //!
+//! The scan reads the whole file and verifies every frame, rather than trusting a
+//! stored checkpoint offset and starting from there. That is a deliberate purchase of
+//! CPU and sequential I/O — both abundant — to delete a piece of state that could be
+//! wrong: at contemporary read and digest throughput a gigabyte of log opens in a
+//! fraction of a second, and a checkpoint pointer is one more thing a crash can leave
+//! lying (`docs/hardware-envelope.md` §3.3).
+//!
 //! # The header
 //!
 //! The header carries a magic, the **frame layout's** revision and the **checksum
@@ -661,7 +668,9 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
     /// and the latter is the tighter fit, but they do not mean the same thing everywhere:
     /// on macOS only `sync_all` is `F_FULLFSYNC`, which flushes the drive's own write
     /// cache. Taking the cheaper one would make "durable before the call returns" weaker
-    /// on the platform the crash tests run on, and it measured no faster.
+    /// on the platform the crash tests run on, and it measured no faster — which is what
+    /// a device with power-loss protection predicts, since there the cache flush the
+    /// stronger call adds is close to free (`docs/hardware-envelope.md` §2).
     ///
     /// # Errors
     ///

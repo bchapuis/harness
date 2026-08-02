@@ -47,6 +47,24 @@ impl std::fmt::Display for PrincipalId {
     }
 }
 
+/// Whether a **client-supplied** session id is well formed: non-empty and free of
+/// `/`.
+///
+/// Cross-tenant isolation does not depend on this — the principal prefix already
+/// confines a client to its own namespace, whatever it sends ([`scoped_session`]).
+/// What the rule protects is the namespace *inside* a tenant. A delegated sub-agent
+/// is named `"{session}/{turn}/{child}"` (multi-tenant-edge design), and those
+/// segments are minted by the agent, never supplied by a client. A client free to
+/// send `"demo/t-1/c-2"` could therefore address — or pre-create — one of its own
+/// sub-agents' grains, which is not a boundary break but is a name collision the
+/// caller was never meant to be able to cause.
+///
+/// Only the client-supplied segment is checked; the internally-minted child ids that
+/// legitimately contain `/` never pass through here.
+pub fn is_valid_session(session: &str) -> bool {
+    !session.is_empty() && !session.contains('/')
+}
+
 /// The grain session key for `session` under `principal`: the principal-prefixed
 /// namespace that isolates tenants. The gateway always supplies the prefix — a
 /// client only ever names the unprefixed `session` — so a client cannot address
@@ -162,6 +180,15 @@ mod tests {
         // A `/` would let a client forge another tenant's prefix.
         assert!(PrincipalId::parse("a/b").is_none());
         assert!(PrincipalId::parse("a b").is_none());
+    }
+
+    #[test]
+    fn a_client_session_id_may_not_contain_a_path_separator() {
+        assert!(is_valid_session("demo"));
+        assert!(is_valid_session("demo-1.2_3"));
+        // The delegated-child shape, which a client must not be able to name.
+        assert!(!is_valid_session("demo/t-1/c-2"));
+        assert!(!is_valid_session(""));
     }
 
     #[test]

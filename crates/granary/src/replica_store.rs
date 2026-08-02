@@ -33,10 +33,13 @@ use serde::Serialize;
 use std::sync::Arc;
 
 use crate::blobs::BlobId;
+use crate::blocking::BlockingIo;
+use crate::blocking::offload;
 use crate::grain::Grain;
 use crate::grain::GrainName;
 use crate::journal::Seq;
 use crate::journal::Term;
+use crate::store::BlobAck;
 use crate::store::GrainStore;
 use crate::store::ReadOutcome;
 use crate::store::StoreAck;
@@ -141,7 +144,9 @@ impl Message for SealRange {
 /// Store one immutable, content-addressed blob on a replica (durable-workspace
 /// design). No `after`, no `term`, no `repair`: a content hash names exactly one byte
 /// sequence, so there is nothing to fence or order and no `Fenced`/`Stale` outcome to
-/// report. The ask resolving is the durable acknowledgement.
+/// report. The reply is a [`BlobAck`]: the one thing a replica can still refuse is
+/// storing at all, and a quorum that could not distinguish that from success would
+/// count a failed replica as a durable copy (**G18**).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct StoreBlob {
     pub(crate) shard: u32,
@@ -151,7 +156,7 @@ pub(crate) struct StoreBlob {
 }
 
 impl Message for StoreBlob {
-    type Reply = ();
+    type Reply = BlobAck;
     const MANIFEST: Manifest = Manifest::new("granary.StoreBlob");
 }
 
@@ -230,13 +235,20 @@ impl Message for ListBlobs {
 /// per grain type (like the gateway), registered under [`replica_store_key`].
 pub(crate) struct ReplicaStore<G: Grain> {
     store: Arc<dyn GrainStore>,
+    /// Where this replica's blocking store calls run (§7.4). Every durable write in
+    /// the cluster that is not the leader's own copy arrives here, so this is the
+    /// hottest fsync path there is: run inline it would block the async worker that
+    /// is also driving this node's Raft heartbeats and every other shard's quorum
+    /// wait (see [`crate::blocking`]).
+    io: Arc<dyn BlockingIo>,
     _marker: PhantomData<fn() -> G>,
 }
 
 impl<G: Grain> ReplicaStore<G> {
-    pub(crate) fn new(store: Arc<dyn GrainStore>) -> ReplicaStore<G> {
+    pub(crate) fn new(store: Arc<dyn GrainStore>, io: Arc<dyn BlockingIo>) -> ReplicaStore<G> {
         ReplicaStore {
             store,
+            io,
             _marker: PhantomData,
         }
     }
@@ -259,47 +271,48 @@ impl<G: Grain> Actor for ReplicaStore<G> {
     }
 }
 
-// Every handler's reply IS the peer's acknowledgement, so each awaits durability
-// before returning: a reply released early would let the leader count this replica
-// toward a quorum for something this node has not stored (**G14**). A refusal needs no
-// wait — it changed nothing — and short-circuiting it keeps a deposed leader from
-// waiting a commit interval to learn it is deposed.
+// Every handler's reply IS the peer's acknowledgement, so each returns only what the
+// store has already made durable: a reply released early would let the leader count
+// this replica toward a quorum for something this node has not stored (**G14**). The
+// store settles the write before it returns, so the durability is the offloaded call's
+// own — there is nothing further to await here.
 impl<G: Grain> Handler<StoreRecord> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreRecord, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
-        let stored = self.store.store_record(
-            msg.shard,
-            &msg.grain,
-            msg.after,
-            msg.term,
-            msg.records,
-            msg.kind,
-        );
-        match stored.refusal() {
-            Some(refused) => refused,
-            None => stored.durable().await,
-        }
+        let store = Arc::clone(&self.store);
+        let stored = offload(&self.io, move || {
+            store.store_record(
+                msg.shard,
+                &msg.grain,
+                msg.after,
+                msg.term,
+                msg.records,
+                msg.kind,
+            )
+        })
+        .await;
+        stored.durable()
     }
 }
 
 impl<G: Grain> Handler<ReadGrain> for ReplicaStore<G> {
     async fn handle(&mut self, msg: ReadGrain, _ctx: &Ctx<ReplicaStore<G>>) -> ReadOutcome {
-        let prepared = self.store.prepare(msg.shard, &msg.grain, msg.term);
-        match prepared.refusal() {
-            Some(higher) => ReadOutcome::Fenced(higher),
-            None => prepared.durable().await,
-        }
+        let store = Arc::clone(&self.store);
+        let prepared = offload(&self.io, move || {
+            store.prepare(msg.shard, &msg.grain, msg.term)
+        })
+        .await;
+        prepared.durable()
     }
 }
 
 impl<G: Grain> Handler<StoreSnapshot> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreSnapshot, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
-        let stored = self
-            .store
-            .store_snapshot(msg.shard, &msg.grain, msg.at, msg.term, msg.state, msg.kind);
-        match stored.refusal() {
-            Some(refused) => refused,
-            None => stored.durable().await,
-        }
+        let store = Arc::clone(&self.store);
+        let stored = offload(&self.io, move || {
+            store.store_snapshot(msg.shard, &msg.grain, msg.at, msg.term, msg.state, msg.kind)
+        })
+        .await;
+        stored.durable()
     }
 }
 
@@ -307,34 +320,33 @@ impl<G: Grain> Handler<SealRange> for ReplicaStore<G> {
     async fn handle(&mut self, msg: SealRange, _ctx: &Ctx<ReplicaStore<G>>) {
         // The bound must be durable before this ask resolves, or a majority could
         // report itself sealed while a restart would forget the promise (**G15**).
-        self.store.seal_range(msg.shard, msg.from).durable().await;
+        let store = Arc::clone(&self.store);
+        offload(&self.io, move || store.seal_range(msg.shard, msg.from))
+            .await
+            .durable();
     }
 }
 
 impl<G: Grain> Handler<StoreBlob> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: StoreBlob, _ctx: &Ctx<ReplicaStore<G>>) {
-        self.store
-            .put_blob(msg.shard, &msg.grain, msg.id, msg.bytes)
-            .durable()
-            .await;
+    async fn handle(&mut self, msg: StoreBlob, _ctx: &Ctx<ReplicaStore<G>>) -> BlobAck {
+        let store = Arc::clone(&self.store);
+        offload(&self.io, move || {
+            store.put_blob(msg.shard, &msg.grain, msg.id, msg.bytes)
+        })
+        .await
+        .durable()
     }
 }
 
 impl<G: Grain> Handler<FetchBlob> for ReplicaStore<G> {
     async fn handle(&mut self, msg: FetchBlob, _ctx: &Ctx<ReplicaStore<G>>) -> Option<Vec<u8>> {
-        self.store
-            .get_blob(msg.shard, &msg.grain, msg.id)
-            .durable()
-            .await
+        self.store.get_blob(msg.shard, &msg.grain, msg.id).durable()
     }
 }
 
 impl<G: Grain> Handler<HasBlob> for ReplicaStore<G> {
     async fn handle(&mut self, msg: HasBlob, _ctx: &Ctx<ReplicaStore<G>>) -> bool {
-        self.store
-            .has_blob(msg.shard, &msg.grain, msg.id)
-            .durable()
-            .await
+        self.store.has_blob(msg.shard, &msg.grain, msg.id).durable()
     }
 }
 
@@ -346,8 +358,7 @@ impl<G: Grain> Handler<SweepBlobs> for ReplicaStore<G> {
                 .store
                 .retain_blobs(msg.shard, &msg.grain, &ids.into_iter().collect()),
         }
-        .durable()
-        .await;
+        .durable();
     }
 }
 
@@ -359,7 +370,7 @@ impl<G: Grain> Handler<ListGrains> for ReplicaStore<G> {
 
 impl<G: Grain> Handler<ListBlobs> for ReplicaStore<G> {
     async fn handle(&mut self, msg: ListBlobs, _ctx: &Ctx<ReplicaStore<G>>) -> Vec<BlobId> {
-        self.store.blob_ids(msg.shard, &msg.grain).durable().await
+        self.store.blob_ids(msg.shard, &msg.grain).durable()
     }
 }
 
@@ -415,6 +426,8 @@ pub trait ReplicaTransport: Send + Sync + 'static {
 
     /// Store one immutable blob on a replica (durable-workspace design): unfenced,
     /// unordered — the immutable subset of [`store_record`](ReplicaTransport::store_record).
+    /// The [`BlobAck`] distinguishes a stored copy from a replica that could not
+    /// store it, so only real copies count toward the quorum (**G18**).
     fn store_blob(
         &self,
         node: NodeId,
@@ -423,7 +436,7 @@ pub trait ReplicaTransport: Send + Sync + 'static {
         id: BlobId,
         bytes: Vec<u8>,
         within: Duration,
-    ) -> BoxFuture<'static, Result<(), CallError>>;
+    ) -> BoxFuture<'static, Result<BlobAck, CallError>>;
 
     /// Fetch one blob's bytes from a replica, or `None` if it lacks it.
     fn fetch_blob(
@@ -611,7 +624,7 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         id: BlobId,
         bytes: Vec<u8>,
         within: Duration,
-    ) -> BoxFuture<'static, Result<(), CallError>> {
+    ) -> BoxFuture<'static, Result<BlobAck, CallError>> {
         self.ask(
             node,
             StoreBlob {

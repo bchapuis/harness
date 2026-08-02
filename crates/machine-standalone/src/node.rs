@@ -36,6 +36,7 @@ use actor_core::NodeId;
 use actor_runtime::DEFAULT_CONNECT_TIMEOUT;
 use actor_runtime::DEFAULT_HANDSHAKE_TIMEOUT;
 use actor_runtime::DEFAULT_OUTBOUND_CAPACITY;
+use actor_runtime::Encryption;
 use actor_runtime::FileRaftWAL;
 use actor_runtime::OsEntropy;
 use actor_runtime::TcpCluster;
@@ -199,7 +200,9 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
             // trusted cluster network. Note what this is *not* protecting —
             // the SSH connection is terminated at the door and bridged over a
             // node-local socket, so no session bytes cross this transport.
-            tls: None,
+            // See the note in `harness-standalone`: plaintext is a stated choice,
+            // valid only on a network the operator controls.
+            encryption: Encryption::PlaintextTrusted,
         },
         listener,
     );
@@ -272,9 +275,17 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     let host = machine_host(&opts, machine_kind)?;
     let provider = Arc::new(runtime_provider(&host, node, &system));
     let grain_store = FileGrainStore::factory(opts.data.join("grains"));
+    // One I/O pool for the node (granary §7.4). A machine's disk facet writes whole
+    // 1 MiB image blocks, so this is the deployment where an inline fsync would stall
+    // the executor hardest — and the node is also running Raft heartbeats on it.
+    let blocking_io: Arc<dyn granary::BlockingIo> =
+        Arc::new(granary::ThreadPoolIo::sized_for_host());
+    let metrics = Arc::new(granary::AtomicGrainMetrics::new());
     let config = GranaryConfig {
         shards: opts.shards,
         grain_store: Some(grain_store.clone()),
+        blocking_io: Some(Arc::clone(&blocking_io)),
+        metrics: Some(metrics.clone()),
         // Where the disk facet materializes each machine's image and the
         // workspace facet its files (grain §7.11, §7.15) — under --data, so a
         // restarted node finds its own.
@@ -287,6 +298,8 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // is what re-activates a due machine after hibernation or failover.
     let alarms: Granary<AlarmIndex<TcpCluster>> = system.granary(GranaryConfig {
         grain_store: Some(grain_store),
+        blocking_io: Some(blocking_io),
+        metrics: Some(metrics),
         shards: opts.shards,
         ..GranaryConfig::default()
     });

@@ -48,8 +48,10 @@ pub struct Kind {
 }
 
 impl Kind {
-    /// Start a kind from its system prompt, with conservative defaults. The
-    /// grain config defaults to granary's (`idle_after` ≈ 10s, §7.2).
+    /// Start a kind from its system prompt, with conservative defaults. The grain
+    /// config defaults to granary's, whose idle window is minutes rather than seconds
+    /// (§7.2) — which suits a session, since the gap between turns is the user's
+    /// reading time and a model call is itself seconds long.
     pub fn new(system_prompt: impl Into<String>) -> Kind {
         Kind {
             system_prompt: system_prompt.into(),

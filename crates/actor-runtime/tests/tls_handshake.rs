@@ -40,7 +40,7 @@ async fn mutual_tls_association_carries_traffic() {
     let tls = auth.tls_config();
     let with_tls = |node, peers| {
         let mut cfg = tcp_config(node, peers);
-        cfg.tls = Some(tls.clone());
+        cfg.encryption = actor_runtime::Encryption::MutualTls(Box::new(tls.clone()));
         cfg
     };
 
@@ -59,7 +59,7 @@ async fn a_wrong_cluster_secret_is_rejected() {
         let tls = tls.clone();
         move |node, peers| {
             let mut cfg = tcp_config(node, peers);
-            cfg.tls = Some(tls.clone());
+            cfg.encryption = actor_runtime::Encryption::MutualTls(Box::new(tls.clone()));
             cfg.cluster_secret = secret.to_string();
             cfg
         }
@@ -84,12 +84,12 @@ async fn an_untrusted_certificate_is_rejected() {
     let (sys_a, sys_b) = support::two_nodes_with(
         move |node, peers| {
             let mut cfg = tcp_config(node, peers);
-            cfg.tls = Some(tls_a.clone());
+            cfg.encryption = actor_runtime::Encryption::MutualTls(Box::new(tls_a.clone()));
             cfg
         },
         move |node, peers| {
             let mut cfg = tcp_config(node, peers);
-            cfg.tls = Some(tls_b.clone());
+            cfg.encryption = actor_runtime::Encryption::MutualTls(Box::new(tls_b.clone()));
             cfg
         },
     )
@@ -110,13 +110,13 @@ async fn a_node_outside_the_allowlist_is_rejected() {
     let (sys_a, sys_b) = support::two_nodes_with(
         move |node, peers| {
             let mut cfg = tcp_config(node, peers);
-            cfg.tls = Some(tls_for.clone());
+            cfg.encryption = actor_runtime::Encryption::MutualTls(Box::new(tls_for.clone()));
             cfg.allowlist = Some(BTreeSet::from([NodeId::new(1)])); // only itself
             cfg
         },
         move |node, peers| {
             let mut cfg = tcp_config(node, peers);
-            cfg.tls = Some(tls.clone());
+            cfg.encryption = actor_runtime::Encryption::MutualTls(Box::new(tls.clone()));
             cfg
         },
     )

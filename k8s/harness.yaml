@@ -131,6 +131,25 @@ spec:
             # a single StatefulSet template guarantees.
             - name: MODEL
               value: claude-sonnet-4-6
+          # DEMO SIZING. These limits fit a laptop kind/minikube cluster and are
+          # roughly three orders of magnitude below the machine the design assumes
+          # (docs/hardware-envelope.md §1: local NVMe, tens of cores, 128-256 GB).
+          # Several defaults are set on the assumption that memory is abundant —
+          # the manifest is held whole, segments and host handles are cached by the
+          # thousand — so a node run at 512Mi will OOM under any real grain count.
+          #
+          # For production, size a node to the envelope and give it a real
+          # descriptor budget; the store's segment cache alone wants ~65k
+          # (crates/granary/src/file_store.rs, DEFAULT_SEGMENT_CAPACITY):
+          #
+          #   resources:
+          #     requests: { cpu: "8",  memory: "32Gi" }
+          #     limits:   { cpu: "16", memory: "64Gi" }
+          #
+          # and raise LimitNOFILE on the node, or set it here per-container via a
+          # securityContext/initContainer, to at least 70000. Note that the target
+          # deployment is bare metal rather than Kubernetes — see
+          # docs/standalone-deployment.md for the sizing this manifest does not do.
           resources:
             requests:
               cpu: "250m"
@@ -143,6 +162,12 @@ spec:
               mountPath: /data
   # One PVC per pod: each node's journal + workspaces live on its own volume.
   # Nothing is shared between them.
+  #
+  # DEMO SIZING again, and the storage class matters more than the number. The
+  # design assumes directly-attached NVMe, where a durable flush costs tens of
+  # microseconds; network-attached block storage puts it back near a millisecond
+  # and reverses one of the assumptions the storage layer is built on
+  # (docs/hardware-envelope.md §6). Prefer a local-NVMe storage class.
   volumeClaimTemplates:
     - metadata:
         name: data

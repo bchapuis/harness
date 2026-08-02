@@ -123,9 +123,32 @@ pub struct TcpConfig {
     /// If set, only these node identities may associate (spec §15). `None`
     /// permits any peer that clears the version/codec/secret checks.
     pub allowlist: Option<BTreeSet<NodeId>>,
-    /// Mutual-TLS material (spec §15). `None` runs plaintext — intended for
-    /// trusted networks and tests; production SHOULD set it.
-    pub tls: Option<TlsConfig>,
+    /// How this association is protected on the wire (spec §15).
+    ///
+    /// Deliberately not an `Option<TlsConfig>` defaulting to `None`: the plaintext
+    /// choice is a security decision every deployment must make on purpose, and an
+    /// `Option` lets it be made by omission. The [`Encryption`] enum has no default,
+    /// so a construction site has to name which it wants and a reader can see the
+    /// answer without going to look for it.
+    pub encryption: Encryption,
+}
+
+/// How a transport association is protected (spec §15).
+///
+/// The stakes: the `cluster_secret` is what authorizes membership, and it crosses
+/// the wire in the association handshake. Under [`Encryption::PlaintextTrusted`]
+/// anyone who can observe one handshake learns it and can join the cluster as a
+/// replica. That is acceptable on loopback or a genuinely private network and
+/// nowhere else, which is why the variant says so in its name.
+#[derive(Clone)]
+pub enum Encryption {
+    /// Mutual TLS: both ends present certificates and the association runs
+    /// encrypted. The production choice for any link that leaves a trusted network.
+    MutualTls(Box<TlsConfig>),
+    /// Plaintext, on a network the operator asserts is trusted — loopback, a private
+    /// cluster network, or a test. The cluster secret is exposed to anyone who can
+    /// see the traffic.
+    PlaintextTrusted,
 }
 
 /// Shared transport state behind an `Arc`, so the handle clones cheaply.
@@ -287,8 +310,8 @@ impl TcpTransport {
 
         // Wrap in TLS if configured, then run the application handshake over the
         // (possibly encrypted) stream, all under one handshake deadline.
-        match &self.shared.config.tls {
-            Some(tls) => {
+        match &self.shared.config.encryption {
+            Encryption::MutualTls(tls) => {
                 let handshake = async {
                     let stream = tls.connector.connect(tls.server_name.clone(), tcp).await?;
                     client_handshake(stream, &self.shared, peer).await
@@ -299,7 +322,7 @@ impl TcpTransport {
                     .map_err(|_| TransportError::Unreachable)?;
                 Ok(self.register_dialed(peer, stream))
             }
-            None => {
+            Encryption::PlaintextTrusted => {
                 let stream = tokio::time::timeout(
                     handshake_timeout,
                     client_handshake(tcp, &self.shared, peer),
@@ -397,8 +420,8 @@ async fn serve_accepted(tcp: TcpStream, shared: Arc<Shared>) {
     // Bound the whole accept-side handshake: a peer that connects but never
     // speaks must not tie up this task (spec §7, §15).
     let handshake_timeout = shared.config.handshake_timeout;
-    match shared.config.tls.clone() {
-        Some(tls) => {
+    match shared.config.encryption.clone() {
+        Encryption::MutualTls(tls) => {
             let handshake = async {
                 let stream = tls.acceptor.accept(tcp).await.map_err(|_| ())?;
                 server_handshake(stream, &shared).await.map_err(|_| ())
@@ -408,7 +431,7 @@ async fn serve_accepted(tcp: TcpStream, shared: Arc<Shared>) {
                 read_loop(stream, peer, &shared).await;
             }
         }
-        None => {
+        Encryption::PlaintextTrusted => {
             if let Ok(Ok((stream, peer))) =
                 tokio::time::timeout(handshake_timeout, server_handshake(tcp, &shared)).await
             {
@@ -597,7 +620,7 @@ mod tests {
                 codec: Arc::new(actor_serialization::JsonCodec),
                 cluster_secret: secret.to_string(),
                 allowlist: None,
-                tls: None,
+                encryption: Encryption::PlaintextTrusted,
             },
             inbound: async_channel::unbounded().0,
             conns: Mutex::new(HashMap::new()),

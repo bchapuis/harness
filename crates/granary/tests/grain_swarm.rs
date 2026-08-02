@@ -156,12 +156,19 @@ impl GrainHandler<ReadBalance> for Account {
 /// while the nemesis is still running. The snapshot cadence follows, because a
 /// hibernating grain that never snapshotted comes back by replaying from an
 /// empty base and never exercises the snapshot-plus-tail restore.
+///
+/// The hibernating cadence is `1` — a snapshot at every commit — because idle
+/// eviction takes one only when §9's threshold has been crossed, exactly as the
+/// write path does (`host.rs::passivate`). A faulted client here often lands
+/// fewer than two commits on a grain before idling past `idle_after`, so any
+/// higher cadence leaves the restore path unexercised, which
+/// `Exercised::assert_hibernated` then reports.
 fn config(hibernating: bool) -> GranaryConfig {
     GranaryConfig {
         shards: 2,
         replication_factor: 3,
         idle_after: if hibernating { IDLE_AFTER } else { RESIDENT },
-        snapshot_every: if hibernating { 3 } else { 8 },
+        snapshot_every: if hibernating { 1 } else { 8 },
         ..GranaryConfig::default()
     }
 }

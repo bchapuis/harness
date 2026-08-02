@@ -170,7 +170,7 @@ async fn run(args: &[String]) {
         codec: Arc::clone(&codec),
         cluster_secret: SECRET.to_string(),
         allowlist: None,
-        tls: Some(tls),
+        encryption: actor_runtime::Encryption::MutualTls(Box::new(tls)),
     };
     let (transport, inbound) = TcpTransport::start(config, listener);
     let system = ClusterSystem::start(

@@ -182,8 +182,8 @@ impl crate::GrainBlobStore for StaticGrainStore {
         _grain: &GrainName,
         _id: crate::BlobId,
         _bytes: Vec<u8>,
-    ) -> crate::Reserved<()> {
-        crate::Reserved::ready(())
+    ) -> crate::Reserved<crate::BlobAck> {
+        crate::Reserved::ready(crate::BlobAck::Stored)
     }
 
     fn get_blob(
@@ -369,7 +369,7 @@ impl crate::GrainBlobStore for SnapshotAheadOfHeadStore {
         grain: &GrainName,
         id: crate::BlobId,
         bytes: Vec<u8>,
-    ) -> crate::Reserved<()> {
+    ) -> crate::Reserved<crate::BlobAck> {
         self.inner.put_blob(shard, grain, id, bytes)
     }
 

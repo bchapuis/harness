@@ -34,6 +34,7 @@ use actor_core::NodeId;
 use actor_runtime::DEFAULT_CONNECT_TIMEOUT;
 use actor_runtime::DEFAULT_HANDSHAKE_TIMEOUT;
 use actor_runtime::DEFAULT_OUTBOUND_CAPACITY;
+use actor_runtime::Encryption;
 use actor_runtime::FileRaftWAL;
 use actor_runtime::OsEntropy;
 use actor_runtime::TcpCluster;
@@ -253,8 +254,10 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
             allowlist: Some(admitted),
             // Plaintext, guarded by the cluster secret. Fine on loopback or a
             // trusted cluster network; a deployment crossing untrusted links
-            // would provision certificates and set `TlsConfig` here.
-            tls: None,
+            // provisions certificates and names `Encryption::MutualTls` here.
+            // Stated rather than defaulted: the cluster secret crosses the wire in
+            // the handshake, so anyone who can watch this traffic can join.
+            encryption: Encryption::PlaintextTrusted,
         },
         listener,
     );
@@ -307,6 +310,17 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // the tenancy directory. Its factory caches per node, so every grain type shares
     // one on-disk store keyed by (shard, grain), the grain analogue of the Raft WAL.
     let grain_store = FileGrainStore::factory(opts.data.join("grains"));
+    // One I/O pool for the node, shared by every grain type it hosts (granary §7.4).
+    // Without it every fsync runs on the tokio worker that is also driving this
+    // node's Raft heartbeats and its shards' quorum waits, so a slow disk becomes
+    // spurious elections and a rehydration storm rather than just slow writes.
+    let blocking_io: Arc<dyn granary::BlockingIo> =
+        Arc::new(granary::ThreadPoolIo::sized_for_host());
+    // One metrics registry for the node, shared by every grain type (granary §13):
+    // commit latency by outcome, rehydration cost, and the resident grain count — the
+    // signals that say whether this node's shards are healthy. Distinct from the event
+    // stream, which is shaped for the simulator's checkers, not for an operator.
+    let metrics = Arc::new(granary::AtomicGrainMetrics::new());
     // Every mode runs over the agent grain's own workspace facet (see `SandboxMode`);
     // the provider just opens the supplied directory.
     let sandboxes: Arc<dyn SandboxProvider> = match sandbox_mode {
@@ -346,7 +360,13 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     };
     // The handle is bound for the node's life (this function never returns) to keep
     // the gateway actors alive, like `_directory` below.
-    let node_kinds = kinds(&opts, sandbox_mode, grain_store.clone());
+    let node_kinds = kinds(
+        &opts,
+        sandbox_mode,
+        grain_store.clone(),
+        Arc::clone(&blocking_io),
+        metrics.clone(),
+    );
     let _harness = Harness::builder(system.clone(), &node_kinds)
         .config(harness_config())
         .host_all(model, sandboxes)
@@ -356,6 +376,8 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // node only hosts it; the recording on each prompt happens at the gateway edge.
     let _directory: Granary<Directory<TcpCluster>> = system.granary(GranaryConfig {
         grain_store: Some(grain_store),
+        blocking_io: Some(blocking_io),
+        metrics: Some(metrics),
         ..GranaryConfig::default()
     });
 
@@ -392,7 +414,13 @@ fn resolve(host: &str, base: u16, id: u64) -> Result<SocketAddr, String> {
 /// every node must register byte-identical kinds — the digest is pinned by
 /// `SessionCreated` — so all nodes must run with the same values for those
 /// flags.
-fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreFactory) -> Kinds {
+fn kinds(
+    opts: &NodeOptions,
+    sandbox_mode: SandboxMode,
+    grain_store: GrainStoreFactory,
+    blocking_io: Arc<dyn granary::BlockingIo>,
+    metrics: Arc<dyn granary::GrainMetrics>,
+) -> Kinds {
     let params = ModelParams {
         model: opts.model.to_string(),
         max_tokens: 4096,
@@ -440,6 +468,8 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
     let grain = move |kind: Kind| -> Kind {
         kind.grain(GranaryConfig {
             grain_store: Some(grain_store.clone()),
+            blocking_io: Some(Arc::clone(&blocking_io)),
+            metrics: Some(Arc::clone(&metrics)),
             data_dir: Some(data_dir.clone()),
             ..GranaryConfig::default()
         })

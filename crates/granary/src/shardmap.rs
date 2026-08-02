@@ -27,6 +27,7 @@ use std::time::Duration;
 use actor_cluster::Committed;
 use actor_cluster::GroupId;
 use actor_cluster::RaftConsensus;
+use actor_core::BoxFuture;
 use actor_core::NodeId;
 use async_channel::Receiver;
 use serde::Deserialize;
@@ -46,7 +47,7 @@ use crate::system::MAP_SHARD_INDEX;
 use crate::system::ShardId;
 use crate::system::group_id_for;
 use crate::system::initial_ranges;
-use crate::system::select_replicas;
+use crate::system::select_replicas_in;
 
 /// How often the map leader re-checks for unallocated shards to propose. Short
 /// relative to commit latency; the work is one-shot per shard, so the loop is idle
@@ -86,6 +87,28 @@ pub trait ShardMapSource: Send + Sync + 'static {
     /// its range is a single point. A no-op on the `Local` tier (split/merge is
     /// `Quorum` elasticity) and on a routing-only client.
     fn request_split(&self, _shard: u32) {}
+
+    /// Hand every shard this node leads to another of its replicas, returning how
+    /// many handoffs were still outstanding when the attempt gave up (`0` means all
+    /// of them moved).
+    ///
+    /// The graceful half of a planned departure. Without it, a node that leads N
+    /// shards simply stops, and each of those shards waits a full election timeout
+    /// before its replicas notice and elect — then every grain on them rehydrates.
+    /// For a rolling restart, which is the most common production operation there is,
+    /// that turns a routine action into N simultaneous failovers. With it, each shard
+    /// is handed to a replica that is already caught up, so the gap is a round trip
+    /// rather than a timeout.
+    ///
+    /// Best-effort by construction: a handoff can only go to a caught-up voter, and a
+    /// shard whose peers are all lagging or unreachable keeps its leader here rather
+    /// than being dropped. Callers should treat a non-zero return as "some shards
+    /// will fail over the slow way", not as an error to retry forever — the node is
+    /// leaving either way. A no-op on the `Local` tier (no peers to hand to) and on a
+    /// routing-only client.
+    fn hand_off_leadership(&self) -> BoxFuture<'_, usize> {
+        Box::pin(std::future::ready(0))
+    }
 
     /// Request a merge of `shard` with its **right** neighbour — the shard whose
     /// range begins just past `shard`'s (§7.7), the mirror of a split. The seam
@@ -259,11 +282,19 @@ pub(crate) struct LocalShardMap {
 }
 
 impl LocalShardMap {
-    pub(crate) fn new(node: NodeId, shards: usize, store: Arc<dyn GrainStore>) -> LocalShardMap {
+    pub(crate) fn new(
+        node: NodeId,
+        shards: usize,
+        store: Arc<dyn GrainStore>,
+        io: Arc<dyn crate::BlockingIo>,
+    ) -> LocalShardMap {
         let journals = (0..shards)
             .map(|shard| {
-                Arc::new(LocalGrainJournal::over(Arc::clone(&store), shard as u32))
-                    as Arc<dyn DynGrainJournal>
+                Arc::new(LocalGrainJournal::over(
+                    Arc::clone(&store),
+                    shard as u32,
+                    Arc::clone(&io),
+                )) as Arc<dyn DynGrainJournal>
             })
             .collect();
         LocalShardMap { node, journals }
@@ -336,6 +367,17 @@ struct Inner {
     /// keyed by the **left** shard: merge it with its right neighbour. Drained
     /// by the merge proposer. Not committed state.
     merge_requests: std::collections::BTreeSet<u32>,
+    /// Bumped whenever a committed command changes [`allocation`](Inner::allocation).
+    ///
+    /// The allocator's job is to notice when a shard's committed replica set differs
+    /// from its rendezvous choice, and that can only change when either the
+    /// allocation or the cluster's voters change. Without a way to detect "neither
+    /// did", it recomputed the choice for **every** shard on **every** tick — an
+    /// O(shards) rendezvous sort ten times a second, forever, whose answer is
+    /// identical each time. The generation makes the common case a single integer
+    /// comparison, which is what keeps the control plane's cost proportional to
+    /// cluster events rather than to wall-clock time (§7.8).
+    allocation_generation: u64,
 }
 
 /// The shard-event emitter (spec §13): how the map's loops put `ShardSplit`,
@@ -363,6 +405,12 @@ type ShardHandles<R> = BTreeMap<
 /// spawned loops, so the source itself is just the shared `Inner`.
 pub(crate) struct RaftShardMap {
     inner: Arc<Mutex<Inner>>,
+    /// The graceful-departure action ([`ShardMapSource::hand_off_leadership`]).
+    ///
+    /// A closure rather than a stored consensus handle because this type is not
+    /// generic over `R: RaftConsensus` — the [`ShardMapSource`] seam is object-safe,
+    /// so the engine is captured here where `R` is still in scope.
+    handoff: Arc<dyn Fn() -> BoxFuture<'static, usize> + Send + Sync>,
 }
 
 impl RaftShardMap {
@@ -380,6 +428,9 @@ impl RaftShardMap {
         split_target_bytes: u64,
         local: Arc<dyn GrainStore>,
         transport: Arc<dyn ReplicaTransport>,
+        io: Arc<dyn crate::BlockingIo>,
+        deadlines: crate::replicator::Deadlines,
+        domains: Option<crate::FailureDomains>,
         emit: EmitEvent,
     ) -> RaftShardMap {
         let group = map_group_id_for(grain_type);
@@ -419,6 +470,8 @@ impl RaftShardMap {
             Arc::clone(&handles),
             Arc::clone(&local),
             transport,
+            io,
+            deadlines,
             Arc::clone(&emit),
         )));
         consensus.launch(Box::pin(allocator_loop(
@@ -427,6 +480,7 @@ impl RaftShardMap {
             group,
             shards,
             replicas,
+            domains,
             Arc::downgrade(&inner),
         )));
         consensus.launch(Box::pin(reconcile_loop(
@@ -472,11 +526,94 @@ impl RaftShardMap {
             )));
         }
 
-        RaftShardMap { inner }
+        let handoff = {
+            let consensus = consensus.clone();
+            let inner = Arc::clone(&inner);
+            Arc::new(move || {
+                let consensus = consensus.clone();
+                let inner = Arc::clone(&inner);
+                Box::pin(hand_off_all(consensus, grain_type, inner)) as BoxFuture<'static, usize>
+            }) as Arc<dyn Fn() -> BoxFuture<'static, usize> + Send + Sync>
+        };
+        RaftShardMap { inner, handoff }
     }
 }
 
+/// How many rounds [`hand_off_all`] retries before giving up.
+///
+/// A handoff can be refused because the chosen peer has not replicated the leader's
+/// last entry yet, which ordinary replication fixes within a heartbeat or two. A
+/// handful of rounds covers that; beyond it the peer is not merely lagging but
+/// unreachable, and waiting longer delays the shutdown without improving the outcome.
+const HANDOFF_ROUNDS: usize = 10;
+
+/// How long a round waits before re-checking, long enough for a heartbeat to land.
+const HANDOFF_ROUND_WAIT: Duration = Duration::from_millis(50);
+
+/// Hand every shard this node leads to one of its other replicas, returning how many
+/// are still led when the attempt gives up (spec §7.1, §8.3).
+///
+/// Ordered shard-by-shard rather than all at once: each handoff is one round trip,
+/// and issuing them serially keeps the departing node from flooding its peers with
+/// elections it then has to service while it is trying to leave.
+async fn hand_off_all<R: RaftConsensus>(
+    consensus: R,
+    grain_type: &'static str,
+    inner: Arc<Mutex<Inner>>,
+) -> usize {
+    let self_node = consensus.node();
+    for _ in 0..HANDOFF_ROUNDS {
+        // Re-read the allocation each round: a reconfiguration may have committed
+        // while we were handing shards off.
+        let allocation: Vec<(u32, Vec<NodeId>)> = {
+            let guard = inner.lock().expect("shard map mutex poisoned");
+            guard
+                .allocation
+                .iter()
+                .map(|(&shard, alloc)| (shard, alloc.current.clone()))
+                .collect()
+        };
+        let mut remaining = 0;
+        for (shard, replicas) in allocation {
+            let group = shard_group_id(grain_type, shard);
+            if !consensus.group_is_leader(group) {
+                continue;
+            }
+            let mut moved = false;
+            for target in replicas.into_iter().filter(|&n| n != self_node) {
+                if consensus.transfer_group_leadership(group, target).await {
+                    moved = true;
+                    break;
+                }
+            }
+            if !moved {
+                remaining += 1;
+            }
+        }
+        if remaining == 0 {
+            return 0;
+        }
+        // A handoff is an invitation, not a completed election: even the ones we
+        // started need a moment to land, and the ones we could not start need
+        // replication to catch a peer up. Both are what this wait is for.
+        consensus.sleep(HANDOFF_ROUND_WAIT).await;
+    }
+    // Final count, after the last round's elections have had their wait.
+    let allocation: Vec<u32> = {
+        let guard = inner.lock().expect("shard map mutex poisoned");
+        guard.allocation.keys().copied().collect()
+    };
+    allocation
+        .into_iter()
+        .filter(|&shard| consensus.group_is_leader(shard_group_id(grain_type, shard)))
+        .count()
+}
+
 impl ShardMapSource for RaftShardMap {
+    fn hand_off_leadership(&self) -> BoxFuture<'_, usize> {
+        (self.handoff)()
+    }
+
     fn replicas(&self, shard: u32) -> Option<Vec<NodeId>> {
         self.inner
             .lock()
@@ -557,6 +694,8 @@ async fn apply_loop<R: RaftConsensus>(
     handles: Arc<Mutex<ShardHandles<R>>>,
     local: Arc<dyn GrainStore>,
     transport: Arc<dyn ReplicaTransport>,
+    io: Arc<dyn crate::BlockingIo>,
+    deadlines: crate::replicator::Deadlines,
     emit: EmitEvent,
 ) {
     // Build this node's journal + live control for `shard` and register them.
@@ -570,6 +709,8 @@ async fn apply_loop<R: RaftConsensus>(
             Arc::clone(&control),
             Arc::clone(&local),
             Arc::clone(&transport),
+            Arc::clone(&io),
+            deadlines,
         );
         handles
             .lock()
@@ -592,6 +733,16 @@ async fn apply_loop<R: RaftConsensus>(
         let Some(command) = decode(&bytes) else {
             continue; // a command this map cannot parse is defensively ignored
         };
+        // Bumped once here rather than at each of the arms that touch `allocation`:
+        // every allocation change is the result of applying a committed command, so
+        // this is the one place that provably covers them all. Over-counting (a
+        // command that changes nothing still bumps) only costs the allocator one
+        // redundant sweep, while under-counting would leave a real drift unnoticed —
+        // so the safe direction is to bump unconditionally.
+        inner
+            .lock()
+            .expect("shard map mutex poisoned")
+            .allocation_generation += 1;
         match command {
             ShardMapCommand::Assign {
                 shard,
@@ -772,7 +923,7 @@ async fn apply_loop<R: RaftConsensus>(
                         })
                     };
                     if let Some(sealed) = sealed {
-                        sealed.durable().await;
+                        sealed.durable();
                     }
                 }
             }
@@ -835,8 +986,8 @@ async fn apply_loop<R: RaftConsensus>(
                     })
                 };
                 if let Some((sealed, removed)) = reclaimed {
-                    sealed.durable().await;
-                    removed.durable().await;
+                    sealed.durable();
+                    removed.durable();
                 }
                 // Child replicas (the parent's set, inherited): create the
                 // child's leader-election group and journal — only now, so no
@@ -898,7 +1049,7 @@ async fn apply_loop<R: RaftConsensus>(
                         }
                     };
                     if let Some(sealed) = sealed {
-                        sealed.durable().await;
+                        sealed.durable();
                     }
                 }
             }
@@ -945,9 +1096,9 @@ async fn apply_loop<R: RaftConsensus>(
                     })
                 };
                 if let Some((unsealed, resealed)) = rebounded {
-                    unsealed.durable().await;
+                    unsealed.durable();
                     if let Some(resealed) = resealed {
-                        resealed.durable().await;
+                        resealed.durable();
                     }
                 }
                 // Right replicas: GC the now-unreachable right-keyed data (the
@@ -965,7 +1116,7 @@ async fn apply_loop<R: RaftConsensus>(
                     // The whole shard goes, so drop it in one call rather than
                     // walking its grains; `drop_shard` also clears right's fence
                     // and bound.
-                    local.drop_shard(right).durable().await;
+                    local.drop_shard(right).durable();
                 }
                 handles
                     .lock()
@@ -1023,9 +1174,19 @@ async fn allocator_loop<R: RaftConsensus>(
     group: GroupId,
     shards: usize,
     replicas: usize,
+    domains: Option<crate::FailureDomains>,
     inner: Weak<Mutex<Inner>>,
 ) {
     let consensus = &consensus;
+    // Borrowed, not moved: the tick closure is `FnMut` and runs every interval.
+    let domains = domains.as_ref();
+    // What the last sweep was computed against. The rendezvous choice is a pure
+    // function of the voters and the group, and whether it *differs* from the
+    // committed set additionally depends on the allocation — so if neither has
+    // changed since the last sweep, every shard's answer is the one already
+    // committed and the whole O(shards) pass is dead work.
+    let last: Mutex<Option<(Vec<NodeId>, u64)>> = Mutex::new(None);
+    let last = &last;
     driver_loop(
         consensus,
         ALLOCATE_INTERVAL,
@@ -1037,6 +1198,18 @@ async fn allocator_loop<R: RaftConsensus>(
             let voters = consensus.cluster_voters();
             if voters.is_empty() {
                 return; // control plane not settled yet; nothing to allocate over
+            }
+            // The skip, taken *after* the leadership check above so a node that newly
+            // becomes map leader still sweeps: its watermark is its own and starts
+            // empty.
+            let generation = inner
+                .lock()
+                .expect("shard map mutex poisoned")
+                .allocation_generation;
+            if last.lock().expect("allocator watermark poisoned").as_ref()
+                == Some(&(voters.clone(), generation))
+            {
+                return;
             }
             // The proposal set: the founding shards (allocated with their initial
             // ranges if absent) plus every committed shard — a split-minted child
@@ -1060,9 +1233,15 @@ async fn allocator_loop<R: RaftConsensus>(
                 );
                 candidates
             };
+            let mut proposed = false;
             for (shard, range) in candidates {
-                let desired =
-                    select_replicas(&voters, shard_group_id(grain_type, shard), replicas).0;
+                let desired = select_replicas_in(
+                    &voters,
+                    shard_group_id(grain_type, shard),
+                    replicas,
+                    domains,
+                )
+                .0;
                 // Propose the founding allocation, or — when the desired set has
                 // drifted from the committed one — start a migration toward it
                 // (§7.7). Never re-propose while a migration is already in flight:
@@ -1080,6 +1259,7 @@ async fn allocator_loop<R: RaftConsensus>(
                     Some(alloc) => alloc.idle() && alloc.current != desired,
                 };
                 if proposable {
+                    proposed = true;
                     consensus
                         .propose_to(
                             group,
@@ -1091,6 +1271,17 @@ async fn allocator_loop<R: RaftConsensus>(
                         )
                         .await;
                 }
+            }
+            // The watermark is recorded ONLY for a sweep that found nothing to do.
+            //
+            // Recording it after a sweep that proposed something would be a liveness
+            // bug: a proposal is not a commit — it can be dropped, lose leadership,
+            // or fail — and a failed one bumps no generation, so the loop would skip
+            // from then on and the drift would never be reallocated. Requiring a
+            // quiet sweep means the loop keeps working until the cluster actually
+            // converged, and only then goes idle.
+            if !proposed {
+                *last.lock().expect("allocator watermark poisoned") = Some((voters, generation));
             }
         },
     )
@@ -1554,10 +1745,20 @@ async fn merge_loop<R: RaftConsensus>(
     .await;
 }
 
-/// How often the size trigger re-measures the shards it leads. Slower than the
-/// allocator's cadence — a shard's size drifts gradually, and a split is
-/// expensive, so there is no need to poll it tightly.
-const SPLIT_TRIGGER_INTERVAL: Duration = Duration::from_millis(500);
+/// How often the size trigger re-measures the shards it leads.
+///
+/// Much slower than the allocator's cadence, because the measurement is not cheap:
+/// [`GrainStore::shard_bytes`](crate::GrainStore::shard_bytes) walks every grain in
+/// the shard, stat-ing its segment and enumerating its blob directory, so its cost is
+/// O(grains), not O(shards). At half a second that walk was the dominant steady-state
+/// I/O of a large node — repeated to learn a number that moves slowly and gates an
+/// operation (a split) that takes far longer than the interval.
+///
+/// Thirty seconds costs a split at most that much delay, which is nothing against the
+/// cost of the split itself, and makes the trigger's overhead negligible. The
+/// remaining structural cost is the walk: a store that maintained a running total
+/// would make this O(1) and is the real fix.
+const SPLIT_TRIGGER_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The size-based split trigger (spec §7.7): for each shard this node **leads**,
 /// if its local durable footprint exceeds `target_bytes` and the shard is idle

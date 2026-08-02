@@ -185,7 +185,11 @@ SupervisionDirective::Restart { max: 5, within: Duration::from_secs(30), backoff
 
 A pattern, framework, or method earns its place only when it cuts complexity here. Simple
 code is often the fastest and the easiest to optimize. Measure, find the critical path,
-and remove work there — which usually simplifies the code. The local fast path is design,
+and remove work there — which usually simplifies the code. Know what the critical path
+costs before deciding: [docs/hardware-envelope.md](docs/hardware-envelope.md) states the
+machine this tree targets and the arithmetic that follows, so a technique inherited from
+slower storage has to re-earn its complexity against the numbers rather than against
+habit. The local fast path is design,
 not micro-optimization: a local send enqueues by value and skips serialization entirely
 (§4.3), yet its observable result is identical to the remote path. And the framework ships
 no macros of its own (§1.1) — resisting the derive-everything trend except where an

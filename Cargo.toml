@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+# The trailing slash restricts the glob to directories. Without it, any stray file
+# under `crates/` — an editor artifact, a tool's scratch output — is treated as a
+# member and fails the whole build with a confusing "failed to read Cargo.toml".
+members = ["crates/*/"]
 
 # Shared metadata inherited by member crates via `field.workspace = true`.
 [workspace.package]

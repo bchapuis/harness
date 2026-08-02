@@ -180,18 +180,89 @@ pub(crate) fn group_id_for(shard: ShardId) -> GroupId {
 /// computes the identical split — and it spreads each shard's voters across the
 /// cluster while moving only `~1/N` of shards when membership changes. `members`
 /// is assumed sorted (the tie-break) and non-empty; `replicas` is clamped to it.
-pub(crate) fn select_replicas(
+/// How a deployment groups nodes into failure domains — racks, availability zones,
+/// whatever fails together (spec §7.1).
+///
+/// Replica selection without this spreads voters across the *cluster* but is blind to
+/// how the cluster is arranged, so nothing stops all R replicas of a shard landing in
+/// one zone. For a design whose entire safety argument is quorum intersection, that is
+/// the difference between a zone loss being survivable and it taking shards below
+/// quorum while the cluster still looks healthy.
+///
+/// **Every node MUST map a given node to the same domain.** The allocation is agreed
+/// by every node computing the identical rendezvous choice (§7.6); a mapping that
+/// disagreed across nodes would make them propose different sets. Deriving it from
+/// static deployment metadata (the zone label a scheduler sets) satisfies this;
+/// deriving it from anything node-local does not.
+pub type FailureDomains = Arc<dyn Fn(NodeId) -> u64 + Send + Sync>;
+
+/// Split `members` into voters and learners, spreading voters across failure domains
+/// (spec §7.1). See [`select_replicas`] for the domain-blind case.
+///
+/// Walks the rendezvous order and takes a node only while its domain is under the
+/// per-domain cap — `ceil(replicas / distinct domains)`, so R=3 over 3 zones takes one
+/// each, and R=3 over 2 zones takes at most two from either. A second pass fills from
+/// whatever is left if the caps could not be met, because a shard with fewer replicas
+/// than configured is strictly worse than an imperfectly spread one.
+///
+/// Still a pure, deterministic function of `(members, group, replicas, domains)`, and
+/// still minimal-movement: the rendezvous order does the choosing, the cap only skips.
+fn select_spread(
     members: &[NodeId],
     group: GroupId,
     replicas: usize,
+    domains: &FailureDomains,
 ) -> (Vec<NodeId>, Vec<NodeId>) {
-    // Rendezvous (HRW) score per node. The group id MUST be hashed, not XORed in
-    // raw: `group_id_for` derives a type's shard groups as `BASE ^ (index+1)`, so
-    // consecutive shards' ids differ only in the low ~4 bits. XORing that raw into a
-    // per-node constant leaves the high-order bits — which dominate the sort — fixed,
-    // so every shard would rank the nodes identically and pile onto the same R
-    // replicas with the same leader. Diffusing the id through `fnv1a` first spreads
-    // those low-bit differences across all 64 bits, so each shard ranks independently.
+    let ranked = rendezvous_order(members, group);
+    let voter_count = replicas.clamp(1, members.len());
+    let distinct: std::collections::BTreeSet<u64> = members.iter().map(|&n| domains(n)).collect();
+    let per_domain = voter_count.div_ceil(distinct.len().max(1));
+
+    let mut taken: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
+    let mut voters = Vec::with_capacity(voter_count);
+    for &node in &ranked {
+        if voters.len() == voter_count {
+            break;
+        }
+        let slot = taken.entry(domains(node)).or_default();
+        if *slot < per_domain {
+            *slot += 1;
+            voters.push(node);
+        }
+    }
+    // The caps can leave us short when domains are lopsided (say four nodes in one
+    // zone and one in another, R=3). Fill in rendezvous order rather than leave the
+    // shard under-replicated.
+    if voters.len() < voter_count {
+        for &node in &ranked {
+            if voters.len() == voter_count {
+                break;
+            }
+            if !voters.contains(&node) {
+                voters.push(node);
+            }
+        }
+    }
+    let mut learners: Vec<NodeId> = ranked.into_iter().filter(|n| !voters.contains(n)).collect();
+    voters.sort_unstable();
+    learners.sort_unstable();
+    (voters, learners)
+}
+
+/// The members in rendezvous (HRW) order for `group` — the shared ranking both
+/// selection strategies choose from, and the one place the score is computed.
+///
+/// Every node must derive the same order for the allocation to converge (§7.6), so a
+/// second copy of this scoring is a convergence hazard, not merely duplication.
+///
+/// The group id MUST be hashed, not XORed in raw: `group_id_for` derives a type's
+/// shard groups as `BASE ^ (index+1)`, so consecutive shards' ids differ only in the
+/// low ~4 bits. XORing that raw into a per-node constant leaves the high-order bits —
+/// which dominate the sort — fixed, so every shard would rank the nodes identically and
+/// pile onto the same R replicas with the same leader. Diffusing the id through `fnv1a`
+/// first spreads those low-bit differences across all 64 bits, so each shard ranks
+/// independently.
+fn rendezvous_order(members: &[NodeId], group: GroupId) -> Vec<NodeId> {
     let mut scored: Vec<(u64, NodeId)> = members
         .iter()
         .map(|&node| {
@@ -201,9 +272,33 @@ pub(crate) fn select_replicas(
         })
         .collect();
     scored.sort_unstable(); // by score, then node id (the deterministic tie-break)
+    scored.into_iter().map(|(_, n)| n).collect()
+}
+
+/// Split `members` into a shard's voters and learners, optionally spreading the
+/// voters across failure domains (spec §7.1). `domains` of `None` is the
+/// domain-blind rendezvous split.
+pub(crate) fn select_replicas_in(
+    members: &[NodeId],
+    group: GroupId,
+    replicas: usize,
+    domains: Option<&FailureDomains>,
+) -> (Vec<NodeId>, Vec<NodeId>) {
+    match domains {
+        Some(domains) => select_spread(members, group, replicas, domains),
+        None => select_replicas(members, group, replicas),
+    }
+}
+
+pub(crate) fn select_replicas(
+    members: &[NodeId],
+    group: GroupId,
+    replicas: usize,
+) -> (Vec<NodeId>, Vec<NodeId>) {
+    let ranked = rendezvous_order(members, group);
     let voter_count = replicas.clamp(1, members.len());
-    let mut voters: Vec<NodeId> = scored[..voter_count].iter().map(|&(_, n)| n).collect();
-    let mut learners: Vec<NodeId> = scored[voter_count..].iter().map(|&(_, n)| n).collect();
+    let (voters, learners) = ranked.split_at(voter_count);
+    let (mut voters, mut learners) = (voters.to_vec(), learners.to_vec());
     voters.sort_unstable();
     learners.sort_unstable();
     (voters, learners)
@@ -240,6 +335,7 @@ pub trait GranarySystem: ActorSystem {
     /// size trigger). `local` is this node's durable [`GrainStore`] and `transport`
     /// reaches peer replicas' stores (§7.2). Created once at `granary()` time;
     /// routing reads it through the [`ShardMapSource`] seam.
+    #[allow(clippy::too_many_arguments)] // one call site, from `granary()`
     fn shard_map(
         &self,
         grain_type: &'static str,
@@ -248,6 +344,9 @@ pub trait GranarySystem: ActorSystem {
         split_target_bytes: u64,
         local: Arc<dyn GrainStore>,
         transport: Arc<dyn ReplicaTransport>,
+        io: Arc<dyn crate::BlockingIo>,
+        deadlines: crate::replicator::Deadlines,
+        domains: Option<crate::FailureDomains>,
     ) -> Arc<dyn ShardMapSource>;
 
     /// The node that currently leads `shard`, where its grains activate (§5.2), or
@@ -287,11 +386,16 @@ impl<C: Clock, E: Entropy, S: Spawner> GranarySystem for LocalSystem<C, E, S> {
         _split_target_bytes: u64,
         local: Arc<dyn GrainStore>,
         _transport: Arc<dyn ReplicaTransport>,
+        io: Arc<dyn crate::BlockingIo>,
+        // The `Local` tier has no quorum and no recovery read to bound.
+        _deadlines: crate::replicator::Deadlines,
+        // One node replicates everything, so there is nothing to spread.
+        _domains: Option<crate::FailureDomains>,
     ) -> Arc<dyn ShardMapSource> {
         // `Local` tier: the single node replicates every shard, all keyed in one
         // local store (the peer transport is unused — there are no peers). Split
         // and merge are `Quorum` elasticity, so the size trigger is inert here.
-        Arc::new(LocalShardMap::new(self.node(), shards, local))
+        Arc::new(LocalShardMap::new(self.node(), shards, local, io))
     }
 
     fn shard_leader(&self, _shard: ShardId) -> Option<NodeId> {
@@ -335,6 +439,9 @@ where
         split_target_bytes: u64,
         local: Arc<dyn GrainStore>,
         transport: Arc<dyn ReplicaTransport>,
+        io: Arc<dyn crate::BlockingIo>,
+        deadlines: crate::replicator::Deadlines,
+        domains: Option<crate::FailureDomains>,
     ) -> Arc<dyn ShardMapSource> {
         // `Quorum` tier: a per-type Raft group whose committed log is the allocation,
         // so every node agrees on each shard's replica set (§7.6). It creates each
@@ -350,6 +457,9 @@ where
             split_target_bytes,
             local,
             transport,
+            io,
+            deadlines,
+            domains,
             Arc::new(move |event| system.emit_grain_event(event)),
         ))
     }
@@ -502,6 +612,80 @@ mod tests {
             5,
             "every node must replicate at least one shard — no idle nodes (covered {covered:?})",
         );
+    }
+
+    /// The property a zone loss depends on: R replicas of a shard must not all land
+    /// in one failure domain. Domain-blind rendezvous can and does put them there —
+    /// this checks the spread actually prevents it, across every shard, not on average.
+    #[test]
+    fn replicas_spread_across_failure_domains() {
+        // Nine nodes, three per zone — the shape a three-AZ deployment has.
+        let members: Vec<NodeId> = (1..=9).map(NodeId::new).collect();
+        let zones: FailureDomains = Arc::new(|node: NodeId| (node.uid() - 1) % 3);
+        let mut blind_concentrated = 0;
+        for shard in 0..200u64 {
+            let group = GroupId(shard.max(1));
+            let (voters, _) = select_replicas_in(&members, group, 3, Some(&zones));
+            let distinct: std::collections::BTreeSet<u64> =
+                voters.iter().map(|&n| zones(n)).collect();
+            assert_eq!(
+                distinct.len(),
+                3,
+                "shard {shard}: voters {voters:?} must cover three zones, not {distinct:?}"
+            );
+            let (blind, _) = select_replicas(&members, group, 3);
+            let blind_zones: std::collections::BTreeSet<u64> =
+                blind.iter().map(|&n| zones(n)).collect();
+            if blind_zones.len() < 3 {
+                blind_concentrated += 1;
+            }
+        }
+        assert!(
+            blind_concentrated > 0,
+            "the domain-blind split should concentrate some shards, or this test proves nothing"
+        );
+    }
+
+    /// Lopsided domains must not leave a shard under-replicated: fewer replicas than
+    /// configured is strictly worse than an imperfect spread.
+    #[test]
+    fn a_lopsided_domain_layout_still_yields_the_full_replica_count() {
+        let members: Vec<NodeId> = (1..=5).map(NodeId::new).collect();
+        // Four nodes in zone 0, one in zone 1 — R=3 cannot be spread evenly.
+        let zones: FailureDomains = Arc::new(|node: NodeId| u64::from(node.uid() == 5));
+        for shard in 0..50u64 {
+            let (voters, _) = select_replicas_in(&members, GroupId(shard.max(1)), 3, Some(&zones));
+            assert_eq!(
+                voters.len(),
+                3,
+                "shard {shard} must still get three replicas"
+            );
+        }
+    }
+
+    /// The spread is still a pure function every node computes identically — the
+    /// property the consensus-agreed allocation rests on (§7.6).
+    #[test]
+    fn the_spread_is_deterministic() {
+        let members: Vec<NodeId> = (1..=6).map(NodeId::new).collect();
+        let zones: FailureDomains = Arc::new(|node: NodeId| node.uid() % 3);
+        let a = select_replicas_in(&members, GroupId(11), 3, Some(&zones));
+        let b = select_replicas_in(&members, GroupId(11), 3, Some(&zones));
+        assert_eq!(a, b);
+    }
+
+    /// No domains configured must behave exactly as before, so the default deployment
+    /// is unchanged.
+    #[test]
+    fn no_domains_is_the_domain_blind_split() {
+        let members: Vec<NodeId> = (1..=7).map(NodeId::new).collect();
+        for shard in 0..50u64 {
+            let group = GroupId(shard.max(1));
+            assert_eq!(
+                select_replicas_in(&members, group, 3, None),
+                select_replicas(&members, group, 3)
+            );
+        }
     }
 
     #[test]

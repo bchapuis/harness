@@ -28,7 +28,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use actor_core::BoxFuture;
 use actor_core::NodeId;
 use serde::Deserialize;
 use serde::Serialize;
@@ -70,6 +69,36 @@ pub enum StoreAck {
     /// assembling a majority for a moved key. The caller surfaces `NotLeader`, so
     /// the client re-resolves against the committed map (G15).
     Sealed,
+    /// Refused: this replica's storage is **unusable** — an I/O error (a full or
+    /// failing disk, a lost mount) means it cannot make the write durable, so it
+    /// cannot honestly acknowledge it.
+    ///
+    /// Distinct from every other refusal above, which are decisions this replica
+    /// *made*; this one is a decision it could not make. The caller counts it like
+    /// an unreachable replica: it does not satisfy a quorum, it carries no term or
+    /// head worth believing, and it must never be read as a commit. A store that
+    /// answers `Failed` once answers it for everything afterwards
+    /// ([`FileGrainStore`](crate::FileGrainStore) poisons itself), so the node
+    /// simply stops counting toward its shards' quorums instead of crashing and
+    /// failing over every shard it happened to lead.
+    Failed,
+}
+
+/// The outcome of a blob store (§7.10).
+///
+/// Blobs are unfenced and unordered, so unlike [`StoreAck`] there is no term or
+/// head to refuse on: the only refusal is a store that cannot write at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlobAck {
+    /// Durable in this store (or already present — a blob put is idempotent by
+    /// content, B2).
+    Stored,
+    /// Refused: this replica's storage is unusable, as [`StoreAck::Failed`].
+    ///
+    /// It must not count toward a blob write quorum. A transport success carrying
+    /// this is *not* a stored copy, which is why the reply is this type rather than
+    /// `()`: an ack that cannot say "no" makes a failed replica look durable.
+    Failed,
 }
 
 /// The reply to a read: every occupied slot with its committing term, and the
@@ -118,6 +147,14 @@ pub enum ReadOutcome {
     Prepared(ReadReply),
     /// Refused: the replica has acknowledged a higher shard term (the fence, §8).
     Fenced(Term),
+    /// Refused: this replica's storage is unusable, so neither the promise nor the
+    /// view can be trusted — the [`StoreAck::Failed`] of the read path.
+    ///
+    /// It must not count toward a recovery read quorum. Note the promise is the
+    /// load-bearing half: a replica that cannot durably record the term it just
+    /// promised could accept a lower one after a restart, so a failed `prepare` is
+    /// not merely a missing view (**G14**).
+    Failed,
 }
 
 /// Whether a record store is a normal append or a recovery write-back (§8) — the
@@ -143,102 +180,51 @@ pub enum WriteKind {
     Transfer,
 }
 
-/// A store operation whose in-memory effect has **already happened** and whose
-/// durable effect is enqueued — the outcome is settled, only its *stability* is
-/// pending.
+/// A store operation whose effect has **already happened**, durably: the call did the
+/// work — the guard, the in-memory apply, and the fsync — before it returned.
 ///
-/// The in-memory half must run under the grain's segment lock, synchronously, before
-/// the call returns: that is what serializes a write against the same grain's recovery
-/// `prepare` (the only fencing-critical race, §8). The durable half must **not** run
-/// under that lock, so many grains' writes can share one fsync.
+/// All of that runs under the grain's segment lock, synchronously, which is what
+/// serializes a write against the same grain's recovery `prepare` (the only
+/// fencing-critical race, §8). That property comes from the trait's signature being
+/// synchronous, not from this wrapper; what the wrapper adds is narrower:
 ///
-/// Not a `BoxFuture<StoreAck>`: an async block runs its body at first *poll*, which
-/// would defer the guard-and-apply to whenever the caller happened to poll, admitting
-/// histories the segment lock never permitted. Returning a value whose effect has
-/// already occurred makes the eager phase un-skippable.
+/// - It is `#[must_use]`, so a caller cannot let a store call's answer fall on the
+///   floor. Every mutating method can answer `Fenced`, `Stale`, `Sealed`, or `Failed`,
+///   and each of those is a *refusal to have written* — silently discarding one is how
+///   a deposed leader convinces itself it committed (**G14**).
+/// - Reading it is spelled [`durable`](Reserved::durable), so each of the call sites
+///   names the guarantee it is leaning on rather than assuming it.
 ///
-/// **A `Stored` outcome is not an acknowledgement until [`durable`](Reserved::durable)
-/// resolves.** Reporting one earlier shrinks a write's durability below the quorum
-/// that was counted for it (**G14**). `durable` is the only way to obtain the outcome;
-/// [`refusal`](Reserved::refusal), the one way to answer without waiting, can only
-/// yield outcomes that changed nothing and so have nothing to sync.
-#[must_use = "a store outcome is not acknowledged until it is durable (G14)"]
+/// It was once a future, carrying the pending half of a store that would fsync a batch
+/// later — the shape a group-commit writer needs. On this deployment's storage a flush
+/// costs tens of microseconds against a round trip in the hundreds, so batching flushes
+/// buys nothing and group commit was withdrawn (`docs/hardware-envelope.md` §3.1, I3).
+/// Nothing ever constructed the pending half, so it is gone.
+#[must_use = "a store call can refuse to write (Fenced/Stale/Sealed/Failed); read the outcome (G14)"]
 pub struct Reserved<T> {
     outcome: T,
-    /// `None` when the outcome is already stable: an in-memory store, or a refusal
-    /// that wrote nothing. Kept out of the box so the common case allocates nothing.
-    durable: Option<BoxFuture<'static, ()>>,
 }
 
-impl<T: Send + 'static> Reserved<T> {
-    /// An outcome that is already stable — every [`MemoryGrainStore`] reply, and every
-    /// refusal, which by definition changed nothing durable.
+impl<T> Reserved<T> {
+    /// A settled, durable outcome — what every store in this crate returns, having
+    /// finished the write before it returned.
     pub fn ready(outcome: T) -> Reserved<T> {
-        Reserved {
-            outcome,
-            durable: None,
-        }
+        Reserved { outcome }
     }
 
-    /// An outcome settled in memory, stable once `durable` resolves. Crate-private:
-    /// only a store may claim that something is pending, and only for work it has
-    /// actually enqueued. Both stores in this crate settle synchronously, so outside a
-    /// test build nothing constructs a pending outcome.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn pending(outcome: T, durable: BoxFuture<'static, ()>) -> Reserved<T> {
-        Reserved {
-            outcome,
-            durable: Some(durable),
-        }
-    }
-
-    /// Narrow the outcome, keeping its durability marker.
+    /// Narrow the outcome, keeping the durability the wrapper stands for.
     ///
     /// For a caller that wants one part of a reply: the projection happens where the
-    /// reply is produced, so the parts it drops are never carried further, while what
-    /// remains is still gated on the same stability (**G14**).
-    pub fn map<U: Send + 'static>(self, f: impl FnOnce(T) -> U) -> Reserved<U> {
+    /// reply is produced, so the parts it drops are never carried further (**G14**).
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Reserved<U> {
         Reserved {
             outcome: f(self.outcome),
-            durable: self.durable,
         }
     }
 
-    /// The outcome, once it is on stable storage — the only way to obtain it.
-    pub fn durable(self) -> BoxFuture<'static, T> {
-        let Reserved { outcome, durable } = self;
-        match durable {
-            None => Box::pin(std::future::ready(outcome)),
-            Some(durable) => Box::pin(async move {
-                durable.await;
-                outcome
-            }),
-        }
-    }
-}
-
-impl Reserved<StoreAck> {
-    /// The refusal this write already is, or `None` for a `Stored`.
-    ///
-    /// A refused write changed nothing, so there is nothing to sync and no reason to
-    /// make a deposed leader wait a whole commit interval to learn it is deposed.
-    pub fn refusal(&self) -> Option<StoreAck> {
-        match &self.outcome {
-            StoreAck::Stored(_) => None,
-            refused => Some(refused.clone()),
-        }
-    }
-}
-
-impl Reserved<ReadOutcome> {
-    /// The higher term this replica has already promised, or `None` if the read
-    /// prepared. A `Fenced` promise was made before the call returned, so — like a
-    /// refused write — it needs no wait.
-    pub fn refusal(&self) -> Option<Term> {
-        match &self.outcome {
-            ReadOutcome::Fenced(higher) => Some(*higher),
-            ReadOutcome::Prepared(_) => None,
-        }
+    /// The outcome, on stable storage — the only way to obtain it.
+    pub fn durable(self) -> T {
+        self.outcome
     }
 }
 
@@ -254,9 +240,16 @@ pub trait GrainBlobStore: Send + Sync + 'static {
     /// Store an immutable, content-addressed blob for a grain. Idempotent: an `id`
     /// already present is kept (storing equal content writes nothing new). Unfenced.
     ///
-    /// The acknowledgement *is* the durability (**G18**), so unlike the record path
-    /// there is no refusal to short-circuit on: a caller must await.
-    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) -> Reserved<()>;
+    /// The acknowledgement *is* the durability (**G18**): a `Stored` means the bytes
+    /// are on this node's storage, and the only other answer is
+    /// [`BlobAck::Failed`] — there is no fence and no ordering to refuse against.
+    fn put_blob(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+    ) -> Reserved<BlobAck>;
 
     /// The bytes of `id` for a grain, or `None` if this store does not hold it. The
     /// caller re-hashes and verifies the bytes against `id` before use.
@@ -835,7 +828,7 @@ pub(crate) trait WriteGuard {
     /// advance. Returns the blocking (higher, already-acknowledged) fence on refusal,
     /// so a deposed leader learns it has been fenced (§8). A same-term append does not
     /// rewrite the fence — only a strict advance changes it.
-    fn bump_fence(&self, shard: u32, term: Term) -> Result<(), Term>;
+    fn bump_fence(&self, shard: u32, term: Term) -> Result<(), BumpRefusal>;
 
     /// Guard a fenced **record** store; `Err` is the refusal ack the store returns.
     ///
@@ -862,13 +855,30 @@ pub(crate) trait WriteGuard {
     /// (§9) is not an append to the moved range, so only the fence guards it. A
     /// [`WriteKind::Transfer`] skips the fence, for the reason stated on that variant.
     fn guard_snapshot(&self, shard: u32, term: Term, kind: WriteKind) -> Result<(), StoreAck> {
-        if kind != WriteKind::Transfer
-            && let Err(fence) = self.bump_fence(shard, term)
-        {
-            return Err(StoreAck::Fenced(fence));
+        if kind != WriteKind::Transfer {
+            match self.bump_fence(shard, term) {
+                Ok(()) => {}
+                Err(BumpRefusal::Fenced(fence)) => return Err(StoreAck::Fenced(fence)),
+                Err(BumpRefusal::Failed) => return Err(StoreAck::Failed),
+            }
         }
         Ok(())
     }
+}
+
+/// Why a fence bump did not happen (spec §8).
+///
+/// The two arms are opposites and must not be conflated: `Fenced` is this replica
+/// *enforcing* the fence, and the caller learns a real, higher term from it;
+/// `Failed` is this replica unable to record a fence at all, so it has promised
+/// nothing and its answer carries no information about any term.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BumpRefusal {
+    /// A higher term is already acknowledged here; carries it so a deposed leader
+    /// learns it has been fenced.
+    Fenced(Term),
+    /// The bump could not be made durable, so it was not made.
+    Failed,
 }
 
 impl WriteGuard for MemoryGrainStore {
@@ -881,7 +891,8 @@ impl WriteGuard for MemoryGrainStore {
             .is_some_and(|&from| crate::system::name_at_or_above(grain, from))
     }
 
-    fn bump_fence(&self, shard: u32, term: Term) -> Result<(), Term> {
+    /// Never `Failed`: an in-memory store has nothing that can fail to persist.
+    fn bump_fence(&self, shard: u32, term: Term) -> Result<(), BumpRefusal> {
         let mut fences = self
             .inner
             .fences
@@ -889,7 +900,7 @@ impl WriteGuard for MemoryGrainStore {
             .expect("grain store fences poisoned");
         let fence = *fences.get(&shard).unwrap_or(&Term::ZERO);
         if term < fence {
-            return Err(fence);
+            return Err(BumpRefusal::Fenced(fence));
         }
         if term > fence {
             fences.insert(shard, term);
@@ -901,7 +912,13 @@ impl WriteGuard for MemoryGrainStore {
 // Every reply is `Reserved::ready`: an in-memory store has no stability to wait for,
 // so its outcomes are stable the moment they are settled.
 impl GrainBlobStore for MemoryGrainStore {
-    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) -> Reserved<()> {
+    fn put_blob(
+        &self,
+        shard: u32,
+        grain: &GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+    ) -> Reserved<BlobAck> {
         self.inner
             .blobs
             .lock()
@@ -910,7 +927,7 @@ impl GrainBlobStore for MemoryGrainStore {
             .or_default()
             .entry(id)
             .or_insert(bytes);
-        Reserved::ready(())
+        Reserved::ready(BlobAck::Stored)
     }
 
     fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Reserved<Option<Vec<u8>>> {
@@ -1031,7 +1048,10 @@ impl GrainStore for MemoryGrainStore {
     }
 
     fn snapshot(&self, shard: u32, grain: &GrainName) -> Reserved<Option<(Seq, Vec<u8>)>> {
-        Reserved::ready(self.with_records(shard, grain, GrainRecords::snapshot).flatten())
+        Reserved::ready(
+            self.with_records(shard, grain, GrainRecords::snapshot)
+                .flatten(),
+        )
     }
 
     fn read_from(
@@ -1053,11 +1073,14 @@ impl GrainStore for MemoryGrainStore {
     fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> Reserved<ReadOutcome> {
         let segment = self.segment(shard, grain);
         let records_guard = segment.lock().expect("grain segment poisoned");
-        // The promise, under the grain's segment lock (§8).
-        if let Err(fence) = self.bump_fence(shard, term) {
-            return Reserved::ready(ReadOutcome::Fenced(fence));
+        // The promise, under the grain's segment lock (§8). An in-memory fence cannot
+        // fail to persist, so `Failed` is unreachable here — mapped rather than
+        // asserted, since the arm costs a line and an assertion costs a panic.
+        match self.bump_fence(shard, term) {
+            Ok(()) => Reserved::ready(ReadOutcome::Prepared(records_guard.read())),
+            Err(BumpRefusal::Fenced(fence)) => Reserved::ready(ReadOutcome::Fenced(fence)),
+            Err(BumpRefusal::Failed) => Reserved::ready(ReadOutcome::Failed),
         }
-        Reserved::ready(ReadOutcome::Prepared(records_guard.read()))
     }
 
     fn store_snapshot(
@@ -1225,65 +1248,35 @@ mod tests {
         GrainName::new("test.Grain", key)
     }
 
-    /// Drive a store call to its durable outcome. These tests are synchronous by
-    /// design — several of them race the store's own lock discipline (§18.1), which
-    /// an async task cannot exercise — so they block rather than run a runtime.
+    /// Read a store call's durable outcome. The call itself did the work, so this
+    /// only unwraps the settled value.
     fn now<T: Send + 'static>(reserved: Reserved<T>) -> T {
-        futures::executor::block_on(reserved.durable())
+        reserved.durable()
     }
 
-    /// `durable` must not resolve before the durability it stands for: a `Stored`
-    /// handed back before its bytes are stable is the **G14** hole the type exists to
-    /// close.
+    /// The property [`Reserved`] exists to enforce: the write happens at **call**
+    /// time, under the grain's segment lock, not when the caller gets around to
+    /// reading the outcome. An `async fn` store would run its body at first poll,
+    /// and a caller that never polled would silently not write — which is why the
+    /// seam returns a settled value rather than a future (§8, §18.1).
     #[test]
-    fn a_pending_outcome_is_withheld_until_its_durability_resolves() {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicBool;
-        use std::sync::atomic::Ordering;
-
-        let synced = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&synced);
-        let reserved = Reserved::pending(
-            StoreAck::Stored(Seq::new(7)),
-            Box::pin(async move {
-                flag.store(true, Ordering::SeqCst);
-            }),
+    fn the_write_happens_when_the_call_is_made_not_when_its_outcome_is_read() {
+        let store = MemoryGrainStore::new();
+        let n = name("eager");
+        // The outcome is deliberately discarded: no `now`, no read of any kind.
+        drop(store.store_record(
+            0,
+            &n,
+            Seq::ZERO,
+            Term::ZERO,
+            vec![vec![1], vec![2]],
+            WriteKind::Append,
+        ));
+        assert_eq!(
+            now(store.head(0, &n)),
+            Seq::new(2),
+            "the record must be stored by the time the call returned",
         );
-        // The outcome is settled — a refusal can be read off it with no wait — but
-        // nothing has been made stable yet.
-        assert_eq!(reserved.refusal(), None, "a Stored is not a refusal");
-        assert!(
-            !synced.load(Ordering::SeqCst),
-            "nothing synced before awaiting"
-        );
-
-        let ack = futures::executor::block_on(reserved.durable());
-        assert_eq!(ack, StoreAck::Stored(Seq::new(7)));
-        assert!(
-            synced.load(Ordering::SeqCst),
-            "the outcome was released without its durability running"
-        );
-    }
-
-    /// A refusal reports itself without waiting: it changed nothing, so there is
-    /// nothing to sync, and a deposed leader must not wait a commit interval to
-    /// learn it is deposed.
-    #[test]
-    fn a_refusal_is_readable_without_awaiting() {
-        let fenced = Reserved::ready(StoreAck::Fenced(Term::new(9)));
-        assert_eq!(fenced.refusal(), Some(StoreAck::Fenced(Term::new(9))));
-        let sealed = Reserved::ready(StoreAck::Sealed);
-        assert_eq!(sealed.refusal(), Some(StoreAck::Sealed));
-        let stale = Reserved::ready(StoreAck::Stale(Seq::new(3)));
-        assert_eq!(stale.refusal(), Some(StoreAck::Stale(Seq::new(3))));
-        // And on the read path, the promise a `prepare` already made.
-        let outcome = Reserved::ready(ReadOutcome::Fenced(Term::new(4)));
-        assert_eq!(outcome.refusal(), Some(Term::new(4)));
-        let prepared = Reserved::ready(ReadOutcome::Prepared(ReadReply {
-            slots: Vec::new(),
-            snapshot: None,
-        }));
-        assert_eq!(prepared.refusal(), None);
     }
 
     #[test]

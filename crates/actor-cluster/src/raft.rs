@@ -687,6 +687,74 @@ impl RaftGroup {
         state.election_deadline = now + self.election_timeout + jitter;
     }
 
+    /// Hand leadership of this group to `target` (Raft §3.10), returning whether
+    /// the handoff was actually initiated.
+    ///
+    /// `false` means "not yet, try again": this node is not the leader, `target` is
+    /// not a voter, or — the interesting case — `target`'s log is not yet caught up
+    /// to ours. A node that has not replicated our last entry cannot win an election
+    /// against the rest of the group (its log is not up to date, so voters refuse
+    /// it), so sending it `TimeoutNow` would cost a disrupted term and change
+    /// nothing. The caller retries while ordinary replication closes the gap.
+    ///
+    /// This does **not** step down. It cannot: leadership is a quorum fact, and the
+    /// only thing that legitimately ends our term is someone else winning a higher
+    /// one. All this does is invite a caught-up peer to try immediately instead of
+    /// after its election timeout. If that peer fails, nothing is lost — we are
+    /// still the leader and the caller can pick another target.
+    pub(crate) fn transfer_leadership(&self, target: NodeId) -> (bool, RaftOutput) {
+        let mut out = RaftOutput::default();
+        let state = self.lock();
+        if state.role != Role::Leader || target == self.node || !state.voters.contains(&target) {
+            return (false, out);
+        }
+        // Caught up means matched to OUR last index: the entry a voter compares
+        // against when deciding whether the candidate's log is up to date.
+        if state.matched.get(&target).copied().unwrap_or(0) < state.last_index() {
+            return (false, out);
+        }
+        out.frames.push((
+            target,
+            Frame::RaftTimeoutNow {
+                group: self.group,
+                term: state.term,
+                leader: self.node,
+            },
+        ));
+        (true, out)
+    }
+
+    /// A voter this group's leader asked to stand for election immediately
+    /// (Raft §3.10, the recipient half of [`transfer_leadership`]).
+    ///
+    /// Accepted only from the leader of our current term, so a stale or forged
+    /// invitation cannot make us disrupt a healthy leader. Beyond that no new trust
+    /// is extended: this starts an ordinary election, which still has to win a
+    /// quorum, so the worst a wrongly-accepted invitation costs is one disrupted
+    /// term — never a split leadership.
+    pub(crate) fn handle_timeout_now<E: Entropy>(
+        &self,
+        from: NodeId,
+        term: u64,
+        now: Instant,
+        entropy: &E,
+    ) -> RaftOutput {
+        let mut out = RaftOutput::default();
+        let mut state = self.lock();
+        // Only a voter can stand, and only for the term we currently believe in
+        // under the leader we currently believe in.
+        if term != state.term
+            || state.leader != Some(from)
+            || !state.voters.contains(&self.node)
+            || state.role == Role::Leader
+        {
+            return out;
+        }
+        self.start_election(&mut state, now, entropy, &mut out);
+        self.drain_committed(&mut state, &mut out, now, entropy);
+        out
+    }
+
     /// The driver tick (spec §9.4.3): a follower/candidate whose election timer
     /// fired starts an election; a leader replicates its log and heartbeats,
     /// advancing the commit index over quorum-matched, current-term entries.
@@ -1271,6 +1339,7 @@ mod tests {
             | Frame::RaftAppend { group, .. }
             | Frame::RaftAppendReply { group, .. }
             | Frame::RaftInstallSnapshot { group, .. }
+            | Frame::RaftTimeoutNow { group, .. }
             | Frame::RaftPropose { group, .. } => *group,
             _ => unreachable!("a Raft group only ever produces Raft frames"),
         }
@@ -1333,6 +1402,9 @@ mod tests {
                 now,
                 entropy,
             ),
+            Frame::RaftTimeoutNow { term, leader, .. } => {
+                group.handle_timeout_now(leader, term, now, entropy)
+            }
             _ => RaftOutput::default(),
         }
     }
@@ -1483,6 +1555,300 @@ mod tests {
                 "group 2 log on {node}",
             );
         }
+    }
+
+    /// The multi-raft framing property (spec §9.4.3): a node leading many groups
+    /// emits one heartbeat *per group per follower*, which is what
+    /// [`Frame::RaftHeartbeats`] exists to collapse.
+    ///
+    /// Asserted at the source — what a tick produces — because that is what the
+    /// coalescing in the system tick loop consumes. The count is the ceiling the
+    /// batching removes: at `G` groups and `R` replicas it is `G × (R-1)` frames per
+    /// interval, all of them empty.
+    #[test]
+    fn a_tick_emits_one_empty_append_per_group_per_follower() {
+        let nodes = [NodeId::new(1), NodeId::new(2), NodeId::new(3)];
+        let groups_n = 8;
+        let timeout = Duration::from_millis(100);
+        let entropy: BTreeMap<NodeId, TestEntropy> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, &node)| {
+                (
+                    node,
+                    TestEntropy::new((i as u64 + 1).wrapping_mul(0x9e37_79b9)),
+                )
+            })
+            .collect();
+        let ids: Vec<GroupId> = (1..=groups_n).map(GroupId).collect();
+        let mut groups: BTreeMap<(GroupId, NodeId), RaftGroup> = BTreeMap::new();
+        for &group in &ids {
+            for &node in &nodes {
+                groups.insert(
+                    (group, node),
+                    RaftGroup::new(
+                        group,
+                        node,
+                        nodes.to_vec(),
+                        Vec::new(),
+                        timeout,
+                        Arc::new(InMemoryRaftWAL::new()),
+                        Instant::ZERO,
+                    ),
+                );
+            }
+        }
+        let mut committed = BTreeMap::new();
+        let mut winners = BTreeMap::new();
+        let mut now = Instant::ZERO;
+        for _ in 0..30 {
+            now = now + Duration::from_millis(40);
+            let mut queue: VecDeque<(NodeId, NodeId, Frame)> = VecDeque::new();
+            let ticks: Vec<(GroupId, NodeId, RaftOutput)> = groups
+                .iter()
+                .map(|(&(g, n), raft)| (g, n, raft.tick(now, &entropy[&n])))
+                .collect();
+            for (g, n, out) in ticks {
+                record(g, n, out, &mut queue, &mut committed, &mut winners);
+            }
+            let mut steps = 0;
+            while let Some((from, to, frame)) = queue.pop_front() {
+                steps += 1;
+                assert!(steps < 100_000, "frame storm");
+                let g = frame_group(&frame);
+                let out = deliver(&groups[&(g, to)], from, frame, now, &entropy[&to]);
+                record(g, to, out, &mut queue, &mut committed, &mut winners);
+            }
+            if ids.iter().all(|&g| leader_of(&groups, g, &nodes).is_some()) {
+                break;
+            }
+        }
+        assert!(
+            ids.iter().all(|&g| leader_of(&groups, g, &nodes).is_some()),
+            "every group elected a leader"
+        );
+
+        // One steady-state tick: count the empty appends a single node emits.
+        now = now + Duration::from_millis(40);
+        let mut empty_appends = 0;
+        // Keyed by the (leader, follower) pair, because that is exactly what a batch
+        // is keyed by: one frame per destination per sending node.
+        let mut per_pair: BTreeMap<(NodeId, NodeId), usize> = BTreeMap::new();
+        let mut led: BTreeMap<NodeId, usize> = BTreeMap::new();
+        for &group in &ids {
+            let leader = leader_of(&groups, group, &nodes).expect("a leader");
+            *led.entry(leader).or_default() += 1;
+            for (to, frame) in groups[&(group, leader)].tick(now, &entropy[&leader]).frames {
+                if matches!(&frame, Frame::RaftAppend { entries, .. } if entries.is_empty()) {
+                    empty_appends += 1;
+                    *per_pair.entry((leader, to)).or_default() += 1;
+                }
+            }
+        }
+        assert_eq!(
+            empty_appends,
+            groups_n as usize * (nodes.len() - 1),
+            "one empty append per group per follower — the G x (R-1) the batching collapses"
+        );
+        // Each of those frames is one *beat*; batching turns every pair's whole set
+        // into a single frame, so the saving is the count per pair — which is the
+        // number of groups that node leads, and grows with the shard count.
+        for ((leader, _), beats) in &per_pair {
+            assert_eq!(
+                *beats, led[leader],
+                "a leader sends each follower one beat per group it leads"
+            );
+        }
+        assert!(
+            per_pair.values().any(|&n| n > 1),
+            "some node leads more than one group, or this proves nothing about batching"
+        );
+    }
+
+    /// Leadership transfer (Raft §3.10): a handoff moves leadership to the chosen
+    /// peer **without waiting out an election timeout**.
+    ///
+    /// That timing is the whole point. A draining node leading many groups otherwise
+    /// pays a full election timeout per group, which is what makes a rolling restart
+    /// a failover storm; here the clock is deliberately never advanced past the
+    /// timeout, so a leadership change can only have come from the handoff.
+    #[test]
+    fn a_handoff_moves_leadership_without_waiting_for_an_election_timeout() {
+        let nodes = [NodeId::new(1), NodeId::new(2), NodeId::new(3)];
+        let group = GroupId(1);
+        let timeout = Duration::from_millis(100);
+        let entropy: BTreeMap<NodeId, TestEntropy> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, &node)| {
+                (
+                    node,
+                    TestEntropy::new((i as u64 + 1).wrapping_mul(0x9e37_79b9)),
+                )
+            })
+            .collect();
+        let mut groups: BTreeMap<(GroupId, NodeId), RaftGroup> = BTreeMap::new();
+        for &node in &nodes {
+            groups.insert(
+                (group, node),
+                RaftGroup::new(
+                    group,
+                    node,
+                    nodes.to_vec(),
+                    Vec::new(),
+                    timeout,
+                    Arc::new(InMemoryRaftWAL::new()),
+                    Instant::ZERO,
+                ),
+            );
+        }
+        let mut committed: BTreeMap<(GroupId, NodeId), Vec<Vec<u8>>> = BTreeMap::new();
+        let mut winners: BTreeMap<(GroupId, u64), NodeId> = BTreeMap::new();
+        let mut now = Instant::ZERO;
+
+        // Settle an initial leader and get a command committed, so the followers'
+        // match indexes are real rather than trivially zero.
+        let settle = |groups: &BTreeMap<(GroupId, NodeId), RaftGroup>,
+                      now: Instant,
+                      committed: &mut BTreeMap<(GroupId, NodeId), Vec<Vec<u8>>>,
+                      winners: &mut BTreeMap<(GroupId, u64), NodeId>,
+                      seed: Option<(NodeId, RaftOutput)>| {
+            let mut queue: VecDeque<(NodeId, NodeId, Frame)> = VecDeque::new();
+            match seed {
+                Some((src, out)) => record(group, src, out, &mut queue, committed, winners),
+                None => {
+                    let ticks: Vec<(NodeId, RaftOutput)> = nodes
+                        .iter()
+                        .map(|&n| (n, groups[&(group, n)].tick(now, &entropy[&n])))
+                        .collect();
+                    for (n, out) in ticks {
+                        record(group, n, out, &mut queue, committed, winners);
+                    }
+                }
+            }
+            let mut steps = 0;
+            while let Some((from, to, frame)) = queue.pop_front() {
+                steps += 1;
+                assert!(steps < 100_000, "frame storm");
+                let out = deliver(&groups[&(group, to)], from, frame, now, &entropy[&to]);
+                record(group, to, out, &mut queue, committed, winners);
+            }
+        };
+
+        let mut first = None;
+        for _ in 0..20 {
+            now = now + Duration::from_millis(40);
+            settle(&groups, now, &mut committed, &mut winners, None);
+            if let Some(l) = leader_of(&groups, group, &nodes) {
+                first = Some(l);
+                break;
+            }
+        }
+        let leader = first.expect("a leader was elected");
+        groups[&(group, leader)].propose(EntryPayload::App(b"before".to_vec()));
+        for _ in 0..5 {
+            now = now + Duration::from_millis(40);
+            settle(&groups, now, &mut committed, &mut winners, None);
+        }
+
+        let target = *nodes.iter().find(|&&n| n != leader).expect("another voter");
+        let (started, out) = groups[&(group, leader)].transfer_leadership(target);
+        assert!(started, "a caught-up voter is a valid handoff target");
+
+        // Deliver the handoff and its consequences at the SAME instant — no tick, so
+        // no election timer can have fired.
+        let frozen = now;
+        settle(
+            &groups,
+            frozen,
+            &mut committed,
+            &mut winners,
+            Some((leader, out)),
+        );
+
+        assert!(
+            groups[&(group, target)].is_leader(),
+            "the handoff target took leadership at the same instant it was invited"
+        );
+        assert!(
+            !groups[&(group, leader)].is_leader(),
+            "and the old leader stood down under the higher term"
+        );
+        // The transfer must not lose the committed prefix.
+        assert_eq!(
+            committed.get(&(group, target)).cloned().unwrap_or_default(),
+            vec![b"before".to_vec()],
+            "the new leader holds everything the old one committed"
+        );
+    }
+
+    /// A handoff to a peer that has not replicated the leader's last entry is
+    /// refused rather than attempted: such a peer loses the election it would be
+    /// invited to hold, so sending it `TimeoutNow` costs a disrupted term and
+    /// achieves nothing. The caller retries while replication catches it up.
+    #[test]
+    fn a_handoff_to_a_lagging_peer_is_refused() {
+        let nodes = [NodeId::new(1), NodeId::new(2), NodeId::new(3)];
+        let group = GroupId(1);
+        let mut groups: BTreeMap<NodeId, RaftGroup> = BTreeMap::new();
+        for &node in &nodes {
+            groups.insert(
+                node,
+                RaftGroup::new(
+                    group,
+                    node,
+                    nodes.to_vec(),
+                    Vec::new(),
+                    Duration::from_millis(100),
+                    Arc::new(InMemoryRaftWAL::new()),
+                    Instant::ZERO,
+                ),
+            );
+        }
+        let entropy = TestEntropy::new(7);
+        // A brand-new group: nobody leads, so nobody may hand anything off.
+        assert!(
+            !groups[&nodes[0]].transfer_leadership(nodes[1]).0,
+            "a non-leader has no leadership to transfer"
+        );
+        // Elect node 1 by driving it alone to its timeout, then answering its votes.
+        let mut now = Instant::ZERO;
+        let mut committed = BTreeMap::new();
+        let mut winners = BTreeMap::new();
+        for _ in 0..20 {
+            now = now + Duration::from_millis(40);
+            let mut queue: VecDeque<(NodeId, NodeId, Frame)> = VecDeque::new();
+            let ticks: Vec<(NodeId, RaftOutput)> = nodes
+                .iter()
+                .map(|&n| (n, groups[&n].tick(now, &entropy)))
+                .collect();
+            for (n, out) in ticks {
+                record(group, n, out, &mut queue, &mut committed, &mut winners);
+            }
+            let mut steps = 0;
+            while let Some((from, to, frame)) = queue.pop_front() {
+                steps += 1;
+                assert!(steps < 100_000, "frame storm");
+                let out = deliver(&groups[&to], from, frame, now, &entropy);
+                record(group, to, out, &mut queue, &mut committed, &mut winners);
+            }
+            if nodes.iter().any(|&n| groups[&n].is_leader()) {
+                break;
+            }
+        }
+        let leader = *nodes
+            .iter()
+            .find(|&&n| groups[&n].is_leader())
+            .expect("a leader");
+        // A node outside the voter set is never a target, caught up or not.
+        assert!(
+            !groups[&leader].transfer_leadership(NodeId::new(99)).0,
+            "a non-voter is not a handoff target"
+        );
+        assert!(
+            !groups[&leader].transfer_leadership(leader).0,
+            "a leader does not hand off to itself"
+        );
     }
 
     /// A non-voting learner replicates the committed log just like a voter, but
@@ -1673,7 +2039,10 @@ mod tests {
             Role::Follower,
             "a self-removed leader steps down instead of leading as a non-voter",
         );
-        assert_eq!(state.leader, None, "and no longer believes itself the leader");
+        assert_eq!(
+            state.leader, None,
+            "and no longer believes itself the leader"
+        );
         assert_eq!(state.voters, vec![v2], "and is gone from the voter set");
     }
 

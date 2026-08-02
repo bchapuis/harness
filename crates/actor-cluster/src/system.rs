@@ -55,6 +55,8 @@ use crate::membership::MembershipMode;
 use crate::membership::SwimConfig;
 use crate::protocol::CallId;
 use crate::protocol::Frame;
+use crate::protocol::RaftBeat;
+use crate::protocol::RaftBeatReply;
 use crate::protocol::ReceptionistEntry;
 use crate::raft::Committed;
 use crate::raft::EntryPayload;
@@ -637,7 +639,11 @@ where
             };
             let (node, status) = command.effect();
             let now = self.inner.clock.now();
-            if self.inner.membership.apply_stamped(node, status, index, now) {
+            if self
+                .inner
+                .membership
+                .apply_stamped(node, status, index, now)
+            {
                 self.node_down_cascade(node).await;
             }
         }
@@ -1044,6 +1050,79 @@ where
                     now,
                     entropy,
                 )
+            })
+            .await
+        }
+        // Each beat is dispatched to its own group exactly as a lone `RaftAppend`
+        // would be, so no group's state machine can tell the difference; only the
+        // replies are gathered, so one batch in yields one batch out.
+        Frame::RaftHeartbeats { beats } => {
+            let mut replies = Vec::with_capacity(beats.len());
+            for beat in beats {
+                let group = beat.group;
+                if let Some(raft) = system.group(group) {
+                    let mut out = raft.handle_append(
+                        beat.leader,
+                        beat.term,
+                        beat.prev_index,
+                        beat.prev_term,
+                        Vec::new(),
+                        beat.commit,
+                        system.inner.clock.now(),
+                        &system.inner.entropy,
+                    );
+                    // Lift this group's reply out of the output and into the batch;
+                    // anything else it produced still goes out on its own.
+                    out.frames.retain(|(_, frame)| match frame {
+                        Frame::RaftAppendReply {
+                            group,
+                            term,
+                            ok,
+                            match_index,
+                        } => {
+                            replies.push(RaftBeatReply {
+                                group: *group,
+                                term: *term,
+                                ok: *ok,
+                                match_index: *match_index,
+                            });
+                            false
+                        }
+                        _ => true,
+                    });
+                    apply_raft_output(system, group, out).await;
+                }
+            }
+            if !replies.is_empty() {
+                let _ = system
+                    .inner
+                    .transport
+                    .send(from, Frame::RaftHeartbeatReplies { replies })
+                    .await;
+            }
+        }
+        Frame::RaftHeartbeatReplies { replies } => {
+            for reply in replies {
+                drive_group(system, reply.group, |raft, now, entropy| {
+                    raft.handle_append_reply(
+                        from,
+                        reply.term,
+                        reply.ok,
+                        reply.match_index,
+                        now,
+                        entropy,
+                    )
+                })
+                .await;
+            }
+        }
+        Frame::RaftTimeoutNow {
+            group,
+            term,
+            leader,
+        } => {
+            drive_group(system, group, |raft, now, entropy| {
+                raft.handle_timeout_now(leader, term, now, entropy)
             })
             .await
         }
@@ -1509,6 +1588,15 @@ where
         self.propose_or_forward(group, command, &voters).await;
     }
 
+    async fn transfer_group_leadership(&self, group: GroupId, target: NodeId) -> bool {
+        let Some(raft) = self.group(group) else {
+            return false;
+        };
+        let (started, out) = raft.transfer_leadership(target);
+        apply_raft_output(self, group, out).await;
+        started
+    }
+
     fn group_is_leader(&self, group: GroupId) -> bool {
         self.group(group).map(|g| g.is_leader()).unwrap_or(false)
     }
@@ -1628,8 +1716,51 @@ where
             return;
         }
         let now = system.inner.clock.now();
-        // Tick every group; apply each group's output under its own id.
-        for (group, out) in raft.tick_all(now, &system.inner.entropy) {
+        // Tick every group, then send. The two are separated so the tick's *pure
+        // heartbeats* — empty appends, which is what almost every group emits on
+        // almost every tick — can be batched per destination into one frame instead
+        // of one frame per group (spec §9.4.3; see `Frame::RaftHeartbeats`).
+        let mut beats: BTreeMap<NodeId, Vec<RaftBeat>> = BTreeMap::new();
+        let mut outputs = raft.tick_all(now, &system.inner.entropy);
+        for (_, out) in &mut outputs {
+            out.frames.retain(|(to, frame)| match frame {
+                Frame::RaftAppend {
+                    group,
+                    term,
+                    leader,
+                    prev_index,
+                    prev_term,
+                    entries,
+                    commit,
+                } if entries.is_empty() => {
+                    beats.entry(*to).or_default().push(RaftBeat {
+                        group: *group,
+                        term: *term,
+                        leader: *leader,
+                        prev_index: *prev_index,
+                        prev_term: *prev_term,
+                        commit: *commit,
+                    });
+                    false // carried in the batch below
+                }
+                // An append with entries is real replication and goes as itself:
+                // batching it would bound one group's throughput by another's.
+                _ => true,
+            });
+        }
+        // Heartbeats go out BEFORE the outputs are applied. Applying is a per-group
+        // await, so with many groups it is the slowest part of the tick, and a
+        // heartbeat that waited behind all of it would arrive later the more groups
+        // this node hosts — precisely the direction that must not scale with `G`,
+        // since a late heartbeat is what starts a spurious election.
+        for (to, beats) in beats {
+            let _ = system
+                .inner
+                .transport
+                .send(to, Frame::RaftHeartbeats { beats })
+                .await;
+        }
+        for (group, out) in outputs {
             apply_raft_output(&system, group, out).await;
         }
         // The control group's leader performs the membership control-plane

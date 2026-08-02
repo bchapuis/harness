@@ -27,8 +27,8 @@ use actor_simulation::Counter;
 use actor_simulation::CounterOp;
 use actor_simulation::CounterRet;
 use actor_simulation::History;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
 use actor_simulation::check_linearizable;
 use actor_simulation::scenario_sweep;
@@ -317,6 +317,74 @@ fn committed_state_survives_shard_leader_failover() {
         balance,
         Ok(250),
         "committed state survived the leader crash (G14)"
+    );
+}
+
+#[test]
+fn a_graceful_handoff_moves_shard_leadership_without_an_election_timeout() {
+    // §8.3: a departing node hands its shards to caught-up replicas instead of
+    // stopping and letting each shard wait out a leader-election timeout. The
+    // difference matters on every rolling restart: without the handoff a node
+    // leading N shards costs N simultaneous failovers, each followed by the
+    // rehydration of every grain on that shard.
+    let sim = Simulation::new(11);
+    let (_net, systems, granaries) = cluster(&sim);
+    let key = "account/handoff";
+
+    // Commit through the shard's leader so the followers' match indexes are real —
+    // a handoff is only offered to a replica that has the leader's last entry.
+    let committed = {
+        let granary = granaries[0].clone();
+        drive(&sim, Duration::from_secs(8), async move {
+            granary.grain(key).ask(Deposit { cents: 640 }).await
+        })
+    };
+    assert_eq!(committed, Ok(640));
+
+    let before = granaries[0]
+        .leader(key)
+        .expect("the shard elected a leader");
+    // The handle that lives ON the leader node — `leader(key)` is a routing
+    // observation any replica answers, so it does not identify the local node.
+    let departing = systems
+        .iter()
+        .position(|s| s.node() == before)
+        .map(|i| granaries[i].clone())
+        .expect("a granary on the shard leader");
+
+    // Hand off, then advance far LESS than an election timeout: any leadership
+    // change observed after this can only have come from the handoff.
+    let outstanding = drive(&sim, Duration::from_secs(3), async move {
+        departing.hand_off_leadership().await
+    });
+    assert_eq!(
+        outstanding, 0,
+        "every led shard found a caught-up successor"
+    );
+
+    let after = granaries
+        .iter()
+        .find_map(|g| g.leader(key))
+        .expect("the shard still has a leader");
+    assert_ne!(
+        after, before,
+        "leadership moved off the departing node ({before} -> {after})"
+    );
+
+    // And the handoff lost nothing: the new leader serves the committed balance.
+    let balance = {
+        let granary = granaries[0].clone();
+        drive(&sim, Duration::from_secs(10), async move {
+            granary
+                .grain(key)
+                .ask_timeout(ReadBalance, Duration::from_secs(9))
+                .await
+        })
+    };
+    assert_eq!(
+        balance,
+        Ok(640),
+        "the handed-off shard kept its committed state (G14)"
     );
 }
 

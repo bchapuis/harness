@@ -28,6 +28,17 @@ Two layers have a design note rather than a spec:
   bearer-token identity, principal-scoped session keys, the tenancy directory,
   and the trust boundary.
 
+## Assumptions
+
+- [hardware-envelope](hardware-envelope.md) — the machine the specs are written
+  against: a rented dedicated server, local NVMe, 128–256 GB, and a **1 Gbps
+  uplink** that is the binding constraint on everything. Carries a 2026 latency
+  table (LLM rows included, since the session's clock is the model's), the four
+  inversions that follow from it, and the rules a review applies with them.
+  Cited as `hw §N` wherever a performance choice rests on it. Read it before
+  arguing that a technique from the slow-disk era belongs here — or that a
+  bound does not.
+
 ## Guides
 
 - [standalone-deployment](standalone-deployment.md) — install

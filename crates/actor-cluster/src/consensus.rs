@@ -88,6 +88,25 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     /// out to the group's voters.
     fn propose_to(&self, group: GroupId, command: Vec<u8>) -> impl Future<Output = ()> + Send;
 
+    /// Hand `group`'s leadership to `target`, returning whether the handoff was
+    /// initiated (Raft §3.10).
+    ///
+    /// `false` means "not yet": this node does not lead `group`, `target` is not one
+    /// of its voters, or `target` has not yet replicated this leader's last entry —
+    /// a peer in that state would lose the election it was invited to hold, so the
+    /// caller retries while replication catches it up.
+    ///
+    /// Initiating a handoff does **not** end this node's term; only another node
+    /// winning a higher one does. The call is an invitation to a caught-up peer to
+    /// stand immediately rather than after its election timeout, which is what makes
+    /// a planned departure cheap: a node leading many groups otherwise costs one full
+    /// election timeout per group on every drain.
+    fn transfer_group_leadership(
+        &self,
+        group: GroupId,
+        target: NodeId,
+    ) -> impl Future<Output = bool> + Send;
+
     /// Whether this node currently leads `group`.
     fn group_is_leader(&self, group: GroupId) -> bool;
 

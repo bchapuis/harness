@@ -49,7 +49,10 @@ impl<R: RaftConsensus> QuorumGrainJournal<R> {
     /// **live** control state — replica sets, owned range, split freeze — shared
     /// with the shard map's apply loop so a committed reallocation or split
     /// reaches in-flight journals (§7.7); `local` is this node's [`GrainStore`];
-    /// `transport` reaches the peer replicas' stores (spec §7.2, §8).
+    /// `transport` reaches the peer replicas' stores (spec §7.2, §8); `io` is where
+    /// this node's own store writes block (§7.4); `deadlines` are the quorum and
+    /// recovery timeouts the deployment set (§11).
+    #[allow(clippy::too_many_arguments)] // one call site, from the shard map
     pub(crate) fn new(
         consensus: R,
         group: GroupId,
@@ -57,11 +60,14 @@ impl<R: RaftConsensus> QuorumGrainJournal<R> {
         control: Arc<std::sync::Mutex<ShardControl>>,
         local: Arc<dyn GrainStore>,
         transport: Arc<dyn ReplicaTransport>,
+        io: Arc<dyn crate::BlockingIo>,
+        deadlines: crate::replicator::Deadlines,
     ) -> QuorumGrainJournal<R> {
         let self_node = consensus.node();
         let election = LeaderElection::new(consensus, group);
-        let replicator =
-            QuorumReplicator::new(election, local, transport, control, shard, self_node);
+        let replicator = QuorumReplicator::new(
+            election, local, transport, control, shard, self_node, io, deadlines,
+        );
         QuorumGrainJournal {
             replicator: Arc::new(replicator),
         }
