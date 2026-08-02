@@ -132,8 +132,6 @@ the seed sweeps run deliberately rather than incidentally.
   `GranaryConfig`, so every deployment threads them by hand into every type's config and
   the accessors allocate a fresh `Arc` per call. `GranarySystem` is where the node's
   other capabilities already hang.
-- `AtomicGrainMetrics::entry` takes a node-wide `Mutex<BTreeMap>` on every commit,
-  rehydrate and activation, though its own doc says the type set is fixed at startup.
 - `file_store.rs` clones the whole record batch per append — once to frame, once to
   apply. Building the `SegOp` first and destructuring it after the append reclaims the
   `Vec`.

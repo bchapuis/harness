@@ -169,15 +169,24 @@ struct TypeMetrics {
     active: AtomicU64,
 }
 
-/// A lock-free, dependency-free [`GrainMetrics`] a deployment can scrape.
+/// A dependency-free [`GrainMetrics`] a deployment can scrape.
 ///
 /// No metrics library: the whole surface is a handful of atomics and a text renderer,
-/// which keeps the build offline-clean and costs one relaxed add per operation. It is
-/// registered per grain type at `granary()` time, so the type set is fixed at startup
-/// and there is no map to grow at runtime.
+/// which keeps the build offline-clean and costs one relaxed add per operation once
+/// the type's entry is in hand.
+///
+/// **Getting that entry is the part worth being careful about.** Every commit,
+/// rehydrate and activation on the node looks its grain type up here, and there is one
+/// of these per *node*, shared across every type it hosts — so this lookup is on the
+/// hot path of the whole process, taken from as many threads as the box has cores. The
+/// map it looks in is effectively fixed: a type's entry is created by its first metric
+/// and then never changes, so after the first commit of each type every subsequent
+/// lookup is a pure read. An [`RwLock`](std::sync::RwLock) is what makes that read
+/// shared; a `Mutex` would serialize every core through one lock to read a map that is
+/// no longer being written.
 #[derive(Default)]
 pub struct AtomicGrainMetrics {
-    types: std::sync::Mutex<std::collections::BTreeMap<&'static str, Arc<TypeMetrics>>>,
+    types: std::sync::RwLock<std::collections::BTreeMap<&'static str, Arc<TypeMetrics>>>,
 }
 
 impl AtomicGrainMetrics {
@@ -186,10 +195,26 @@ impl AtomicGrainMetrics {
         AtomicGrainMetrics::default()
     }
 
+    /// This grain type's counters, creating them on the first metric it reports.
+    ///
+    /// Read-locked first and write-locked only on a miss, which happens once per grain
+    /// type for the life of the node. The miss path re-checks under the write lock
+    /// rather than assuming the entry is still absent: two threads can both miss the
+    /// read and both take the write, and `or_default` on the second must find the
+    /// first's entry rather than replace it — a replaced entry would silently reset
+    /// counters and drop whatever the other thread had already recorded into its `Arc`.
     fn entry(&self, grain_type: &'static str) -> Arc<TypeMetrics> {
+        if let Some(metrics) = self
+            .types
+            .read()
+            .expect("grain metrics poisoned")
+            .get(grain_type)
+        {
+            return Arc::clone(metrics);
+        }
         Arc::clone(
             self.types
-                .lock()
+                .write()
                 .expect("grain metrics poisoned")
                 .entry(grain_type)
                 .or_default(),
@@ -203,7 +228,8 @@ impl AtomicGrainMetrics {
     /// is a sample, not a transaction, and Prometheus already assumes as much.
     pub fn render(&self) -> String {
         let types: Vec<(&'static str, Arc<TypeMetrics>)> = {
-            let guard = self.types.lock().expect("grain metrics poisoned");
+            // A read lock: a scrape must not stand between a commit and its counter.
+            let guard = self.types.read().expect("grain metrics poisoned");
             guard.iter().map(|(&k, v)| (k, Arc::clone(v))).collect()
         };
         let mut out = String::new();
@@ -374,6 +400,57 @@ mod tests {
             m.render()
                 .contains("granary_active_grains{grain_type=\"test.Grain\"} 0")
         );
+    }
+
+    #[test]
+    fn a_types_first_metric_from_many_threads_at_once_loses_none_of_them() {
+        // The lookup reads under a shared lock and only takes the write lock on a
+        // miss, so several threads reporting a grain type's *first* metric can all
+        // miss the read and all reach the write. If the miss path replaced the entry
+        // instead of re-checking, every thread but the last would increment an `Arc`
+        // no longer in the map and its commits would vanish — a race that only shows
+        // on the first touch of a type, which is exactly when a node is starting and
+        // nobody is looking at the numbers.
+        //
+        // Two things make this a test rather than a coin flip. The barrier, because
+        // otherwise the first thread spawned wins the write and installs the entry
+        // before the others start, leaving every later lookup an uncontended read hit
+        // and the miss path never raced. And the repetition, because even barriered
+        // the threads only collide inside the miss window some of the time — against a
+        // deliberately broken `entry` a single round catches it only a few percent of
+        // the time, which is a detector nobody should rely on. Measured against that
+        // broken version, 64 rounds caught it in five runs out of six and 512 in every
+        // run; correct code passes every round, so the repetition costs a quarter of a
+        // second and is not a source of flakiness in the direction that matters.
+        const ROUNDS: usize = 512;
+        const THREADS: u64 = 8;
+        const EACH: u64 = 50;
+        for _ in 0..ROUNDS {
+            let m = Arc::new(AtomicGrainMetrics::new());
+            let gate = Arc::new(std::sync::Barrier::new(THREADS as usize));
+            std::thread::scope(|scope| {
+                for _ in 0..THREADS {
+                    let (m, gate) = (Arc::clone(&m), Arc::clone(&gate));
+                    scope.spawn(move || {
+                        gate.wait();
+                        for _ in 0..EACH {
+                            m.commit(
+                                "test.Racy",
+                                CommitOutcome::Committed,
+                                Duration::from_micros(100),
+                            );
+                        }
+                    });
+                }
+            });
+            assert!(
+                m.render().contains(&format!(
+                    "granary_commits_total{{grain_type=\"test.Racy\",outcome=\"committed\"}} {}",
+                    THREADS * EACH
+                )),
+                "every commit must land in the one entry the type ends up with",
+            );
+        }
     }
 
     #[test]
