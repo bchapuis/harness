@@ -37,11 +37,13 @@ The disk facet is the only one that hand-rolls the loop, and it is the one with 
 the largest artifacts. On the `Local` tier the serialization costs nothing and
 `benches/disk_capture.rs` shows why: a trip through the seam is 0.58 µs against 1.4 ms
 of bytes per block, so there is nothing to overlap. On the `Quorum` tier each of those
-trips is a quorum round, and that is where serializing five hundred of them is paid.
-The change is small — `put_chunked` already exists and already handles the ordering and
-the don't-abandon-in-flight-work discipline. What it wants first is the cluster-side
-number under "Measure", so the before and after are compared against a measurement
-rather than an argument.
+trips is a quorum round, and `tests/disk_rounds.rs` now measures it: 2 ms of virtual
+time per block — one frame out, one acknowledgement back — and the same 2 ms for a
+four-byte blob, so the cost is the round trip and not the payload. A 512-block image
+is 512 serialized quorum rounds. The change is small: `put_chunked` already exists and
+already handles the ordering and the don't-abandon-in-flight-work discipline. It is
+worth up to `IN_FLIGHT_CHUNKS`-fold on the create path, and `disk_rounds.rs` is the
+before it gets measured against — that test is written to fail low when this lands.
 
 **A bare-metal deployment path.** `docs/standalone-deployment.md` now carries sizing,
 `LimitNOFILE`, timeouts by topology, and a failure-domain mapping, but the only
@@ -64,14 +66,22 @@ the block size is the lever: `puts` shows a trip through the seam costs 0.58 µs
 thousand times less than the bytes it carries, so the per-block work is per-byte and
 already near its floor.
 
-What is left to measure is therefore the cluster side, and it needs a cluster rather
-than a bench: where a single `put_blob` spends its time on the `Quorum` tier — transport
-framing, the peer's own `atomic_replace`, the quorum wait — and how much of the 240 s is
-the *count* of those rounds rather than any one of them. 240 s over 512 blocks is
-~470 ms per block, which is far too large to be the 1 MiB of link (~8 ms to two peers at
-125 MB/s) and far too large to be a peer's fsync (11 ms measured above), so the leading
-hypothesis is the serialization named under "Build" — but it is a hypothesis, and the
-demo is where it gets settled. **Still larger than everything else here combined.**
+Half of what was left is now settled too, and without a cluster.
+`tests/disk_rounds.rs` measures the `Quorum` tier in *virtual* time, which counts
+round trips instead of pricing them: a block costs 2 ms — one frame out, one
+acknowledgement back — and a four-byte blob costs the same 2 ms, so a create's cost
+is the round trips and not the payload, and a 512-block image is 512 of them in
+series. That is the serialization now named under "Build", and it is a real
+multiplier, but it is a *count*, and a count alone does not make 240 s.
+
+What is still open is the price of one round, and that does need real hardware.
+240 s over 512 rounds is ~470 ms each, against ~8 ms of link for 1 MiB to two peers
+at 125 MB/s and the 11 ms a peer's own `atomic_replace` measured above — so a round
+costs something like forty times what its parts do, and nothing in the tree explains
+it yet. Instrument `QuorumReplicator::put_blob` on the demo and split it: transport
+framing and encode, time on the wire, the peer's store call, the quorum wait. Suspect
+queueing behind the shard's other traffic and per-frame codec cost on a 1 MiB payload
+before suspecting the device. **Still larger than everything else here combined.**
 
 **Flush distribution on the actual drives.** `blocking.rs` justifies the I/O pool by
 tail isolation, which is right, but the median matters for sizing and nothing records
