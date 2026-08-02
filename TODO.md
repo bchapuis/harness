@@ -25,7 +25,23 @@ the disk facet captures dirty blocks, facet 0's state checks its root set. That 
 but it puts the same discipline in four places and gets nothing for a chunk two
 *different* grains or a re-import produced. An offer round (`has` the ids, put the
 absent ones) would move it under the seam once. It costs an extra RTT on a cold put,
-so it wants the numbers from the disk-capture benchmark below before it is written.
+which is the whole objection — and the objection is much weaker once the puts it rides
+on are pipelined rather than serialized, so sequence it after the item below.
+
+**Pipeline the disk facet's block puts.** `DiskHandle::import` and `DiskHandle::capture`
+`await` one `blobs.put` per block in a plain `for` loop, so a 512-block image is 512
+serialized trips through the journal seam. Every other checkpointing facet hands its
+chunks to `facet_blobs::put_chunked`, which runs `IN_FLIGHT_CHUNKS` of them at once —
+the SQL facet (§7.14), the workspace facet (§7.11), and facet 0's own state (§7.12).
+The disk facet is the only one that hand-rolls the loop, and it is the one with by far
+the largest artifacts. On the `Local` tier the serialization costs nothing and
+`benches/disk_capture.rs` shows why: a trip through the seam is 0.58 µs against 1.4 ms
+of bytes per block, so there is nothing to overlap. On the `Quorum` tier each of those
+trips is a quorum round, and that is where serializing five hundred of them is paid.
+The change is small — `put_chunked` already exists and already handles the ordering and
+the don't-abandon-in-flight-work discipline. What it wants first is the cluster-side
+number under "Measure", so the before and after are compared against a measurement
+rather than an argument.
 
 **A bare-metal deployment path.** `docs/standalone-deployment.md` now carries sizing,
 `LimitNOFILE`, timeouts by topology, and a failure-domain mapping, but the only
@@ -34,12 +50,28 @@ wants a systemd unit and a disk layout.
 
 ## Measure before changing
 
-**The disk-facet capture path.** Creating a 512 MB machine takes roughly four minutes.
-The uplink floor for that work is ~8 seconds, and that assumes nothing deduplicates —
-a fresh image is mostly zeros, which all hash to one blob. Local BLAKE3 over 512 MB is
-~170 ms. So ~97% of the time is unexplained by any constant in the path. Benchmark it
-before touching `IN_FLIGHT_CHUNKS` or the block size. **Larger than everything else
-here combined.**
+**Where a machine create's four minutes actually go.** The local half is now measured
+and it is not the answer. `crates/granary/benches/disk_capture.rs` takes the capture
+path apart in three layers on one node. Per 1 MiB block, medians: read 33 µs, write
+94 µs, BLAKE3 568 µs, a cold put into the memory store 0.3 µs, a cold put into the file
+store 11.4 ms, and a put the file store already holds — the dedup hit, which is most of
+a fresh image — 17 µs. Whole path through a real grain: a clean capture scans at
+746 MB/s, an import runs at 454 MB/s into memory and 299 MB/s onto disk, and all three
+are flat across 4, 16 and 64 MiB, so nothing in the path is super-linear. Extrapolated
+to 512 MB that is ~0.7 s to scan and under 2 s to import, against the ~240 s a create
+takes. **Over 99% of a create is above the store**, and neither `IN_FLIGHT_CHUNKS` nor
+the block size is the lever: `puts` shows a trip through the seam costs 0.58 µs, four
+thousand times less than the bytes it carries, so the per-block work is per-byte and
+already near its floor.
+
+What is left to measure is therefore the cluster side, and it needs a cluster rather
+than a bench: where a single `put_blob` spends its time on the `Quorum` tier — transport
+framing, the peer's own `atomic_replace`, the quorum wait — and how much of the 240 s is
+the *count* of those rounds rather than any one of them. 240 s over 512 blocks is
+~470 ms per block, which is far too large to be the 1 MiB of link (~8 ms to two peers at
+125 MB/s) and far too large to be a peer's fsync (11 ms measured above), so the leading
+hypothesis is the serialization named under "Build" — but it is a hypothesis, and the
+demo is where it gets settled. **Still larger than everything else here combined.**
 
 **Flush distribution on the actual drives.** `blocking.rs` justifies the I/O pool by
 tail isolation, which is right, but the median matters for sizing and nothing records
