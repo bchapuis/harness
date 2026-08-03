@@ -491,3 +491,55 @@ fn truncating_an_unseen_grain_does_not_create_it() {
         store.grains(0)
     );
 }
+
+/// Named regression for the third divergence, and the only one the oracle above
+/// structurally cannot reach: it drives the store from one thread, and this one needs
+/// two.
+///
+/// A blob is named by its content, so two puts of the same bytes are two puts at one
+/// path — and once the disk facet started pipelining its block puts, that stopped
+/// being rare. An image of identical blocks (an all-zero base image is the ordinary
+/// case, not a contrived one) hashes every block to a single id and issues a wave of
+/// them at once. They collided on a shared scratch file: one truncated another's
+/// half-written bytes, and every rename after the first found the path already gone.
+/// `put_blob` reports that as `Failed`, which poisons the store store-wide and
+/// one-way — so a create of a zero-filled image left a live node refusing every
+/// subsequent write, for the rest of its life.
+///
+/// Asserting on `failure()` and not just the acks is the point: a store that answered
+/// `Stored` while quietly poisoning itself would pass on the return values alone and
+/// fail the next unrelated write.
+#[test]
+fn concurrent_puts_of_one_blob_neither_fail_nor_poison_the_store() {
+    const PUTTERS: usize = 16;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileGrainStore::open(dir.path()).expect("open");
+    let g = grain(1);
+    // A block's worth of one repeated byte — the zero-filled image, in miniature.
+    let bytes = vec![0u8; 256 * 1024];
+    let id = BlobId::of(&bytes);
+
+    std::thread::scope(|scope| {
+        for _ in 0..PUTTERS {
+            scope.spawn(|| {
+                assert_eq!(
+                    now(store.put_blob(0, &g, id, bytes.clone())),
+                    granary::BlobAck::Stored,
+                    "a concurrent put of already-agreed content was refused"
+                );
+            });
+        }
+    });
+
+    assert_eq!(store.failure(), None, "the store poisoned itself");
+    assert_eq!(
+        now(store.get_blob(0, &g, id)),
+        Some(bytes),
+        "the blob that landed is not the bytes every putter wrote"
+    );
+    // The store still takes writes — what poisoning would have taken away.
+    assert_eq!(
+        now(store.put_blob(0, &g, BlobId::of(b"after"), b"after".to_vec())),
+        granary::BlobAck::Stored,
+    );
+}

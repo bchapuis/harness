@@ -69,6 +69,8 @@ use std::io::Write;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -164,17 +166,59 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Atomically replace `dir/<name>` with `bytes`: write `<name>.tmp` → fsync → rename
-/// → fsync dir, so a reader sees either the old file or the whole new one. The caller
-/// supplies already-serialized bytes, so the encoding (JSON, postcard, fixed-width)
-/// stays its choice.
+/// Distinguishes one in-flight [`atomic_replace`] from every other one — see
+/// [`temp_name`]. Process-wide rather than per-directory: a counter is cheaper than a
+/// map keyed by path, and it only has to be unique, not dense.
+static REPLACE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The scratch name [`atomic_replace`] writes before renaming: `<name>.<pid>.<n>.tmp`.
+///
+/// Unique per call, and that is the whole point. A fixed `<name>.tmp` is safe only
+/// while one caller at a time replaces a given name, and that is not a property this
+/// crate can promise on the caller's behalf: granary's blob store puts concurrently
+/// through a thread pool, and content addressing means two puts landing on *the same*
+/// name is the normal case, not a rare one — an image full of identical blocks hashes
+/// every one of them to a single id. Two calls sharing a scratch path corrupt each
+/// other in both directions: the second `File::create` truncates the first's
+/// half-written bytes, and whichever renames second finds the path already gone and
+/// fails with `ENOENT`. Callers that treat an I/O error as unrecoverable — the grain
+/// store poisons itself — turn that into a node that has stopped accepting writes.
+///
+/// The pid is in the name because uniqueness has to hold across processes too: two
+/// nodes sharing a data directory is a misconfiguration, but it should not be one that
+/// silently tears a file.
+///
+/// A crash between create and rename leaves the scratch file behind, where the old
+/// fixed name would have been reused by the next call. Every directory this crate's
+/// callers scan already skips names it cannot decode — a blob id, a shard number — so
+/// a stray is inert, and granary's blob sweep removes anything not retained.
+fn temp_name(name: &str) -> String {
+    let seq = REPLACE_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{name}.{}.{seq}.tmp", std::process::id())
+}
+
+/// Atomically replace `dir/<name>` with `bytes`: write a scratch file → fsync →
+/// rename → fsync dir, so a reader sees either the old file or the whole new one. The
+/// caller supplies already-serialized bytes, so the encoding (JSON, postcard,
+/// fixed-width) stays its choice.
+///
+/// Safe to call concurrently on one `name`, including from several threads and
+/// processes: each call writes its own scratch file ([`temp_name`]) and the rename
+/// decides the winner. Concurrent callers writing *different* bytes still race for
+/// which content survives — this replaces atomically, it does not serialize — but the
+/// file that lands is always exactly one caller's whole bytes.
 pub fn atomic_replace(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
-    let tmp_path = dir.join(format!("{name}.tmp"));
+    let tmp_path = dir.join(temp_name(name));
     let final_path = dir.join(name);
     let mut tmp = File::create(&tmp_path)?;
     tmp.write_all(bytes)?;
     tmp.sync_all()?;
-    fs::rename(&tmp_path, &final_path)?;
+    // A failed rename leaves the scratch file behind; remove it rather than let an
+    // error path accumulate them, since nothing else here will revisit this name.
+    if let Err(err) = fs::rename(&tmp_path, &final_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
     sync_dir(dir)
 }
 
@@ -959,6 +1003,50 @@ mod tests {
         // A second replace overwrites it whole.
         atomic_replace(dir.path(), "state", b"world!").unwrap();
         assert_eq!(fs::read(dir.path().join("state")).unwrap(), b"world!");
+    }
+
+    /// Many threads replacing *one* name at once: every call succeeds, and the file
+    /// left behind is one writer's whole bytes rather than a mix of several.
+    ///
+    /// This is granary's blob store put path, which is content-addressed and runs
+    /// through a thread pool: identical content is identical id is one name, so an
+    /// image whose blocks repeat sends a wave of concurrent replaces at a single
+    /// path. With one shared scratch name they truncated each other's bytes and all
+    /// but the first rename failed with `ENOENT` — and a store that treats a failed
+    /// write as unrecoverable poisons itself on the spot, which is a live node
+    /// refusing writes for the rest of its life over an image full of zeros.
+    ///
+    /// The bytes are long enough that a torn write is visible: a few bytes land in
+    /// one `write_all` whatever the interleaving, so a short payload would pass on a
+    /// broken implementation.
+    #[test]
+    fn concurrent_replaces_of_one_name_all_succeed_and_none_tears() {
+        const WRITERS: u8 = 16;
+        let dir = tempfile::tempdir().unwrap();
+        let payloads: Vec<Vec<u8>> = (0..WRITERS).map(|w| vec![w; 256 * 1024]).collect();
+
+        std::thread::scope(|scope| {
+            for bytes in &payloads {
+                scope.spawn(|| atomic_replace(dir.path(), "state", bytes).expect("replace"));
+            }
+        });
+
+        let landed = fs::read(dir.path().join("state")).unwrap();
+        assert!(
+            payloads.contains(&landed),
+            "the file that landed is not any single writer's bytes: {} bytes, first {:?}",
+            landed.len(),
+            landed.first(),
+        );
+
+        // Every scratch file was renamed away, so nothing is left but the sidecar.
+        let strays: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n != "state")
+            .collect();
+        assert!(strays.is_empty(), "scratch files left behind: {strays:?}");
     }
 
     #[test]

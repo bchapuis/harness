@@ -60,10 +60,11 @@ const W_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 3,
         spec: "wal §3.4, §5",
-        property: "Atomic whole-file replacement: rewrite and atomic_replace leave, after any crash, either the whole prior file or the whole new file, never a torn intermediate",
+        property: "Atomic whole-file replacement: rewrite and atomic_replace leave, after any crash, either the whole prior file or the whole new file, never a torn intermediate; concurrent atomic_replace calls on one name all succeed, and the file that lands is one caller's whole bytes",
         tests: &[
             "rewrite_replaces_the_whole_file_and_reopens",
             "atomic_replace_round_trips_a_sidecar",
+            "concurrent_replaces_of_one_name_all_succeed_and_none_tears",
             "rewrite_restamps_the_replacement",
         ],
     },
