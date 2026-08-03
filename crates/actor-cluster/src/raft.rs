@@ -76,7 +76,14 @@ pub enum EntryPayload {
     /// Remove a voter (single-server configuration change).
     RemoveVoter(NodeId),
     /// An opaque application command, committed and drained to the caller.
-    App(Vec<u8>),
+    ///
+    /// `serde_bytes` because these bytes are already encoded and would otherwise go
+    /// through serde's default sequence path in both directions — the cost that
+    /// dominated blob replication (TODO.md). This one is also **durable**: a voter
+    /// persists its log, so the attribute has to leave the encoding byte-identical or
+    /// every existing log file moves with it. It does, for both codecs in the tree;
+    /// `actor-serialization/tests/wire_bytes.rs` covers this newtype-variant shape.
+    App(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 
 /// One replicated log entry: the `term` it was proposed in and its `payload`

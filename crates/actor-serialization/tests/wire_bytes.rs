@@ -170,3 +170,122 @@ fn each_form_decodes_what_the_other_wrote() {
         }
     }
 }
+
+// --- The enum shapes, which the structs above do not reach -------------------------
+
+/// A byte field inside a **struct variant**, as `Frame::Envelope::payload`,
+/// `Frame::RaftInstallSnapshot::data` and `Frame::RaftPropose::command` are.
+///
+/// A variant is not a struct: postcard writes a variant index before the fields, and
+/// `serde_json` writes an outer object keyed by the variant name. Neither of those is
+/// exercised above, and the cluster wire protocol is entirely enums — so the neutrality
+/// that matters most for `actor.wire` is the one this pair checks. The leading variant
+/// is there so the tagged field does not sit at index 0, where an encoder that got the
+/// discriminant wrong could still coincidentally agree.
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+enum PlainFrame {
+    Other(u32),
+    Envelope { recipient: u64, payload: Vec<u8> },
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+enum TaggedFrame {
+    Other(u32),
+    Envelope {
+        recipient: u64,
+        #[serde(with = "serde_bytes")]
+        payload: Vec<u8>,
+    },
+}
+
+/// Bytes in a **newtype variant**, as `EntryPayload::App` is — the shape with no field
+/// name at all.
+///
+/// This one is also durable, not only wire: a Raft voter persists its log through
+/// `wal`, so if the attribute moved these bytes it would move every existing log file
+/// too, and the record-schema revision would have to move with it.
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+enum PlainEntry {
+    Noop,
+    App(Vec<u8>),
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+enum TaggedEntry {
+    Noop,
+    App(#[serde(with = "serde_bytes")] Vec<u8>),
+}
+
+#[test]
+fn tagging_bytes_inside_an_enum_variant_is_neutral_too() {
+    for (name, codec) in CODECS {
+        for payload in payloads() {
+            let untagged = encode(
+                *codec,
+                &PlainFrame::Envelope {
+                    recipient: 9,
+                    payload: payload.clone(),
+                },
+            )
+            .expect("encodes");
+            let tagged = encode(
+                *codec,
+                &TaggedFrame::Envelope {
+                    recipient: 9,
+                    payload: payload.clone(),
+                },
+            )
+            .expect("encodes");
+            assert_eq!(
+                untagged,
+                tagged,
+                "{name} encodes a {}-byte struct-variant field differently once tagged",
+                payload.len(),
+            );
+
+            let untagged = encode(*codec, &PlainEntry::App(payload.clone())).expect("encodes");
+            let tagged = encode(*codec, &TaggedEntry::App(payload.clone())).expect("encodes");
+            assert_eq!(
+                untagged,
+                tagged,
+                "{name} encodes a {}-byte newtype variant differently once tagged — \
+                 this shape is persisted in a Raft voter's log, so it is a durable \
+                 format change as well as a wire one",
+                payload.len(),
+            );
+        }
+    }
+}
+
+#[test]
+fn each_enum_form_decodes_what_the_other_wrote() {
+    for (name, codec) in CODECS {
+        for payload in payloads() {
+            let from_untagged = encode(
+                *codec,
+                &PlainFrame::Envelope {
+                    recipient: 9,
+                    payload: payload.clone(),
+                },
+            )
+            .expect("encodes");
+            let new_reads_old: TaggedFrame = decode(*codec, &from_untagged).expect("decodes");
+            assert_eq!(
+                new_reads_old,
+                TaggedFrame::Envelope {
+                    recipient: 9,
+                    payload: payload.clone(),
+                },
+                "{name}: a tagged build misread an untagged peer's envelope",
+            );
+
+            let from_tagged = encode(*codec, &TaggedEntry::App(payload.clone())).expect("encodes");
+            let old_reads_new: PlainEntry = decode(*codec, &from_tagged).expect("decodes");
+            assert_eq!(
+                old_reads_new,
+                PlainEntry::App(payload.clone()),
+                "{name}: an untagged build misread a tagged log entry",
+            );
+        }
+    }
+}

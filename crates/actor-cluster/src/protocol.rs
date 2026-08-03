@@ -48,6 +48,15 @@ pub enum Frame {
         recipient: ActorId,
         manifest: String,
         correlation: Option<CallId>,
+        /// Already codec-encoded by the sender, and encoded *again* as part of this
+        /// frame — so bulk bytes cross the wire through two encoders, and both have
+        /// to be told they are bytes. Without the attribute serde takes its default
+        /// sequence path and the decoder grows a `Vec` one `u8` at a time: ~16 ms a
+        /// mebibyte, which measured as the whole per-block cost of replicating a
+        /// disk image (TODO.md). Neutral on the wire for both codecs in the tree —
+        /// `actor-serialization/tests/wire_bytes.rs` is that claim, and covers this
+        /// struct-variant shape specifically.
+        #[serde(with = "serde_bytes")]
         payload: Vec<u8>,
     },
     /// The reply to an `ask`, referencing its correlation id. The outcome is the
@@ -166,6 +175,9 @@ pub enum Frame {
         snapshot_term: u64,
         voters: Vec<NodeId>,
         learners: Vec<NodeId>,
+        /// The opaque application snapshot — bulk bytes, so tagged for the same
+        /// reason as `Envelope::payload`.
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
     /// Many groups' heartbeats in one frame, from one leader to one follower
@@ -210,6 +222,9 @@ pub enum Frame {
     /// a non-leader is dropped, and the proposer's bounded wait reports failure.
     RaftPropose {
         group: GroupId,
+        /// Already-encoded app bytes, tagged for the same reason as
+        /// `Envelope::payload`.
+        #[serde(with = "serde_bytes")]
         command: Vec<u8>,
         forwarded: bool,
     },
