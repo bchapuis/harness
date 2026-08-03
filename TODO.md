@@ -25,25 +25,9 @@ the disk facet captures dirty blocks, facet 0's state checks its root set. That 
 but it puts the same discipline in four places and gets nothing for a chunk two
 *different* grains or a re-import produced. An offer round (`has` the ids, put the
 absent ones) would move it under the seam once. It costs an extra RTT on a cold put,
-which is the whole objection — and the objection is much weaker once the puts it rides
-on are pipelined rather than serialized, so sequence it after the item below.
-
-**Pipeline the disk facet's block puts.** `DiskHandle::import` and `DiskHandle::capture`
-`await` one `blobs.put` per block in a plain `for` loop, so a 512-block image is 512
-serialized trips through the journal seam. Every other checkpointing facet hands its
-chunks to `facet_blobs::put_chunked`, which runs `IN_FLIGHT_CHUNKS` of them at once —
-the SQL facet (§7.14), the workspace facet (§7.11), and facet 0's own state (§7.12).
-The disk facet is the only one that hand-rolls the loop, and it is the one with by far
-the largest artifacts. On the `Local` tier the serialization costs nothing and
-`benches/disk_capture.rs` shows why: a trip through the seam is 0.58 µs against 1.4 ms
-of bytes per block, so there is nothing to overlap. On the `Quorum` tier each of those
-trips is a quorum round, and `tests/disk_rounds.rs` now measures it: 2 ms of virtual
-time per block — one frame out, one acknowledgement back — and the same 2 ms for a
-four-byte blob, so the cost is the round trip and not the payload. A 512-block image
-is 512 serialized quorum rounds. The change is small: `put_chunked` already exists and
-already handles the ordering and the don't-abandon-in-flight-work discipline. It is
-worth up to `IN_FLIGHT_CHUNKS`-fold on the create path, and `disk_rounds.rs` is the
-before it gets measured against — that test is written to fail low when this lands.
+which was the whole objection — and that objection is now much weaker, because the
+puts it rides on are pipelined: an extra round per wave of `IN_FLIGHT_CHUNKS`, not an
+extra round per chunk. Now unblocked.
 
 **Tell the wire codec that a blob is bytes.** A `Vec<u8>` goes through serde's default
 sequence path, one element at a time: `actor-serialization`'s bench prices a 1 MiB
@@ -125,6 +109,13 @@ Scale it before prioritizing it. At ~65 ms per block a 512 MB create is ~33 s of
 blocks on top of a one-time warm-up — so the headline "four minutes" was mostly the
 warm-up plus a debug build, which costs ~2.4x release. Both of those are worth more
 than the block path is.
+
+*Since measured:* the block path's rounds no longer add up. The disk facet's puts
+are pipelined `IN_FLIGHT_CHUNKS` at a time, so `disk_rounds.rs` now counts one
+quorum round per **wave of 16 blocks** where it counted one per block — 2 ms of
+virtual time either way, which is the full 16-fold. The ~33 s of blocks above is
+the serialized figure and should be re-taken on real nodes; what it does *not*
+change is the one-time warm-up, which was always the larger half.
 
 *A correction to what this file said before:* the earlier entry divided 240 s by 512
 blocks to get "~470 ms per round" and went looking for a round trip that expensive.

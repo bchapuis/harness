@@ -13,15 +13,26 @@
 //! to each run through `invariants()`, and the test asserts on the totals after
 //! the sweep.
 //!
-//! The totals must hold at **any** width, because these assertions ride invariant
-//! sweeps and those narrow locally (`sweep_seeds` to 8, `slow_seeds` to 1) — a
+//! A total asserted on a narrowable sweep must hold at **any** width, because
+//! those sweeps narrow locally (`sweep_seeds` to 8, `slow_seeds` to 1) and a
 //! coverage claim that only came true on a wide run would be a claim about the
-//! run rather than the workload, which is why `coverage_seeds` exists and never
-//! narrows. So a hibernating workload *drives* these paths rather than sampling
-//! them: it idles past `idle_after` on a fixed cadence rather than a seeded coin,
-//! and snapshots often enough that a grain has a checkpoint to return from before
-//! it first passivates. What stays seeded is everything the nemesis and the wire
-//! do around that.
+//! run rather than the workload. Most hibernating workloads earn that by
+//! *driving* these paths rather than sampling them: they idle past `idle_after`
+//! on a fixed cadence rather than a seeded coin, and snapshot often enough that a
+//! grain has a checkpoint to return from before it first passivates. What stays
+//! seeded is everything the nemesis and the wire do around that.
+//!
+//! A workload that cannot drive them has to say so, and one cannot: the disk
+//! swarm's grains must import a multi-megabyte image before they can commit
+//! anything, and under a nemesis that kills processes there are seeds where the
+//! cluster never gives them a window — seeds on which nothing passivates at all.
+//! Its totals are therefore an aggregate over the seed range rather than a
+//! per-seed property, so they are asserted on a sweep sized by `coverage_seeds`,
+//! which never narrows. See
+//! `disk_swarm.rs::disk_hibernation_actually_passivates_and_restores_from_a_snapshot`,
+//! which records how that was found out. Before assuming a new workload drives
+//! these paths, check it at width 1 across the declared range rather than at the
+//! one seed a local run happens to draw.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;

@@ -87,13 +87,83 @@ where
 /// are independent and issue concurrently, [`IN_FLIGHT_CHUNKS`] at a time; dedup
 /// makes a chunk already stored ~free (§7.10). `what` labels a failure (e.g.
 /// `"sql checkpoint"`).
+///
+/// Takes the whole artifact up front, which suits a facet whose artifact is already
+/// in memory and bounded (the workspace tree's 64 MiB cap, a SQL checkpoint's
+/// serialized pages). A facet whose artifact is not — the disk facet's 16 GiB image
+/// — wants [`put_pulled`], which is the same transfer with the chunks produced as
+/// slots free rather than collected first.
 pub(crate) async fn put_chunked(
     blobs: &GrainBlobs,
     chunks: Vec<Vec<u8>>,
     what: &str,
 ) -> Result<Vec<BlobId>, FacetError> {
-    let work: Vec<_> = chunks.into_iter().map(|chunk| blobs.put(chunk)).collect();
-    bounded_in_order(work, &format!("{what} put")).await
+    put_pulled(blobs, chunks.into_iter().map(Ok), what).await
+}
+
+/// Store chunks **pulled on demand** in the grain's blob area, returning their ids
+/// in the order `chunks` yielded them. [`IN_FLIGHT_CHUNKS`] transfers run at once,
+/// exactly as in [`put_chunked`]; what differs is where the artifact lives.
+///
+/// `chunks` is advanced only when a transfer slot frees, so peak memory is
+/// `IN_FLIGHT_CHUNKS` chunks whatever the artifact's total size, and a source that
+/// reads from a file paces itself against the puts instead of racing ahead of them.
+/// That is what lets the disk facet (§7.15) pipeline a 16 GiB image's blocks without
+/// materializing it: the alternative — collect every block, then hand the vector to
+/// [`put_chunked`] — trades the serialized round trips for an allocation the facet's
+/// whole point is to avoid.
+///
+/// A chunk the source fails to produce ends the pull: the error is returned, and no
+/// *further* chunk is asked for. That is the same discipline [`bounded_in_order`]
+/// applies to the transfers themselves, read from the other side — declining to
+/// start work is allowed, abandoning work already issued is not, so the transfers
+/// already in flight still run to completion.
+pub(crate) async fn put_pulled<I>(
+    blobs: &GrainBlobs,
+    chunks: I,
+    what: &str,
+) -> Result<Vec<BlobId>, FacetError>
+where
+    I: Iterator<Item = Result<Vec<u8>, FacetError>>,
+{
+    // Checks the flag *before* pulling, which `Iterator::scan` cannot: after a
+    // source failure the next chunk is never asked for, not asked for and dropped.
+    let mut chunks = chunks;
+    let mut stopped = false;
+    let source = std::iter::from_fn(move || {
+        if stopped {
+            return None;
+        }
+        let chunk = chunks.next()?;
+        stopped = chunk.is_err();
+        Some(chunk)
+    });
+
+    // The same tag-buffer-sort as [`bounded_in_order`], repeated rather than shared
+    // because that one takes its work already collected. Folding the two together
+    // needs an iterator of futures borrowing `blobs`, and inference will not prove
+    // such a closure general enough over the borrow's lifetime.
+    //
+    // `buffer_unordered` polls its inner stream only while it is under capacity, and
+    // `stream::iter` pulls one iterator item per poll — which is what makes the
+    // source demand-driven rather than eager, and so bounds the memory.
+    let mut done: Vec<(usize, Result<BlobId, FacetError>)> =
+        futures::stream::iter(source.enumerate())
+            .map(|(i, chunk)| async move {
+                let put = match chunk {
+                    Ok(bytes) => blobs
+                        .put(bytes)
+                        .await
+                        .map_err(|e| FacetError(format!("{what} put: {e:?}"))),
+                    Err(source) => Err(source),
+                };
+                (i, put)
+            })
+            .buffer_unordered(IN_FLIGHT_CHUNKS)
+            .collect()
+            .await;
+    done.sort_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, r)| r).collect()
 }
 
 /// Fetch `ids` from the grain's blob area and concatenate them in order — the

@@ -415,6 +415,41 @@ fn disk_grain_invariants_hold_across_hibernation_and_restarts() {
     if let Err(failure) = run_cluster_swarm(&workload, slow_seeds(0..16)) {
         panic!("{failure}");
     }
+    // No `assert_hibernated` here: see the test below for why this sweep is the
+    // wrong place to state it.
+}
+
+#[test]
+fn disk_hibernation_actually_passivates_and_restores_from_a_snapshot() {
+    // The sweep above is where the invariants are checked, and it narrows: at
+    // `slow_seeds` a local run gets one seed of the declared sixteen. That is
+    // right for an invariant, which every seed must satisfy, and wrong for the
+    // coverage claim that used to ride along with it.
+    //
+    // Whether this workload passivates and returns from a checkpoint is a
+    // property of the *seed range*, not of any one seed. Nothing forces it: the
+    // grain has to commit past `snapshot_every`, then idle out, then be called
+    // again, and the nemesis spends stretches of most seeds unable to reach a
+    // write quorum, so on the declared range it happens on some seeds and not
+    // others — seeds 2 and 3 never passivate at all. Asserted on a narrowed
+    // sweep it was a claim about which seed a local run happened to draw, and it
+    // held only because seed 0 was one of the ones that covered. Any change that
+    // shifted the schedule could turn it red without breaking anything, and one
+    // did: pipelining the disk facet's block puts made captures finish sooner,
+    // which shortened the run and took hibernations with it.
+    //
+    // So state it where it is true, on a sweep sized by `coverage_seeds`, which
+    // never narrows — the same treatment `restarted` gets in
+    // `grain_swarm.rs::the_nemesis_actually_restarts_a_node`, and the same one
+    // `disk_cluster_swarm_actually_fires_each_fault_type` gets below. The whole
+    // declared sixteen, because that is the range the claim is an aggregate
+    // over: the seeds that cover are not spread evenly through it, and a half
+    // range picked to save time covered none of them.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workload = DiskBoxSwarm::hibernating(3, 3, 5, dir.path().to_path_buf());
+    if let Err(failure) = run_cluster_swarm(&workload, coverage_seeds(0..16)) {
+        panic!("{failure}");
+    }
     workload.exercised.assert_hibernated();
 }
 

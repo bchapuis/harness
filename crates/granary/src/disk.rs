@@ -53,6 +53,7 @@ use crate::facet::HasFacet;
 use crate::facet::sealed::Sealed;
 use crate::facet_blobs::RootSet;
 use crate::facet_blobs::io_facet_err;
+use crate::facet_blobs::put_pulled;
 use crate::grain::Grain;
 use crate::grain::GrainCtx;
 
@@ -467,10 +468,15 @@ where
                 "import of {src_bytes} bytes exceeds the {MAX_IMAGE_BYTES} bound"
             )));
         }
-        // Copy block by block, hashing and putting each — sequential, so
-        // memory is bounded by one block. Every put precedes staging (plan,
-        // then stage, §7.12): a failed put stages nothing, and blobs orphaned
-        // by a failed commit are unrooted and swept by the host's unioned GC.
+        // Copy block by block, hashing and putting each. The *copy* is sequential
+        // — both files move in position order — but the puts are not: `put_pulled`
+        // keeps `IN_FLIGHT_CHUNKS` of them outstanding and reads the next block
+        // only as one lands, so memory stays bounded by that many blocks (not by
+        // the image, which may be `MAX_IMAGE_BYTES`) while a `Quorum` deployment
+        // overlaps the rounds instead of paying one end to end per block. Every
+        // put precedes staging (plan, then stage, §7.12): a failed put stages
+        // nothing, and blobs orphaned by a failed commit are unrooted and swept by
+        // the host's unioned GC.
         let mut reader = fs::File::open(src).map_err(io_disk_err)?;
         let mut writer = fs::OpenOptions::new()
             .write(true)
@@ -480,17 +486,26 @@ where
             .map_err(io_disk_err)?;
         writer.set_len(src_bytes).map_err(io_disk_err)?;
         let blobs = self.ctx.blobs();
-        let mut blocks = Vec::with_capacity(block_count(src_bytes));
-        for idx in 0..block_count(src_bytes) as u32 {
-            let mut block = vec![0u8; block_len(src_bytes, idx)];
-            reader.read_exact(&mut block).map_err(io_disk_err)?;
-            writer.write_all(&block).map_err(io_disk_err)?;
-            let id = blobs
-                .put(block)
-                .await
-                .map_err(|e| DiskError(format!("block put: {e:?}")))?;
-            blocks.push((idx, id));
-        }
+        let ids = put_pulled(
+            &blobs,
+            (0..block_count(src_bytes) as u32).map(|idx| {
+                let mut block = vec![0u8; block_len(src_bytes, idx)];
+                reader
+                    .read_exact(&mut block)
+                    .map_err(io_facet_err("disk"))?;
+                writer.write_all(&block).map_err(io_facet_err("disk"))?;
+                Ok(block)
+            }),
+            "disk import block",
+        )
+        .await
+        .map_err(facet_disk_err)?;
+        // An import is full coverage, so the nth id is block n by construction.
+        let blocks: Vec<(u32, BlobId)> = ids
+            .into_iter()
+            .enumerate()
+            .map(|(idx, id)| (idx as u32, id))
+            .collect();
         let stats = DiskCaptureStats {
             blocks: blocks.len() as u32,
             bytes: src_bytes,
@@ -535,23 +550,35 @@ where
         }
         let blobs = self.ctx.blobs();
         let mut file = fs::File::open(&path).map_err(io_disk_err)?;
+        // The scan is sequential and the clean blocks never leave it — a block
+        // whose hash still matches the committed index is the dedup case the
+        // facet exists to get for free, and skipping it here is cheaper than
+        // putting it and having the store recognize it. Only the dirty ones reach
+        // `put_pulled`, which pipelines them the way `import`'s do; `blocks`
+        // records each one's index as the scan yields it, so it stays aligned
+        // with the ids that come back in order.
         let mut blocks = Vec::new();
         let mut bytes = 0u64;
-        for idx in 0..block_count(image_bytes) as u32 {
+        let dirty = (0..block_count(image_bytes) as u32).filter_map(|idx| {
             let mut block = vec![0u8; block_len(image_bytes, idx)];
-            file.read_exact(&mut block).map_err(io_disk_err)?;
+            if let Err(e) = file.read_exact(&mut block) {
+                return Some(Err(io_facet_err("disk")(e)));
+            }
             let id = BlobId::of(&block);
             if index.get(idx as usize).copied().flatten() == Some(id) {
-                continue;
+                return None;
             }
             bytes += block.len() as u64;
-            let put = blobs
-                .put(block)
-                .await
-                .map_err(|e| DiskError(format!("block put: {e:?}")))?;
-            debug_assert_eq!(put, id);
             blocks.push((idx, id));
-        }
+            Some(Ok(block))
+        });
+        let ids = put_pulled(&blobs, dirty, "disk capture block")
+            .await
+            .map_err(facet_disk_err)?;
+        debug_assert!(
+            ids.iter().eq(blocks.iter().map(|(_, id)| id)),
+            "a put returned an id the scan did not hash",
+        );
         if blocks.is_empty() {
             return Ok(DiskCaptureStats {
                 blocks: 0,
@@ -609,4 +636,12 @@ where
 
 fn io_disk_err(e: std::io::Error) -> DiskError {
     DiskError(format!("io: {e}"))
+}
+
+/// Carry a block transfer's failure out as the handler's application-level
+/// outcome. The shared blob helpers speak [`FacetError`] because most of their
+/// callers are facet hooks; a capture and an import are commands, and §7.15 has
+/// them reply rather than fail the activation.
+fn facet_disk_err(e: FacetError) -> DiskError {
+    DiskError(e.0)
 }

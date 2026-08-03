@@ -19,31 +19,40 @@
 //! not a total divided by one — because a command's total is dominated by what it
 //! pays once regardless of size: routing to the shard leader, activating the grain,
 //! recovering its head, committing the single manifest record. At these sizes that
-//! intercept is most of the total (~56 ms against 2 ms of block), so an average
+//! intercept is most of the total (~56 ms against 2 ms of wave), so an average
 //! measures the intercept and answers the wrong question. Taking a difference cancels
 //! it exactly. Between them they establish:
 //!
-//! - **a block costs one quorum round of its own** — the slope is a frame out and an
-//!   acknowledgement back, so nothing overlaps and the round trips simply add up;
-//! - **that cost is the round trip and not the bytes**, shown by a control making the
-//!   same number of trips through the same seam carrying four bytes instead of a
-//!   mebibyte, which produces the same slope.
+//! - **a wave of `IN_FLIGHT_CHUNKS` blocks costs one quorum round between them** —
+//!   the facet issues that many puts at once, so the round trips overlap instead of
+//!   adding up, and the marginal block costs a round trip *divided by* the width;
+//! - **pipelining is what makes it cheap, not the payload being small**, shown by a
+//!   control making the same number of trips through the same seam in a serial loop
+//!   carrying four bytes instead of a mebibyte, which costs a full round trip each.
 //!
-//! So a 512-block image is 512 serialized quorum rounds, and pipelining them is worth
-//! up to `IN_FLIGHT_CHUNKS`-fold. What these tests do *not* say is what one round
-//! costs on real hardware: virtual time counts rounds, it does not price them. That
-//! price has since been taken on a real three-node cluster and is ~63 ms per block
-//! against ~12 ms on a single node, rising linearly with each replica added — see
-//! TODO.md, which also records that a create's headline cost turned out to be mostly
-//! a one-time cluster warm-up rather than anything per block.
-//!
-//! The assertions are bands rather than equalities, and the one on the slope is a
-//! characterization: it describes what the path costs *today* so the pipelining
-//! change has a before to be measured against (TODO.md, "Pipeline the disk facet's
-//! block puts"). When that lands this test should fail low, which is the signal that
-//! it worked — re-derive the bound around the new round count rather than deleting
-//! it. Failing high is the regression it guards: more exchanges per put, paid per
+//! So a 512-block image is 32 waves rather than 512 serialized rounds. What these
+//! tests do *not* say is what one round costs on real hardware: virtual time counts
+//! rounds, it does not price them. That price has been taken on a real three-node
+//! cluster and is ~63 ms per block against ~12 ms on a single node, rising linearly
+//! with each replica added — see TODO.md, which also records that a create's headline
+//! cost turned out to be mostly a one-time cluster warm-up rather than anything per
 //! block.
+//!
+//! **What this file measured before**, because the numbers above are only meaningful
+//! against it: while `import` put its blocks in a serial loop, the slope was one whole
+//! round trip *per block*, and the same slope came back when the control carried four
+//! bytes instead of a mebibyte. That pair of readings is what identified the round
+//! count rather than the payload as the lever, and the pipelining change (TODO.md,
+//! "Pipeline the disk facet's block puts") was made on it. When that change landed,
+//! this test failed low exactly as it was written to — 4 blocks and 16 blocks costing
+//! the same 58 ms, because both fit in one wave — and the bounds were re-derived
+//! around the wave rather than the block, which is why `FEW` and `MANY` are now a
+//! wave apart.
+//!
+//! The assertions are bands rather than equalities. Failing **high** is the
+//! regression they guard: the puts have stopped overlapping and a create is back to
+//! a round trip per block. Failing **low** on the wave means the concurrency bound
+//! stopped being applied, which a large image pays for in memory rather than time.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -126,10 +135,11 @@ impl GrainHandler<ImportFrom> for DiskBox {
 /// Make `0` blob puts of four bytes each from inside one command handler — the
 /// control.
 ///
-/// The same seam, the same number of trips through it, the payload taken away. If
-/// this costs what an import of the same block count costs, the import's time is its
-/// round trips; if it costs far less, the bytes are on the wire and the round count
-/// is a red herring.
+/// The same seam, the same number of trips through it, the payload taken away and
+/// the puts left **serialized**: the shape `import` had before it pipelined. Holding
+/// the loop serial here is the point, not an oversight — it is what the import is
+/// measured against, and what makes the comparison read as the width rather than as
+/// the bytes.
 #[derive(Clone, Serialize, Deserialize)]
 struct TinyPuts(u32);
 impl Message for TinyPuts {
@@ -299,6 +309,11 @@ fn tiny_puts_cost(seed: u64, count: usize) -> Duration {
 
 // --- The measurements ---------------------------------------------------------
 
+/// `facet_blobs::IN_FLIGHT_CHUNKS` — how many block puts the disk facet keeps
+/// outstanding. Private to the crate, so it is restated here the way `BLOCK` is;
+/// if it moves, these measurements move with it and the assertions below say so.
+const IN_FLIGHT: usize = 16;
+
 /// The two block counts every measurement here is a slope between.
 ///
 /// A slope rather than an average, because a command's total is dominated by costs
@@ -307,8 +322,18 @@ fn tiny_puts_cost(seed: u64, count: usize) -> Duration {
 /// of that is paid once and shows up as a large intercept — at these sizes it is
 /// most of the total — so `total / blocks` measures the intercept and answers the
 /// wrong question. The difference between two sizes cancels it exactly.
-const FEW: usize = 4;
-const MANY: usize = 16;
+///
+/// Both counts are whole multiples of [`IN_FLIGHT`], one wave apart. That is what
+/// makes the slope readable now that the puts pipeline: within a wave the marginal
+/// block is free, so a pair that fits inside one wave measures nothing at all —
+/// which is precisely how this test reported the change landing, the old `FEW` = 4
+/// and `MANY` = 16 both going out in a single wave and the slope collapsing to a
+/// nanosecond. One wave apart and not two, because the difference is exact rather
+/// than averaged — the transport's minimum delivery latency quantizes it — and the
+/// second wave would be another 16 MiB through a simulated three-node quorum for
+/// no more resolution.
+const FEW: usize = IN_FLIGHT;
+const MANY: usize = 2 * IN_FLIGHT;
 
 /// The marginal virtual cost of one more block, from two measurements sharing a seed.
 fn per_block(few: Duration, many: Duration) -> Duration {
@@ -321,7 +346,7 @@ fn per_block(few: Duration, many: Duration) -> Duration {
 }
 
 #[test]
-fn every_block_costs_its_own_quorum_round() {
+fn a_wave_of_blocks_costs_one_quorum_round_between_them() {
     // The characterization this exists to produce. Import at two sizes and take the
     // slope: whatever a create pays per block, above everything it pays once.
     let (few, few_stats) = import_cost(5, FEW);
@@ -330,52 +355,70 @@ fn every_block_costs_its_own_quorum_round() {
     assert_eq!(many_stats.blocks as usize, MANY);
 
     let marginal = per_block(few, many);
+    let per_wave = marginal * IN_FLIGHT as u32;
     println!(
         "quorum import: {FEW} blocks in {few:?}, {MANY} blocks in {many:?} \
-         → {marginal:?} per block, {:.0} ms of fixed cost",
+         → {marginal:?} per block, {per_wave:?} per {IN_FLIGHT}-block wave, \
+         {:.0} ms of fixed cost",
         (few.as_secs_f64() * 1000.0) - (marginal.as_secs_f64() * 1000.0 * FEW as f64),
     );
 
     // A quorum put is a frame out and an acknowledgement back, and the simulated
-    // transport applies its base latency to each (§18.2). A block costing a whole
-    // round trip of its own is the signature of `import`'s sequential loop: nothing
-    // overlaps, so the round trips add up.
+    // transport applies its base latency to each (§18.2). The facet issues
+    // `IN_FLIGHT` of them at once, so a wave costs one round trip and the blocks
+    // inside it cost nothing of their own: the slope is a round trip *divided by*
+    // the width, not a round trip each.
     assert!(
-        marginal >= Duration::from_millis(1),
-        "a block's marginal cost is {marginal:?}, under one delivery — the puts must \
-         have started overlapping, which is the change TODO.md calls for; re-derive \
-         this bound around the new round count rather than deleting it",
+        per_wave >= Duration::from_millis(1),
+        "a wave of {IN_FLIGHT} blocks costs {per_wave:?}, under one delivery — the \
+         puts are overlapping more widely than the facet's bound allows, so either \
+         `IN_FLIGHT` grew or the bound stopped being applied; a create's memory is \
+         what that costs, so re-derive this around the new width rather than \
+         deleting it",
     );
     assert!(
-        marginal <= Duration::from_millis(10),
-        "a block's marginal cost is {marginal:?}, several round trips rather than one \
-         — a put now costs more exchanges than it did, and a create pays it per block",
+        per_wave <= Duration::from_millis(10),
+        "a wave of {IN_FLIGHT} blocks costs {per_wave:?}, several round trips rather \
+         than one — the puts have stopped overlapping, and a create is back to \
+         paying a round trip per block (TODO.md, \"Pipeline the disk facet's block \
+         puts\")",
     );
 }
 
 #[test]
-fn a_blocks_cost_is_its_round_trip_and_not_its_bytes() {
-    // The same seam, the same number of trips through it, one mebibyte each against
-    // four bytes each. On a path whose cost is the payload these slopes differ by a
-    // factor of a quarter-million; on a path whose cost is the round trips they agree,
-    // and only then is the round *count* the thing worth changing.
+fn pipelining_the_puts_is_what_makes_a_block_cheap_and_not_its_size() {
+    // The same seam and the same number of trips through it, one path pipelined and
+    // one not: an import carrying a mebibyte per put against the control's serial
+    // loop carrying four bytes. The control is the shape `import` used to have.
+    //
+    // This pairing used to ask a different question. While both paths were serial it
+    // compared a mebibyte per put against four bytes per put and found they cost the
+    // same, which is how the round *count* rather than the payload was identified as
+    // the lever — the finding the pipelining change was then made on. That question
+    // is answered and acted on, so the pairing now measures what the answer bought:
+    // the heavier payload is the cheaper path, and only pipelining can explain it.
     let (few_bytes, stats) = import_cost(11, FEW);
     let (many_bytes, _) = import_cost(11, MANY);
     assert_eq!(stats.blocks as usize, FEW);
-    let loaded = per_block(few_bytes, many_bytes);
-    let empty = per_block(tiny_puts_cost(11, FEW), tiny_puts_cost(11, MANY));
+    let pipelined = per_block(few_bytes, many_bytes);
+    let serial = per_block(tiny_puts_cost(11, FEW), tiny_puts_cost(11, MANY));
 
-    println!("quorum put: {loaded:?} per 1 MiB block, {empty:?} per 4-byte blob");
+    println!(
+        "quorum put: {pipelined:?} per pipelined 1 MiB block, \
+         {serial:?} per serialized 4-byte blob"
+    );
 
-    // Within a factor of four either way — a band, not an equality. An import also
-    // reads and writes the image, and the transport's per-frame latency is seeded
-    // rather than fixed, so demanding agreement would be asserting the harness. The
-    // hypothesis being tested is worth six orders of magnitude, so four is ample.
-    let ratio = loaded.as_secs_f64() / empty.as_secs_f64();
+    // A band rather than a figure. In principle the win is the full `IN_FLIGHT`-fold;
+    // in practice an import also reads and writes the image and the transport's
+    // per-frame latency is seeded rather than fixed, so demanding the factor itself
+    // would be asserting the harness. A quarter of it is far outside anything those
+    // can account for, and far inside what a regression to a serial loop would show.
+    let speedup = serial.as_secs_f64() / pipelined.as_secs_f64();
     assert!(
-        (0.25..=4.0).contains(&ratio),
-        "a mebibyte per put cost {ratio:.2}x what four bytes per put cost \
-         ({loaded:?} against {empty:?}) — the payload now dominates the round trip, \
-         so the block size is the lever and the round count is not",
+        speedup >= IN_FLIGHT as f64 / 4.0,
+        "a pipelined mebibyte-per-put block cost {pipelined:?} against the serial \
+         control's {serial:?} for four bytes — only {speedup:.1}x, where overlapping \
+         {IN_FLIGHT} puts should be worth several times that. The block puts are not \
+         overlapping the way `put_pulled` intends.",
     );
 }
