@@ -129,10 +129,35 @@ Only a measurement past the fix distinguishes the two.
 The lesson generalizes past this fix: a `Vec<u8>` that is *already* encoded bytes is
 exactly the field an author does not think of as a payload, and the wire has one at
 every layer it passes through. `Frame`'s remaining `Vec<u8>` fields are all small
-(SWIM digests, membership lists); `ReplyResult` is `Result<Vec<u8>, CallError>`, a
-type alias with nowhere to hang an attribute, and it carries a mebibyte on the
-`fetch_blob` and snapshot-read paths — the same bug, in the other direction, still
-open.
+(SWIM digests, membership lists), so the wire is now swept — but the last one took a
+different fix and is worth its own note.
+
+`Frame::Reply`'s outcome is `ReplyResult`, a `Result<Vec<u8>, CallError>` **type
+alias**: the `Vec<u8>` is inside someone else's generic, so there is no field to hang
+an attribute on, and changing the alias would be a workspace-wide public-API change
+for a serialization concern belonging to one frame. `protocol::reply_bytes` mirrors
+serde's own `Result` representation instead — two newtype variants, `Ok` and `Err`, in
+that order — with the success payload told it is bytes. On the reply direction at a
+mebibyte that is 3.79 ms to 18.5 µs encoding and 12.16 ms to 21.3 µs decoding
+(`actor-cluster/benches/frame.rs`), 204x and 572x, and it matters on `fetch_blob` —
+the lazy hydration a fresh leader does for a block it lacks — and on grain reads.
+
+Mirroring is riskier than an attribute and the risk is specific: a renamed variant or
+a swapped order is a silent wire break, since the bytes stay well-formed and only mean
+something else. Two things hold it. `protocol`'s own tests encode through the real
+module and compare against serde's `Result`, so a drift fails where the break would
+be — checked by mutation, not assumed. And it takes *both* codecs to pin it, which was
+not obvious: postcard writes a variant index, so it catches a reorder and not a rename;
+`serde_json` writes the name, so it catches a rename and not a reorder. A tree with one
+codec would be asserting half of what it appears to.
+
+That leaves an asymmetry worth naming rather than fixing blind: the request direction
+is measured end to end on real nodes and the reply direction is measured only at the
+bench. `machine-cost.sh` drives creates, which are all request; reaching the reply path
+means making a leader fault in a block it does not hold, i.e. a migration or a restart,
+which no harness in the tree drives. The bench is the honest instrument for a codec
+change, but the end-to-end figure is unmeasured and should not be assumed to be the
+bench's.
 
 *The compatibility objection this item carried was wrong, which is why it moved.* It
 said `serde_bytes` was a format change under JSON — an array of decimal numbers
@@ -151,7 +176,9 @@ variant** (postcard writes a variant index first; `serde_json` an outer object k
 the variant name) and one in a **newtype variant**, which is what `EntryPayload::App`
 is. The second carries a second obligation — a Raft voter persists its log through
 `wal`, so a change there would move every existing log file and not only the wire — and
-that is why the neutrality is checked rather than argued for both.
+that is why the neutrality is checked rather than argued for both. The `Result` shape
+is there too, with a negative control: a deliberately wrong mirror, asserted to encode
+differently, so the neutrality tests are known to be capable of failing.
 
 **Pipelining bought almost none of it, and chasing why is what found the envelope.**
 The window was swept against real nodes — two nodes, all-zero image, one build per
