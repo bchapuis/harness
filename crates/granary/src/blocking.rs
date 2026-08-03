@@ -63,7 +63,7 @@
 use std::sync::Arc;
 
 /// A unit of blocking work: one synchronous store call.
-type Job = Box<dyn FnOnce() + Send + 'static>;
+pub(crate) type Job = Box<dyn FnOnce() + Send + 'static>;
 
 /// Where the blocking file I/O of a durable store runs.
 ///

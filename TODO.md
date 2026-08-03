@@ -148,13 +148,19 @@ cannot persist. The grain store was changed to poison and refuse instead, but a 
 that cannot persist its term must stop voting, which is a different and larger question
 than a replica dropping out of a quorum.
 
-**The local fsync is serialized ahead of the peer fan-out.** In
-`QuorumReplicator::append` and `save_snapshot` the peer asks are lazy futures, so
-`offload(...).await` means no `StoreRecord` reaches a replica until this node's own
-flush completes: commit latency is `local + RTT` rather than `max(local, RTT)`. Noise
-at the median, the whole cost at the tail. Overlapping them changes ordering under
-`InlineIo` and so changes what the deterministic simulator sees — safe, but it needs
-the seed sweeps run deliberately rather than incidentally.
+**~~The local fsync is serialized ahead of the peer fan-out.~~** *Done, with one
+constraint this entry did not name.* `append` and `save_snapshot` now hand the local
+write to the quorum unresolved (`local_store_ack`), so the peer asks go on the wire
+while the flush runs and a commit costs `max(local, RTT)`.
+
+The constraint: `BlockingIo`'s contract promises threads and **explicitly not order**,
+and `ThreadPoolIo` runs several workers off one queue. What has been keeping a grain's
+writes ordered is precisely the serialized flush — every caller awaits its store call
+before issuing the next. Letting `append` return while its own write is still queued
+would let the next append for that grain race it. So the write is still awaited before
+`append` returns; what is removed is the *round trip* spent waiting on it, not the
+wait. Anyone tempted to go further — commit on a peer-only quorum and let the local
+write land whenever — has to give the pool an ordering guarantee first.
 
 ## Quality, when the code is next opened
 

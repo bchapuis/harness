@@ -56,6 +56,49 @@ fn local_ack(node: NodeId, reserved: Reserved<StoreAck>) -> StoreAckFuture {
     Box::pin(std::future::ready((node, Ok(reserved.durable()))))
 }
 
+/// A handle on this node's own in-flight store call, held by the caller so it can
+/// wait for the write it already handed to the quorum. See [`local_store_ack`].
+type LocalWrite = futures::future::Shared<actor_core::BoxFuture<'static, StoreAck>>;
+
+/// This node's own store as one more replica's ack — **started with** the peer
+/// fan-out rather than ahead of it, so a commit costs `max(local, RTT)` instead of
+/// `local + RTT`. Noise at the median; the whole of the local flush at the tail.
+///
+/// Two handles onto one write, and both are needed. The [`StoreAckFuture`] goes into
+/// the replica set, where the local ack counts toward the quorum the moment it lands,
+/// exactly as a peer's does — the set is polled in insertion order, so pushing this
+/// last puts the peer asks on the wire before the flush is submitted. The
+/// [`LocalWrite`] stays with the caller, which **must** await it before returning.
+///
+/// That second obligation is not belt-and-braces. [`BlockingIo`] promises threads and
+/// explicitly *not* order (see its trait doc), and `ThreadPoolIo` runs several workers
+/// off one queue, so two store calls for the same grain that are in flight together
+/// may execute in either order. Today nothing exercises that, because every caller
+/// awaits its store call before issuing the next one — the serialized flush this
+/// change removes is exactly what has been enforcing a grain's write order. Awaiting
+/// here keeps that property (one outstanding store call per grain) while still
+/// overlapping the flush with the peers, which is the whole point: the ordering
+/// guarantee costs a wait only when the peers beat the disk, and never a round trip.
+fn local_store_ack(
+    node: NodeId,
+    io: &Arc<dyn BlockingIo>,
+    store: &Arc<dyn crate::store::GrainStore>,
+    call: impl FnOnce(&dyn crate::store::GrainStore) -> Reserved<StoreAck> + Send + 'static,
+) -> (StoreAckFuture, LocalWrite) {
+    let io = Arc::clone(io);
+    let store = Arc::clone(store);
+    // `offload` submits on first poll, not on construction, so the job reaches the
+    // pool when the quorum's stream first polls this — after the peer asks.
+    let write: actor_core::BoxFuture<'static, StoreAck> =
+        Box::pin(async move { on_store(&io, &store, call).await.durable() });
+    let write = futures::FutureExt::shared(write);
+    let ack: StoreAckFuture = {
+        let write = write.clone();
+        Box::pin(async move { (node, Ok(write.await)) })
+    };
+    (ack, write)
+}
+
 /// A pending per-replica blob store from the [`ReplicaTransport`] blob fan-out: it
 /// resolves once that peer has stored the blob or reported it could not. Tagged with
 /// the replica for joint-quorum attribution (§7.7).
@@ -500,23 +543,30 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 Box::pin(async move { (node, ack.await) }) as StoreAckFuture
             })
             .collect();
-        // The local write happens here, synchronously; only its *durability* joins the
-        // fan-out, as one more replica's ack (the leader is a replica, §5.2). All R
-        // acks are gathered the same way, so this node counts toward the quorum exactly
-        // when its own bytes are stable.
+        // The local write joins the fan-out as one more replica's ack (the leader is a
+        // replica, §5.2). All R acks are gathered the same way, so this node counts
+        // toward the quorum exactly when its own bytes are stable.
+        //
         // Offloaded, not inline: this is an fsync, and running it on the async worker
-        // would stall that worker's Raft heartbeats and every other shard's quorum
-        // wait (see [`crate::blocking`]). Awaited here rather than folded into the
-        // fan-out because the peer asks above are lazy futures — nothing is on the
-        // wire until `collect_store_quorum` polls them — so the local write already
-        // preceded them, and keeping that order leaves the latency profile unchanged.
+        // would stall that worker's Raft heartbeats and every other shard's quorum wait
+        // (see [`crate::blocking`]). Handed to the quorum *unresolved* rather than
+        // awaited first: the peer asks are lazy futures, so awaiting the flush here
+        // would keep every `StoreRecord` off the wire until this node's disk answered,
+        // making a commit cost `local + RTT`. `local_store_ack` gives back a handle so
+        // the write is still awaited before this returns — which is what preserves a
+        // grain's write order — but the peers travel while it runs.
         let (name, shard) = (grain.clone(), self.shard);
-        let local = on_store(&self.io, &self.local, move |store| {
-            store.store_record(shard, &name, after, term, events, WriteKind::Append)
-        })
-        .await;
-        replicas.push(local_ack(self.self_node, local));
+        let (local, local_write) =
+            local_store_ack(self.self_node, &self.io, &self.local, move |store| {
+                store.store_record(shard, &name, after, term, events, WriteKind::Append)
+            });
+        replicas.push(local);
         let (outcome, pending) = self.collect_store_quorum(&sets, replicas).await;
+        // Before anything is decided on the outcome, and in particular before the
+        // rollback below touches the same slot: this node's own write must have landed
+        // (see `local_store_ack`). Free on the failure path, where the quorum loop has
+        // already drained every future including this one.
+        local_write.await;
         if matches!(outcome, QuorumOutcome::Committed) {
             // Committed on a quorum: return now and drain the slower replicas off the
             // hot path (§7.2), so the append's latency is the quorum's, not the slowest
@@ -1057,16 +1107,20 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                 Box::pin(async move { (node, ack.await) }) as StoreAckFuture
             })
             .collect();
-        // Offloaded for the same reason as the record write above: a snapshot is the
-        // largest single thing this node fsyncs, so it is the worst one to run on an
-        // async worker.
+        // Offloaded for the same reason as the record write above, and overlapped with
+        // the fan-out for the same reason — more so here: a snapshot is the largest
+        // single thing this node fsyncs, so it is both the worst one to run on an async
+        // worker and the one whose flush the peers would spend the longest waiting on.
         let (name, shard) = (grain.clone(), self.shard);
-        let local = on_store(&self.io, &self.local, move |store| {
-            store.store_snapshot(shard, &name, at, term, state, WriteKind::Append)
-        })
-        .await;
-        replicas.push(local_ack(self.self_node, local));
+        let (local, local_write) =
+            local_store_ack(self.self_node, &self.io, &self.local, move |store| {
+                store.store_snapshot(shard, &name, at, term, state, WriteKind::Append)
+            });
+        replicas.push(local);
         let (outcome, pending) = self.collect_store_quorum(&sets, replicas).await;
+        // This node's own write has landed before the outcome is acted on, as in
+        // `append` — one outstanding store call per grain (see `local_store_ack`).
+        local_write.await;
         match outcome {
             QuorumOutcome::Committed => {
                 self.drain(pending);
@@ -1664,4 +1718,144 @@ fn merge(replies: Vec<crate::store::ReadReply>, our_term: Term) -> Merged {
     }
     let head = Seq::new(base + records.len() as u64);
     (records, head, snapshot, any_below)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use futures::FutureExt;
+
+    use super::*;
+    use crate::blocking::Job;
+    use crate::store::GrainStore;
+    use crate::testing::StaticGrainStore;
+
+    /// A pool that accepts jobs and runs none of them until told — standing in for a
+    /// device that has not answered yet. `InlineIo` cannot express that, because it
+    /// runs the job inside `submit` and so can never be observed mid-flight.
+    #[derive(Default)]
+    struct DeferredIo {
+        queued: Mutex<Vec<Job>>,
+        submitted: std::sync::atomic::AtomicUsize,
+    }
+
+    impl DeferredIo {
+        fn submitted(&self) -> usize {
+            self.submitted.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Let the device answer.
+        fn run_queued(&self) {
+            let jobs: Vec<Job> = std::mem::take(&mut *self.queued.lock().unwrap());
+            for job in jobs {
+                job();
+            }
+        }
+    }
+
+    impl BlockingIo for DeferredIo {
+        fn submit(&self, job: Job) -> bool {
+            self.submitted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.queued.lock().unwrap().push(job);
+            true
+        }
+    }
+
+    fn stored_store() -> Arc<dyn GrainStore> {
+        Arc::new(StaticGrainStore::new(StoreAck::Stored(Seq::new(1))))
+    }
+
+    #[test]
+    fn the_local_write_reaches_the_pool_when_the_quorum_polls_it_and_not_before() {
+        // The property the overlap rests on. `append` builds the peer asks, then this,
+        // then hands the whole set to `collect_store_quorum` — so if constructing the
+        // local ack submitted the flush, the flush would again precede every peer ask
+        // and the commit would be back to `local + RTT`.
+        let io = Arc::new(DeferredIo::default());
+        let store = stored_store();
+        let (ack, write) = local_store_ack(
+            NodeId::new(1),
+            &(io.clone() as Arc<dyn BlockingIo>),
+            &store,
+            |store| {
+                store.store_record(
+                    0,
+                    &GrainName::new("t", "k"),
+                    Seq::new(0),
+                    Term::new(1),
+                    vec![vec![7]],
+                    WriteKind::Append,
+                )
+            },
+        );
+        assert_eq!(
+            io.submitted(),
+            0,
+            "building the local ack submitted the write: it would run before the peer \
+             asks are on the wire, which is the serialization this exists to remove",
+        );
+
+        // The first poll is the quorum's, and it is what submits.
+        assert!(
+            write.clone().now_or_never().is_none(),
+            "the write completed without the pool having run it",
+        );
+        assert_eq!(io.submitted(), 1, "the first poll must reach the pool");
+
+        io.run_queued();
+        assert_eq!(
+            ack.now_or_never(),
+            Some((NodeId::new(1), Ok(StoreAck::Stored(Seq::new(1))))),
+            "the quorum's copy must see the store's answer",
+        );
+    }
+
+    #[test]
+    fn the_callers_handle_observes_the_same_write_the_quorum_counted() {
+        // What keeps a grain's writes ordered. `BlockingIo` promises no ordering, so
+        // `append` must not return while its own flush is still queued — the next
+        // append for the grain would race it. It awaits this handle to prevent that,
+        // which only works if the handle tracks the very write the quorum counted
+        // rather than starting a second one.
+        let io = Arc::new(DeferredIo::default());
+        let store = stored_store();
+        let (ack, write) = local_store_ack(
+            NodeId::new(2),
+            &(io.clone() as Arc<dyn BlockingIo>),
+            &store,
+            |store| {
+                store.store_record(
+                    0,
+                    &GrainName::new("t", "k"),
+                    Seq::new(0),
+                    Term::new(1),
+                    vec![vec![7]],
+                    WriteKind::Append,
+                )
+            },
+        );
+
+        // Drive it the way the quorum does, then release the device.
+        assert!(ack.now_or_never().is_none());
+        assert_eq!(io.submitted(), 1);
+        assert!(
+            write.clone().now_or_never().is_none(),
+            "the caller's handle must still be waiting on the same unfinished write",
+        );
+        io.run_queued();
+
+        assert_eq!(
+            io.submitted(),
+            1,
+            "the two handles started two writes: the caller would be awaiting one the \
+             quorum never counted, and the grain would have two stores in flight",
+        );
+        assert_eq!(
+            write.now_or_never(),
+            Some(StoreAck::Stored(Seq::new(1))),
+            "the caller's handle did not observe the completed write",
+        );
+    }
 }
