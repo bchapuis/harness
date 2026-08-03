@@ -6,6 +6,7 @@
 //! [`Transport`](crate::Transport) that carries it does not.
 
 use actor_core::ActorId;
+use actor_core::CallError;
 use actor_core::NodeId;
 use actor_core::ReplyResult;
 use actor_core::TerminationReason;
@@ -15,6 +16,65 @@ use serde::Serialize;
 use crate::membership::MemberDigest;
 use crate::raft::GroupId;
 use crate::raft::RaftEntry;
+
+/// Serialize [`Frame::Reply`]'s outcome with its success bytes told they are bytes.
+///
+/// The other bulk-byte fields on this wire take `#[serde(with = "serde_bytes")]`
+/// directly. This one cannot: [`ReplyResult`] is `Result<Vec<u8>, CallError>`, a type
+/// alias, and there is no field on it to attach an attribute to — the `Vec<u8>` is
+/// inside someone else's generic. Changing the alias would be a public-API change
+/// across the workspace for a serialization concern that belongs to this one frame.
+///
+/// So the representation is mirrored instead, and mirroring is the whole risk: these
+/// enums must serialize *exactly* as serde's own `Result` does or this is a wire-format
+/// change, and `actor.wire` is at revision 1 with no way to run two revisions at once
+/// (compatibility spec §3.1). Two properties carry it — two newtype variants, named
+/// `Ok` and `Err`, in that order. The names are what self-describing formats emit
+/// (`{"Ok": …}` under JSON) and the order is what index-based ones emit (variant 0 and
+/// 1 under postcard); the enum's *own* name is not on the wire in either. That is
+/// asserted rather than reasoned about, for both codecs and in both directions, in
+/// `actor-serialization/tests/wire_bytes.rs`.
+mod reply_bytes {
+    use super::CallError;
+    use super::ReplyResult;
+    use serde::Deserialize;
+    use serde::Deserializer;
+    use serde::Serialize;
+    use serde::Serializer;
+
+    /// The borrowing half, for the encode: no copy of the reply bytes.
+    #[derive(Serialize)]
+    enum Outcome<'a> {
+        Ok(#[serde(with = "serde_bytes")] &'a [u8]),
+        Err(&'a CallError),
+    }
+
+    /// The owning half, for the decode.
+    #[derive(Deserialize)]
+    enum OwnedOutcome {
+        Ok(#[serde(with = "serde_bytes")] Vec<u8>),
+        Err(CallError),
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        outcome: &ReplyResult,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match outcome {
+            Ok(bytes) => Outcome::Ok(bytes).serialize(serializer),
+            Err(err) => Outcome::Err(err).serialize(serializer),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ReplyResult, D::Error> {
+        Ok(match OwnedOutcome::deserialize(deserializer)? {
+            OwnedOutcome::Ok(bytes) => Ok(bytes),
+            OwnedOutcome::Err(err) => Err(err),
+        })
+    }
+}
 
 /// A correlation id pairing a request with its reply on an association (spec
 /// §7.1).
@@ -63,6 +123,11 @@ pub enum Frame {
     /// encoded reply bytes, or a transport/system `CallError`.
     Reply {
         correlation: CallId,
+        /// The request direction's bytes problem, in the direction that answers:
+        /// a `fetch_blob` or a grain read returns a mebibyte through here. See
+        /// [`reply_bytes`] for why it needs a module where the others needed an
+        /// attribute.
+        #[serde(with = "reply_bytes")]
         outcome: ReplyResult,
     },
     /// A SWIM failure-detector probe (spec §10). Carries the sender's
@@ -254,4 +319,87 @@ pub struct RaftBeatReply {
     pub term: u64,
     pub ok: bool,
     pub match_index: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actor_serialization::Codec;
+    use actor_serialization::JsonCodec;
+    use actor_serialization::PostcardCodec;
+    use actor_serialization::decode;
+    use actor_serialization::encode;
+
+    /// Every codec this workspace can be deployed with, as in
+    /// `actor-serialization/tests/wire_bytes.rs`. Both are needed here for the reason
+    /// that file spells out: postcard pins the mirror's variant *order* and JSON pins
+    /// its *names*, and neither pins both.
+    const CODECS: &[(&str, &dyn Codec)] = &[("postcard", &PostcardCodec), ("json", &JsonCodec)];
+
+    /// The outcome as [`Frame::Reply`] writes it — through [`reply_bytes`].
+    #[derive(Serialize, Deserialize)]
+    struct Mirrored(#[serde(with = "reply_bytes")] ReplyResult);
+
+    /// The outcome as serde writes a `Result` on its own. A newtype struct is
+    /// transparent, so this encodes as the bare `ReplyResult` and the pair differs by
+    /// the module alone.
+    #[derive(Serialize, Deserialize)]
+    struct Plain(ReplyResult);
+
+    fn outcomes() -> Vec<ReplyResult> {
+        vec![
+            Ok(Vec::new()),
+            Ok(vec![0]),
+            Ok((0..=255u8).collect()),
+            Ok(vec![0x5a; 5000]),
+            Err(CallError::Unreachable),
+            Err(CallError::Timeout),
+        ]
+    }
+
+    /// `wire_bytes.rs` proves the *shape* is neutral; this proves **this module** still
+    /// has that shape.
+    ///
+    /// The distinction is the point. That file compares two types it declares itself,
+    /// so it would keep passing if `reply_bytes` drifted — it is a statement about
+    /// serde, not about us. This one encodes through the real module and compares
+    /// against what serde does with a real `Result`, so a renamed variant or a swapped
+    /// order fails here, which is where the wire break would actually be.
+    #[test]
+    fn the_reply_module_writes_what_serde_writes_for_a_plain_result() {
+        for (name, codec) in CODECS {
+            for outcome in outcomes() {
+                let mirrored = encode(*codec, &Mirrored(outcome.clone())).expect("encodes");
+                let plain = encode(*codec, &Plain(outcome.clone())).expect("encodes");
+                assert_eq!(
+                    mirrored, plain,
+                    "{name}: `reply_bytes` no longer encodes as serde's own `Result` \
+                     ({outcome:?}) — `actor.wire` is at revision 1 and cannot run two \
+                     revisions at once (compatibility spec §3.1), so this is a flag day",
+                );
+            }
+        }
+    }
+
+    /// And that a node running this build reads one that does not, in both directions.
+    #[test]
+    fn the_reply_module_round_trips_against_a_plain_result() {
+        for (name, codec) in CODECS {
+            for outcome in outcomes() {
+                let from_plain = encode(*codec, &Plain(outcome.clone())).expect("encodes");
+                let read: Mirrored = decode(*codec, &from_plain).expect("decodes");
+                assert_eq!(
+                    read.0, outcome,
+                    "{name}: this build misread a peer that wrote a plain `Result`",
+                );
+
+                let from_mirrored = encode(*codec, &Mirrored(outcome.clone())).expect("encodes");
+                let read: Plain = decode(*codec, &from_mirrored).expect("decodes");
+                assert_eq!(
+                    read.0, outcome,
+                    "{name}: a peer reading a plain `Result` would misread this build",
+                );
+            }
+        }
+    }
 }

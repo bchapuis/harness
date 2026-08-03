@@ -18,3 +18,10 @@ async-channel.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
+
+[dev-dependencies]
+divan.workspace = true
+
+[[bench]]
+name = "frame"
+harness = false

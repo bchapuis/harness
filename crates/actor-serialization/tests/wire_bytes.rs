@@ -289,3 +289,135 @@ fn each_enum_form_decodes_what_the_other_wrote() {
         }
     }
 }
+
+// --- The `Result` shape, which needs a mirrored representation rather than an
+// --- attribute ---------------------------------------------------------------------
+
+/// A stand-in for `CallError`: the error half has to be *something*, and what matters
+/// is only that it is not bytes and that both forms treat it identically.
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+enum Failure {
+    Unreachable,
+    Timeout(u64),
+}
+
+/// What `actor-cluster`'s `reply_bytes` module mirrors: serde's own representation of
+/// `Result<Vec<u8>, E>` — two newtype variants named `Ok` and `Err`, in that order,
+/// with the success payload told it is bytes.
+///
+/// `Frame::Reply`'s outcome is `ReplyResult`, a `Result<Vec<u8>, CallError>` type
+/// alias, so there is no field to hang `#[serde(with = "serde_bytes")]` on and the
+/// representation is hand-written instead. That makes this the one byte field on the
+/// wire whose neutrality is not a property of serde's derive but of a mirror staying
+/// faithful — a renamed variant or a swapped order is a silent wire break. Hence the
+/// comparison below is against a real `Result`, not against another hand-written enum.
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+enum MirroredOutcome {
+    Ok(#[serde(with = "serde_bytes")] Vec<u8>),
+    Err(Failure),
+}
+
+/// A mirror that reordered its variants. Visible to an index-based codec only.
+///
+/// `Err` is never constructed and must still exist: what is being tested is the
+/// *position* `Ok` holds relative to it, which is exactly what an index-based codec
+/// writes. Deleting the unused variant would delete the mutation.
+#[allow(dead_code)]
+#[derive(Serialize, PartialEq, Debug)]
+enum SwappedOutcome {
+    Err(Failure),
+    Ok(#[serde(with = "serde_bytes")] Vec<u8>),
+}
+
+/// A mirror that renamed one. Visible to a name-based codec only. `Err` is unused for
+/// the same reason as in [`SwappedOutcome`].
+#[allow(dead_code)]
+#[derive(Serialize, PartialEq, Debug)]
+enum RenamedOutcome {
+    Okay(#[serde(with = "serde_bytes")] Vec<u8>),
+    Err(Failure),
+}
+
+#[test]
+fn a_mirrored_result_encodes_exactly_as_serde_encodes_result() {
+    for (name, codec) in CODECS {
+        for payload in payloads() {
+            let real: Result<Vec<u8>, Failure> = Ok(payload.clone());
+            let mirrored = MirroredOutcome::Ok(payload.clone());
+            assert_eq!(
+                encode(*codec, &real).expect("encodes"),
+                encode(*codec, &mirrored).expect("encodes"),
+                "{name}: the mirrored Ok({} bytes) is not what serde writes for \
+                 Result::Ok — `Frame::Reply` would be a wire-format change",
+                payload.len(),
+            );
+        }
+
+        let real: Result<Vec<u8>, Failure> = Err(Failure::Timeout(3));
+        let mirrored = MirroredOutcome::Err(Failure::Timeout(3));
+        assert_eq!(
+            encode(*codec, &real).expect("encodes"),
+            encode(*codec, &mirrored).expect("encodes"),
+            "{name}: the mirrored Err is not what serde writes for Result::Err",
+        );
+    }
+}
+
+#[test]
+fn each_result_form_decodes_what_the_other_wrote() {
+    for (name, codec) in CODECS {
+        for payload in payloads() {
+            let real: Result<Vec<u8>, Failure> = Ok(payload.clone());
+            let from_real = encode(*codec, &real).expect("encodes");
+            let from_mirrored =
+                encode(*codec, &MirroredOutcome::Ok(payload.clone())).expect("encodes");
+
+            let new_reads_old: MirroredOutcome = decode(*codec, &from_real).expect("decodes");
+            let old_reads_new: Result<Vec<u8>, Failure> =
+                decode(*codec, &from_mirrored).expect("decodes");
+
+            assert_eq!(
+                new_reads_old,
+                MirroredOutcome::Ok(payload.clone()),
+                "{name}: a mirroring build misread a peer that wrote a plain Result",
+            );
+            assert_eq!(
+                old_reads_new, real,
+                "{name}: a plain-Result build misread a mirroring peer",
+            );
+        }
+    }
+}
+
+/// The negative control, and it is per-codec because the two codecs constrain
+/// *different halves* of the mirror. This is the reason the property is stated as two
+/// clauses — variant names and variant order — rather than one:
+///
+/// - **postcard** writes a variant index, so reordering is a wire change and renaming
+///   is invisible to it;
+/// - **`serde_json`** writes the variant name, so renaming is a wire change and
+///   reordering is invisible to it.
+///
+/// Neither codec alone would catch a mirror that drifted the other way, so a tree with
+/// only one of them would be asserting half of what it looks like it asserts. A third
+/// codec that is neither — one writing, say, a hash of the name — needs its own clause
+/// here rather than inheriting these.
+#[test]
+fn getting_the_mirror_wrong_is_visible_on_the_wire() {
+    let payload = vec![0x5a; 64];
+    let right = encode(&PostcardCodec, &MirroredOutcome::Ok(payload.clone())).expect("encodes");
+    let reordered = encode(&PostcardCodec, &SwappedOutcome::Ok(payload.clone())).expect("encodes");
+    assert_ne!(
+        right, reordered,
+        "postcard encodes a variant identically whichever position it holds, so the \
+         mirror tests above cannot detect a mirror whose variant order drifts",
+    );
+
+    let right = encode(&JsonCodec, &MirroredOutcome::Ok(payload.clone())).expect("encodes");
+    let renamed = encode(&JsonCodec, &RenamedOutcome::Okay(payload.clone())).expect("encodes");
+    assert_ne!(
+        right, renamed,
+        "json encodes a variant identically whatever it is named, so the mirror tests \
+         above cannot detect a mirror whose variant names drift",
+    );
+}
