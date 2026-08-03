@@ -45,41 +45,44 @@ in the capture path, and it was never one number.
 read 33 µs, write 94 µs, BLAKE3 568 µs, a cold put into the memory store 0.3 µs, a
 cold put into the file store 11.4 ms, and a put the store already holds — the dedup
 hit, which is most of a fresh image — 17 µs. `tests/disk_rounds.rs` counts the
-`Quorum` tier in virtual time: one round trip per block, the same for a four-byte
-blob as for a mebibyte, so the cost is rounds and not payload.
+`Quorum` tier in virtual time: one round trip per **wave** of `IN_FLIGHT_CHUNKS`
+blocks, the same for a four-byte blob as for a mebibyte, so the cost is rounds and not
+payload.
 
 Then the cluster itself, on real nodes over loopback. `./machine-cost.sh` is the
 harness — it boots a cluster the way `machine-demo.sh` does and times two creates
 against it, because the first and the second answer different questions. Slopes
-between two image sizes, release build, `--machine fake`:
+between two image sizes (16 and 64 blocks), release build, `--machine fake`, taken
+after the pipelining and the codec fix below and with the figures they replace in
+parentheses:
 
-| replicas | ms per block |
-|---------:|-------------:|
-| 1        | 11.0 |
-| 2        | ~40  |
-| 3        | 63–71 |
+| replicas | ms per block, random image | ms per block, all-zero image |
+|---------:|---------------------------:|-----------------------------:|
+| 1        | 7.3  (11.0)                | 1.0  (0.9)  |
+| 2        | 24.0 (~40)                 | 14.0 (33.8) |
+| 3        | 27.3 (63–71)               | 15.6 (40.5) |
 
 Two things fall out. **A create is a large fixed cost plus a small per-block one.**
-The first create after a cluster starts takes ~33 s on one node and ~40–57 s on
-three *regardless of image size* — 1 block and 128 blocks cost the same — while the
-second create on the same live cluster costs 0.06 s and 8.8 s respectively. Nothing
-in that ~33 s is the disk facet; it is cluster and control-plane warm-up, and with
-`machine-standalone`'s deliberately patient timings (SWIM probe 2 s, Raft heartbeat
-4 s, election timeout 20 s) that is where to look for it first. **And the single-node
-per-block cost is 11.0 ms, which is the file store's 11.4 ms cold put and nothing
-else** — the local path is fully explained by the bench, with no gap left in it.
+The first create after a cluster starts takes ~33 s on one node *regardless of image
+size* — 16 blocks and 64 blocks cost the same to within 0.4 s — while the second
+create on the same live cluster costs 0.16 s and 0.51 s. Nothing in that ~33 s is the
+disk facet; it is cluster and control-plane warm-up, and with `machine-standalone`'s
+deliberately patient timings (SWIM probe 2 s, Raft heartbeat 4 s, election timeout
+20 s) that is where to look for it first. It is also the only column that got *worse*
+to measure: at two and three nodes it now scatters between 35 s and 98 s run to run,
+which is itself a warm-up finding and not a per-block one.
 
 The fan-out is not the problem, and an earlier draft of this entry said it was. That
 draft read a per-replica cost off the *random* image, where each added replica also
 adds a replica's worth of cold `atomic_replace` on a laptop where all three nodes
-share one device — disk work, not coordination. Re-run against an all-zero image,
-where every block after the first is a dedup hit at every replica and no node writes
-anything, the shape is different: **1 node 0.9 ms per block, 2 nodes 33.8, 3 nodes
-40.5.** The first peer costs ~33 ms; the second costs ~7 ms more. Peers overlap.
+share one device — disk work, not coordination. Against an all-zero image, where every
+block after the first is a dedup hit at every replica and no node writes anything, the
+shape is different: the first peer costs ~13 ms per block and the second ~1.6 ms more.
+Peers overlap; replicas are close to free after the first.
 
-So the question is a single one: **a peer round trip carrying a 1 MiB blob costs
-~33 ms on loopback, with the peer's disk work deduplicated away entirely.** Half of
-that was the codec, and that half is now gone.
+So the question is a single one: **what the first peer costs per block, with that
+peer's disk work deduplicated away entirely.** It was ~33 ms. It is now ~13 ms, and
+the interesting part is which change bought that.
 
 The bench had priced postcard on a 1 MiB `Vec<u8>` at 3.8 ms to encode and 12.0 ms to
 decode — 272 MB/s and 86 MB/s against a memcpy's several GB/s — because nothing told
@@ -100,22 +103,29 @@ unchanged for both codecs in the tree and `actor.wire` stays at revision 1 —
 cross-decoding both ways, and names the condition it depends on: a codec with a
 *distinct* byte form (CBOR, MessagePack) would make these fields a wire change.
 
-That leaves ~17 ms in the transport and the peer's actor hop, which is where to
-instrument next, and it is now the whole of what remains rather than half of it. The
-~33 ms figure itself is pre-pipelining and pre-codec and should be re-taken on real
-nodes (`./machine-cost.sh`) before anything is built on it.
+**Pipelining bought almost none of it, and that is the finding.** The codec fix alone
+accounts for ~15.8 ms of the old ~33 ms, which predicts ~18 ms per block still
+serialized. Sixteen puts in flight then took it to ~13 ms — call it 1.3x, where the
+window is 16. The same holds on the single-node random column, which is nearly all
+local cold put: 11.0 ms to 7.3 ms, 1.5x, against a `ThreadPoolIo` of up to eight
+workers. (Both subtractions mix a bench figure into an end-to-end one, so read them as
+the shape and not to a decimal.) `disk_rounds.rs` confirms the facet is doing its
+part — it counts one quorum round per **wave of 16 blocks** where it counted one per
+block, the full 16-fold, in virtual time.
 
-Scale it before prioritizing it. At ~65 ms per block a 512 MB create is ~33 s of
+So the facet issues the concurrency and the wall clock does not collect it. Something
+below the facet serializes what it hands down, on both the peer path and the local
+one, and **that is what to instrument next** — rather than the transport and the actor
+hop as such, which is where the previous draft of this entry pointed. Two candidates
+are already written down elsewhere in this file: `ThreadPoolIo::sized_for_host`'s
+`clamp(2, 8)` on the local side, and `HostCache`/`FileGrainStore`'s single mutexes.
+A third is the per-shard actor hop at the peer, which has no entry here yet.
+
+Scale it before prioritizing it. At ~27 ms per block a 512 MB create is ~14 s of
 blocks on top of a one-time warm-up — so the headline "four minutes" was mostly the
-warm-up plus a debug build, which costs ~2.4x release. Both of those are worth more
-than the block path is.
-
-*Since measured:* the block path's rounds no longer add up. The disk facet's puts
-are pipelined `IN_FLIGHT_CHUNKS` at a time, so `disk_rounds.rs` now counts one
-quorum round per **wave of 16 blocks** where it counted one per block — 2 ms of
-virtual time either way, which is the full 16-fold. The ~33 s of blocks above is
-the serialized figure and should be re-taken on real nodes; what it does *not*
-change is the one-time warm-up, which was always the larger half.
+warm-up plus a debug build, which costs ~2.4x release. Both of those are still worth
+more than the block path is, and the gap has widened: the block path has come down by
+a factor of ~2.4 and the warm-up has not moved.
 
 *A correction to what this file said before:* the earlier entry divided 240 s by 512
 blocks to get "~470 ms per round" and went looking for a round trip that expensive.

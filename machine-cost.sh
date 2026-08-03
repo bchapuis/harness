@@ -48,7 +48,23 @@ DOOR_BASE=${MACHINE_DOOR_BASE:-2222}
 ADMIN_BASE=${MACHINE_ADMIN_BASE:-7701}
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/machine-cost.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+
+# The nodes are torn down by the trap, not by the happy path, because every way out
+# of this script that is *not* the happy path leaves them running otherwise — a node
+# that never opened its door, a create that failed, a ^C. They hold `$PORT_BASE` when
+# they do, so the next run fails to bind and reports it as that run's problem. The
+# ports are fixed and shared with machine-demo.sh, so one orphan poisons everything
+# until it is found by hand.
+PIDS=()
+trap 'teardown; rm -rf "$WORK"' EXIT
+
+# `wait` reports each killed node as "Terminated", which is noise here: the kill is
+# this script's own teardown, not a failure worth printing between measurements.
+teardown() {
+  kill ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true
+  wait ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true
+  PIDS=()
+}
 
 echo "▸ $NODES node(s), $FILL image, $(basename "$BIN") build"
 
@@ -70,7 +86,6 @@ for mib in "${SIZES[@]}"; do
     ADMIN+=(--admin "127.0.0.1:$((ADMIN_BASE + i - 1))")
   done
 
-  PIDS=()
   for i in $(seq 1 "$NODES"); do
     "$BIN" node --id "$i" --nodes "$NODES" --data "$DATA/node$i" --secret "$SECRET" \
       --port-base "$PORT_BASE" --machine fake \
@@ -94,17 +109,18 @@ for mib in "${SIZES[@]}"; do
 
   for n in 1 2; do
     start=$(python3 -c 'import time; print(time.time())')
+    # The create's output goes to a log inside `$WORK`, which the trap deletes on the
+    # way out — so a create that fails has to be reported here or it is reported
+    # nowhere, and the run exits with a bare status and no reason.
     "$BIN" create "cost-box-$n" "${ADMIN[@]}" --base-image "$IMAGE" --key "$KEY.pub" \
       --vcpus 1 --mem-mib 512 --checkpoint-secs 30 --lease-secs 10 \
-      > "$DATA/create$n.log" 2>&1
+      > "$DATA/create$n.log" 2>&1 \
+      || { echo "create $n of $mib failed:" >&2; tail -20 "$DATA/create$n.log" >&2; exit 1; }
     end=$(python3 -c 'import time; print(time.time())')
     eval "t$n=\$(python3 -c \"print($end - $start)\")"
   done
 
-  # `wait` reports each killed node as "Terminated", which is noise here: the kill is
-  # this script's own teardown, not a failure worth printing between measurements.
-  kill ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true
-  wait ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true
+  teardown
 
   python3 -c "
 mib, first, second = $mib, $t1, $t2
