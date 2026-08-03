@@ -23,6 +23,7 @@ blake3.workspace = true
 # the graph via `cap-std`; cargo unions this with the workspace's `process` feature.
 rustix = { workspace = true, features = ["fs"] }
 serde = { workspace = true }
+serde_bytes.workspace = true
 serde_json.workspace = true
 postcard.workspace = true
 futures.workspace = true

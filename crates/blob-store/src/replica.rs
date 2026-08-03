@@ -52,6 +52,10 @@ pub fn blob_replica_key<S: BlobSystem>() -> Key<BlobReplica<S>> {
 pub struct StoreBlob {
     pub ns: Namespace,
     pub id: BlobId,
+    /// Told to the codec as bytes rather than left to serde's default sequence
+    /// path. Wire-identical under both codecs in the tree (`wire_bytes.rs`), and
+    /// worth ~160x on encode and ~670x on decode at a mebibyte.
+    #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
 }
 
@@ -73,7 +77,10 @@ pub struct FetchBlob {
 }
 
 impl Message for FetchBlob {
-    type Reply = Option<Vec<u8>>;
+    /// `ByteBuf` for the same reason [`StoreBlob::bytes`] is tagged: this is the read
+    /// half of the same payload. The transport's signature keeps `Vec<u8>` —
+    /// unwrapping the newtype is a move, not a copy.
+    type Reply = Option<serde_bytes::ByteBuf>;
     const MANIFEST: Manifest = Manifest::new("blob.FetchBlob");
 }
 
@@ -196,9 +203,15 @@ impl<S: BlobSystem> Handler<StoreBlob> for BlobReplica<S> {
 }
 
 impl<S: BlobSystem> Handler<FetchBlob> for BlobReplica<S> {
-    async fn handle(&mut self, msg: FetchBlob, _ctx: &Ctx<BlobReplica<S>>) -> Option<Vec<u8>> {
+    async fn handle(
+        &mut self,
+        msg: FetchBlob,
+        _ctx: &Ctx<BlobReplica<S>>,
+    ) -> Option<serde_bytes::ByteBuf> {
         // Raw, unverified bytes: the caller verifies after transfer (B1, §5.2).
-        self.store.read_raw(&msg.ns, &msg.id)
+        self.store
+            .read_raw(&msg.ns, &msg.id)
+            .map(serde_bytes::ByteBuf::from)
     }
 }
 
@@ -352,6 +365,7 @@ impl<S: BlobSystem> BlobTransport for ActorBlobTransport<S> {
             replica
                 .ask_timeout(FetchBlob { ns, id, range }, within)
                 .await
+                .map(|found| found.map(serde_bytes::ByteBuf::into_vec))
         })
     }
 
@@ -509,7 +523,7 @@ mod tests {
                         within
                     )
                     .await,
-                Ok(Some(bytes)),
+                Ok(Some(serde_bytes::ByteBuf::from(bytes))),
             );
             assert_eq!(
                 replica

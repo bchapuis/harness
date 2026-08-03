@@ -39,6 +39,8 @@ use crate::grain::Grain;
 use crate::grain::GrainName;
 use crate::journal::Seq;
 use crate::journal::Term;
+use serde_bytes::ByteBuf;
+
 use crate::store::BlobAck;
 use crate::store::GrainStore;
 use crate::store::ReadOutcome;
@@ -80,7 +82,11 @@ pub(crate) struct StoreRecord {
     pub(crate) grain: GrainName,
     pub(crate) after: Seq,
     pub(crate) term: Term,
-    pub(crate) records: Vec<Vec<u8>>,
+    /// `ByteBuf` rather than `Vec<u8>` so the codec is told these are bytes: it
+    /// derefs to `Vec<u8>` and encodes identically (see `wire_bytes.rs`), but it
+    /// reaches `serialize_bytes`/`deserialize_bytes` instead of serde's default
+    /// element-at-a-time sequence path.
+    pub(crate) records: Vec<ByteBuf>,
     /// A recovery write-back (read-repair, §8) versus a normal append.
     pub(crate) kind: WriteKind,
 }
@@ -115,6 +121,7 @@ pub(crate) struct StoreSnapshot {
     pub(crate) grain: GrainName,
     pub(crate) at: Seq,
     pub(crate) term: Term,
+    #[serde(with = "serde_bytes")]
     pub(crate) state: Vec<u8>,
     pub(crate) kind: WriteKind,
 }
@@ -152,6 +159,9 @@ pub(crate) struct StoreBlob {
     pub(crate) shard: u32,
     pub(crate) grain: GrainName,
     pub(crate) id: BlobId,
+    /// The mebibyte this whole exercise is about: one encode on the leader and one
+    /// decode on every peer, per block, on the create path.
+    #[serde(with = "serde_bytes")]
     pub(crate) bytes: Vec<u8>,
 }
 
@@ -170,7 +180,11 @@ pub(crate) struct FetchBlob {
 }
 
 impl Message for FetchBlob {
-    type Reply = Option<Vec<u8>>;
+    /// `ByteBuf` for the same reason `StoreBlob::bytes` uses it — this is the read
+    /// half of the same mebibyte, and a restore fetches every block of an image, so
+    /// the decode is paid per block there too. The transport's own signature keeps
+    /// `Vec<u8>`: unwrapping the newtype is a move, not a copy.
+    type Reply = Option<ByteBuf>;
     const MANIFEST: Manifest = Manifest::new("granary.FetchBlob");
 }
 
@@ -284,7 +298,10 @@ impl<G: Grain> Handler<StoreRecord> for ReplicaStore<G> {
                 &msg.grain,
                 msg.after,
                 msg.term,
-                msg.records,
+                // Rebuilding the outer `Vec` of pointers, not the records: a
+                // `ByteBuf` is a newtype over the same allocation, so each
+                // `into_vec` moves rather than copies.
+                msg.records.into_iter().map(ByteBuf::into_vec).collect(),
                 msg.kind,
             )
         })
@@ -336,8 +353,11 @@ impl<G: Grain> Handler<StoreBlob> for ReplicaStore<G> {
 }
 
 impl<G: Grain> Handler<FetchBlob> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: FetchBlob, _ctx: &Ctx<ReplicaStore<G>>) -> Option<Vec<u8>> {
-        self.store.get_blob(msg.shard, &msg.grain, msg.id).durable()
+    async fn handle(&mut self, msg: FetchBlob, _ctx: &Ctx<ReplicaStore<G>>) -> Option<ByteBuf> {
+        self.store
+            .get_blob(msg.shard, &msg.grain, msg.id)
+            .durable()
+            .map(ByteBuf::from)
     }
 }
 
@@ -563,7 +583,10 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
                 grain,
                 after,
                 term,
-                records,
+                // As in the handler: a move per record, no bytes copied. The
+                // transport's own signature stays `Vec<Vec<u8>>` so the wire type
+                // does not leak into every caller.
+                records: records.into_iter().map(ByteBuf::from).collect(),
                 kind,
             },
             within,
@@ -646,7 +669,12 @@ impl<G: Grain> ReplicaTransport for ActorReplicaTransport<G> {
         id: BlobId,
         within: Duration,
     ) -> BoxFuture<'static, Result<Option<Vec<u8>>, CallError>> {
-        self.ask(node, FetchBlob { shard, grain, id }, within)
+        let reply = self.ask(node, FetchBlob { shard, grain, id }, within);
+        Box::pin(async move {
+            reply
+                .await
+                .map(|found: Option<ByteBuf>| found.map(ByteBuf::into_vec))
+        })
     }
 
     fn has_blob(

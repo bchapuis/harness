@@ -17,33 +17,18 @@ plaintext, and hashing compressed bytes would break dedup and every durable mani
 Now unblocked: the snapshot state payload it was to be sequenced behind is chunked
 (`cdc.rs`, §7.12). Measure the ratio on real transcripts first.
 
-**Skip the bytes for a blob the peer already holds.** `QuorumReplicator::put_blob`
-sends every chunk to every peer; the peer recognizes the id and writes nothing. Dedup
-is therefore a *disk* saving in the substrate, and a bandwidth saving only because
-every writer above it declines to put at all — the ws facet caches per-file chunk ids,
-the disk facet captures dirty blocks, facet 0's state checks its root set. That works,
-but it puts the same discipline in four places and gets nothing for a chunk two
-*different* grains or a re-import produced. An offer round (`has` the ids, put the
-absent ones) would move it under the seam once. It costs an extra RTT on a cold put,
-which was the whole objection — and that objection is now much weaker, because the
-puts it rides on are pipelined: an extra round per wave of `IN_FLIGHT_CHUNKS`, not an
-extra round per chunk. Now unblocked.
-
-**Tell the wire codec that a blob is bytes.** A `Vec<u8>` goes through serde's default
-sequence path, one element at a time: `actor-serialization`'s bench prices a 1 MiB
-payload at 3.76 ms to encode and 12.2 ms to decode, 279 MB/s and 86 MB/s where a
-length prefix and a memcpy would run at several GB/s, and the decode's allocation
-profile shows it growing the vector as it goes rather than reserving. Every replicated
-blob pays an encode on the leader and a decode on each peer, so this is ~16 ms of the
-~33 ms a 1 MiB peer round trip costs (see "Measure") — the largest single piece of it
-anyone has named.
-
-`serde_bytes` on the payload fields is the mechanism. It is not a free change, which
-is why it is here rather than done: under postcard a `Vec<u8>` and a byte string
-serialize to the *same* bytes — varint length then the payload — so a postcard
-deployment can adopt it without a format revision, but under JSON it moves an array of
-decimal numbers to a base64 string, and `harness-standalone` runs `JsonCodec`. That is
-a compatibility-window question (`docs/compatibility-spec.md` §2), not a refactor.
+**~~Skip the bytes for a blob the peer already holds.~~** *Withdrawn.* An offer round
+(`has` the ids, put the absent ones) in `QuorumReplicator::put_blob` was to centralize
+the don't-put-what-they-have discipline the facets each implement, and to catch a
+chunk two *different* grains produced. It cannot catch that one: a grain's blob area
+is per-grain all the way down — `FileGrainStore::segment_id` keys on `(shard, grain)`
+and `has_blob` with it — so the round can only ask about *this* grain, and
+centralizing would not create cross-grain dedup. What remains is a re-put the facets
+above already filter, bought by making every *cold* put pay a `has` round first. On a
+create every chunk is cold, and pipelining sharpened rather than softened that: puts
+now cost one round per wave, so an offer round is two, doubling what was just halved.
+Reopen only alongside a shared (not per-grain) blob namespace, where the question
+would have a useful answer. Kept as a note so it is not re-proposed.
 
 **A bare-metal deployment path.** `docs/standalone-deployment.md` now carries sizing,
 `LimitNOFILE`, timeouts by topology, and a failure-domain mapping, but the only
@@ -94,16 +79,31 @@ anything, the shape is different: **1 node 0.9 ms per block, 2 nodes 33.8, 3 nod
 
 So the question is a single one: **a peer round trip carrying a 1 MiB blob costs
 ~33 ms on loopback, with the peer's disk work deduplicated away entirely.** Half of
-that is now accounted for. `actor-serialization`'s codec bench prices postcard on a
-1 MiB `Vec<u8>` at 3.76 ms to encode and **12.2 ms to decode** — 279 MB/s and 86 MB/s,
-against a memcpy's several GB/s — so encode on the leader plus decode on the peer is
-~16 ms of the ~33 before a byte reaches the wire or the store. The allocation profile
-says why: the decode grows its vector as it goes, one `u8` at a time through serde's
-default sequence path, because nothing tells the codec these are bytes rather than a
-sequence that happens to hold them.
+that was the codec, and that half is now gone.
+
+The bench had priced postcard on a 1 MiB `Vec<u8>` at 3.8 ms to encode and 12.0 ms to
+decode — 272 MB/s and 86 MB/s against a memcpy's several GB/s — because nothing told
+the codec these were bytes rather than a sequence that happened to hold them, so the
+decode grew its vector one `u8` at a time. The payload fields now say so
+(`serde_bytes`), and the same bench reads **23.5 µs to encode and 17.9 µs to decode**:
+163x and 669x, taking encode-on-the-leader plus decode-on-the-peer from ~15.8 ms to
+~0.04 ms.
+
+*The compatibility objection this item carried was wrong, which is why it moved.* It
+said `serde_bytes` was a format change under JSON — an array of decimal numbers
+becoming a base64 string — and so a compatibility-window question. `serde_json` has
+no byte form at all: `serialize_bytes` falls back to `collect_seq` and emits the same
+number array, ~2.5x faster for the same output. Under postcard a byte string and a
+`Vec<u8>` were always the same varint length and payload. So the encoding is
+unchanged for both codecs in the tree and `actor.wire` stays at revision 1 —
+`actor-serialization/tests/wire_bytes.rs` asserts exactly that, including
+cross-decoding both ways, and names the condition it depends on: a codec with a
+*distinct* byte form (CBOR, MessagePack) would make these fields a wire change.
 
 That leaves ~17 ms in the transport and the peer's actor hop, which is where to
-instrument next, and it is now a small enough number to instrument honestly.
+instrument next, and it is now the whole of what remains rather than half of it. The
+~33 ms figure itself is pre-pipelining and pre-codec and should be re-taken on real
+nodes (`./machine-cost.sh`) before anything is built on it.
 
 Scale it before prioritizing it. At ~65 ms per block a 512 MB create is ~33 s of
 blocks on top of a one-time warm-up — so the headline "four minutes" was mostly the

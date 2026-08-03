@@ -76,10 +76,29 @@ fn decode_bench<T: Serialize + DeserializeOwned + Sync>(
     bencher.bench(|| decode::<T>(black_box(codec), black_box(&encoded)));
 }
 
+/// A payload that tells the codec it is bytes, rather than letting serde infer a
+/// sequence that happens to hold them.
+///
+/// The distinction is one `#[serde(with)]` and it changes which serde call the codec
+/// sees: `serialize_bytes` and `deserialize_bytes` instead of the default sequence
+/// path's element-at-a-time loop. It changes nothing on the wire — under postcard a
+/// byte string and a `Vec<u8>` are the same varint length and the same payload, and
+/// under JSON `serde_json` has no byte form so it emits the identical number array —
+/// which is what makes the `*_fast` figures below a free comparison rather than a
+/// format trade.
+#[derive(Serialize, Deserialize)]
+struct Bytes(#[serde(with = "serde_bytes")] Vec<u8>);
+
 /// Encoding a `Vec<u8>` through postcard, which has a byte-string form.
 #[divan::bench(consts = [1024, 65_536, 1_048_576])]
 fn bytes_postcard<const N: usize>(bencher: Bencher) {
     encode_bench(bencher, &PostcardCodec, &vec![0x5a_u8; N], N);
+}
+
+/// The same encode with the codec told these are bytes — the paired figure.
+#[divan::bench(consts = [1024, 65_536, 1_048_576])]
+fn bytes_postcard_fast<const N: usize>(bencher: Bencher) {
+    encode_bench(bencher, &PostcardCodec, &Bytes(vec![0x5a_u8; N]), N);
 }
 
 /// The same payload through JSON: the case the `JsonCodec` warning is about, where every
@@ -102,6 +121,28 @@ fn bytes_json<const N: usize>(bencher: Bencher) {
 #[divan::bench(consts = [1024, 65_536, 1_048_576])]
 fn bytes_postcard_decode<const N: usize>(bencher: Bencher) {
     decode_bench(bencher, &PostcardCodec, &vec![0x5a_u8; N]);
+}
+
+/// The same decode with the codec told these are bytes. This is the half that was
+/// worth the most: the default path grows the vector as it goes, one `u8` at a time,
+/// where a byte string reads a length and copies once.
+#[divan::bench(consts = [1024, 65_536, 1_048_576])]
+fn bytes_postcard_decode_fast<const N: usize>(bencher: Bencher) {
+    decode_bench(bencher, &PostcardCodec, &Bytes(vec![0x5a_u8; N]));
+}
+
+/// JSON's encode with the codec told these are bytes.
+///
+/// Measured because the obvious prediction is that it cannot matter — `serde_json`
+/// has no byte form, so `serialize_bytes` emits the same array of decimal numbers,
+/// and the bytes on the wire are indeed identical. It is ~2.5x faster anyway (139
+/// MB/s to 343 MB/s at a mebibyte): what changes is not the output but the path to
+/// it, `collect_seq` over a `&[u8]` against the generic sequence loop serde uses for
+/// `Vec<u8>`. Kept as a bench rather than folded into the postcard story because a
+/// figure nobody expected is the one most worth being able to re-run.
+#[divan::bench(consts = [1024, 65_536, 1_048_576])]
+fn bytes_json_fast<const N: usize>(bencher: Bencher) {
+    encode_bench(bencher, &JsonCodec, &Bytes(vec![0x5a_u8; N]), N);
 }
 
 // The wire-size half of the `JsonCodec` warning is asserted in the crate's own tests

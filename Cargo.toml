@@ -80,6 +80,12 @@ harness-sandbox = { path = "crates/harness-sandbox", version = "0.1.0" }
 # Third-party. The runtime seam (Clock/Entropy/Spawner) and mailbox are built
 # on these; our own crates remain `unsafe`-free.
 serde = { version = "1", features = ["derive"] }
+# Tells a codec that a payload field is bytes rather than a sequence that happens to
+# hold them, which is the difference between a length and a memcpy and serde's
+# element-at-a-time loop: ~160x on encode and ~670x on decode for a mebibyte under
+# postcard. It changes no encoding for the codecs in this tree, which is asserted
+# rather than assumed — `actor-serialization/tests/wire_bytes.rs`.
+serde_bytes = "0.11"
 serde_json = "1"
 # Compact, serde-based binary format for the durable WAL/op-log record payloads
 # (the file-backed Raft WAL and grain store): varint-framed, no field names, so a

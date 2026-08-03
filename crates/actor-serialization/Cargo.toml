@@ -19,6 +19,7 @@ erased-serde.workspace = true
 
 [dev-dependencies]
 divan.workspace = true
+serde_bytes.workspace = true
 
 [[bench]]
 name = "codec"
