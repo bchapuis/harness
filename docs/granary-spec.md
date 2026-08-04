@@ -313,6 +313,7 @@ Activation is **exactly-once per node by construction.** The gateway is a serial
 Two consequences of caching (§7.8):
 - The gateway serializes only the activation-table mutation. Once a caller has cached the leader and the host is active, repeated calls go straight to the host actor (a normal mailbox), so the serial gateway is off the steady-state hot path.
 - The shard-map cache is refreshed on `NotLeader`, not consulted per call, so routing costs no control-plane traffic in steady state.
+- The host cache MUST be **bounded** (`host_cache_capacity`, Appendix A). It is keyed per grain *name*, and a long-lived client — the gateway fronts every tenant — would otherwise hold one entry for every name it has ever addressed. A miss costs one gateway round trip and nothing else, so the bound is set by what an entry costs rather than by how many are expected live; it is a bound because an unlucky workload must not be able to consume the node, not because the cache is expected to fill.
 
 ### 5.5 The grain dispatch registry
 
@@ -715,6 +716,7 @@ A grain must have one writer. The fence is the shard's **leadership term**: one 
 
 - **One leader per term.** A shard's leader-election group is a small Raft group (§7.1) that elects at most one leader per term and records the shard's replica set. The leader is the single writer for every grain in the shard's range and hosts their activations (§5.2). Electing a leader is the *only* agreement round, and it happens on failover (§8.3), never per write.
 - **Every append carries the term.** A grain write is a per-grain quorum append (§7.2) stamped with the leader's term. Each replica persists the highest term it has acknowledged for the shard and refuses any append stamped lower. A write commits only while a quorum still recognizes its term, the fencing-token discipline with the shard term as the token.
+- **The persisted fence MUST be keyed by the shard's whole identity, `(grain_type, index)`.** A shard index alone does not name a shard: the same index under two grain types is two leader-election groups (§8.2), whose terms advance independently and at unrelated rates. Keying a replica's persisted term by index alone therefore lets the type that elects more often raise the fence past the quieter type's term, on a shard nothing has gone wrong with — after which every append of that type is refused (`NotLeader`, so a live activation steps down) and every recovery read is refused too (`Unavailable`, so the next activation cannot rehydrate and the grain never returns). Neither half can recover on its own, because no leader of that group can reach a term above a fence its neighbour raised. The corollary binds the deployment, not just the store: a node hosting several types MUST NOT share one store across them, since sharing the store is how the fence gets shared. Where a store is obtained from a factory, taking the grain type as part of the key is what makes that structural.
 - **A deposed leader cannot commit.** A new leader raises the term; the old leader's in-flight appends are then refused by every replica that has seen it, reach no quorum, and return `NotLeader` or `Unavailable` (§7.3). Two nodes that briefly both believe they lead the shard cannot both commit, because a quorum acknowledges only one term, so the minority's writes never land and the grain's record never forks (invariant **G1**).
 - **A new leader recovers each grain's head from a quorum.** Because durability is a per-grain quorum append and *not* a shared replicated log, a fresh leader does not inherit every grain's latest records the way a Raft leader inherits its log. Before serving a grain it recovers that grain's head and tail from a write quorum of the shard's replicas (the rehydration barrier, §9). The recovery is a read-repair, not a bare read: the leader takes, for each `Seq` slot, the record carried under the **highest term** any replica in the quorum holds (a partitioned replica MAY hold a stale-term record at a slot a higher term later won, so slot occupancy alone does not decide it), and **writes the recovered tail back** to a quorum under its own term before serving, so the head it adopts is itself quorum-durable and no later recovery can regress it. By quorum intersection, any record acknowledged on a quorum is present, under its committing term, on at least one replica the new leader reads, so no acknowledged write is lost (invariant **G14**). G14 rests on this **quorum read-repair of a per-grain head**, in place of leader-completeness over a shared log.
 - **The host steps down cleanly.** On `NotLeader` the host passivates the grain and the caller retries against the new leader (§5.4, §6 step 5). The host MUST NOT keep serving a grain whose shard it no longer leads.
@@ -812,7 +814,8 @@ pub enum GrainError {
 ## 13. Security and observability
 
 - **Security.** Granary adds no transport; it inherits mutual-TLS associations, the handshake allowlist, and the deserialization allowlist (the grain dispatch registry, §5.5) from actor §15. The gateway MAY consult an `Authorizer` per `(peer, GrainName, manifest)` before activating or dispatching, as actor §15.5 gates `deliver`.
-- **Observability.** Granary emits, on the actor framework's single extensible `Event` stream (actor §16), the grain-lifecycle events `Activated`, `Rehydrated { from_snapshot, replayed }`, `Committed { shard, seq }`, `Snapshotted { at }`, and `Passivated`. Every variant also carries the `node` that hosts the activation (its shard's leader, §5.2) and the grain `name`, which is what makes the per-node activation guarantee (**G6**) expressible as a continuous checker over the stream; `Committed` also carries the `shard` the grain committed under, so a split or merge is checkable as a move that keeps `seq` strictly increasing across the boundary (**G15**). The shard events `LeaderChanged { shard, term }` (emitted by a new shard leader, once per term it wins), `ShardSplit { parent, child, boundary }`, and `ShardMerged { left, right }` (emitted by each node as it applies the committed partition change, §7.7) drive both operator tooling and the simulator's invariant checks (§14). Metrics SHOULD include per-shard commit latency and log size, per-node active-grain count, shard count, and leadership changes. Record subscriptions (§7.9) add **no** content-bearing event: they reuse `Committed { seq }` as their commit signal and deliver the records out of band, keeping the journal the one place a grain's content lives.
+- **Observability.** Granary emits, on the actor framework's single extensible `Event` stream (actor §16), the grain-lifecycle events `Activated`, `Rehydrated { from_snapshot, replayed }`, `Committed { shard, seq }`, `Snapshotted { at }`, and `Passivated`. Every variant also carries the `node` that hosts the activation (its shard's leader, §5.2) and the grain `name`, which is what makes the per-node activation guarantee (**G6**) expressible as a continuous checker over the stream; `Committed` also carries the `shard` the grain committed under, so a split or merge is checkable as a move that keeps `seq` strictly increasing across the boundary (**G15**). The shard events `LeaderChanged { shard, term }` (emitted by a new shard leader, once per term it wins), `ShardSplit { parent, child, boundary }`, and `ShardMerged { left, right }` (emitted by each node as it applies the committed partition change, §7.7) drive both operator tooling and the simulator's invariant checks (§14). Record subscriptions (§7.9) add **no** content-bearing event: they reuse `Committed { seq }` as their commit signal and deliver the records out of band, keeping the journal the one place a grain's content lives.
+- **Metrics are a second, separate sink.** The event stream is the *checker's* interface: one structured record per lifecycle transition, so the simulator can assert an invariant over an exact history (§14). That is the wrong shape for an operator — it emits per message, its volume scales with traffic, and answering "is commit latency rising?" from it means rebuilding a distribution from a firehose. A node therefore SHOULD also expose a **metrics sink**: a small set of aggregates costing O(1) per operation. Three measurements carry most of the answer, and an implementation SHOULD report them — the **commit round**, labelled by its outcome (`Committed`/`NotLeader`/`Unavailable`, §6 steps 4–6), because a fast refusal and a fast commit mean opposite things and averaging them hides both; **rehydration** (§9), separately, because it is the cost of a *cold* access and the thing hibernation trades against memory (§10); and the **resident activation count**, which is what hibernation exists to bound. The sink is **node-scoped**, like the blocking-I/O seam and for the same reason (§7.4): it describes the node an operator is judging, not one type it happens to host. Its vocabulary MUST be closed rather than an open `incr(name, labels)` surface, and its keys no wider than a grain type: unbounded label cardinality is the ordinary way a metrics pipeline falls over, and a per-*shard* key is unbounded by §7.7's own elasticity. What is missing from that list is missing on purpose — leadership changes, splits, and merges are *transitions*, already carried exactly once each by `LeaderChanged`, `ShardSplit`, and `ShardMerged` above, and a counter would restate them less precisely.
 
 ---
 
@@ -897,7 +900,16 @@ let accounts: Granary<Account> = system.granary(GranaryConfig {
                                             //   replica, a replay is local reads
     grain_store: None,                      // None ⇒ fresh in-memory store per node; a
                                             //   factory persists records across a cold
-                                            //   restart (§7.4, the Raft-WAL analogue, G14)
+                                            //   restart (§7.4, the Raft-WAL analogue, G14);
+                                            //   keyed by (grain_type, node), never shared
+                                            //   across types (§8, the fence)
+    failure_domains: None,                  // None ⇒ domain-blind placement; a mapping
+                                            //   caps replicas per rack/zone (§7.1)
+    quorum_timeout: Duration::from_secs(2), // append/snapshot/blob-put deadline (§11)
+    recover_timeout: Duration::from_secs(2),// head-recovery deadline (§8, §9); separate
+                                            //   because a slow recovery is a grain that
+                                            //   cannot activate at all
+    host_cache_capacity: 65536,             // bound on resolved host handles (§5.4)
     data_dir: None,                         // node-local scratch for physical facets
                                             //   (§7.12/§7.14); None ⇒ the system temp dir
 });
@@ -912,6 +924,30 @@ match acct.ask(Withdraw { cents: 500 }).await {
     Err(GrainError::Call(e))         => eprintln!("transport: {e:?}"),  // incl. CallError::Unhandled
 }
 ```
+
+**What is *not* in this config, and why.** `GranaryConfig` is per grain type, so the two
+capabilities that belong to the **node** are not fields of it (§7.4, §13): the blocking-I/O
+pool, which exists to bound *this node's* concurrent device work, and the metrics sink,
+which describes *this node's* health. Both hang off a node hosting handle instead, set once
+and used to host every type:
+
+```rust
+let node = system
+    .granary_node()                                          // the node's hosting handle
+    .blocking_io(Arc::new(ThreadPoolIo::sized_for_host()))   // §7.4; default: inline
+    .metrics(Arc::clone(&metrics));                          // §13; default: discarded
+
+let accounts: Granary<Account> = node.granary(config_accounts);
+let orders:   Granary<Order>   = node.granary(config_orders);   // one pool, one sink
+```
+
+Hosting straight off the system (`system.granary(config)`, above) is the same call with both
+defaulted — inline I/O and discarded measurements — which is the `Local` tier's shape and
+what the deterministic simulation requires (§14). Making them per-type fields instead would
+be expressible but wrong in a way nothing catches: a node hosting three types would write the
+same two handles into three configs, and a config that omitted one would silently get a
+*second*, inline pool rather than the node's — invisible in a signature and invisible at
+runtime, until a stalled device blocks the executor the pool was added to protect.
 
 **Hosting one grain under many type names (`granary_named`).** `granary(config)` hosts a
 type under its own `GRAIN_TYPE`, built by `G::default` per activation, the common case.
@@ -969,6 +1005,12 @@ granary/                 # the grain runtime, built on actor-core + actor-cluste
   config.rs              # GranaryConfig (Appendix A)
   node.rs                # the node's hosting handle: the capabilities every type it hosts
                          #   shares — the BlockingIo pool (§7.4) and the metrics sink (§13)
+  blocking.rs            # the BlockingIo seam (§7.4): where a store's fsync blocks —
+                         #   inline by default, a thread pool on real storage
+  metrics.rs             # the operator-facing metrics sink (§13): a closed vocabulary of
+                         #   counters and fixed-bucket histograms, keyed by grain type
+  cdc.rs                 # content-defined chunking (§7.12): the rolling-hash split that
+                         #   makes facet 0's snapshot cost what changed, not what accumulated
   error.rs               # GrainError (§12)
   ws.rs                  # the workspace facet (§7.11): a real per-grain directory,
                          #   captured file deltas as records, checkpoint chunks as blobs

@@ -70,12 +70,12 @@ impl std::fmt::Debug for NodeCapabilities {
 /// A node's grain hosting, carrying the capabilities every type it hosts shares
 /// (spec §7.4, §13).
 ///
-/// Obtained from [`GranaryExt::node`](crate::GranaryExt::node), configured once, and
-/// then used in place of the `system.granary(..)` calls:
+/// Obtained from [`GranaryExt::granary_node`](crate::GranaryExt::granary_node),
+/// configured once, and then used in place of the `system.granary(..)` calls:
 ///
 /// ```ignore
 /// let node = system
-///     .node()
+///     .granary_node()
 ///     .blocking_io(Arc::new(ThreadPoolIo::sized_for_host()))
 ///     .metrics(Arc::clone(&metrics));
 ///

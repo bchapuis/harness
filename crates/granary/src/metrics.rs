@@ -7,14 +7,20 @@
 //! rising?" from it means reconstructing a distribution from a firehose.
 //!
 //! This is the operator's interface: a fixed, small set of aggregates that cost O(1)
-//! per operation and answer the questions an on-call engineer actually has — is the
-//! shard committing, how long is it taking, is leadership moving, how much is
-//! resident. The two are complementary and neither replaces the other.
+//! per operation and answer the questions an on-call engineer actually has — are
+//! commits landing, how long are they taking, what does a cold access cost, how much
+//! is resident. The two are complementary and neither replaces the other.
+//!
+//! What is *not* here is as deliberate. Leadership changes, splits and merges are
+//! transitions, not rates: the event stream carries each exactly once, with the term
+//! or the boundary attached, and a counter beside it would restate the same fact less
+//! precisely.
 //!
 //! The vocabulary is closed on purpose. An open `incr(name, labels)` surface invites
 //! unbounded label cardinality, which is the standard way a metrics pipeline falls
 //! over; every metric here is either a counter or a fixed-bucket histogram, keyed by
-//! nothing wider than a grain type and a shard.
+//! nothing wider than a grain type. Not by shard: shard count is this substrate's
+//! elasticity knob (§7.7), so a per-shard key is unbounded by design.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;

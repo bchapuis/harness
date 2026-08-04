@@ -22,7 +22,7 @@ cites the ones beneath it by a short prefix (`core §N`, `grain §N`, and so on)
 | | [machine-spec](machine-spec.md) | the agent's sibling: a durable lightweight VM as a grain, reached over SSH | M1–M6 |
 | cross-cutting | [compatibility-spec](compatibility-spec.md) | format revisions, the boundary registry, the read-new-first policy | V1–V6 |
 
-Two layers have a design note rather than a spec:
+One layer has a design note rather than a spec:
 
 - [multi-tenant-edge](multi-tenant-edge.md) — the gateway as a cluster client:
   bearer-token identity, principal-scoped session keys, the tenancy directory,
@@ -56,6 +56,13 @@ Two layers have a design note rather than a spec:
   why the simulator is owned rather than imported, the primitives, the
   strategies, the four shapes a test can take, seed sizing, the regression
   corpus, and the gaps the sweeps do not yet reach.
+- [`../machine-cost.sh`](../machine-cost.sh) — the wall-clock counterpart, where the
+  simulator's virtual time cannot price anything: it boots a real cluster and times
+  two machine creates against it, the first paying every cold-start cost and the
+  second pricing the path. Its header carries the figures it last produced, and
+  several code comments cite it as the source of an end-to-end number. Read cold and
+  warm as two different measurements, and read per-block cost as the *slope* between
+  two image sizes — a total divided by its block count measures the intercept.
 
 ## Elsewhere in the tree
 

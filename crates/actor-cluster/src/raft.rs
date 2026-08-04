@@ -513,7 +513,8 @@ struct RaftState {
 /// campaign: one slot per voter, so the whole staggered fan fits inside one timeout.
 const FIRST_ELECTION_SLOTS: u32 = 10;
 
-/// How long a freshly built group waits before campaigning for the first time.
+/// How long a freshly built group waits before campaigning for the first time
+/// (spec §9.4.3 item 10).
 ///
 /// The election timeout exists to detect a leader that has *stopped*. A group that has
 /// never had one is not detecting anything — it is waiting out a timer for a failure
