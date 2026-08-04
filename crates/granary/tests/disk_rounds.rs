@@ -32,18 +32,29 @@
 //!
 //! So a 512-block image is 32 waves rather than 512 serialized rounds. What these
 //! tests do *not* say is what one round costs on real hardware: virtual time counts
-//! rounds, it does not price them. That price has been taken on a real three-node
-//! cluster and is ~63 ms per block against ~12 ms on a single node, rising linearly
-//! with each replica added — see TODO.md, which also records that a create's headline
-//! cost turned out to be mostly a one-time cluster warm-up rather than anything per
-//! block.
+//! rounds, it does not price them, and a codec pass costs zero ticks here. That price
+//! has been taken on real nodes with `machine-cost.sh`, and the answer corrected two
+//! readings that were taken off this file:
+//!
+//! - **The cost was payload, not rounds.** A four-byte blob and a mebibyte cost the
+//!   same *here* whatever the bytes do, which is evidence about round counts only. On
+//!   the wall clock a mebibyte was ~16 ms through serde's element-at-a-time path, at
+//!   each of two encoding layers. Annotating both took the deduplicated three-node
+//!   figure from ~40 ms a block to ~1.4 ms.
+//! - **It does not rise with replica count.** An earlier reading said it did; that was
+//!   measured on a random image, where each added replica also adds a replica's worth
+//!   of cold `atomic_replace` on a laptop whose three nodes share one device. With the
+//!   codec fixed, one node and three cost the same per deduplicated block. What is left
+//!   in the random column is the device, and only the device.
 //!
 //! **What this file measured before**, because the numbers above are only meaningful
 //! against it: while `import` put its blocks in a serial loop, the slope was one whole
 //! round trip *per block*, and the same slope came back when the control carried four
 //! bytes instead of a mebibyte. That pair of readings is what identified the round
-//! count rather than the payload as the lever, and the pipelining change (TODO.md,
-//! "Pipeline the disk facet's block puts") was made on it. When that change landed,
+//! count rather than the payload as the lever, and the pipelining change was made on
+//! it. (That lever was real but small — the sweep that followed showed the curve flat
+//! past one wave, which is what sent the search below the facet and found the codec.)
+//! When that change landed,
 //! this test failed low exactly as it was written to — 4 blocks and 16 blocks costing
 //! the same 58 ms, because both fit in one wave — and the bounds were re-derived
 //! around the wave rather than the block, which is why `FEW` and `MANY` are now a
@@ -380,8 +391,7 @@ fn a_wave_of_blocks_costs_one_quorum_round_between_them() {
         per_wave <= Duration::from_millis(10),
         "a wave of {IN_FLIGHT} blocks costs {per_wave:?}, several round trips rather \
          than one — the puts have stopped overlapping, and a create is back to \
-         paying a round trip per block (TODO.md, \"Pipeline the disk facet's block \
-         puts\")",
+         paying a round trip per block",
     );
 }
 

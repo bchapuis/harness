@@ -7,7 +7,7 @@
 //! is the layer that was missed — granary's blob messages were told they held bytes
 //! long before the frame wrapping them was, so a replicated mebibyte still went
 //! through serde's element-at-a-time sequence path once in each direction and it cost
-//! ~11 ms a block on real nodes (TODO.md).
+//! ~11 ms a block on real nodes.
 //!
 //! Two variants carry bulk bytes and they are measured separately because they are
 //! fixed differently and were fixed at different times:

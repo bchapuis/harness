@@ -209,9 +209,15 @@ pub struct GrainCtx<G: Grain> {
     /// through it.
     facets: Arc<FacetCell<G::Facets>>,
     watches: Arc<std::sync::Mutex<Vec<ActorId>>>,
+    /// This node's blocking-I/O pool (§7.4). Physical facets reach it to keep their
+    /// scans off the async executor: a facet that reads and hashes a whole image
+    /// inline stalls the worker driving this node's Raft heartbeats, which is a
+    /// cluster-wide event produced by one grain's local work.
+    blocking_io: Arc<dyn crate::BlockingIo>,
 }
 
 impl<G: Grain> GrainCtx<G> {
+    #[allow(clippy::too_many_arguments)] // one call site, `Host::grain_ctx`
     pub(crate) fn new(
         grain_type: &'static str,
         name: GrainName,
@@ -220,6 +226,7 @@ impl<G: Grain> GrainCtx<G> {
         journal: Arc<dyn DynGrainJournal>,
         facets: Arc<FacetCell<G::Facets>>,
         watches: Arc<std::sync::Mutex<Vec<ActorId>>>,
+        blocking_io: Arc<dyn crate::BlockingIo>,
     ) -> GrainCtx<G> {
         GrainCtx {
             grain_type,
@@ -229,6 +236,7 @@ impl<G: Grain> GrainCtx<G> {
             journal,
             facets,
             watches,
+            blocking_io,
         }
     }
 
@@ -245,6 +253,18 @@ impl<G: Grain> GrainCtx<G> {
 
     pub(crate) fn facet_cell(&self) -> &Arc<FacetCell<G::Facets>> {
         &self.facets
+    }
+
+    /// This node's blocking-I/O pool (spec §7.4).
+    ///
+    /// For a **physical facet** whose work is bulk device I/O and hashing rather than
+    /// coordination: the disk facet's capture scans and hashes a whole image, which on
+    /// the async worker stalls this node's Raft heartbeats for as long as it runs. The
+    /// default is [`InlineIo`](crate::InlineIo), so a deployment that has not opted
+    /// into a pool — and the deterministic simulation, which must not — behaves exactly
+    /// as it did before the seam existed.
+    pub(crate) fn blocking_io(&self) -> &Arc<dyn crate::BlockingIo> {
+        &self.blocking_io
     }
 
     pub fn name(&self) -> &GrainName {

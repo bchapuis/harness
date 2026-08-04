@@ -225,6 +225,34 @@ impl Shared {
     fn accept_hello(&self, hello: &Hello, expected: Option<NodeId>) -> Result<NodeId, String> {
         // The negotiated revision is dropped; what this call buys is the refusal
         // of a peer outside our range. Nothing yet varies behavior by revision.
+        //
+        // The first thing that wants to will be **compressing replicated blobs**, and
+        // this line is what stands in its way, so the shape of the problem belongs
+        // here. The measurement is done and it pays: `granary/benches/compress.rs`
+        // reports 4.2x on real 1 MiB image blocks and 3.3x on grain records, at ~740
+        // MB/s to compress and ~3.6 GB/s to decompress — roughly six times more uplink
+        // saved than CPU spent at R=3, against the 1 Gbps link that is this
+        // deployment's binding constraint (`docs/hardware-envelope.md` §3.3).
+        //
+        // What blocks it is not the codec. Small control records *grow* under LZ4 —
+        // nine in ten of them — so the payload has to say which form it carries, and a
+        // tag byte is a wire change: an older peer would read it as blob content and
+        // fail the content hash. Gating on the negotiated revision is exactly what
+        // `compat` is for, except that the revision is discarded right here, so there
+        // is nothing to gate on. Turning it on therefore needs one of:
+        //
+        //   - retaining this `Version` per association and reaching it at encode time,
+        //     which is a change to the transport/codec seam (the granary message layer
+        //     sits above it and knows nothing of associations);
+        //   - the **V4** two-release path: widen `WIRE` to accept 1..=2 now, write 2
+        //     in a later release;
+        //   - or capability negotiation instead of versioning — a new blob message
+        //     that older peers reject with `Unhandled`, cached per peer, falling back
+        //     to the current one. Additive, needs no revision bump, and the blob put is
+        //     idempotent and content-addressed, so the retry is safe.
+        //
+        // The third is the smallest blast radius. All three are protocol decisions with
+        // rollout consequences, which is why none of them is taken here yet.
         WIRE.negotiate(hello.accepts).map_err(|e| e.to_string())?;
         if hello.codec_name != self.config.codec.name() {
             return Err(format!("codec mismatch: {}", hello.codec_name));

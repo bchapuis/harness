@@ -34,9 +34,18 @@ rusqlite = { workspace = true, optional = true }
 # Its own `testing` module, for this crate's swarm suites.
 granary = { path = ".", features = ["testing"] }
 actor-simulation.workspace = true
+# A *threaded* runtime for the contention bench: the simulation seams are
+# single-threaded by construction (§14), so they cannot show lock contention at all.
+actor-runtime.workspace = true
+tokio = { workspace = true }
 trybuild.workspace = true
 tempfile.workspace = true
 divan.workspace = true
+# Bench-only, and deliberately not a dependency: `benches/compress.rs` measures what
+# compressing the replication path would buy, which is a question about this
+# deployment's payloads rather than about the algorithm. Nothing compresses yet — see
+# the wire handshake in `actor-runtime` for what turning it on would take.
+lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "frame"] }
 
 [[bench]]
 name = "store"
@@ -44,6 +53,18 @@ harness = false
 
 [[bench]]
 name = "disk_capture"
+harness = false
+
+[[bench]]
+name = "flush"
+harness = false
+
+[[bench]]
+name = "contention"
+harness = false
+
+[[bench]]
+name = "compress"
 harness = false
 
 [features]

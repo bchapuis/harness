@@ -1,0 +1,65 @@
+# A harness-gateway on bare metal: the cluster's only tenant-facing process.
+#
+# The gateway joins the same cluster as a non-voting, non-hosting CLIENT (the Orleans
+# cluster-client pattern). It verifies a caller's bearer token to a tenant, then
+# addresses the session's grain directly over the actor transport — no forwarding hop.
+# Because it holds `GrainRef`s and rides the receptionist gossip it sits INSIDE the
+# cluster's trust boundary and presents the cluster secret; untrusted callers reach it
+# only over HTTP with a bearer token.
+#
+# Run it on its own machine, or at least give it its own node id. It is stateless —
+# no --data, nothing to replicate — so unlike a node it can be restarted freely.
+#
+# Install: as for harness-node, with /etc/harness/gateway.env.
+
+[Unit]
+Description=harness-gateway (cluster client, tenant-facing HTTP)
+Documentation=file:///usr/share/doc/harness/standalone-deployment.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=harness
+Group=harness
+EnvironmentFile=/etc/harness/gateway.env
+ExecStart=/usr/local/bin/harness-gateway \
+    --bind ${HARNESS_HTTP_BIND} \
+    --node-id ${HARNESS_NODE_ID} \
+    --nodes ${HARNESS_NODES} \
+    --bind-host ${HARNESS_BIND_HOST} \
+    --advertise-host ${HARNESS_ADVERTISE_HOST} \
+    --auth-tokens /etc/harness/tenants \
+    --secret ${HARNESS_SECRET} \
+    $HARNESS_PEERS
+
+# As on a node, the secret is an argument and so visible in `ps` locally.
+
+# On SIGTERM the gateway flips /readyz to 503 and drains in-flight requests. Give it
+# room to finish them: a request cut off here is a tenant's prompt lost, and the
+# gateway holds no state that a retry can reconstruct.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+Restart=on-failure
+RestartSec=5s
+
+# Fronts every tenant: one connection per caller plus its transport associations to
+# every node. Lower than a node's (it opens no segment files) but still well above
+# the default 1024.
+LimitNOFILE=65536
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Stateless: it needs no writable path at all.
+
+[Install]
+WantedBy=multi-user.target

@@ -167,6 +167,9 @@ pub struct Host<G: Grain> {
     /// The operator-facing sink (§13), lifted out of `config` because it is read on
     /// every commit.
     metrics: Arc<dyn crate::GrainMetrics>,
+    /// This node's blocking-I/O pool (§7.4), handed to each [`GrainCtx`] so a physical
+    /// facet's scan runs off the executor driving Raft.
+    blocking_io: Arc<dyn crate::BlockingIo>,
     gateway: ActorRef<Gateway<G>>,
     /// Virtual time of the last *command* (not a tick), for idle eviction (§10).
     last_active: actor_core::Instant,
@@ -214,6 +217,7 @@ impl<G: Grain> Host<G> {
         shard: u32,
         journal: Arc<dyn DynGrainJournal>,
         config: GranaryConfig,
+        capabilities: &crate::node::NodeCapabilities,
         gateway: ActorRef<Gateway<G>>,
         alarm_index: Option<Granary<AlarmIndex<G::System>>>,
     ) -> Host<G> {
@@ -226,7 +230,8 @@ impl<G: Grain> Host<G> {
             name,
             shard,
             journal,
-            metrics: config.metrics(),
+            metrics: Arc::clone(capabilities.metrics()),
+            blocking_io: Arc::clone(capabilities.blocking_io()),
             config,
             gateway,
             last_active: actor_core::Instant::ZERO,
@@ -250,6 +255,7 @@ impl<G: Grain> Host<G> {
             Arc::clone(&self.journal),
             Arc::clone(&self.facets),
             Arc::clone(&self.pending_watches),
+            Arc::clone(&self.blocking_io),
         )
     }
 

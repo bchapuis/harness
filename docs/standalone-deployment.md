@@ -269,6 +269,11 @@ before the store's cache ever evicts anything:
 LimitNOFILE=131072
 ```
 
+Ready-made units carrying this and the rest of the operational shape — the shutdown
+timeout the leadership handoff needs, the restart backoff, and the sandbox caveat —
+are in [`deploy/systemd/`](../deploy/systemd/README.md), alongside the on-disk layout
+and which parts of it are rebuildable.
+
 **Storage.** One filesystem per node, not shared, on local NVMe. Network
 attached block storage (EBS, Persistent Disk, Ceph) puts a durable flush back
 near a millisecond and reverses an assumption the storage layer is built on

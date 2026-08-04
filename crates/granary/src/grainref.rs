@@ -155,6 +155,24 @@ impl<V: Clone> Generations<V> {
 ///
 /// Bounded by [`Generations`], so a long-lived process that addresses many distinct
 /// names does not grow one entry per name for its whole lifetime.
+///
+/// **One mutex, and measured rather than assumed.** The map is taken on every call
+/// including a hit, in a gateway that is one long-lived process fronting every tenant
+/// on a many-core box (`docs/hardware-envelope.md` §3.4) — the shape that invites
+/// sharding it by name hash. `benches/contention.rs` sweeps concurrent lookups across
+/// it, and the contention is real: aggregate throughput *falls* with concurrency, from
+/// 18.4 M lookups/s on one thread to 8.6 M at sixteen, which is the signature of a
+/// lock that has become the serial point rather than one that merely queues.
+///
+/// It is deliberately not sharded anyway, because the absolute number is the one that
+/// decides. 8.6 M lookups/s is the floor under contention, and the deployment's
+/// binding constraint is a 1 Gbps uplink (hw §3.3): a request that does one lookup and
+/// then any real work cannot arrive within three orders of magnitude of that rate.
+/// Sharding would buy throughput this deployment has no way to ask for, at the cost of
+/// a partitioned generation policy — so the number is recorded here instead, along
+/// with the condition that would change the answer. Revisit if a gateway is ever
+/// expected to sustain millions of grain dispatches per second, or if a profile shows
+/// this lock held for longer than a hash lookup.
 pub(crate) struct HostCache<G: Grain> {
     system: G::System,
     grain_type: &'static str,
@@ -741,6 +759,22 @@ impl<G: Grain> Granary<G> {
 /// [`GranarySystem`], so `system.granary::<G>(config)` starts the gateway and
 /// returns a [`Granary`] handle.
 pub trait GranaryExt: GranarySystem {
+    /// This node's grain hosting, carrying the capabilities every type it hosts
+    /// shares (spec §7.4, §13): the blocking-I/O pool and the metrics registry.
+    ///
+    /// Both are properties of the *node*, not of a grain type, so a deployment sets
+    /// them once here and hosts every type through the returned handle. Hosting
+    /// straight off the system — `system.granary(..)` — is the same call with both
+    /// defaulted (inline I/O, discarded metrics), which is what the `Local` tier and
+    /// the deterministic simulation want.
+    ///
+    /// Named for what it returns rather than `node`, which on an
+    /// [`ActorSystem`](actor_core::ActorSystem) is already this node's
+    /// [`NodeId`](actor_core::NodeId).
+    fn granary_node(&self) -> crate::node::GranaryNode<Self> {
+        crate::node::GranaryNode::new(self.clone())
+    }
+
     /// Start hosting grains of type `G` under its own `G::GRAIN_TYPE` (spec
     /// Appendix A): spawn the type's gateway and return the handle. Each
     /// activation's behavior is built by `G::default`. The common case — one Rust
@@ -857,7 +891,8 @@ impl<T: GranarySystem> GranaryExt for T {
     where
         G: Grain<System = Self>,
     {
-        build_granary::<Self, G>(self, grain_type, config, factory, None)
+        self.granary_node()
+            .granary_named(grain_type, config, factory)
     }
 
     fn granary_named_with_alarms<G>(
@@ -870,19 +905,44 @@ impl<T: GranarySystem> GranaryExt for T {
     where
         G: Grain<System = Self>,
     {
-        let shards = config.shards.max(1);
-        let handle =
-            build_granary::<Self, G>(self, grain_type, config, factory, Some(index.clone()));
-        // Start this type's alarm driver (spec §7.16): the callerless-activation seam.
-        self.launch(Box::pin(alarm_driver_loop::<Self, G>(
-            self.clone(),
-            handle.clone(),
-            index,
-            grain_type,
-            shards,
-        )));
-        handle
+        self.granary_node()
+            .granary_named_with_alarms(grain_type, config, factory, index)
     }
+}
+
+/// [`build_granary`] plus this type's alarm driver (spec §7.16), the
+/// callerless-activation seam. Shared by
+/// [`GranaryNode::granary_named_with_alarms`](crate::node::GranaryNode::granary_named_with_alarms)
+/// and the [`GranaryExt`] method that delegates to it.
+pub(crate) fn build_granary_with_alarms<S, G>(
+    system: &S,
+    grain_type: &'static str,
+    config: GranaryConfig,
+    capabilities: &crate::node::NodeCapabilities,
+    factory: Arc<dyn Fn() -> G + Send + Sync>,
+    index: Granary<AlarmIndex<S>>,
+) -> Granary<G>
+where
+    S: GranarySystem,
+    G: Grain<System = S>,
+{
+    let shards = config.shards.max(1);
+    let handle = build_granary::<S, G>(
+        system,
+        grain_type,
+        config,
+        capabilities,
+        factory,
+        Some(index.clone()),
+    );
+    system.launch(Box::pin(alarm_driver_loop::<S, G>(
+        system.clone(),
+        handle.clone(),
+        index,
+        grain_type,
+        shards,
+    )));
+    handle
 }
 
 /// How often the alarm driver sweeps the shards it leads (spec §7.16). The exact
@@ -895,10 +955,11 @@ const ALARM_DRIVE_INTERVAL: Duration = Duration::from_millis(500);
 /// [`granary_named`](GranaryExt::granary_named) and
 /// [`granary_named_with_alarms`](GranaryExt::granary_named_with_alarms), which
 /// differ only by the `alarm_index` a host receives.
-fn build_granary<S, G>(
+pub(crate) fn build_granary<S, G>(
     system: &S,
     grain_type: &'static str,
     config: GranaryConfig,
+    capabilities: &crate::node::NodeCapabilities,
     factory: Arc<dyn Fn() -> G + Send + Sync>,
     alarm_index: Option<Granary<AlarmIndex<S>>>,
 ) -> Granary<G>
@@ -919,8 +980,8 @@ where
         Some(factory) => factory(grain_type, system.node()),
         None => Arc::new(MemoryGrainStore::new()),
     };
-    let io = config.blocking_io();
-    let replica_store = system.spawn(ReplicaStore::<G>::new(Arc::clone(&store), Arc::clone(&io)));
+    let io = capabilities.blocking_io();
+    let replica_store = system.spawn(ReplicaStore::<G>::new(Arc::clone(&store), Arc::clone(io)));
     system
         .receptionist()
         .register(replica_store_key::<G>(grain_type), &replica_store);
@@ -937,7 +998,7 @@ where
         config.shard_target_bytes,
         store,
         transport,
-        Arc::clone(&io),
+        Arc::clone(io),
         crate::replicator::Deadlines {
             quorum: config.quorum_timeout,
             recover: config.recover_timeout,
@@ -951,6 +1012,7 @@ where
         Arc::clone(&shard_map),
         shards,
         config,
+        capabilities.clone(),
         factory,
         alarm_index,
     ));

@@ -48,6 +48,7 @@ pub use raft::PersistedRaft;
 pub use raft::RaftConfig;
 pub use raft::RaftEntry;
 pub use raft::RaftWAL;
+pub use raft::WalAck;
 pub use registry::InMemoryRegistry;
 pub use registry::RegistryClient;
 pub use registry::RegistryEntry;

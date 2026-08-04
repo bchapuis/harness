@@ -1,5 +1,12 @@
 #!/bin/bash
-# What a machine `create` costs, decomposed — the harness behind TODO.md's numbers.
+# What a machine `create` costs, decomposed.
+#
+# The current figures, all-zero image, release build, so a regression is visible
+# against something: a **cold** create is ~1.4-1.6 s on one node and ~1.8-2.0 s on
+# three (with occasional ~4 s excursions), and a **warm** one is ~0.2-0.5 s. Both
+# columns used to be dominated by a cold-start cost of ~33 s at one node and 61-65 s at
+# three, which was Raft groups waiting out an election timeout built to detect a
+# failure that had not happened — see `first_election_delay` in actor-cluster.
 #
 #   ./machine-cost.sh [image-mib ...]
 #

@@ -558,26 +558,23 @@ fn a_snapshot_never_outruns_the_head_it_is_measured_against() {
     let name = granary::GrainName::new("test.Counter", "g4/structural");
     let shard = 0u32;
 
-    let head_of = |store: &granary::MemoryGrainStore| store.head(shard, &name).durable();
-    let snapshot_seq_of = |store: &granary::MemoryGrainStore| {
-        store.snapshot(shard, &name).durable().map(|(seq, _)| seq)
-    };
+    let head_of = |store: &granary::MemoryGrainStore| store.head(shard, &name);
+    let snapshot_seq_of =
+        |store: &granary::MemoryGrainStore| store.snapshot(shard, &name).map(|(seq, _)| seq);
 
     // Interleave appends and snapshots the way a live grain does, checking the
     // identity after every step — including right after a snapshot, which is the
     // moment a seq could outrun the head if the base were computed any other way.
     for round in 0..6u64 {
         let after = granary::Seq::new(round * 2);
-        store
-            .store_record(
-                shard,
-                &name,
-                after,
-                granary::Term::ZERO,
-                vec![vec![round as u8], vec![round as u8]],
-                granary::WriteKind::Append,
-            )
-            .durable();
+        let _seeded = store.store_record(
+            shard,
+            &name,
+            after,
+            granary::Term::ZERO,
+            vec![vec![round as u8], vec![round as u8]],
+            granary::WriteKind::Append,
+        );
 
         let head = head_of(&store);
         if let Some(seq) = snapshot_seq_of(&store) {
@@ -588,16 +585,14 @@ fn a_snapshot_never_outruns_the_head_it_is_measured_against() {
         }
 
         // Snapshot at the current head, as the host does (§9).
-        store
-            .store_snapshot(
-                shard,
-                &name,
-                head,
-                granary::Term::ZERO,
-                vec![round as u8],
-                granary::WriteKind::Append,
-            )
-            .durable();
+        let _seeded = store.store_snapshot(
+            shard,
+            &name,
+            head,
+            granary::Term::ZERO,
+            vec![round as u8],
+            granary::WriteKind::Append,
+        );
 
         let head = head_of(&store);
         let seq = snapshot_seq_of(&store).expect("a snapshot was just stored");

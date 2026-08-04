@@ -38,6 +38,7 @@ use granary::GrainError;
 use granary::GrainRef;
 use granary::Granary;
 use granary::GranaryExt;
+use granary::GranaryNode;
 use granary::GranarySystem;
 
 use crate::agent::Agent;
@@ -202,6 +203,7 @@ impl<S: HarnessSystem> Harness<S> {
     /// ```
     pub fn builder(system: S, kinds: &Kinds) -> HarnessBuilder<S, NoRoutes> {
         HarnessBuilder {
+            granary_node: system.granary_node(),
             system,
             kinds: kinds.clone(),
             config: HarnessConfig::default(),
@@ -279,6 +281,10 @@ pub struct HasRoutes;
 /// the receptionist). See [`Harness::builder`].
 pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
     system: S,
+    /// The node-scoped granary capabilities every hosted kind's grain type shares
+    /// (granary §7.4, §13). One per node, not per kind — a node hosting five kinds
+    /// wants one I/O pool and one metrics registry, not five.
+    granary_node: GranaryNode<S>,
     kinds: Kinds,
     config: HarnessConfig,
     hosted: Vec<(KindId, Arc<Kind>, Seams)>,
@@ -287,6 +293,17 @@ pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
 }
 
 impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
+    /// The node-scoped granary capabilities every hosted kind shares (granary §7.4,
+    /// §13): the blocking-I/O pool and the metrics registry. Defaults to the system's
+    /// own — inline I/O and discarded metrics — which is what the simulation wants.
+    ///
+    /// A deployment on real storage sets it once here rather than per kind, since a
+    /// pool exists to bound *the node's* concurrent device work.
+    pub fn granary_node(mut self, node: GranaryNode<S>) -> Self {
+        self.granary_node = node;
+        self
+    }
+
     /// Override the harness tuning (§7.2); defaults to [`HarnessConfig::default`].
     pub fn config(mut self, config: HarnessConfig) -> Self {
         self.config = config;
@@ -363,6 +380,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
     fn into_has_routes(self) -> HarnessBuilder<S, HasRoutes> {
         HarnessBuilder {
             system: self.system,
+            granary_node: self.granary_node,
             kinds: self.kinds,
             config: self.config,
             hosted: self.hosted,
@@ -398,7 +416,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
             let factory_shared = Arc::clone(&shared);
             let factory_kind = Arc::clone(def);
             let factory_seams = seams.clone();
-            let granary = self.system.granary_named::<Agent<S>>(
+            let granary = self.granary_node.granary_named::<Agent<S>>(
                 grain_type,
                 def.config.clone(),
                 Arc::new(move || {

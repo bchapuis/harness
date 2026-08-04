@@ -182,52 +182,26 @@ impl crate::GrainBlobStore for StaticGrainStore {
         _grain: &GrainName,
         _id: crate::BlobId,
         _bytes: Vec<u8>,
-    ) -> crate::Reserved<crate::BlobAck> {
-        crate::Reserved::ready(crate::BlobAck::Stored)
+    ) -> crate::BlobAck {
+        crate::BlobAck::Stored
     }
 
-    fn get_blob(
-        &self,
-        _shard: u32,
-        _grain: &GrainName,
-        _id: crate::BlobId,
-    ) -> crate::Reserved<Option<Vec<u8>>> {
-        crate::Reserved::ready(None)
+    fn get_blob(&self, _shard: u32, _grain: &GrainName, _id: crate::BlobId) -> Option<Vec<u8>> {
+        None
     }
 
-    fn has_blob(
-        &self,
-        _shard: u32,
-        _grain: &GrainName,
-        _id: crate::BlobId,
-    ) -> crate::Reserved<bool> {
-        crate::Reserved::ready(false)
+    fn has_blob(&self, _shard: u32, _grain: &GrainName, _id: crate::BlobId) -> bool {
+        false
     }
 
-    fn delete_blob(
-        &self,
-        _shard: u32,
-        _grain: &GrainName,
-        _id: crate::BlobId,
-    ) -> crate::Reserved<()> {
-        crate::Reserved::ready(())
-    }
+    fn delete_blob(&self, _shard: u32, _grain: &GrainName, _id: crate::BlobId) {}
 
-    fn delete_blobs(&self, _shard: u32, _grain: &GrainName) -> crate::Reserved<()> {
-        crate::Reserved::ready(())
-    }
+    fn delete_blobs(&self, _shard: u32, _grain: &GrainName) {}
 
-    fn retain_blobs(
-        &self,
-        _shard: u32,
-        _grain: &GrainName,
-        _retain: &BTreeSet<crate::BlobId>,
-    ) -> crate::Reserved<()> {
-        crate::Reserved::ready(())
-    }
+    fn retain_blobs(&self, _shard: u32, _grain: &GrainName, _retain: &BTreeSet<crate::BlobId>) {}
 
-    fn blob_ids(&self, _shard: u32, _grain: &GrainName) -> crate::Reserved<Vec<crate::BlobId>> {
-        crate::Reserved::ready(Vec::new())
+    fn blob_ids(&self, _shard: u32, _grain: &GrainName) -> Vec<crate::BlobId> {
+        Vec::new()
     }
 }
 
@@ -240,12 +214,12 @@ impl crate::GrainStore for StaticGrainStore {
         _term: crate::Term,
         _records: Vec<Vec<u8>>,
         _kind: crate::WriteKind,
-    ) -> crate::Reserved<crate::StoreAck> {
-        crate::Reserved::ready(self.refusal.clone())
+    ) -> crate::StoreAck {
+        self.refusal.clone()
     }
 
-    fn read(&self, _shard: u32, _grain: &GrainName) -> crate::Reserved<crate::ReadReply> {
-        crate::Reserved::ready(StaticGrainStore::empty_reply())
+    fn read(&self, _shard: u32, _grain: &GrainName) -> crate::ReadReply {
+        StaticGrainStore::empty_reply()
     }
 
     fn read_from(
@@ -254,19 +228,14 @@ impl crate::GrainStore for StaticGrainStore {
         _grain: &GrainName,
         _from: crate::Seq,
         _limit: usize,
-    ) -> crate::Reserved<Vec<(crate::Seq, Vec<u8>)>> {
-        crate::Reserved::ready(Vec::new())
+    ) -> Vec<(crate::Seq, Vec<u8>)> {
+        Vec::new()
     }
 
-    fn prepare(
-        &self,
-        _shard: u32,
-        _grain: &GrainName,
-        _term: crate::Term,
-    ) -> crate::Reserved<crate::ReadOutcome> {
+    fn prepare(&self, _shard: u32, _grain: &GrainName, _term: crate::Term) -> crate::ReadOutcome {
         // Prepared, not fenced: a read must succeed so activation gets far enough
         // for the refusal to land at the commit.
-        crate::Reserved::ready(crate::ReadOutcome::Prepared(StaticGrainStore::empty_reply()))
+        crate::ReadOutcome::Prepared(StaticGrainStore::empty_reply())
     }
 
     fn store_snapshot(
@@ -277,43 +246,25 @@ impl crate::GrainStore for StaticGrainStore {
         _term: crate::Term,
         _state: Vec<u8>,
         _kind: crate::WriteKind,
-    ) -> crate::Reserved<crate::StoreAck> {
-        crate::Reserved::ready(self.refusal.clone())
+    ) -> crate::StoreAck {
+        self.refusal.clone()
     }
 
-    fn truncate(
-        &self,
-        _shard: u32,
-        _grain: &GrainName,
-        _after: crate::Seq,
-        _term: crate::Term,
-    ) -> crate::Reserved<()> {
-        crate::Reserved::ready(())
-    }
+    fn truncate(&self, _shard: u32, _grain: &GrainName, _after: crate::Seq, _term: crate::Term) {}
 
     fn grains(&self, _shard: u32) -> Vec<GrainName> {
         Vec::new()
     }
 
-    fn seal_range(&self, _shard: u32, _from: u64) -> crate::Reserved<()> {
-        crate::Reserved::ready(())
-    }
+    fn seal_range(&self, _shard: u32, _from: u64) {}
 
-    fn unseal(&self, _shard: u32) -> crate::Reserved<()> {
-        crate::Reserved::ready(())
-    }
+    fn unseal(&self, _shard: u32) {}
 
-    fn remove_grain(&self, _shard: u32, _grain: &GrainName) -> crate::Reserved<()> {
-        crate::Reserved::ready(())
-    }
+    fn remove_grain(&self, _shard: u32, _grain: &GrainName) {}
 
-    fn remove_range(&self, _shard: u32, _from: u64) -> crate::Reserved<()> {
-        crate::Reserved::ready(())
-    }
+    fn remove_range(&self, _shard: u32, _from: u64) {}
 
-    fn drop_shard(&self, _shard: u32) -> crate::Reserved<()> {
-        crate::Reserved::ready(())
-    }
+    fn drop_shard(&self, _shard: u32) {}
 
     fn shard_bytes(&self, _shard: u32) -> u64 {
         0
@@ -369,41 +320,31 @@ impl crate::GrainBlobStore for SnapshotAheadOfHeadStore {
         grain: &GrainName,
         id: crate::BlobId,
         bytes: Vec<u8>,
-    ) -> crate::Reserved<crate::BlobAck> {
+    ) -> crate::BlobAck {
         self.inner.put_blob(shard, grain, id, bytes)
     }
 
-    fn get_blob(
-        &self,
-        shard: u32,
-        grain: &GrainName,
-        id: crate::BlobId,
-    ) -> crate::Reserved<Option<Vec<u8>>> {
+    fn get_blob(&self, shard: u32, grain: &GrainName, id: crate::BlobId) -> Option<Vec<u8>> {
         self.inner.get_blob(shard, grain, id)
     }
 
-    fn has_blob(&self, shard: u32, grain: &GrainName, id: crate::BlobId) -> crate::Reserved<bool> {
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: crate::BlobId) -> bool {
         self.inner.has_blob(shard, grain, id)
     }
 
-    fn delete_blob(&self, shard: u32, grain: &GrainName, id: crate::BlobId) -> crate::Reserved<()> {
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: crate::BlobId) {
         self.inner.delete_blob(shard, grain, id)
     }
 
-    fn delete_blobs(&self, shard: u32, grain: &GrainName) -> crate::Reserved<()> {
+    fn delete_blobs(&self, shard: u32, grain: &GrainName) {
         self.inner.delete_blobs(shard, grain)
     }
 
-    fn retain_blobs(
-        &self,
-        shard: u32,
-        grain: &GrainName,
-        retain: &BTreeSet<crate::BlobId>,
-    ) -> crate::Reserved<()> {
+    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<crate::BlobId>) {
         self.inner.retain_blobs(shard, grain, retain)
     }
 
-    fn blob_ids(&self, shard: u32, grain: &GrainName) -> crate::Reserved<Vec<crate::BlobId>> {
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<crate::BlobId> {
         self.inner.blob_ids(shard, grain)
     }
 }
@@ -417,7 +358,7 @@ impl crate::GrainStore for SnapshotAheadOfHeadStore {
         term: crate::Term,
         records: Vec<Vec<u8>>,
         kind: crate::WriteKind,
-    ) -> crate::Reserved<crate::StoreAck> {
+    ) -> crate::StoreAck {
         self.inner
             .store_record(shard, grain, after, term, records, kind)
     }
@@ -425,26 +366,22 @@ impl crate::GrainStore for SnapshotAheadOfHeadStore {
     /// Forwarded whole. `read` feeds recovery and the `ReadReply::head` computation,
     /// which the snapshot's seq participates in — overstating it here would move the
     /// head too, and the disagreement being modelled would vanish.
-    fn read(&self, shard: u32, grain: &GrainName) -> crate::Reserved<crate::ReadReply> {
+    fn read(&self, shard: u32, grain: &GrainName) -> crate::ReadReply {
         self.inner.read(shard, grain)
     }
 
     /// The honest head: this is the authority the overstated snapshot is measured
     /// against (**G3**).
-    fn head(&self, shard: u32, grain: &GrainName) -> crate::Reserved<crate::Seq> {
+    fn head(&self, shard: u32, grain: &GrainName) -> crate::Seq {
         self.inner.head(shard, grain)
     }
 
     /// The one method that lies, and the whole point of the double.
-    fn snapshot(
-        &self,
-        shard: u32,
-        grain: &GrainName,
-    ) -> crate::Reserved<Option<(crate::Seq, Vec<u8>)>> {
+    fn snapshot(&self, shard: u32, grain: &GrainName) -> Option<(crate::Seq, Vec<u8>)> {
         let ahead = self.ahead;
         self.inner
             .snapshot(shard, grain)
-            .map(move |snap| snap.map(|(seq, bytes)| (crate::Seq::new(seq.value() + ahead), bytes)))
+            .map(|(seq, bytes)| (crate::Seq::new(seq.value() + ahead), bytes))
     }
 
     fn read_from(
@@ -453,16 +390,11 @@ impl crate::GrainStore for SnapshotAheadOfHeadStore {
         grain: &GrainName,
         from: crate::Seq,
         limit: usize,
-    ) -> crate::Reserved<Vec<(crate::Seq, Vec<u8>)>> {
+    ) -> Vec<(crate::Seq, Vec<u8>)> {
         self.inner.read_from(shard, grain, from, limit)
     }
 
-    fn prepare(
-        &self,
-        shard: u32,
-        grain: &GrainName,
-        term: crate::Term,
-    ) -> crate::Reserved<crate::ReadOutcome> {
+    fn prepare(&self, shard: u32, grain: &GrainName, term: crate::Term) -> crate::ReadOutcome {
         self.inner.prepare(shard, grain, term)
     }
 
@@ -474,18 +406,12 @@ impl crate::GrainStore for SnapshotAheadOfHeadStore {
         term: crate::Term,
         state: Vec<u8>,
         kind: crate::WriteKind,
-    ) -> crate::Reserved<crate::StoreAck> {
+    ) -> crate::StoreAck {
         self.inner
             .store_snapshot(shard, grain, at, term, state, kind)
     }
 
-    fn truncate(
-        &self,
-        shard: u32,
-        grain: &GrainName,
-        after: crate::Seq,
-        term: crate::Term,
-    ) -> crate::Reserved<()> {
+    fn truncate(&self, shard: u32, grain: &GrainName, after: crate::Seq, term: crate::Term) {
         self.inner.truncate(shard, grain, after, term)
     }
 
@@ -493,23 +419,23 @@ impl crate::GrainStore for SnapshotAheadOfHeadStore {
         self.inner.grains(shard)
     }
 
-    fn seal_range(&self, shard: u32, from: u64) -> crate::Reserved<()> {
+    fn seal_range(&self, shard: u32, from: u64) {
         self.inner.seal_range(shard, from)
     }
 
-    fn unseal(&self, shard: u32) -> crate::Reserved<()> {
+    fn unseal(&self, shard: u32) {
         self.inner.unseal(shard)
     }
 
-    fn remove_grain(&self, shard: u32, grain: &GrainName) -> crate::Reserved<()> {
+    fn remove_grain(&self, shard: u32, grain: &GrainName) {
         self.inner.remove_grain(shard, grain)
     }
 
-    fn remove_range(&self, shard: u32, from: u64) -> crate::Reserved<()> {
+    fn remove_range(&self, shard: u32, from: u64) {
         self.inner.remove_range(shard, from)
     }
 
-    fn drop_shard(&self, shard: u32) -> crate::Reserved<()> {
+    fn drop_shard(&self, shard: u32) {
         self.inner.drop_shard(shard)
     }
 

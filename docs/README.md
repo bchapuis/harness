@@ -46,6 +46,9 @@ Two layers have a design note rather than a spec:
   walk the failure drill, and read the full flag reference.
 - [k8s/README](../k8s/README.md) — the same cluster as a Kubernetes
   StatefulSet.
+- [deploy/systemd/README](../deploy/systemd/README.md) — the same cluster on bare
+  metal: systemd units, the on-disk layout and which parts of it are rebuildable,
+  the rolling restart, and how to replace a node.
 
 ## Testing
 
@@ -58,8 +61,6 @@ Two layers have a design note rather than a spec:
 
 - [../design-principles.md](../design-principles.md) — the design rubric the
   specs were written against; defaults for writing and reviewing code here.
-- [../TODO.md](../TODO.md) — work that survived a review with a reason to exist
-  and no fix yet, each entry saying what would close it. Not a bug list.
 - [../research/](../research/) — background notes the specs cite as `DO §N`:
   [durable-objects](../research/durable-objects.md) and
   [durable-sqlite-and-filesystem](../research/durable-sqlite-and-filesystem.md).

@@ -180,54 +180,6 @@ pub enum WriteKind {
     Transfer,
 }
 
-/// A store operation whose effect has **already happened**, durably: the call did the
-/// work — the guard, the in-memory apply, and the fsync — before it returned.
-///
-/// All of that runs under the grain's segment lock, synchronously, which is what
-/// serializes a write against the same grain's recovery `prepare` (the only
-/// fencing-critical race, §8). That property comes from the trait's signature being
-/// synchronous, not from this wrapper; what the wrapper adds is narrower:
-///
-/// - It is `#[must_use]`, so a caller cannot let a store call's answer fall on the
-///   floor. Every mutating method can answer `Fenced`, `Stale`, `Sealed`, or `Failed`,
-///   and each of those is a *refusal to have written* — silently discarding one is how
-///   a deposed leader convinces itself it committed (**G14**).
-/// - Reading it is spelled [`durable`](Reserved::durable), so each of the call sites
-///   names the guarantee it is leaning on rather than assuming it.
-///
-/// It was once a future, carrying the pending half of a store that would fsync a batch
-/// later — the shape a group-commit writer needs. On this deployment's storage a flush
-/// costs tens of microseconds against a round trip in the hundreds, so batching flushes
-/// buys nothing and group commit was withdrawn (`docs/hardware-envelope.md` §3.1, I3).
-/// Nothing ever constructed the pending half, so it is gone.
-#[must_use = "a store call can refuse to write (Fenced/Stale/Sealed/Failed); read the outcome (G14)"]
-pub struct Reserved<T> {
-    outcome: T,
-}
-
-impl<T> Reserved<T> {
-    /// A settled, durable outcome — what every store in this crate returns, having
-    /// finished the write before it returned.
-    pub fn ready(outcome: T) -> Reserved<T> {
-        Reserved { outcome }
-    }
-
-    /// Narrow the outcome, keeping the durability the wrapper stands for.
-    ///
-    /// For a caller that wants one part of a reply: the projection happens where the
-    /// reply is produced, so the parts it drops are never carried further (**G14**).
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Reserved<U> {
-        Reserved {
-            outcome: f(self.outcome),
-        }
-    }
-
-    /// The outcome, on stable storage — the only way to obtain it.
-    pub fn durable(self) -> T {
-        self.outcome
-    }
-}
-
 /// A grain's immutable, content-addressed blob area (durable-workspace design).
 ///
 /// Blobs live beside a grain's records in the same per-node store but **off** the
@@ -243,45 +195,38 @@ pub trait GrainBlobStore: Send + Sync + 'static {
     /// The acknowledgement *is* the durability (**G18**): a `Stored` means the bytes
     /// are on this node's storage, and the only other answer is
     /// [`BlobAck::Failed`] — there is no fence and no ordering to refuse against.
-    fn put_blob(
-        &self,
-        shard: u32,
-        grain: &GrainName,
-        id: BlobId,
-        bytes: Vec<u8>,
-    ) -> Reserved<BlobAck>;
+    #[must_use = "a store call can refuse to write (Fenced/Stale/Sealed/Failed); read the outcome (G14)"]
+    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) -> BlobAck;
 
     /// The bytes of `id` for a grain, or `None` if this store does not hold it. The
     /// caller re-hashes and verifies the bytes against `id` before use.
-    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Reserved<Option<Vec<u8>>>;
+    #[must_use = "the answer is the whole point of the call"]
+    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>>;
 
     /// Whether this store holds `id` for a grain.
-    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Reserved<bool>;
+    #[must_use = "the answer is the whole point of the call"]
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool;
 
     /// Drop a **single** blob of a grain. Idempotent (a missing blob is already
     /// done). Used by the read path to evict a copy that failed verification before
     /// re-fetching a good one (corruption self-heal, §7.10): a content-addressed
     /// [`put_blob`](GrainBlobStore::put_blob) of an id already on disk writes nothing, so
     /// a corrupt copy must be removed before its replacement can be stored.
-    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Reserved<()>;
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId);
 
     /// Drop **every** blob of a grain — grain-scoped reclamation on destroy, with no
     /// namespace tombstone or membership gating (the area lives only on the grain's
     /// known replicas).
-    fn delete_blobs(&self, shard: u32, grain: &GrainName) -> Reserved<()>;
+    fn delete_blobs(&self, shard: u32, grain: &GrainName);
 
     /// Drop every blob of a grain **not** in `retain` — the grain's mark-from-roots
     /// sweep, reclaiming blocks orphaned by overwrites. Idempotent.
-    fn retain_blobs(
-        &self,
-        shard: u32,
-        grain: &GrainName,
-        retain: &BTreeSet<BlobId>,
-    ) -> Reserved<()>;
+    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>);
 
     /// Every blob id this store holds for one grain — the migration driver's
     /// source list when copying a grain's blob area to a new replica.
-    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Reserved<Vec<BlobId>>;
+    #[must_use = "the answer is the whole point of the call"]
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId>;
 }
 
 /// A node's durable store of grain records and snapshots (spec §7.2, §7.4).
@@ -298,10 +243,17 @@ pub trait GrainBlobStore: Send + Sync + 'static {
 /// enumeration and reclamation methods here — `grains`, `remove_grain`,
 /// `remove_range`, `drop_shard`, `shard_bytes` — span both areas.
 ///
-/// **Every method that changes durable state returns a [`Reserved`]**, whose outcome
-/// is settled but not yet stable. `grains` and `shard_bytes` are the exceptions and
-/// stay plain: neither reports durability, and both are used where awaiting would be
-/// wrong (`shard_bytes` from a size-trigger poll, `grains` from inside a held lock).
+/// **A store call's effect has already happened when it returns**, durably: the guard,
+/// the in-memory apply, and the fsync all run before the call comes back, under the
+/// grain's segment lock. That is what serializes a write against the same grain's
+/// recovery `prepare` — the only fencing-critical race (§8) — and it comes from these
+/// methods being *synchronous*. An `async fn` store would run its body at first poll,
+/// and a caller that never polled would silently not write.
+///
+/// **Every method that can refuse is `#[must_use]`.** A mutating call answers `Fenced`,
+/// `Stale`, `Sealed`, or `Failed` — each a *refusal to have written* — and silently
+/// dropping one is how a deposed leader convinces itself it committed (**G14**). The
+/// methods that report nothing return `()` and carry no such obligation.
 pub trait GrainStore: GrainBlobStore {
     /// Store `records` for a grain beginning at the slot after `after`, fenced by
     /// `term`. Idempotent per slot: a slot already holding an equal-or-higher term
@@ -310,6 +262,7 @@ pub trait GrainStore: GrainBlobStore {
     /// a [`WriteKind::Append`] onto a stale head — `Stale(head)`. A
     /// [`WriteKind::Repair`] fills/repairs slots by highest term and never reports
     /// `Stale`.
+    #[must_use = "a store call can refuse to write (Fenced/Stale/Sealed/Failed); read the outcome (G14)"]
     fn store_record(
         &self,
         shard: u32,
@@ -318,14 +271,15 @@ pub trait GrainStore: GrainBlobStore {
         term: Term,
         records: Vec<Vec<u8>>,
         kind: WriteKind,
-    ) -> Reserved<StoreAck>;
+    ) -> StoreAck;
 
     /// Every occupied slot (with its term) and the latest snapshot for a grain —
     /// a non-fencing local read, used for recovery merge and replay (§9). Empty for a
-    /// grain this store has never seen. A [`Reserved`] because the reply may name
-    /// records this store has applied but not yet made stable, which a caller must not
-    /// count toward a quorum (**G14**).
-    fn read(&self, shard: u32, grain: &GrainName) -> Reserved<ReadReply>;
+    /// grain this store has never seen. The reply may name records this store has
+    /// applied but not yet made stable, which a caller must not count toward a quorum
+    /// (**G14**).
+    #[must_use = "the answer is the whole point of the call"]
+    fn read(&self, shard: u32, grain: &GrainName) -> ReadReply;
 
     /// A grain's head alone (§7.3) — what activation needs before it can serve.
     ///
@@ -338,8 +292,9 @@ pub trait GrainStore: GrainBlobStore {
     /// its head without materializing the records overrides it. Defaulted rather than
     /// required so a store with nothing to gain — an immutable test double — need not
     /// restate it.
-    fn head(&self, shard: u32, grain: &GrainName) -> Reserved<Seq> {
-        self.read(shard, grain).map(|reply| reply.head())
+    #[must_use = "the answer is the whole point of the call"]
+    fn head(&self, shard: u32, grain: &GrainName) -> Seq {
+        self.read(shard, grain).head()
     }
 
     /// A grain's latest snapshot as `(seq, state)`, without its records.
@@ -347,8 +302,9 @@ pub trait GrainStore: GrainBlobStore {
     /// The [`head`](GrainStore::head) argument applies unchanged: rehydration asks for
     /// this immediately after the head, and through `read` it cloned the whole record set
     /// a second time to reach one field.
-    fn snapshot(&self, shard: u32, grain: &GrainName) -> Reserved<Option<(Seq, Vec<u8>)>> {
-        self.read(shard, grain).map(ReadReply::into_snapshot)
+    #[must_use = "the answer is the whole point of the call"]
+    fn snapshot(&self, shard: u32, grain: &GrainName) -> Option<(Seq, Vec<u8>)> {
+        self.read(shard, grain).into_snapshot()
     }
 
     /// Up to `limit` records for a grain after `from` (exclusive), ascending by
@@ -356,30 +312,33 @@ pub trait GrainStore: GrainBlobStore {
     /// bytes are cloned, so paging a grain's tail on replay costs `O(limit)`. Records
     /// the snapshot already subsumes (`Seq <= base`) are absent, as in
     /// [`read`](GrainStore::read).
+    #[must_use = "the answer is the whole point of the call"]
     fn read_from(
         &self,
         shard: u32,
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> Reserved<Vec<(Seq, Vec<u8>)>>;
+    ) -> Vec<(Seq, Vec<u8>)>;
 
     /// A **fenced** read for recovery (§8): promise not to accept a shard term below
     /// `term` (so a deposed leader cannot commit on this replica once a new leader
     /// has read it), then return this replica's slots and snapshot. Refuses with
     /// `Fenced(higher)` if it has already promised a higher term.
     /// The promise is made under the grain's segment lock, before the call returns,
-    /// so it fences a concurrent append either way; the returned view is stable once
-    /// the [`Reserved`] resolves. Both halves matter: a promise made late would let a
+    /// so it fences a concurrent append either way, and the returned view is stable by
+    /// the time the call returns. Both halves matter: a promise made late would let a
     /// deposed leader commit, and a view released early would let a recovering leader
     /// adopt a head no replica has on disk (**G14**).
-    fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> Reserved<ReadOutcome>;
+    #[must_use = "a store call can refuse to write (Fenced/Stale/Sealed/Failed); read the outcome (G14)"]
+    fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> ReadOutcome;
 
     /// Persist a snapshot at `at` fenced by `term` (§9). Kept only if it advances
     /// the stored snapshot. Returns `Stored(at)` or `Fenced(higher)`. A
     /// [`WriteKind::Transfer`] skips the fence (the split/merge driver landing a
     /// moved grain's snapshot under the destination shard's keys, §7.7); `Append`
     /// and `Repair` are fenced identically.
+    #[must_use = "a store call can refuse to write (Fenced/Stale/Sealed/Failed); read the outcome (G14)"]
     fn store_snapshot(
         &self,
         shard: u32,
@@ -388,7 +347,7 @@ pub trait GrainStore: GrainBlobStore {
         term: Term,
         state: Vec<u8>,
         kind: WriteKind,
-    ) -> Reserved<StoreAck>;
+    ) -> StoreAck;
 
     /// Drop records past slot `after` whose term is at most `term` — the leader
     /// rolling back the tentative local write of an append that failed to reach a
@@ -402,7 +361,7 @@ pub trait GrainStore: GrainBlobStore {
     /// committed records for the same grain above `after`. Those records carry the
     /// higher term and MUST NOT be dropped (G14); a term-blind truncate here could
     /// silently shrink a committed write's durability below a quorum.
-    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: Term) -> Reserved<()>;
+    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: Term);
 
     // --- Enumeration (replica-set migration, §7.7) ---------------------------
 
@@ -426,18 +385,18 @@ pub trait GrainStore: GrainBlobStore {
     /// [`unseal`](GrainStore::unseal) on a committed merge. Recovery reads,
     /// repairs, and transfers are not bounded — the split driver itself must
     /// recover and copy the moved grains after sealing.
-    fn seal_range(&self, shard: u32, from: u64) -> Reserved<()>;
+    fn seal_range(&self, shard: u32, from: u64);
 
     /// Clear the shard's append bound — only on applying a committed merge
     /// (§7.7), where the shard re-absorbs the very range its earlier split moved
     /// out and the merged data is already durable under this shard's keys.
-    fn unseal(&self, shard: u32) -> Reserved<()>;
+    fn unseal(&self, shard: u32);
 
     /// Drop every trace of one grain under `shard` — records, snapshot, and
     /// blobs. The split driver's local GC of a moved grain's parent-keyed data
     /// after the child's copy is quorum-durable and the mapping has committed.
     /// Idempotent; never touches other shards' keys for the same grain.
-    fn remove_grain(&self, shard: u32, grain: &GrainName) -> Reserved<()>;
+    fn remove_grain(&self, shard: u32, grain: &GrainName);
 
     /// Drop every trace of every grain under `shard` whose name hash is `>= from` —
     /// the same half-open range [`seal_range`](GrainStore::seal_range) bounds, and the
@@ -445,14 +404,14 @@ pub trait GrainStore: GrainBlobStore {
     ///
     /// Stated as a range rather than a `grains`-then-`remove_grain` loop so a store
     /// that keys by name hash can honour it by discarding whole files. Idempotent.
-    fn remove_range(&self, shard: u32, from: u64) -> Reserved<()>;
+    fn remove_range(&self, shard: u32, from: u64);
 
     /// Drop everything this store holds under `shard` — every grain's records,
     /// snapshot, and blobs, and the shard's fence and append bound.
     ///
     /// The reclamation a committed merge performs on the retired shard, whose grains
     /// now live under the surviving shard's keys (§7.7). Idempotent.
-    fn drop_shard(&self, shard: u32) -> Reserved<()>;
+    fn drop_shard(&self, shard: u32);
 
     /// An estimate of the bytes this store holds under `shard` — records,
     /// snapshots, and blobs. The split trigger's size signal (§7.7,
@@ -909,16 +868,10 @@ impl WriteGuard for MemoryGrainStore {
     }
 }
 
-// Every reply is `Reserved::ready`: an in-memory store has no stability to wait for,
-// so its outcomes are stable the moment they are settled.
+// An in-memory store has no stability to wait for, so its outcomes are stable the
+// moment they are settled.
 impl GrainBlobStore for MemoryGrainStore {
-    fn put_blob(
-        &self,
-        shard: u32,
-        grain: &GrainName,
-        id: BlobId,
-        bytes: Vec<u8>,
-    ) -> Reserved<BlobAck> {
+    fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) -> BlobAck {
         self.inner
             .blobs
             .lock()
@@ -927,32 +880,28 @@ impl GrainBlobStore for MemoryGrainStore {
             .or_default()
             .entry(id)
             .or_insert(bytes);
-        Reserved::ready(BlobAck::Stored)
+        BlobAck::Stored
     }
 
-    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Reserved<Option<Vec<u8>>> {
-        Reserved::ready(
-            self.inner
-                .blobs
-                .lock()
-                .expect("grain store blobs poisoned")
-                .get(&(shard, grain.clone()))
-                .and_then(|area| area.get(&id).cloned()),
-        )
+    fn get_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Option<Vec<u8>> {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get(&(shard, grain.clone()))
+            .and_then(|area| area.get(&id).cloned())
     }
 
-    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Reserved<bool> {
-        Reserved::ready(
-            self.inner
-                .blobs
-                .lock()
-                .expect("grain store blobs poisoned")
-                .get(&(shard, grain.clone()))
-                .is_some_and(|area| area.contains_key(&id)),
-        )
+    fn has_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> bool {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get(&(shard, grain.clone()))
+            .is_some_and(|area| area.contains_key(&id))
     }
 
-    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) -> Reserved<()> {
+    fn delete_blob(&self, shard: u32, grain: &GrainName, id: BlobId) {
         if let Some(area) = self
             .inner
             .blobs
@@ -962,24 +911,17 @@ impl GrainBlobStore for MemoryGrainStore {
         {
             area.remove(&id);
         }
-        Reserved::ready(())
     }
 
-    fn delete_blobs(&self, shard: u32, grain: &GrainName) -> Reserved<()> {
+    fn delete_blobs(&self, shard: u32, grain: &GrainName) {
         self.inner
             .blobs
             .lock()
             .expect("grain store blobs poisoned")
             .remove(&(shard, grain.clone()));
-        Reserved::ready(())
     }
 
-    fn retain_blobs(
-        &self,
-        shard: u32,
-        grain: &GrainName,
-        retain: &BTreeSet<BlobId>,
-    ) -> Reserved<()> {
+    fn retain_blobs(&self, shard: u32, grain: &GrainName, retain: &BTreeSet<BlobId>) {
         if let Some(area) = self
             .inner
             .blobs
@@ -989,19 +931,16 @@ impl GrainBlobStore for MemoryGrainStore {
         {
             area.retain(|id, _| retain.contains(id));
         }
-        Reserved::ready(())
     }
 
-    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Reserved<Vec<BlobId>> {
-        Reserved::ready(
-            self.inner
-                .blobs
-                .lock()
-                .expect("grain store blobs poisoned")
-                .get(&(shard, grain.clone()))
-                .map(|area| area.keys().copied().collect())
-                .unwrap_or_default(),
-        )
+    fn blob_ids(&self, shard: u32, grain: &GrainName) -> Vec<BlobId> {
+        self.inner
+            .blobs
+            .lock()
+            .expect("grain store blobs poisoned")
+            .get(&(shard, grain.clone()))
+            .map(|area| area.keys().copied().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -1014,24 +953,22 @@ impl GrainStore for MemoryGrainStore {
         term: Term,
         records: Vec<Vec<u8>>,
         kind: WriteKind,
-    ) -> Reserved<StoreAck> {
+    ) -> StoreAck {
         let segment = self.segment(shard, grain);
         // Guard and apply under the segment lock (the fencing race, §8).
         let mut records_guard = segment.lock().expect("grain segment poisoned");
         if let Err(ack) = self.guard_record(shard, grain, term, kind) {
-            return Reserved::ready(ack);
+            return ack;
         }
-        Reserved::ready(records_guard.store_record(after, term, records, kind))
+        records_guard.store_record(after, term, records, kind)
     }
 
-    fn read(&self, shard: u32, grain: &GrainName) -> Reserved<ReadReply> {
-        Reserved::ready(
-            self.with_records(shard, grain, GrainRecords::read)
-                .unwrap_or_else(|| ReadReply {
-                    slots: Vec::new(),
-                    snapshot: None,
-                }),
-        )
+    fn read(&self, shard: u32, grain: &GrainName) -> ReadReply {
+        self.with_records(shard, grain, GrainRecords::read)
+            .unwrap_or_else(|| ReadReply {
+                slots: Vec::new(),
+                snapshot: None,
+            })
     }
 
     // `head` and `snapshot` read the segment directly rather than through `read`, whose
@@ -1040,18 +977,14 @@ impl GrainStore for MemoryGrainStore {
     // that `ReadReply::head` folds — `base` equals that seq whenever a snapshot exists —
     // so the answer is unchanged and nothing is copied to reach it.
 
-    fn head(&self, shard: u32, grain: &GrainName) -> Reserved<Seq> {
-        Reserved::ready(
-            self.with_records(shard, grain, GrainRecords::head)
-                .unwrap_or(Seq::ZERO),
-        )
+    fn head(&self, shard: u32, grain: &GrainName) -> Seq {
+        self.with_records(shard, grain, GrainRecords::head)
+            .unwrap_or(Seq::ZERO)
     }
 
-    fn snapshot(&self, shard: u32, grain: &GrainName) -> Reserved<Option<(Seq, Vec<u8>)>> {
-        Reserved::ready(
-            self.with_records(shard, grain, GrainRecords::snapshot)
-                .flatten(),
-        )
+    fn snapshot(&self, shard: u32, grain: &GrainName) -> Option<(Seq, Vec<u8>)> {
+        self.with_records(shard, grain, GrainRecords::snapshot)
+            .flatten()
     }
 
     fn read_from(
@@ -1060,26 +993,26 @@ impl GrainStore for MemoryGrainStore {
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> Reserved<Vec<(Seq, Vec<u8>)>> {
-        Reserved::ready(match self.existing(shard, grain) {
+    ) -> Vec<(Seq, Vec<u8>)> {
+        match self.existing(shard, grain) {
             Some(segment) => segment
                 .lock()
                 .expect("grain segment poisoned")
                 .read_from(from, limit),
             None => Vec::new(),
-        })
+        }
     }
 
-    fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> Reserved<ReadOutcome> {
+    fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> ReadOutcome {
         let segment = self.segment(shard, grain);
         let records_guard = segment.lock().expect("grain segment poisoned");
         // The promise, under the grain's segment lock (§8). An in-memory fence cannot
         // fail to persist, so `Failed` is unreachable here — mapped rather than
         // asserted, since the arm costs a line and an assertion costs a panic.
         match self.bump_fence(shard, term) {
-            Ok(()) => Reserved::ready(ReadOutcome::Prepared(records_guard.read())),
-            Err(BumpRefusal::Fenced(fence)) => Reserved::ready(ReadOutcome::Fenced(fence)),
-            Err(BumpRefusal::Failed) => Reserved::ready(ReadOutcome::Failed),
+            Ok(()) => ReadOutcome::Prepared(records_guard.read()),
+            Err(BumpRefusal::Fenced(fence)) => ReadOutcome::Fenced(fence),
+            Err(BumpRefusal::Failed) => ReadOutcome::Failed,
         }
     }
 
@@ -1091,23 +1024,22 @@ impl GrainStore for MemoryGrainStore {
         term: Term,
         state: Vec<u8>,
         kind: WriteKind,
-    ) -> Reserved<StoreAck> {
+    ) -> StoreAck {
         let segment = self.segment(shard, grain);
         let mut records_guard = segment.lock().expect("grain segment poisoned");
         if let Err(ack) = self.guard_snapshot(shard, term, kind) {
-            return Reserved::ready(ack);
+            return ack;
         }
-        Reserved::ready(records_guard.store_snapshot(at, term, state).0)
+        records_guard.store_snapshot(at, term, state).0
     }
 
-    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: Term) -> Reserved<()> {
+    fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: Term) {
         if let Some(segment) = self.existing(shard, grain) {
             segment
                 .lock()
                 .expect("grain segment poisoned")
                 .truncate(after, term);
         }
-        Reserved::ready(())
     }
 
     fn grains(&self, shard: u32) -> Vec<GrainName> {
@@ -1135,25 +1067,23 @@ impl GrainStore for MemoryGrainStore {
         names.into_iter().collect()
     }
 
-    fn seal_range(&self, shard: u32, from: u64) -> Reserved<()> {
+    fn seal_range(&self, shard: u32, from: u64) {
         let mut seals = self.inner.seals.lock().expect("grain store seals poisoned");
         // Monotone: a bound only ever tightens (a re-driven seal, or a second
         // split at a lower boundary); only `unseal` (a committed merge) lifts it.
         let bound = seals.get(&shard).map_or(from, |&cur| cur.min(from));
         seals.insert(shard, bound);
-        Reserved::ready(())
     }
 
-    fn unseal(&self, shard: u32) -> Reserved<()> {
+    fn unseal(&self, shard: u32) {
         self.inner
             .seals
             .lock()
             .expect("grain store seals poisoned")
             .remove(&shard);
-        Reserved::ready(())
     }
 
-    fn remove_grain(&self, shard: u32, grain: &GrainName) -> Reserved<()> {
+    fn remove_grain(&self, shard: u32, grain: &GrainName) {
         self.inner
             .segments
             .lock()
@@ -1164,10 +1094,9 @@ impl GrainStore for MemoryGrainStore {
             .lock()
             .expect("grain store blobs poisoned")
             .remove(&(shard, grain.clone()));
-        Reserved::ready(())
     }
 
-    fn remove_range(&self, shard: u32, from: u64) -> Reserved<()> {
+    fn remove_range(&self, shard: u32, from: u64) {
         // The same half-open hash range `seal_range` bounds, so a grain the bound
         // refuses appends for is exactly a grain this discards.
         let moved = |(s, grain): &(u32, GrainName)| {
@@ -1183,10 +1112,9 @@ impl GrainStore for MemoryGrainStore {
             .lock()
             .expect("grain store blobs poisoned")
             .retain(|key, _| !moved(key));
-        Reserved::ready(())
     }
 
-    fn drop_shard(&self, shard: u32) -> Reserved<()> {
+    fn drop_shard(&self, shard: u32) {
         self.inner
             .segments
             .lock()
@@ -1209,7 +1137,6 @@ impl GrainStore for MemoryGrainStore {
             .lock()
             .expect("grain store seals poisoned")
             .remove(&shard);
-        Reserved::ready(())
     }
 
     fn shard_bytes(&self, shard: u32) -> u64 {
@@ -1248,22 +1175,17 @@ mod tests {
         GrainName::new("test.Grain", key)
     }
 
-    /// Read a store call's durable outcome. The call itself did the work, so this
-    /// only unwraps the settled value.
-    fn now<T: Send + 'static>(reserved: Reserved<T>) -> T {
-        reserved.durable()
-    }
-
-    /// The property [`Reserved`] exists to enforce: the write happens at **call**
-    /// time, under the grain's segment lock, not when the caller gets around to
-    /// reading the outcome. An `async fn` store would run its body at first poll,
-    /// and a caller that never polled would silently not write — which is why the
-    /// seam returns a settled value rather than a future (§8, §18.1).
+    /// The property the synchronous seam exists to enforce: the write happens at
+    /// **call** time, under the grain's segment lock, not when the caller gets around
+    /// to reading the outcome. An `async fn` store would run its body at first poll,
+    /// and a caller that never polled would silently not write — which is why the seam
+    /// returns a settled value rather than a future (§8, §18.1).
     #[test]
     fn the_write_happens_when_the_call_is_made_not_when_its_outcome_is_read() {
         let store = MemoryGrainStore::new();
         let n = name("eager");
-        // The outcome is deliberately discarded: no `now`, no read of any kind.
+        // The outcome is deliberately discarded — no read of any kind. `drop` is what
+        // discharges the `#[must_use]`, and doing so is the point of the test.
         drop(store.store_record(
             0,
             &n,
@@ -1273,7 +1195,7 @@ mod tests {
             WriteKind::Append,
         ));
         assert_eq!(
-            now(store.head(0, &n)),
+            store.head(0, &n),
             Seq::new(2),
             "the record must be stored by the time the call returned",
         );
@@ -1285,81 +1207,81 @@ mod tests {
         let n = name("a");
         let hash = crate::system::name_hash(n.grain_type(), n.key());
         // A bound above the grain's hash leaves its appends unaffected.
-        now(store.seal_range(0, hash.saturating_add(1)));
+        store.seal_range(0, hash.saturating_add(1));
         assert!(matches!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(1),
                 vec![b"e1".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stored(_)
         ));
         // Tighten the bound to cover the grain: appends refused at ANY term, including
         // one above the fence, so a leader that has not applied the split is stopped
         // (G15).
-        now(store.seal_range(0, hash));
+        store.seal_range(0, hash);
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::new(1),
                 Term::new(99),
                 vec![b"e2".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Sealed
         );
         // Monotone: a later, looser seal does not lift the bound.
-        now(store.seal_range(0, hash.saturating_add(1)));
+        store.seal_range(0, hash.saturating_add(1));
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::new(1),
                 Term::new(99),
                 vec![b"e2".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Sealed
         );
         // The split driver's recovery write-back (`Repair`) still lands.
         assert!(matches!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::new(1),
                 Term::new(2),
                 vec![b"e2".to_vec()],
                 WriteKind::Repair
-            )),
+            ),
             StoreAck::Stored(_)
         ));
         // Another shard's bound is independent.
         assert!(matches!(
-            now(store.store_record(
+            store.store_record(
                 1,
                 &n,
                 Seq::ZERO,
                 Term::new(1),
                 vec![b"x".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stored(_)
         ));
         // Only a committed merge lifts the bound.
-        now(store.unseal(0));
+        store.unseal(0);
         assert!(matches!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::new(2),
                 Term::new(99),
                 vec![b"e3".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stored(_)
         ));
     }
@@ -1372,54 +1294,54 @@ mod tests {
         let store = MemoryGrainStore::new();
         let n = name("moved");
         assert!(matches!(
-            now(store.prepare(0, &name("resident"), Term::new(7))),
+            store.prepare(0, &name("resident"), Term::new(7)),
             ReadOutcome::Prepared(_)
         ));
         // A normal zero-term write is fenced...
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::ZERO,
                 vec![b"e1".to_vec()],
                 WriteKind::Repair
-            )),
+            ),
             StoreAck::Fenced(Term::new(7))
         );
         // ...but the transfer copy lands, records and snapshot both.
         assert!(matches!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::ZERO,
                 vec![b"e1".to_vec()],
                 WriteKind::Transfer
-            )),
+            ),
             StoreAck::Stored(_)
         ));
         assert!(matches!(
-            now(store.store_snapshot(
+            store.store_snapshot(
                 0,
                 &n,
                 Seq::new(1),
                 Term::ZERO,
                 b"snap@1".to_vec(),
                 WriteKind::Transfer
-            )),
+            ),
             StoreAck::Stored(_)
         ));
         // And the transfer did not poison the fence: the live term still writes.
         assert!(matches!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &name("resident"),
                 Seq::ZERO,
                 Term::new(7),
                 vec![b"r1".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stored(_)
         ));
     }
@@ -1428,31 +1350,31 @@ mod tests {
     fn remove_grain_drops_records_snapshot_and_blobs_for_one_shard_only() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(1),
             vec![b"e1".to_vec()],
             WriteKind::Append,
-        ));
-        now(store.store_record(
+        );
+        let _ = store.store_record(
             1,
             &n,
             Seq::ZERO,
             Term::new(1),
             vec![b"other-shard".to_vec()],
             WriteKind::Append,
-        ));
+        );
         let id = BlobId::of(b"blob");
-        now(store.put_blob(0, &n, id, b"blob".to_vec()));
-        now(store.remove_grain(0, &n));
-        assert!(now(store.read(0, &n)).slots.is_empty());
-        assert!(!now(store.has_blob(0, &n, id)));
+        let _ = store.put_blob(0, &n, id, b"blob".to_vec());
+        store.remove_grain(0, &n);
+        assert!(store.read(0, &n).slots.is_empty());
+        assert!(!store.has_blob(0, &n, id));
         // The same grain under another shard index is untouched.
-        assert_eq!(now(store.read(1, &n)).slots.len(), 1);
+        assert_eq!(store.read(1, &n).slots.len(), 1);
         // Idempotent.
-        now(store.remove_grain(0, &n));
+        store.remove_grain(0, &n);
     }
 
     #[test]
@@ -1460,15 +1382,15 @@ mod tests {
         let store = MemoryGrainStore::new();
         let n = name("a");
         assert_eq!(store.shard_bytes(0), 0);
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(1),
             vec![vec![b'x'; 100]],
             WriteKind::Append,
-        ));
-        now(store.put_blob(0, &n, BlobId::of(b"b"), vec![b'y'; 50]));
+        );
+        let _ = store.put_blob(0, &n, BlobId::of(b"b"), vec![b'y'; 50]);
         assert_eq!(store.shard_bytes(0), 150);
         assert_eq!(store.shard_bytes(1), 0);
     }
@@ -1478,17 +1400,17 @@ mod tests {
         let store = MemoryGrainStore::new();
         let n = name("a");
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(1),
                 vec![b"e1".to_vec(), b"e2".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stored(Seq::new(2))
         );
-        let reply = now(store.read(0, &n));
+        let reply = store.read(0, &n);
         assert_eq!(
             reply.slots,
             vec![
@@ -1502,16 +1424,16 @@ mod tests {
     fn read_from_is_exclusive_of_from_and_bounded_by_limit() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(1),
             vec![b"e1".to_vec(), b"e2".to_vec(), b"e3".to_vec()],
             WriteKind::Append,
-        ));
+        );
         assert_eq!(
-            now(store.read_from(0, &n, Seq::ZERO, 10)),
+            store.read_from(0, &n, Seq::ZERO, 10),
             vec![
                 (Seq::new(1), b"e1".to_vec()),
                 (Seq::new(2), b"e2".to_vec()),
@@ -1520,21 +1442,21 @@ mod tests {
         );
         // Exclusive of `from`, bounded by `limit`.
         assert_eq!(
-            now(store.read_from(0, &n, Seq::new(1), 1)),
+            store.read_from(0, &n, Seq::new(1), 1),
             vec![(Seq::new(2), b"e2".to_vec())]
         );
-        assert_eq!(now(store.read_from(0, &n, Seq::new(3), 10)), Vec::new());
+        assert_eq!(store.read_from(0, &n, Seq::new(3), 10), Vec::new());
         // A read past a compacted base returns the live tail only.
-        now(store.store_snapshot(
+        let _ = store.store_snapshot(
             0,
             &n,
             Seq::new(2),
             Term::new(1),
             b"snap@2".to_vec(),
             WriteKind::Append,
-        ));
+        );
         assert_eq!(
-            now(store.read_from(0, &n, Seq::ZERO, 10)),
+            store.read_from(0, &n, Seq::ZERO, 10),
             vec![(Seq::new(3), b"e3".to_vec())]
         );
     }
@@ -1543,24 +1465,24 @@ mod tests {
     fn a_lower_term_write_is_fenced() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(5),
             vec![b"e1".to_vec()],
             WriteKind::Append,
-        ));
+        );
         // A write stamped with a term below the acknowledged shard term is refused.
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(4),
                 vec![b"stale".to_vec()],
                 WriteKind::Repair
-            )),
+            ),
             StoreAck::Fenced(Term::new(5))
         );
     }
@@ -1571,30 +1493,30 @@ mod tests {
         // A prepare on grain `a` at term 5 promises the whole shard not to accept a
         // lower term; a write to grain `b` in the same shard at term 4 is then fenced.
         assert!(matches!(
-            now(store.prepare(0, &name("a"), Term::new(5))),
+            store.prepare(0, &name("a"), Term::new(5)),
             ReadOutcome::Prepared(_)
         ));
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &name("b"),
                 Seq::ZERO,
                 Term::new(4),
                 vec![b"stale".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Fenced(Term::new(5))
         );
         // A different shard keeps its own fence.
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 1,
                 &name("b"),
                 Seq::ZERO,
                 Term::new(4),
                 vec![b"ok".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stored(Seq::new(1))
         );
     }
@@ -1603,42 +1525,42 @@ mod tests {
     fn a_stale_head_append_is_rejected_but_repair_overwrites_by_term() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(1),
             vec![b"e1".to_vec()],
             WriteKind::Append,
-        ));
+        );
         // A normal append at a stale head (slot 1 already holds a different record)
         // is rejected, so a stale leader cannot overwrite a committed record.
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(3),
                 vec![b"other".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stale(Seq::new(1))
         );
         assert_eq!(
-            now(store.read(0, &n)).slots,
+            store.read(0, &n).slots,
             vec![(Seq::new(1), Term::new(1), b"e1".to_vec())]
         );
         // A recovery write-back (repair) read-repairs the slot to the higher term.
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(3),
             vec![b"repaired".to_vec()],
             WriteKind::Repair,
-        ));
+        );
         assert_eq!(
-            now(store.read(0, &n)).slots,
+            store.read(0, &n).slots,
             vec![(Seq::new(1), Term::new(3), b"repaired".to_vec())]
         );
     }
@@ -1650,76 +1572,76 @@ mod tests {
         // `GrainRecords::store_record`, **G14**).
         let store = MemoryGrainStore::new();
         let n = name("a");
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(1),
             vec![b"deposit-1".to_vec()],
             WriteKind::Append,
-        ));
+        );
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(2),
                 vec![b"deposit-1".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stale(Seq::new(1)),
             "a newer leader appending onto a head it recovered stale must be refused, \
              however its record happens to encode",
         );
         // The committed record is untouched, still at the term that committed it.
         assert_eq!(
-            now(store.read(0, &n)).slots,
+            store.read(0, &n).slots,
             vec![(Seq::new(1), Term::new(1), b"deposit-1".to_vec())]
         );
         // The case this tolerance exists for still works: on a replica that has
         // seen no newer term, the very same append re-delivered (a duplicated
         // frame, or a drained straggler arriving late, §7.2) is idempotent.
         let fresh = MemoryGrainStore::new();
-        now(fresh.store_record(
+        let _ = fresh.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(1),
             vec![b"deposit-1".to_vec()],
             WriteKind::Append,
-        ));
+        );
         assert_eq!(
-            now(fresh.store_record(
+            fresh.store_record(
                 0,
                 &n,
                 Seq::ZERO,
                 Term::new(1),
                 vec![b"deposit-1".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stored(Seq::new(1))
         );
         // And a batch is judged over every slot it targets, not just the first: a
         // stale head that happens to line up on a gap must not let the rest of the
         // batch overwrite what follows it.
         let gapped = MemoryGrainStore::new();
-        now(gapped.store_record(
+        let _ = gapped.store_record(
             0,
             &n,
             Seq::new(2),
             Term::new(1),
             vec![b"third".to_vec()],
             WriteKind::Append,
-        ));
+        );
         assert_eq!(
-            now(gapped.store_record(
+            gapped.store_record(
                 0,
                 &n,
                 Seq::new(1),
                 Term::new(2),
                 vec![b"second".to_vec(), b"third".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stale(Seq::ZERO),
             "slot 2 was empty but slot 3 is occupied under an older term",
         );
@@ -1729,24 +1651,24 @@ mod tests {
     fn contiguous_head_stops_at_the_first_gap() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(1),
             vec![b"e1".to_vec(), b"e2".to_vec()],
             WriteKind::Append,
-        ));
+        );
         // A write that skips a slot (an uncommitted tail) does not advance the head.
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::new(3),
                 Term::new(1),
                 vec![b"e4".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stored(Seq::new(2))
         );
     }
@@ -1755,28 +1677,28 @@ mod tests {
     fn a_snapshot_compacts_the_covered_records_and_holds_the_head() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(1),
             vec![b"e1".to_vec(), b"e2".to_vec(), b"e3".to_vec()],
             WriteKind::Append,
-        ));
+        );
         // A snapshot at seq 2 subsumes e1, e2: they drop, the base advances to 2, and
         // only e3 remains as a live record.
         assert_eq!(
-            now(store.store_snapshot(
+            store.store_snapshot(
                 0,
                 &n,
                 Seq::new(2),
                 Term::new(1),
                 b"snap@2".to_vec(),
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stored(Seq::new(2))
         );
-        let reply = now(store.read(0, &n));
+        let reply = store.read(0, &n);
         assert_eq!(
             reply.slots,
             vec![(Seq::new(3), Term::new(1), b"e3".to_vec())]
@@ -1788,14 +1710,14 @@ mod tests {
         // The head still reads 3 (base 2 + the one retained record) — compaction
         // never regresses it. The next append lands contiguously at seq 4.
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::new(3),
                 Term::new(1),
                 vec![b"e4".to_vec()],
                 WriteKind::Append
-            )),
+            ),
             StoreAck::Stored(Seq::new(4))
         );
     }
@@ -1804,35 +1726,35 @@ mod tests {
     fn a_far_ahead_snapshot_carries_a_lagging_replica_to_its_seq() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(1),
             vec![b"e1".to_vec()],
             WriteKind::Append,
-        ));
+        );
         // A snapshot well past this replica's records (an InstallSnapshot analogue):
         // all slots drop, the base jumps to 5, and the head follows.
-        now(store.store_snapshot(
+        let _ = store.store_snapshot(
             0,
             &n,
             Seq::new(5),
             Term::new(2),
             b"snap@5".to_vec(),
             WriteKind::Append,
-        ));
-        assert!(now(store.read(0, &n)).slots.is_empty());
+        );
+        assert!(store.read(0, &n).slots.is_empty());
         // A write-back of the recovered tail lands cleanly after the new base.
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::new(5),
                 Term::new(2),
                 vec![b"e6".to_vec()],
                 WriteKind::Repair
-            )),
+            ),
             StoreAck::Stored(Seq::new(6))
         );
     }
@@ -1842,26 +1764,26 @@ mod tests {
         let store = MemoryGrainStore::new();
         let n = name("a");
         // This replica compacted through seq 3.
-        now(store.store_snapshot(
+        let _ = store.store_snapshot(
             0,
             &n,
             Seq::new(3),
             Term::new(2),
             b"snap@3".to_vec(),
             WriteKind::Append,
-        ));
+        );
         // A recovery write-back from base 1 re-offers seqs 2..=4; seqs 2,3 are already
         // subsumed by the snapshot, so only seq 4 is stored — no gap, no regression.
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::new(1),
             Term::new(2),
             vec![b"e2".to_vec(), b"e3".to_vec(), b"e4".to_vec()],
             WriteKind::Repair,
-        ));
+        );
         assert_eq!(
-            now(store.read(0, &n)).slots,
+            store.read(0, &n).slots,
             vec![(Seq::new(4), Term::new(2), b"e4".to_vec())]
         );
     }
@@ -1870,31 +1792,31 @@ mod tests {
     fn truncate_drops_own_term_tentative_records() {
         let store = MemoryGrainStore::new();
         let n = name("a");
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(5),
             vec![b"e1".to_vec()],
             WriteKind::Append,
-        ));
+        );
         // A tentative append at head 1 that failed its quorum rolls back.
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::new(1),
             Term::new(5),
             vec![b"e2".to_vec()],
             WriteKind::Append,
-        ));
-        now(store.truncate(0, &n, Seq::new(1), Term::new(5)));
+        );
+        store.truncate(0, &n, Seq::new(1), Term::new(5));
         assert_eq!(
-            now(store.read(0, &n)).slots,
+            store.read(0, &n).slots,
             vec![(Seq::new(1), Term::new(5), b"e1".to_vec())]
         );
         // Idempotent: nothing above the head remains.
-        now(store.truncate(0, &n, Seq::new(1), Term::new(5)));
-        assert_eq!(now(store.read(0, &n)).slots.len(), 1);
+        store.truncate(0, &n, Seq::new(1), Term::new(5));
+        assert_eq!(store.read(0, &n).slots.len(), 1);
     }
 
     #[test]
@@ -1904,27 +1826,27 @@ mod tests {
         // records above the same head here. It must drop only its own tentative slot.
         let store = MemoryGrainStore::new();
         let n = name("a");
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(5),
             vec![b"e1".to_vec()],
             WriteKind::Append,
-        ));
+        );
         // The new leader (term 6) repairs slot 2 and appends slot 3 to this replica.
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::new(1),
             Term::new(6),
             vec![b"e2'".to_vec(), b"e3'".to_vec()],
             WriteKind::Repair,
-        ));
+        );
         // The deposed leader's rollback of its failed term-5 append above head 1.
-        now(store.truncate(0, &n, Seq::new(1), Term::new(5)));
+        store.truncate(0, &n, Seq::new(1), Term::new(5));
         assert_eq!(
-            now(store.read(0, &n)).slots,
+            store.read(0, &n).slots,
             vec![
                 (Seq::new(1), Term::new(5), b"e1".to_vec()),
                 (Seq::new(2), Term::new(6), b"e2'".to_vec()),
@@ -1942,34 +1864,34 @@ mod tests {
         // and the surviving record is re-merged by the next recovery).
         let store = MemoryGrainStore::new();
         let n = name("a");
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::ZERO,
             Term::new(5),
             vec![b"e1".to_vec()],
             WriteKind::Append,
-        ));
+        );
         // Own-term tentative at slot 2; a newer leader's record at slot 3.
-        now(store.store_record(
+        let _ = store.store_record(
             0,
             &n,
             Seq::new(1),
             Term::new(5),
             vec![b"mine".to_vec()],
             WriteKind::Append,
-        ));
-        now(store.store_record(
+        );
+        let _ = store.store_record(
             0,
             &n,
             Seq::new(2),
             Term::new(6),
             vec![b"theirs".to_vec()],
             WriteKind::Repair,
-        ));
-        now(store.truncate(0, &n, Seq::new(1), Term::new(5)));
+        );
+        store.truncate(0, &n, Seq::new(1), Term::new(5));
         assert_eq!(
-            now(store.read(0, &n)).slots,
+            store.read(0, &n).slots,
             vec![
                 (Seq::new(1), Term::new(5), b"e1".to_vec()),
                 (Seq::new(3), Term::new(6), b"theirs".to_vec()),
@@ -1977,14 +1899,14 @@ mod tests {
         );
         // The head stops at the gap: slot 3 is above an uncommitted hole.
         assert_eq!(
-            now(store.store_record(
+            store.store_record(
                 0,
                 &n,
                 Seq::new(1),
                 Term::new(6),
                 vec![b"x".to_vec()],
                 WriteKind::Repair
-            )),
+            ),
             StoreAck::Stored(Seq::new(3))
         );
     }
@@ -1996,14 +1918,14 @@ mod tests {
         let store = MemoryGrainStore::new();
         let n = name("a");
         let id = BlobId::of(b"block");
-        assert!(!now(store.has_blob(0, &n, id)));
-        now(store.put_blob(0, &n, id, b"block".to_vec()));
+        assert!(!store.has_blob(0, &n, id));
+        let _ = store.put_blob(0, &n, id, b"block".to_vec());
         // Idempotent: a second store of equal content keeps the one copy (B2).
-        now(store.put_blob(0, &n, id, b"block".to_vec()));
-        assert!(now(store.has_blob(0, &n, id)));
-        assert_eq!(now(store.get_blob(0, &n, id)), Some(b"block".to_vec()));
+        let _ = store.put_blob(0, &n, id, b"block".to_vec());
+        assert!(store.has_blob(0, &n, id));
+        assert_eq!(store.get_blob(0, &n, id), Some(b"block".to_vec()));
         // A different grain's blob area is independent.
-        assert!(!now(store.has_blob(0, &name("b"), id)));
+        assert!(!store.has_blob(0, &name("b"), id));
     }
 
     #[test]
@@ -2013,19 +1935,19 @@ mod tests {
         let store = MemoryGrainStore::new();
         let n = name("a");
         let id = BlobId::of(b"good");
-        now(store.put_blob(0, &n, id, b"corrupt".to_vec())); // a copy that does not verify
-        assert!(now(store.has_blob(0, &n, id)));
+        let _ = store.put_blob(0, &n, id, b"corrupt".to_vec()); // a copy that does not verify
+        assert!(store.has_blob(0, &n, id));
         // Without eviction, a re-put keeps the corrupt copy (idempotent on the id).
-        now(store.put_blob(0, &n, id, b"good".to_vec()));
-        assert_eq!(now(store.get_blob(0, &n, id)), Some(b"corrupt".to_vec()));
+        let _ = store.put_blob(0, &n, id, b"good".to_vec());
+        assert_eq!(store.get_blob(0, &n, id), Some(b"corrupt".to_vec()));
         // Evict, then re-put: now the good bytes land.
-        now(store.delete_blob(0, &n, id));
-        assert!(!now(store.has_blob(0, &n, id)));
-        now(store.put_blob(0, &n, id, b"good".to_vec()));
-        assert_eq!(now(store.get_blob(0, &n, id)), Some(b"good".to_vec()));
+        store.delete_blob(0, &n, id);
+        assert!(!store.has_blob(0, &n, id));
+        let _ = store.put_blob(0, &n, id, b"good".to_vec());
+        assert_eq!(store.get_blob(0, &n, id), Some(b"good".to_vec()));
         // Idempotent: deleting an absent blob is a no-op, and an unrelated grain is
         // untouched.
-        now(store.delete_blob(0, &name("b"), id));
+        store.delete_blob(0, &name("b"), id);
     }
 
     #[test]
@@ -2036,13 +1958,13 @@ mod tests {
         let b = BlobId::of(b"b");
         let c = BlobId::of(b"c");
         for (id, bytes) in [(a, &b"a"[..]), (b, &b"b"[..]), (c, &b"c"[..])] {
-            now(store.put_blob(0, &n, id, bytes.to_vec()));
+            let _ = store.put_blob(0, &n, id, bytes.to_vec());
         }
         // Keep only a and c: b is swept (the mark-from-roots GC).
-        now(store.retain_blobs(0, &n, &BTreeSet::from([a, c])));
-        assert!(now(store.has_blob(0, &n, a)));
-        assert!(!now(store.has_blob(0, &n, b)));
-        assert!(now(store.has_blob(0, &n, c)));
+        store.retain_blobs(0, &n, &BTreeSet::from([a, c]));
+        assert!(store.has_blob(0, &n, a));
+        assert!(!store.has_blob(0, &n, b));
+        assert!(store.has_blob(0, &n, c));
     }
 
     #[test]
@@ -2050,9 +1972,9 @@ mod tests {
         let store = MemoryGrainStore::new();
         let n = name("a");
         let a = BlobId::of(b"a");
-        now(store.put_blob(0, &n, a, b"a".to_vec()));
-        now(store.delete_blobs(0, &n));
-        assert!(!now(store.has_blob(0, &n, a)));
-        assert_eq!(now(store.get_blob(0, &n, a)), None);
+        let _ = store.put_blob(0, &n, a, b"a".to_vec());
+        store.delete_blobs(0, &n);
+        assert!(!store.has_blob(0, &n, a));
+        assert_eq!(store.get_blob(0, &n, a), None);
     }
 }

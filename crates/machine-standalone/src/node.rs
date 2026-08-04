@@ -139,6 +139,44 @@ impl Default for NodeOptions {
 /// How long a front-door command waits on the machine's leader.
 const DOOR_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The Raft election timeout every group on this node inherits.
+///
+/// This was 20 s, and the reason was not network latency: the disk facet's capture and
+/// import scanned a whole image *on the async worker*, so a node served no heartbeat
+/// for the 7-14 s that took. A 4 s timeout sailed past that, and the resulting election
+/// deposed the activation owning the guest — killing a live SSH session by way of a
+/// checkpoint. The timeout was covering for that stall.
+///
+/// The stall is gone: both scans now run on the node's blocking-I/O pool (granary
+/// §7.4, `disk.rs`), so a capture no longer costs the node its heartbeats. What remains
+/// to cover is ordinary scheduling jitter on a laptop running three debug nodes, which
+/// is what the library's own defaults are sized for. Every group inherits this
+/// (`RaftEngine::create_group`), shard groups included.
+const RAFT_ELECTION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How often a leader heartbeats, and — because the driver checks election deadlines on
+/// the same tick — the granularity of every election decision on this node.
+///
+/// Well under the election timeout, so a healthy leader is never mistaken for a stopped
+/// one, and small enough that a cold start is not quantized into multi-second steps.
+const RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long [`wait_for_hosts`] waits for the cluster to be ready before serving anyway.
+///
+/// Derived, not chosen. This was a flat 15 s against a 20 s election timeout, so a cold
+/// start could not possibly satisfy it: every boot printed "cluster not ready after
+/// 15s", opened its door on a cluster that had no leader, and left the first caller to
+/// absorb the rest of the wait. The warning was not describing a fault, it was
+/// describing the constant sitting below the one it was racing.
+///
+/// Readiness waits on two things, so the budget has to cover both: SWIM has to discover
+/// the peers (`probe_interval` below), and the control group has to elect (a pristine
+/// group campaigns a fraction of [`RAFT_ELECTION_TIMEOUT`] after it is built, actor
+/// §9.4.3). Several times the larger of the two, so a slow start is absorbed rather
+/// than reported, and derived so retuning either does not silently reintroduce a
+/// warning that describes the constant rather than the cluster.
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Boot the node, open its doors, and host machines forever.
 pub async fn run(opts: NodeOptions) -> Result<(), String> {
     if opts.id < 1 || opts.id > opts.nodes {
@@ -222,15 +260,20 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
             codec: Arc::new(PostcardCodec),
             events: Arc::new(StderrEvents { node }),
             membership: MembershipMode::Leader(LeaderMode {
-                // Deliberately more patient than the library defaults (1s
-                // election, 250ms heartbeat, 3s suspect). A machine's shard
-                // leader is where its microVM runs, so a *spurious* election
-                // is not free here the way it is for a stateless service: it
-                // resigns the activation that owns the guest. Three debug
-                // builds sharing one host's CPU miss those defaults often
-                // enough to churn leadership continuously. Real deployments
-                // on separate hosts can tighten these back down; failure
-                // detection stays well inside the machine's lease (M5).
+                // A machine's shard leader is where its microVM runs, so a
+                // *spurious* election is not free here the way it is for a
+                // stateless service: it resigns the activation that owns the
+                // guest. That is why the SWIM side below stays more patient
+                // than the library defaults (3 s suspect) — three debug builds
+                // sharing one host's CPU miss the tighter ones often enough to
+                // churn membership.
+                //
+                // The Raft side is *not* patient any more, and the difference is
+                // worth reading: it used to be an order of magnitude slower than
+                // the defaults, but only to survive a capture that blocked the
+                // executor. That stall is gone (the scans run on the blocking-I/O
+                // pool, granary §7.4), so the timings answer to the network again.
+                // Failure detection stays well inside the machine's lease (M5).
                 swim: SwimConfig {
                     probe_interval: Duration::from_secs(2),
                     rtt: Duration::from_millis(500),
@@ -240,22 +283,11 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
                 raft: {
                     let mut raft = RaftConfig::new(roster.clone());
                     raft.storage = FileRaftWAL::factory(opts.data.join("raft"));
-                    // Patient enough to outlast a *capture*, which is the one thing
-                    // this deployment does that stalls a node for seconds: the disk
-                    // facet scans the whole image synchronously — 512 MiB here, read
-                    // and hashed block by block on the runtime — so the node serves no
-                    // heartbeat while it runs. Measured at 7-14s on one laptop, which
-                    // sailed past a 4s timeout: the checkpoint elected a new leader for
-                    // the very shard whose machine it was capturing, deposing the
-                    // activation and killing the guest under a live SSH session. Every
-                    // group inherits this timeout (`RaftEngine::create_group`), shard
-                    // groups included, so it is the knob that governs that race.
-                    //
-                    // The scan belongs off the executor; until it is, a demo's timings
-                    // have to cover it. A real deployment with a non-blocking capture
-                    // tightens these back down.
-                    raft.election_timeout = Duration::from_secs(20);
-                    raft.heartbeat_interval = Duration::from_secs(4);
+                    // See the constants: these were an order of magnitude more patient
+                    // to survive a capture that blocked the executor, which it no
+                    // longer does.
+                    raft.election_timeout = RAFT_ELECTION_TIMEOUT;
+                    raft.heartbeat_interval = RAFT_HEARTBEAT_INTERVAL;
                     raft
                 },
                 downing: DowningPolicy::Conservative,
@@ -275,17 +307,17 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     let host = machine_host(&opts, machine_kind)?;
     let provider = Arc::new(runtime_provider(&host, node, &system));
     let grain_store = FileGrainStore::factory(opts.data.join("grains"));
-    // One I/O pool for the node (granary §7.4). A machine's disk facet writes whole
-    // 1 MiB image blocks, so this is the deployment where an inline fsync would stall
-    // the executor hardest — and the node is also running Raft heartbeats on it.
-    let blocking_io: Arc<dyn granary::BlockingIo> =
-        Arc::new(granary::ThreadPoolIo::sized_for_host());
-    let metrics = Arc::new(granary::AtomicGrainMetrics::new());
+    // This node's shared capabilities, set once and used to host every type below
+    // (granary §7.4, §13). The I/O pool matters most in this deployment: a machine's
+    // disk facet writes whole 1 MiB image blocks, so an inline fsync would stall the
+    // executor hardest here — and the node is also running Raft heartbeats on it.
+    let granary_node = system
+        .granary_node()
+        .blocking_io(Arc::new(granary::ThreadPoolIo::sized_for_host()))
+        .metrics(Arc::new(granary::AtomicGrainMetrics::new()));
     let config = GranaryConfig {
         shards: opts.shards,
         grain_store: Some(grain_store.clone()),
-        blocking_io: Some(Arc::clone(&blocking_io)),
-        metrics: Some(metrics.clone()),
         // Where the disk facet materializes each machine's image and the
         // workspace facet its files (grain §7.11, §7.15) — under --data, so a
         // restarted node finds its own.
@@ -296,14 +328,12 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // also its session lease (machine §4, M5), and a lease that only fired
     // while the grain happened to be awake would not bound anything: the index
     // is what re-activates a due machine after hibernation or failover.
-    let alarms: Granary<AlarmIndex<TcpCluster>> = system.granary(GranaryConfig {
+    let alarms: Granary<AlarmIndex<TcpCluster>> = granary_node.granary(GranaryConfig {
         grain_store: Some(grain_store),
-        blocking_io: Some(blocking_io),
-        metrics: Some(metrics),
         shards: opts.shards,
         ..GranaryConfig::default()
     });
-    let machines: Granary<NodeMachine> = system.granary_named_with_alarms(
+    let machines: Granary<NodeMachine> = granary_node.granary_named_with_alarms(
         MACHINE_TYPE,
         config,
         Arc::new(move || Machine::new(Arc::clone(&provider))),
@@ -482,17 +512,34 @@ fn resolve(host: &str, base: u16, id: u64) -> Result<SocketAddr, String> {
 /// convenience: granary's bounded redirect absorbs a command issued before the
 /// shard map converges (G13).
 async fn wait_for_hosts(system: &TcpCluster, expected: usize) {
+    const POLL: Duration = Duration::from_millis(100);
     let peers = expected.saturating_sub(1);
-    for _ in 0..150 {
+    // Counted polls rather than a wall-clock deadline: reading the host clock directly
+    // is what the `Clock` seam exists to prevent (actor §4.6), and it is disallowed
+    // here for that reason. The elapsed figure below is derived from the count, which
+    // is exact enough for a startup line and owes nothing to the wall clock.
+    let attempts = (READY_TIMEOUT.as_millis() / POLL.as_millis()).max(1) as u32;
+    for attempt in 0..attempts {
         if system.membership().members().len() >= peers && system.leader().is_some() {
-            eprintln!("[{}] cluster ready (leader elected)", system.node());
+            eprintln!(
+                "[{}] cluster ready (leader elected) after {:.1}s",
+                system.node(),
+                (POLL * attempt).as_secs_f64()
+            );
             return;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(POLL).await;
     }
+    // Reaching here now means something is actually wrong — a peer that never
+    // appeared, or a group that cannot elect — rather than the budget being shorter
+    // than the election it was waiting for.
     eprintln!(
-        "[{}] warning: cluster not ready after 15s; serving anyway",
-        system.node()
+        "[{}] warning: cluster not ready after {:.0}s; serving anyway. \
+         Members {}/{peers}, leader {:?}",
+        system.node(),
+        READY_TIMEOUT.as_secs_f64(),
+        system.membership().members().len(),
+        system.leader(),
     );
 }
 

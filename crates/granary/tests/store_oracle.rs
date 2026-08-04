@@ -28,8 +28,8 @@ use granary::GrainName;
 use granary::GrainStore;
 use granary::MemoryGrainStore;
 use granary::ReadOutcome;
-use granary::Reserved;
 use granary::Seq;
+use granary::StoreAck;
 use granary::Term;
 use granary::WriteKind;
 
@@ -69,10 +69,6 @@ impl Rng {
 
 /// Read a store call's durable outcome. The seam completes the write before it
 /// returns, so this only unwraps the value the store already made stable.
-fn now<T: Send + 'static>(reserved: Reserved<T>) -> T {
-    reserved.durable()
-}
-
 fn grain(i: u64) -> GrainName {
     GrainName::new("test.Grain", format!("g{i}"))
 }
@@ -226,23 +222,23 @@ fn apply(
             kind,
         } => {
             let records: Vec<Vec<u8>> = (0..*count).map(|i| vec![b'r', i as u8]).collect();
-            let f = now(file.store_record(shard, g, *after, *term, records.clone(), *kind));
-            let m = now(mem.store_record(shard, g, *after, *term, records, *kind));
+            let f = file.store_record(shard, g, *after, *term, records.clone(), *kind);
+            let m = mem.store_record(shard, g, *after, *term, records, *kind);
             assert_eq!(f, m, "{where_}: store_record ack diverged ({op:?})");
         }
         Op::StoreSnapshot { at, term, kind } => {
             let state = vec![b's', at.value() as u8];
-            let f = now(file.store_snapshot(shard, g, *at, *term, state.clone(), *kind));
-            let m = now(mem.store_snapshot(shard, g, *at, *term, state, *kind));
+            let f = file.store_snapshot(shard, g, *at, *term, state.clone(), *kind);
+            let m = mem.store_snapshot(shard, g, *at, *term, state, *kind);
             assert_eq!(f, m, "{where_}: store_snapshot ack diverged ({op:?})");
         }
         Op::Truncate { after, term } => {
-            now(file.truncate(shard, g, *after, *term));
-            now(mem.truncate(shard, g, *after, *term));
+            file.truncate(shard, g, *after, *term);
+            mem.truncate(shard, g, *after, *term);
         }
         Op::Prepare { term } => {
-            let f = now(file.prepare(shard, g, *term));
-            let m = now(mem.prepare(shard, g, *term));
+            let f = file.prepare(shard, g, *term);
+            let m = mem.prepare(shard, g, *term);
             match (&f, &m) {
                 (ReadOutcome::Prepared(a), ReadOutcome::Prepared(b)) => {
                     assert_eq!(a.slots, b.slots, "{where_}: prepare slots diverged");
@@ -258,75 +254,79 @@ fn apply(
             }
         }
         Op::Read => {
-            let f = now(file.read(shard, g));
-            let m = now(mem.read(shard, g));
+            let f = file.read(shard, g);
+            let m = mem.read(shard, g);
             assert_eq!(f.slots, m.slots, "{where_}: read slots diverged");
             assert_eq!(f.snapshot, m.snapshot, "{where_}: read snapshot diverged");
         }
         Op::ReadFrom { from, limit } => {
-            let f = now(file.read_from(shard, g, *from, *limit));
-            let m = now(mem.read_from(shard, g, *from, *limit));
+            let f = file.read_from(shard, g, *from, *limit);
+            let m = mem.read_from(shard, g, *from, *limit);
             assert_eq!(f, m, "{where_}: read_from diverged ({op:?})");
         }
         Op::PutBlob { which } => {
             let bytes = blob_bytes(*which);
             let id = BlobId::of(&bytes);
-            now(file.put_blob(shard, g, id, bytes.clone()));
-            now(mem.put_blob(shard, g, id, bytes));
+            // The acks are compared like every other op's result: a store that
+            // refuses a put the other accepted has diverged, and the two stores
+            // agreeing on *outcomes* is what this oracle is for (**G18**).
+            let f = file.put_blob(shard, g, id, bytes.clone());
+            let m = mem.put_blob(shard, g, id, bytes);
+            assert_eq!(f, m, "{where_}: put_blob diverged ({op:?})");
         }
         Op::GetBlob { which } => {
             let id = BlobId::of(&blob_bytes(*which));
-            let f = now(file.get_blob(shard, g, id));
-            let m = now(mem.get_blob(shard, g, id));
+            let f = file.get_blob(shard, g, id);
+            let m = mem.get_blob(shard, g, id);
             assert_eq!(f, m, "{where_}: get_blob diverged ({op:?})");
         }
         Op::HasBlob { which } => {
             let id = BlobId::of(&blob_bytes(*which));
-            let f = now(file.has_blob(shard, g, id));
-            let m = now(mem.has_blob(shard, g, id));
+            let f = file.has_blob(shard, g, id);
+            let m = mem.has_blob(shard, g, id);
             assert_eq!(f, m, "{where_}: has_blob diverged ({op:?})");
         }
         Op::DeleteBlob { which } => {
             let id = BlobId::of(&blob_bytes(*which));
-            now(file.delete_blob(shard, g, id));
-            now(mem.delete_blob(shard, g, id));
+            file.delete_blob(shard, g, id);
+            mem.delete_blob(shard, g, id);
         }
         Op::RetainBlobs { keep } => {
             let retain: BTreeSet<BlobId> =
                 keep.iter().map(|w| BlobId::of(&blob_bytes(*w))).collect();
-            now(file.retain_blobs(shard, g, &retain));
-            now(mem.retain_blobs(shard, g, &retain));
+            file.retain_blobs(shard, g, &retain);
+            mem.retain_blobs(shard, g, &retain);
         }
         Op::BlobIds => {
-            let mut f = now(file.blob_ids(shard, g));
-            let mut m = now(mem.blob_ids(shard, g));
+            let mut f = file.blob_ids(shard, g);
+            let mut m = mem.blob_ids(shard, g);
             f.sort();
             m.sort();
             assert_eq!(f, m, "{where_}: blob_ids diverged");
         }
         Op::DeleteBlobs => {
-            now(file.delete_blobs(shard, g));
-            now(mem.delete_blobs(shard, g));
+            file.delete_blobs(shard, g);
+            mem.delete_blobs(shard, g);
         }
         Op::SealRange { from } => {
-            now(file.seal_range(shard, *from));
-            now(mem.seal_range(shard, *from));
+            file.seal_range(shard, *from);
+            mem.seal_range(shard, *from);
         }
         Op::Unseal => {
-            now(file.unseal(shard));
-            now(mem.unseal(shard));
+            file.unseal(shard);
+            mem.unseal(shard);
         }
         Op::RemoveGrain => {
-            now(file.remove_grain(shard, g));
-            now(mem.remove_grain(shard, g));
+            file.remove_grain(shard, g);
+            mem.remove_grain(shard, g);
         }
         Op::RemoveRange { from } => {
-            now(file.remove_range(shard, *from));
-            now(mem.remove_range(shard, *from));
+            file.remove_range(shard, *from);
+            mem.remove_range(shard, *from);
         }
         Op::DropShard => {
-            now(file.drop_shard(shard));
-            now(mem.drop_shard(shard));
+            file.drop_shard(shard);
+            mem.drop_shard(shard);
         }
     }
 }
@@ -340,20 +340,20 @@ fn compare_all(
 ) {
     for shard in SHARDS {
         for g in all_grains() {
-            let f = now(file.read(shard, &g));
-            let m = now(mem.read(shard, &g));
+            let f = file.read(shard, &g);
+            let m = mem.read(shard, &g);
             assert_eq!(f.slots, m.slots, "{where_}: final slots diverged for {g:?}");
             assert_eq!(
                 f.snapshot, m.snapshot,
                 "{where_}: final snapshot diverged for {g:?}"
             );
             assert_eq!(
-                now(file.read_from(shard, &g, Seq::ZERO, usize::MAX)),
-                now(mem.read_from(shard, &g, Seq::ZERO, usize::MAX)),
+                file.read_from(shard, &g, Seq::ZERO, usize::MAX),
+                mem.read_from(shard, &g, Seq::ZERO, usize::MAX),
                 "{where_}: final read_from diverged for {g:?}"
             );
-            let mut fb = now(file.blob_ids(shard, &g));
-            let mut mb = now(mem.blob_ids(shard, &g));
+            let mut fb = file.blob_ids(shard, &g);
+            let mut mb = mem.blob_ids(shard, &g);
             fb.sort();
             mb.sort();
             assert_eq!(fb, mb, "{where_}: final blob_ids diverged for {g:?}");
@@ -408,7 +408,7 @@ fn run(seed: u64) {
         }
         let shard = SHARDS[rng.below(SHARDS.len() as u64) as usize];
         let g = grain(rng.below(GRAINS as u64));
-        let reply = now(mem.read(shard, &g));
+        let reply = mem.read(shard, &g);
         let head = reply
             .slots
             .last()
@@ -448,19 +448,23 @@ fn a_read_of_a_removed_grain_does_not_resurrect_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let g = grain(0);
     let store = FileGrainStore::open(dir.path()).expect("open");
-    now(store.store_record(
+    let seeded = store.store_record(
         0,
         &g,
         Seq::ZERO,
         Term::new(1),
         vec![b"a".to_vec()],
         WriteKind::Append,
-    ));
-    now(store.remove_grain(0, &g));
+    );
+    assert!(
+        matches!(seeded, StoreAck::Stored(_)),
+        "the grain must exist before removal is worth testing"
+    );
+    store.remove_grain(0, &g);
 
     // The read that used to bring it back.
-    assert!(now(store.read(0, &g)).slots.is_empty());
-    assert!(now(store.read_from(0, &g, Seq::ZERO, 10)).is_empty());
+    assert!(store.read(0, &g).slots.is_empty());
+    assert!(store.read_from(0, &g, Seq::ZERO, 10).is_empty());
 
     assert!(
         !store.grains(0).contains(&g),
@@ -484,7 +488,7 @@ fn truncating_an_unseen_grain_does_not_create_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let g = grain(1);
     let store = FileGrainStore::open(dir.path()).expect("open");
-    now(store.truncate(0, &g, Seq::ZERO, Term::new(1)));
+    store.truncate(0, &g, Seq::ZERO, Term::new(1));
     assert!(
         store.grains(0).is_empty(),
         "truncating nothing created a grain: {:?}",
@@ -523,7 +527,7 @@ fn concurrent_puts_of_one_blob_neither_fail_nor_poison_the_store() {
         for _ in 0..PUTTERS {
             scope.spawn(|| {
                 assert_eq!(
-                    now(store.put_blob(0, &g, id, bytes.clone())),
+                    store.put_blob(0, &g, id, bytes.clone()),
                     granary::BlobAck::Stored,
                     "a concurrent put of already-agreed content was refused"
                 );
@@ -533,13 +537,13 @@ fn concurrent_puts_of_one_blob_neither_fail_nor_poison_the_store() {
 
     assert_eq!(store.failure(), None, "the store poisoned itself");
     assert_eq!(
-        now(store.get_blob(0, &g, id)),
+        store.get_blob(0, &g, id),
         Some(bytes),
         "the blob that landed is not the bytes every putter wrote"
     );
     // The store still takes writes — what poisoning would have taken away.
     assert_eq!(
-        now(store.put_blob(0, &g, BlobId::of(b"after"), b"after".to_vec())),
+        store.put_blob(0, &g, BlobId::of(b"after"), b"after".to_vec()),
         granary::BlobAck::Stored,
     );
 }

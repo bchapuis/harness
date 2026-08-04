@@ -1,6 +1,5 @@
 //! Deployment configuration for a grain type (spec Appendix A).
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::store::GrainStoreFactory;
@@ -70,17 +69,6 @@ pub struct GranaryConfig {
     /// supplies a factory that caches per node and outlives a restart — the grain
     /// analogue of the Raft WAL storage seam (actor §9.4.3).
     pub grain_store: Option<GrainStoreFactory>,
-    /// Where this node's blocking store I/O runs (spec §7.4). `None` (the default)
-    /// runs it on the calling async worker — correct, and what the deterministic
-    /// simulation requires (§14), but it means a *stalled* device blocks a thread that
-    /// is also driving Raft heartbeats and other shards' quorum waits. A deployment on
-    /// real storage supplies [`ThreadPoolIo`](crate::ThreadPoolIo); see
-    /// [`crate::blocking`] for why this is a seam rather than a default, and why the
-    /// case for it is the tail rather than the median.
-    ///
-    /// Shared across every grain type hosted on the node, since the pool exists to
-    /// bound *the node's* concurrent device work, not one type's.
-    pub blocking_io: Option<Arc<dyn crate::BlockingIo>>,
     /// How this deployment groups nodes into failure domains — racks, zones,
     /// whatever fails together (spec §7.1). `None` (the default) treats every node as
     /// its own domain, which is the historical behaviour: replicas spread across the
@@ -127,10 +115,6 @@ pub struct GranaryConfig {
     /// §3.2). The cache holds up
     /// to twice this many entries while an older generation ages out.
     pub host_cache_capacity: usize,
-    /// Where this node reports its operator-facing measurements (spec §13). `None`
-    /// (the default) discards them. Distinct from the event stream, which is the
-    /// checker's interface: see [`crate::metrics`] for why both exist.
-    pub metrics: Option<Arc<dyn crate::GrainMetrics>>,
     /// The node-local scratch directory a **physical facet** materializes under
     /// (spec §7.12/§7.14): the SQL facet's database files live here, keyed by
     /// grain. Rebuildable caches only, never a source of truth (§1); safe to
@@ -139,18 +123,6 @@ pub struct GranaryConfig {
 }
 
 impl GranaryConfig {
-    /// This node's blocking-I/O seam: the configured pool, or the inline default.
-    pub(crate) fn blocking_io(&self) -> Arc<dyn crate::BlockingIo> {
-        self.blocking_io
-            .clone()
-            .unwrap_or_else(|| Arc::new(crate::InlineIo))
-    }
-
-    /// This node's metrics sink: the configured one, or the discarding default.
-    pub(crate) fn metrics(&self) -> Arc<dyn crate::GrainMetrics> {
-        self.metrics.clone().unwrap_or_else(|| Arc::new(()))
-    }
-
     /// The resolved physical-facet scratch directory:
     /// [`data_dir`](GranaryConfig::data_dir), or its documented system-temp
     /// default.
@@ -175,8 +147,6 @@ impl Default for GranaryConfig {
             // Bias hard toward replaying (see the field docs).
             snapshot_every: 4096,
             grain_store: None,
-            blocking_io: None,
-            metrics: None,
             failure_domains: None,
             // Comfortably above a healthy quorum round-trip (milliseconds) yet short
             // enough that a write to an unreachable shard fails fast rather than
@@ -210,11 +180,6 @@ impl std::fmt::Debug for GranaryConfig {
             .field("quorum_timeout", &self.quorum_timeout)
             .field("recover_timeout", &self.recover_timeout)
             .field("host_cache_capacity", &self.host_cache_capacity)
-            .field("metrics", &self.metrics.as_ref().map(|_| "<sink>"))
-            .field(
-                "blocking_io",
-                &self.blocking_io.as_ref().map_or("<inline>", |_| "<pool>"),
-            )
             .field("data_dir", &self.data_dir)
             .finish()
     }

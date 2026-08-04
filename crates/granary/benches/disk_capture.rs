@@ -10,9 +10,11 @@
 //!
 //! It has since been attributed, and this file is the layer that did it: what these
 //! numbers established is that the single-node path costs what its parts cost and no
-//! more, which is what made the rest of the time findable elsewhere (a one-time
-//! cluster warm-up, and a per-replica cost in the fan-out — see TODO.md). Keep them
-//! honest; they are the floor every later claim is checked against.
+//! more, which is what made the rest of the time findable elsewhere. It was two things,
+//! and neither was the fan-out — a mebibyte going through serde's element-at-a-time
+//! path at each of two encoding layers, and a cold-start cost that was a Raft group
+//! waiting out an election timeout built to detect a failure that had not happened.
+//! Keep these numbers honest; they are the floor every later claim is checked against.
 //!
 //! So this file does not benchmark a knob. It measures the capture path in three
 //! layers, cheapest first, so the layer that holds the time can be named:
@@ -200,11 +202,7 @@ fn put_cold(bencher: Bencher, store: impl GrainBlobStore) {
             (BlobId::of(&bytes), bytes)
         })
         .bench_local_values(|(id, bytes)| {
-            black_box(
-                store
-                    .put_blob(SHARD, black_box(&grain), id, bytes)
-                    .durable(),
-            )
+            black_box(store.put_blob(SHARD, black_box(&grain), id, bytes))
         });
 }
 
@@ -252,17 +250,12 @@ fn put_file_present(bencher: Bencher) {
     let grain = name();
     let bytes = block(0);
     let id = BlobId::of(&bytes);
-    store.put_blob(SHARD, &grain, id, bytes.clone()).durable(); // the first put is the cold one; the measured ones are hits
+    // The first put is the cold one; the measured ones are hits, so its ack is moot.
+    let _warm = store.put_blob(SHARD, &grain, id, bytes.clone());
     bencher
         .counter(BytesCount::new(BLOCK))
         .with_inputs(|| bytes.clone())
-        .bench_local_values(|bytes| {
-            black_box(
-                store
-                    .put_blob(SHARD, black_box(&grain), id, bytes)
-                    .durable(),
-            )
-        });
+        .bench_local_values(|bytes| black_box(store.put_blob(SHARD, black_box(&grain), id, bytes)));
 }
 
 // --- Layer 3: the whole path, through a grain ---------------------------------

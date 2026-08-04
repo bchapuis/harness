@@ -46,6 +46,7 @@ use serde::Serialize;
 
 use crate::blobs::BlobId;
 use crate::blobs::GrainBlobs;
+use crate::blocking::offload;
 use crate::facet::Facet;
 use crate::facet::FacetEnv;
 use crate::facet::FacetError;
@@ -141,6 +142,15 @@ impl DiskManifest {
 fn block_count(image_bytes: u64) -> usize {
     image_bytes.div_ceil(BLOCK_BYTES as u64) as usize
 }
+
+/// How many blocks one scan job takes off to the blocking pool at a time.
+///
+/// Matched to [`IN_FLIGHT_CHUNKS`](crate::facet_blobs) — the bound the put pipeline
+/// already holds blocks under — so moving the scan off the executor does not raise the
+/// facet's peak memory: a wave is scanned, put, and dropped before the next is read.
+/// Larger would amortize the pool hop further and buy nothing measurable: a hop is
+/// microseconds against a wave's quorum round.
+const SCAN_WAVE: u32 = 16;
 
 /// The byte length of block `idx` in an image of `image_bytes`.
 fn block_len(image_bytes: u64, idx: u32) -> usize {
@@ -477,6 +487,13 @@ where
         // put precedes staging (plan, then stage, §7.12): a failed put stages
         // nothing, and blobs orphaned by a failed commit are unrooted and swept by
         // the host's unioned GC.
+        //
+        // The copy itself runs on the node's blocking-I/O pool, a wave at a time, for
+        // the reason [`capture`](DiskHandle::capture) does: reading and writing a whole
+        // image is seconds of device work, and inline it stalls the async worker that
+        // is also driving this node's Raft heartbeats. On the create path that is the
+        // most visible form of the problem — provisioning a machine is exactly when the
+        // node must not look dead to its peers.
         let mut reader = fs::File::open(src).map_err(io_disk_err)?;
         let mut writer = fs::OpenOptions::new()
             .write(true)
@@ -486,20 +503,38 @@ where
             .map_err(io_disk_err)?;
         writer.set_len(src_bytes).map_err(io_disk_err)?;
         let blobs = self.ctx.blobs();
-        let ids = put_pulled(
-            &blobs,
-            (0..block_count(src_bytes) as u32).map(|idx| {
-                let mut block = vec![0u8; block_len(src_bytes, idx)];
-                reader
-                    .read_exact(&mut block)
-                    .map_err(io_facet_err("disk"))?;
-                writer.write_all(&block).map_err(io_facet_err("disk"))?;
-                Ok(block)
-            }),
-            "disk import block",
-        )
-        .await
-        .map_err(facet_disk_err)?;
+        let io = Arc::clone(self.ctx.blocking_io());
+        let total = block_count(src_bytes) as u32;
+        let mut ids: Vec<BlobId> = Vec::new();
+        let mut next = 0u32;
+        while next < total {
+            let end = (next + SCAN_WAVE).min(total);
+            // Both handles travel with the job and come back with it: the copy is
+            // sequential, so each file's cursor is this scan's own position.
+            let (returned, wave) = offload(&io, move || {
+                let mut wave: Vec<Vec<u8>> = Vec::new();
+                for idx in next..end {
+                    let mut block = vec![0u8; block_len(src_bytes, idx)];
+                    if let Err(e) = reader.read_exact(&mut block) {
+                        return ((reader, writer), Err(io_facet_err("disk")(e)));
+                    }
+                    if let Err(e) = writer.write_all(&block) {
+                        return ((reader, writer), Err(io_facet_err("disk")(e)));
+                    }
+                    wave.push(block);
+                }
+                ((reader, writer), Ok(wave))
+            })
+            .await;
+            (reader, writer) = returned;
+            let wave = wave.map_err(facet_disk_err)?;
+            ids.extend(
+                put_pulled(&blobs, wave.into_iter().map(Ok), "disk import block")
+                    .await
+                    .map_err(facet_disk_err)?,
+            );
+            next = end;
+        }
         // An import is full coverage, so the nth id is block n by construction.
         let blocks: Vec<(u32, BlobId)> = ids
             .into_iter()
@@ -549,36 +584,71 @@ where
             )));
         }
         let blobs = self.ctx.blobs();
+        // The scan runs on the node's blocking-I/O pool, a wave at a time, never on the
+        // async worker. Reading and hashing a whole image is seconds of work — 512 MiB
+        // at ~600 µs a block is most of a minute — and inline it stalls the worker that
+        // is also driving this node's Raft heartbeats. That is not a slow capture, it
+        // is an election: the shard whose machine is being captured deposes the
+        // activation that owns the guest, which is the failure the deployment's
+        // deliberately patient election timeout was covering for.
+        //
+        // The scan is still sequential and the clean blocks still never leave it — a
+        // block whose hash matches the committed index is the dedup case the facet
+        // exists to get for free, so it is discarded on the pool thread and never
+        // crosses back. Only the dirty ones return, and only a wave of them at a time,
+        // which is the same bound `put_pulled` holds them under anyway.
+        let io = Arc::clone(self.ctx.blocking_io());
+        let index = Arc::new(index);
+        let total = block_count(image_bytes) as u32;
         let mut file = fs::File::open(&path).map_err(io_disk_err)?;
-        // The scan is sequential and the clean blocks never leave it — a block
-        // whose hash still matches the committed index is the dedup case the
-        // facet exists to get for free, and skipping it here is cheaper than
-        // putting it and having the store recognize it. Only the dirty ones reach
-        // `put_pulled`, which pipelines them the way `import`'s do; `blocks`
-        // records each one's index as the scan yields it, so it stays aligned
-        // with the ids that come back in order.
         let mut blocks = Vec::new();
         let mut bytes = 0u64;
-        let dirty = (0..block_count(image_bytes) as u32).filter_map(|idx| {
-            let mut block = vec![0u8; block_len(image_bytes, idx)];
-            if let Err(e) = file.read_exact(&mut block) {
-                return Some(Err(io_facet_err("disk")(e)));
+        let mut next = 0u32;
+        while next < total {
+            let end = (next + SCAN_WAVE).min(total);
+            let index = Arc::clone(&index);
+            // The handle travels with the job and comes back with it: the scan is
+            // sequential, so the file's cursor is the scan's own position and no other
+            // thread may touch it.
+            let (returned, wave) = offload(&io, move || {
+                let mut wave: Vec<(u32, BlobId, Vec<u8>)> = Vec::new();
+                for idx in next..end {
+                    let mut block = vec![0u8; block_len(image_bytes, idx)];
+                    if let Err(e) = file.read_exact(&mut block) {
+                        return (file, Err(io_facet_err("disk")(e)));
+                    }
+                    let id = BlobId::of(&block);
+                    if index.get(idx as usize).copied().flatten() == Some(id) {
+                        continue;
+                    }
+                    wave.push((idx, id, block));
+                }
+                (file, Ok(wave))
+            })
+            .await;
+            file = returned;
+            let wave = wave.map_err(facet_disk_err)?;
+            // `blocks` records each dirty block's index as the scan yields it, so it
+            // stays aligned with the ids the puts return in order.
+            for (idx, id, block) in &wave {
+                bytes += block.len() as u64;
+                blocks.push((*idx, *id));
             }
-            let id = BlobId::of(&block);
-            if index.get(idx as usize).copied().flatten() == Some(id) {
-                return None;
-            }
-            bytes += block.len() as u64;
-            blocks.push((idx, id));
-            Some(Ok(block))
-        });
-        let ids = put_pulled(&blobs, dirty, "disk capture block")
+            let ids = put_pulled(
+                &blobs,
+                wave.into_iter().map(|(_, _, block)| Ok(block)),
+                "disk capture block",
+            )
             .await
             .map_err(facet_disk_err)?;
-        debug_assert!(
-            ids.iter().eq(blocks.iter().map(|(_, id)| id)),
-            "a put returned an id the scan did not hash",
-        );
+            // This wave's ids are the tail `blocks` just grew by.
+            debug_assert!(
+                ids.iter()
+                    .eq(blocks[blocks.len() - ids.len()..].iter().map(|(_, id)| id)),
+                "a put returned an id the scan did not hash",
+            );
+            next = end;
+        }
         if blocks.is_empty() {
             return Ok(DiskCaptureStats {
                 blocks: 0,

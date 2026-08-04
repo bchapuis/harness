@@ -56,10 +56,10 @@ fn name() -> GrainName {
 /// the very number this file exists to report. `with_inputs` hands each iteration its own
 /// batch and excludes building it from the measurement.
 ///
-/// The ack is dropped rather than awaited. `Reserved` is `#[must_use]` so a real caller
-/// cannot forget that an outcome is unacknowledged until durable (**G14**), but both
-/// stores settle synchronously — by the time `store_record` returns there is nothing left
-/// to wait for, and awaiting would only add a ready future to the measurement.
+/// The ack is bound and dropped rather than checked. `store_record` is `#[must_use]` so
+/// a real caller cannot let a refusal fall on the floor (**G14**), but this bench is
+/// measuring the write itself: both stores settle synchronously, so by the time the call
+/// returns there is nothing left to wait for and nothing a check would change.
 fn commit(bencher: Bencher, store: impl GrainStore, records: usize) {
     let grain = name();
     let events = batch(records, 256);

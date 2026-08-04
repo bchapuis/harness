@@ -183,7 +183,6 @@ impl Fixture {
     fn snapshot_bytes(&self, name: &str) -> usize {
         self.store
             .snapshot(0, &GrainName::new(Transcript::GRAIN_TYPE, name))
-            .durable()
             .map(|(_seq, bytes)| bytes.len())
             .unwrap_or(0)
     }
@@ -192,7 +191,6 @@ impl Fixture {
     fn blob_count(&self, name: &str) -> usize {
         self.store
             .blob_ids(0, &GrainName::new(Transcript::GRAIN_TYPE, name))
-            .durable()
             .len()
     }
 }

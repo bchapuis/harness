@@ -306,7 +306,6 @@ impl<G: Grain> Handler<StoreRecord> for ReplicaStore<G> {
             )
         })
         .await
-        .durable()
     }
 }
 
@@ -316,7 +315,6 @@ impl<G: Grain> Handler<ReadGrain> for ReplicaStore<G> {
             store.prepare(msg.shard, &msg.grain, msg.term)
         })
         .await
-        .durable()
     }
 }
 
@@ -326,7 +324,6 @@ impl<G: Grain> Handler<StoreSnapshot> for ReplicaStore<G> {
             store.store_snapshot(msg.shard, &msg.grain, msg.at, msg.term, msg.state, msg.kind)
         })
         .await
-        .durable()
     }
 }
 
@@ -337,8 +334,7 @@ impl<G: Grain> Handler<SealRange> for ReplicaStore<G> {
         on_store(&self.io, &self.store, move |store| {
             store.seal_range(msg.shard, msg.from)
         })
-        .await
-        .durable();
+        .await;
     }
 }
 
@@ -348,7 +344,6 @@ impl<G: Grain> Handler<StoreBlob> for ReplicaStore<G> {
             store.put_blob(msg.shard, &msg.grain, msg.id, msg.bytes)
         })
         .await
-        .durable()
     }
 }
 
@@ -356,14 +351,13 @@ impl<G: Grain> Handler<FetchBlob> for ReplicaStore<G> {
     async fn handle(&mut self, msg: FetchBlob, _ctx: &Ctx<ReplicaStore<G>>) -> Option<ByteBuf> {
         self.store
             .get_blob(msg.shard, &msg.grain, msg.id)
-            .durable()
             .map(ByteBuf::from)
     }
 }
 
 impl<G: Grain> Handler<HasBlob> for ReplicaStore<G> {
     async fn handle(&mut self, msg: HasBlob, _ctx: &Ctx<ReplicaStore<G>>) -> bool {
-        self.store.has_blob(msg.shard, &msg.grain, msg.id).durable()
+        self.store.has_blob(msg.shard, &msg.grain, msg.id)
     }
 }
 
@@ -372,12 +366,9 @@ impl<G: Grain> Handler<SweepBlobs> for ReplicaStore<G> {
         // Offloaded like the writes: a sweep unlinks one file per reclaimed blob, so
         // a grain that has churned a large disk image makes this thousands of
         // synchronous unlinks against the same device the durability path needs.
-        on_store(&self.io, &self.store, move |store| {
-            match msg.retain {
-                None => store.delete_blobs(msg.shard, &msg.grain),
-                Some(ids) => store.retain_blobs(msg.shard, &msg.grain, &ids.into_iter().collect()),
-            }
-            .durable()
+        on_store(&self.io, &self.store, move |store| match msg.retain {
+            None => store.delete_blobs(msg.shard, &msg.grain),
+            Some(ids) => store.retain_blobs(msg.shard, &msg.grain, &ids.into_iter().collect()),
         })
         .await;
     }
@@ -391,7 +382,7 @@ impl<G: Grain> Handler<ListGrains> for ReplicaStore<G> {
 
 impl<G: Grain> Handler<ListBlobs> for ReplicaStore<G> {
     async fn handle(&mut self, msg: ListBlobs, _ctx: &Ctx<ReplicaStore<G>>) -> Vec<BlobId> {
-        self.store.blob_ids(msg.shard, &msg.grain).durable()
+        self.store.blob_ids(msg.shard, &msg.grain)
     }
 }
 

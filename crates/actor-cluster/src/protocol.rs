@@ -112,8 +112,10 @@ pub enum Frame {
         /// frame — so bulk bytes cross the wire through two encoders, and both have
         /// to be told they are bytes. Without the attribute serde takes its default
         /// sequence path and the decoder grows a `Vec` one `u8` at a time: ~16 ms a
-        /// mebibyte, which measured as the whole per-block cost of replicating a
-        /// disk image (TODO.md). Neutral on the wire for both codecs in the tree —
+        /// mebibyte, which measured as the whole per-block cost of replicating a disk
+        /// image. `benches/frame.rs` measures this outer layer; annotating it took the
+        /// deduplicated two-node figure from 12.7 ms a block to 1.9. Neutral on the
+        /// wire for both codecs in the tree —
         /// `actor-serialization/tests/wire_bytes.rs` is that claim, and covers this
         /// struct-variant shape specifically.
         #[serde(with = "serde_bytes")]

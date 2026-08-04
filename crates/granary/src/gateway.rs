@@ -110,6 +110,10 @@ pub(crate) struct Gateway<G: Grain> {
     /// How many shards the type's namespace is partitioned into (§7.1).
     shards: usize,
     config: GranaryConfig,
+    /// What this **node** provides to every type it hosts (§7.4, §13), as opposed to
+    /// the per-type `config` above. Carried here so each activation gets the node's
+    /// handles rather than rebuilding a default pair per host.
+    capabilities: crate::node::NodeCapabilities,
     /// How a fresh activation's behavior value is built: the runtime instantiates
     /// the grain, the user supplies no value per `GrainName`.
     factory: Arc<dyn Fn() -> G + Send + Sync>,
@@ -119,11 +123,13 @@ pub(crate) struct Gateway<G: Grain> {
 }
 
 impl<G: Grain> Gateway<G> {
+    #[allow(clippy::too_many_arguments)] // one call site, `build_granary`
     pub(crate) fn new(
         grain_type: &'static str,
         shard_map: Arc<dyn ShardMapSource>,
         shards: usize,
         config: GranaryConfig,
+        capabilities: crate::node::NodeCapabilities,
         factory: Arc<dyn Fn() -> G + Send + Sync>,
         alarm_index: Option<Granary<AlarmIndex<G::System>>>,
     ) -> Gateway<G> {
@@ -133,6 +139,7 @@ impl<G: Grain> Gateway<G> {
             shard_map,
             shards,
             config,
+            capabilities,
             factory,
             alarm_index,
         }
@@ -170,6 +177,7 @@ impl<G: Grain> Gateway<G> {
             .journal(shard.index)
             .expect("a leader replicates the shard, so its journal is present");
         let config = self.config.clone();
+        let capabilities = self.capabilities.clone();
         let factory = Arc::clone(&self.factory);
         let gateway = ctx.this();
         let activated = name.clone();
@@ -184,6 +192,7 @@ impl<G: Grain> Gateway<G> {
                 shard_index,
                 journal.clone(),
                 config.clone(),
+                &capabilities,
                 gateway.clone(),
                 alarm_index.clone(),
             )

@@ -28,11 +28,25 @@
 //! `term` or `snapshot` file is a hard error: silently resetting either could violate
 //! safety, so only the operator may resolve it.
 //!
-//! **Failure policy.** [`RaftWAL`]'s methods are infallible by signature; a voter
-//! whose state cannot be made durable cannot safely continue (it might announce
-//! un-persisted state). This implementation panics on an I/O error after open,
-//! taking the consensus task down rather than risking a safety violation; peers
-//! observe the node unreachable.
+//! **Failure policy.** A voter whose state cannot be made durable cannot safely
+//! continue: it might announce un-persisted state — vote twice in a term, or
+//! acknowledge an entry it cannot replay. An I/O error after open therefore **poisons**
+//! this WAL: the reason is recorded and logged once, every later write answers
+//! [`WalAck::Failed`] without touching the disk, and the engine steps the node out of
+//! consensus for good (it stops voting, leading, and acknowledging appends).
+//!
+//! It does *not* panic, and the reason is specific to this process. An unwind here
+//! does not reliably stop a voter: a panic inside an actor is caught by supervision
+//! and becomes a restart, and one inside a spawned consensus loop kills that task
+//! alone. Either leaves the node up, gossiping, and counted in quorums with nothing
+//! durable behind it — which is the exact failure this policy exists to prevent, made
+//! harder to see. Poisoning stops the voter *and* leaves it answering, so peers elect
+//! around it at once and [`poisoned`](RaftWAL::poisoned) tells an operator which node
+//! to replace.
+//!
+//! Poisoning is one-way. Nothing here can establish that the volume recovered, and a
+//! log that resumed after a gap would be worse than one that stopped: the records
+//! either side of the gap would look contiguous.
 //!
 //! **Single writer.** A storage directory must belong to one process at a time.
 //! Not enforced (advisory locking needs a newer toolchain than the workspace
@@ -50,6 +64,7 @@ use actor_cluster::GroupId;
 use actor_cluster::PersistedRaft;
 use actor_cluster::RaftEntry;
 use actor_cluster::RaftWAL;
+use actor_cluster::WalAck;
 use actor_core::NodeId;
 use serde::Deserialize;
 use serde::Serialize;
@@ -99,6 +114,15 @@ struct Inner {
 pub struct FileRaftWAL {
     dir: PathBuf,
     inner: Mutex<Inner>,
+    /// Why this WAL stopped accepting writes, or `None` while healthy.
+    ///
+    /// **One-way, and store-wide.** One-way because nothing here can establish that
+    /// the volume recovered, and a Raft log that resumed writing after a gap would be
+    /// worse than one that stopped: the entries written either side of the gap would
+    /// look contiguous. Store-wide because the failures it catches — a full or
+    /// read-only filesystem, a device that has stopped acknowledging — are properties
+    /// of the volume, not of the record that happened to hit them.
+    poison: Mutex<Option<String>>,
 }
 
 impl FileRaftWAL {
@@ -181,6 +205,7 @@ impl FileRaftWAL {
 
         Ok(FileRaftWAL {
             dir,
+            poison: Mutex::new(None),
             inner: Mutex::new(Inner {
                 log,
                 state: PersistedRaft {
@@ -216,6 +241,22 @@ impl FileRaftWAL {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().expect("raft storage mutex poisoned")
+    }
+
+    /// Poison this WAL and report the failure to the engine, which steps the node out
+    /// of consensus (see [`RaftWAL`]'s failure policy). The first reason is kept: it
+    /// is the one that describes the volume, and everything after it is a consequence.
+    ///
+    /// Logged to stderr as well as recorded, because a node that has stopped voting
+    /// looks from the outside like a node that is merely slow, and the difference is
+    /// the whole operational question.
+    fn fail(&self, why: String) -> WalAck {
+        let mut poison = self.poison.lock().expect("raft storage poison mutex");
+        if poison.is_none() {
+            eprintln!("[raft] {why}");
+            *poison = Some(why);
+        }
+        WalAck::Failed
     }
 
     /// The fallible body of [`RaftWAL::save_term_and_vote`]: atomic
@@ -315,40 +356,58 @@ impl RaftWAL for FileRaftWAL {
         self.lock().state.clone()
     }
 
-    fn save_term_and_vote(&self, term: u64, voted_for: Option<NodeId>) {
-        self.persist_term(&TermRecord { term, voted_for })
-            .unwrap_or_else(|err| {
-                panic!(
-                    "raft term persistence failed at {}: {err} — a voter that cannot \
-                     persist its vote cannot safely continue",
-                    self.dir.display()
-                )
-            });
+    fn save_term_and_vote(&self, term: u64, voted_for: Option<NodeId>) -> WalAck {
+        if self.poisoned().is_some() {
+            return WalAck::Failed;
+        }
+        if let Err(err) = self.persist_term(&TermRecord { term, voted_for }) {
+            return self.fail(format!(
+                "raft term persistence failed at {}: {err} — a voter that cannot \
+                 persist its vote cannot safely continue",
+                self.dir.display()
+            ));
+        }
+        // In memory only after the disk write landed, so `load` after a failure still
+        // reports the last state this node can actually reconstruct.
         let mut inner = self.lock();
         inner.state.term = term;
         inner.state.voted_for = voted_for;
+        WalAck::Persisted
     }
 
-    fn append(&self, from_index: u64, entries: &[RaftEntry]) {
-        self.persist_append(from_index, entries)
-            .unwrap_or_else(|err| {
-                panic!(
-                    "raft log persistence failed at {}: {err} — a voter that cannot \
+    fn append(&self, from_index: u64, entries: &[RaftEntry]) -> WalAck {
+        if self.poisoned().is_some() {
+            return WalAck::Failed;
+        }
+        if let Err(err) = self.persist_append(from_index, entries) {
+            return self.fail(format!(
+                "raft log persistence failed at {}: {err} — a voter that cannot \
                  persist its log cannot safely continue",
-                    self.dir.display()
-                )
-            });
+                self.dir.display()
+            ));
+        }
+        WalAck::Persisted
     }
 
-    fn save_snapshot(&self, index: u64, term: u64, data: &[u8]) {
-        self.persist_snapshot(index, term, data)
-            .unwrap_or_else(|err| {
-                panic!(
-                    "raft snapshot persistence failed at {}: {err} — a voter that cannot \
-                     persist its snapshot cannot safely continue",
-                    self.dir.display()
-                )
-            });
+    fn poisoned(&self) -> Option<String> {
+        self.poison
+            .lock()
+            .expect("raft storage poison mutex")
+            .clone()
+    }
+
+    fn save_snapshot(&self, index: u64, term: u64, data: &[u8]) -> WalAck {
+        if self.poisoned().is_some() {
+            return WalAck::Failed;
+        }
+        if let Err(err) = self.persist_snapshot(index, term, data) {
+            return self.fail(format!(
+                "raft snapshot persistence failed at {}: {err} — a voter that cannot \
+                 persist its snapshot cannot safely continue",
+                self.dir.display()
+            ));
+        }
+        WalAck::Persisted
     }
 }
 
@@ -380,8 +439,12 @@ mod tests {
     fn state_round_trips_across_a_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileRaftWAL::open(dir.path()).unwrap();
-        storage.save_term_and_vote(3, Some(node(2)));
-        storage.append(0, &[entry(1, EntryPayload::Noop), entry(3, app(0, 4))]);
+        assert!(storage.save_term_and_vote(3, Some(node(2))).persisted());
+        assert!(
+            storage
+                .append(0, &[entry(1, EntryPayload::Noop), entry(3, app(0, 4))])
+                .persisted()
+        );
         drop(storage);
 
         let reopened = FileRaftWAL::open(dir.path()).unwrap();
@@ -405,16 +468,24 @@ mod tests {
     fn truncate_then_append_replaces_the_conflicting_suffix() {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileRaftWAL::open(dir.path()).unwrap();
-        storage.append(
-            0,
-            &[
-                entry(1, EntryPayload::Noop),
-                entry(1, app(0, 4)),
-                entry(1, app(1, 4)),
-            ],
+        assert!(
+            storage
+                .append(
+                    0,
+                    &[
+                        entry(1, EntryPayload::Noop),
+                        entry(1, app(0, 4)),
+                        entry(1, app(1, 4)),
+                    ],
+                )
+                .persisted()
         );
         // Raft conflict resolution: overwrite from index 1 with a higher term.
-        storage.append(1, &[entry(2, EntryPayload::Noop), entry(2, app(4, 4))]);
+        assert!(
+            storage
+                .append(1, &[entry(2, EntryPayload::Noop), entry(2, app(4, 4))])
+                .persisted()
+        );
         drop(storage);
 
         let reopened = FileRaftWAL::open(dir.path()).unwrap();
@@ -432,19 +503,23 @@ mod tests {
     fn a_snapshot_compacts_the_prefix_and_reloads() {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileRaftWAL::open(dir.path()).unwrap();
-        storage.append(
-            0,
-            &[
-                entry(1, EntryPayload::Noop), // index 1
-                entry(1, app(1, 9)),          // index 2
-                entry(2, app(2, 9)),          // index 3
-                entry(2, app(3, 9)),          // index 4
-            ],
+        assert!(
+            storage
+                .append(
+                    0,
+                    &[
+                        entry(1, EntryPayload::Noop), // index 1
+                        entry(1, app(1, 9)),          // index 2
+                        entry(2, app(2, 9)),          // index 3
+                        entry(2, app(3, 9)),          // index 4
+                    ],
+                )
+                .persisted()
         );
         // Compact through index 2: indices 1..=2 are subsumed by the snapshot.
-        storage.save_snapshot(2, 1, b"state@2");
+        assert!(storage.save_snapshot(2, 1, b"state@2").persisted());
         // A fresh append lands contiguously at absolute index 5.
-        storage.append(4, &[entry(3, app(5, 9))]);
+        assert!(storage.append(4, &[entry(3, app(5, 9))]).persisted());
         drop(storage);
 
         let reopened = FileRaftWAL::open(dir.path()).unwrap();
@@ -467,7 +542,11 @@ mod tests {
     fn a_torn_tail_is_discarded_and_appends_continue() {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileRaftWAL::open(dir.path()).unwrap();
-        storage.append(0, &[entry(1, EntryPayload::Noop), entry(1, app(3, 9))]);
+        assert!(
+            storage
+                .append(0, &[entry(1, EntryPayload::Noop), entry(1, app(3, 9))])
+                .persisted()
+        );
         drop(storage);
 
         // A torn write: garbage lands after the valid records (a record whose
@@ -484,7 +563,11 @@ mod tests {
             "the torn tail is not part of the log",
         );
         // The recovery truncated the garbage; appends land cleanly after it.
-        reopened.append(2, &[entry(2, EntryPayload::Noop)]);
+        assert!(
+            reopened
+                .append(2, &[entry(2, EntryPayload::Noop)])
+                .persisted()
+        );
         drop(reopened);
         let again = FileRaftWAL::open(dir.path()).unwrap();
         assert_eq!(again.load().log.len(), 3);
@@ -494,9 +577,13 @@ mod tests {
     fn a_record_cut_mid_payload_is_discarded() {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileRaftWAL::open(dir.path()).unwrap();
-        storage.append(
-            0,
-            &[entry(1, EntryPayload::Noop), entry(1, EntryPayload::Noop)],
+        assert!(
+            storage
+                .append(
+                    0,
+                    &[entry(1, EntryPayload::Noop), entry(1, EntryPayload::Noop)],
+                )
+                .persisted()
         );
         drop(storage);
 
@@ -519,9 +606,13 @@ mod tests {
     fn a_corrupted_checksum_ends_the_valid_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let storage = FileRaftWAL::open(dir.path()).unwrap();
-        storage.append(
-            0,
-            &[entry(1, EntryPayload::Noop), entry(1, EntryPayload::Noop)],
+        assert!(
+            storage
+                .append(
+                    0,
+                    &[entry(1, EntryPayload::Noop), entry(1, EntryPayload::Noop)],
+                )
+                .persisted()
         );
         drop(storage);
 
@@ -589,16 +680,16 @@ mod tests {
             match op {
                 Op::Save(term, voted_for) => {
                     let vote = voted_for.map(node);
-                    file.save_term_and_vote(*term, vote);
-                    mirror.save_term_and_vote(*term, vote);
+                    assert!(file.save_term_and_vote(*term, vote).persisted());
+                    assert!(mirror.save_term_and_vote(*term, vote).persisted());
                 }
                 Op::Append(from, entries) => {
-                    file.append(*from, entries);
-                    mirror.append(*from, entries);
+                    assert!(file.append(*from, entries).persisted());
+                    assert!(mirror.append(*from, entries).persisted());
                 }
                 Op::Snapshot(index, term, data) => {
-                    file.save_snapshot(*index, *term, data);
-                    mirror.save_snapshot(*index, *term, data);
+                    assert!(file.save_snapshot(*index, *term, data).persisted());
+                    assert!(mirror.save_snapshot(*index, *term, data).persisted());
                 }
             }
             assert_eq!(file.load(), mirror.load(), "diverged after step {step}");

@@ -120,9 +120,9 @@ where
 /// is a policy question (see the module docs) rather than an accident of how each
 /// site happened to be written.
 ///
-/// The outcome comes back as whatever the call returns, `Reserved` and all: the
-/// durability marker is the caller's to discharge where it means something, and a
-/// helper that unwrapped it here would move that decision away from the site that
+/// The outcome comes back as whatever the call returns, unexamined: a store call's
+/// ack is the caller's to read where it means something (**G14**), and a helper that
+/// inspected or discarded it here would move that decision away from the site that
 /// makes it.
 pub(crate) async fn on_store<T, F>(
     io: &Arc<dyn BlockingIo>,
@@ -194,13 +194,26 @@ impl ThreadPoolIo {
 
     /// A pool sized to the machine, the default for a deployment that does not choose.
     ///
-    /// The width is set by how many writes must keep making progress *while the device
-    /// is stalled* (see the module docs), not by throughput: at tens of microseconds a
-    /// flush, even two threads clear far more work than a node generates, and past the
-    /// point where the device is saturated more threads add queueing and context
-    /// switches rather than bandwidth. The floor keeps a stalled write from blocking an
-    /// unrelated one; the ceiling keeps a large host from spawning a thread per core for
-    /// work that is not CPU-bound.
+    /// The **floor** is set by how many writes must keep making progress *while the
+    /// device is stalled* (see the module docs), not by throughput: it keeps a stalled
+    /// write from blocking an unrelated one. That argument is about the tail and does
+    /// not depend on the median.
+    ///
+    /// The **ceiling** is a throughput claim, and it is measured — `benches/flush.rs`
+    /// sweeps concurrent `atomic_replace`s across this clamp and past both ends of it.
+    /// On the one host measured so far (an Apple-silicon laptop, APFS, where `sync_all`
+    /// is `F_FULLFSYNC` and so a real media flush) aggregate durable writes per second
+    /// climb monotonically to eight threads and *fall* beyond it: 100, 118, 160, 191 at
+    /// 1/2/4/8, then 154 at 16 and 151 at 32. Eight is the peak, so that is where the
+    /// ceiling belongs, and past it the extra threads only queue.
+    ///
+    /// One caveat this must not lose: that host's median flush is **9.4 ms**, not the
+    /// tens of microseconds an earlier version of this comment assumed. The assumption
+    /// came from Linux `fsync` on enterprise NVMe (~30 µs with power-loss protection,
+    /// ~500 µs without); a full drive-cache flush on a consumer SSD is two orders away
+    /// from it. The deployment's own figure is still unmeasured, and the shape of the
+    /// curve — not its height — is what licenses the ceiling. Re-run the bench with
+    /// `TMPDIR` on the deployment volume before treating either end as settled.
     pub fn sized_for_host() -> ThreadPoolIo {
         let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
         ThreadPoolIo::new(cores.clamp(2, 8))
