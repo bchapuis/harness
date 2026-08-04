@@ -11,7 +11,10 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use actor_simulation::Catalogue;
+use actor_simulation::CheckerCoverage;
 use actor_simulation::Verify;
+use actor_simulation::checker_coverage;
 use actor_simulation::core_catalogue;
 use actor_simulation::default_invariants;
 use actor_simulation::utilities_catalogue;
@@ -66,18 +69,27 @@ fn every_utilities_invariant_is_present_exactly_once_and_described() {
     }
 }
 
-/// Checker names the catalogues (core and utilities) claim are continuously
-/// checked.
-fn catalogue_checker_names() -> BTreeSet<&'static str> {
-    core_catalogue()
-        .iter()
-        .chain(utilities_catalogue())
-        .flat_map(|e| e.verify.iter())
-        .filter_map(|v| match v {
-            Verify::Checker(name) => Some(*name),
-            _ => None,
-        })
-        .collect()
+/// The pairs the catalogues assert: every `Verify::Checker` row, tagged with
+/// the table it sits in and the invariant whose row it is.
+fn catalogued_coverage() -> BTreeSet<CheckerCoverage> {
+    let mut pairs = BTreeSet::new();
+    for (catalogue, entries) in [
+        (Catalogue::Core, core_catalogue()),
+        (Catalogue::Utilities, utilities_catalogue()),
+    ] {
+        for entry in entries {
+            for verify in entry.verify {
+                if let Verify::Checker(name) = verify {
+                    pairs.insert(CheckerCoverage {
+                        checker: name,
+                        catalogue,
+                        invariant: entry.invariant,
+                    });
+                }
+            }
+        }
+    }
+    pairs
 }
 
 /// Checker names actually wired into `default_invariants()`.
@@ -85,26 +97,33 @@ fn live_checker_names() -> BTreeSet<&'static str> {
     default_invariants().iter().map(|i| i.name()).collect()
 }
 
+/// The pairing, both ways and **per invariant** — not over the two sets of
+/// checker *names*, which cannot see one entry dropping its `Verify::Checker`
+/// while a sibling entry still names the same checker. Today each core checker
+/// carries exactly one invariant, so the two comparisons happen to agree; the
+/// pair check is what keeps that a fact rather than an assumption the moment a
+/// checker earns a second row.
 #[test]
-fn every_catalogue_checker_is_live() {
-    let live = live_checker_names();
-    for name in catalogue_checker_names() {
-        assert!(
-            live.contains(name),
-            "catalogue records checker {name:?}, but it is not in default_invariants()"
-        );
-    }
+fn every_checker_covers_exactly_the_invariants_the_catalogues_give_it() {
+    let declared: BTreeSet<CheckerCoverage> = checker_coverage().iter().copied().collect();
+    assert_eq!(
+        declared,
+        catalogued_coverage(),
+        "a checker's declared coverage (actor_simulation::checker_coverage) and the \
+         catalogues' Verify::Checker rows name different (checker, invariant) pairs (§18.5)"
+    );
 }
 
 #[test]
-fn every_live_checker_is_recorded_in_the_catalogue() {
-    let recorded = catalogue_checker_names();
-    for name in live_checker_names() {
-        assert!(
-            recorded.contains(name),
-            "default_invariants() ships checker {name:?} that the catalogue does not record"
-        );
-    }
+fn the_declared_checkers_are_exactly_the_live_ones() {
+    // A checker covering nothing is absent from this set, so shipping one
+    // without declaring what it carries fails here rather than passing silently.
+    let declared: BTreeSet<&'static str> = checker_coverage().iter().map(|c| c.checker).collect();
+    assert_eq!(
+        live_checker_names(),
+        declared,
+        "default_invariants() and the declared checker coverage drifted apart (§18.5)"
+    );
 }
 
 /// Every `SimTest`/`Differential`/`CompileFail` file pointer must name a file

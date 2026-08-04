@@ -39,6 +39,54 @@ pub struct CatalogueEntry {
     pub verify: &'static [Verify],
 }
 
+/// Which table an invariant number belongs to. The two are numbered
+/// independently — core #2 and utilities U2 are unrelated claims — so a
+/// coverage row naming a bare number has to say which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Catalogue {
+    /// The core catalogue, #1–#22 ([`core_catalogue`]).
+    Core,
+    /// The cluster-utilities catalogue, U1, U2, … ([`utilities_catalogue`]).
+    Utilities,
+}
+
+/// One catalogued invariant that one continuous checker enforces — the pairing
+/// a `Verify::Checker` row asserts, stated from the checker's side.
+///
+/// Both sides are needed because neither is derivable from the other: the
+/// catalogue is what the spec's "Verified by" column mirrors, and the coverage
+/// table is what an edit to an `observe` body invalidates. The
+/// `conformance_catalogue` test holds them equal
+/// (see [`checker_coverage`](crate::checker_coverage)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CheckerCoverage {
+    /// The checker's [`Invariant::name`](crate::Invariant::name).
+    pub checker: &'static str,
+    pub catalogue: Catalogue,
+    /// The invariant's number within [`catalogue`](CheckerCoverage::catalogue).
+    pub invariant: u8,
+}
+
+impl CheckerCoverage {
+    /// `checker` enforces core invariant `#invariant`.
+    pub const fn core(checker: &'static str, invariant: u8) -> CheckerCoverage {
+        CheckerCoverage {
+            checker,
+            catalogue: Catalogue::Core,
+            invariant,
+        }
+    }
+
+    /// `checker` enforces utilities invariant `U<invariant>`.
+    pub const fn utilities(checker: &'static str, invariant: u8) -> CheckerCoverage {
+        CheckerCoverage {
+            checker,
+            catalogue: Catalogue::Utilities,
+            invariant,
+        }
+    }
+}
+
 /// The §18.5 invariant catalogue (#1–#22): the single source of truth linking
 /// each invariant to the code that verifies it (spec §17, §18.5). Kept
 /// consistent with [`default_invariants`](crate::default_invariants) by the
@@ -68,7 +116,9 @@ const CATALOGUE: &[CatalogueEntry] = &[
     },
     CatalogueEntry {
         invariant: 2,
-        spec: "§7.2, §10",
+        // §9.4 is where `down` is declared, and the MUST is stated against `down`;
+        // §10's confirmed `unreachable` only MAY complete the ask early (§18.5 #2).
+        spec: "§7.2, §9.4",
         property: "An ask to a downed node completes with Unreachable, never hangs",
         verify: &[Verify::SimTest("conformance_faults.rs, conformance_membership.rs")],
     },

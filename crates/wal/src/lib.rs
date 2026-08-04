@@ -83,8 +83,8 @@ use serde::de::DeserializeOwned;
 /// and compare. Callers treat a mismatch as *torn or absent* rather than as a refusal,
 /// because with `atomic_replace` behind them a mismatch cannot otherwise happen. Change
 /// what this returns and every existing sidecar silently reads as missing: granary's
-/// durable fence would come back as *no fence* (**G15**), which is a safety property, not
-/// a compatibility inconvenience.
+/// durable fence would come back as *no fence* (**G1**, the single-writer fence), which is
+/// a safety property, not a compatibility inconvenience.
 ///
 /// The log's own frames do not use this. They carry a checksum-kind field in the header
 /// naming which digest closed them, so they are free to move to a faster one and still be

@@ -34,7 +34,7 @@
 #     -H "Accept: text/event-stream" -d '{"turn":"t-1","content":"hello"}'
 #
 # See k8s/README.md for the walkthrough, the failure drill, and the sandbox
-# trade-off (`local` here vs. a per-session container).
+# trade-off (`durable` here vs. a shell behind a per-session container).
 ---
 apiVersion: v1
 kind: Service

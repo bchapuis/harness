@@ -35,7 +35,7 @@ pub enum HarnessEvent {
     /// One model call finished and its response committed on a live activation.
     /// `usage` is the model-reported total token count feeding the H4 checker;
     /// a discarded straggler (run already ended) emits nothing, keeping the
-    /// event scoped to journaled spend (§9.1.4, §10.4). `node` attributes the
+    /// event scoped to journaled spend (§9.1 item 4, §10.4). `node` attributes the
     /// call to its enclosing activation.
     ModelCompleted {
         session: SessionId,

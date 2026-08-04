@@ -1,12 +1,14 @@
 # Build harness-standalone (the node/silo) and harness-gateway (the public
 # HTTP/SSE edge, a cluster client) and ship both on a small Python base.
 #
-# With `--sandbox local` (the Kubernetes manifest's default) the model's
-# `shell` tool runs inside THIS container, so the runtime image carries
-# python3, bash, and coreutils — the same tools demo-agent.sh hands the model via
-# python:3.12-slim — and the pod is the isolation boundary. Switch the
-# manifest to `--sandbox docker`/`firecracker` for a per-session boundary
-# (see k8s/README.md); that needs extra in-cluster plumbing.
+# The Kubernetes manifest runs `--sandbox durable`: the model gets the typed
+# file tools over a durable workspace grain and no `shell` at all, so nothing
+# the model composes ever executes in this container. The runtime base is
+# python:3.12-slim anyway — the same tools demo-agent.sh hands the model — so
+# the image is ready for an operator who adds an interpreter path later.
+# Switch the manifest to `--sandbox docker`/`firecracker` for a shell behind a
+# per-session boundary (see k8s/README.md); that needs extra in-cluster
+# plumbing.
 #
 # Build from the repository root:  docker build -t harness-standalone:latest .
 

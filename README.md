@@ -57,9 +57,10 @@ authenticated form with opaque per-tenant tokens.
   are injected seams (`crates/harness-anthropic` is the Anthropic one).
 - A **standalone deployment** (`crates/harness-standalone`): the binary the demo
   runs. A file-backed journal fenced by an atomic `hard_link`, tokio/rustls HTTP
-  to the Messages API, and per-session shell workspaces behind an explicit
-  `--sandbox` choice: a `docker` container, a `firecracker` microVM (Linux/KVM),
-  or an unconfined trusted-input-only `local` mode that is never the default.
+  to the Messages API, and per-session workspaces behind an explicit
+  `--sandbox` choice, required and never defaulted: a `docker` container, a
+  `firecracker` microVM (Linux/KVM), or `durable` — the typed file tools over
+  the same durable workspace, with no shell at all. There is no unconfined mode.
 - A **gateway-as-cluster-client edge** (`crates/harness-gateway`): an `axum`
   HTTP/SSE tier that is the single public boundary. It joins the actor transport
   as a non-voting, non-hosting member (the Orleans cluster-client pattern),

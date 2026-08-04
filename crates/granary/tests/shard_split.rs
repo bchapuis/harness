@@ -442,7 +442,7 @@ where
 
 #[test]
 fn a_split_moves_grains_to_a_child_and_loses_no_write() {
-    // The core §7.7 sequence: commit state across many grains of one shard,
+    // The granary §7.7 sequence: commit state across many grains of one shard,
     // split it, and prove every committed write survives — including compacted
     // grains whose prefix exists only in their snapshot — and that the same
     // pre-split refs (with their now-stale host caches) keep working against

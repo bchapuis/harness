@@ -1,7 +1,7 @@
 //! Budget and delegation conformance (harness spec §8, §9.1; invariant H4):
 //! pre-call enforcement, carve-outs, the compositional tree bound, and child
 //! failure surfacing as a tool outcome — audited against the journals, where
-//! spend is defined (§9.1.4).
+//! spend is defined (§9.1 item 4).
 
 mod support;
 

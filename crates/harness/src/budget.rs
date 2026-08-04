@@ -29,7 +29,7 @@ impl Budget {
 
 /// Model-reported token usage for one call (harness spec §4.1). The harness
 /// never counts tokens itself: spend is whatever the model reports, journaled
-/// with the response it belongs to (§9.1.4).
+/// with the response it belongs to (§9.1 item 4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,

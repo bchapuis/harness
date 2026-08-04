@@ -114,10 +114,13 @@ pub use invariant::NoSilentLoss;
 pub use invariant::OneLeaderPerTerm;
 pub use invariant::SerialExecution;
 pub use invariant::SingletonAtMostOnePerNode;
+pub use invariant::checker_coverage;
 pub use invariant::default_invariants;
 
 // --- Conformance traceability: which invariant is verified how (spec §17) -----
+pub use catalogue::Catalogue;
 pub use catalogue::CatalogueEntry;
+pub use catalogue::CheckerCoverage;
 pub use catalogue::Verify;
 pub use catalogue::core_catalogue;
 pub use catalogue::utilities_catalogue;

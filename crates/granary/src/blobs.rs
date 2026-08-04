@@ -134,7 +134,9 @@ impl GrainBlobs {
     }
 
     /// Re-replicate every facet-root blob to the grain's current shard replicas
-    /// (spec §7.10 B6): source a verifying copy of each (G17) and re-`put` it,
+    /// (spec §7.10, the repair property the blob store numbers B6 — the same
+    /// obligation over a grain's own replica set rather than the cluster's):
+    /// source a verifying copy of each (G17) and re-`put` it,
     /// re-fanning the bytes to the current replica set — holders dedup (a
     /// no-op), a replica that lacked it receives it. Root-driven, additive, and
     /// idempotent; best-effort (a blob no reachable replica holds is skipped —

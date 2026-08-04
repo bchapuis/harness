@@ -21,7 +21,7 @@ A **machine** is a virtual, durable, single-activation lightweight VM addressed 
 
 | | Grain (grain spec) | Machine (this spec) |
 |---|---|---|
-| Identity | a stable `GrainName` | `MachineId` **is** a `GrainName`: `(GrainType = "machine", key = the machine's name)` |
+| Identity | a stable `GrainName` | `MachineId` **is** a `GrainName`: `(grain_type = "machine", key = the machine's name)` |
 | State | event-sourced journal + snapshots | the **disk facet** (grain §7.15): the guest's whole rootfs as a raw block image; plus the **workspace facet** (grain §7.11): the machine's `/workspace` as host-side files (§3) |
 | Activation | fold of the journal on the shard leader | a **running microVM** on the shard leader, its image rehydrated from the disk facet |
 | Reply | held until events are durable (output gate) | **relaxed to session-grained** (§4): the terminal is live; the disk is durable to the last capture |

@@ -573,7 +573,7 @@ const FOLLOW_PAGE: u32 = 256;
 /// How long a caught-up follower waits for a live record before re-checking the
 /// journal. A silent leader move or crash leaves the old sink alive but idle —
 /// the stream never closes and the new leader has no sink — so a periodic
-/// backfill is the liveness net that detects the move and re-subscribes (§7.9).
+/// backfill is the liveness net that detects the move and re-subscribes (grain §7.9).
 const FOLLOW_RESYNC: Duration = Duration::from_secs(2);
 
 /// A live follower over a session's journal (granary §7.9). It rides a grain

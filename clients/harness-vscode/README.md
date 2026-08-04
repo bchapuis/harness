@@ -22,6 +22,7 @@ those semantics onto VS Code's chat model.
 | `src/mapping.ts` | Records / outcomes → neutral render parts (pure, unit-tested) |
 | `src/sessionProvider.ts` | `ChatSessionItemProvider` — lists sessions |
 | `src/contentProvider.ts` | `ChatSessionContentProvider` — history + live request handler |
+| `src/config.ts` | Gateway settings, preferring a SecretStorage token over the plaintext setting |
 | `src/extension.ts` | `activate()` — registers providers, commands, config |
 | `vscode.proposed.chatSessionsProvider.d.ts` | Hand-pinned subset of the proposed API |
 

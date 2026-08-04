@@ -58,7 +58,7 @@ A grain's in-memory activation is a **cache** of state folded from the journal. 
 | Term | Definition |
 |---|---|
 | **Grain** | A virtual, durable, single-activation object: state + behavior addressed by a `GrainName`. |
-| **`GrainName`** | The stable, cluster-wide, serializable identity of a grain. A `(GrainType, key)` pair; `key` is an arbitrary application string. |
+| **`GrainName`** | The stable, cluster-wide, serializable identity of a grain. A `(grain_type, key)` pair; `key` is an arbitrary application string. |
 | **Shard** | A partition of one grain type's namespace and the unit of *placement*: a small per-shard Raft group (the **leader-election group**) owning leadership and term, and holding as its Raft membership the *realized* replica set for that type's grains whose names fall in its range, holding *no* grain data (§7.1, §8). The grains' data is durable by per-grain quorum append, not a shared log. |
 | **Shard leader** | The single node elected by a shard's leader-election group to write and host every grain in the shard's range, for one term (§5.2, §8). |
 | **Replicator** | The per-grain durability mechanism: it quorum-appends a grain's records to the shard's replicas, fenced by the shard term, and recovers a grain's head from a quorum on activation. Two tiers: single-node `Local`, clustered `Quorum` (§7.2, §7.4). |
@@ -279,7 +279,7 @@ Beside `on_alarm` (§7.16), the `Grain` trait carries one more callerless hook, 
 
 ### 5.1 Names and shards
 
-A grain is addressed by `GrainName`, a `(GrainType, key)` pair where `key` is an arbitrary application-chosen string (`"account/42"`, a UUID, a tenant id). Unlike an `ActorId` (actor §3.6), a `GrainName` is **not** locality-classifiable on its own: it names a logical object, not a node.
+A grain is addressed by `GrainName`, a `(grain_type, key)` pair where `key` is an arbitrary application-chosen string (`"account/42"`, a UUID, a tenant id). Unlike an `ActorId` (actor §3.6), a `GrainName` is **not** locality-classifiable on its own: it names a logical object, not a node.
 
 Every name maps to exactly one **shard** of its grain type, by a stable hash of the name onto a key-range partition (§7.1). The mapping changes only when a shard splits or merges (§7.7), not when nodes come and go, so it is far steadier than a direct name-to-node mapping. A second lookup, the shard map (§7.6), gives the shard's current leader. Resolution is therefore two levels: name to shard (stable), shard to leader (changes on Raft elections).
 
@@ -813,7 +813,7 @@ pub enum GrainError {
 
 ## 13. Security and observability
 
-- **Security.** Granary adds no transport; it inherits mutual-TLS associations, the handshake allowlist, and the deserialization allowlist (the grain dispatch registry, §5.5) from actor §15. The gateway MAY consult an `Authorizer` per `(peer, GrainName, manifest)` before activating or dispatching, as actor §15.5 gates `deliver`.
+- **Security.** Granary adds no transport; it inherits mutual-TLS associations, the handshake allowlist, and the deserialization allowlist (the grain dispatch registry, §5.5) from actor §15. The gateway MAY consult an `Authorizer` per `(peer, GrainName, manifest)` before activating or dispatching, as actor §15 item 5 gates `deliver`.
 - **Observability.** Granary emits, on the actor framework's single extensible `Event` stream (actor §16), the grain-lifecycle events `Activated`, `Rehydrated { from_snapshot, replayed }`, `Committed { shard, seq }`, `Snapshotted { at }`, and `Passivated`. Every variant also carries the `node` that hosts the activation (its shard's leader, §5.2) and the grain `name`, which is what makes the per-node activation guarantee (**G6**) expressible as a continuous checker over the stream; `Committed` also carries the `shard` the grain committed under, so a split or merge is checkable as a move that keeps `seq` strictly increasing across the boundary (**G15**). The shard events `LeaderChanged { shard, term }` (emitted by a new shard leader, once per term it wins), `ShardSplit { parent, child, boundary }`, and `ShardMerged { left, right }` (emitted by each node as it applies the committed partition change, §7.7) drive both operator tooling and the simulator's invariant checks (§14). Record subscriptions (§7.9) add **no** content-bearing event: they reuse `Committed { seq }` as their commit signal and deliver the records out of band, keeping the journal the one place a grain's content lives.
 - **Metrics are a second, separate sink.** The event stream is the *checker's* interface: one structured record per lifecycle transition, so the simulator can assert an invariant over an exact history (§14). That is the wrong shape for an operator — it emits per message, its volume scales with traffic, and answering "is commit latency rising?" from it means rebuilding a distribution from a firehose. A node therefore SHOULD also expose a **metrics sink**: a small set of aggregates costing O(1) per operation. Three measurements carry most of the answer, and an implementation SHOULD report them — the **commit round**, labelled by its outcome (`Committed`/`NotLeader`/`Unavailable`, §6 steps 4–6), because a fast refusal and a fast commit mean opposite things and averaging them hides both; **rehydration** (§9), separately, because it is the cost of a *cold* access and the thing hibernation trades against memory (§10); and the **resident activation count**, which is what hibernation exists to bound. The sink is **node-scoped**, like the blocking-I/O seam and for the same reason (§7.4): it describes the node an operator is judging, not one type it happens to host. Its vocabulary MUST be closed rather than an open `incr(name, labels)` surface, and its keys no wider than a grain type: unbounded label cardinality is the ordinary way a metrics pipeline falls over, and a per-*shard* key is unbounded by §7.7's own elasticity. What is missing from that list is missing on purpose — leadership changes, splits, and merges are *transitions*, already carried exactly once each by `LeaderChanged`, `ShardSplit`, and `ShardMerged` above, and a counter would restate them less precisely.
 
@@ -971,7 +971,7 @@ name), its own shard map, and, in the `Quorum` tier, its own leader-election gro
 (§5.1); the `&'static str` makes that lifetime explicit (a deployment leaks its bounded set
 of names if they are not literals). The `factory` lets the runtime inject per-node seam
 handles into each fresh activation, so the grain needs no `Default`. This is the seam the
-agentic harness rides: each *kind* is its own grain type (`KindId` IS the `GrainType`),
+agentic harness rides: each *kind* is its own grain type (`KindId` IS the `grain_type`),
 hosted under one shared agent run loop.
 
 ## Appendix B: Suggested crate layout

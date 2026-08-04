@@ -17,6 +17,8 @@ use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Terminated;
 
+use crate::CheckerCoverage;
+
 /// A property checked continuously during a run and at final quiescence
 /// (spec §18.5). Observation must be side-effect-free apart from the invariant's
 /// own bookkeeping, and must never panic: a violation is a returned `Err`, so
@@ -60,6 +62,33 @@ pub fn default_invariants() -> Vec<Box<dyn Invariant>> {
         Box::new(SingletonAtMostOnePerNode::default()),
     ]
 }
+
+/// Which catalogued invariant each checker in [`default_invariants`] enforces.
+///
+/// Declared here, beside the checkers, because this is the claim an edit to an
+/// `observe` body falsifies: narrow what [`OneLeaderPerTerm`] watches and the
+/// row saying it carries #22 is what stopped being true. The catalogue states
+/// the same pairing from the other side, and the `conformance_catalogue` test
+/// holds the two equal **per pair**, in both directions.
+///
+/// Comparing the pairs rather than the two sets of checker *names* is the
+/// point. A name set cannot see one entry dropping its `Verify::Checker` while
+/// a sibling entry still names the same checker — which is exactly how a
+/// "Verified by" column drifts: quietly, one row at a time, with the totals
+/// still matching.
+pub fn checker_coverage() -> &'static [CheckerCoverage] {
+    CHECKER_COVERAGE
+}
+
+const CHECKER_COVERAGE: &[CheckerCoverage] = &[
+    CheckerCoverage::core("no-silent-loss", 1),
+    CheckerCoverage::core("serial-execution", 4),
+    CheckerCoverage::core("lifecycle-exactly-once", 6),
+    CheckerCoverage::core("signal-in-band", 13),
+    CheckerCoverage::core("down-is-terminal", 15),
+    CheckerCoverage::core("one-leader-per-term", 22),
+    CheckerCoverage::utilities("singleton-at-most-one-per-node", 2),
+];
 
 /// **No silent loss** (spec §18.5 #1): every issued `ask` reaches an outcome,
 /// and none remains pending at quiescence.

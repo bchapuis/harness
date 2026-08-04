@@ -274,7 +274,7 @@ impl<G: Grain> HostCache<G> {
 /// The system handle drives the **client-side bounded redirect** (§5.4 step 4):
 /// it follows `NotLeader(hint)` toward the shard's leader until the caller's
 /// deadline expires. Never serialized; a wire-arrived ref recovers it from its
-/// decoded `gateway` handle, which rebinds to the local system on decode (§4.4).
+/// decoded `gateway` handle, which rebinds to the local system on decode (core §4.4).
 pub struct GrainRef<G: Grain> {
     /// The runtime type name (spec §5.1) this ref routes under, used to look up
     /// the leader's gateway in the receptionist. A ref decoded off the wire
@@ -287,7 +287,7 @@ pub struct GrainRef<G: Grain> {
 }
 
 // `GrainRef` travels as just its name and gateway id (the gateway rebinds on
-// decode, §4.4); the system handle and host cache are reconstructed locally.
+// decode, core §4.4); the system handle and host cache are reconstructed locally.
 impl<G: Grain> Serialize for GrainRef<G> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         (&self.name, &self.gateway).serialize(serializer)
@@ -295,7 +295,7 @@ impl<G: Grain> Serialize for GrainRef<G> {
 }
 
 // Decoding recovers the local system from the rebound gateway ref, so a ref
-// embedded in a message is usable on the node that receives it (§4.4).
+// embedded in a message is usable on the node that receives it (core §4.4).
 // `grain_type` recovers as `G::GRAIN_TYPE`: the receptionist `Key` needs a
 // `&'static str` and the wire carries only the name's owned string, so this is the
 // one path that cannot honor a runtime type name. A type hosted under

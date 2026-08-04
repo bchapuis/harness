@@ -1,5 +1,4 @@
-//! Filesystem-safe names for session ids (cf. `harness-standalone`'s
-//! identical helper).
+//! Filesystem-safe names for session ids.
 //!
 //! Session ids are arbitrary strings — delegation derives child ids like
 //! `parent/turn/call` — and two distinct ids must never map to one

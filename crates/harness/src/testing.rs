@@ -116,7 +116,7 @@ impl Invariant for HarnessEventGrammar {
 /// **Run discipline** (H3 pairing, H7): per `(session, turn)` exactly one
 /// `RunStarted` and at most one `RunEnded`, never an end without a start. A
 /// resume emits no second `RunStarted` (§10.4), and `ModelCompleted` is scoped to
-/// journaled spend (emitted only after the response commits, §9.1.4), so no
+/// journaled spend (emitted only after the response commits, §9.1 item 4), so no
 /// completion follows a run's end.
 #[derive(Default)]
 pub struct RunDiscipline {
@@ -177,4 +177,32 @@ pub fn harness_invariants() -> Vec<Box<dyn Invariant>> {
     invariants.push(Box::new(HarnessEventGrammar::default()));
     invariants.push(Box::new(RunDiscipline::default()));
     invariants
+}
+
+/// Which H-invariant each harness checker enforces, as `(checker name, H
+/// number)` — the pairing §11's "Verified by" column asserts, stated from the
+/// checker's side.
+///
+/// Declared here, beside the checkers, because this is the claim an edit to an
+/// `observe` body falsifies: stop watching `ModelCompleted` outside an
+/// activation and the row saying [`HarnessEventGrammar`] carries H6 is what
+/// became false. `conformance_catalogue` holds these pairs equal to the
+/// catalogue's, **per pair** and in both directions.
+///
+/// Two names cover six invariants here, which is why the pairing has to be
+/// compared rather than the two sets of checker *names*: a name set cannot see
+/// H6 dropping its `Verify::Checker` while H8 still names the same checker.
+///
+/// A bare `(name, number)` rather than `actor_simulation::CheckerCoverage`
+/// because that type carries which of *its* two catalogues a number belongs to,
+/// and every number here is an H.
+pub fn checker_coverage() -> &'static [(&'static str, u8)] {
+    &[
+        ("harness-event-grammar", 6),
+        ("harness-event-grammar", 8),
+        ("harness-run-discipline", 3),
+        ("harness-run-discipline", 4),
+        ("harness-run-discipline", 5),
+        ("harness-run-discipline", 7),
+    ]
 }

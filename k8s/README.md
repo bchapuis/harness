@@ -170,8 +170,8 @@ The manifest runs `--sandbox durable`: the `Workspace` tier is backed by a
 durable filesystem grain (granary §7.10), so a session's files survive
 hibernation, migration, and node loss. It needs no extra in-cluster runtime —
 the right starter default — but it offers the typed file tools
-(`read_file`/`write_file`/`list_dir`/`remove`) only: **no `shell` and no
-`run_js`**.
+(`read_file`/`write_file`/`edit_file`/`list_dir`/`remove`) only: **no `shell`
+and no `run_js`**.
 
 For a confined `shell` (and `run_js`) with the same durable workspace, switch to
 `--sandbox docker` or `--sandbox firecracker`. Both need extra in-cluster
@@ -184,8 +184,9 @@ plumbing this starter manifest leaves out:
 - **firecracker**: one microVM per session. Needs `/dev/kvm` on the node and a
   privileged context. Best on bare-metal node pools.
 
-Keep `local` unless you are feeding the model untrusted input; then a
-per-session container or microVM is the right boundary.
+Keep `durable` unless the model needs a shell; once it does, and especially
+once you are feeding it untrusted input, a per-session container or microVM is
+the right boundary.
 
 ## Scaling and limits
 

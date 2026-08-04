@@ -140,7 +140,7 @@ Reclaiming *individual* blobs while a namespace lives on (a deleted file in a st
 
 ## 6. The clustered replica actor
 
-The `Clustered` tier reuses the actor framework's transport, with no new wire protocol (actor §2.2), exactly as the grain Quorum replicator does (granary §7.2). The pieces mirror `replica_store.rs`, minus everything fencing- and order-related:
+The `Clustered` tier reuses the actor framework's transport, with no new wire protocol (actor §7.1), exactly as the grain Quorum replicator does (granary §7.2). The pieces mirror `replica_store.rs`, minus everything fencing- and order-related:
 
 - A per-node **`BlobReplica`** actor owns this node's local on-disk store (§5.1 mechanics) and accepts four messages: `StoreBlob { ns, id, bytes } -> StoreAck`, `FetchBlob { ns, id, range } -> Option<Vec<u8>>`, `HasBlob { ns, id } -> bool`, and `DeleteNamespace { ns, deleted_at } -> DeleteAck`. It is registered in the receptionist (actor §13) under a well-known key so peers discover it. Unlike `StoreRecord` (granary `replica_store.rs`), `StoreBlob` carries **no shard, no `after`, no term, and no `repair` flag**: nothing needs fencing and nothing needs ordering, and the only field beyond the bytes is the namespace it lives under.
 - A **`BlobTransport`** seam (the analogue of `ReplicaTransport`, granary `replica_store.rs`) sends those messages to a named peer's `BlobReplica`, resolving it through the receptionist; its reference implementation rides the actor system's `Transport`. Keeping it a seam preserves deterministic simulation (§8).

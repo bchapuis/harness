@@ -291,7 +291,7 @@ impl LocalHost {
     /// resolves it against whatever actor now occupies that path — a *different*
     /// actor, since spawn order does not survive a restart. Stamping the process
     /// incarnation makes such a ref fail to resolve instead, which is a
-    /// `DeadLetter`, the one outcome that proves the command never ran (§2.2), so
+    /// `DeadLetter`, the one outcome that proves the command never ran (§8), so
     /// the caller re-resolves and re-issues safely.
     ///
     /// A single-node system passes `0`: it has no restart-under-the-same-identity

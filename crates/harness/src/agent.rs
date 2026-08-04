@@ -243,7 +243,7 @@ impl Message for Advance {
 /// response answers. Receipt matches it against the live run's current
 /// `own_steps`, so a superseded call (an old activation's straggler racing the
 /// reissue after a same-node resume) can never journal a second response for a
-/// step the journal has already answered (§3.1 step 2, §9.1.4).
+/// step the journal has already answered (§3.1 step 2, §9.1 item 4).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelDone {
     pub turn: TurnId,
@@ -319,7 +319,7 @@ struct SandboxState {
 /// `CallId` (§3.1 step 4). Claims are never released — a committed response
 /// advances `own_steps`, so the next model claim is a fresh key, and a committed
 /// `ToolOutcome` removes the call from the pending set the dispatcher scans. A
-/// straggler therefore has nothing to "unlock" into a duplicate launch (§9.1.4,
+/// straggler therefore has nothing to "unlock" into a duplicate launch (§9.1 item 4,
 /// §9.2 item 4).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum StepKey {
@@ -365,7 +365,7 @@ struct EventOutbox {
     /// Turns whose `RunEnded` just committed, awaiting `RunEnded` (§10.4, H3).
     ended: Vec<TurnId>,
     /// Model calls whose `ModelResponse` just committed, awaiting
-    /// `ModelCompleted` (§10.4, §9.1.4): `(turn, tokens)`.
+    /// `ModelCompleted` (§10.4, §9.1 item 4): `(turn, tokens)`.
     model: Vec<(TurnId, u64)>,
     /// Tool calls whose `ToolOutcome` just committed, awaiting `ToolCompleted`
     /// (§10.4).
@@ -745,7 +745,7 @@ impl<S: HarnessSystem> Agent<S> {
                     }
                 }
                 // `ModelCompleted` is emitted after the response commits (§10.4),
-                // so it counts only journaled spend (§9.1.4).
+                // so it counts only journaled spend (§9.1 item 4).
                 act.events
                     .model
                     .push((turn.clone(), response.usage.total()));
@@ -1654,7 +1654,7 @@ impl<S: HarnessSystem> Grain for Agent<S> {
         // Off the activation latency path: sweep checkpoint chunks a prior
         // activation orphaned (the blob handle unions the facet roots, so the
         // restored manifest's chunks always survive, granary §7.12/F3) and
-        // re-fan the live ones to the current replicas (§7.10 B6).
+        // re-fan the live ones to the current replicas (granary §7.10).
         let blobs = ctx.blobs();
         ctx.system().launch(Box::pin(async move {
             let _ = blobs.gc(&BTreeSet::new()).await;

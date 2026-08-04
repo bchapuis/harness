@@ -26,7 +26,7 @@ One filesystem per node, on **local NVMe**, mounted at `/var/lib/harness`. Not s
 /etc/harness/tenants                   0640 root:harness — "<principal> <token>" per line
 /var/lib/harness/                      the mount point; one filesystem, this node's only state
 └── node/                              --data
-    ├── grains/<node-id>/              the durable grain store
+    ├── grains/<type>/<node-id>/       the durable grain store, one per hosted grain type
     │   ├── manifest                   (shard, grain) -> segment id; held whole in memory
     │   ├── LOCK                       advisory single-writer guard
     │   ├── segments/<id>              one append log per grain: records + snapshots
@@ -37,11 +37,16 @@ One filesystem per node, on **local NVMe**, mounted at `/var/lib/harness`. Not s
     │   │                              corruption check protecting election safety)
     │   ├── log                        framed, checksummed entries
     │   └── snapshot                   the compacted prefix
-    ├── facets/                        physical-facet materializations (SQL dbs, disk images)
-    └── workspaces/                    per-session workspace directories
+    └── workspaces/<node-id>/          physical-facet materializations, keyed by grain:
+                                       the per-session workspace directories, and any
+                                       SQL database files or disk images beside them
 ```
 
-**`grains/` and `raft/` are the source of truth. `facets/` and `workspaces/` are rebuildable caches** (granary spec §1) — keyed by node and grain, and safe to wipe between runs. A node that lost only those rematerializes them from the committed state on next activation. A node that lost `grains/` or `raft/` has lost its replica: do not restart it on the empty directory, because it will be re-replicated to as if it were healthy. Give it a **fresh node id** instead (see below).
+A store is per hosted **grain type** (`grains/<type>/…`), never shared across
+types: the fence under it is keyed by shard index, and the same index is a
+different leader-election group under each type (granary spec §8.2).
+
+**`grains/` and `raft/` are the source of truth. `workspaces/` is a rebuildable cache** (granary spec §1) — keyed by node and grain, and safe to wipe between runs. A node that lost only that rematerializes it from the committed state on next activation. A node that lost `grains/` or `raft/` has lost its replica: do not restart it on the empty directory, because it will be re-replicated to as if it were healthy. Give it a **fresh node id** instead (see below).
 
 Sizing per node: eight or more cores, 32 GB and up, local NVMe. Memory is consumed by grain *count* rather than concurrency — the manifest is held whole and segments and host handles are cached by the thousand — so undershooting shows up as an OOM under grain growth, not under load. `docs/standalone-deployment.md` carries the full sizing note and the `link ÷ (replication_factor − 1)` ingest ceiling.
 

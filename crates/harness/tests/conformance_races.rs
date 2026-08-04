@@ -9,7 +9,7 @@
 //!    new run's calls: synthesized ids repeat across runs).
 //! 2. A straggler `ModelDone` of an ended run must not release the successor
 //!    run's model-call launch claim, and a superseded call's response must
-//!    never journal a second `ModelResponse` for a step (§3.1 step 2, §9.1.4).
+//!    never journal a second `ModelResponse` for a step (§3.1 step 2, §9.1 item 4).
 
 mod support;
 

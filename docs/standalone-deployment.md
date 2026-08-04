@@ -50,24 +50,26 @@ addresses any session regardless of which node hosts it.
 
 Two agent kinds are registered on every node:
 
-| kind        | tools                        | delegates to | budget             |
-|-------------|------------------------------|--------------|--------------------|
-| `assistant` | `shell`, `run_js`, `delegate` | `worker`    | 200k tokens, 50 steps |
-| `worker`    | `shell`, `run_js`            | —            | 100k tokens, 25 steps |
+| kind        | tools                                    | delegates to | budget             |
+|-------------|------------------------------------------|--------------|--------------------|
+| `assistant` | the file tools, `shell`, `run_js`, `delegate` | `worker` | 200k tokens, 50 steps |
+| `worker`    | the file tools, `shell`, `run_js`        | —            | 100k tokens, 25 steps |
 
-`shell` is the Native tier (the container or microVM `--sandbox` selected);
-`run_js` is the hermetic QuickJS Compute tier (sandbox spec §3.2), so the
-model runs JavaScript without any language runtime in the shell image. Both
-shell-capable modes back the workspace with a durable filesystem grain
-(granary §7.10), so a session's files survive hibernation, migration, and node
-loss. The runtime-free `--sandbox durable` mode offers the typed file tools
-(`read_file`/`write_file`/`list_dir`/`remove`) only — a durable workspace with
-no `shell` or `run_js`, so the `assistant`/`worker` kinds carry those tools
-instead.
+Every `--sandbox` mode carries the typed file tools —
+`read_file`, `write_file`, `edit_file`, `list_dir`, `remove` — over a workspace
+backed by a durable filesystem grain (granary §7.10), so a session's files
+survive hibernation, migration, and node loss. The shell-capable modes add two
+tools on top of the same workspace: `shell`, the Native tier (the container or
+microVM `--sandbox` selected), and `run_js`, the hermetic QuickJS Compute tier
+(sandbox spec §3.2), so the model runs JavaScript without any language runtime
+in the shell image. The runtime-free `--sandbox durable` mode has the file
+tools alone — no `shell`, no `run_js` — so the rows above lose their last two
+entries.
 
 ## Prerequisites
 
-- Rust ≥ 1.85 (`rustup` recommended).
+- Rust ≥ 1.88 (the workspace MSRV; `rustup` recommended). Building the tree's
+  tests wants the pinned toolchain in `rust-toolchain.toml` instead.
 - An Anthropic API key in `ANTHROPIC_API_KEY`.
 - macOS or Linux. Each node keeps its own `--data` directory; nodes need not
   share a filesystem (see "Across machines" below).
@@ -361,12 +363,23 @@ Environment: `ANTHROPIC_API_KEY` (required by `node`).
 Every flag marked "agree everywhere" is deployment configuration in the
 spec's sense (§7.1): all nodes must be started with the same values.
 
-The **gateway** (`harness-gateway`) takes: `--bind <host:port>` (public HTTP,
-default `127.0.0.1:8080`), `--secret` / `--node-id` / `--nodes` / `--peer` /
-`--port-base` (the transport join, mirroring the nodes; `--node-id` must be
-outside `1..=--nodes` and admitted by the nodes' `--client`),
-`--advertise-host` (the host the nodes dial it back at), and `--auth-tokens`
-(a tenants file; without it the bearer token is the tenant, loopback only).
+The **gateway** (`harness-gateway`) takes its own set:
+
+| flag                    | default            | notes |
+|-------------------------|--------------------|-------|
+| `--bind <host:port>`    | `127.0.0.1:8080`   | the public HTTP listener |
+| `--secret <s>`          | `harness-standalone` | must match the nodes' `--secret` |
+| `--node-id <n>`         | `100`              | outside `1..=--nodes`, and admitted by the nodes' `--client` |
+| `--nodes <n>`           | `3`                | the voter roster size, mirroring the nodes |
+| `--peer <id>=<host>`    | all `127.0.0.1`    | each node's reachable host; repeat for the roster |
+| `--bind-host <addr>`    | `127.0.0.1`        | interface the *transport* binds; `0.0.0.0` in a container |
+| `--advertise-host <a>`  | `--bind-host`      | the host the nodes dial it back at; must match their `--client <host>` |
+| `--port-base <p>`       | `7401`             | node/client *i*'s transport = p+i−1 |
+| `--auth-tokens <path>`  | —                  | tenants file (`<principal> <token>` per line), reloaded on SIGHUP. **Required** unless `--bind` is loopback; without it the bearer token *is* the tenant |
+| `--max-within-secs <n>` | `3600`             | ceiling on a prompt's `within_secs` |
+| `--max-body-bytes <n>`  | `1048576`          | max request body size |
+
+SIGTERM and SIGINT drain it gracefully.
 
 `scripts/smoke-agent.sh` scripts the whole walkthrough — three
 nodes plus the gateway against a canned fake API, prompt, records, kill, resume
