@@ -8,7 +8,7 @@ on) is disposable, replaceable while the session lives.
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-…
-./demo.sh        # needs docker running: the model's shell commands execute confined
+./demo-agent.sh        # needs docker running: the model's shell commands execute confined
 ```
 
 That builds the workspace and boots a three-node cluster: three OS processes on
@@ -81,7 +81,7 @@ authenticated form with opaque per-tenant tokens.
 ## The other demo: a machine you SSH into
 
 ```sh
-./machine-demo.sh
+./demo-machine.sh
 ```
 
 Same cluster, different thing on top of it: three nodes, a machine named
@@ -142,5 +142,5 @@ the guides, and the testing conventions. The paths worth taking first:
 - [design-principles.md](design-principles.md): the rubric the specs were written
   against, and the defaults for writing or reviewing code here.
 
-No API key handy? `crates/harness-standalone/smoke.sh` runs the same story
+No API key handy? `scripts/smoke-agent.sh` runs the same story
 against a canned fake model.

@@ -20,7 +20,7 @@
 #   2. Create the API-key secret (NOT committed):
 #        kubectl create secret generic harness-anthropic \
 #          --from-literal=api-key="$ANTHROPIC_API_KEY"
-#   3. Create the cluster-secret and tenants secrets (start.sh does this for you;
+#   3. Create the cluster-secret and tenants secrets (deploy.sh does this for you;
 #      see k8s/README.md to do it by hand):
 #        harness-cluster  — the cluster secret guarding the transport handshake
 #        harness-auth     — a tenants file (`<principal> <token>` per line)

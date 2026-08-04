@@ -8,9 +8,9 @@
 # three, which was Raft groups waiting out an election timeout built to detect a
 # failure that had not happened — see `first_election_delay` in actor-cluster.
 #
-#   ./machine-cost.sh [image-mib ...]
+#   ./scripts/bench-machine-cost.sh [image-mib ...]
 #
-# Boots a cluster exactly as machine-demo.sh does (same ports, same secret, the fake
+# Boots a cluster exactly as demo-machine.sh does (same ports, same secret, the fake
 # machine binding), then times **two** creates against it and reports each. Two,
 # because the first and the second answer different questions and conflating them is
 # how this measurement went wrong the first time:
@@ -39,7 +39,7 @@
 #   FILL=zero     an all-zero image (every block after the first is a dedup hit)
 #                 instead of the default random one (every block a cold put).
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 NODES=${NODES:-3}
 BIN=${BIN:-target/release/machine-standalone}
@@ -60,7 +60,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/machine-cost.XXXXXX")
 # of this script that is *not* the happy path leaves them running otherwise — a node
 # that never opened its door, a create that failed, a ^C. They hold `$PORT_BASE` when
 # they do, so the next run fails to bind and reports it as that run's problem. The
-# ports are fixed and shared with machine-demo.sh, so one orphan poisons everything
+# ports are fixed and shared with demo-machine.sh, so one orphan poisons everything
 # until it is found by hand.
 PIDS=()
 trap 'teardown; rm -rf "$WORK"' EXIT

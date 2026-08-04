@@ -3,7 +3,7 @@
 #
 # With `--sandbox local` (the Kubernetes manifest's default) the model's
 # `shell` tool runs inside THIS container, so the runtime image carries
-# python3, bash, and coreutils — the same tools demo.sh hands the model via
+# python3, bash, and coreutils — the same tools demo-agent.sh hands the model via
 # python:3.12-slim — and the pod is the isolation boundary. Switch the
 # manifest to `--sandbox docker`/`firecracker` for a per-session boundary
 # (see k8s/README.md); that needs extra in-cluster plumbing.

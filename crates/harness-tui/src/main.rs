@@ -10,7 +10,7 @@
 //!             [--kind assistant] [--session demo]
 //! ```
 //!
-//! Defaults match the loopback demo (`demo.sh`): the insecure gateway takes the
+//! Defaults match the loopback demo (`demo-agent.sh`): the insecure gateway takes the
 //! bearer token as the tenant, so the default `--token anonymous` simply acts as
 //! tenant "anonymous". Against an authenticated gateway, pass the opaque API
 //! token instead.

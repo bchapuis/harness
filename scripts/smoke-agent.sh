@@ -5,7 +5,7 @@
 # a same-turn resume — driven entirely through the gateway, which routes around
 # the dead node. Run from the workspace root.
 set -u
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/.."
 
 DATA=$(mktemp -d)
 BIN=target/debug/harness-standalone

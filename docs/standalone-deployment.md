@@ -368,7 +368,7 @@ outside `1..=--nodes` and admitted by the nodes' `--client`),
 `--advertise-host` (the host the nodes dial it back at), and `--auth-tokens`
 (a tenants file; without it the bearer token is the tenant, loopback only).
 
-`crates/harness-standalone/smoke.sh` scripts the whole walkthrough — three
+`scripts/smoke-agent.sh` scripts the whole walkthrough — three
 nodes plus the gateway against a canned fake API, prompt, records, kill, resume
 over HTTP — and needs no API key.
 

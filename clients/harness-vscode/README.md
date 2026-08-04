@@ -37,7 +37,7 @@ npm test            # node:test unit tests for sse.ts + mapping.ts
 
 ## Run (F5)
 
-1. Start a local gateway + cluster. From the repo root, `./demo.sh` boots three
+1. Start a local gateway + cluster. From the repo root, `./demo-agent.sh` boots three
    `harness-standalone` nodes and the gateway on `127.0.0.1:8080` in **insecure
    loopback** mode (the bearer token is taken as the tenant, unverified).
    Requires `ANTHROPIC_API_KEY` and Docker (see the script header).

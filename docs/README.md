@@ -56,7 +56,7 @@ One layer has a design note rather than a spec:
   why the simulator is owned rather than imported, the primitives, the
   strategies, the four shapes a test can take, seed sizing, the regression
   corpus, and the gaps the sweeps do not yet reach.
-- [`../machine-cost.sh`](../machine-cost.sh) — the wall-clock counterpart, where the
+- [`../scripts/bench-machine-cost.sh`](../scripts/bench-machine-cost.sh) — the wall-clock counterpart, where the
   simulator's virtual time cannot price anything: it boots a real cluster and times
   two machine creates against it, the first paying every cold-start cost and the
   second pricing the path. Its header carries the figures it last produced, and

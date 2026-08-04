@@ -116,9 +116,9 @@ fn bytes_json<const N: usize>(bencher: Bencher) {
 /// before any device is touched. A blob is a mebibyte, which makes this the largest
 /// single thing the codec is asked to do, and a peer round trip carrying one measured
 /// ~33 ms on loopback with the peer's disk work deduplicated away entirely
-/// (`machine-cost.sh`). Encode plus decode is how much of that the codec can account
-/// for — and it turned out to be nearly all of it, at each of the two layers a blob is
-/// encoded by.
+/// (`scripts/bench-machine-cost.sh`). Encode plus decode is how much of that the codec
+/// can account for — and it turned out to be nearly all of it, at each of the two
+/// layers a blob is encoded by.
 #[divan::bench(consts = [1024, 65_536, 1_048_576])]
 fn bytes_postcard_decode<const N: usize>(bencher: Bencher) {
     decode_bench(bencher, &PostcardCodec, &vec![0x5a_u8; N]);

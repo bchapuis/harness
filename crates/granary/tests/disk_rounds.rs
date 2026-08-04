@@ -33,8 +33,8 @@
 //! So a 512-block image is 32 waves rather than 512 serialized rounds. What these
 //! tests do *not* say is what one round costs on real hardware: virtual time counts
 //! rounds, it does not price them, and a codec pass costs zero ticks here. That price
-//! has been taken on real nodes with `machine-cost.sh`, and the answer corrected two
-//! readings that were taken off this file:
+//! has been taken on real nodes with `scripts/bench-machine-cost.sh`, and the answer
+//! corrected two readings that were taken off this file:
 //!
 //! - **The cost was payload, not rounds.** A four-byte blob and a mebibyte cost the
 //!   same *here* whatever the bytes do, which is evidence about round counts only. On

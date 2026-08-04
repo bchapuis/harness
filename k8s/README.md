@@ -3,7 +3,7 @@
 A three-node `harness-standalone` cluster (silos) as a **StatefulSet**, fronted
 by a **`harness-gateway` StatefulSet** that joins the same cluster as a
 non-voting, non-hosting **client** (the Orleans cluster-client pattern). Each pod
-has its own data volume and stable DNS name. Unlike the single-host `demo.sh`,
+has its own data volume and stable DNS name. Unlike the single-host `demo-agent.sh`,
 the nodes run on separate pods, and so potentially separate machines, and share
 nothing on disk. The journal replicates over the transport, a quorum append per
 grain (spec §7.2).
@@ -40,7 +40,7 @@ at the stable DNS name `harness-gw-N.harness-gw`, which the nodes admit with
 
 ## Quick start
 
-`start.sh` does steps 1–3 in one go: it builds the image, makes it reachable
+`deploy.sh` does steps 1–3 in one go: it builds the image, makes it reachable
 (detecting `kind`/`minikube` versus a shared daemon store from the current
 context), creates the three Secrets if they are missing (the API key, the
 cluster secret, and a tenant token), applies the manifest, and waits for the
@@ -48,7 +48,7 @@ nodes and the gateways.
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-…
-k8s/start.sh
+k8s/deploy.sh
 ```
 
 It is idempotent: re-run it after editing the manifest, and it leaves existing
