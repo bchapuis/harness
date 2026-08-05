@@ -102,6 +102,8 @@ Every boundary in the tree, its name, and where its layout is specified. A new d
 | `actor.raft.log` | 1 | The record-schema field of its log's header | the caller's own record type | actor §9.4.3 |
 | `granary.store.manifest` | 1 | The record-schema field of its log's header | the caller's own record type | [granary](granary-spec.md) §7 |
 | `granary.store.segment` | 1 | The record-schema field of its log's header | the caller's own record type | [granary](granary-spec.md) §7 |
+| `granary.store.fence` | 1 | `GRFNCE` and a `u16`, ahead of each `fences/<shard>` file | **extension area** | [granary](granary-spec.md) §8 |
+| `granary.store.seal` | 1 | `GRSEAL` and a `u16`, ahead of each `seals/<shard>` file | **extension area** | [granary](granary-spec.md) §7.7 |
 | `blob.tombstone` | 1 | `BSTOMB` and a `u16`, ahead of each `tombstones/<ns>` file | **extension area** | [blob-store](blob-store-spec.md) §5.3 |
 
 The three `Wal` record schemas have **no extension area**, because their record types belong to their callers and `wal` must not reach into `T`. A caller whose records will need additive evolution should carry a `compat::Extensions` field in `T` itself; otherwise every field it adds is a revision bump on that boundary. This is the one place §2.1's rule has to be honoured by convention rather than by construction.
@@ -109,6 +111,8 @@ The three `Wal` record schemas have **no extension area**, because their record 
 **Two durable formats are deliberately unstamped**, and their absence from this table is a decision rather than an omission: a blob file (`blob-store` `local.rs`) and a grain-colocated blob (`granary` `file_store.rs`) are named by the BLAKE3 hash of their own bytes. A prefix would make the path disagree with what it addresses, and the reader that re-hashes on every read would refuse what the writer wrote. There the stamp *is* the name, and it is checked on every read rather than once per format change.
 
 **Granularity is a cost decision.** The right granularity for a stamp is the coarsest one that still catches the error, because a stamp's cost is paid per stamped item and its value is paid once per mistake. An association is stamped once for its whole lifetime and can afford a full announced range; a snapshot is large and cold, so eight bytes and a codec name are noise; a journal record is the hottest durable path in the tree and is stamped for **zero bytes** by reserving a bit of a byte it already carries.
+
+The rule says *coarsest that still catches the error*, and a fence file is where the second half does the work. Folding `granary.store.fence` into `granary.store`'s revision would cost nothing in bytes — one stamp already covers the directory, and it is admitted before the fences load — but it fails three ways. It couples two formats that evolve apart to one number (**V6**). It puts a fence file's identity in a *different file*, so a fence restored from a backup or left by a half-finished upgrade no longer says what it is, which is the case **V1** exists for. And §3.4's adoption arm stamps an unstamped directory without inspecting anything, so the store's revision would assert a fence layout nothing had looked at — on the one boundary whose misread costs a safety property rather than a decode. The per-item cost that would argue the other way rounds to nothing here: one file per shard, rewritten only when the term advances, on a write whose expense is an fsync of a block it already occupies.
 
 ### 3.1 `actor.wire`
 

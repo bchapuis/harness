@@ -53,11 +53,16 @@
 //!   acknowledged (§8), the one piece of state shared across a shard's grains. It is
 //!   rewritten (atomically) only when the term advances — on failover and recovery
 //!   `prepare`, never on a steady-state append — and loaded eagerly on open, so the
-//!   fence is known before any grain's records load lazily.
+//!   fence is known before any grain's records load lazily. A stamped format,
+//!   `granary.store.fence` (compatibility §3), whose reader also accepts the
+//!   unstamped predecessor. A file this build cannot read is a **refusal that fails
+//!   `open`**, not an absent fence: reading a damaged fence as "no fence" would
+//!   withdraw **G1** with no diagnostic, and there is nothing safe to guess.
 //! - `seals/<shard>` — the per-shard **append bound** (§7.7): refuse appends at or
 //!   above this name hash. Durable and loaded eagerly for the same reason as the
 //!   fence — a restart that forgot the bound could let a stale leader assemble a
-//!   majority for a range a split moved away (**G15**).
+//!   majority for a range a split moved away (**G15**). Stamped as
+//!   `granary.store.seal`, and unreadable bytes refuse for the same reason.
 //! - `blobs/<id>/<blob hex>` — a grain's content-addressed blob area (§7.10), one
 //!   file per blob under the same collision-free id the manifest assigns the grain.
 //!
@@ -699,6 +704,60 @@ struct StoreBody {
 /// key is refused (**V2**) — its writer said a reader must understand it.
 const STORE_EXT_KNOWN: &[u16] = &[];
 
+/// The stamp on a `fences/<shard>` file (compatibility §3, `granary.store.fence`).
+///
+/// A per-file stamp rather than a field of [`STORE`]'s, though the coarser one
+/// would be free in bytes. A fence file is a durable byte sequence in its own right
+/// — restored from a backup, copied between directories, left behind by a
+/// half-finished upgrade — and delegating its identity to a neighbouring file is
+/// what a stamp exists to stop (**V1**). It would also couple two formats that
+/// evolve apart (**V6**), and `admit_store_stamp` adopts an unstamped directory
+/// without inspecting anything, so the store's revision would end up asserting a
+/// fence layout nothing had looked at — on the one boundary whose misread costs a
+/// safety property rather than a decode.
+///
+/// The cost the granularity rule prices is per *item*, and here it rounds to
+/// nothing: one file per shard, rewritten only when the term actually advances, on
+/// a write whose real expense is the fsync of a block it already occupies.
+///
+/// `GRFNCE` cannot be confused with the unstamped predecessor, whose leading eight
+/// bytes are a term: aliasing it needs term 0x45434E465247, some 7.6e13 elections
+/// away. The width is a second, independent discriminator.
+pub(crate) const FENCE: compat::Stamp =
+    compat::Stamp::new(b"GRFNCE", compat::Window::at("granary.store.fence", 1));
+
+/// The stamp on a `seals/<shard>` file (compatibility §3, `granary.store.seal`).
+///
+/// A separate boundary from [`FENCE`] for the reason [`MANIFEST_RECORDS`] and
+/// [`SEGMENT_RECORDS`] are separate: a fence term (§8) and an append bound (§7.7)
+/// mean different things and evolve apart, and **V6** says a bump at one must not
+/// invalidate the other. They share a body and a reader, not a revision.
+pub(crate) const SEAL: compat::Stamp =
+    compat::Stamp::new(b"GRSEAL", compat::Window::at("granary.store.seal", 1));
+
+/// A fence's or a seal's body, behind the stamp.
+///
+/// The checksum covers the value *and* the extension area, so a change there
+/// cannot pass unnoticed. It is still FNV-1a at revision 1: `wal::checksum` is
+/// frozen for callers who cannot say which digest wrote them, and having a header
+/// is exactly what would let this one say.
+#[derive(Serialize, Deserialize)]
+struct SidecarBody {
+    checksum: u64,
+    value: u64,
+    /// Room to grow without a revision bump (compatibility spec §2.1), for the same
+    /// reason [`StoreBody`] carries one: the body is positional `postcard`.
+    ext: compat::Extensions,
+}
+
+/// The critical extension keys a fence or a seal implements: none yet.
+const SIDECAR_EXT_KNOWN: &[u16] = &[];
+
+/// Bytes of an **unstamped** fence or seal: the value (u64 LE) followed by its
+/// checksum (u64 LE), which is the shape both files had before they carried a
+/// stamp. A reader adopts it; nothing writes it.
+const SIDECAR_LEGACY_BYTES: usize = 16;
+
 /// Confirm `dir` holds records `codec` can read, stamping it if it is not stamped.
 ///
 /// **An unstamped directory is adopted, not refused.** Refusing would make this
@@ -831,7 +890,7 @@ fn load_seals(dir: &Path) -> io::Result<HashMap<u32, u64>> {
         let Some(shard) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
             continue;
         };
-        if let Some(bound) = read_checksummed_u64(&entry.path())? {
+        if let Some(bound) = read_sidecar(&entry.path(), &SEAL)? {
             seals.insert(shard, bound);
         }
     }
@@ -857,27 +916,81 @@ fn write_checksummed_u64(dir: &Path, shard: u32, value: u64) -> io::Result<()> {
     wal::atomic_replace(dir, &shard.to_string(), &bytes)
 }
 
-/// Read a shard's fence term, or `None` if the file is absent or torn.
+/// Read a shard's fence term, or `None` if the file is absent.
 fn read_fence(path: &Path) -> io::Result<Option<Term>> {
-    Ok(read_checksummed_u64(path)?.map(Term::new))
+    Ok(read_sidecar(path, &FENCE)?.map(Term::new))
 }
 
-/// Read one checksummed u64, or `None` if the file is absent or torn.
-fn read_checksummed_u64(path: &Path) -> io::Result<Option<u64>> {
+/// Read one fence or seal, accepting the stamped form and the unstamped
+/// predecessor. `None` means one thing only: **the file is absent**.
+///
+/// That is the whole point of giving these files a header. Every other way of
+/// getting one wrong used to return `None` too — a short file, a long file, a
+/// checksum mismatch — and `load_fences` reads `None` as *no fence for this shard*,
+/// so bit-rot or a build skew silently withdrew **G1**'s single-writer guarantee
+/// with no diagnostic anywhere. "There is no fence here" and "this is a fence and
+/// something is wrong with it" are different sentences, and only the first is safe
+/// to act on. A magic is what lets the reader tell them apart.
+///
+/// So a malformed sidecar now fails [`FileGrainStore::open`] rather than opening a
+/// store with a fence quietly missing — the same direction the Raft term file
+/// already fails in, and for the same reason: guessing risks a safety property.
+///
+/// The order is the contract: bytes carrying the magic are *this* format, so their
+/// revision is admitted before any field is read (**V2**) and a revision this build
+/// refuses is never handed to the older decoder. Only bytes without the magic are
+/// read as the predecessor.
+fn read_sidecar(path: &Path, stamp: &compat::Stamp) -> io::Result<Option<u64>> {
+    let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
+    let named = |msg: &str| {
+        invalid(format!(
+            "{} at {}: {msg}",
+            stamp.window().boundary(),
+            path.display()
+        ))
+    };
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err),
     };
-    if bytes.len() != 16 {
-        return Ok(None);
+    if stamp.is_stamped(&bytes) {
+        let (_, body) = stamp.unstamp(&bytes).map_err(|err| {
+            invalid(format!(
+                "{} at {}: {err}",
+                stamp.window().boundary(),
+                path.display()
+            ))
+        })?;
+        let body: SidecarBody = postcard::from_bytes(body)
+            .map_err(|err| named(&format!("body did not decode: {err}")))?;
+        body.ext
+            .admit(stamp.window().boundary(), SIDECAR_EXT_KNOWN)
+            .map_err(|err| {
+                invalid(format!(
+                    "{} at {}: {err}",
+                    stamp.window().boundary(),
+                    path.display()
+                ))
+            })?;
+        if body.checksum != wal::checksum(&body.value.to_le_bytes()) {
+            return Err(named("checksum mismatch"));
+        }
+        return Ok(Some(body.value));
     }
-    let raw = u64::from_le_bytes(bytes[..8].try_into().expect("8-byte slice"));
-    let check = u64::from_le_bytes(bytes[8..].try_into().expect("8-byte slice"));
-    if check != wal::checksum(&raw.to_le_bytes()) {
-        return Ok(None);
+    if bytes.len() == SIDECAR_LEGACY_BYTES {
+        let raw = u64::from_le_bytes(bytes[..8].try_into().expect("8-byte slice"));
+        let check = u64::from_le_bytes(bytes[8..].try_into().expect("8-byte slice"));
+        if check != wal::checksum(&raw.to_le_bytes()) {
+            return Err(named("unstamped record's checksum mismatch"));
+        }
+        return Ok(Some(raw));
     }
-    Ok(Some(raw))
+    Err(named(&format!(
+        "neither a `{}` record nor a {SIDECAR_LEGACY_BYTES}-byte unstamped one ({} bytes)",
+        String::from_utf8_lossy(stamp.magic()),
+        bytes.len(),
+    )))
 }
 
 impl WriteGuard for FileGrainStore {
@@ -1581,6 +1694,161 @@ mod tests {
             err.to_string().contains("json"),
             "the refusal must name the codec that wrote the store: {err}",
         );
+    }
+
+    /// Stage `bytes` as shard 0's file under `dir/<kind>`, on an already-opened
+    /// store directory.
+    fn stage_sidecar(dir: &Path, kind: &str, bytes: &[u8]) {
+        std::fs::write(dir.join(kind).join("0"), bytes).expect("stage a sidecar");
+    }
+
+    /// A fence or seal in the shape both files had before they carried a stamp.
+    fn legacy_sidecar(value: u64) -> Vec<u8> {
+        let mut bytes = value.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&wal::checksum(&value.to_le_bytes()).to_le_bytes());
+        bytes
+    }
+
+    /// A stamped fence or seal, encoded the way this build reads one. Written here
+    /// rather than taken from the store, because the writers still emit the
+    /// unstamped form until the release that flips them (**V4**).
+    fn stamped_sidecar(stamp: &compat::Stamp, value: u64) -> Vec<u8> {
+        let body = postcard::to_allocvec(&SidecarBody {
+            checksum: wal::checksum(&value.to_le_bytes()),
+            value,
+            ext: compat::Extensions::new(),
+        })
+        .expect("encode a sidecar body");
+        stamp.stamp(&body)
+    }
+
+    #[test]
+    fn granary_store_fence_v1_still_reads_its_term() {
+        let bytes = crate::corpus::golden("granary.store.fence", 1, || stamped_sidecar(&FENCE, 7));
+
+        let dir = tempfile::tempdir().unwrap();
+        drop(FileGrainStore::open(dir.path(), TEST_CODEC).expect("open"));
+        stage_sidecar(dir.path(), "fences", &bytes);
+
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("reopen with the fixture");
+        assert!(
+            matches!(
+                store.bump_fence(0, Term::new(6)),
+                Err(BumpRefusal::Fenced(fence)) if fence == Term::new(7)
+            ),
+            "the fixture's term must still fence a lower one",
+        );
+    }
+
+    #[test]
+    fn granary_store_seal_v1_still_reads_its_bound() {
+        let bytes = crate::corpus::golden("granary.store.seal", 1, || stamped_sidecar(&SEAL, 4242));
+
+        let dir = tempfile::tempdir().unwrap();
+        drop(FileGrainStore::open(dir.path(), TEST_CODEC).expect("open"));
+        stage_sidecar(dir.path(), "seals", &bytes);
+
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("reopen with the fixture");
+        assert_eq!(
+            store.seals.lock().unwrap().get(&0).copied(),
+            Some(4242),
+            "the fixture's bound must still load",
+        );
+    }
+
+    #[test]
+    fn an_unstamped_fence_is_adopted_rather_than_refused() {
+        // A store predating the stamp keeps its fence. Refusing here would make the
+        // stamp a migration for every existing store, and the reader has an
+        // unambiguous predecessor to fall back on.
+        let dir = tempfile::tempdir().unwrap();
+        drop(FileGrainStore::open(dir.path(), TEST_CODEC).expect("open"));
+        stage_sidecar(dir.path(), "fences", &legacy_sidecar(7));
+
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("adopt the legacy fence");
+        assert!(
+            matches!(
+                store.bump_fence(0, Term::new(6)),
+                Err(BumpRefusal::Fenced(fence)) if fence == Term::new(7)
+            ),
+            "an adopted fence must fence exactly as it did before",
+        );
+    }
+
+    /// **The load-bearing one.** Every representable way of getting a fence file
+    /// wrong used to return `Ok(None)`, which `load_fences` reads as *no fence for
+    /// this shard* — so bit-rot or a build skew silently withdrew **G1** with no
+    /// diagnostic. Each of these must now fail `open` by name instead, and the
+    /// store must not come up with the fence quietly missing.
+    #[test]
+    fn a_fence_this_build_cannot_read_is_refused_rather_than_read_as_no_fence() {
+        let mut future = stamped_sidecar(&FENCE, 7);
+        let head = FENCE.magic().len();
+        future[head..head + 2].copy_from_slice(&9u16.to_le_bytes());
+
+        let mut torn = stamped_sidecar(&FENCE, 7);
+        let last = torn.len() - 1;
+        torn[last] ^= 0xff;
+
+        for (what, bytes) in [
+            ("a revision this build does not accept", future),
+            ("a stamped record whose body is damaged", torn),
+            ("a file of no recognized width", vec![0u8; 20]),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            drop(FileGrainStore::open(dir.path(), TEST_CODEC).expect("open"));
+            stage_sidecar(dir.path(), "fences", &bytes);
+
+            let Err(err) = FileGrainStore::open(dir.path(), TEST_CODEC) else {
+                panic!("{what} must refuse, not open with no fence for the shard");
+            };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(
+                err.to_string().contains("granary.store.fence"),
+                "{what}: the refusal must name the boundary: {err}",
+            );
+        }
+    }
+
+    /// The deliberate behaviour change: a torn *legacy* fence used to read as no
+    /// fence, and now refuses. A store that fails to open is recoverable; one that
+    /// silently forgot which terms it had already refused is not.
+    #[test]
+    fn a_torn_legacy_fence_is_refused_rather_than_read_as_no_fence() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(FileGrainStore::open(dir.path(), TEST_CODEC).expect("open"));
+        let mut torn = legacy_sidecar(7);
+        torn[0] ^= 0xff; // the value moves; the checksum no longer covers it
+        stage_sidecar(dir.path(), "fences", &torn);
+
+        let Err(err) = FileGrainStore::open(dir.path(), TEST_CODEC) else {
+            panic!("a torn legacy fence must refuse, not read as no fence");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("checksum"),
+            "the refusal must say what is wrong with it: {err}",
+        );
+    }
+
+    /// **V4**, read-new first: this release reads both forms and still writes the
+    /// unstamped one, so a rollback onto the previous build finds bytes it can
+    /// read. Inverts in the release that flips the writers.
+    #[test]
+    fn a_fence_and_a_seal_are_still_written_unstamped_until_the_write_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("open");
+        store.bump_fence(0, Term::new(3)).expect("bump");
+        store.seal_range(0, 99);
+
+        for (kind, stamp) in [("fences", &FENCE), ("seals", &SEAL)] {
+            let bytes = std::fs::read(dir.path().join(kind).join("0")).expect("read the sidecar");
+            assert!(
+                !stamp.is_stamped(&bytes),
+                "{kind} must still be written unstamped in the read release",
+            );
+            assert_eq!(bytes.len(), SIDECAR_LEGACY_BYTES);
+        }
     }
 
     /// The single-writer rule, enforced rather than documented.
