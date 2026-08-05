@@ -17,6 +17,23 @@ use crate::membership::MemberDigest;
 use crate::raft::GroupId;
 use crate::raft::RaftEntry;
 
+/// The wire revisions this build accepts, and the one it writes (spec §7.1,
+/// compatibility spec §3).
+///
+/// It sits with the protocol rather than with a transport because it describes
+/// the **frames**, not the carrier. Both transports in the tree — the TCP one and
+/// the simulator's in-memory network — judge a peer against this same window, so
+/// a mixed-version simulation exercises the policy the cluster actually ships
+/// rather than a copy of it that can drift.
+///
+/// The handshake settles on the highest revision both ends accept
+/// ([`Window::negotiate`](compat::Window::negotiate)); a peer whose range does not
+/// overlap this one is refused by name. Bumping the wire format takes two
+/// releases: widen the range first (`Window::new("actor.wire", 1, 2, 1)`, so this
+/// build *reads* v2 without writing it), and only once that release is everywhere
+/// move `writes` up. That ordering is invariant **V4**.
+pub const WIRE: compat::Window = compat::Window::at("actor.wire", 1);
+
 /// Serialize [`Frame::Reply`]'s outcome with its success bytes told they are bytes.
 ///
 /// The other bulk-byte fields on this wire take `#[serde(with = "serde_bytes")]`

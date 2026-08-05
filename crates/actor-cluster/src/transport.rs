@@ -42,6 +42,30 @@ pub trait Transport: Clone + Send + Sync + 'static {
         frame: Frame,
     ) -> impl Future<Output = Result<(), TransportError>> + Send;
 
+    /// The wire revision settled with `peer` on the association this node would
+    /// **send** over, or `None` when there is no such association (spec §7.1,
+    /// compatibility spec §3.1).
+    ///
+    /// This is the *send-side gate*, and the reason the negotiated revision has to
+    /// leave the handshake at all. A build whose window spans two revisions must
+    /// not write the higher one to a peer that settled on the lower — negotiation
+    /// alone only lets that be detected, on the receiving end, as an association
+    /// torn down. Gating needs the value here, above the transport, where the
+    /// frame is composed.
+    ///
+    /// `None` means **not yet known**, never "anything goes": a caller must then
+    /// write what the oldest peer in its own accepted range could read. Guessing
+    /// in the other direction is precisely the misparse **V2** exists to prevent,
+    /// and the first send to a peer always lands here, because the association is
+    /// what [`send`](Transport::send) establishes.
+    ///
+    /// The answer belongs to the **association**, not to the peer. A revision is
+    /// what two ends settled on when they handshook, so it lives and dies with the
+    /// connection frames travel over; a value cached per peer would outlive that
+    /// peer being restarted onto a narrower window, which is the case a gate exists
+    /// for in the first place.
+    fn peer_version(&self, peer: NodeId) -> Option<compat::Version>;
+
     /// Release the transport's resources — background tasks, listeners, and open
     /// associations — on a graceful node stop (spec §9.3). Closing the inbound
     /// path also ends the system's receive loop. The default is a no-op, for a

@@ -429,6 +429,8 @@ A transport is pluggable behind a trait; the default is TCP with length-delimite
 1. **Associations.** Before exchanging actor traffic, two nodes MUST complete a handshake that establishes an association: a wire-revision negotiation, a node-identity exchange, codec agreement, and optional authentication (§15). The nodes send actor envelopes only over an established association.
 
    The revision is **negotiated, not matched**. Each end announces the inclusive range of wire revisions it accepts, and the association settles on the highest revision both accept; a peer whose range does not overlap MUST be refused, naming both ranges ([compatibility](compatibility-spec.md) **V2**). Two adjacent releases must be able to associate, so a format change widens the accepted range in one release and only writes the new revision in a later one (compatibility **V4**).
+
+   The settled revision MUST be reachable from the association it belongs to (`peer_version`), because that is what a sender gates on: during the release where a build accepts two revisions, it writes the higher one only to a peer that settled on it. A transport MUST NOT report a revision for an association that no longer exists — a revision outliving its connection would gate the frames sent to whatever process reconnects in its place.
 2. **Multiplexing.** Many actor conversations share one association. Each request carries a correlation id, and each response references it.
 3. **Framing.** Messages are length-delimited; a malformed frame MUST tear down the association, not the node.
 4. **Failure detection.** The transport never decides liveness. Wherever a detector runs (§9.4), SWIM (§10) probes members independently of connection state, so a node whose association merely blipped is never mistaken for a failed one; in static mode without its optional detector (§9.4.1), liveness surfaces only as failed sends (§8). A transport is not required to report association loss. It MAY surface establishment/loss as an *optimization hint* to speed detection (e.g. mark a peer `suspect` early), but such a hint MUST feed only the detector's refutable `suspect` state, never the terminal `down` decision (§9.4).
@@ -440,6 +442,12 @@ pub trait Transport: Clone + Send + Sync + 'static {
     /// Send one frame to `peer` over its association, dialing and completing the
     /// §7.1 handshake on first use. At-most-once (§7.2): never retransmits.
     async fn send(&self, peer: NodeId, frame: Frame) -> Result<(), TransportError>;
+
+    /// The revision settled with `peer` on the association this node sends over,
+    /// or `None` when there is none — including the first send, which is what
+    /// establishes it. `None` obliges the caller to write its oldest accepted
+    /// revision, never its newest (compatibility **V2**).
+    fn peer_version(&self, peer: NodeId) -> Option<compat::Version>;
 
     /// Release listeners, background tasks, and open associations on a graceful
     /// stop (§9.3); closing the inbound path ends the system's receive loop.

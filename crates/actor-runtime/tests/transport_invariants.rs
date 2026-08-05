@@ -17,8 +17,11 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use actor_cluster::Frame;
 use actor_cluster::Reachability;
 use actor_cluster::SwimConfig;
+use actor_cluster::Transport;
+use actor_cluster::WIRE;
 use actor_core::Actor;
 use actor_core::ActorId;
 use actor_core::ActorRef;
@@ -33,6 +36,7 @@ use actor_core::NodeId;
 use actor_core::Path;
 use actor_core::Terminated;
 use actor_runtime::TcpCluster;
+use actor_runtime::TcpTransport;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
@@ -320,4 +324,71 @@ async fn a_refused_dial_is_unreachable_not_a_hang() {
     .await
     .expect("a refused dial must fail fast, not hang");
     assert_eq!(outcome, Err(CallError::Unreachable));
+}
+
+// --- §7.1: the negotiated wire revision reaches a caller ---------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_negotiated_wire_revision_is_reachable_once_the_association_exists() {
+    // The send-side gate the compatibility spec §3.1 asks for: a caller composing
+    // a frame can find out what the association it will travel over settled on.
+    // Two raw transports rather than two cluster systems, because the property is
+    // the transport's and nothing above it has to be running for it to hold.
+    let (la, addr_a) = support::bind_local().await;
+    let (lb, addr_b) = support::bind_local().await;
+    let (a, b) = (NodeId::new(1), NodeId::new(2));
+    let peers: BTreeMap<NodeId, SocketAddr> = BTreeMap::from([(a, addr_a), (b, addr_b)]);
+
+    // Endpoint gossip is pushed out of the way: it dials, and a dial is a
+    // handshake, so leaving it on its 50 ms default would race the assertion that
+    // nothing has been negotiated yet.
+    let quiet = |node| {
+        let mut cfg = support::tcp_config(node, peers.clone());
+        cfg.endpoint_gossip_interval = Duration::from_secs(3600);
+        cfg
+    };
+    let (ta, _inbound_a) = TcpTransport::start(quiet(a), la);
+    let (_tb, inbound_b) = TcpTransport::start(quiet(b), lb);
+
+    // Before the first send there is no association, and therefore no revision to
+    // report. `None` is a real answer here, not a failure: it is what a gate must
+    // read as "write what the oldest peer I accept could read".
+    assert_eq!(
+        ta.peer_version(b),
+        None,
+        "no revision may be reported before the association that settles it exists",
+    );
+
+    // Sending dials and handshakes, which is where the revision is settled.
+    let frame = Frame::Envelope {
+        recipient: ActorId::new(b, Path::new("/user/anything"), 1),
+        manifest: "rt.Greet".to_string(),
+        correlation: None,
+        payload: Vec::new(),
+    };
+    ta.send(b, frame).await.expect("the dial must succeed");
+    tokio::time::timeout(Duration::from_secs(5), inbound_b.recv())
+        .await
+        .expect("the frame must cross")
+        .expect("B's inbound side is live");
+
+    assert_eq!(
+        ta.peer_version(b),
+        Some(WIRE.accepted().hi),
+        "an established association must report the revision it negotiated",
+    );
+
+    // A peer never dialed has no association either, whatever the address book
+    // says about it.
+    assert_eq!(ta.peer_version(NodeId::new(9)), None);
+
+    // And the answer does not outlive the association: shutting the transport down
+    // drops every connection, so the gate stops reporting a revision agreed with a
+    // process that may not come back on the same window.
+    ta.shutdown();
+    assert_eq!(
+        ta.peer_version(b),
+        None,
+        "a revision must not survive the association that settled it",
+    );
 }

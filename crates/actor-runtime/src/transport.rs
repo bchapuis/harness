@@ -55,12 +55,10 @@ use crate::wire::write_wire;
 /// The wire revisions this build accepts, and the one it writes (spec §7.1,
 /// compatibility spec §3).
 ///
-/// The handshake settles on the highest revision both ends accept; a peer whose
-/// range does not overlap this one is refused by name. Bumping the wire format
-/// takes two releases: widen the range first (`Window::new("actor.wire", 1, 2,
-/// 1)`, so this build *reads* v2 without writing it), and only once that release
-/// is everywhere move `writes` up. That ordering is invariant **V4**.
-pub const WIRE: compat::Window = compat::Window::at("actor.wire", 1);
+/// Defined with the protocol it governs ([`actor_cluster::WIRE`]) and re-exported
+/// here, where the handshake that announces it lives, so this transport and the
+/// simulator's cannot drift apart on what a build speaks.
+pub use actor_cluster::WIRE;
 
 /// Default for [`TcpConfig::connect_timeout`]: how long to wait for a TCP
 /// connect before giving up (spec §7), so a dial to a black-holed peer cannot
@@ -158,13 +156,28 @@ struct Shared {
     /// Outbound connections this node dialed, one per peer. Held only briefly to
     /// look up or insert; dialing happens with the lock released. The queue is
     /// bounded (backpressure, spec §6).
-    conns: Mutex<HashMap<NodeId, mpsc::Sender<Wire>>>,
+    conns: Mutex<HashMap<NodeId, Conn>>,
     /// The runtime address book (spec §9.3): seeded from config, then grown as
     /// handshakes and gossip reveal more peers.
     endpoints: Mutex<BTreeMap<NodeId, SocketAddr>>,
     /// Flipped to `true` on [`shutdown`](TcpTransport::shutdown); the accept loop,
     /// gossip loop, and connection tasks watch it and stop (spec §9.3).
     shutdown: watch::Sender<bool>,
+}
+
+/// One live outbound association: the queue frames leave by, and the wire
+/// revision this end settled on when it handshook (spec §7.1).
+///
+/// The two travel together because they have one lifetime. A revision is what
+/// two ends agreed on over *this* connection, so when the connection is
+/// deregistered — peer restarted, socket died, queue saturated — the revision
+/// goes with it and [`peer_version`](Transport::peer_version) falls back to
+/// `None` rather than answering from a peer that may since have come back on a
+/// narrower window.
+#[derive(Clone)]
+struct Conn {
+    tx: mpsc::Sender<Wire>,
+    version: compat::Version,
 }
 
 impl Shared {
@@ -220,40 +233,22 @@ impl Shared {
     }
 
     /// Validate a peer's handshake against our policy, returning the peer's node
-    /// id. `expected` is `Some` when we dialed a specific peer and want to
-    /// confirm we reached it.
-    fn accept_hello(&self, hello: &Hello, expected: Option<NodeId>) -> Result<NodeId, String> {
-        // The negotiated revision is dropped; what this call buys is the refusal
-        // of a peer outside our range. Nothing yet varies behavior by revision.
-        //
-        // The first thing that wants to will be **compressing replicated blobs**, and
-        // this line is what stands in its way, so the shape of the problem belongs
-        // here. The measurement is done and it pays: `granary/benches/compress.rs`
-        // reports 4.2x on real 1 MiB image blocks and 3.3x on grain records, at ~740
-        // MB/s to compress and ~3.6 GB/s to decompress — roughly six times more uplink
-        // saved than CPU spent at R=3, against the 1 Gbps link that is this
-        // deployment's binding constraint (`docs/hardware-envelope.md` §3.3).
-        //
-        // What blocks it is not the codec. Small control records *grow* under LZ4 —
-        // nine in ten of them — so the payload has to say which form it carries, and a
-        // tag byte is a wire change: an older peer would read it as blob content and
-        // fail the content hash. Gating on the negotiated revision is exactly what
-        // `compat` is for, except that the revision is discarded right here, so there
-        // is nothing to gate on. Turning it on therefore needs one of:
-        //
-        //   - retaining this `Version` per association and reaching it at encode time,
-        //     which is a change to the transport/codec seam (the granary message layer
-        //     sits above it and knows nothing of associations);
-        //   - the **V4** two-release path: widen `WIRE` to accept 1..=2 now, write 2
-        //     in a later release;
-        //   - or capability negotiation instead of versioning — a new blob message
-        //     that older peers reject with `Unhandled`, cached per peer, falling back
-        //     to the current one. Additive, needs no revision bump, and the blob put is
-        //     idempotent and content-addressed, so the retry is safe.
-        //
-        // The third is the smallest blast radius. All three are protocol decisions with
-        // rollout consequences, which is why none of them is taken here yet.
-        WIRE.negotiate(hello.accepts).map_err(|e| e.to_string())?;
+    /// id and the wire revision the two ends settled on. `expected` is `Some` when
+    /// we dialed a specific peer and want to confirm we reached it.
+    ///
+    /// The revision is *returned*, not consumed here: nothing in the handshake
+    /// varies by it, and everything that will vary by it composes frames far above
+    /// this call. Its route to those callers is the association it is stored on
+    /// and [`Transport::peer_version`].
+    fn accept_hello(
+        &self,
+        hello: &Hello,
+        expected: Option<NodeId>,
+    ) -> Result<(NodeId, compat::Version), String> {
+        // Both ends run this same comparison over the same two ranges and reach the
+        // same answer, so the association needs no confirmation round to agree on
+        // what it speaks (compatibility spec §2).
+        let version = WIRE.negotiate(hello.accepts).map_err(|e| e.to_string())?;
         if hello.codec_name != self.config.codec.name() {
             return Err(format!("codec mismatch: {}", hello.codec_name));
         }
@@ -273,7 +268,7 @@ impl Shared {
                 hello.node
             ));
         }
-        Ok(hello.node)
+        Ok((hello.node, version))
     }
 }
 
@@ -316,10 +311,10 @@ impl TcpTransport {
     /// Get a sender to `peer`'s outbound queue, dialing and handshaking if no
     /// live connection exists. Connect and handshake are bounded by timeouts, so
     /// an unresponsive peer surfaces as `Unreachable` (spec §7).
-    async fn connection(&self, peer: NodeId) -> Result<mpsc::Sender<Wire>, TransportError> {
+    async fn connection(&self, peer: NodeId) -> Result<Conn, TransportError> {
         // Fast path: reuse a live connection.
-        if let Some(tx) = self.lookup(peer) {
-            return Ok(tx);
+        if let Some(conn) = self.lookup(peer) {
+            return Ok(conn);
         }
 
         // Resolve the address from the runtime book (seeded + learned).
@@ -344,69 +339,92 @@ impl TcpTransport {
                     let stream = tls.connector.connect(tls.server_name.clone(), tcp).await?;
                     client_handshake(stream, &self.shared, peer).await
                 };
-                let stream = tokio::time::timeout(handshake_timeout, handshake)
+                let (stream, version) = tokio::time::timeout(handshake_timeout, handshake)
                     .await
                     .map_err(|_| TransportError::Unreachable)?
                     .map_err(|_| TransportError::Unreachable)?;
-                Ok(self.register_dialed(peer, stream))
+                Ok(self.register_dialed(peer, stream, version))
             }
             Encryption::PlaintextTrusted => {
-                let stream = tokio::time::timeout(
+                let (stream, version) = tokio::time::timeout(
                     handshake_timeout,
                     client_handshake(tcp, &self.shared, peer),
                 )
                 .await
                 .map_err(|_| TransportError::Unreachable)?
                 .map_err(|_| TransportError::Unreachable)?;
-                Ok(self.register_dialed(peer, stream))
+                Ok(self.register_dialed(peer, stream, version))
             }
         }
     }
 
-    fn lookup(&self, peer: NodeId) -> Option<mpsc::Sender<Wire>> {
+    fn lookup(&self, peer: NodeId) -> Option<Conn> {
         let conns = self.shared.conns.lock().expect("conns mutex poisoned");
-        conns.get(&peer).filter(|tx| !tx.is_closed()).cloned()
+        conns.get(&peer).filter(|c| !c.tx.is_closed()).cloned()
     }
 
-    /// Register a freshly dialed connection, or, if a concurrent dial already
-    /// won, keep the existing one and let this stream drop (clean teardown).
-    fn register_dialed<S>(&self, peer: NodeId, stream: S) -> mpsc::Sender<Wire>
+    /// Register a freshly dialed connection under the revision its handshake
+    /// settled on, or, if a concurrent dial already won, keep the existing one and
+    /// let this stream drop (clean teardown).
+    fn register_dialed<S>(&self, peer: NodeId, stream: S, version: compat::Version) -> Conn
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (tx, rx) = mpsc::channel(self.shared.config.outbound_capacity);
+        let conn = Conn {
+            tx: tx.clone(),
+            version,
+        };
         let mut conns = self.shared.conns.lock().expect("conns mutex poisoned");
-        if let Some(existing) = conns.get(&peer).filter(|tx| !tx.is_closed()) {
+        // A concurrent dial that won carries its own negotiated revision, and it is
+        // that association's frames that will travel, so its `Conn` is the one to
+        // keep whole.
+        if let Some(existing) = conns.get(&peer).filter(|c| !c.tx.is_closed()) {
             return existing.clone();
         }
-        conns.insert(peer, tx.clone());
+        conns.insert(peer, conn.clone());
         drop(conns);
         tokio::spawn(dialed_connection(
             stream,
             rx,
             peer,
             Arc::clone(&self.shared),
-            tx.clone(),
+            tx,
         ));
-        tx
+        conn
     }
 }
 
 impl Transport for TcpTransport {
     async fn send(&self, peer: NodeId, frame: Frame) -> Result<(), TransportError> {
-        let tx = self.connection(peer).await?;
+        let conn = self.connection(peer).await?;
         // Non-blocking enqueue with backpressure: a full queue (peer too slow) or
         // a closed one (connection died) both surface as `Unreachable`, and the
         // dead/saturated entry is dropped so the next send re-dials. At-most-once:
         // this frame is never resent (spec §7.2), and a dropped frame an `ask` was
         // awaiting completes it as `Unreachable`, so nothing is silently lost.
-        tx.try_send(Wire::Frame(frame)).map_err(|_| {
+        conn.tx.try_send(Wire::Frame(frame)).map_err(|_| {
             let mut conns = self.shared.conns.lock().expect("conns mutex poisoned");
-            if conns.get(&peer).is_some_and(|cur| cur.same_channel(&tx)) {
+            if conns
+                .get(&peer)
+                .is_some_and(|cur| cur.tx.same_channel(&conn.tx))
+            {
                 conns.remove(&peer);
             }
             TransportError::Unreachable
         })
+    }
+
+    /// The revision settled with `peer` on the connection this node dials it over
+    /// (spec §7.1, compatibility spec §3.1).
+    ///
+    /// `None` until that connection exists, which for a peer never yet sent to
+    /// means the first [`send`](Transport::send) — the dial *is* the handshake.
+    /// Deliberately not answered from the peer's *accepted* connection: that is a
+    /// separate, receive-only association (§7), and its revision governs what the
+    /// peer may write to us, not what we may write to it.
+    fn peer_version(&self, peer: NodeId) -> Option<compat::Version> {
+        self.lookup(peer).map(|conn| conn.version)
     }
 
     /// Stop the node's transport (spec §9.3): signal the accept, gossip, and
@@ -514,11 +532,13 @@ async fn dialed_connection<S>(
         _ = shutdown.changed() => {} // node stopping (spec §9.3)
     }
 
-    // Deregister so the next send re-dials.
+    // Deregister so the next send re-dials — and so the revision this association
+    // settled on stops being served as the peer's, since the re-dial negotiates
+    // its own.
     let mut conns = shared.conns.lock().expect("conns mutex poisoned");
     if conns
         .get(&peer)
-        .is_some_and(|cur| cur.same_channel(&self_tx))
+        .is_some_and(|cur| cur.tx.same_channel(&self_tx))
     {
         conns.remove(&peer);
     }
@@ -561,29 +581,39 @@ async fn deliver(shared: &Arc<Shared>, peer: NodeId, msg: Wire) -> bool {
 
 /// Dialer side of the handshake: announce ourselves, then read and validate the
 /// peer's `Hello`, confirming it is the node we meant to reach — and learn its
-/// advertised address (spec §9.3).
-async fn client_handshake<S>(mut stream: S, shared: &Arc<Shared>, expected: NodeId) -> io::Result<S>
+/// advertised address (spec §9.3). Returns the stream and the revision the two
+/// ends settled on, which becomes this association's for as long as it lives.
+async fn client_handshake<S>(
+    mut stream: S,
+    shared: &Arc<Shared>,
+    expected: NodeId,
+) -> io::Result<(S, compat::Version)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     write_hello(&mut stream, &shared.hello()).await?;
     let peer = read_hello(&mut stream).await?;
-    shared
+    let (_, version) = shared
         .accept_hello(&peer, Some(expected))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     shared.learn(peer.node, peer.advertised);
-    Ok(stream)
+    Ok((stream, version))
 }
 
 /// Acceptor side of the handshake: read and validate the peer's `Hello` first,
 /// then announce ourselves. Returns the verified peer identity and learns its
 /// advertised address (spec §9.3).
+///
+/// The negotiated revision is dropped here, and only here. An accepted connection
+/// is receive-only (§7) — replies and gossip go back over this node's own dialed
+/// connection — so there is nothing on it to gate, and the revision that governs
+/// what we write to this peer is the one that connection settles for itself.
 async fn server_handshake<S>(mut stream: S, shared: &Arc<Shared>) -> io::Result<(S, NodeId)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let peer = read_hello(&mut stream).await?;
-    let node = shared
+    let (node, _version) = shared
         .accept_hello(&peer, None)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     write_hello(&mut stream, &shared.hello()).await?;
@@ -619,8 +649,8 @@ async fn endpoint_gossip(shared: Arc<Shared>, interval: Duration) {
                 let transport = transport.clone();
                 let table = table.clone();
                 async move {
-                    if let Ok(tx) = transport.connection(peer).await {
-                        let _ = tx.try_send(Wire::Endpoints(table));
+                    if let Ok(conn) = transport.connection(peer).await {
+                        let _ = conn.tx.try_send(Wire::Endpoints(table));
                     }
                 }
             });
@@ -675,11 +705,32 @@ mod tests {
         for accepts in [WIRE.accepted(), Accepted::new(1, 9)] {
             assert_eq!(
                 shared.accept_hello(&hello(accepts), None),
-                Ok(NodeId::new(2)),
+                Ok((NodeId::new(2), WIRE.accepted().hi)),
                 "a peer accepting {accepts} shares a revision with {}",
                 WIRE.accepted()
             );
         }
+    }
+
+    #[test]
+    fn the_settled_revision_is_the_highest_both_ends_accept() {
+        // What the handshake returns is not this build's written revision but the
+        // *negotiated* one, so a peer that reads less than we write is settled
+        // downward rather than written to at a revision it cannot read (**V4**).
+        // With `WIRE` a single revision wide there is nothing yet to settle
+        // downward, so the property is asserted against a widened window standing
+        // in for the release that widens the real one.
+        let ours = compat::Window::new("actor.wire", 1, 3, 3);
+        assert_eq!(
+            ours.negotiate(Accepted::new(1, 2)),
+            Ok(compat::Version(2)),
+            "a peer that stops at v2 must settle the association at v2, not our v3",
+        );
+        assert_eq!(
+            ours.negotiate(Accepted::new(1, 9)),
+            Ok(compat::Version(3)),
+            "a peer that reads further than we do settles at the highest we accept",
+        );
     }
 
     #[test]

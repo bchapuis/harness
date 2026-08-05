@@ -110,9 +110,16 @@ The three `Wal` record schemas have **no extension area**, because their record 
 
 The association handshake announces `Accepted` and negotiates (actor §7, rule 1). A peer whose range does not overlap is refused before its codec name, cluster secret, or identity is examined, so a version skew is never reported as a security failure — the two have very different operator responses.
 
-The negotiated revision is currently **discarded** after the verdict, so **this boundary cannot yet be bumped.** A rolling upgrade also needs a *send-side gate* — a node that speaks revision 2 must not send a revision-2 frame to a peer that settled on 1 — and there is nothing to gate on, because the negotiated value reaches no caller. `Frame` is a serde enum, so a peer receiving a variant it does not know fails to decode and the association is torn down; negotiation lets that be *detected* early, not *avoided*.
+The negotiated revision reaches a caller as **`Transport::peer_version`**, which is the *send-side gate* a rolling upgrade needs: a node that speaks revision 2 must not send a revision-2 frame to a peer that settled on 1, and this is what it asks before composing one. `Frame` is a serde enum, so a peer receiving a variant it does not know fails to decode and the association is torn down; negotiation lets that be *detected* early, and the gate is what *avoids* it.
 
-What exists today is the refusal: a future bump is a controlled rejection of one peer rather than the cluster-wide mutual partition an equality check guarantees. Running two wire revisions at once needs the negotiated revision surfaced to the cluster layer (`Transport::peer_version`, §5). **Anyone planning a wire-format change should expect to build it first.**
+The answer belongs to the **association**, not to the peer. A revision is what two ends settled on when they handshook, so it is stored on the connection frames travel over and dies with it — a value cached per peer would outlive that peer being restarted onto a narrower window, which is the case the gate exists for. Two consequences follow, and a caller must handle both:
+
+- **`None` means *not yet known*, never *anything goes*.** A caller that reads `None` writes what the oldest revision in its own accepted range could read. Guessing upward is the misparse **V2** exists to prevent.
+- **The first send to a peer always reads `None`**, because establishing the association is what a send does. A gate is therefore a *steady-state* optimization: the first frame to a peer goes out conservatively, and everything after it is gated.
+
+The TCP transport stores the revision beside the outbound queue and reports it once the dial has handshook; the accepted (receive-only) connection's revision is discarded, since it governs what the peer may write to *us*. The simulator has no handshake, so it negotiates the two nodes' windows on demand and treats a partition as no association — `SimNetwork::set_wire_window` is what gives a simulated node a window of its own, and so what makes a mixed-version run possible at all (§4).
+
+What remains before a bump is therefore the bump's own two releases (**V4**) rather than a mechanism to build first.
 
 ### 3.2 `granary.record`
 
@@ -160,7 +167,9 @@ Fixtures live beside the format that owns them, at `crates/<owner>/corpus/<bound
 
 What the corpus deliberately does **not** assert is that the current build re-encodes a fixture byte-for-byte. Under **V4** a build reads revisions it no longer writes, so byte equality would fail on precisely the upgrade the policy prescribes; and a boundary may change its bytes compatibly without changing their meaning at all (a log records which digest wrote it and reads both, wal §2.1). Decoding old bytes to the right *value* is the property. Reproducing them is not.
 
-**Mixed-version simulation** — simulated nodes given *different* windows, prior record and message definitions kept behind their revision, and the granary invariants and linearizability checks asserted across a rolling upgrade and a rollback. This is the reason to route every boundary through one `Window` type. *Not yet implemented.*
+**Mixed-version simulation** — simulated nodes given *different* windows, prior record and message definitions kept behind their revision, and the granary invariants and linearizability checks asserted across a rolling upgrade and a rollback. This is the reason to route every boundary through one `Window` type.
+
+The mechanism exists: a simulated node runs whatever window `SimNetwork::set_wire_window` gives it, and `peer_version` settles the two ends' ranges exactly as the TCP handshake does, so `crates/actor-simulation/tests/conformance_compatibility.rs` already exercises an upgrade, a mixed cluster, a rollback, and a refusal against widened windows standing in for a bump not yet taken. What is *not* there is the rest of it: no workload varies a node's window mid-run, no record or message definition is kept behind its revision, and no granary invariant is asserted across the transition. Until that exists, what the boundary's policy holds up is the negotiation, not the behavior on either side of it.
 
 ---
 
@@ -170,6 +179,5 @@ Boundaries that exist as formats but are **not yet stamped**, in priority order.
 
 - **`granary.store`** — a grain's **event payloads** are encoded with the deployment's codec, and nothing on disk records which codec that was. §3.3 closes this for snapshots, but a grain with records past its last snapshot — or none at all — is still unguarded, so swapping the codec turns those records into a storm of corrupt-grain activation aborts rather than one diagnosable configuration error. A store-level stamp catches every record and snapshot at once, and is worth having *before* a codec swap rather than after.
 - **Sidecars** — the Raft term and snapshot pointers, the shardmap, and the blob-store tombstones are durable formats written through `wal::atomic_replace` with no stamp. `compat::Stamp` wraps them without changing the primitive, keeping its opaque-bytes interface intact.
-- **`Transport::peer_version`** — the negotiated wire revision, surfaced so the cluster layer can gate what it sends. Until it exists, `actor.wire` can refuse an incompatible peer but cannot run two revisions at once, and so cannot be bumped (§3.1). First in priority order, because it also unblocks the mixed-version simulation of §4.
 - **Raising a log's record-schema stamp in place** — a `Wal` appends frames at the revision its build writes without updating the header, so once a caller's window spans two revisions the stamp understates until a compaction restamps it (wal §2.1 rule 5). Fail-closed, and a caller can work around it by compacting; removing the caveat means a second, non-append handle to rewrite two bytes of the header on the first append after a bump.
 - **A cluster-wide minimum revision** — carrying each member's announced range in the membership digest, so a behavior can enable itself only once the whole cluster accepts it. This turns **V4** from a policy into a mechanism.

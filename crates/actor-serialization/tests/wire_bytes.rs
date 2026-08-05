@@ -9,11 +9,12 @@
 //! (`benches/codec.rs`). It was made on the claim that it is *only* a performance
 //! change, and this file is that claim.
 //!
-//! Why it needs stating rather than assuming. The `actor.wire` boundary is at
-//! revision 1 and cannot currently be bumped at all: the negotiated revision is
-//! discarded after the handshake, so there is no send-side gate and no way to run two
-//! revisions at once (compatibility spec §3.1). A change that altered the encoding
-//! would therefore not be a version bump but a flag day. The reason this one does not:
+//! Why it needs stating rather than assuming. The `actor.wire` boundary is at revision
+//! 1, and a change that altered the encoding would have to be a bump: two releases,
+//! the first widening what a build accepts and the second moving what it writes, with
+//! every send to a peer that settled lower gated down in between (compatibility spec
+//! §3.1, **V4**). That is a release cycle, not an edit. The reason this change is not
+//! one:
 //!
 //! - **postcard** has a byte-string form, and it is encoded exactly as its sequence
 //!   form — a varint length then the payload. Same bytes, different code path.

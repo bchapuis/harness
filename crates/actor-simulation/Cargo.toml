@@ -16,6 +16,7 @@ actor-core.workspace = true
 actor-cluster.workspace = true
 actor-serialization.workspace = true
 async-channel.workspace = true
+compat.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 

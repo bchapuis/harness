@@ -19,7 +19,6 @@ use actor_serialization::JsonCodec;
 
 use crate::SimNetwork;
 use crate::transport::SimNode;
-use crate::transport::SimTransport;
 
 /// A node's process was replaced by [`SimNetwork::restart`] — emitted on the
 /// event stream (actor §16) just before the old system is shut down.
@@ -45,10 +44,7 @@ impl SimNetwork {
         // which carry the same `NodeId` — untouched.
         let (spawner, domain) = self.spawner.with_fresh_domain();
         let (tx, rx) = async_channel::unbounded();
-        let transport = SimTransport {
-            net: self.clone(),
-            from: node,
-        };
+        let transport = self.transport(node);
         let codec: Arc<dyn Codec> = Arc::new(JsonCodec);
         let config = ClusterConfig {
             codec,

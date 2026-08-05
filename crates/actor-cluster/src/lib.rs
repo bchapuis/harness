@@ -40,6 +40,7 @@ pub use membership::SwimConfig;
 pub use protocol::CallId;
 pub use protocol::Frame;
 pub use protocol::ReceptionistEntry;
+pub use protocol::WIRE;
 pub use raft::Committed;
 pub use raft::EntryPayload;
 pub use raft::GroupId;

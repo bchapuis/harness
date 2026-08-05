@@ -35,8 +35,15 @@
 //!   A compressor applied unconditionally would make the most numerous payload class
 //!   on the wire worse.
 //!
-//! Turning it on is blocked on something this file cannot settle — see
-//! `actor-runtime/src/transport.rs`, where the negotiated wire revision is discarded.
+//! What it needs from outside this file is a way to say which form a payload carries
+//! without an older peer reading the tag as blob content and failing the content hash.
+//! `Transport::peer_version` is that: the association reports what it settled on, and
+//! a build accepting two revisions writes the tagged form only to a peer that settled
+//! on the higher one. Taking it is the **V4** two-release path — widen `WIRE` to accept
+//! 1..=2, write 2 in a later release — against the alternative of capability
+//! negotiation, a new blob message older peers reject with `Unhandled` and the sender
+//! caches per peer. Both are rollout decisions rather than measurements, which is why
+//! this file takes neither.
 //!
 //! Run with `cargo bench -p granary --bench compress`. If a `machine-data/` or
 //! `harness-data/` directory from a real run is present at the workspace root, the
