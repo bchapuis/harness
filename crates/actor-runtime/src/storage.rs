@@ -412,7 +412,7 @@ impl FileRaftWAL {
     /// replace of the `term` file.
     fn persist_term(&self, record: &TermRecord) -> io::Result<()> {
         let bytes = serde_json::to_vec(record).expect("a TermRecord always serializes");
-        wal::atomic_replace(&self.dir, "term", &bytes)
+        wal::atomic_replace(&self.dir, "term", &TERM.stamp(&bytes))
     }
 
     /// The fallible body of [`RaftWAL::append`]: truncate the log at `from_index`'s
@@ -456,16 +456,14 @@ impl FileRaftWAL {
         let base = inner.state.snapshot_index;
         // Persist the snapshot first: a crash here leaves a snapshot newer than the
         // log, which `open` self-heals; the reverse would lose the prefix.
-        let record = SnapshotRecord {
+        let record = SnapshotBody {
             index,
             term,
             data: data.to_vec(),
+            ext: compat::Extensions::new(),
         };
-        wal::atomic_replace(
-            &self.dir,
-            "snapshot",
-            &postcard::to_allocvec(&record).expect("a SnapshotRecord always serializes"),
-        )?;
+        let body = postcard::to_allocvec(&record).expect("a SnapshotBody always serializes");
+        wal::atomic_replace(&self.dir, "snapshot", &SNAPSHOT.stamp(&body))?;
 
         // Drop the prefix the snapshot subsumes, then rewrite the log to what remains.
         // Mirrors `InMemoryRaftWAL`: a stale/duplicate index discards nothing.
@@ -976,21 +974,26 @@ mod tests {
         );
     }
 
-    /// **V4**, read-new first: this release reads both forms and still writes the
-    /// unstamped one, so a rollback onto the previous build finds a `term` file it
-    /// can parse. Inverts in the release that flips the writer.
+    /// **V4**'s write step, now that every build reads both forms.
     #[test]
-    fn a_term_is_still_written_unstamped_until_the_write_release() {
+    fn a_term_is_written_stamped() {
         let dir = tempfile::tempdir().unwrap();
         let wal = FileRaftWAL::open(dir.path()).expect("open");
         assert_eq!(wal.save_term_and_vote(5, Some(node(1))), WalAck::Persisted);
+        drop(wal);
 
         let bytes = std::fs::read(dir.path().join("term")).expect("read the term file");
+        assert!(TERM.is_stamped(&bytes), "the term file must be stamped");
         assert!(
-            !TERM.is_stamped(&bytes),
-            "the term file must still be written unstamped in the read release",
+            bytes[TERM.magic().len() + 2..].starts_with(b"{"),
+            "and the body must still be the JSON whose parse failure is the \
+             corruption check protecting election safety",
         );
-        assert!(bytes.starts_with(b"{"), "and still be plain JSON");
+
+        // And what it wrote, it reads back (**V3**).
+        let state = FileRaftWAL::open(dir.path()).expect("reopen").load();
+        assert_eq!(state.term, 5);
+        assert_eq!(state.voted_for, Some(node(1)));
     }
 
     /// A `snapshot` file in the shape it had before the format carried a stamp.
@@ -1099,19 +1102,25 @@ mod tests {
         assert_ne!(misread.index, 4, "and it is not the index that was written");
     }
 
-    /// **V4**, read-new first: this release reads both forms and still writes the
-    /// unstamped one. Inverts in the release that flips the writer.
+    /// **V4**'s write step, now that every build reads both forms — and the one
+    /// place the ordering was not optional: a build predating the read release
+    /// decodes these bytes to index 10505 and truncates its log, as
+    /// `a_stamped_snapshot_misparses_under_the_older_decoder` shows.
     #[test]
-    fn a_snapshot_is_still_written_unstamped_until_the_write_release() {
+    fn a_snapshot_is_written_stamped() {
         let dir = tempfile::tempdir().unwrap();
         let wal = FileRaftWAL::open(dir.path()).expect("open");
         assert!(wal.append(0, &[entry(1, app(1, 9))]).persisted());
         assert!(wal.save_snapshot(1, 1, b"state@1").persisted());
+        drop(wal);
 
         let bytes = std::fs::read(dir.path().join("snapshot")).expect("read the snapshot file");
-        assert!(
-            !SNAPSHOT.is_stamped(&bytes),
-            "the snapshot must still be written unstamped in the read release",
-        );
+        assert!(SNAPSHOT.is_stamped(&bytes), "the snapshot must be stamped");
+
+        // And what it wrote, it reads back (**V3**).
+        let state = FileRaftWAL::open(dir.path()).expect("reopen").load();
+        assert_eq!(state.snapshot_index, 1);
+        assert_eq!(state.snapshot_term, 1);
+        assert_eq!(state.snapshot.as_deref(), Some(&b"state@1"[..]));
     }
 }

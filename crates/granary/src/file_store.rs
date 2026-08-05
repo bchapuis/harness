@@ -897,23 +897,26 @@ fn load_seals(dir: &Path) -> io::Result<HashMap<u32, u64>> {
     Ok(seals)
 }
 
-/// Atomically persist a shard's fence term: `[u64 term][u64 checksum]`.
+/// Atomically persist a shard's fence term, stamped `granary.store.fence`.
 fn write_fence(dir: &Path, shard: u32, term: Term) -> io::Result<()> {
-    write_checksummed_u64(&dir.join("fences"), shard, term.value())
+    write_sidecar(&dir.join("fences"), shard, term.value(), &FENCE)
 }
 
-/// Atomically persist a shard's append bound: `[u64 bound][u64 checksum]`.
+/// Atomically persist a shard's append bound, stamped `granary.store.seal`.
 fn write_seal(dir: &Path, shard: u32, bound: u64) -> io::Result<()> {
-    write_checksummed_u64(&dir.join("seals"), shard, bound)
+    write_sidecar(&dir.join("seals"), shard, bound, &SEAL)
 }
 
-/// Atomically persist one checksummed u64 under `dir/<shard>` — the shared shape
-/// of the fence and seal files.
-fn write_checksummed_u64(dir: &Path, shard: u32, value: u64) -> io::Result<()> {
-    let raw = value.to_le_bytes();
-    let mut bytes = raw.to_vec();
-    bytes.extend_from_slice(&wal::checksum(&raw).to_le_bytes());
-    wal::atomic_replace(dir, &shard.to_string(), &bytes)
+/// Atomically persist one stamped sidecar under `dir/<shard>` — the shared shape
+/// of the fence and seal files, read back by [`read_sidecar`].
+fn write_sidecar(dir: &Path, shard: u32, value: u64, stamp: &compat::Stamp) -> io::Result<()> {
+    let body = postcard::to_allocvec(&SidecarBody {
+        checksum: wal::checksum(&value.to_le_bytes()),
+        value,
+        ext: compat::Extensions::new(),
+    })
+    .expect("a sidecar body is plain owned data");
+    wal::atomic_replace(dir, &shard.to_string(), &stamp.stamp(&body))
 }
 
 /// Read a shard's fence term, or `None` if the file is absent.
@@ -1831,24 +1834,33 @@ mod tests {
         );
     }
 
-    /// **V4**, read-new first: this release reads both forms and still writes the
-    /// unstamped one, so a rollback onto the previous build finds bytes it can
-    /// read. Inverts in the release that flips the writers.
+    /// **V4**'s write step: the release before this one taught every build to read
+    /// the stamped form, so writing it is now safe. A build predating *that*
+    /// release reads a stamped fence as no fence, which is why the two steps could
+    /// not be one.
     #[test]
-    fn a_fence_and_a_seal_are_still_written_unstamped_until_the_write_release() {
+    fn a_fence_and_a_seal_are_written_stamped() {
         let dir = tempfile::tempdir().unwrap();
         let store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("open");
         store.bump_fence(0, Term::new(3)).expect("bump");
         store.seal_range(0, 99);
+        drop(store);
 
         for (kind, stamp) in [("fences", &FENCE), ("seals", &SEAL)] {
             let bytes = std::fs::read(dir.path().join(kind).join("0")).expect("read the sidecar");
-            assert!(
-                !stamp.is_stamped(&bytes),
-                "{kind} must still be written unstamped in the read release",
-            );
-            assert_eq!(bytes.len(), SIDECAR_LEGACY_BYTES);
+            assert!(stamp.is_stamped(&bytes), "{kind} must be written stamped");
         }
+
+        // And what it wrote, it reads back (**V3**).
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("reopen");
+        assert!(
+            matches!(
+                store.bump_fence(0, Term::new(2)),
+                Err(BumpRefusal::Fenced(fence)) if fence == Term::new(3)
+            ),
+            "a stamped fence must fence exactly as an unstamped one did",
+        );
+        assert_eq!(store.seals.lock().unwrap().get(&0).copied(), Some(99));
     }
 
     /// The single-writer rule, enforced rather than documented.
