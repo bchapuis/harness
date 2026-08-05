@@ -24,7 +24,11 @@
 //! - **`snapshot`** — one postcard record `{index, term, data}` for the compacted
 //!   prefix (§9), rewritten by the same atomic replace as `term`. Written *before*
 //!   the log prefix it subsumes is dropped, so a crash can leave a snapshot newer
-//!   than the log but never the reverse.
+//!   than the log but never the reverse. Stamped as `actor.raft.snapshot`
+//!   (compatibility §3), with the reader accepting the unstamped predecessor. This
+//!   is the boundary where a *missing* stamp was most dangerous: an unstamped
+//!   `postcard` body has no first byte a reader can reject, so a wrong-format file
+//!   decodes to a plausible index and `open` then discards the log prefix below it.
 //!
 //! **Recovery.** At [`open`](FileRaftWAL::open), the snapshot is loaded, then the log
 //! is recovered by [`Wal::open`](wal::Wal::open) (which discards a torn tail). Records
@@ -124,8 +128,51 @@ struct TermRecord {
     ext: compat::Extensions,
 }
 
-/// The `snapshot` file's content (spec §9): the compacted prefix's last index and
-/// term, and the application snapshot taken at it.
+/// The stamp on the `snapshot` file (compatibility spec §3, `actor.raft.snapshot`).
+///
+/// The magic buys less here than at any other boundary in the tree, and it is
+/// worth being plain about why. A `snapshot` file predating the stamp begins with
+/// a `postcard` varint, so *every* byte is a possible first byte of one: no magic
+/// can make the older decoder safe against stamped bytes. Read as a
+/// [`SnapshotRecord`], `\x89RFSNAP\n` decodes to `index = 10505`, `term = 70`, and
+/// a payload length of 83 — and `postcard::from_bytes` ignores trailing bytes, so
+/// a snapshot with 83 bytes of state or more decodes *successfully* to a wrong
+/// index, after which [`FileRaftWAL::open`] drops every log record at or below it.
+/// Committed entries, gone silently.
+///
+/// What the magic buys is the forward direction, which is the one this build
+/// controls: a reader that has it never takes a stamped file for an unstamped one.
+/// The backward direction is why the writer flips a release later than the reader
+/// (**V4**), and `a_stamped_snapshot_misparses_under_the_older_decoder` pins the
+/// hazard so the ordering is not mistaken for ceremony.
+const SNAPSHOT: compat::Stamp = compat::Stamp::new(
+    b"\x89RFSNAP\n",
+    compat::Window::at("actor.raft.snapshot", 1),
+);
+
+/// The critical extension keys the `snapshot` file implements: none yet.
+const SNAPSHOT_EXT_KNOWN: &[u16] = &[];
+
+/// The `snapshot` file's content behind the stamp (spec §9): the compacted
+/// prefix's last index and term, and the application snapshot taken at it.
+///
+/// A second type rather than a field added to [`SnapshotRecord`], because
+/// `postcard` is positional: adding one there would change what every stored
+/// snapshot means, and **V4** wants the previous definition kept behind its own
+/// decoder anyway.
+#[derive(Serialize, Deserialize)]
+struct SnapshotBody {
+    index: u64,
+    term: u64,
+    data: Vec<u8>,
+    /// Room to grow without a revision bump (compatibility spec §2.1). Mandatory
+    /// here: the body is positional, so without it every added field is a revision
+    /// with a second decoder to keep.
+    ext: compat::Extensions,
+}
+
+/// The `snapshot` file's content **before** it carried a stamp: the shape a
+/// reader adopts, kept verbatim so the predecessor decodes exactly as it did.
 #[derive(Serialize, Deserialize)]
 struct SnapshotRecord {
     index: u64,
@@ -226,6 +273,43 @@ impl FileRaftWAL {
 
         let snapshot_path = dir.join("snapshot");
         let (snapshot_index, snapshot_term, snapshot) = match fs::read(&snapshot_path) {
+            // As with the term file: the magic decides which decoder runs, so a
+            // revision this build refuses is a named skew (**V2**) rather than
+            // bytes fed to the predecessor's decoder.
+            Ok(bytes) if SNAPSHOT.is_stamped(&bytes) => {
+                let (_, body) = SNAPSHOT.unstamp(&bytes).map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "raft snapshot file {} was written by a different build \
+                             ({err}); this is a version skew, not corruption — run this \
+                             node on a build that accepts it, and keep the node's state",
+                            snapshot_path.display()
+                        ),
+                    )
+                })?;
+                let record: SnapshotBody = postcard::from_bytes(body).map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "corrupt raft snapshot file {} ({err}); refusing to guess a \
+                             compacted prefix — restore or remove the node's state and \
+                             rejoin it as a new member",
+                            snapshot_path.display()
+                        ),
+                    )
+                })?;
+                record
+                    .ext
+                    .admit(SNAPSHOT.window().boundary(), SNAPSHOT_EXT_KNOWN)
+                    .map_err(|err| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("raft snapshot file {}: {err}", snapshot_path.display()),
+                        )
+                    })?;
+                (record.index, record.term, Some(record.data))
+            }
             Ok(bytes) => {
                 let record: SnapshotRecord = postcard::from_bytes(&bytes).map_err(|err| {
                     io::Error::new(
@@ -907,5 +991,127 @@ mod tests {
             "the term file must still be written unstamped in the read release",
         );
         assert!(bytes.starts_with(b"{"), "and still be plain JSON");
+    }
+
+    /// A `snapshot` file in the shape it had before the format carried a stamp.
+    fn legacy_snapshot(index: u64, term: u64, data: Vec<u8>) -> Vec<u8> {
+        postcard::to_allocvec(&SnapshotRecord { index, term, data })
+            .expect("encode a legacy snapshot record")
+    }
+
+    /// A stamped `snapshot` file, encoded the way this build reads one. Written
+    /// here rather than taken from `persist_snapshot`, because the writer still
+    /// emits the unstamped form until the release that flips it (**V4**).
+    fn stamped_snapshot(index: u64, term: u64, data: Vec<u8>) -> Vec<u8> {
+        let body = postcard::to_allocvec(&SnapshotBody {
+            index,
+            term,
+            data,
+            ext: compat::Extensions::new(),
+        })
+        .expect("encode a snapshot body");
+        SNAPSHOT.stamp(&body)
+    }
+
+    #[test]
+    fn actor_raft_snapshot_v1_still_loads_its_compacted_prefix() {
+        // The payload is deliberately longer than 83 bytes, which is what the
+        // magic's own bytes decode as a length under the older decoder. That makes
+        // this fixture double as the input to
+        // `a_stamped_snapshot_misparses_under_the_older_decoder`: shorten it and
+        // that test stops demonstrating anything.
+        let data: Vec<u8> = (0u8..=199).collect();
+        let bytes = crate::corpus::golden("actor.raft.snapshot", 1, || {
+            stamped_snapshot(4, 2, data.clone())
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("snapshot"), &bytes).expect("stage the fixture");
+
+        let wal = FileRaftWAL::open(dir.path())
+            .expect("this build must read an actor.raft.snapshot v1 it accepts");
+        let state = wal.load();
+        assert_eq!(state.snapshot_index, 4);
+        assert_eq!(state.snapshot_term, 2);
+        assert_eq!(state.snapshot.as_deref(), Some(&data[..]));
+    }
+
+    #[test]
+    fn an_unstamped_snapshot_file_is_adopted_rather_than_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = b"the compacted prefix".to_vec();
+        std::fs::write(
+            dir.path().join("snapshot"),
+            legacy_snapshot(6, 3, data.clone()),
+        )
+        .expect("stage a legacy record");
+
+        let wal = FileRaftWAL::open(dir.path()).expect("an unstamped snapshot must still load");
+        let state = wal.load();
+        assert_eq!(state.snapshot_index, 6);
+        assert_eq!(state.snapshot_term, 3);
+        assert_eq!(state.snapshot.as_deref(), Some(&data[..]));
+    }
+
+    #[test]
+    fn a_snapshot_from_another_revision_is_refused_as_a_revision_not_as_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = stamped_snapshot(4, 2, vec![7; 90]);
+        let head = SNAPSHOT.magic().len();
+        bytes[head..head + 2].copy_from_slice(&9u16.to_le_bytes());
+        std::fs::write(dir.path().join("snapshot"), &bytes).expect("stage a future revision");
+
+        let Err(err) = FileRaftWAL::open(dir.path()) else {
+            panic!("a revision this build does not accept must not open");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let message = err.to_string();
+        assert!(
+            message.contains("actor.raft.snapshot") && message.contains("v9"),
+            "the refusal must name the boundary and what it found: {message}",
+        );
+        assert!(
+            !message.contains("remove the"),
+            "a version skew must not carry the corruption advice: {message}",
+        );
+    }
+
+    /// Why the writer flips a release after the reader (**V4**), demonstrated
+    /// rather than asserted.
+    ///
+    /// A stamped snapshot handed to the decoder that predates the stamp does not
+    /// fail — it *succeeds*, at a fabricated index, because the magic's own bytes
+    /// are a valid `postcard` prefix and `from_bytes` ignores whatever trails. A
+    /// build reading that would then drop every log record at or below index
+    /// 10505: committed entries destroyed with no diagnostic. Nothing but the
+    /// release ordering stands between that and a rollback.
+    #[test]
+    fn a_stamped_snapshot_misparses_under_the_older_decoder() {
+        let bytes = stamped_snapshot(4, 2, (0u8..=199).collect());
+        let misread: SnapshotRecord = postcard::from_bytes(&bytes)
+            .expect("the older decoder accepts these bytes — that is the hazard");
+
+        assert_eq!(
+            misread.index, 10505,
+            "the magic's leading bytes decode as this index, and `open` would \
+             discard every log record at or below it",
+        );
+        assert_ne!(misread.index, 4, "and it is not the index that was written");
+    }
+
+    /// **V4**, read-new first: this release reads both forms and still writes the
+    /// unstamped one. Inverts in the release that flips the writer.
+    #[test]
+    fn a_snapshot_is_still_written_unstamped_until_the_write_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = FileRaftWAL::open(dir.path()).expect("open");
+        assert!(wal.append(0, &[entry(1, app(1, 9))]).persisted());
+        assert!(wal.save_snapshot(1, 1, b"state@1").persisted());
+
+        let bytes = std::fs::read(dir.path().join("snapshot")).expect("read the snapshot file");
+        assert!(
+            !SNAPSHOT.is_stamped(&bytes),
+            "the snapshot must still be written unstamped in the read release",
+        );
     }
 }

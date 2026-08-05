@@ -103,6 +103,7 @@ Every boundary in the tree, its name, and where its layout is specified. A new d
 | `granary.store.manifest` | 1 | The record-schema field of its log's header | the caller's own record type | [granary](granary-spec.md) §7 |
 | `granary.store.segment` | 1 | The record-schema field of its log's header | the caller's own record type | [granary](granary-spec.md) §7 |
 | `actor.raft.term` | 1 | `\x89RFTERM\n` and a `u16`, ahead of the JSON body in the node's `term` file | **extension area** | actor §9.4.3 |
+| `actor.raft.snapshot` | 1 | `\x89RFSNAP\n` and a `u16`, ahead of the postcard body in the node's `snapshot` file | **extension area** | actor §9.4.3 |
 | `granary.store.fence` | 1 | `GRFNCE` and a `u16`, ahead of each `fences/<shard>` file | **extension area** | [granary](granary-spec.md) §8 |
 | `granary.store.seal` | 1 | `GRSEAL` and a `u16`, ahead of each `seals/<shard>` file | **extension area** | [granary](granary-spec.md) §7.7 |
 | `blob.tombstone` | 1 | `BSTOMB` and a `u16`, ahead of each `tombstones/<ns>` file | **extension area** | [blob-store](blob-store-spec.md) §5.3 |
