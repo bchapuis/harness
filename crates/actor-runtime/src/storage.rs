@@ -10,7 +10,12 @@
 //!   [`save_term_and_vote`](RaftWAL::save_term_and_vote) by atomic replace
 //!   ([`wal::atomic_replace`]). A torn write is impossible: a reader sees either the
 //!   old record or the new one. It stays JSON so that its parse failure is the
-//!   corruption check protecting election safety.
+//!   corruption check protecting election safety. The stamp ahead of it
+//!   (`actor.raft.term`, compatibility §3) answers a different question — that
+//!   the bytes are this format at all — so a build skew is refused *by name*
+//!   rather than reported as the corruption this JSON body exists to detect. The
+//!   two have opposite fixes: roll the binary back, versus re-seed the node and
+//!   lose its vote history. The reader also accepts the unstamped predecessor.
 //! - **`log`** — a framed, checksummed append-only [`wal::Wal`] of `(absolute index,
 //!   entry)` records. Carrying the absolute index makes a crash mid-compaction
 //!   self-healing (below). Raft's truncate-then-append maps to
@@ -82,12 +87,41 @@ const MAX_RECORD: u32 = 1 << 20;
 /// range one release before anything writes the new revision.
 const LOG_RECORDS: compat::Window = compat::Window::at("actor.raft.log", 1);
 
+/// The stamp on the `term` file (compatibility spec §3, `actor.raft.term`).
+///
+/// `\x89RFTERM\n` is `wal::MAGIC`'s convention, and the discrimination it buys
+/// here is total in both directions — the rare case. A `term` file that predates
+/// the stamp is `serde_json` of a struct, so it always begins `{`, and no JSON
+/// value may begin `0x89`. A stamped reader can never take the predecessor for a
+/// stamp, and a build predating the stamp fails at byte 0 rather than parsing part
+/// of one.
+const TERM: compat::Stamp =
+    compat::Stamp::new(b"\x89RFTERM\n", compat::Window::at("actor.raft.term", 1));
+
+/// The critical extension keys the `term` file implements: none yet.
+const TERM_EXT_KNOWN: &[u16] = &[];
+
 /// The `term` file's content (spec §9.4.3 item 2): the current term and the
 /// vote cast in it, always written together — they are one atomic decision.
 #[derive(Serialize, Deserialize)]
 struct TermRecord {
     term: u64,
     voted_for: Option<NodeId>,
+    /// Room to grow without a revision bump (compatibility spec §2.1).
+    ///
+    /// JSON already tolerates a field a reader does not know, so the *ancillary*
+    /// half of the rule comes free. What it cannot express is the other half —
+    /// "a reader that does not know this MUST refuse" — and the term file is
+    /// exactly where a silently-ignored field would cost election safety. A
+    /// pre-vote term or a lease recorded here and skipped by an older build is a
+    /// double vote waiting to happen.
+    ///
+    /// `default` is what makes adoption free: a legacy record with no such field
+    /// decodes into this struct with no second decoder anywhere.
+    /// `skip_serializing_if` keeps revision 1's bytes identical to what this file
+    /// held before the stamp, which the corpus fixture then pins.
+    #[serde(default, skip_serializing_if = "compat::Extensions::is_empty")]
+    ext: compat::Extensions,
 }
 
 /// The `snapshot` file's content (spec §9): the compacted prefix's last index and
@@ -142,7 +176,29 @@ impl FileRaftWAL {
         let term_path = dir.join("term");
         let (term, voted_for) = match fs::read(&term_path) {
             Ok(bytes) => {
-                let record: TermRecord = serde_json::from_slice(&bytes).map_err(|err| {
+                // Two questions, asked in this order and answered differently. Bytes
+                // carrying the magic are *this* format, so a revision outside the
+                // window is refused as a version skew (**V2**) and never handed to
+                // the JSON decoder; only bytes without it are the unstamped
+                // predecessor, which JSON reads exactly as it always did.
+                let body = if TERM.is_stamped(&bytes) {
+                    let (_, body) = TERM.unstamp(&bytes).map_err(|err| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "raft term file {} was written by a different build \
+                                 ({err}); this is a version skew, not corruption — run \
+                                 this node on a build that accepts it, and keep the \
+                                 node's state",
+                                term_path.display()
+                            ),
+                        )
+                    })?;
+                    body
+                } else {
+                    &bytes[..]
+                };
+                let record: TermRecord = serde_json::from_slice(body).map_err(|err| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!(
@@ -153,6 +209,15 @@ impl FileRaftWAL {
                         ),
                     )
                 })?;
+                record
+                    .ext
+                    .admit(TERM.window().boundary(), TERM_EXT_KNOWN)
+                    .map_err(|err| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("raft term file {}: {err}", term_path.display()),
+                        )
+                    })?;
                 (record.term, record.voted_for)
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => (0, None),
@@ -360,7 +425,12 @@ impl RaftWAL for FileRaftWAL {
         if self.poisoned().is_some() {
             return WalAck::Failed;
         }
-        if let Err(err) = self.persist_term(&TermRecord { term, voted_for }) {
+        let record = TermRecord {
+            term,
+            voted_for,
+            ext: compat::Extensions::new(),
+        };
+        if let Err(err) = self.persist_term(&record) {
             return self.fail(format!(
                 "raft term persistence failed at {}: {err} — a voter that cannot \
                  persist its vote cannot safely continue",
@@ -744,5 +814,98 @@ mod tests {
             "a node cannot read its own log: the entry schema moved without a \
              revision bump (compatibility V4, §3.2.1)",
         );
+    }
+
+    /// A `term` file in the shape it had before the format carried a stamp.
+    fn legacy_term(term: u64, voted_for: Option<NodeId>) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "term": term, "voted_for": voted_for }))
+            .expect("encode a legacy term record")
+    }
+
+    /// A stamped `term` file, encoded the way this build reads one. Written here
+    /// rather than taken from `persist_term`, because the writer still emits the
+    /// unstamped form until the release that flips it (**V4**).
+    fn stamped_term(term: u64, voted_for: Option<NodeId>) -> Vec<u8> {
+        let body = serde_json::to_vec(&TermRecord {
+            term,
+            voted_for,
+            ext: compat::Extensions::new(),
+        })
+        .expect("encode a term record");
+        TERM.stamp(&body)
+    }
+
+    #[test]
+    fn actor_raft_term_v1_still_loads_its_term_and_vote() {
+        let bytes = crate::corpus::golden("actor.raft.term", 1, || stamped_term(7, Some(node(3))));
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("term"), &bytes).expect("stage the fixture");
+
+        let wal =
+            FileRaftWAL::open(dir.path()).expect("this build must read an actor.raft.term v1");
+        let state = wal.load();
+        assert_eq!(state.term, 7);
+        assert_eq!(state.voted_for, Some(node(3)));
+    }
+
+    /// A `term` file predating the stamp is *adopted*: read by the JSON decoder it
+    /// always had. Refusing would make the stamp a migration for every node, and
+    /// the operator advice attached to that refusal destroys vote history.
+    #[test]
+    fn an_unstamped_term_file_is_adopted_rather_than_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("term"), legacy_term(4, Some(node(2))))
+            .expect("stage a legacy record");
+
+        let wal = FileRaftWAL::open(dir.path()).expect("an unstamped term file must still load");
+        let state = wal.load();
+        assert_eq!(state.term, 4);
+        assert_eq!(state.voted_for, Some(node(2)));
+    }
+
+    /// A version skew and a corrupt file must not read alike: their fixes are
+    /// opposite. Corruption says restore or remove the node's state, which throws
+    /// away its vote history; a skew says roll the binary back and *keep* it. An
+    /// operator who follows the wrong one destroys recoverable state.
+    #[test]
+    fn a_term_from_another_revision_is_refused_as_a_revision_not_as_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = stamped_term(7, Some(node(3)));
+        let head = TERM.magic().len();
+        bytes[head..head + 2].copy_from_slice(&9u16.to_le_bytes());
+        std::fs::write(dir.path().join("term"), &bytes).expect("stage a future revision");
+
+        let Err(err) = FileRaftWAL::open(dir.path()) else {
+            panic!("a revision this build does not accept must not open");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let message = err.to_string();
+        assert!(
+            message.contains("actor.raft.term") && message.contains("v9"),
+            "the refusal must name the boundary and what it found: {message}",
+        );
+        assert!(
+            !message.contains("remove the"),
+            "a version skew must not carry the corruption advice, which discards \
+             the node's vote history: {message}",
+        );
+    }
+
+    /// **V4**, read-new first: this release reads both forms and still writes the
+    /// unstamped one, so a rollback onto the previous build finds a `term` file it
+    /// can parse. Inverts in the release that flips the writer.
+    #[test]
+    fn a_term_is_still_written_unstamped_until_the_write_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = FileRaftWAL::open(dir.path()).expect("open");
+        assert_eq!(wal.save_term_and_vote(5, Some(node(1))), WalAck::Persisted);
+
+        let bytes = std::fs::read(dir.path().join("term")).expect("read the term file");
+        assert!(
+            !TERM.is_stamped(&bytes),
+            "the term file must still be written unstamped in the read release",
+        );
+        assert!(bytes.starts_with(b"{"), "and still be plain JSON");
     }
 }

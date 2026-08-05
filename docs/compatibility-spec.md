@@ -102,6 +102,7 @@ Every boundary in the tree, its name, and where its layout is specified. A new d
 | `actor.raft.log` | 1 | The record-schema field of its log's header | the caller's own record type | actor §9.4.3 |
 | `granary.store.manifest` | 1 | The record-schema field of its log's header | the caller's own record type | [granary](granary-spec.md) §7 |
 | `granary.store.segment` | 1 | The record-schema field of its log's header | the caller's own record type | [granary](granary-spec.md) §7 |
+| `actor.raft.term` | 1 | `\x89RFTERM\n` and a `u16`, ahead of the JSON body in the node's `term` file | **extension area** | actor §9.4.3 |
 | `granary.store.fence` | 1 | `GRFNCE` and a `u16`, ahead of each `fences/<shard>` file | **extension area** | [granary](granary-spec.md) §8 |
 | `granary.store.seal` | 1 | `GRSEAL` and a `u16`, ahead of each `seals/<shard>` file | **extension area** | [granary](granary-spec.md) §7.7 |
 | `blob.tombstone` | 1 | `BSTOMB` and a `u16`, ahead of each `tombstones/<ns>` file | **extension area** | [blob-store](blob-store-spec.md) §5.3 |
@@ -170,6 +171,18 @@ The boundary it closes is a gap §3.3 leaves. A grain's *event payloads* are use
 The granularity is the directory, not the record (§3, *granularity is a cost decision*). Every record under one store is written by one deployment's codec, so the question is answered once per store rather than once per record on the hottest durable path in the tree.
 
 **An unstamped directory is adopted, not refused.** A store predating the stamp opens, and the codec running at that moment is written down. Adoption cannot verify what it records, so a store whose codec was *already* swapped is stamped with the wrong answer and its records still fail one grain at a time. That is the honest limit: the stamp guards every swap after it and cannot retroactively guard one that already happened. Refusing instead would make the check a migration for every existing directory, which is the cost a stamp exists to avoid.
+
+### 3.5 `actor.raft.term`
+
+A magic and a revision ahead of the JSON body in a voter's `term` file (actor §9.4.3). It is the one boundary in the registry where the stamp sits in front of a body that could already detect a problem on its own, and the two checks are deliberately kept apart.
+
+**The body stays JSON, and the stamp does not replace what that buys.** JSON's structural redundancy is the *corruption* check: a damaged byte fails to parse rather than decoding to a different valid term, which is why the term file stayed JSON while the snapshot beside it went `postcard`. Election safety rests on that — a term read wrongly is a second vote in a term already voted in. The stamp answers a different question: whether these bytes are this format at all.
+
+**The two refusals must not read alike**, because their fixes are opposite. A corrupt term tells the operator to restore or remove the node's state and rejoin it as a new member, which throws away its vote history. A version skew tells them to run the node on a build that accepts the file, and to *keep* that state. Before the stamp, a build skew would have been reported as corruption, and an operator following that advice would have destroyed recoverable state to fix a binary they only had to roll back.
+
+**The extension area is not redundant with JSON's own tolerance.** JSON already ignores a field a reader does not know, which is the ancillary half of §2.1 and comes free. The half it cannot express is criticality — *a reader that does not know this MUST refuse* — and the term file is precisely where a silently-ignored field costs safety: a pre-vote term or a lease written here and skipped by an older build is a double vote waiting to happen.
+
+**An unstamped file is adopted**, and unlike §3.4's adoption this one verifies nothing and claims nothing: the predecessor is read by the same JSON decoder it always was, and the stamp appears on the next ordinary write.
 
 ---
 
