@@ -14,9 +14,11 @@ What is left is that the sweep's revision-varying behavior is the workload's own
 
 Boundaries that exist as formats but are **not yet stamped**, in the spec's priority order (compatibility §5). Each is a place where a format change today is a migration rather than an edit.
 
+The sidecars are done. The Raft term and snapshot pointers, granary's per-shard fences and seals, and the blob-store tombstones are stamped boundaries with checked-in bytes, and each reader still adopts its unstamped predecessor. Two of them were not in the spec's list: the fence and the seal, which were the most dangerous of the set, and which the list did not mention. Note what this does *not* close — unstamped-to-stamped is not revision 1 to revision 2, so the tree still has no boundary keeping a prior definition behind a revision, and the gap above stands.
+
 | Boundary | What an unstamped change costs |
 |---|---|
-| Sidecars | The Raft term and snapshot pointers, the shardmap, and the blob-store tombstones are durable formats written through `wal::atomic_replace` with no stamp. `compat::Stamp` wraps them without disturbing the primitive's opaque-bytes interface. |
+| The shard map's commands | `ShardMapCommand` is `serde_json` inside `EntryPayload::App`, riding the stamped `actor.raft.log` — whose revision covers the envelope, not the payload. Worse than unstamped: `decode` swallows failures with `.ok()`, so an unrecognized command is silently skipped at apply time on one node while its peer applies it. State divergence on a consensus apply path, and a **V2** violation. Fail-closed first, a boundary second; needs mixed-version simulation, not a fixture. |
 | A log's record-schema stamp | A `Wal` appends at the revision its build writes without updating the header, so once a caller's window spans two revisions the stamp understates until a compaction restamps it (wal §2.1 rule 5). Fail-closed, and compaction is the workaround. |
 | A cluster-wide minimum revision | Carrying each member's announced range in the membership digest, so a behavior enables itself only once the whole cluster accepts it. Turns **V4** from a policy into a mechanism. |
 

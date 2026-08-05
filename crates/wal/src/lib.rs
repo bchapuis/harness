@@ -78,13 +78,18 @@ use serde::de::DeserializeOwned;
 /// FNV-1a 64, for a caller framing its own sidecar bytes (e.g. a fixed-width value
 /// file). Detects torn and partial writes, not adversarial tampering.
 ///
-/// **This function's output is frozen.** A sidecar is a bare `[value][checksum]` with no
-/// header, so a reader has no way to ask which digest wrote it — it can only recompute
-/// and compare. Callers treat a mismatch as *torn or absent* rather than as a refusal,
-/// because with `atomic_replace` behind them a mismatch cannot otherwise happen. Change
-/// what this returns and every existing sidecar silently reads as missing: granary's
-/// durable fence would come back as *no fence* (**G1**, the single-writer fence), which is
-/// a safety property, not a compatibility inconvenience.
+/// **This function's output is frozen for any sidecar that still has no header.** A bare
+/// `[value][checksum]` gives a reader no way to ask which digest wrote it — it can only
+/// recompute and compare — so changing what this returns would make every such sidecar
+/// silently read as missing, and a durable fence coming back as *no fence* is a safety
+/// property lost, not a compatibility inconvenience.
+///
+/// Giving a sidecar a header is what lifts that, and granary's fence and seal have since
+/// taken it: `granary.store.fence` and `granary.store.seal` carry a magic and a revision
+/// (compatibility §3), so a digest change there becomes an ordinary revision bump, and a
+/// mismatch is a *refusal naming the file* rather than an absence. What remains frozen is
+/// the case this paragraph describes — and the reason to reach for a header before
+/// reaching for a faster digest.
 ///
 /// The log's own frames do not use this. They carry a checksum-kind field in the header
 /// naming which digest closed them, so they are free to move to a faster one and still be
