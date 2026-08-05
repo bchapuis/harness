@@ -64,6 +64,16 @@ One layer has a design note rather than a spec:
   warm as two different measurements, and read per-block cost as the *slope* between
   two image sizes — a total divided by its block count measures the intercept.
 
+## Open work
+
+- [open-work](open-work.md) — the cross-cutting read of everything the specs
+  declare unfinished, ordered by what blocks what: the negotiated wire revision
+  that no caller can see (and so gates every other compatibility move), the
+  format boundaries still unstamped, the invariants no sweep asserts, and the
+  deferrals each layer owns. An index, not a source of truth — every entry
+  points at the section that owns it, and both are deleted together when an item
+  lands.
+
 ## Elsewhere in the tree
 
 - [../design-principles.md](../design-principles.md) — the design rubric the

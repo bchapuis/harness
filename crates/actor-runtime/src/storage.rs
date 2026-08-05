@@ -697,4 +697,52 @@ mod tests {
         let final_state = FileRaftWAL::open(dir.path()).unwrap();
         assert_eq!(final_state.load(), mirror.load(), "diverged at the end");
     }
+
+    // --- Golden corpus (compatibility spec §4) --------------------------------
+
+    /// The corpus log records, and they must never change: the checked-in bytes
+    /// *are* these values.
+    ///
+    /// One of each [`EntryPayload`] variant, because `postcard` encodes a variant
+    /// as a positional discriminant — inserting a variant anywhere but the end
+    /// silently reinterprets every entry written under the ones after it. `App`
+    /// carries the `serde_bytes` shape whose encoding must stay byte-identical
+    /// (see its own note), so the fixture pins that too.
+    fn corpus_log() -> Vec<(u64, RaftEntry)> {
+        vec![
+            (1, entry(1, EntryPayload::Noop)),
+            (2, entry(1, EntryPayload::AddVoter(node(2)))),
+            (3, entry(2, EntryPayload::RemoveVoter(node(3)))),
+            (4, entry(2, app(0xA5, 9))),
+        ]
+    }
+
+    #[test]
+    fn actor_raft_log_v1_still_recovers_its_entries() {
+        let bytes = crate::corpus::golden("actor.raft.log", 1, || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("log");
+            let (mut log, _) = wal::Wal::<(u64, RaftEntry)>::open(&path, MAX_RECORD, &LOG_RECORDS)
+                .expect("open a fresh log");
+            log.append_batch(&corpus_log()).expect("append");
+            drop(log);
+            std::fs::read(&path).expect("read back the produced log")
+        });
+
+        // Staged, never opened in place: `Wal::open` truncates a torn tail, so a
+        // build that could not read the fixture would rewrite it and erase the
+        // failure it is here to catch.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (_log, records) = wal::Wal::<(u64, RaftEntry)>::open(&path, MAX_RECORD, &LOG_RECORDS)
+            .expect("this build must read an actor.raft.log v1 log it accepts");
+        assert_eq!(
+            records,
+            corpus_log(),
+            "a node cannot read its own log: the entry schema moved without a \
+             revision bump (compatibility V4, §3.2.1)",
+        );
+    }
 }

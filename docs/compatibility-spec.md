@@ -152,7 +152,13 @@ The one entry defined so far shows why the criticality bit is carried per key ra
 
 Stamps are mechanism; **V4** and **V5** are policy, and policy nothing checks decays.
 
-**A golden corpus** — per boundary, checked-in bytes from each revision and a test that decodes every one with the current build. It catches the failure a type system cannot see: adding a field to a `postcard` struct compiles cleanly and breaks every stored copy of it. *Not yet implemented.*
+**A golden corpus** — per boundary, checked-in bytes from each revision and a test that decodes every one with the current build. It catches the failure a type system cannot see: adding a field to a `postcard` struct, or reordering two of them, compiles cleanly and breaks every stored copy at once, with no diagnostic anywhere — a reordered struct makes a log recover as *empty*, which every layer above reads as a grain that was never written to.
+
+Fixtures live beside the format that owns them, at `crates/<owner>/corpus/<boundary>/v<revision>.bin`, and each is decoded by a test next to that format's own code: `compat` owns no format and reads no file (§2), so it cannot do the decoding itself. What it owns is the **completeness gate** (`crates/compat/tests/golden_corpus.rs`), which parses the §3 table above and holds the tree to it in both directions — a boundary in the registry with no corpus at its current revision fails, and so does a fixture naming a boundary the registry does not. That is what makes §3's "a new durable or wire format MUST appear here" carry an obligation a later build can act on, rather than only a place to write the name down.
+
+**The fixtures are evidence, not output.** A file records what a revision's bytes meant, so regenerating one turns a caught format break into a green run — the one way a corpus can fail silently. `GOLDEN_UPDATE=1` therefore writes only a fixture that is *absent*, the case of adding a revision, and never rewrites one that exists. A fixture that stops decoding is the corpus working, and the fix is **V4**'s rather than the file's: widen the window, keep the old decoder, add the new revision's bytes beside it.
+
+What the corpus deliberately does **not** assert is that the current build re-encodes a fixture byte-for-byte. Under **V4** a build reads revisions it no longer writes, so byte equality would fail on precisely the upgrade the policy prescribes; and a boundary may change its bytes compatibly without changing their meaning at all (a log records which digest wrote it and reads both, wal §2.1). Decoding old bytes to the right *value* is the property. Reproducing them is not.
 
 **Mixed-version simulation** — simulated nodes given *different* windows, prior record and message definitions kept behind their revision, and the granary invariants and linearizability checks asserted across a rolling upgrade and a rollback. This is the reason to route every boundary through one `Window` type. *Not yet implemented.*
 

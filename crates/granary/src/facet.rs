@@ -1312,4 +1312,74 @@ mod tests {
             SNAPSHOT.stamp(&postcard::to_allocvec(&(String::from("json"), parts())).unwrap());
         assert_eq!(stamped.len(), bare.len() + 1);
     }
+
+    // --- Golden corpus (compatibility spec §4) --------------------------------
+
+    /// The corpus record, and it must never change: the checked-in bytes *are*
+    /// this value, so editing it silently redefines the fixture instead of
+    /// testing against it. A different shape belongs to a different revision.
+    ///
+    /// Tag 1 with a payload whose leading byte is itself 1 — the ambiguity the
+    /// envelope's tag-space stamp exists to avoid (a version prefix could not tell
+    /// `[rev 1][tag 1]` from `[tag 1][payload 0x01]`), so the fixture pins that
+    /// the leading byte is read as a tag and nothing else.
+    fn corpus_record() -> (u8, Vec<u8>) {
+        (1, vec![0x01, 0x7F, 0x80, 0xFF])
+    }
+
+    #[test]
+    fn granary_record_v1_still_splits_into_its_tag_and_payload() {
+        let (tag, payload) = corpus_record();
+        let bytes = crate::corpus::golden("granary.record", 1, || tag_record(tag, &payload));
+
+        let (found_tag, found_payload) = split_record(&bytes)
+            .expect("this build must read a granary.record v1 envelope it accepts");
+        assert_eq!(found_tag, tag, "the leading byte is the facet tag");
+        assert_eq!(
+            found_payload, payload,
+            "the payload came back changed — the envelope moved a byte",
+        );
+    }
+
+    /// Facet 0 inline, two facet contributions, and an empty extension area: the
+    /// shape every snapshot written by this build has, and the one a later reader
+    /// must keep reading.
+    #[test]
+    fn granary_snapshot_v1_still_decodes_to_its_composite() {
+        let bytes = crate::corpus::golden("granary.snapshot", 1, || {
+            composite()
+                .encode("json")
+                .expect("encode the corpus snapshot")
+        });
+
+        let back = CompositeSnapshot::decode(&bytes, "json")
+            .expect("this build must read a granary.snapshot v1 body it accepts");
+        assert_eq!(
+            inline(back.state),
+            vec![9, 9],
+            "facet 0's state decoded to different bytes than it was written from",
+        );
+        assert_eq!(
+            back.facets,
+            vec![(1, vec![4]), (2, vec![])],
+            "the facet contributions decoded out of order or changed",
+        );
+    }
+
+    #[test]
+    fn the_snapshot_corpus_is_refused_under_another_codec() {
+        // Facet 0's state is codec-encoded (§4.1), so the fixture also pins that a
+        // deployment codec change is reported as itself rather than as a corrupt
+        // grain — the failure `granary.store` is still unstamped against (§5).
+        let bytes = crate::corpus::golden("granary.snapshot", 1, || {
+            composite().encode("json").expect("encode")
+        });
+        let err = CompositeSnapshot::decode(&bytes, "postcard")
+            .err()
+            .expect("a snapshot from another codec must not decode");
+        assert!(
+            err.0.contains("granary.snapshot") && err.0.contains("json"),
+            "the refusal must name the boundary and the codec that wrote it: {err}",
+        );
+    }
 }

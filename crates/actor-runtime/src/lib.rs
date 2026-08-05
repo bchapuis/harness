@@ -31,6 +31,8 @@
 #![allow(clippy::disallowed_methods)]
 
 mod clock;
+#[cfg(test)]
+mod corpus;
 mod entropy;
 mod spawner;
 mod storage;

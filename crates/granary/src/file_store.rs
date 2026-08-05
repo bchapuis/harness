@@ -1216,6 +1216,145 @@ mod tests {
         GrainName::new("test.Grain", key)
     }
 
+    // --- Golden corpus (compatibility spec §4) --------------------------------
+    //
+    // Both logs stamp a *record schema* into their header, and both record types
+    // are `postcard`, which is positional: adding or reordering a field compiles
+    // cleanly and makes every stored segment unreadable. These fixtures are the
+    // only thing that notices. See `crate::corpus` for why they are never
+    // regenerated.
+
+    /// Stage checked-in bytes as a log file and hand back its path.
+    ///
+    /// Never opened in place: `Wal::open` truncates a torn tail, so a build that
+    /// could not read the fixture would rewrite it and erase the failure.
+    fn stage(dir: &tempfile::TempDir, bytes: &[u8]) -> std::path::PathBuf {
+        let path = dir.path().join("log");
+        std::fs::write(&path, bytes).expect("stage the fixture");
+        path
+    }
+
+    /// Write `records` into a fresh log under `window` and return its bytes.
+    fn produce_log<T: Serialize + serde::de::DeserializeOwned>(
+        records: &[T],
+        window: &compat::Window,
+    ) -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        let (mut log, _) = Wal::<T>::open(&path, MAX_RECORD, window).expect("open a fresh log");
+        log.append_batch(records).expect("append");
+        drop(log);
+        std::fs::read(&path).expect("read back the produced log")
+    }
+
+    /// The corpus manifest entries, and they must never change: the checked-in
+    /// bytes *are* these values.
+    fn corpus_manifest() -> Vec<ManifestEntry> {
+        vec![
+            ManifestEntry {
+                shard: 0,
+                grain: name("a"),
+                id: 0,
+            },
+            ManifestEntry {
+                shard: 7,
+                grain: GrainName::new("test.Other", ""),
+                id: 42,
+            },
+        ]
+    }
+
+    #[test]
+    fn granary_store_manifest_v1_still_replays_its_entries() {
+        let bytes = crate::corpus::golden("granary.store.manifest", 1, || {
+            produce_log(&corpus_manifest(), &MANIFEST_RECORDS)
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_log, entries) =
+            Wal::<ManifestEntry>::open(stage(&dir, &bytes), MAX_RECORD, &MANIFEST_RECORDS)
+                .expect("this build must read a granary.store.manifest v1 log it accepts");
+
+        let found: Vec<(u32, GrainName, u64)> = entries
+            .into_iter()
+            .map(|e| (e.shard, e.grain, e.id))
+            .collect();
+        let expected: Vec<(u32, GrainName, u64)> = corpus_manifest()
+            .into_iter()
+            .map(|e| (e.shard, e.grain, e.id))
+            .collect();
+        assert_eq!(
+            found, expected,
+            "manifest entries decoded to different values than they were written from",
+        );
+    }
+
+    /// The corpus segment ops: every [`SegOp`] variant, in an order whose replay
+    /// leaves a state worth asserting — a checkpoint, two appends past it, a
+    /// snapshot that advances the base, and a truncate that drops the last append.
+    fn corpus_segment() -> Vec<SegOp> {
+        let mut records = GrainRecords::default();
+        records.store_record(
+            Seq::ZERO,
+            Term::new(1),
+            vec![b"e1".to_vec(), b"e2".to_vec()],
+            WriteKind::Append,
+        );
+        vec![
+            SegOp::Checkpoint(records.export()),
+            SegOp::Record {
+                after: Seq::new(2),
+                term: Term::new(1),
+                records: vec![b"e3".to_vec()],
+                kind: WriteKind::Append,
+            },
+            SegOp::Record {
+                after: Seq::new(3),
+                term: Term::new(1),
+                records: vec![b"e4".to_vec()],
+                kind: WriteKind::Append,
+            },
+            SegOp::Snapshot {
+                at: Seq::new(2),
+                term: Term::new(1),
+                state: b"snap".to_vec(),
+            },
+            SegOp::Truncate {
+                after: Seq::new(3),
+                term: Term::new(1),
+            },
+        ]
+    }
+
+    #[test]
+    fn granary_store_segment_v1_still_replays_to_the_same_segment() {
+        let bytes = crate::corpus::golden("granary.store.segment", 1, || {
+            produce_log(&corpus_segment(), &SEGMENT_RECORDS)
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = stage(&dir, &bytes);
+        std::fs::create_dir_all(dir.path().join("segments")).unwrap();
+        std::fs::rename(&path, dir.path().join("segments").join("0")).unwrap();
+
+        // Replayed through the real `open_segment`, so the fixture pins the whole
+        // read path — the header's schema stamp, the frame scan, and the fold —
+        // rather than just `postcard`.
+        let segment = open_segment(dir.path(), 0)
+            .expect("this build must read a granary.store.segment v1 log it accepts");
+        let inner = segment.inner.lock().unwrap();
+        assert_eq!(
+            inner.records.head(),
+            Seq::new(3),
+            "the replayed head moved: an op decoded to something else",
+        );
+        assert_eq!(
+            inner.records.snapshot(),
+            Some((Seq::new(2), b"snap".to_vec())),
+            "the replayed snapshot moved: a Snapshot op decoded to something else",
+        );
+    }
+
     /// The single-writer rule, enforced rather than documented.
     #[cfg(unix)]
     #[test]
