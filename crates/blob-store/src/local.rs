@@ -22,6 +22,12 @@
 //! harmless and re-driven, because the tombstone — not the presence of files —
 //! makes the namespace gone. `Local` is CP trivially (one store, one writer) and
 //! cannot survive losing that node's disk.
+//!
+//! A tombstone file is a stamped durable format, `blob.tombstone` (compatibility
+//! §3), and the reader also accepts the unstamped predecessor. The blob files
+//! themselves are not stamped and must not be: their name *is* the BLAKE3 hash of
+//! their bytes, so a prefix would make every path a lie and `verify` would refuse
+//! what it wrote. There the stamp is the name.
 
 use std::fs;
 use std::future::Future;
@@ -41,11 +47,37 @@ use crate::blob::Namespace;
 use crate::blob::slice;
 use crate::blob::verify;
 
-/// Bytes of a tombstone record on disk: `deleted_at` (u64 LE) followed by its
-/// checksum (u64 LE), mirroring the grain store's fence file (granary
-/// `file_store`). The checksum guards against a torn read, though `atomic_replace`
-/// already makes the write whole-or-nothing.
-const TOMBSTONE_BYTES: usize = 16;
+/// The stamp on a tombstone file (compatibility §3, `blob.tombstone`).
+///
+/// `BSTOMB` cannot be confused with the unstamped predecessor by length alone —
+/// that form is exactly [`TOMBSTONE_LEGACY_BYTES`], and a stamped record is longer
+/// — but the magic is what lets the reader say so without depending on a width
+/// that a later revision may change.
+const TOMBSTONE: compat::Stamp =
+    compat::Stamp::new(b"BSTOMB", compat::Window::at("blob.tombstone", 1));
+
+/// Extension keys revision 1 knows. Empty: the area exists so the record can gain
+/// a field without a revision bump, and nothing has needed one yet.
+const TOMBSTONE_EXT_KNOWN: &[u16] = &[];
+
+/// A tombstone record's body, behind the stamp: the deletion stamp, a checksum
+/// over it, and the extension area (compatibility §2.1).
+///
+/// The checksum guards a torn read, though `atomic_replace` already makes the
+/// write whole-or-nothing; it covers the area as well as the value, so a change
+/// there cannot pass unnoticed.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TombstoneBody {
+    checksum: u64,
+    deleted_at: u64,
+    ext: compat::Extensions,
+}
+
+/// Bytes of an **unstamped** tombstone record: `deleted_at` (u64 LE) followed by
+/// its checksum (u64 LE), which is the shape this format had before it carried a
+/// stamp, and the shape the grain store's fence file still has (granary
+/// `file_store`). A reader adopts it; nothing writes it.
+const TOMBSTONE_LEGACY_BYTES: usize = 16;
 
 /// A single-node, on-disk content-addressed store (spec §5.1).
 ///
@@ -173,9 +205,7 @@ impl LocalBlobStore {
     /// the sweep, so even a crash mid-sweep leaves the namespace gone.
     pub fn tombstone(&self, ns: &Namespace, deleted_at: u64) -> Result<(), BlobError> {
         let _guard = self.lock();
-        let mut record = [0u8; TOMBSTONE_BYTES];
-        record[..8].copy_from_slice(&deleted_at.to_le_bytes());
-        record[8..].copy_from_slice(&wal::checksum(&deleted_at.to_le_bytes()).to_le_bytes());
+        let record = encode_tombstone(deleted_at);
         wal::atomic_replace(&self.inner.tombstones, &ns.to_string(), &record)
             .map_err(unavailable)?;
         self.sweep(ns);
@@ -184,8 +214,37 @@ impl LocalBlobStore {
 
     /// Whether `ns` has been tombstoned. The tombstone file's presence is the
     /// answer (the atomic write makes it whole-or-absent).
+    ///
+    /// Deliberately not a decode: **presence**, not the record's contents, is what
+    /// makes a namespace gone (spec §5.3), so a namespace stays deleted even if a
+    /// build cannot read the stamp inside. What such a build loses is the stamp,
+    /// which [`tombstoned_at`](Self::tombstoned_at) reports and which is
+    /// informational — never the deletion itself.
     pub fn is_tombstoned(&self, ns: &Namespace) -> bool {
         self.inner.tombstones.join(ns.to_string()).exists()
+    }
+
+    /// The stamp recorded when `ns` was tombstoned, or `None` if it was not.
+    ///
+    /// The value is the anchor a rejoining node's [`TombstoneSet`] converges on:
+    /// `insert` keeps the **minimum** of two stamps for one namespace (spec §5.3),
+    /// so a set rebuilt from these files merges commutatively with one gossiped
+    /// from a peer.
+    ///
+    /// # Errors
+    ///
+    /// The bytes are neither a stamped record this build accepts nor the unstamped
+    /// predecessor — a format skew or bit-rot, which is reported rather than read
+    /// as an absent tombstone.
+    ///
+    /// [`TombstoneSet`]: crate::tombstone::TombstoneSet
+    pub fn tombstoned_at(&self, ns: &Namespace) -> io::Result<Option<u64>> {
+        let path = self.inner.tombstones.join(ns.to_string());
+        match fs::read(&path) {
+            Ok(bytes) => decode_tombstone(&path, &bytes).map(Some),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     /// Remove a namespace's blob subtree. Best-effort and re-drivable: an absent
@@ -313,6 +372,63 @@ fn unavailable(err: io::Error) -> BlobError {
     BlobError::Unavailable(err.to_string())
 }
 
+/// A tombstone record's bytes, stamped at the revision this build writes.
+fn encode_tombstone(deleted_at: u64) -> Vec<u8> {
+    let body = TombstoneBody {
+        checksum: wal::checksum(&deleted_at.to_le_bytes()),
+        deleted_at,
+        ext: compat::Extensions::new(),
+    };
+    TOMBSTONE.stamp(&postcard::to_allocvec(&body).expect("a tombstone body is plain owned data"))
+}
+
+/// The deletion stamp `bytes` carry, accepting both the stamped form and the
+/// unstamped predecessor.
+///
+/// The two questions are asked in that order and kept apart (**V2**): bytes
+/// carrying the magic are *this* format, so a revision this build does not accept
+/// is refused rather than handed to the older decoder, and only bytes without the
+/// magic are read as the predecessor.
+fn decode_tombstone(path: &Path, bytes: &[u8]) -> io::Result<u64> {
+    let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
+    if TOMBSTONE.is_stamped(bytes) {
+        // Revision first, then the extension area, then the body: nothing reads a
+        // field until the bytes have been admitted as this format at all.
+        let (_, body) = TOMBSTONE
+            .unstamp(bytes)
+            .map_err(|err| invalid(format!("tombstone at {}: {err}", path.display())))?;
+        let body: TombstoneBody = postcard::from_bytes(body)
+            .map_err(|err| invalid(format!("tombstone at {}: {err}", path.display())))?;
+        body.ext
+            .admit(TOMBSTONE.window().boundary(), TOMBSTONE_EXT_KNOWN)
+            .map_err(|err| invalid(format!("tombstone at {}: {err}", path.display())))?;
+        if body.checksum != wal::checksum(&body.deleted_at.to_le_bytes()) {
+            return Err(invalid(format!(
+                "tombstone at {}: checksum mismatch",
+                path.display()
+            )));
+        }
+        return Ok(body.deleted_at);
+    }
+    if bytes.len() == TOMBSTONE_LEGACY_BYTES {
+        let raw = u64::from_le_bytes(bytes[..8].try_into().expect("8-byte slice"));
+        let check = u64::from_le_bytes(bytes[8..].try_into().expect("8-byte slice"));
+        if check != wal::checksum(&raw.to_le_bytes()) {
+            return Err(invalid(format!(
+                "unstamped tombstone at {}: checksum mismatch",
+                path.display()
+            )));
+        }
+        return Ok(raw);
+    }
+    Err(invalid(format!(
+        "tombstone at {}: neither a `BSTOMB` record nor a {TOMBSTONE_LEGACY_BYTES}-byte \
+         unstamped one ({} bytes)",
+        path.display(),
+        bytes.len(),
+    )))
+}
+
 impl BlobStore for LocalBlobStore {
     fn put(
         &self,
@@ -389,6 +505,90 @@ mod tests {
         assert_eq!(id, BlobId::of(&bytes));
         assert_eq!(block_on(store.get(&ns, &id, None)), Ok(bytes));
         assert_eq!(block_on(store.has(&ns, &id)), Ok(true));
+    }
+
+    /// The `blob.tombstone` fixture still decodes to the stamp it recorded
+    /// (compatibility §4). A `postcard` body is positional, so a field added to
+    /// `TombstoneBody` or two of them reordered compiles cleanly and silently
+    /// changes what every stored record means; nothing else in this crate — which
+    /// has no in-tree consumer — would notice.
+    #[test]
+    fn blob_tombstone_v1_still_reads_its_stamp() {
+        let (_dir, store) = store();
+        let ns = ns();
+        let bytes = crate::corpus::golden("blob.tombstone", 1, || encode_tombstone(9));
+
+        let path = store.inner.tombstones.join(ns.to_string());
+        fs::write(&path, &bytes).expect("stage the fixture");
+
+        assert!(store.is_tombstoned(&ns));
+        assert_eq!(store.tombstoned_at(&ns).expect("decode"), Some(9));
+    }
+
+    /// A tombstone written before this format carried a stamp is *adopted*: read
+    /// by its own decoder rather than refused. The alternative would make the
+    /// stamp a migration for every existing store, which is the opposite of what
+    /// a stamp is for.
+    #[test]
+    fn an_unstamped_tombstone_is_adopted_rather_than_refused() {
+        let (_dir, store) = store();
+        let ns = ns();
+        let mut legacy = [0u8; TOMBSTONE_LEGACY_BYTES];
+        legacy[..8].copy_from_slice(&42u64.to_le_bytes());
+        legacy[8..].copy_from_slice(&wal::checksum(&42u64.to_le_bytes()).to_le_bytes());
+
+        let path = store.inner.tombstones.join(ns.to_string());
+        fs::write(&path, legacy).expect("stage a legacy record");
+
+        assert_eq!(store.tombstoned_at(&ns).expect("decode"), Some(42));
+    }
+
+    /// A record carrying the magic is *this* format, so a revision outside the
+    /// window is refused by name (**V2**) instead of being handed to the older
+    /// decoder — the misparse `is_stamped` exists to prevent.
+    #[test]
+    fn a_tombstone_from_another_revision_is_refused_rather_than_adopted() {
+        let (_dir, store) = store();
+        let ns = ns();
+        let mut bytes = encode_tombstone(9);
+        bytes[6..8].copy_from_slice(&9u16.to_le_bytes());
+
+        let path = store.inner.tombstones.join(ns.to_string());
+        fs::write(&path, &bytes).expect("stage a future revision");
+
+        let err = store
+            .tombstoned_at(&ns)
+            .expect_err("a refusal, not a value");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let message = err.to_string();
+        assert!(
+            message.contains("blob.tombstone") && message.contains("v9"),
+            "the refusal names the boundary and what it found: {message}"
+        );
+    }
+
+    /// **Presence**, not the record's contents, is what makes a namespace gone
+    /// (spec §5.3). Pinned so a later change to the body cannot quietly make
+    /// deletion depend on parsing — a build that could not read the stamp would
+    /// otherwise start serving blobs from a deleted namespace.
+    #[test]
+    fn a_tombstone_is_gone_by_presence_whatever_its_bytes() {
+        let (_dir, store) = store();
+        let ns = ns();
+        let id = block_on(store.put(&ns, b"soon to be swept".to_vec())).expect("put");
+
+        let path = store.inner.tombstones.join(ns.to_string());
+        fs::write(&path, b"not a tombstone record at all").expect("stage garbage");
+
+        assert!(store.is_tombstoned(&ns), "presence answers, not the bytes");
+        assert_eq!(
+            block_on(store.get(&ns, &id, None)),
+            Err(BlobError::Deleted(ns.clone()))
+        );
+        assert!(
+            store.tombstoned_at(&ns).is_err(),
+            "the stamp is unreadable, and that is reported rather than read as absent"
+        );
     }
 
     #[test]

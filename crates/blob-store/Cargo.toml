@@ -15,7 +15,9 @@ workspace = true
 actor-core.workspace = true
 actor-cluster.workspace = true
 actor-serialization.workspace = true
+compat.workspace = true
 wal.workspace = true
+postcard.workspace = true
 serde = { workspace = true }
 serde_bytes.workspace = true
 futures.workspace = true

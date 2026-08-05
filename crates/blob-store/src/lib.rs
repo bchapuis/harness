@@ -21,6 +21,8 @@ use std::path::Path;
 
 pub mod blob;
 pub mod cluster;
+#[cfg(test)]
+mod corpus;
 pub mod event;
 pub mod local;
 pub mod placement;
