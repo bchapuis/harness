@@ -20,6 +20,14 @@
 //!   body, for a boundary that puts bytes on disk.
 //! - [`Extensions`] is **headroom**: a tagged area a durable envelope carries so it
 //!   can grow without a revision bump at all.
+//!
+//! A durable boundary that predates its own stamp needs one move more:
+//! **adoption**. Bytes already on disk carry no magic, so a reader accepts both
+//! forms — [`Stamp::is_stamped`] asks which one it is holding — reads a legacy file
+//! with the legacy decoder, and lets the next ordinary write rewrite it stamped.
+//! What adoption must not do is treat "no magic" and "a revision I refuse" alike:
+//! the first is a predecessor and the second is a skew, and answering the second
+//! with the old decoder is exactly the misparse the stamp was added to stop.
 
 use std::fmt;
 
@@ -217,6 +225,26 @@ impl Stamp {
     /// The window this stamp judges against.
     pub const fn window(&self) -> &Window {
         &self.window
+    }
+
+    /// The magic this stamp writes and recognizes.
+    pub const fn magic(&self) -> &'static [u8] {
+        self.magic
+    }
+
+    /// Whether `bytes` carry this stamp's magic — the question an **adopting**
+    /// reader asks before [`unstamp`](Stamp::unstamp), so an unstamped predecessor
+    /// can be read by its own decoder while a stamped input at an unreadable
+    /// revision is still refused (**V2**).
+    ///
+    /// Without it the two are one [`Incompatible::Unstamped`], and a reader that
+    /// took that to mean "try the old decoder" would silently downgrade a refusal
+    /// into a misparse — the failure the stamp exists to prevent.
+    ///
+    /// This is a question about the *format*, not about the shape of a verdict: a
+    /// caller still propagates [`Incompatible`] unexamined.
+    pub fn is_stamped(&self, bytes: &[u8]) -> bool {
+        bytes.starts_with(self.magic)
     }
 
     /// Prefix `body` with the magic and the revision this build writes.
@@ -481,6 +509,25 @@ mod tests {
         bytes[6..8].copy_from_slice(&9u16.to_le_bytes());
         let err = STAMP.unstamp(&bytes).unwrap_err();
         assert!(matches!(err, Incompatible::Version { found, .. } if found == Version(9)));
+    }
+
+    #[test]
+    fn is_stamped_separates_a_foreign_input_from_an_unreadable_revision() {
+        const STAMP: Stamp = Stamp::new(b"TESTMG", WIRE);
+        assert!(
+            !STAMP.is_stamped(b"{\"legacy\":true}"),
+            "an unstamped predecessor is not this format, and adoption may read it"
+        );
+        let mut bytes = STAMP.stamp(b"payload");
+        bytes[6..8].copy_from_slice(&9u16.to_le_bytes());
+        assert!(
+            STAMP.is_stamped(&bytes),
+            "a revision this build refuses is still this format, and must not be adopted"
+        );
+        assert!(matches!(
+            STAMP.unstamp(&bytes),
+            Err(Incompatible::Version { .. })
+        ));
     }
 
     #[test]
