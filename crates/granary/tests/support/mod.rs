@@ -13,6 +13,9 @@
 //! - [`log`] — the appendable `LogGrain` and the reference subscription
 //!   reconciler, shared by `subscription_faults.rs` (scripted §14 cases) and
 //!   `subscription_swarm.rs` (the same object under the nemesis).
+//! - [`timer`] — the alarm-bearing `Timer`, generic over the hosting system, so
+//!   `alarm_index.rs` drives it on the `Local` tier and `alarm_cluster.rs` and
+//!   `alarm_swarm.rs` drive the same grain on the clustered one.
 //!
 //! `counter` is re-exported flat; `ledger` is not. Both define an `Add`, so two
 //! globs would make the name ambiguous — and because `ledger` is feature-gated,
@@ -34,6 +37,8 @@ pub use exercised::Exercised;
 // Not re-exported flat: `log` defines an `Append`, as `ledger` does, and the
 // suites that use it name the module.
 pub mod log;
+
+pub mod timer;
 
 #[cfg(feature = "sql")]
 pub mod ledger;

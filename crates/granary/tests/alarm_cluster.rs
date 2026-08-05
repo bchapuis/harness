@@ -11,6 +11,8 @@
 //! never re-activates the timer): a fired alarm consumes itself and the host clears
 //! its index entry, so the entry's disappearance means the grain fired callerlessly.
 
+mod support;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -18,106 +20,34 @@ use std::time::Duration;
 use actor_cluster::DowningPolicy;
 use actor_cluster::RaftConfig;
 use actor_cluster::SwimConfig;
-use actor_core::Manifest;
-use actor_core::Message;
 use actor_core::NodeId;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
 use actor_simulation::scenario_sweep;
 use actor_simulation::sweep_seeds;
-use granary::Alarm;
 use granary::AlarmIndex;
 use granary::AllPending;
 use granary::DueBefore;
-use granary::Grain;
-use granary::GrainCtx;
-use granary::GrainHandler;
 use granary::GrainName;
 use granary::Granary;
 use granary::GranaryConfig;
 use granary::GranaryExt;
 use granary::index_key;
 use granary::shard_for;
-use serde::Deserialize;
-use serde::Serialize;
+
+use support::timer::Arm;
+use support::timer::ReadFired;
+use support::timer::TIMER_TYPE;
+
+/// The `Timer` at this suite's tier.
+type Timer = support::timer::Timer<SimNode>;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
 
-const TIMER_TYPE: &str = "test.Timer";
 const SHARDS: usize = 2;
-
-// --- An alarm-bearing grain on the clustered system ---------------------------
-
-#[derive(Default)]
-struct Timer;
-
-#[derive(Default, Serialize, Deserialize)]
-struct TimerState {
-    fired: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-enum TimerEvent {
-    Fired,
-}
-
-impl Grain for Timer {
-    type System = SimNode;
-    type State = TimerState;
-    type Event = TimerEvent;
-    type Facets = (Alarm,);
-    const GRAIN_TYPE: &'static str = "test.Timer";
-
-    fn apply(state: &mut TimerState, event: &TimerEvent) {
-        match event {
-            TimerEvent::Fired => state.fired += 1,
-        }
-    }
-
-    fn register(r: &mut granary::GrainRegistry<Self>) {
-        r.accept::<Arm>();
-        r.accept::<ReadFired>();
-    }
-
-    async fn on_alarm(&self, _s: &TimerState, _ctx: &GrainCtx<Self>) -> Vec<TimerEvent> {
-        vec![TimerEvent::Fired]
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Arm {
-    after_ms: u64,
-}
-impl Message for Arm {
-    type Reply = ();
-    const MANIFEST: Manifest = Manifest::new("test.timer.Arm");
-}
-impl GrainHandler<Arm> for Timer {
-    async fn handle(&self, _s: &TimerState, m: Arm, ctx: &GrainCtx<Self>) -> (Vec<TimerEvent>, ()) {
-        ctx.alarm().set_after(Duration::from_millis(m.after_ms));
-        (vec![], ())
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ReadFired;
-impl Message for ReadFired {
-    type Reply = u64;
-    const MANIFEST: Manifest = Manifest::new("test.timer.ReadFired");
-}
-impl GrainHandler<ReadFired> for Timer {
-    async fn handle(
-        &self,
-        s: &TimerState,
-        _m: ReadFired,
-        _ctx: &GrainCtx<Self>,
-    ) -> (Vec<TimerEvent>, u64) {
-        (vec![], s.fired)
-    }
-}
 
 // --- Cluster harness (mirrors clustered_grains.rs) ----------------------------
 

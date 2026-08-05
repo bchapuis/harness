@@ -10,6 +10,8 @@
 //! an alarmed grain hibernates once (and only once) the index has acknowledged
 //! its deadline, the driver waking it when the alarm falls due.
 
+mod support;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -22,7 +24,6 @@ use actor_core::Spawner;
 use actor_simulation::Recorder;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
-use granary::Alarm;
 use granary::AlarmIndex;
 use granary::AlarmSync;
 use granary::AllPending;
@@ -41,77 +42,17 @@ use granary::testing::StaticGrainStore;
 use serde::Deserialize;
 use serde::Serialize;
 
+use support::timer::Arm;
+use support::timer::ReadFired;
+// `Poke` below reuses the timer's state and event types: it is a grain the driver
+// re-activates, not one that fires, so its own vocabulary would be two empty types.
+use support::timer::TimerEvent;
+use support::timer::TimerState;
+
+/// The `Timer` at this suite's tier.
+type Timer = support::timer::Timer<SimSystem>;
+
 const SHARDS: usize = 4;
-
-// --- A minimal alarm-bearing grain -------------------------------------------
-
-#[derive(Default)]
-struct Timer;
-
-#[derive(Default, Serialize, Deserialize)]
-struct TimerState {
-    fired: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-enum TimerEvent {
-    Fired,
-}
-
-impl Grain for Timer {
-    type System = SimSystem;
-    type State = TimerState;
-    type Event = TimerEvent;
-    type Facets = (Alarm,);
-    const GRAIN_TYPE: &'static str = "test.Timer";
-
-    fn apply(state: &mut TimerState, event: &TimerEvent) {
-        match event {
-            TimerEvent::Fired => state.fired += 1,
-        }
-    }
-
-    fn register(r: &mut granary::GrainRegistry<Self>) {
-        r.accept::<Arm>();
-        r.accept::<ReadFired>();
-    }
-
-    async fn on_alarm(&self, _s: &TimerState, _ctx: &GrainCtx<Self>) -> Vec<TimerEvent> {
-        vec![TimerEvent::Fired]
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Arm {
-    after_ms: u64,
-}
-impl Message for Arm {
-    type Reply = ();
-    const MANIFEST: Manifest = Manifest::new("test.timer.Arm");
-}
-impl GrainHandler<Arm> for Timer {
-    async fn handle(&self, _s: &TimerState, m: Arm, ctx: &GrainCtx<Self>) -> (Vec<TimerEvent>, ()) {
-        ctx.alarm().set_after(Duration::from_millis(m.after_ms));
-        (vec![], ())
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ReadFired;
-impl Message for ReadFired {
-    type Reply = u64;
-    const MANIFEST: Manifest = Manifest::new("test.timer.ReadFired");
-}
-impl GrainHandler<ReadFired> for Timer {
-    async fn handle(
-        &self,
-        s: &TimerState,
-        _m: ReadFired,
-        _ctx: &GrainCtx<Self>,
-    ) -> (Vec<TimerEvent>, u64) {
-        (vec![], s.fired)
-    }
-}
 
 // --- A plain grain the driver can re-activate from the index ------------------
 
