@@ -13,6 +13,7 @@
 //! (append visible on every replica, follower fenced, quorum loss → `Unavailable`)
 //! live in `tests/clustered_grains.rs` and `tests/partition_safety.rs`.
 
+use actor_serialization::JsonCodec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -25,8 +26,8 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
 use granary::FileGrainStore;
 use granary::Grain;
@@ -273,7 +274,7 @@ fn committed_writes_survive_a_full_cluster_cold_restart_with_a_file_store() {
     let dir = tempfile::tempdir().expect("tempdir");
     let sim = Simulation::new(7);
     let net = leader_net(&sim);
-    let factory = FileGrainStore::factory(dir.path());
+    let factory = FileGrainStore::factory(dir.path(), &JsonCodec);
     let mut systems = [net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2));
     let granaries: Vec<Granary<Account>> = systems
@@ -293,7 +294,7 @@ fn committed_writes_survive_a_full_cluster_cold_restart_with_a_file_store() {
         systems[idx] = net.restart(node);
     }
     sim.run_for(Duration::from_secs(3));
-    let factory = FileGrainStore::factory(dir.path());
+    let factory = FileGrainStore::factory(dir.path(), &JsonCodec);
     let granaries: Vec<Granary<Account>> = systems
         .iter()
         .map(|s| s.granary::<Account>(config(factory.clone(), 0)))

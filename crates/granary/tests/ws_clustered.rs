@@ -7,6 +7,7 @@
 //! replica that missed its write — the consumer-level restoration of the
 //! durability margin.
 
+use actor_serialization::JsonCodec;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,8 +22,8 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
 use granary::BlobId;
 use granary::FileGrainStore;
@@ -323,7 +324,7 @@ fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
     let cfg = GranaryConfig {
         idle_after: Duration::from_secs(1), // hibernate when idle, to force a re-activation
         snapshot_every: 1,                  // checkpoint (and put chunks) on every commit
-        grain_store: Some(FileGrainStore::factory(dir.path())),
+        grain_store: Some(FileGrainStore::factory(dir.path(), &JsonCodec)),
         ..config(scratch.path())
     };
     let (net, systems, granaries) = cluster(&sim, cfg);

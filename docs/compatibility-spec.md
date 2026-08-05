@@ -95,6 +95,7 @@ Every boundary in the tree, its name, and where its layout is specified. A new d
 | `actor.wire` | 1 | The accepted range, announced in the `Hello` preamble | negotiated — no area needed | [actor](distributed-actor-spec.md) §7.1 |
 | `granary.record` | 1 | The envelope's leading byte, whose high bit is the revision escape | enum variants in the payload; the envelope itself by revision | [granary](granary-spec.md) §7.12 |
 | `granary.snapshot` | 1 | `GRSNAP` and a `u16`, ahead of the composite's body | **extension area** | [granary](granary-spec.md) §7.12 |
+| `granary.store` | 1 | `GRSTOR` and a `u16`, in the store directory's `store` file | **extension area** | [granary](granary-spec.md) §7.4 |
 | `wal.frame` | 1 | The log file header's magic and frame revision | by revision; the header layout is revision-scoped | [wal](wal-spec.md) §2.1 |
 | `wal.checksum` | — | The header's checksum-kind field (an identity, not a revision) | a new value for the field | [wal](wal-spec.md) §2.1 |
 | `wal.reserved` | — | The header's reserved field, zero at frame revision 1 | by revision | [wal](wal-spec.md) §2.1 |
@@ -143,7 +144,7 @@ The write-ahead log's header (wal §2.1) is the one place a single stamp is spli
 
 A magic and a revision ahead of the composite's `postcard` body (granary §7.12). The revision is admitted before the body is decoded, so a composite from another revision is refused rather than misparsed.
 
-The body also records the **codec that encoded facet 0's contribution**, which is the one part of a snapshot that is not codec-independent (granary §4.1, §5). A mismatch is refused naming both codecs. This is not a revision check and does not use `Version`: the codec is an identity, not an ordering. A `granary.store` stamp (§5) would close the same gap for a whole store; a snapshot carries its own copy because it is the one durable artifact that can travel between stores.
+The body also records the **codec that encoded facet 0's contribution**, which is the one part of a snapshot that is not codec-independent (granary §4.1, §5). A mismatch is refused naming both codecs. This is not a revision check and does not use `Version`: the codec is an identity, not an ordering. The `granary.store` stamp (§3.4) closes the same gap for a whole store and catches it earlier — at open, rather than when a grain activates — so in a store this check is the second line. A snapshot keeps its own copy regardless, because it is the one durable artifact that can travel *between* stores, where the store's answer does not follow it.
 
 The body carries an **extension area** (§2.1). The composite is `postcard`, so without one a single added field — a compression marker, a provenance note, a per-facet digest — would be a revision bump.
 
@@ -152,6 +153,16 @@ The body carries an **extension area** (§2.1). The composite is `postcard`, so 
 | `0x8001` | critical | Facet 0's state travelled as content-addressed chunks; the value is the manifest naming them, and the body's inline state is empty (granary §7.12). |
 
 The one entry defined so far shows why the criticality bit is carried per key rather than per format. Chunking the state adds a *carriage* and reinterprets no byte already defined, so it is an extension, not a revision — a snapshot without the entry means exactly what it always meant, and a build that predates the key still reads every snapshot written before it. But a reader that *skipped* the entry would find the inline state empty and rebuild the grain from a default `State`: total, silent data loss that no later check would catch. So the key is critical, and a build without it refuses the whole snapshot and aborts the activation. That is the shape every future entry should be judged against: ancillary if ignoring it leaves the reader where it was, critical if ignoring it changes what the bytes mean.
+
+### 3.4 `granary.store`
+
+A magic and a revision in a `store` file at the root of a node's grain-store directory, holding the name of the **deployment codec that encoded everything under it** (granary §7.4). It is admitted at `open`, before the fences, the manifest, or any grain's records are read.
+
+The boundary it closes is a gap §3.3 leaves. A grain's *event payloads* are user types under the deployment's codec (granary §4.1, §5) — facet payloads are `postcard` by construction, and a snapshot carries its own copy of the codec that wrote facet 0 — so a grain with records past its last snapshot, or with no snapshot at all, has nothing that would notice the codec changing. Every one of those records would fail to decode, and each failure would surface as its own corrupt-grain activation abort. The store stamp turns that storm into **one refusal at startup naming both codecs**, which is what the situation actually is: a configuration change, not a corrupt store.
+
+The granularity is the directory, not the record (§3, *granularity is a cost decision*). Every record under one store is written by one deployment's codec, so the question is answered once per store rather than once per record on the hottest durable path in the tree.
+
+**An unstamped directory is adopted, not refused.** A store predating the stamp opens, and the codec running at that moment is written down. Adoption cannot verify what it records, so a store whose codec was *already* swapped is stamped with the wrong answer and its records still fail one grain at a time. That is the honest limit: the stamp guards every swap after it and cannot retroactively guard one that already happened. Refusing instead would make the check a migration for every existing directory, which is the cost a stamp exists to avoid.
 
 ---
 
@@ -179,7 +190,6 @@ The revision-varying behavior in that sweep is the *workload's own*, not the tre
 
 Boundaries that exist as formats but are **not yet stamped**, in priority order. Each is a place where a format change today would be a migration rather than an edit.
 
-- **`granary.store`** — a grain's **event payloads** are encoded with the deployment's codec, and nothing on disk records which codec that was. §3.3 closes this for snapshots, but a grain with records past its last snapshot — or none at all — is still unguarded, so swapping the codec turns those records into a storm of corrupt-grain activation aborts rather than one diagnosable configuration error. A store-level stamp catches every record and snapshot at once, and is worth having *before* a codec swap rather than after.
 - **Sidecars** — the Raft term and snapshot pointers, the shardmap, and the blob-store tombstones are durable formats written through `wal::atomic_replace` with no stamp. `compat::Stamp` wraps them without changing the primitive, keeping its opaque-bytes interface intact.
 - **Raising a log's record-schema stamp in place** — a `Wal` appends frames at the revision its build writes without updating the header, so once a caller's window spans two revisions the stamp understates until a compaction restamps it (wal §2.1 rule 5). Fail-closed, and a caller can work around it by compacting; removing the caveat means a second, non-append handle to rewrite two bytes of the header on the first append after a bump.
 - **A cluster-wide minimum revision** — carrying each member's announced range in the membership digest, so a behavior can enable itself only once the whole cluster accepts it. This turns **V4** from a policy into a mechanism.

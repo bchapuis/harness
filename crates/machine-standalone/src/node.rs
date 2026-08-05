@@ -44,6 +44,7 @@ use actor_runtime::TcpConfig;
 use actor_runtime::TcpTransport;
 use actor_runtime::TokioClock;
 use actor_runtime::TokioSpawner;
+use actor_serialization::Codec;
 use actor_serialization::PostcardCodec;
 use granary::AlarmIndex;
 use granary::FileGrainStore;
@@ -215,6 +216,10 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|e| format!("bind transport {bind}: {e}"))?;
+    // One codec value for the three places that must agree: the transport's
+    // framing, the message layer granary encodes records and snapshots with, and
+    // the grain store's stamp naming that codec (granary §7.4).
+    let codec: Arc<dyn Codec> = Arc::new(PostcardCodec);
     let (transport, inbound) = TcpTransport::start(
         TcpConfig {
             node,
@@ -231,7 +236,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
             // per copy, so a block's replication misses the quorum timeout on
             // an unremarkable host and provisioning fails as `Unavailable`.
             // Nothing on this system's wire needs a self-describing format.
-            codec: Arc::new(PostcardCodec),
+            codec: Arc::clone(&codec),
             cluster_secret: opts.secret.clone(),
             allowlist: Some(admitted),
             // Plaintext, guarded by the cluster secret: fine on loopback or a
@@ -255,9 +260,11 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
             // The message layer, matching the transport's above: a blob's bytes
             // are encoded here first and framed there second, so both have to
             // be binary for either to help. This is also the codec granary
-            // encodes a grain's records and snapshots with, so a deployment
-            // that changes it cannot read journals written under the old one.
-            codec: Arc::new(PostcardCodec),
+            // encodes a grain's records and snapshots with, so a deployment that
+            // changes it cannot read journals written under the old one — which
+            // the store's stamp now enforces at open rather than leaving to this
+            // comment (granary §7.4).
+            codec: Arc::clone(&codec),
             events: Arc::new(StderrEvents { node }),
             membership: MembershipMode::Leader(LeaderMode {
                 // A machine's shard leader is where its microVM runs, so a
@@ -306,7 +313,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // host cannot supply is a configuration error, not a half-booted node.
     let host = machine_host(&opts, machine_kind)?;
     let provider = Arc::new(runtime_provider(&host, node, &system));
-    let grain_store = FileGrainStore::factory(opts.data.join("grains"));
+    let grain_store = FileGrainStore::factory(opts.data.join("grains"), codec.as_ref());
     // This node's shared capabilities, set once and used to host every type below
     // (granary §7.4, §13). The I/O pool matters most in this deployment: a machine's
     // disk facet writes whole 1 MiB image blocks, so an inline fsync would stall the

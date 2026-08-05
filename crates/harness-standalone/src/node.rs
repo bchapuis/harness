@@ -42,6 +42,7 @@ use actor_runtime::TcpConfig;
 use actor_runtime::TcpTransport;
 use actor_runtime::TokioClock;
 use actor_runtime::TokioSpawner;
+use actor_serialization::Codec;
 use actor_serialization::JsonCodec;
 use granary::Granary;
 use granary::GranaryExt;
@@ -240,6 +241,13 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|e| format!("bind transport {bind}: {e}"))?;
+    // One codec value for this node, used in all three places that need to agree:
+    // the transport's framing, the message layer granary encodes a grain's records
+    // and snapshots with, and the grain store's stamp naming that codec (granary
+    // §7.4). The store refuses to open under a codec other than the one that wrote
+    // it, so a stamp taken from a *different* value than the message layer's would
+    // be worse than none — it would enforce agreement with the wrong thing.
+    let codec: Arc<dyn Codec> = Arc::new(JsonCodec);
     let (transport, inbound) = TcpTransport::start(
         TcpConfig {
             node,
@@ -249,7 +257,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             outbound_capacity: DEFAULT_OUTBOUND_CAPACITY,
-            codec: Arc::new(JsonCodec),
+            codec: Arc::clone(&codec),
             cluster_secret: opts.secret.clone(),
             allowlist: Some(admitted),
             // Plaintext, guarded by the cluster secret. Fine on loopback or a
@@ -269,6 +277,10 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         transport,
         inbound,
         ClusterConfig {
+            // Explicit rather than inherited from `..default()`: this is the codec
+            // the grain store is stamped with, so it must be *this* value and not
+            // one that happens to match it.
+            codec: Arc::clone(&codec),
             events: Arc::new(StderrEvents { node }),
             // Granary's sharded journal rides Raft, so the node must run the
             // consensus engine: leader-based membership is the only mode that
@@ -309,7 +321,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // One durable grain store under --data (§7.4), shared by the session kinds and
     // the tenancy directory. Its factory caches per node, so every grain type shares
     // one on-disk store keyed by (shard, grain), the grain analogue of the Raft WAL.
-    let grain_store = FileGrainStore::factory(opts.data.join("grains"));
+    let grain_store = FileGrainStore::factory(opts.data.join("grains"), codec.as_ref());
     // This node's shared granary capabilities, set once here and used for every grain
     // type it hosts (granary §7.4, §13).
     //

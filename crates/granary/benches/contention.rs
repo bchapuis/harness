@@ -27,6 +27,8 @@
 //!
 //! Run with `cargo bench -p granary --bench contention`.
 
+use actor_serialization::Codec;
+use actor_serialization::JsonCodec;
 use std::sync::Arc;
 use std::sync::Barrier;
 use std::sync::atomic::AtomicU64;
@@ -145,7 +147,7 @@ fn host_cache_lookup(bencher: Bencher, threads: usize) {
 // --- 2. The file store's manifest and segment maps ---------------------------------
 
 fn store(dir: &std::path::Path) -> FileGrainStore {
-    FileGrainStore::open(dir).expect("open the store")
+    FileGrainStore::open(dir, JsonCodec.name()).expect("open the store")
 }
 
 fn name(i: usize) -> GrainName {

@@ -17,6 +17,8 @@
 //! `read_head` is here because activating a grain asks its store for the head sequence
 //! number, and how much work that costs decides part of a session's time-to-first-token.
 
+use actor_serialization::Codec;
+use actor_serialization::JsonCodec;
 use divan::Bencher;
 use divan::black_box;
 use divan::counter::ItemsCount;
@@ -98,7 +100,7 @@ fn file(bencher: Bencher, records: usize) {
     let dir = tempfile::tempdir().expect("scratch dir");
     commit(
         bencher,
-        FileGrainStore::open(dir.path()).expect("open the store"),
+        FileGrainStore::open(dir.path(), JsonCodec.name()).expect("open the store"),
         records,
     );
 }

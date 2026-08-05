@@ -48,6 +48,8 @@
 //! measures as well as a 512 MiB one and sixteen times faster; a cost that appears
 //! only at 512 MB would show as a slope across the sweep.
 
+use actor_serialization::Codec;
+use actor_serialization::JsonCodec;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -229,7 +231,7 @@ fn put_file(bencher: Bencher) {
     let dir = tempfile::tempdir().expect("scratch dir");
     put_cold(
         bencher,
-        FileGrainStore::open(dir.path()).expect("open the store"),
+        FileGrainStore::open(dir.path(), JsonCodec.name()).expect("open the store"),
     );
 }
 
@@ -246,7 +248,7 @@ fn put_file(bencher: Bencher) {
 #[divan::bench]
 fn put_file_present(bencher: Bencher) {
     let dir = tempfile::tempdir().expect("scratch dir");
-    let store = FileGrainStore::open(dir.path()).expect("open the store");
+    let store = FileGrainStore::open(dir.path(), JsonCodec.name()).expect("open the store");
     let grain = name();
     let bytes = block(0);
     let id = BlobId::of(&bytes);
@@ -476,7 +478,11 @@ fn import_memory(bencher: Bencher, mib: usize) {
 #[divan::bench(args = [4, 16], sample_count = 5, sample_size = 1)]
 fn import_file(bencher: Bencher, mib: usize) {
     let dir = tempfile::tempdir().expect("store dir");
-    import(bencher, mib, Some(FileGrainStore::factory(dir.path())));
+    import(
+        bencher,
+        mib,
+        Some(FileGrainStore::factory(dir.path(), &JsonCodec)),
+    );
     drop(dir);
 }
 

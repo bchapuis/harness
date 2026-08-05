@@ -125,6 +125,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use actor_core::NodeId;
+use actor_serialization::Codec;
 use serde::Deserialize;
 use serde::Serialize;
 use wal::Wal;
@@ -275,17 +276,30 @@ pub struct FileGrainStore {
 }
 
 impl FileGrainStore {
-    /// Open (creating if needed) a node's store directory: load the per-shard fences
-    /// and the segment manifest, truncating any torn tail. Grain segments load lazily.
+    /// Open (creating if needed) a node's store directory: confirm it holds records
+    /// this build's codec can read, then load the per-shard fences and the segment
+    /// manifest, truncating any torn tail. Grain segments load lazily.
+    ///
+    /// `codec` is the name of the deployment's codec
+    /// ([`Codec::name`](actor_serialization::Codec::name)) — the one that encoded
+    /// every event payload in here (§4.1, §5). It is checked against the store's
+    /// stamp (§7.4) *before* any record is read, so a codec change is one refusal
+    /// at startup rather than a corrupt-grain abort per activation.
     ///
     /// # Errors
     ///
-    /// Any filesystem error opening the directory or its index files.
-    pub fn open(dir: impl Into<PathBuf>) -> io::Result<FileGrainStore> {
+    /// [`io::ErrorKind::InvalidData`] when the store was written by another codec
+    /// or at a `granary.store` revision this build does not accept; otherwise any
+    /// filesystem error opening the directory or its index files.
+    pub fn open(dir: impl Into<PathBuf>, codec: &str) -> io::Result<FileGrainStore> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
         // Before anything is read (see `acquire_lock`).
         let lock = acquire_lock(&dir)?;
+        // And before anything is *decoded*: the point of the stamp is that a store
+        // this build cannot read is refused whole, in one place, rather than one
+        // grain at a time as each activation fails to decode its own records.
+        admit_store_stamp(&dir, codec)?;
         fs::create_dir_all(dir.join("segments"))?;
         fs::create_dir_all(dir.join("fences"))?;
         fs::create_dir_all(dir.join("seals"))?;
@@ -362,8 +376,12 @@ impl FileGrainStore {
     /// take a bare index, which names a different consensus group under each type
     /// (§8.2). Separate roots make that mismatch unrepresentable instead of leaving it
     /// to every caller to remember.
-    pub fn factory(root: impl Into<PathBuf>) -> GrainStoreFactory {
+    pub fn factory(root: impl Into<PathBuf>, codec: &dyn Codec) -> GrainStoreFactory {
         let root = root.into();
+        // The codec by name, taken from the value the deployment configured its
+        // system with rather than from a string beside it — the stamp is only worth
+        // anything if it cannot disagree with what actually encodes the records.
+        let codec = codec.name().to_string();
         let cache: Arc<StoreCache> = Arc::new(Mutex::new(HashMap::new()));
         Arc::new(move |grain_type: &str, node: NodeId| {
             let mut cache = cache.lock().expect("grain store cache poisoned");
@@ -371,7 +389,7 @@ impl FileGrainStore {
                 .entry((grain_type.to_string(), node))
                 .or_insert_with(|| {
                     let dir = root.join(grain_type).join(node.to_string());
-                    Arc::new(FileGrainStore::open(&dir).unwrap_or_else(|err| {
+                    Arc::new(FileGrainStore::open(&dir, &codec).unwrap_or_else(|err| {
                         panic!("cannot open grain store at {}: {err}", dir.display())
                     }))
                 })
@@ -646,6 +664,94 @@ fn acquire_lock(dir: &Path) -> io::Result<Option<fs::File>> {
 #[cfg(not(unix))]
 fn acquire_lock(_dir: &Path) -> io::Result<Option<fs::File>> {
     Ok(None)
+}
+
+/// The store's stamp (spec §7.4, compatibility spec §3).
+///
+/// One stamp for a whole directory rather than one per record: a store's records
+/// and snapshots are all encoded by the same deployment codec, so the thing worth
+/// recording is a property of the store, and recording it per record would cost
+/// bytes on the hottest durable path in the tree to answer the same question a
+/// million times.
+pub(crate) const STORE: compat::Stamp =
+    compat::Stamp::new(b"GRSTOR", compat::Window::at("granary.store", 1));
+
+/// The stamp file's name inside the store directory.
+const STORE_FILE: &str = "store";
+
+/// The stamp's body: which codec wrote everything under this directory.
+#[derive(Serialize, Deserialize)]
+struct StoreBody {
+    /// The deployment codec that encoded this store's event payloads (§4.1, §5).
+    ///
+    /// Facet payloads are `postcard` by construction and a snapshot carries its own
+    /// copy of this (§7.12), but a grain's *events* are user types under the
+    /// deployment's codec, and a grain with records past its last snapshot — or no
+    /// snapshot at all — has nothing else that would notice the codec changing.
+    codec: String,
+    /// Room to grow without a revision bump (compatibility spec §2.1). The body is
+    /// `postcard`, which is positional, so without this any added field would be a
+    /// new revision with a second decoder to keep.
+    ext: compat::Extensions,
+}
+
+/// The critical extension keys this build implements: none yet. An unknown critical
+/// key is refused (**V2**) — its writer said a reader must understand it.
+const STORE_EXT_KNOWN: &[u16] = &[];
+
+/// Confirm `dir` holds records `codec` can read, stamping it if it is not stamped.
+///
+/// **An unstamped directory is adopted, not refused.** Refusing would make this
+/// check a migration for every store that predates it, which is the opposite of
+/// what a stamp is for; adoption records the codec running now. The limitation is
+/// worth stating plainly: adoption cannot verify the claim it writes down, so a
+/// store whose codec was *already* swapped is stamped with the wrong answer and
+/// its records still fail one grain at a time. The stamp protects every swap after
+/// it, and cannot retroactively protect one that already happened — which is why
+/// the compatibility spec files this as worth having *before* a codec change.
+fn admit_store_stamp(dir: &Path, codec: &str) -> io::Result<()> {
+    let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
+    let path = dir.join(STORE_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => {
+            // Revision first, then the extension area, then the body: nothing reads a
+            // field until the bytes have been admitted as this format at all.
+            let (_, body) = STORE
+                .unstamp(&bytes)
+                .map_err(|err| invalid(format!("grain store at {}: {err}", dir.display())))?;
+            let body: StoreBody = postcard::from_bytes(body).map_err(|err| {
+                invalid(format!(
+                    "grain store at {}: stamp body did not decode: {err}",
+                    dir.display()
+                ))
+            })?;
+            body.ext
+                .admit(STORE.window().boundary(), STORE_EXT_KNOWN)
+                .map_err(|err| invalid(format!("grain store at {}: {err}", dir.display())))?;
+            if body.codec != codec {
+                return Err(invalid(format!(
+                    "grain store at {}: written with codec '{}', but this node runs \
+                     '{codec}' — a grain's event payloads are codec-encoded (§4.1), so \
+                     every record here would fail to decode. This is a configuration \
+                     change, not a corrupt store: run this node with '{}', or point it \
+                     at a different directory.",
+                    dir.display(),
+                    body.codec,
+                    body.codec,
+                )));
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            let body = postcard::to_allocvec(&StoreBody {
+                codec: codec.to_string(),
+                ext: compat::Extensions::new(),
+            })
+            .expect("the stamp body is plain owned data");
+            wal::atomic_replace(dir, STORE_FILE, &STORE.stamp(&body))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Load every `fences/<shard>` file into a shard→term map (eager: there are few shards
@@ -1209,8 +1315,15 @@ impl GrainStore for FileGrainStore {
 mod tests {
     use super::*;
     use crate::store::MemoryGrainStore;
+    use actor_serialization::JsonCodec;
     use std::fs::OpenOptions;
     use std::io::Write;
+
+    /// The codec these tests open every store under. Which one is immaterial to
+    /// everything below except the stamp's own tests — what matters is that a
+    /// reopen uses the *same* one, since disagreeing is exactly what the stamp
+    /// refuses.
+    const TEST_CODEC: &str = "json";
 
     fn name(key: &str) -> GrainName {
         GrainName::new("test.Grain", key)
@@ -1355,19 +1468,134 @@ mod tests {
         );
     }
 
+    // --- The store stamp (spec §7.4, compatibility spec §3.4) -----------------
+
+    #[test]
+    fn a_fresh_store_is_stamped_and_reopens_under_the_same_codec() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("open a fresh store");
+        assert!(
+            dir.path().join(STORE_FILE).exists(),
+            "a fresh store must record which codec wrote it",
+        );
+        drop(store);
+        FileGrainStore::open(dir.path(), TEST_CODEC).expect("the same codec must reopen it");
+    }
+
+    #[test]
+    fn a_codec_change_is_refused_once_at_open_naming_both() {
+        // The whole point: a swapped codec is *one* refusal here, not a corrupt-grain
+        // abort per activation for every grain with records past its last snapshot.
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileGrainStore::open(dir.path(), "json").expect("open");
+        let n = name("a");
+        assert!(
+            matches!(
+                store.store_record(
+                    0,
+                    &n,
+                    Seq::ZERO,
+                    Term::new(1),
+                    vec![b"e1".to_vec()],
+                    WriteKind::Append
+                ),
+                StoreAck::Stored(_),
+            ),
+            "the record this store cannot later decode has to be there for the \
+             refusal to matter",
+        );
+        drop(store);
+
+        let Err(err) = FileGrainStore::open(dir.path(), "postcard") else {
+            panic!("a store written under another codec must not open");
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("json") && msg.contains("postcard"),
+            "the refusal must name both codecs so an operator knows which end to \
+             move: {msg}",
+        );
+    }
+
+    #[test]
+    fn a_store_from_another_revision_is_refused_as_a_revision() {
+        // Not as a corrupt store, and without the body being decoded at all: the
+        // revision is admitted before anything downstream sees a byte (**V2**).
+        let dir = tempfile::tempdir().unwrap();
+        FileGrainStore::open(dir.path(), TEST_CODEC).expect("open");
+        let mut bytes = std::fs::read(dir.path().join(STORE_FILE)).expect("read the stamp");
+        // The revision is a little-endian `u16` immediately after the magic.
+        let head = b"GRSTOR".len();
+        bytes[head..head + 2].copy_from_slice(&9u16.to_le_bytes());
+        std::fs::write(dir.path().join(STORE_FILE), &bytes).expect("rewrite the stamp");
+
+        let Err(err) = FileGrainStore::open(dir.path(), TEST_CODEC) else {
+            panic!("a revision this build does not accept must not open");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("granary.store") && msg.contains("v9"),
+            "the refusal must name the boundary and what it found: {msg}",
+        );
+    }
+
+    #[test]
+    fn an_unstamped_store_is_adopted_rather_than_refused() {
+        // A store predating the stamp keeps working; adoption writes down the codec
+        // running now. It cannot verify that claim — see `admit_store_stamp` — so
+        // what this pins is that the check is not a migration.
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("open");
+        drop(store);
+        std::fs::remove_file(dir.path().join(STORE_FILE)).expect("un-stamp the store");
+
+        FileGrainStore::open(dir.path(), TEST_CODEC).expect("an unstamped store must still open");
+        assert!(
+            dir.path().join(STORE_FILE).exists(),
+            "adoption must leave the store stamped, so the next codec change is caught",
+        );
+    }
+
+    #[test]
+    fn granary_store_v1_still_admits_its_codec() {
+        let bytes = crate::corpus::golden("granary.store", 1, || {
+            let body = postcard::to_allocvec(&StoreBody {
+                codec: "json".to_string(),
+                ext: compat::Extensions::new(),
+            })
+            .expect("encode the corpus body");
+            STORE.stamp(&body)
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(STORE_FILE), &bytes).expect("stage the fixture");
+        admit_store_stamp(dir.path(), "json")
+            .expect("this build must read a granary.store v1 stamp it accepts");
+
+        // And the fixture pins the refusal too: the same bytes under another codec
+        // are what an operator would hit after a swap.
+        let err = admit_store_stamp(dir.path(), "postcard")
+            .expect_err("the fixture must not admit another codec");
+        assert!(
+            err.to_string().contains("json"),
+            "the refusal must name the codec that wrote the store: {err}",
+        );
+    }
+
     /// The single-writer rule, enforced rather than documented.
     #[cfg(unix)]
     #[test]
     fn a_second_open_of_one_directory_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let first = FileGrainStore::open(dir.path()).expect("first open");
+        let first = FileGrainStore::open(dir.path(), TEST_CODEC).expect("first open");
         assert!(
-            FileGrainStore::open(dir.path()).is_err(),
+            FileGrainStore::open(dir.path(), TEST_CODEC).is_err(),
             "a second store opened a directory another already holds"
         );
         // Released with the store, so a replacement can take over.
         drop(first);
-        FileGrainStore::open(dir.path()).expect("reopen once the holder is gone");
+        FileGrainStore::open(dir.path(), TEST_CODEC).expect("reopen once the holder is gone");
     }
 
     #[test]
@@ -1375,7 +1603,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let n = name("a");
         {
-            let store = FileGrainStore::open(dir.path()).unwrap();
+            let store = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
             assert_eq!(
                 store.store_record(
                     0,
@@ -1402,7 +1630,7 @@ mod tests {
         }
         // A fresh open recovers the retained record (e1 is compacted under the
         // snapshot at seq 1), its term, and the snapshot from disk.
-        let reopened = FileGrainStore::open(dir.path()).unwrap();
+        let reopened = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         let reply = reopened.read(0, &n);
         assert_eq!(
             reply.slots,
@@ -1418,7 +1646,7 @@ mod tests {
     fn a_snapshot_compacts_one_grains_segment_on_disk_and_recovers() {
         let dir = tempfile::tempdir().unwrap();
         let n = name("a");
-        let store = FileGrainStore::open(dir.path()).unwrap();
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         // Grow the grain's segment with many sizeable records.
         for i in 0..50u64 {
             let _ = store.store_record(
@@ -1458,7 +1686,7 @@ mod tests {
         drop(store);
 
         // The compacted segment reloads the snapshot and the (now empty) live tail.
-        let reopened = FileGrainStore::open(dir.path()).unwrap();
+        let reopened = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         let reply = reopened.read(0, &n);
         assert!(reply.slots.is_empty());
         assert_eq!(
@@ -1483,7 +1711,7 @@ mod tests {
     fn one_grains_snapshot_leaves_another_grains_segment_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let (a, b) = (name("a"), name("b"));
-        let store = FileGrainStore::open(dir.path()).unwrap();
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         let _ = store.store_record(
             0,
             &a,
@@ -1529,7 +1757,7 @@ mod tests {
     fn a_redundant_snapshot_writes_nothing_and_does_not_bloat_the_segment() {
         let dir = tempfile::tempdir().unwrap();
         let n = name("a");
-        let store = FileGrainStore::open(dir.path()).unwrap();
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         let _ = store.store_record(
             0,
             &n,
@@ -1578,7 +1806,7 @@ mod tests {
         );
         // And the state still recovers correctly.
         drop(store);
-        let reopened = FileGrainStore::open(dir.path()).unwrap();
+        let reopened = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         assert_eq!(
             reopened.read(0, &n).snapshot,
             Some((Seq::new(2), Term::new(1), b"snap@2".to_vec()))
@@ -1590,13 +1818,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let n = name("a");
         {
-            let store = FileGrainStore::open(dir.path()).unwrap();
+            let store = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
             // Bound the whole space: every append on shard 0 is refused.
             store.seal_range(0, 0);
         }
         // The bound is a durable promise (G15): a reopen must not forget it, or a
         // stale leader could assemble a majority for the moved range afterward.
-        let reopened = FileGrainStore::open(dir.path()).unwrap();
+        let reopened = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         assert_eq!(
             reopened.store_record(
                 0,
@@ -1623,7 +1851,7 @@ mod tests {
         // A committed merge lifts the bound, durably.
         reopened.unseal(0);
         drop(reopened);
-        let again = FileGrainStore::open(dir.path()).unwrap();
+        let again = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         assert!(matches!(
             again.store_record(
                 0,
@@ -1642,7 +1870,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let n = name("moved");
         {
-            let store = FileGrainStore::open(dir.path()).unwrap();
+            let store = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
             let _ = store.store_record(
                 0,
                 &n,
@@ -1657,7 +1885,7 @@ mod tests {
             assert!(!store.has_blob(0, &n, BlobId::of(b"b")));
         }
         // Durable: the reopened store does not resurrect the grain.
-        let reopened = FileGrainStore::open(dir.path()).unwrap();
+        let reopened = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         assert!(reopened.read(0, &n).slots.is_empty());
         assert!(reopened.blob_ids(0, &n).is_empty());
     }
@@ -1667,7 +1895,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let n = name("a");
         {
-            let store = FileGrainStore::open(dir.path()).unwrap();
+            let store = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
             // A recovery prepare at term 5 promises not to accept a lower term.
             assert!(matches!(
                 store.prepare(0, &n, Term::new(5)),
@@ -1675,7 +1903,7 @@ mod tests {
             ));
         }
         // The promise is durable: after reopen, a term-4 write is still fenced.
-        let reopened = FileGrainStore::open(dir.path()).unwrap();
+        let reopened = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         assert_eq!(
             reopened.store_record(
                 0,
@@ -1697,7 +1925,7 @@ mod tests {
     #[test]
     fn two_grain_types_do_not_share_a_shards_fence() {
         let root = tempfile::tempdir().unwrap();
-        let factory = FileGrainStore::factory(root.path().to_path_buf());
+        let factory = FileGrainStore::factory(root.path().to_path_buf(), &JsonCodec);
         let node = NodeId::new(1);
         let busy = factory("busy.Type", node);
         let quiet = factory("quiet.Type", node);
@@ -1732,7 +1960,7 @@ mod tests {
     #[test]
     fn one_store_per_grain_type_and_node() {
         let root = tempfile::tempdir().unwrap();
-        let factory = FileGrainStore::factory(root.path().to_path_buf());
+        let factory = FileGrainStore::factory(root.path().to_path_buf(), &JsonCodec);
         let first = factory("a.Type", NodeId::new(1));
         let second = factory("a.Type", NodeId::new(1));
         assert!(
@@ -1749,7 +1977,7 @@ mod tests {
         // stored and acked after a term-2 prepare returned empty.
         let dir = tempfile::tempdir().unwrap();
         let n = name("fresh");
-        let store = FileGrainStore::open(dir.path()).unwrap();
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         assert!(matches!(
             store.prepare(0, &n, Term::new(2)),
             ReadOutcome::Prepared(_)
@@ -1790,7 +2018,7 @@ mod tests {
         use std::sync::Barrier;
         for round in 0..64 {
             let dir = tempfile::tempdir().unwrap();
-            let store = std::sync::Arc::new(FileGrainStore::open(dir.path()).unwrap());
+            let store = std::sync::Arc::new(FileGrainStore::open(dir.path(), TEST_CODEC).unwrap());
             let n = name(&format!("race-{round}"));
             let barrier = std::sync::Arc::new(Barrier::new(2));
             let (s1, n1, b1) = (store.clone(), n.clone(), barrier.clone());
@@ -1827,13 +2055,13 @@ mod tests {
         {
             // Prepare a grain that has no records yet: the promise is the shard fence,
             // which must survive even though no segment was ever written.
-            let store = FileGrainStore::open(dir.path()).unwrap();
+            let store = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
             assert!(matches!(
                 store.prepare(0, &name("ghost"), Term::new(7)),
                 ReadOutcome::Prepared(_)
             ));
         }
-        let reopened = FileGrainStore::open(dir.path()).unwrap();
+        let reopened = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         // A different grain in the same shard is fenced by the recovered promise.
         assert_eq!(
             reopened.store_record(
@@ -1853,7 +2081,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let n = name("a");
         {
-            let store = FileGrainStore::open(dir.path()).unwrap();
+            let store = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
             let _ = store.store_record(
                 0,
                 &n,
@@ -1865,7 +2093,7 @@ mod tests {
         }
         // A torn write: garbage lands after the valid record in the grain's segment.
         let id = {
-            let store = FileGrainStore::open(dir.path()).unwrap();
+            let store = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
             *store
                 .manifest
                 .lock()
@@ -1879,7 +2107,7 @@ mod tests {
         file.write_all(&[0x12, 0x34, 0x56]).unwrap();
         drop(file);
 
-        let reopened = FileGrainStore::open(dir.path()).unwrap();
+        let reopened = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         assert_eq!(
             reopened.read(0, &n).slots,
             vec![(Seq::new(1), Term::new(1), b"e1".to_vec())]
@@ -1897,7 +2125,7 @@ mod tests {
             StoreAck::Stored(Seq::new(2))
         );
         drop(reopened);
-        let again = FileGrainStore::open(dir.path()).unwrap();
+        let again = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
         assert_eq!(again.read(0, &n).slots.len(), 2);
     }
 
@@ -1947,7 +2175,7 @@ mod tests {
         let mirror = MemoryGrainStore::new();
         for (step, op) in ops.iter().enumerate() {
             // A fresh open every step: the state must come back from disk.
-            let file = FileGrainStore::open(dir.path()).unwrap();
+            let file = FileGrainStore::open(dir.path(), TEST_CODEC).unwrap();
             assert_eq!(
                 file.read(0, &n).slots,
                 mirror.read(0, &n).slots,
@@ -1993,7 +2221,7 @@ mod tests {
     #[test]
     fn the_loaded_segment_set_stays_bounded_across_many_grains() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = FileGrainStore::open(dir.path()).expect("open");
+        let mut store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("open");
         store.segment_capacity = 16;
         for i in 0..500 {
             let grain = name(&format!("grain-{i}"));
@@ -2019,7 +2247,7 @@ mod tests {
     #[test]
     fn a_segment_in_use_is_never_evicted() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = FileGrainStore::open(dir.path()).expect("open");
+        let mut store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("open");
         store.segment_capacity = 1;
         let held = name("held");
         let _ = store.store_record(
@@ -2074,7 +2302,7 @@ mod tests {
     #[test]
     fn an_evicted_segment_reopens_with_its_records_intact() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = FileGrainStore::open(dir.path()).expect("open");
+        let mut store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("open");
         store.segment_capacity = 1;
         let grain = name("survivor");
         let _ = store.store_record(
@@ -2114,7 +2342,7 @@ mod tests {
     #[test]
     fn a_store_that_cannot_write_refuses_instead_of_panicking() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FileGrainStore::open(dir.path()).expect("open");
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("open");
         let healthy = name("healthy");
         assert!(matches!(
             store.store_record(
@@ -2156,7 +2384,7 @@ mod tests {
     #[test]
     fn a_poisoned_store_refuses_every_later_operation() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FileGrainStore::open(dir.path()).expect("open");
+        let store = FileGrainStore::open(dir.path(), TEST_CODEC).expect("open");
         let grain = name("served");
         let _ = store.store_record(
             0,

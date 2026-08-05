@@ -16,7 +16,6 @@ Boundaries that exist as formats but are **not yet stamped**, in the spec's prio
 
 | Boundary | What an unstamped change costs |
 |---|---|
-| `granary.store` | A grain's event payloads record no codec. Swapping the deployment codec turns every record past the last snapshot into a storm of corrupt-grain activation aborts rather than one diagnosable configuration error. Worth having *before* a codec swap, not after. |
 | Sidecars | The Raft term and snapshot pointers, the shardmap, and the blob-store tombstones are durable formats written through `wal::atomic_replace` with no stamp. `compat::Stamp` wraps them without disturbing the primitive's opaque-bytes interface. |
 | A log's record-schema stamp | A `Wal` appends at the revision its build writes without updating the header, so once a caller's window spans two revisions the stamp understates until a compaction restamps it (wal §2.1 rule 5). Fail-closed, and compaction is the workaround. |
 | A cluster-wide minimum revision | Carrying each member's announced range in the membership digest, so a behavior enables itself only once the whole cluster accepts it. Turns **V4** from a policy into a mechanism. |

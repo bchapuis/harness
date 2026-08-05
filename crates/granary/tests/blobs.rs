@@ -13,6 +13,7 @@
 //!   read fanned over the shard's replicas, callable from any node, surviving the
 //!   loss of a minority of replicas.
 
+use actor_serialization::JsonCodec;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -28,8 +29,8 @@ use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
 use actor_simulation::Recorder;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
 use granary::BlobId;
@@ -381,24 +382,14 @@ fn drive<T: Send + 'static>(
         .expect("future did not complete")
 }
 
-fn cluster(
-    sim: &Simulation,
-) -> (
-    SimNetwork,
-    Vec<SimNode>,
-    Vec<Granary<BlobGrain<SimNode>>>,
-) {
+fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, Vec<Granary<BlobGrain<SimNode>>>) {
     cluster_cfg(sim, config())
 }
 
 fn cluster_cfg(
     sim: &Simulation,
     cfg: GranaryConfig,
-) -> (
-    SimNetwork,
-    Vec<SimNode>,
-    Vec<Granary<BlobGrain<SimNode>>>,
-) {
+) -> (SimNetwork, Vec<SimNode>, Vec<Granary<BlobGrain<SimNode>>>) {
     let net = SimNetwork::new(sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
     let systems = vec![
         net.join(NodeId::new(1)),
@@ -530,7 +521,7 @@ fn a_corrupt_blob_is_detected_and_never_returned() {
     let dir = tempfile::tempdir().unwrap();
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
     let blobs = system.granary::<BlobGrain<SimSystem>>(GranaryConfig {
-        grain_store: Some(FileGrainStore::factory(dir.path())),
+        grain_store: Some(FileGrainStore::factory(dir.path(), &JsonCodec)),
         ..GranaryConfig::default()
     });
 
@@ -563,7 +554,7 @@ fn a_tampered_replica_copy_falls_through_to_a_good_one() {
     let sim = Simulation::new(1);
     let dir = tempfile::tempdir().unwrap();
     let cfg = GranaryConfig {
-        grain_store: Some(FileGrainStore::factory(dir.path())),
+        grain_store: Some(FileGrainStore::factory(dir.path(), &JsonCodec)),
         ..config()
     };
     let (_net, _systems, granaries) = cluster_cfg(&sim, cfg);
@@ -606,7 +597,7 @@ fn a_tampered_local_copy_is_healed_in_place_from_a_peer() {
     let sim = Simulation::new(1);
     let dir = tempfile::tempdir().unwrap();
     let cfg = GranaryConfig {
-        grain_store: Some(FileGrainStore::factory(dir.path())),
+        grain_store: Some(FileGrainStore::factory(dir.path(), &JsonCodec)),
         ..config()
     };
     let (_net, _systems, granaries) = cluster_cfg(&sim, cfg);

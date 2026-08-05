@@ -19,6 +19,8 @@
 //! This drives the store directly and synchronously — no simulation, no `run_swarm`,
 //! so no `*swarm.rs` naming obligation and no corpus key (simulation-testing §4).
 
+use actor_serialization::Codec;
+use actor_serialization::JsonCodec;
 use std::collections::BTreeSet;
 
 use granary::BlobId;
@@ -395,7 +397,7 @@ fn run(seed: u64) {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
     let mem = MemoryGrainStore::new();
-    let mut file = FileGrainStore::open(dir.path()).expect("open");
+    let mut file = FileGrainStore::open(dir.path(), JsonCodec.name()).expect("open");
 
     for step in 0..STEPS {
         let where_ = format!("seed {seed} step {step}");
@@ -403,7 +405,7 @@ fn run(seed: u64) {
         // store recovered rather than state it still had in memory.
         if rng.chance(6) {
             drop(file);
-            file = FileGrainStore::open(dir.path()).expect("reopen");
+            file = FileGrainStore::open(dir.path(), JsonCodec.name()).expect("reopen");
             compare_all(&file, &mem, dir.path(), &format!("{where_} (after reopen)"));
         }
         let shard = SHARDS[rng.below(SHARDS.len() as u64) as usize];
@@ -425,7 +427,7 @@ fn run(seed: u64) {
 
     // The state must survive one more round trip through the filesystem.
     drop(file);
-    let file = FileGrainStore::open(dir.path()).expect("final reopen");
+    let file = FileGrainStore::open(dir.path(), JsonCodec.name()).expect("final reopen");
     compare_all(&file, &mem, dir.path(), &format!("seed {seed} final"));
 }
 
@@ -447,7 +449,7 @@ fn file_store_matches_memory_store_under_a_seeded_op_stream() {
 fn a_read_of_a_removed_grain_does_not_resurrect_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let g = grain(0);
-    let store = FileGrainStore::open(dir.path()).expect("open");
+    let store = FileGrainStore::open(dir.path(), JsonCodec.name()).expect("open");
     let seeded = store.store_record(
         0,
         &g,
@@ -471,7 +473,7 @@ fn a_read_of_a_removed_grain_does_not_resurrect_it() {
         "a read resurrected the removed grain"
     );
     drop(store);
-    let reopened = FileGrainStore::open(dir.path()).expect("reopen");
+    let reopened = FileGrainStore::open(dir.path(), JsonCodec.name()).expect("reopen");
     assert!(
         !reopened.grains(0).contains(&g),
         "the resurrected grain survived a reopen"
@@ -487,7 +489,7 @@ fn a_read_of_a_removed_grain_does_not_resurrect_it() {
 fn truncating_an_unseen_grain_does_not_create_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let g = grain(1);
-    let store = FileGrainStore::open(dir.path()).expect("open");
+    let store = FileGrainStore::open(dir.path(), JsonCodec.name()).expect("open");
     store.truncate(0, &g, Seq::ZERO, Term::new(1));
     assert!(
         store.grains(0).is_empty(),
@@ -517,7 +519,7 @@ fn truncating_an_unseen_grain_does_not_create_it() {
 fn concurrent_puts_of_one_blob_neither_fail_nor_poison_the_store() {
     const PUTTERS: usize = 16;
     let dir = tempfile::tempdir().expect("tempdir");
-    let store = FileGrainStore::open(dir.path()).expect("open");
+    let store = FileGrainStore::open(dir.path(), JsonCodec.name()).expect("open");
     let g = grain(1);
     // A block's worth of one repeated byte — the zero-filled image, in miniature.
     let bytes = vec![0u8; 256 * 1024];
