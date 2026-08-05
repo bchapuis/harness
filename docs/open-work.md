@@ -8,7 +8,9 @@ The tree carries no TODO backlog. A sweep of `crates/` finds zero `todo!()`, zer
 
 Of the two checks that keep **V4**/**V5** from decaying into prose (compatibility §4), the golden corpus now exists: every registered boundary has checked-in bytes at its current revision, a test beside the format decodes them, and a completeness gate fails the build when a new boundary ships without them.
 
-What remains is **mixed-version simulation**. Its mechanism is in place: a simulated node runs whatever window `SimNetwork::set_wire_window` gives it, `Transport::peer_version` settles the two ends exactly as the TCP handshake does, and a conformance test drives an upgrade, a mixed cluster, a rollback, and a refusal (compatibility §3.1, §4). What is missing is everything on either side of the negotiation — no workload varies a window mid-run, no record or message definition is kept behind its revision, and no granary invariant or linearizability check is asserted across the transition. So what the policy holds up today is that two builds agree on a revision, not that either behaves correctly at the one they agreed on.
+**Mixed-version simulation** is most of the way there. The negotiation is pinned node by node, and a swarm sweeps a `Rollout` — the nemesis walking nodes one release at a time, forward and back, under the usual partitions and crashes — asserting that no node is ever sent a form of a message its build cannot read (compatibility §4).
+
+What is left is that the sweep's revision-varying behavior is the workload's own, since no boundary in `crates/` has a second revision to keep a prior definition behind. So the gate is shown usable and a build ignoring it is caught, but no tree format is exercised across a rollout, and no granary invariant or linearizability check is asserted across the transition. Closing it needs a real second revision somewhere — which is the same prerequisite as the first wire bump, not a separate project.
 
 Boundaries that exist as formats but are **not yet stamped**, in the spec's priority order (compatibility §5). Each is a place where a format change today is a migration rather than an edit.
 

@@ -239,6 +239,15 @@ impl SimNetwork {
         }
     }
 
+    /// Move `node` to another release's wire window and record it as an injected
+    /// fault (spec §18.3) — the nemesis's rolling upgrade, as distinct from
+    /// [`set_wire_window`](SimNetwork::set_wire_window), which a scenario uses to
+    /// set a run's starting shape and which nothing counts.
+    pub(crate) fn upgrade(&self, node: NodeId, window: compat::Window) {
+        self.set_wire_window(node, window);
+        self.stats.record_upgrade();
+    }
+
     /// Run `node` on a wire window other than the one this build ships (spec
     /// §7.1, compatibility spec §3, §4).
     ///

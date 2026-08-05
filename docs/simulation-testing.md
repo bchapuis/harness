@@ -223,6 +223,21 @@ quietly shrunk the cluster rather than faulted it. A consenting workload also
 bounds its calls (`ask_timeout`) and keeps no long-lived handle on a node other
 than the first, which the nemesis never restarts.
 
+An **upgrade** joins it on the same terms, for a workload that returns a
+`Rollout` from `ClusterWorkload::rollout`: a list of releases, oldest first, that
+the nemesis walks one node one step at a time, forward or back, so a run is a
+rolling upgrade with rollbacks rather than an arbitrary mix of windows. Because a
+release is a process replacement, an upgrade also restarts the node wherever
+restarts are allowed — which is everywhere but the first node. There the window
+moves under the running process instead, the weaker model, and the reason a
+workload can still drive traffic from node one while its own revision changes.
+
+A `Rollout` is validated when it is built, not when it runs: adjacent releases
+must share a revision (**V2**) and each must accept what its neighbour writes
+(**V4** forward, **V5** back). An invalid sequence is a rollout no operator could
+perform, so it panics at construction rather than failing a sweep for a reason
+that has nothing to do with the workload.
+
 Restart ends the old process for real: its scheduler domain is retired, so none
 of its tasks is ever polled again. That leaves brackets open — an actor stopped
 between `DispatchStart` and `DispatchEnd`, an `ask` issued and never answered, an

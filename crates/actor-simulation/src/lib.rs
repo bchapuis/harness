@@ -58,8 +58,8 @@ pub use entropy::SimEntropy;
 pub use executor::SimSpawner;
 pub use executor::Simulation;
 pub use registry::SimRegistry;
-pub use transport::SimNode;
 pub use transport::SimNetwork;
+pub use transport::SimNode;
 pub use transport::SimTransport;
 pub use workload::SimSystem;
 
@@ -70,6 +70,7 @@ pub use cluster_swarm::ClusterCtx;
 pub use cluster_swarm::ClusterModeSpec;
 pub use cluster_swarm::ClusterWorkload;
 pub use cluster_swarm::Rehost;
+pub use cluster_swarm::Rollout;
 pub use cluster_swarm::run_cluster_seed;
 pub use cluster_swarm::run_cluster_swarm;
 pub use cluster_swarm::run_cluster_swarm_coverage;

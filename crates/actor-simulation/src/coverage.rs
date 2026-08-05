@@ -25,6 +25,9 @@ pub struct FaultStats {
     pub registry_outages: u64,
     /// Registry fetches served a stale snapshot by a seeded roll (spec §18.3).
     pub registry_stale: u64,
+    /// Nodes moved to another release's wire window by the nemesis — a rolling
+    /// upgrade or a rollback (spec §18.3, compatibility §4).
+    pub upgrades: u64,
 }
 
 impl FaultStats {
@@ -37,6 +40,7 @@ impl FaultStats {
             + self.blocked
             + self.registry_outages
             + self.registry_stale
+            + self.upgrades
     }
 }
 
@@ -51,6 +55,7 @@ impl std::ops::Add for FaultStats {
             blocked: self.blocked + rhs.blocked,
             registry_outages: self.registry_outages + rhs.registry_outages,
             registry_stale: self.registry_stale + rhs.registry_stale,
+            upgrades: self.upgrades + rhs.upgrades,
         }
     }
 }
@@ -63,6 +68,7 @@ pub(crate) struct FaultCounters {
     duplicated: AtomicU64,
     delayed: AtomicU64,
     blocked: AtomicU64,
+    upgrades: AtomicU64,
 }
 
 impl FaultCounters {
@@ -82,12 +88,17 @@ impl FaultCounters {
         self.blocked.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn record_upgrade(&self) {
+        self.upgrades.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn snapshot(&self) -> FaultStats {
         FaultStats {
             dropped: self.dropped.load(Ordering::Relaxed),
             duplicated: self.duplicated.load(Ordering::Relaxed),
             delayed: self.delayed.load(Ordering::Relaxed),
             blocked: self.blocked.load(Ordering::Relaxed),
+            upgrades: self.upgrades.load(Ordering::Relaxed),
             // The registry rows are tallied by the simulated registry itself
             // (`SimRegistry::fault_stats`), not by the network.
             registry_outages: 0,
