@@ -217,7 +217,7 @@ fn ask_default_deadline_elapses_to_timeout() {
     assert_eq!(outcome, Err(CallError::Timeout));
 }
 
-// --- Spec interface not yet implemented (conformance checklist) --------------
+// --- §14.3: ask_flat collapses the two-level result ---------------------------
 
 #[test]
 fn ask_flat_collapses_the_two_level_result() {
@@ -246,6 +246,8 @@ fn ask_flat_collapses_the_two_level_result() {
         "a transport CallError is folded in via From<CallError>",
     );
 }
+
+// --- §4.4 / #10: an ActorRef in a message or reply rebinds on decode ----------
 
 // An actor that records the values it is told (lives on node A).
 #[derive(Serialize, Deserialize)]
