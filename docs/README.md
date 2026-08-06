@@ -67,12 +67,12 @@ One layer has a design note rather than a spec:
 ## Open work
 
 - [open-work](open-work.md) — the cross-cutting read of everything the specs
-  declare unfinished, ordered by what blocks what: the negotiated wire revision
-  that no caller can see (and so gates every other compatibility move), the
-  format boundaries still unstamped, the invariants no sweep asserts, and the
-  deferrals each layer owns. An index, not a source of truth — every entry
-  points at the section that owns it, and both are deleted together when an item
-  lands.
+  declare unfinished, in reading order rather than dependency order: the
+  compatibility policy only half enforced, the format boundaries still
+  unstamped, the invariants no sweep asserts, the deferrals each layer owns, and
+  what is finished but unused. An index, not a source of truth — every entry
+  points at the section that owns it and carries a next step for a session
+  picking it up cold, and both are deleted together when an item lands.
 
 ## Elsewhere in the tree
 
