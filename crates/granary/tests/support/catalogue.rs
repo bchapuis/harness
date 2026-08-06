@@ -1,4 +1,4 @@
-//! The machine-readable G-catalogue, G1–G20 (granary spec §15).
+//! The machine-readable G-catalogue, G1–G21 (granary spec §15).
 //!
 //! The granary analogue of the core, utilities, harness, and sandbox catalogues:
 //! one table linking each invariant to the code that verifies it, guarded by the
@@ -23,7 +23,7 @@
 use actor_simulation::CatalogueEntry;
 use actor_simulation::Verify;
 
-/// The granary invariant catalogue, G1–G20 (granary spec §15).
+/// The granary invariant catalogue, G1–G21 (granary spec §15).
 pub fn g_catalogue() -> &'static [CatalogueEntry] {
     G_CATALOGUE
 }
@@ -172,5 +172,11 @@ const G_CATALOGUE: &[CatalogueEntry] = &[
         spec: "granary §7.12, §7.14",
         property: "Physical facets expose only durable state: the materialization is a rebuildable cache, unobservable before the commit and discarded on any non-committed outcome; rehydration reproduces it exactly",
         verify: &[Verify::SimTest("sql.rs, ws_local.rs")],
+    },
+    CatalogueEntry {
+        invariant: 21,
+        spec: "granary §7.16",
+        property: "An alarm fires at most once per arm: the fired deadline's Clear joins the same atomic batch as on_alarm's records and the epoch guard voids a superseded timer, so one armed deadline commits at most one callerless effect — the bound is on effects that commit, not on handler invocations",
+        verify: &[Verify::SimTest("alarm.rs, alarm_cluster.rs")],
     },
 ];

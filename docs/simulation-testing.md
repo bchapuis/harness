@@ -660,12 +660,24 @@ For each component, write:
 Known gaps between what the sweeps exercise and what the specs mandate. Each is
 a place a bug could live undetected today.
 
-- **Granary alarms have no continuous sweep.** `alarm-cluster/leader-crash`
-  sweeps 24 seeds — which node leads the shard, which survivor wins the
-  re-election, and where the deadline falls relative to the driver's sweep are
-  all seed-dependent — but there is no `ClusterWorkload` for alarms under the
-  continuous nemesis with at-most-once firing as a checker. That needs the
-  alarm-index wiring (`granary_with_alarms`) threaded through a workload.
+- **Granary alarms have no continuous sweep, and one cannot pass as the runner
+  stands.** `alarm-cluster/leader-crash` sweeps 24 seeds, and **G21** is now a
+  catalogued invariant, but a `ClusterWorkload` asserting it under the
+  continuous nemesis trips `no-silent-loss` on roughly one seed in ten: *"1
+  ask(s) still pending at quiescence"*. The cause is structural rather than a
+  workload bug. The alarm driver polls its shard's index every 500 ms for as
+  long as its node lives (`ALARM_DRIVE_INTERVAL`, `grainref.rs`), so an
+  alarm-wired granary has an ask in flight a fixed fraction of the time and
+  never reaches ask-quiescence; `drive_cluster` steps until `CLUSTER_SETTLE_MAX`
+  and then reports whatever it finds outstanding. Nothing is lost — those asks
+  carry the 5 s `DEFAULT_ASK_TIMEOUT` and do resolve — so this is the check
+  meeting a subsystem it was not written for, not a leak. Closing it needs a
+  decision about what quiescence means when a subsystem polls forever: exempt
+  background-loop asks from the tally, require in-flight-zero over a sustained
+  window, or give the driver a way to stand down. All three are changes to the
+  runner or the driver, not to a test. A workload that reproduces it is in the
+  session scratchpad rather than the tree, since a sweep failing one seed in ten
+  is worse than no sweep.
 - **Granary workflows have no sweep at all.** "A step's effect runs at most once
   across passivation" is a natural continuous invariant and nothing asserts it.
 - **`harness-sandbox`, `harness-gateway`, and `machine-frontdoor` have no

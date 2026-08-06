@@ -1,4 +1,4 @@
-//! Catalogue drift test (granary spec §15): the machine-readable G1–G20 table
+//! Catalogue drift test (granary spec §15): the machine-readable G1–G21 table
 //! stays complete, and every file it points at still exists.
 //!
 //! This is the spec↔code drift gate for granary, the same pattern that guards the
@@ -17,13 +17,13 @@ use actor_simulation::Verify;
 use support::catalogue::g_catalogue;
 
 #[test]
-fn every_invariant_g1_through_g20_is_present_exactly_once() {
+fn every_invariant_g1_through_g21_is_present_exactly_once() {
     let mut numbers: Vec<u8> = g_catalogue().iter().map(|e| e.invariant).collect();
     numbers.sort_unstable();
     assert_eq!(
         numbers,
-        (1..=20).collect::<Vec<u8>>(),
-        "the catalogue must list G1..=G20, each exactly once",
+        (1..=21).collect::<Vec<u8>>(),
+        "the catalogue must list G1..=G21, each exactly once",
     );
 }
 

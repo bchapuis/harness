@@ -26,7 +26,7 @@ The sidecars are done. The Raft term and snapshot pointers, granary's per-shard 
 
 Known gaps between what the simulation sweeps exercise and what the specs mandate (simulation-testing, *Where the sweeps do not yet reach*). Each is a place a bug could live undetected today.
 
-- **Granary alarms have no continuous sweep.** `alarm-cluster/leader-crash` sweeps 24 seeds, but no `ClusterWorkload` runs alarms under the continuous nemesis with at-most-once firing as a checker. Needs the alarm-index wiring (`granary_with_alarms`) threaded through a workload.
+- **Granary alarms have no continuous sweep, and one cannot pass as the runner stands.** At-most-once firing is now catalogued as **G21** and verified by scenarios, but a `ClusterWorkload` asserting it under the continuous nemesis trips `no-silent-loss` on about one seed in ten — "1 ask(s) still pending at quiescence". The alarm driver polls its shard's index every 500 ms for as long as its node lives, so an alarm-wired granary never reaches ask-quiescence; nothing is lost (those asks carry the 5 s default deadline), so this is the check meeting a subsystem it was not written for. Needs a decision about what quiescence means when a subsystem polls forever — a change to the runner or the driver, not to a test (simulation-testing, *Where the sweeps do not yet reach*).
 - **Granary workflows have no sweep at all.** "A step's effect runs at most once across passivation" is a natural continuous invariant and nothing asserts it.
 - **`harness-sandbox`, `harness-gateway`, and `machine-frontdoor` have no sweep.** These are I/O-boundary crates rather than distributed ones, so the simulator reaches them only indirectly, and what a sweep would even look like there is itself unsettled.
 
