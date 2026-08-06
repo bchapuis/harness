@@ -672,12 +672,19 @@ a place a bug could live undetected today.
   and then reports whatever it finds outstanding. Nothing is lost — those asks
   carry the 5 s `DEFAULT_ASK_TIMEOUT` and do resolve — so this is the check
   meeting a subsystem it was not written for, not a leak. Closing it needs a
-  decision about what quiescence means when a subsystem polls forever: exempt
-  background-loop asks from the tally, require in-flight-zero over a sustained
-  window, or give the driver a way to stand down. All three are changes to the
-  runner or the driver, not to a test. A workload that reproduces it is in the
-  session scratchpad rather than the tree, since a sweep failing one seed in ten
-  is worse than no sweep.
+  decision about what quiescence means when a subsystem polls forever. Three
+  options change the runner or the driver: exempt background-loop asks from the
+  tally, require in-flight-zero over a sustained window, or give the driver a
+  way to stand down. A fourth is already in the tree and is test-local —
+  `blob-store`'s swarm drops `no-silent-loss` from `default_invariants()`
+  outright, because its reconcile loop keeps background asks in flight for the
+  same structural reason, and its comment names granary as the contrast —
+  which alarm-wiring is exactly what ends: *"granary's swarm keeps the checker
+  because it issues no continuous background asks."* That move is honest only while the
+  workload awaits every op it issues to an outcome, which is what leaves the
+  data path's no-loss covered with the checker gone. A sweep failing one seed
+  in ten is worse than no sweep, so nothing was committed; the workload that
+  reproduced it does not survive.
 - **Granary workflows have no sweep at all, and the obvious shape does not
   reach the property.** The invariant worth asserting is not "the effect ran
   once" — `LaunchGuard` is per-activation and never journaled, so a
@@ -695,11 +702,11 @@ a place a bug could live undetected today.
   the seeds that get far enough to observe anything are the calm ones — which
   never re-launch — and the seeds that re-launch never get readable. At the
   nemesis's fault levels, roughly two seeds in twenty-four observe a memo at
-  all, and none of those re-launched. A workload demonstrating this is in the
-  session scratchpad. Landing one needs the chain shortened until a single
-  commit suffices to observe the property — dropping the `Start` round trip in
-  favour of activating on first touch is the obvious first cut — rather than
-  more seeds or a longer settle, both of which were tried and moved nothing.
+  all, and none of those re-launched. The workload that measured this was never
+  committed and does not survive. Landing one needs the chain shortened until a
+  single commit suffices to observe the property — dropping the `Start` round
+  trip in favour of activating on first touch is the obvious first cut — rather
+  than more seeds or a longer settle, both of which were tried and moved nothing.
 - **`harness-sandbox`, `harness-gateway`, and `machine-frontdoor` have no
   sweep.** These are I/O-boundary crates rather than distributed ones, so the
   simulator reaches them only indirectly; what a sweep would look like there is
