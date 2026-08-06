@@ -678,8 +678,28 @@ a place a bug could live undetected today.
   runner or the driver, not to a test. A workload that reproduces it is in the
   session scratchpad rather than the tree, since a sweep failing one seed in ten
   is worse than no sweep.
-- **Granary workflows have no sweep at all.** "A step's effect runs at most once
-  across passivation" is a natural continuous invariant and nothing asserts it.
+- **Granary workflows have no sweep at all, and the obvious shape does not
+  reach the property.** The invariant worth asserting is not "the effect ran
+  once" — `LaunchGuard` is per-activation and never journaled, so a
+  re-activation legitimately re-launches an unresolved step and an effect may
+  run many times (§7.17). It is that the **memo is write-once**: `complete_step`
+  records only a step that is not already done, so the first committed result
+  wins and every later drive resolves from it. Making that observable needs a
+  fixture whose effect returns a *different value on each run*, so an overwrite
+  shows up in the memo; a constant-valued effect cannot tell the two cases
+  apart.
+  
+  What blocks a sweep is that the property needs a **chain**: the workflow must
+  commit a step, be interrupted, re-launch, and then be readable. Other granary
+  sweeps judge independent operations and tolerate individual failures, but here
+  the seeds that get far enough to observe anything are the calm ones — which
+  never re-launch — and the seeds that re-launch never get readable. At the
+  nemesis's fault levels, roughly two seeds in twenty-four observe a memo at
+  all, and none of those re-launched. A workload demonstrating this is in the
+  session scratchpad. Landing one needs the chain shortened until a single
+  commit suffices to observe the property — dropping the `Start` round trip in
+  favour of activating on first touch is the obvious first cut — rather than
+  more seeds or a longer settle, both of which were tried and moved nothing.
 - **`harness-sandbox`, `harness-gateway`, and `machine-frontdoor` have no
   sweep.** These are I/O-boundary crates rather than distributed ones, so the
   simulator reaches them only indirectly; what a sweep would look like there is
