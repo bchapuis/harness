@@ -9,7 +9,7 @@
 //!
 //! Generic over the hosting system, like [`granary::AlarmIndex`] itself, so the
 //! same grain runs on the `Local` tier in `alarm_index.rs` and on the clustered
-//! `Quorum` tier in `alarm_cluster.rs` and `alarm_swarm.rs`. Before it moved here
+//! `Quorum` tier in `alarm_cluster.rs` and `alarm_loss.rs`. Before it moved here
 //! the first two carried byte-identical copies differing only in `type System`.
 
 use std::marker::PhantomData;

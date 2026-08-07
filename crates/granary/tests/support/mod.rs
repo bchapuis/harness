@@ -15,7 +15,7 @@
 //!   `subscription_swarm.rs` (the same object under the nemesis).
 //! - [`timer`] — the alarm-bearing `Timer`, generic over the hosting system, so
 //!   `alarm_index.rs` drives it on the `Local` tier and `alarm_cluster.rs` and
-//!   `alarm_swarm.rs` drive the same grain on the clustered one.
+//!   `alarm_loss.rs` drive the same grain on the clustered one.
 //!
 //! `counter` is re-exported flat; `ledger` is not. Both define an `Add`, so two
 //! globs would make the name ambiguous — and because `ledger` is feature-gated,

@@ -685,6 +685,25 @@ a place a bug could live undetected today.
   data path's no-loss covered with the checker gone. A sweep failing one seed
   in ten is worse than no sweep, so nothing was committed; the workload that
   reproduced it does not survive.
+
+  **A stronger claim about this subsystem was recorded, reverted, and has now
+  been tested: it does not reproduce.** A commit on the branch that carried this
+  work said an alarm-wired granary does not commit *at all* under plain frame
+  loss — no partition, no crash — the grain activating, never committing, being
+  passivated, while the caller hangs to its own deadline. It was reverted with
+  no reason written down and the workload behind it was never committed, which
+  left an assertion nobody could check sitting under the paragraph above. The
+  controlled differential is now `crates/granary/tests/alarm_loss.rs`: both arms
+  host the `AlarmIndex` granary so the Raft group count matches, both run the
+  same `Timer` on the same seeds under the same `FaultPolicy`, and only the
+  timer's wiring differs. The alarm arm commits at one-in-six, one-in-three, and
+  one-in-two loss, with passivation on and off, and with the settle window
+  removed — more often than the plain arm on most configurations, never
+  categorically less. That test stays, because the property is worth holding on
+  its own: adding the index and its driver to a grain type must not cost that
+  type its ability to commit. What it asserts is categorical, not a rate — under
+  loss either arm can lose a given call, and a threshold on the difference would
+  be a flake rather than a check.
 - **Granary workflows have no sweep at all, and the obvious shape does not
   reach the property.** The invariant worth asserting is not "the effect ran
   once" — `LaunchGuard` is per-activation and never journaled, so a
