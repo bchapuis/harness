@@ -267,8 +267,14 @@ impl MembershipCommand {
         bytes
     }
 
-    /// Decode a committed control-group app payload. `None` on a malformed or
-    /// unknown payload (defensively ignored rather than panicking).
+    /// Decode a committed control-group app payload. `None` on a payload this
+    /// build cannot read: a short or malformed one, or an unknown tag — a
+    /// transition a later build defined and this one has never heard of.
+    ///
+    /// The two are one answer here because the codec has no policy: `None` means
+    /// *unreadable*, and what to do about an unreadable **committed** entry is the
+    /// apply path's decision, not this function's. It stops rather than skipping
+    /// (`ClusterSystem::apply_membership_commits`, spec §9.4.3 item 1).
     pub fn decode(bytes: &[u8]) -> Option<MembershipCommand> {
         let tag = *bytes.first()?;
         let uid = u64::from_le_bytes(bytes.get(1..9)?.try_into().ok()?);
@@ -413,6 +419,9 @@ pub struct Membership {
     /// A node only *adopts* status decisions about itself — it is never the
     /// writer — so this just tracks the highest stamp it has accepted.
     self_stamp: AtomicU64,
+    /// Why this node stopped applying the control group's committed log, or
+    /// `None` while healthy ([`Membership::failure`]). One-way.
+    stopped: Mutex<Option<String>>,
     events: Arc<dyn EventSink>,
 }
 
@@ -449,8 +458,47 @@ impl Membership {
             self_status: Mutex::new(self_status),
             incarnation: AtomicU64::new(0),
             self_stamp: AtomicU64::new(0),
+            stopped: Mutex::new(None),
             events,
         }
+    }
+
+    /// Stop applying the control group's committed log, permanently, and say why
+    /// (spec §9.4.3 item 1).
+    ///
+    /// Called on a committed entry this build cannot decode. The first reason
+    /// wins and nothing clears it: nothing here can establish that the entry
+    /// became readable, and the point of the flag is that an operator reads the
+    /// *cause* rather than whatever happened last.
+    pub(crate) fn stop_applying(&self, why: String) {
+        self.stopped
+            .lock()
+            .expect("stopped mutex poisoned")
+            .get_or_insert(why);
+    }
+
+    /// Why this node stopped applying committed membership transitions, or `None`
+    /// while healthy — the operator-facing half of [`stop_applying`](
+    /// Membership::stop_applying), for a deployment's health probe.
+    ///
+    /// A node in this state is **still a member and still gossiping**, and that is
+    /// deliberate: gossip carries each member's status with the deciding commit
+    /// index as its stamp, so a peer that applied the entry can still deliver the
+    /// *outcome* here (`merge_peer`), even though the log no longer can. What it
+    /// cannot deliver is a transition this build has no concept of — the case that
+    /// made the node stop in the first place — so this is a node to replace, not
+    /// one that heals.
+    pub fn failure(&self) -> Option<String> {
+        self.stopped.lock().expect("stopped mutex poisoned").clone()
+    }
+
+    /// Whether this node has stopped applying committed membership transitions.
+    /// [`failure`](Membership::failure) carries the reason behind it.
+    pub(crate) fn stopped_applying(&self) -> bool {
+        self.stopped
+            .lock()
+            .expect("stopped mutex poisoned")
+            .is_some()
     }
 
     /// This node's own current lifecycle status.
@@ -1210,5 +1258,111 @@ impl Membership {
             .expect("members mutex poisoned")
             .get(&node)
             .map(|m| m.stamp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: NodeId = NodeId::new(1);
+    const B: NodeId = NodeId::new(2);
+
+    /// A roster for `A` under the mode that has no control-plane authority, which
+    /// is enough for everything below: the log is not what these exercise.
+    fn roster() -> Membership {
+        Membership::new(
+            A,
+            &MembershipMode::Static { detector: None },
+            Arc::new(()),
+            false,
+        )
+    }
+
+    #[test]
+    fn a_transition_this_build_knows_round_trips() {
+        for command in [
+            MembershipCommand::Admit(B),
+            MembershipCommand::Drain(B),
+            MembershipCommand::Resume(B),
+            MembershipCommand::Leave(B),
+            MembershipCommand::Down(B),
+        ] {
+            assert_eq!(
+                MembershipCommand::decode(&command.encode()),
+                Some(command),
+                "a command this build encodes did not decode back",
+            );
+        }
+    }
+
+    #[test]
+    fn a_transition_from_a_later_build_is_not_decodable() {
+        // The shape that stops a node: a sixth transition, defined by a build this
+        // one has never seen. The tag space is what carries it, so a tag past the
+        // five defined here is the whole of the test.
+        let mut from_a_later_build = vec![5u8];
+        from_a_later_build.extend_from_slice(&B.uid().to_le_bytes());
+        assert_eq!(
+            MembershipCommand::decode(&from_a_later_build),
+            None,
+            "an unknown transition decoded as one of this build's five",
+        );
+        assert_eq!(
+            MembershipCommand::decode(&[0u8, 1, 2]),
+            None,
+            "a payload too short to hold a node id decoded anyway",
+        );
+    }
+
+    #[test]
+    fn a_stopped_roster_reports_the_first_reason_and_keeps_it() {
+        let membership = roster();
+        assert!(!membership.stopped_applying(), "a fresh roster is applying");
+        assert_eq!(membership.failure(), None);
+
+        membership.stop_applying("the cause".into());
+        membership.stop_applying("a later symptom".into());
+
+        assert!(membership.stopped_applying());
+        assert_eq!(
+            membership.failure().as_deref(),
+            Some("the cause"),
+            "the flag is not one-way: a later reason overwrote the cause",
+        );
+    }
+
+    #[test]
+    fn a_stopped_roster_still_adopts_a_peers_gossiped_outcome() {
+        // The repair path the refusal deliberately leaves running (§9.4.3 item 1).
+        // A node that stopped applying the log can still be *told* what the log
+        // decided, because every transition it knows also travels in gossip
+        // stamped with the commit index that decided it. This is what bounds the
+        // damage of stopping — and pinning it here is what keeps that claim from
+        // being prose alone.
+        let membership = roster();
+        membership.stop_applying("stopped at entry 9".into());
+
+        let downed = membership.merge(
+            vec![MemberDigest {
+                node: B,
+                status: MemberStatus::Down,
+                reachability: Reachability::Reachable,
+                incarnation: 0,
+                stamp: 9,
+            }],
+            Instant::ZERO,
+        );
+
+        assert_eq!(
+            membership.status(B),
+            Some(MemberStatus::Down),
+            "a stopped roster ignored a peer's stamped outcome",
+        );
+        assert_eq!(
+            downed,
+            vec![B],
+            "the node-down cascade did not run for a gossiped downing",
+        );
     }
 }

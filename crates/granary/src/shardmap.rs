@@ -110,6 +110,23 @@ pub trait ShardMapSource: Send + Sync + 'static {
         Box::pin(std::future::ready(0))
     }
 
+    /// Why this node stopped tracking the committed allocation, or `None` while
+    /// healthy (spec §7.6). One-way: nothing clears it, because nothing here can
+    /// establish that the entry became readable.
+    ///
+    /// Set when a committed map command cannot be decoded ([`admit`]). A poisoned
+    /// map keeps *answering* — its allocation is frozen at the last command it
+    /// could apply, which is a prefix of the committed log and therefore exactly
+    /// the state of a node that is merely behind — but it will never advance
+    /// again, so the node is one to replace. The deployment's health probe reads
+    /// this, as it reads [`FileGrainStore::failure`](crate::FileGrainStore::failure).
+    ///
+    /// `None` on the tiers that have no committed log to fall behind: the `Local`
+    /// map is this node's own, and a routing-only client tracks no allocation.
+    fn poisoned(&self) -> Option<String> {
+        None
+    }
+
     /// Request a merge of `shard` with its **right** neighbour — the shard whose
     /// range begins just past `shard`'s (§7.7), the mirror of a split. The seam
     /// behind [`Granary::merge_shards`](crate::Granary::merge_shards). Best-
@@ -268,8 +285,37 @@ fn encode(command: &ShardMapCommand) -> Vec<u8> {
     serde_json::to_vec(command).expect("a ShardMapCommand always serializes")
 }
 
-fn decode(bytes: &[u8]) -> Option<ShardMapCommand> {
-    serde_json::from_slice(bytes).ok()
+/// What one committed observation means for this map, decided **before** any of it
+/// is applied (compatibility **V2**).
+///
+/// `Ok(None)` is an observation with no allocation in it. `Err` is a committed
+/// entry this build cannot read, and it is returned rather than swallowed because
+/// of where this sits. The bytes are already committed, so every node will see
+/// them; a node that skips one and applies the next holds an allocation that is
+/// not any *prefix* of the log but a **gap** in it — a `SplitCommitted` applied
+/// without the `SplitStarted` under it — and disagrees with its peers about which
+/// node owns a range. That is state divergence on a consensus apply path, which
+/// running the shard map through consensus was supposed to make impossible.
+/// [`apply_loop`] stops on it; see there for why stopping is safe where skipping
+/// was not.
+fn admit(
+    observation: &Committed,
+    grain_type: &'static str,
+) -> Result<Option<ShardMapCommand>, String> {
+    // The map group is tiny and never compacts, so it only ever applies commands; a
+    // snapshot install (were one to occur) carries no allocation this loop can act
+    // on. Not a refusal: nothing about it is unreadable.
+    let Committed::Apply { index, command, .. } = observation else {
+        return Ok(None);
+    };
+    match serde_json::from_slice(command) {
+        Ok(command) => Ok(Some(command)),
+        Err(err) => Err(format!(
+            "shard map {grain_type}: committed entry {index} is not a ShardMapCommand \
+             this build can decode ({err}), so this node stopped applying the map's \
+             log rather than skip an entry its peers will apply"
+        )),
+    }
 }
 
 // --- the `Local` tier: the single node replicates everything ---------------------------
@@ -378,6 +424,27 @@ struct Inner {
     /// comparison, which is what keeps the control plane's cost proportional to
     /// cluster events rather than to wall-clock time (§7.8).
     allocation_generation: u64,
+    /// Why this node stopped applying the map's committed log, or `None` while
+    /// healthy ([`ShardMapSource::poisoned`]). Written once by [`apply_loop`] and
+    /// never cleared; read by every driver loop, which stops with it.
+    poison: Option<String>,
+}
+
+impl Inner {
+    /// Stop tracking the committed allocation, permanently, and say why.
+    ///
+    /// The first reason wins. There is one writer today — the apply loop poisons
+    /// and immediately returns — but keeping the flag one-way is what makes the
+    /// reason an operator reads the *cause* rather than whatever happened last.
+    fn poison(&mut self, why: String) {
+        self.poison.get_or_insert(why);
+    }
+
+    /// Whether this map has stopped applying — the gate every driver loop takes.
+    /// [`ShardMapSource::poisoned`] carries the reason behind it.
+    fn poisoned(&self) -> bool {
+        self.poison.is_some()
+    }
 }
 
 /// The shard-event emitter (spec §13): how the map's loops put `ShardSplit`,
@@ -669,6 +736,14 @@ impl ShardMapSource for RaftShardMap {
             .merge_requests
             .insert(left);
     }
+
+    fn poisoned(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .expect("shard map mutex poisoned")
+            .poison
+            .clone()
+    }
 }
 
 /// Apply the map group's committed allocation records (spec §7.6, §7.7).
@@ -724,14 +799,38 @@ async fn apply_loop<R: RaftConsensus>(
     };
 
     while let Ok(observation) = commits.recv().await {
-        // The map group is tiny and never compacts, so it only ever applies
-        // commands; a snapshot install (were one to occur) carries no allocation
-        // this loop can act on and is ignored.
-        let Committed::Apply { command: bytes, .. } = observation else {
-            continue;
-        };
-        let Some(command) = decode(&bytes) else {
-            continue; // a command this map cannot parse is defensively ignored
+        let command = match admit(&observation, grain_type) {
+            Ok(Some(command)) => command,
+            Ok(None) => continue, // no allocation in it (see `admit`)
+            Err(why) => {
+                // **Fail closed on a committed entry** (compatibility **V2**, spec
+                // §7.6). Skipping it and applying the next is what left this node's
+                // allocation a gap rather than a prefix; `admit` has the divergence
+                // that follows. So the loop stops here, for good.
+                //
+                // Stopping is safe in a way that skipping was not, and the reason is
+                // worth stating: a frozen prefix is exactly the state of a node that
+                // is merely *behind* on the log, which every path here already
+                // tolerates. A stale leader cannot serve a moved range from it
+                // either — its peers sealed their durable append bound before the
+                // move, and that bound, not the map, is the authoritative barrier
+                // (§7.7, `QuorumReplicator::seal_shard`).
+                //
+                // It does not crash, for the reason `RaftGroup::wal_failed` gives
+                // one boundary over: an unwind takes down a task and leaves the node
+                // up, still leading shards, with nothing behind it. So it does what
+                // that does and steps out of the way — every shard this node leads
+                // goes to a replica whose map is still advancing.
+                //
+                // It stays in the map group and keeps acknowledging its appends.
+                // Quorum there is about the log being *durable*, not about this
+                // build having applied it: the entries are on disk, and a restart
+                // onto a build that can read them applies them. Dropping out would
+                // cost availability and buy no safety.
+                inner.lock().expect("shard map mutex poisoned").poison(why);
+                hand_off_all(consensus.clone(), grain_type, Arc::clone(&inner)).await;
+                return;
+            }
         };
         // Bumped once here rather than at each of the arms that touch `allocation`:
         // every allocation change is the result of applying a committed command, so
@@ -1102,18 +1201,26 @@ async fn apply_loop<R: RaftConsensus>(
     }
 }
 
-/// Drive `tick` every `interval`, exiting the moment `upgrade` yields `None` —
-/// the shard map (the `Weak` back-reference each loop holds) was dropped. Every
-/// shard-map driver loop's teardown contract — the sleep and the
-/// weak-upgrade-or-exit — lives here once; each loop supplies only its own
-/// `upgrade` (one `Arc`, or a tuple for the loops that need both `inner` and
-/// `handles`) and its per-tick body. The leadership gate stays in the body: it
-/// varies loop to loop (whole-tick, per-shard-group, or per-term), and two loops
-/// run their proposer phase ungated. A `tick` that returns early skips just that
-/// tick.
+/// Drive `tick` every `interval`, exiting the moment the shard map is dropped or
+/// poisoned. Every shard-map driver loop's teardown contract — the sleep, the
+/// poison gate, and the weak-upgrade-or-exit — lives here once; each loop supplies
+/// only its own `upgrade` (one `Arc`, or a tuple for the loops that need both
+/// `inner` and `handles`) and its per-tick body. The leadership gate stays in the
+/// body: it varies loop to loop (whole-tick, per-shard-group, or per-term), and two
+/// loops run their proposer phase ungated. A `tick` that returns early skips just
+/// that tick.
+///
+/// `map` is the same `Inner` every `upgrade` reaches, taken separately because `D`
+/// is opaque here. The gate is not the loop's own business the way its leadership
+/// check is: a poisoned map's allocation is frozen at a prefix of the committed log
+/// ([`apply_loop`]), so every proposal computed from it is computed from a view
+/// this node knows is behind. An allocator that kept sweeping would read a shard it
+/// never learned about as unallocated and propose a *founding* assignment over the
+/// real one — turning a node that stopped reading the log into one that corrupts it.
 async fn driver_loop<R, D, Fut>(
     consensus: &R,
     interval: Duration,
+    map: &Weak<Mutex<Inner>>,
     upgrade: impl Fn() -> Option<D>,
     mut tick: impl FnMut(D) -> Fut,
 ) where
@@ -1122,6 +1229,12 @@ async fn driver_loop<R, D, Fut>(
 {
     loop {
         consensus.sleep(interval).await;
+        let stop = map
+            .upgrade()
+            .is_none_or(|inner| inner.lock().expect("shard map mutex poisoned").poisoned());
+        if stop {
+            return; // the map was dropped, or stopped applying — stop the loop
+        }
         let Some(deps) = upgrade() else {
             return; // the map was dropped — stop the loop
         };
@@ -1158,6 +1271,7 @@ async fn allocator_loop<R: RaftConsensus>(
     driver_loop(
         consensus,
         ALLOCATE_INTERVAL,
+        &inner,
         || inner.upgrade(),
         move |inner| async move {
             if !consensus.group_is_leader(group) {
@@ -1280,6 +1394,7 @@ async fn reconcile_loop<R: RaftConsensus>(
     driver_loop(
         consensus,
         ALLOCATE_INTERVAL,
+        &inner,
         || inner.upgrade(),
         move |inner| async move {
             // Map group → current cluster voters.
@@ -1331,6 +1446,7 @@ async fn migrate_loop<R: RaftConsensus>(
     driver_loop(
         consensus,
         ALLOCATE_INTERVAL,
+        &inner,
         || Some((inner.upgrade()?, handles.upgrade()?)),
         move |(inner, handles)| async move {
             let migrating: Vec<u32> = {
@@ -1445,6 +1561,7 @@ async fn split_loop<R: RaftConsensus>(
     driver_loop(
         consensus,
         ALLOCATE_INTERVAL,
+        &inner,
         || Some((inner.upgrade()?, handles.upgrade()?)),
         move |(inner, handles)| async move {
             // Proposer: (re)propose `SplitStarted` for each requested shard. A
@@ -1593,6 +1710,7 @@ async fn merge_loop<R: RaftConsensus>(
     driver_loop(
         consensus,
         ALLOCATE_INTERVAL,
+        &inner,
         || Some((inner.upgrade()?, handles.upgrade()?)),
         move |(inner, handles)| async move {
             // Proposer: (re)propose `MergeStarted` for each requested left shard.
@@ -1749,6 +1867,7 @@ async fn split_trigger_loop<R: RaftConsensus>(
     driver_loop(
         consensus,
         SPLIT_TRIGGER_INTERVAL,
+        &inner,
         || inner.upgrade(),
         move |inner| async move {
             // The idle, splittable shards this node's allocation knows about.
@@ -1798,6 +1917,7 @@ async fn leader_watch_loop<R: RaftConsensus>(
     driver_loop(
         consensus,
         ALLOCATE_INTERVAL,
+        &inner,
         || inner.upgrade(),
         move |inner| async move {
             let shards: Vec<u32> = {
@@ -1830,4 +1950,124 @@ async fn leader_watch_loop<R: RaftConsensus>(
         },
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A committed observation carrying `command` at `index`.
+    fn applied(index: u64, command: Vec<u8>) -> Committed {
+        Committed::Apply {
+            index,
+            command,
+            commit: index,
+        }
+    }
+
+    /// A map whose state is `inner` and whose handoff does nothing — enough to
+    /// read the [`ShardMapSource`] surface without a consensus engine behind it.
+    fn map_over(inner: Inner) -> RaftShardMap {
+        RaftShardMap {
+            inner: Arc::new(Mutex::new(inner)),
+            handoff: Arc::new(|| Box::pin(std::future::ready(0usize)) as BoxFuture<'static, usize>),
+        }
+    }
+
+    #[test]
+    fn a_command_this_build_knows_is_admitted() {
+        let command = ShardMapCommand::SplitCommitted { parent: 7 };
+        let admitted = admit(&applied(4, encode(&command)), "acct").expect("a known command");
+        assert!(
+            matches!(
+                admitted,
+                Some(ShardMapCommand::SplitCommitted { parent: 7 })
+            ),
+            "a command this build encodes did not come back from `admit`",
+        );
+    }
+
+    #[test]
+    fn a_committed_command_this_build_cannot_decode_is_refused() {
+        // The shape a mixed-version cluster produces: a peer on a later build
+        // proposes a variant this one has never heard of, and it commits.
+        let from_a_later_build = br#"{"Retired":{"shard":3}}"#.to_vec();
+        let why = match admit(&applied(9, from_a_later_build), "acct") {
+            Err(why) => why,
+            Ok(_) => panic!("a command from a later build was admitted rather than refused"),
+        };
+        assert!(
+            why.contains("acct") && why.contains('9'),
+            "the refusal names neither the map nor the entry it stopped on: {why}",
+        );
+    }
+
+    #[test]
+    fn a_snapshot_observation_is_not_a_refusal() {
+        // The map group never compacts, so this is a shape that does not arise —
+        // but "no allocation in it" and "unreadable" must stay different answers,
+        // or a snapshot would poison the node that installed it.
+        let observation = Committed::Snapshot {
+            index: 2,
+            snapshot: vec![0xff, 0xff],
+            commit: 2,
+        };
+        assert!(
+            admit(&observation, "acct")
+                .expect("a snapshot is not unreadable")
+                .is_none(),
+            "a snapshot install was mistaken for a command",
+        );
+    }
+
+    #[test]
+    fn a_poisoned_map_reports_the_first_reason_and_keeps_it() {
+        let mut inner = Inner::default();
+        assert!(!inner.poisoned(), "a fresh map is not poisoned");
+        inner.poison("the cause".into());
+        inner.poison("a later symptom".into());
+        assert_eq!(
+            map_over(inner).poisoned().as_deref(),
+            Some("the cause"),
+            "the poison is not one-way: a later reason overwrote the cause",
+        );
+    }
+
+    #[test]
+    fn an_unpoisoned_map_reports_healthy() {
+        assert_eq!(
+            map_over(Inner::default()).poisoned(),
+            None,
+            "a map that has applied everything it saw reported a failure",
+        );
+    }
+
+    #[test]
+    fn a_poisoned_map_keeps_answering_from_the_prefix_it_applied() {
+        // The property that makes stopping safe where skipping was not: what the
+        // node already applied stays readable and stays *correct*, because it is a
+        // prefix of the committed log rather than a gap in it. A poisoned map that
+        // went blank instead would look to every caller like one still
+        // bootstrapping, and routing would fall back to the founding partition —
+        // the wrong answer, arrived at silently.
+        let mut inner = Inner::default();
+        inner.allocation.insert(
+            0,
+            Allocation {
+                range: KeyRange {
+                    start: 0,
+                    end: u64::MAX,
+                },
+                current: vec![NodeId::new(1)],
+                target: None,
+                split: None,
+                merge: None,
+            },
+        );
+        inner.poison("stopped at entry 9".into());
+        let map = map_over(inner);
+        assert_eq!(map.replicas(0), Some(vec![NodeId::new(1)]));
+        assert_eq!(map.shard_of(1234), Some(0));
+        assert_eq!(map.shard_indices(), vec![0]);
+    }
 }

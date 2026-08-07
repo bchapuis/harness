@@ -627,15 +627,49 @@ where
     /// commit index, and run the node-down cascade (spec §8.1) for one that lands a
     /// `Down`/`Leave`.
     async fn apply_membership_commits(&self, committed: Vec<Committed>) {
+        // A node that stopped applying stays stopped: this runs every tick, and
+        // the flag is what makes the refusal below permanent rather than one
+        // batch's worth (`Membership::stop_applying`).
+        if self.inner.membership.stopped_applying() {
+            return;
+        }
         for observation in committed {
             // The control group never compacts, so it only ever applies commands.
             let Committed::Apply { index, command, .. } = observation else {
                 continue;
             };
-            // The control group's app payload is a `MembershipCommand`; a
-            // malformed payload is defensively ignored, never panicked on.
             let Some(command) = MembershipCommand::decode(&command) else {
-                continue;
+                // **Fail closed on a committed entry** (compatibility **V2**). The
+                // control group's log is agreed, so an entry this node skips is one
+                // its peers apply: it would go on applying the transitions *after*
+                // an admission or a downing it never saw, holding a member set that
+                // is not a prefix of the committed log but a gap in it, while
+                // remaining a full voting member of the cluster whose membership it
+                // has stopped tracking.
+                //
+                // The blast radius is smaller than the shard map's, and worth
+                // stating precisely rather than overstating: every transition this
+                // build *knows* also travels in gossip, stamped with its commit
+                // index, so a peer that applied the entry can still deliver the
+                // outcome here (`Membership::merge`). That repair is what makes
+                // stopping cheap. It is also exactly what does not cover the case
+                // that gets here — a tag from a later build is a transition this
+                // one cannot name, in gossip no more than in the log.
+                //
+                // So the node stops applying, keeps gossiping (the repair path is
+                // strictly better left running), keeps acknowledging the group's
+                // appends — quorum there is about the log being *durable*, not
+                // about this build having applied it — and hands the control-plane
+                // duties to a peer that can still perform them (`raft_driver`).
+                self.inner.membership.stop_applying(format!(
+                    "control group: committed entry {index} is not a \
+                     MembershipCommand this build can decode ({} bytes, tag {:?}), \
+                     so this node stopped applying membership transitions rather \
+                     than skip one its peers will apply",
+                    command.len(),
+                    command.first(),
+                ));
+                return;
             };
             let (node, status) = command.effect();
             let now = self.inner.clock.now();
@@ -1768,22 +1802,58 @@ where
         if let Some(control) = raft.group(GroupId::CONTROL)
             && control.is_leader()
         {
-            let propose = |command: MembershipCommand| {
-                control.propose(EntryPayload::App(command.encode()));
-            };
-            for node in system.inner.membership.admission_candidates() {
-                propose(MembershipCommand::Admit(node));
+            if system.inner.membership.stopped_applying() {
+                // A leader that cannot apply the log it commits to is the one node
+                // that must not hold this job: it would propose a `Down`, commit
+                // it, never observe it, and propose it again on the next tick,
+                // forever. So it invites a peer to take over instead. Best-effort
+                // and retried each tick — a target that has not replicated this
+                // leader's last entry refuses, and replication fixes that within a
+                // heartbeat or two.
+                hand_off_control(&system, &mode).await;
+            } else {
+                let propose = |command: MembershipCommand| {
+                    control.propose(EntryPayload::App(command.encode()));
+                };
+                for node in system.inner.membership.admission_candidates() {
+                    propose(MembershipCommand::Admit(node));
+                }
+                for node in system.inner.membership.leaving_members() {
+                    propose(MembershipCommand::Leave(node));
+                }
+                for node in system
+                    .inner
+                    .membership
+                    .downing_candidates(mode.downing, now)
+                {
+                    propose(MembershipCommand::Down(node));
+                }
             }
-            for node in system.inner.membership.leaving_members() {
-                propose(MembershipCommand::Leave(node));
-            }
-            for node in system
-                .inner
-                .membership
-                .downing_candidates(mode.downing, now)
-            {
-                propose(MembershipCommand::Down(node));
-            }
+        }
+    }
+}
+
+/// Hand the control group's leadership to any other configured voter, for a node
+/// that has stopped applying membership transitions (spec §9.4.3 item 1).
+///
+/// The configured voters, not the live ones: the live set is read out of the
+/// member view this node has stopped advancing, which is the state being escaped.
+/// The founding set is a constant every node agrees on, and a target that is no
+/// longer a voter simply refuses, which costs one call and is retried next tick.
+async fn hand_off_control<C, E, S, T>(system: &ClusterSystem<C, E, S, T>, mode: &LeaderMode)
+where
+    C: Clock,
+    E: Entropy,
+    S: Spawner,
+    T: Transport,
+{
+    let self_node = system.node();
+    for target in mode.raft.voters.iter().copied().filter(|&n| n != self_node) {
+        if system
+            .transfer_group_leadership(GroupId::CONTROL, target)
+            .await
+        {
+            return;
         }
     }
 }
