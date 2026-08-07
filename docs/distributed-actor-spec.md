@@ -483,6 +483,8 @@ SystemMessage =
     | Receptionist(..)                    // §13
 ```
 
+**The frame vocabulary is a compatibility boundary** (`actor.wire`, [compatibility](compatibility-spec.md) §3, §3.1), and it grows by **appending a variant, never by editing one**. Under a positional encoding an edited variant shifts the layout of everything after it, so a peer a release behind reads every subsequent frame as a different one — it compiles, it round-trips against itself, and both ends agree right up until they are not the same build. An appended variant leaves each prior definition exactly as the release that shipped it saw it, which is what makes that definition something a peer can still be sent.
+
 ### 7.2 Delivery guarantees
 
 - **At-most-once** per call attempt. The framework MUST NOT transparently retransmit a delivered message.

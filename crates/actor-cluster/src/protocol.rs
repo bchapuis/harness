@@ -32,6 +32,13 @@ use crate::raft::RaftEntry;
 /// releases: widen the range first (`Window::new("actor.wire", 1, 2, 1)`, so this
 /// build *reads* v2 without writing it), and only once that release is everywhere
 /// move `writes` up. That ordering is invariant **V4**.
+///
+/// **The vocabulary grows by appending a variant, never by editing one.** Under a
+/// positional encoding an edited variant shifts every discriminant after it, so a
+/// peer a release behind reads every subsequent frame as a different one; an
+/// appended variant leaves each prior definition exactly as the release that
+/// shipped it saw it. [`tests::frame_discriminants_are_stable`] is what notices
+/// the difference, because nothing in the type system can.
 pub const WIRE: compat::Window = compat::Window::at("actor.wire", 1);
 
 /// Serialize [`Frame::Reply`]'s outcome with its success bytes told they are bytes.
@@ -420,5 +427,93 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- The frame vocabulary's own layout (spec §7.1) -------------------------
+
+    /// The postcard discriminant a variant encodes as: its position in the
+    /// declaration, read off the first byte.
+    ///
+    /// Sound only while the enum stays under 128 variants, where postcard's
+    /// varint is a single byte — asserted rather than assumed, so this helper
+    /// cannot start lying as the vocabulary grows.
+    fn discriminant(frame: &Frame) -> u8 {
+        let bytes = encode(&PostcardCodec, frame).expect("a frame encodes");
+        assert!(
+            bytes[0] < 0x80,
+            "the frame vocabulary has passed 128 variants, so a discriminant is \
+             no longer one byte and this test is reading the wrong thing",
+        );
+        bytes[0]
+    }
+
+    #[test]
+    fn frame_discriminants_are_stable() {
+        // **The failure this catches has no other detector.** `Frame`'s postcard
+        // encoding is *positional*: a variant inserted anywhere but the end
+        // shifts every discriminant after it, so a peer one release behind reads
+        // every subsequent frame as a different one — a `RaftAppend` arriving as
+        // a `Watch`. It compiles, it round-trips against itself, and both ends
+        // agree right up until they are not the same build. No round-trip test
+        // can see it, because a round-trip only ever asks one build to agree
+        // with itself; and the `actor.wire` golden corpus does not cover it,
+        // because that fixture pins the `Hello` preamble rather than the frames
+        // (compatibility §3, §4).
+        //
+        // Appending is the safe growth (spec §7.1), and it is what these numbers
+        // permit: a new variant takes the next free index and moves none of
+        // these. Changing one means the wire format changed, which is a revision
+        // and not an edit.
+        //
+        // The SWIM family is pinned because it is the likeliest thing to be
+        // reshaped — its digest is where a membership field would want to go —
+        // and `RaftPropose` because it is the last variant, so an insertion
+        // *anywhere* moves it.
+        let digest = Vec::new();
+        assert_eq!(
+            discriminant(&Frame::Ping {
+                seq: 1,
+                incarnation: 0,
+                digest: digest.clone(),
+            }),
+            2,
+        );
+        assert_eq!(
+            discriminant(&Frame::Ack {
+                seq: 1,
+                incarnation: 0,
+                digest: digest.clone(),
+            }),
+            3,
+        );
+        assert_eq!(
+            discriminant(&Frame::PingReq {
+                seq: 1,
+                target: NodeId::new(2),
+                incarnation: 0,
+                digest: digest.clone(),
+            }),
+            4,
+        );
+        assert_eq!(
+            discriminant(&Frame::IndirectAck {
+                seq: 1,
+                target: NodeId::new(2),
+                incarnation: 0,
+                digest,
+            }),
+            5,
+        );
+        assert_eq!(
+            discriminant(&Frame::RaftPropose {
+                group: GroupId::CONTROL,
+                command: Vec::new(),
+                forwarded: false,
+            }),
+            19,
+            "the last variant moved, so something was inserted rather than \
+             appended and every frame after the insertion point now means \
+             something else on the wire",
+        );
     }
 }

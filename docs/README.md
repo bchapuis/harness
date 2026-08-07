@@ -68,11 +68,14 @@ One layer has a design note rather than a spec:
 
 - [open-work](open-work.md) — the cross-cutting read of everything the specs
   declare unfinished, in reading order rather than dependency order: the
-  compatibility policy only half enforced, the format boundaries still
-  unstamped, the invariants no sweep asserts, the deferrals each layer owns, and
-  what is finished but unused. An index, not a source of truth — every entry
-  points at the section that owns it and carries a next step for a session
-  picking it up cold, and both are deleted together when an item lands.
+  compatibility policy mechanised but never exercised, the format boundaries
+  still unstamped, the invariants no sweep asserts, the deferrals each layer
+  owns, and what is finished but unused. An index, not a source of truth —
+  every entry points at the section that owns it and carries a **status**
+  (open, postponed, or by design) plus a next step for a session picking it up
+  cold, and all of it is deleted together when an item lands. What survives a
+  landing is a *decision*: where work was built and pulled back, the entry
+  records what was decided, when, and what would reopen it.
 
 ## Elsewhere in the tree
 
