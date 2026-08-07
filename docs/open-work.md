@@ -76,19 +76,9 @@ Each build announces the range it accepts at a boundary (`Window::accepted()`), 
 
 ## 2. Where the sweeps do not reach
 
-Known gaps between what the simulation sweeps exercise and what the specs mandate (simulation-testing, *Where the sweeps do not yet reach*, which owns all three). Each is a place a bug could live undetected today.
+Known gaps between what the simulation sweeps exercise and what the specs mandate (simulation-testing, *Where the sweeps do not yet reach*, which owns both). Each is a place a bug could live undetected today.
 
-### 2.1 Granary alarms have no continuous sweep
-
-**Status:** open — the disputed evidence was settled on 2026-08-07 and did not reproduce, so the sweep is the work after all.
-
-At-most-once firing is now catalogued as **G21** and verified by scenarios (`alarm.rs`, `alarm_cluster.rs`), but a `ClusterWorkload` asserting it under the continuous nemesis trips `no-silent-loss` on about one seed in ten — *"1 ask(s) still pending at quiescence"*. The alarm driver polls its shard's index every 500 ms for as long as its node lives (`ALARM_DRIVE_INTERVAL`, `crates/granary/src/grainref.rs`), so an alarm-wired granary never reaches ask-quiescence. Nothing is lost — those asks carry the 5 s `DEFAULT_ASK_TIMEOUT` and do resolve — so this is a check meeting a subsystem it was not written for.
-
-**Settled 2026-08-07: the stronger claim does not reproduce.** `932ebca` recorded that an alarm-wired granary does not commit *at all* under plain frame loss, and `557ad1a` reverted it with no reason written down, leaving an assertion nobody could check. The controlled differential is now in the tree (`crates/granary/tests/alarm_loss.rs`), and the alarm arm commits at every loss rate tried, with passivation on and off — more often than the plain arm on most, never categorically less. The quiescence story above is therefore the whole of the problem, and the test stays as a regression guard on its own property. Simulation-testing has the detail.
-
-**Next step —** build the `ClusterWorkload` on `granary_with_alarms::<Timer>` over the hoisted fixture in `crates/granary/tests/support/timer.rs`, which `alarm_cluster.rs` and `alarm_index.rs` already drive, and take the fourth way out of the quiescence problem: drop `NoSilentLoss` from `default_invariants()` (`crates/actor-simulation/src/invariant.rs`) exactly as `crates/blob-store/tests/swarm.rs` does in its `invariants()`, writing down the same reasoning. That move is honest only while the workload awaits every op it issues to an outcome, which is what leaves the data path's no-loss covered with the checker gone; if that reads as too weak, the alternatives all change the runner or the driver — exempt background-loop asks from the tally, require in-flight-zero over a sustained window, or give the driver a way to stand down. Done when a seeded sweep asserts **G21** under the continuous nemesis and passes every seed, not nine in ten.
-
-### 2.2 Granary workflows have no sweep at all
+### 2.1 Granary workflows have no sweep at all
 
 **Status:** open, attempted — a workload was built, measured, and not committed. What is missing is a shorter fixture, not more effort against the current one.
 
@@ -96,7 +86,7 @@ What is assertable is not "the effect ran once" — `LaunchGuard` is per-activat
 
 **Next step —** shorten the chain until one commit suffices. Today's fixture (`crates/granary/tests/workflow.rs`) opens with an ask — `Pipeline` accepts a `Start` message — so a round trip has to succeed before the workflow commits anything; dropping it in favour of activating on first touch is the obvious first cut. Alongside it, give the effect a value that differs on each run (a counter, not a constant), because a constant-valued effect cannot tell an overwritten memo from a preserved one. Then assert write-once against the memo rather than against the effect count. Done when a seeded sweep observes a memo on most seeds and re-launches on some of them — the two conditions that currently never co-occur.
 
-### 2.3 Three crates have no sweep
+### 2.2 Three crates have no sweep
 
 **Status:** open, and blocked on a decision rather than on effort — what a *fault* even is at an I/O boundary has never been settled, and the code cannot start before it is.
 

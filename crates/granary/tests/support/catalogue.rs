@@ -177,6 +177,8 @@ const G_CATALOGUE: &[CatalogueEntry] = &[
         invariant: 21,
         spec: "granary §7.16",
         property: "An alarm fires at most once per arm: the fired deadline's Clear joins the same atomic batch as on_alarm's records and the epoch guard voids a superseded timer, so one armed deadline commits at most one callerless effect — the bound is on effects that commit, not on handler invocations",
-        verify: &[Verify::SimTest("alarm.rs, alarm_cluster.rs")],
+        verify: &[Verify::SimTest(
+            "alarm.rs, alarm_cluster.rs, alarm_swarm.rs",
+        )],
     },
 ];

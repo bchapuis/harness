@@ -432,6 +432,24 @@ overrun the driver's time budget on a degraded cluster, failing the seed for
 liveness rather than for anything observed. Bound it in total, so a seed that
 runs out of budget makes no claim rather than a false one.
 
+**Some subsystems never quiesce, and the answer is per checker, not per sweep.**
+A background loop that polls for as long as its node lives has something in
+flight at *any* stopping point, so a quiescence assertion over it fails on a
+fraction of seeds no matter how long the runner waits. Granary's alarm driver
+sweeps its shard's index every 500 ms (`ALARM_DRIVE_INTERVAL`), and
+`blob-store`'s reconcile loop probes owners continuously, and both break the same
+two default checkers — but they do not deserve the same remedy.
+`no-silent-loss` is *entirely* a quiescence claim, so a workload over such a
+subsystem drops it whole, which both swarms do. `serial-execution` is two claims
+in one: `observe` asserts no reentrant dispatch, which is real safety and holds
+fine, and only `at_quiescence` asserts nothing is left open. Dropping it whole
+would throw away the safety half, so `alarm_swarm.rs` wraps the real checker and
+overrides the final call alone. Read a failing checker before deleting it: the
+question is not "does this subsystem satisfy it" but "which of its claims does
+it satisfy". Dropping a quiescence claim stays honest only while the workload
+awaits every op it issues to an outcome, which is what keeps the data path's
+no-loss covered with the checker gone.
+
 ## The regression corpus
 
 `crates/actor-simulation/corpus.txt` records every seed that ever failed, keyed
@@ -660,50 +678,6 @@ For each component, write:
 Known gaps between what the sweeps exercise and what the specs mandate. Each is
 a place a bug could live undetected today.
 
-- **Granary alarms have no continuous sweep, and one cannot pass as the runner
-  stands.** `alarm-cluster/leader-crash` sweeps 24 seeds, and **G21** is now a
-  catalogued invariant, but a `ClusterWorkload` asserting it under the
-  continuous nemesis trips `no-silent-loss` on roughly one seed in ten: *"1
-  ask(s) still pending at quiescence"*. The cause is structural rather than a
-  workload bug. The alarm driver polls its shard's index every 500 ms for as
-  long as its node lives (`ALARM_DRIVE_INTERVAL`, `grainref.rs`), so an
-  alarm-wired granary has an ask in flight a fixed fraction of the time and
-  never reaches ask-quiescence; `drive_cluster` steps until `CLUSTER_SETTLE_MAX`
-  and then reports whatever it finds outstanding. Nothing is lost — those asks
-  carry the 5 s `DEFAULT_ASK_TIMEOUT` and do resolve — so this is the check
-  meeting a subsystem it was not written for, not a leak. Closing it needs a
-  decision about what quiescence means when a subsystem polls forever. Three
-  options change the runner or the driver: exempt background-loop asks from the
-  tally, require in-flight-zero over a sustained window, or give the driver a
-  way to stand down. A fourth is already in the tree and is test-local —
-  `blob-store`'s swarm drops `no-silent-loss` from `default_invariants()`
-  outright, because its reconcile loop keeps background asks in flight for the
-  same structural reason, and its comment names granary as the contrast —
-  which alarm-wiring is exactly what ends: *"granary's swarm keeps the checker
-  because it issues no continuous background asks."* That move is honest only while the
-  workload awaits every op it issues to an outcome, which is what leaves the
-  data path's no-loss covered with the checker gone. A sweep failing one seed
-  in ten is worse than no sweep, so nothing was committed; the workload that
-  reproduced it does not survive.
-
-  **A stronger claim about this subsystem was recorded, reverted, and has now
-  been tested: it does not reproduce.** A commit on the branch that carried this
-  work said an alarm-wired granary does not commit *at all* under plain frame
-  loss — no partition, no crash — the grain activating, never committing, being
-  passivated, while the caller hangs to its own deadline. It was reverted with
-  no reason written down and the workload behind it was never committed, which
-  left an assertion nobody could check sitting under the paragraph above. The
-  controlled differential is now `crates/granary/tests/alarm_loss.rs`: both arms
-  host the `AlarmIndex` granary so the Raft group count matches, both run the
-  same `Timer` on the same seeds under the same `FaultPolicy`, and only the
-  timer's wiring differs. The alarm arm commits at one-in-six, one-in-three, and
-  one-in-two loss, with passivation on and off, and with the settle window
-  removed — more often than the plain arm on most configurations, never
-  categorically less. That test stays, because the property is worth holding on
-  its own: adding the index and its driver to a grain type must not cost that
-  type its ability to commit. What it asserts is categorical, not a rate — under
-  loss either arm can lose a given call, and a threshold on the difference would
-  be a flake rather than a check.
 - **Granary workflows have no sweep at all, and the obvious shape does not
   reach the property.** The invariant worth asserting is not "the effect ran
   once" — `LaunchGuard` is per-activation and never journaled, so a
