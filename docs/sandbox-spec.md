@@ -99,6 +99,23 @@ An environment can vanish at any moment: a crash, an eviction, an idle release. 
 
 Reporting a loss requires detecting it: a provider that can observe that the environment itself is gone (the workspace's backing directory no longer exists; the engine's state vanished beneath it) MUST report the failing call as environment loss, the harness's `EnvironmentLost` outcome, never as an ordinary tool failure. Only environment loss engages §5.5's reset protocol; an ordinary failure leaves the model retrying against state that no longer exists, while the journal asserts a workspace the world lost.
 
+### 4.1 The fault model at this seam
+
+§4 says what a provider does when something is lost. This says what "something is lost" *is* — the vocabulary a test may inject, and which invariant is expected to survive each — because a sweep whose faults are not the seam's faults asserts nothing while looking like coverage.
+
+**The faults are the seam's answers, not the environment's internals.** The simulator's fault surface is the four nondeterminism traits (core §4.6, §7) and the transport under them; none of that reaches inside a sandbox call, which crosses a *process* boundary — a wasm instance, a container, a microVM — that the simulator does not model. What is injectable is therefore exactly what a `Sandbox` implementation can answer, and the vocabulary is closed:
+
+| Fault | What the seam answers | What must survive |
+|---|---|---|
+| **Environment loss** | a call returns the harness's `EnvironmentLost` outcome (§4, harness §5.5) | the next activation opens fresh, `WorkspaceReset` is journaled, and the held set restarts at `Workspace` (S4) |
+| **Single-tier loss** | a call at a provisioned tier fails as an ordinary `ToolError` while the sandbox lives (§4) | the run continues; the tier may be re-provisioned under the acquisition already journaled, and never under one that was not (S4) |
+| **Refused acquisition** | a call at a tier outside the kind's cap is refused before any effect | no `TierAcquired` for it, and no effect at it (S4) |
+| **Slow call** | a call that outlives the caller's deadline | the harness's own timeout path, not a provider re-entry; `release` still tears down whatever was provisioned (S5) |
+
+**Two invariants are assertable this way and three are not**, which is the part that decides whether a sweep is worth writing. S4 and S5 are claims about the *bookkeeping around* calls — the journaled order of acquisitions, the monotone held set, the activation boundary, the completeness and idempotence of release — so they hold or fail against any conforming `Sandbox`, including a test double that only answers. S1, S2 and S3 are claims about what a real environment *cannot do*: an unrepresentable path, a hermetic guest, a default-deny egress. A double cannot violate them and cannot be made to, so a sweep over one would report them green while exercising nothing. They stay where they are — by construction, plus the adversarial scenario tests §6 names.
+
+**The consequence for a workload.** A conforming sweep drives an agent whose tools declare several tiers, injects the four faults above under seed control, and asserts S4 and S5 over the journal alongside the harness's own catalogue (harness §11). It does **not** claim to cover confinement. That distinction is why this section exists: the gap a sweep here closes is the acquisition bookkeeping under loss, and stating it stops a later reader from reading a green sweep as evidence about escape.
+
 ---
 
 ## 5. Relation to the harness specification
@@ -115,6 +132,7 @@ Reporting a loss requires detecting it: a provider that can observe that the env
 | Per-tier provider obligations and the threat model | §3 |
 | Reference realization (non-normative) | §3.5 |
 | Provider conduct under loss | §4 |
+| The fault model at the seam, and what a sweep there can assert | §4.1 |
 | S-catalogue | §6 |
 
 Nothing here changes the seam: a pre-tier provider that executes every call in one environment is a degenerate conforming provider for a kind whose tools all declare one tier and whose cap is that singleton.

@@ -555,9 +555,29 @@ recur in workloads that assert one:
      six-round nemesis misses any one action about two runs in five, so the same
      assertion on an invariant sweep is not stricter, only flaky.
 5. If it needs a grain or actor a scenario suite already drives, take it from
-   `tests/support/` rather than writing a second one.
+   `tests/support/` rather than writing a second one. A fixture whose *shape*
+   has to differ between the scenarios and the sweep takes a config field, not a
+   second copy — `granary`'s `support::pipeline` switches its alarm-backed sleep
+   off for the sweep that way.
 6. When soak finds a failing seed, add it to `corpus.txt` — and write the
    scenario test once you know what broke.
+
+Two shaping mistakes are worth naming, because both produce a sweep that runs
+and asserts nothing:
+
+- **A constant-valued fixture cannot say which write won.** For a property about
+  *which* of several attempts is the durable one — a memoized step result, a
+  first-writer-wins register, a deduplicated command — the fixture's effect must
+  produce a **different value each time it runs**. `granary`'s workflow sweep
+  hands every step launch a fresh ordinal for exactly this reason: with a
+  constant, a memo that was overwritten and one that was preserved read
+  identically, and the check passes either way.
+- **Pace a round by the clock, not by its calls.** A drive that awaits round *N*
+  before opening round *N+1* lets one refused call stretch a 500 ms round into a
+  `CALL_DEADLINE` one, and the whole drive shares a single virtual-time budget —
+  so on the faulted seeds the sweep exists for, the later rounds are never
+  issued at all. Sleep to each round's *offset* and let the rounds overlap; the
+  schedule then belongs to the workload rather than to the nemesis.
 
 ## Shared fixtures and invariants
 
@@ -678,29 +698,14 @@ For each component, write:
 Known gaps between what the sweeps exercise and what the specs mandate. Each is
 a place a bug could live undetected today.
 
-- **Granary workflows have no sweep at all, and the obvious shape does not
-  reach the property.** The invariant worth asserting is not "the effect ran
-  once" — `LaunchGuard` is per-activation and never journaled, so a
-  re-activation legitimately re-launches an unresolved step and an effect may
-  run many times (§7.17). It is that the **memo is write-once**: `complete_step`
-  records only a step that is not already done, so the first committed result
-  wins and every later drive resolves from it. Making that observable needs a
-  fixture whose effect returns a *different value on each run*, so an overwrite
-  shows up in the memo; a constant-valued effect cannot tell the two cases
-  apart.
-  
-  What blocks a sweep is that the property needs a **chain**: the workflow must
-  commit a step, be interrupted, re-launch, and then be readable. Other granary
-  sweeps judge independent operations and tolerate individual failures, but here
-  the seeds that get far enough to observe anything are the calm ones — which
-  never re-launch — and the seeds that re-launch never get readable. At the
-  nemesis's fault levels, roughly two seeds in twenty-four observe a memo at
-  all, and none of those re-launched. The workload that measured this was never
-  committed and does not survive. Landing one needs the chain shortened until a
-  single commit suffices to observe the property — dropping the `Start` round
-  trip in favour of activating on first touch is the obvious first cut — rather
-  than more seeds or a longer settle, both of which were tried and moved nothing.
 - **`harness-sandbox`, `harness-gateway`, and `machine-frontdoor` have no
   sweep.** These are I/O-boundary crates rather than distributed ones, so the
-  simulator reaches them only indirectly; what a sweep would look like there is
-  itself unsettled.
+  simulator reaches them only indirectly. What a sweep would look like there is
+  settled for one of the three and open for the other two: the sandbox states
+  its fault model (sandbox §4.1) — a closed vocabulary of four faults, and the
+  two of its five invariants a sweep over them can actually assert — so a
+  workload there has something to inject and something to claim. The gateway and
+  the front door have no such statement, and a sweep whose faults are not the
+  seam's faults asserts nothing while looking like coverage, which is worse than
+  the gap it closes. The decision comes before the code there: pick one, answer
+  what a fault is in its own spec's terms, and only then write a workload.

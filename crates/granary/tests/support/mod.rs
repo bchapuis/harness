@@ -16,6 +16,10 @@
 //! - [`timer`] — the alarm-bearing `Timer`, generic over the hosting system, so
 //!   `alarm_index.rs` drives it on the `Local` tier and `alarm_cluster.rs` and
 //!   `alarm_loss.rs` drive the same grain on the clustered one.
+//! - [`pipeline`] — the workflow-facet `Pipeline`, likewise generic over the
+//!   system, shared by `workflow.rs` (scenarios) and `workflow_swarm.rs` (the
+//!   sweep). Its shape varies by `PipelineConfig` rather than by a second grain,
+//!   so the sweep asserts against the object the scenarios specify.
 //!
 //! `counter` is re-exported flat; `ledger` is not. Both define an `Add`, so two
 //! globs would make the name ambiguous — and because `ledger` is feature-gated,
@@ -39,6 +43,10 @@ pub use exercised::Exercised;
 pub mod log;
 
 pub mod timer;
+
+// Not re-exported flat: `pipeline` defines a `Read`, and so would any other
+// fixture with a query command.
+pub mod pipeline;
 
 #[cfg(feature = "sql")]
 pub mod ledger;

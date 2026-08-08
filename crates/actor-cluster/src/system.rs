@@ -638,38 +638,43 @@ where
             let Committed::Apply { index, command, .. } = observation else {
                 continue;
             };
-            let Some(command) = MembershipCommand::decode(&command) else {
-                // **Fail closed on a committed entry** (compatibility **V2**). The
-                // control group's log is agreed, so an entry this node skips is one
-                // its peers apply: it would go on applying the transitions *after*
-                // an admission or a downing it never saw, holding a member set that
-                // is not a prefix of the committed log but a gap in it, while
-                // remaining a full voting member of the cluster whose membership it
-                // has stopped tracking.
-                //
-                // The blast radius is smaller than the shard map's, and worth
-                // stating precisely rather than overstating: every transition this
-                // build *knows* also travels in gossip, stamped with its commit
-                // index, so a peer that applied the entry can still deliver the
-                // outcome here (`Membership::merge`). That repair is what makes
-                // stopping cheap. It is also exactly what does not cover the case
-                // that gets here — a tag from a later build is a transition this
-                // one cannot name, in gossip no more than in the log.
-                //
-                // So the node stops applying, keeps gossiping (the repair path is
-                // strictly better left running), keeps acknowledging the group's
-                // appends — quorum there is about the log being *durable*, not
-                // about this build having applied it — and hands the control-plane
-                // duties to a peer that can still perform them (`raft_driver`).
-                self.inner.membership.stop_applying(format!(
-                    "control group: committed entry {index} is not a \
-                     MembershipCommand this build can decode ({} bytes, tag {:?}), \
-                     so this node stopped applying membership transitions rather \
-                     than skip one its peers will apply",
-                    command.len(),
-                    command.first(),
-                ));
-                return;
+            // **Fail closed on a committed entry** (compatibility **V2**). The
+            // control group's log is agreed, so an entry this node skips is one its
+            // peers apply: it would go on applying the transitions *after* an
+            // admission or a downing it never saw, holding a member set that is not
+            // a prefix of the committed log but a gap in it, while remaining a full
+            // voting member of the cluster whose membership it has stopped tracking.
+            //
+            // The blast radius is smaller than the shard map's, and worth stating
+            // precisely rather than overstating: every transition this build *knows*
+            // also travels in gossip, stamped with its commit index, so a peer that
+            // applied the entry can still deliver the outcome here
+            // (`Membership::merge`). That repair is what makes stopping cheap. It is
+            // also exactly what does not cover the case that gets here — a tag from
+            // a later build is a transition this one cannot name, in gossip no more
+            // than in the log.
+            //
+            // So the node stops applying, keeps gossiping (the repair path is
+            // strictly better left running), keeps acknowledging the group's appends
+            // — quorum there is about the log being *durable*, not about this build
+            // having applied it — and hands the control-plane duties to a peer that
+            // can still perform them (`raft_driver`).
+            //
+            // `admit` rather than `decode`, so the reason an operator reads names a
+            // *revision* where there is one (`actor.membership`, compatibility §3).
+            // A version skew and a damaged entry have opposite fixes: run the node
+            // on a build that accepts the entry, or repair a log.
+            let command = match MembershipCommand::admit(&command) {
+                Ok(command) => command,
+                Err(why) => {
+                    self.inner.membership.stop_applying(format!(
+                        "control group: committed entry {index} is not a \
+                         MembershipCommand this build can read ({why}), so this \
+                         node stopped applying membership transitions rather than \
+                         skip one its peers will apply",
+                    ));
+                    return;
+                }
             };
             let (node, status) = command.effect();
             let now = self.inner.clock.now();

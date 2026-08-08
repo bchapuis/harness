@@ -1,291 +1,43 @@
-//! Durable-workflow tests under deterministic simulation (granary §16).
+//! Durable-workflow scenarios under deterministic simulation (granary §7.17).
 //!
-//! Exercises the [`Workflow`] step memo + the [`Alarm`]-backed `sleep` through a
-//! self-driving pipeline grain — the reference shape a linear DSL would generate.
-//! Proves the property that matters: a step's effect runs **at most once** across a
-//! mid-workflow passivation (memoization), `sleep` resumes the workflow with no
-//! caller (the alarm), and a `retry` step re-launches after an alarm-backed backoff.
+//! Exercises the [`Workflow`](granary::Workflow) step memo + the
+//! [`Alarm`](granary::Alarm)-backed `sleep` through the self-driving
+//! [`Pipeline`](support::pipeline::Pipeline) grain — the reference shape a linear
+//! DSL would generate. One seed each, hand-built: `sleep` resumes the workflow with
+//! no caller (the alarm), a `retry` step re-launches after a failed effect, and the
+//! memo carries completed steps across hibernation.
+//!
+//! The property these state and `workflow_swarm.rs` sweeps is the memo's
+//! **write-once** rule: `complete_step` records only a step that is not already
+//! done, so the first committed result wins. Here it is asserted on a clean
+//! single-node run — the necessary counterpart to the sweep, which bounds what can
+//! change and would be satisfied just as well by a fixture whose workflow never
+//! commits anything at all.
+
+mod support;
 
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use actor_core::EventSink;
 use actor_core::LocalSystemBuilder;
-use actor_core::Manifest;
-use actor_core::Message;
+use actor_core::Spawner;
 use actor_simulation::Recorder;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
-use granary::Alarm;
-use granary::Grain;
-use granary::GrainCtx;
 use granary::GrainEvent;
-use granary::GrainHandler;
-use granary::GrainRef;
 use granary::GranaryConfig;
 use granary::GranaryExt;
-use granary::GranarySystem;
 use granary::LaunchGuard;
-use granary::StepDone;
-use granary::Workflow;
-use granary::complete_step;
-use serde::Deserialize;
-use serde::Serialize;
 
-// Step ids — the workflow's stable call-site ordinals.
-const STEP_FETCH: u32 = 0; // an external effect, run once
-const STEP_WOKE: u32 = 1; // the sleep gate (recorded by on_alarm)
-const STEP_DOUBLE: u32 = 2; // a second external effect
+use support::pipeline::Effects;
+use support::pipeline::PipelineConfig;
+use support::pipeline::Read;
+use support::pipeline::ReadMemo;
+use support::pipeline::STEP_FETCH;
 
-/// How many times each grain's fetch/double effect actually ran — the at-most-once
-/// witness. Shared into the grain via the `granary_named` factory, so it survives
-/// re-activation (the factory captures one `Arc` and clones the handle per build).
-#[derive(Clone, Default)]
-struct Effects {
-    fetch_runs: Arc<AtomicU32>,
-    double_runs: Arc<AtomicU32>,
-    // Whether `fetch` should fail on its first launch this process (retry test).
-    fail_first_fetch: Arc<AtomicU32>,
-}
-
-/// A three-stage workflow: fetch → sleep(50ms) → double → Finished.
-struct Pipeline {
-    fx: Effects,
-    eph: Mutex<Ephemeral>,
-}
-
-#[derive(Default)]
-struct Ephemeral {
-    this: Option<GrainRef<Pipeline>>,
-    guard: LaunchGuard,
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct PipelineState {
-    finished: Option<u32>,
-}
-
-#[derive(Serialize, Deserialize)]
-enum PipelineEvent {
-    Finished(u32),
-}
-
-impl Pipeline {
-    fn schedule_drive(&self, ctx: &GrainCtx<Self>) {
-        let this = ctx.this();
-        ctx.system().launch(Box::pin(async move {
-            let _ = this.tell(Drive).await;
-        }));
-    }
-
-    /// The re-entrant workflow body (spec §7.17): re-run after every commit, it
-    /// resolves completed steps from the memo and drives the first incomplete one.
-    fn drive(&self, state: &PipelineState, ctx: &GrainCtx<Self>) -> Vec<PipelineEvent> {
-        if state.finished.is_some() {
-            return Vec::new();
-        }
-        let wf = ctx.workflow();
-
-        // Step FETCH: an external effect, launched once, its result memoized.
-        let fetched: Option<u32> = wf.result(STEP_FETCH).expect("decode");
-        let Some(fetched) = fetched else {
-            self.launch_fetch(ctx);
-            return Vec::new();
-        };
-
-        // Sleep: gate on the WOKE step, set by on_alarm. Arm the alarm once.
-        if !wf.is_done(STEP_WOKE) {
-            if ctx.alarm().pending().is_none() {
-                ctx.alarm().set_after(Duration::from_millis(50));
-            }
-            return Vec::new();
-        }
-
-        // Step DOUBLE: a second effect over the fetched value, memoized.
-        let doubled: Option<u32> = wf.result(STEP_DOUBLE).expect("decode");
-        let Some(doubled) = doubled else {
-            self.launch_double(ctx, fetched);
-            return Vec::new();
-        };
-
-        vec![PipelineEvent::Finished(doubled)]
-    }
-
-    fn launch_fetch(&self, ctx: &GrainCtx<Self>) {
-        if !self.eph.lock().unwrap().guard.claim(STEP_FETCH) {
-            return; // already in flight this activation
-        }
-        let this = ctx.this();
-        let runs = self.fx.fetch_runs.clone();
-        let fail_first = self.fx.fail_first_fetch.clone();
-        ctx.system().launch(Box::pin(async move {
-            // A failing first attempt (retry test): record no result and ask the
-            // grain to re-launch, the alarm-free shape of a `retry` step.
-            if fail_first.swap(0, Ordering::SeqCst) == 1 {
-                let _ = this.tell(Retry { id: STEP_FETCH }).await;
-                return;
-            }
-            runs.fetch_add(1, Ordering::SeqCst);
-            let _ = this.tell(StepDone::new(STEP_FETCH, &21u32)).await;
-        }));
-    }
-
-    fn launch_double(&self, ctx: &GrainCtx<Self>, value: u32) {
-        if !self.eph.lock().unwrap().guard.claim(STEP_DOUBLE) {
-            return;
-        }
-        let this = ctx.this();
-        let runs = self.fx.double_runs.clone();
-        ctx.system().launch(Box::pin(async move {
-            runs.fetch_add(1, Ordering::SeqCst);
-            let _ = this.tell(StepDone::new(STEP_DOUBLE, &(value * 2))).await;
-        }));
-    }
-}
-
-impl Grain for Pipeline {
-    type System = SimSystem;
-    type State = PipelineState;
-    type Event = PipelineEvent;
-    type Facets = (Workflow, Alarm);
-    const GRAIN_TYPE: &'static str = "test.Pipeline";
-
-    fn apply(state: &mut PipelineState, event: &PipelineEvent) {
-        match event {
-            PipelineEvent::Finished(v) => state.finished = Some(*v),
-        }
-    }
-
-    fn register(r: &mut granary::GrainRegistry<Self>) {
-        r.accept::<Start>();
-        r.accept::<Drive>();
-        r.accept::<StepDone>();
-        r.accept::<Retry>();
-        r.accept::<Read>();
-    }
-
-    async fn on_activate(&mut self, ctx: &GrainCtx<Self>) -> Result<(), actor_core::BoxError> {
-        let mut eph = self.eph.lock().unwrap();
-        eph.this = Some(ctx.this());
-        eph.guard.reset();
-        drop(eph);
-        // Resume an in-flight workflow after a (re)activation.
-        self.schedule_drive(ctx);
-        Ok(())
-    }
-
-    // The sleep fires here with no caller: record the WOKE gate and re-drive.
-    async fn on_alarm(&self, _state: &PipelineState, ctx: &GrainCtx<Self>) -> Vec<PipelineEvent> {
-        ctx.workflow().record(STEP_WOKE, &());
-        self.schedule_drive(ctx);
-        Vec::new()
-    }
-
-    // Do not hibernate mid-workflow (the alarm veto covers the sleep; this covers
-    // the launched-effect windows).
-    fn can_passivate(&self, state: &PipelineState) -> bool {
-        state.finished.is_some()
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Start;
-impl Message for Start {
-    type Reply = ();
-    const MANIFEST: Manifest = Manifest::new("test.Start");
-}
-impl GrainHandler<Start> for Pipeline {
-    async fn handle(
-        &self,
-        _s: &PipelineState,
-        _m: Start,
-        ctx: &GrainCtx<Self>,
-    ) -> (Vec<PipelineEvent>, ()) {
-        self.schedule_drive(ctx);
-        (vec![], ())
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Drive;
-impl Message for Drive {
-    type Reply = ();
-    const MANIFEST: Manifest = Manifest::new("test.Drive");
-}
-impl GrainHandler<Drive> for Pipeline {
-    async fn handle(
-        &self,
-        state: &PipelineState,
-        _m: Drive,
-        ctx: &GrainCtx<Self>,
-    ) -> (Vec<PipelineEvent>, ()) {
-        let events = self.drive(state, ctx);
-        // If the workflow made progress that unblocks the next step, re-drive.
-        if !events.is_empty() {
-            // terminal: nothing more to do
-        }
-        (events, ())
-    }
-}
-
-impl GrainHandler<StepDone> for Pipeline {
-    async fn handle(
-        &self,
-        _s: &PipelineState,
-        msg: StepDone,
-        ctx: &GrainCtx<Self>,
-    ) -> (Vec<PipelineEvent>, ()) {
-        let events = complete_step(ctx, msg);
-        self.schedule_drive(ctx); // a committed step result unblocks the next drive
-        (events, ())
-    }
-}
-
-/// A step's effect failed: forget the activation's launch claims so the next
-/// drive re-launches it (the alarm-free core of a `retry`; a real backoff arms
-/// an alarm first).
-#[derive(Clone, Serialize, Deserialize)]
-struct Retry {
-    id: u32,
-}
-impl Message for Retry {
-    type Reply = ();
-    const MANIFEST: Manifest = Manifest::new("test.Retry");
-}
-impl GrainHandler<Retry> for Pipeline {
-    async fn handle(
-        &self,
-        _s: &PipelineState,
-        _msg: Retry,
-        ctx: &GrainCtx<Self>,
-    ) -> (Vec<PipelineEvent>, ()) {
-        // Only the failed step can be in flight here, so a full reset is a
-        // targeted un-claim: the next drive re-launches it.
-        self.eph.lock().unwrap().guard.reset();
-        self.schedule_drive(ctx);
-        (vec![], ())
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Read;
-impl Message for Read {
-    type Reply = Option<u32>;
-    const MANIFEST: Manifest = Manifest::new("test.Read");
-}
-impl GrainHandler<Read> for Pipeline {
-    async fn handle(
-        &self,
-        state: &PipelineState,
-        _m: Read,
-        _ctx: &GrainCtx<Self>,
-    ) -> (Vec<PipelineEvent>, Option<u32>) {
-        (vec![], state.finished)
-    }
-}
+/// The `Pipeline` at this suite's tier.
+type Pipeline = support::pipeline::Pipeline<SimSystem>;
 
 // --- Test rig -----------------------------------------------------------------
 
@@ -293,6 +45,7 @@ fn rig(
     seed: u64,
     idle_after: Duration,
     fx: Effects,
+    cfg: PipelineConfig,
 ) -> (Simulation, Recorder, granary::Granary<Pipeline>) {
     let sim = Simulation::new(seed);
     let recorder = Recorder::new();
@@ -300,17 +53,13 @@ fn rig(
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
         .events(sink)
         .build();
-    let factory_fx = fx.clone();
     let grains = system.granary_named::<Pipeline>(
-        Pipeline::GRAIN_TYPE,
+        support::pipeline::PIPELINE_TYPE,
         GranaryConfig {
             idle_after,
             ..GranaryConfig::default()
         },
-        Arc::new(move || Pipeline {
-            fx: factory_fx.clone(),
-            eph: Mutex::new(Ephemeral::default()),
-        }),
+        support::pipeline::Pipeline::factory(fx, cfg),
     );
     (sim, recorder, grains)
 }
@@ -329,19 +78,29 @@ fn passivated(recorder: &Recorder) -> bool {
 #[test]
 fn workflow_runs_steps_sleeps_and_finishes() {
     let fx = Effects::default();
-    let (sim, _rec, grains) = rig(1, Duration::from_secs(3600), fx.clone());
+    let (sim, _rec, grains) = rig(
+        1,
+        Duration::from_secs(3600),
+        fx.clone(),
+        PipelineConfig::default(),
+    );
+    // The touch that starts it: the grain drives from `on_activate`, so a read is
+    // enough and nothing has to succeed before the first step commits.
     let g = grains.grain("p/0");
     sim.block_on(async move {
-        g.ask(Start).await.expect("start");
+        let _ = g.ask(ReadMemo).await;
     });
-    // block_on(Start) returns at t=0; the workflow drives on its own timers.
+    // The read returns at t=0; the workflow drives on its own timers.
     sim.run();
 
     let g = grains.grain("p/0");
     let result = sim.block_on(async move { g.ask(Read).await.expect("read") });
-    assert_eq!(result, Some(42), "fetch(21) → sleep → double = 42");
-    assert_eq!(fx.fetch_runs.load(Ordering::SeqCst), 1, "fetch ran once");
-    assert_eq!(fx.double_runs.load(Ordering::SeqCst), 1, "double ran once");
+    assert_eq!(result, Some(2), "fetch(1) → sleep → double = 2");
+    assert_eq!(
+        fx.launches("p/0", STEP_FETCH),
+        1,
+        "a calm run launches the fetch effect once",
+    );
 }
 
 #[test]
@@ -349,29 +108,108 @@ fn steps_memoize_across_passivation() {
     // Aggressive idle window: the grain hibernates in every gap the workflow allows
     // (after Finished, and — because the alarm veto holds during the sleep — the
     // memo must still carry completed steps across the reactivations the drive
-    // triggers). The witness is the run counters: each effect fires exactly once
-    // even though the grain activates several times.
+    // triggers). The witness is the terminal value: `finished` is twice whatever
+    // `fetch` first committed, and a re-launch that overwrote the memo would carry
+    // a later ordinal into it.
     let fx = Effects::default();
-    let (sim, recorder, grains) = rig(2, Duration::from_millis(5), fx.clone());
+    let (sim, recorder, grains) = rig(
+        2,
+        Duration::from_millis(5),
+        fx.clone(),
+        PipelineConfig::default(),
+    );
     let g = grains.grain("p/0");
     sim.block_on(async move {
-        g.ask(Start).await.expect("start");
+        let _ = g.ask(ReadMemo).await;
     });
     sim.run();
 
     let g = grains.grain("p/0");
     let result = sim.block_on(async move { g.ask(Read).await.expect("read") });
-    assert_eq!(result, Some(42));
+    assert_eq!(result, Some(2));
     assert!(
         passivated(&recorder),
         "the aggressive idle window must have hibernated the grain at least once",
     );
+    let g = grains.grain("p/0");
+    let memo = sim.block_on(async move { g.ask(ReadMemo).await.expect("read") });
     assert_eq!(
-        fx.fetch_runs.load(Ordering::SeqCst),
-        1,
-        "memoization: the fetch effect runs once despite re-activations",
+        memo,
+        Some(1),
+        "the memo still holds the first committed result after the re-activations",
     );
-    assert_eq!(fx.double_runs.load(Ordering::SeqCst), 1, "double runs once");
+}
+
+#[test]
+fn a_relaunched_step_does_not_overwrite_the_memo() {
+    // The write-once rule, driven rather than waited for. The effect takes time and
+    // the grain may hibernate under it, so the second touch below re-activates a
+    // grain whose `fetch` is still outstanding: the drive that follows finds an
+    // unresolved step and launches a *second* effect carrying a different ordinal.
+    // `complete_step` refuses the second result, so the memo — and the terminal
+    // value derived from it — stay at the first.
+    //
+    // The second touch is what makes the window observable, and it has to be a
+    // separate one: a `StepDone` re-activating the grain itself is already in the
+    // mailbox ahead of the drive it triggers, so that path commits the step before
+    // anything could re-launch it.
+    //
+    // The touches are **launched, not blocked on**: `block_on` drives the scheduler
+    // to quiescence, so blocking on the first read would run the whole workflow to
+    // completion — deadline and all — before the second read was ever issued, and
+    // there would be no in-flight window left to interrupt.
+    //
+    // This is the shape `workflow_swarm.rs` sweeps under the nemesis; here it is
+    // pinned on one seed with no faults at all, so a failure names an interleaving
+    // rather than a distribution.
+    let fx = Effects::default();
+    let (sim, _rec, grains) = rig(
+        4,
+        Duration::from_millis(1),
+        fx.clone(),
+        PipelineConfig {
+            sleep: None,
+            hibernate_mid_workflow: true,
+            effect_latency: Some(Duration::from_millis(200)),
+        },
+    );
+    let touch = |sim: &Simulation, grains: &granary::Granary<Pipeline>| {
+        let g = grains.grain("p/0");
+        sim.spawner().launch(Box::pin(async move {
+            let _ = g.ask(ReadMemo).await;
+        }));
+    };
+    touch(&sim, &grains);
+    // Past `idle_after`, well short of the effect's latency: the grain hibernates
+    // with its step in flight.
+    sim.run_for(Duration::from_millis(50));
+    touch(&sim, &grains);
+    sim.run_for(Duration::from_millis(50));
+    // Both effects now land, the first winning the memo.
+    sim.run();
+
+    let g = grains.grain("p/0");
+    let memo = sim
+        .block_on(async move { g.ask(ReadMemo).await.expect("read") })
+        .expect("the workflow committed its first step");
+    let launches = fx.launches("p/0", STEP_FETCH);
+    assert!(
+        launches > 1,
+        "the fixture did not re-launch, so this run did not exercise the rule \
+         (launches={launches})",
+    );
+    assert_eq!(
+        memo, 1,
+        "a re-launched step overwrote the memo: {launches} launches drew ordinals \
+         1..={launches}, and the memo must hold the one that committed first",
+    );
+    let g = grains.grain("p/0");
+    let result = sim.block_on(async move { g.ask(Read).await.expect("read") });
+    assert_eq!(
+        result,
+        Some(2),
+        "the terminal value is twice the memo, so it moves with any overwrite",
+    );
 }
 
 #[test]
@@ -397,14 +235,19 @@ fn launch_guard_claims_by_arbitrary_key() {
 #[test]
 fn retry_relaunches_after_a_failed_step() {
     // The first fetch launch fails (records no result); the re-drive re-launches it
-    // and the second attempt records 21. The effect-run counter counts only
-    // successful runs, so it lands at 1, and the workflow still finishes at 42.
+    // and the second attempt records its own ordinal. A failed launch draws no
+    // ordinal, so the memo lands at 1 and the workflow still finishes at 2.
     let fx = Effects::default();
-    fx.fail_first_fetch.store(1, Ordering::SeqCst);
-    let (sim, _rec, grains) = rig(3, Duration::from_secs(3600), fx.clone());
+    fx.fail_next_fetch();
+    let (sim, _rec, grains) = rig(
+        3,
+        Duration::from_secs(3600),
+        fx.clone(),
+        PipelineConfig::default(),
+    );
     let g = grains.grain("p/0");
     sim.block_on(async move {
-        g.ask(Start).await.expect("start");
+        let _ = g.ask(ReadMemo).await;
     });
     sim.run();
 
@@ -412,11 +255,11 @@ fn retry_relaunches_after_a_failed_step() {
     let result = sim.block_on(async move { g.ask(Read).await.expect("read") });
     assert_eq!(
         result,
-        Some(42),
+        Some(2),
         "a failed step re-launches and the workflow completes"
     );
     assert_eq!(
-        fx.fetch_runs.load(Ordering::SeqCst),
+        fx.launches("p/0", STEP_FETCH),
         1,
         "one successful fetch after the failed attempt"
     );

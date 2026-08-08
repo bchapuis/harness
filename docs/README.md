@@ -64,18 +64,26 @@ One layer has a design note rather than a spec:
   warm as two different measurements, and read per-block cost as the *slope* between
   two image sizes — a total divided by its block count measures the intercept.
 
-## Open work
+## Unfinished work
 
-- [open-work](open-work.md) — the cross-cutting read of everything the specs
-  declare unfinished, in reading order rather than dependency order: the
-  compatibility policy mechanised but never exercised, the format boundaries
-  still unstamped, the invariants no sweep asserts, the deferrals each layer
-  owns, and what is finished but unused. An index, not a source of truth —
-  every entry points at the section that owns it and carries a **status**
-  (open, postponed, or by design) plus a next step for a session picking it up
-  cold, and all of it is deleted together when an item lands. What survives a
-  landing is a *decision*: where work was built and pulled back, the entry
-  records what was decided, when, and what would reopen it.
+The tree carries no TODO backlog: a sweep of `crates/` finds zero `todo!()`,
+zero `unimplemented!()`, zero `#[ignore]`, and zero `TODO`/`FIXME`/`HACK`
+comments. That is deliberate. Unfinished work is **declared in the spec that
+owns it**, where a reader sees its cost and its blast radius, rather than
+dropped as a comment beside the code that would have to change. The consequence
+is that "what is left here?" cannot be answered by grepping the code, and is
+answered by reading these sections instead:
+
+- [compatibility §5](compatibility-spec.md) — the format machinery that waits on
+  a boundary having a second revision. Every format in the tree is stamped, and
+  no boundary is mid-flight; §4 records what was built and pulled back, and what
+  would reopen it.
+- Each layer's own deferrals, declined with their reasons: [granary
+  §16](granary-spec.md), [machine §8](machine-spec.md), [harness
+  §13](agentic-harness-spec.md), [sandbox §7](sandbox-spec.md),
+  [cluster-utilities §7](cluster-utilities-spec.md), [wal §8](wal-spec.md).
+- [simulation-testing](simulation-testing.md), *Where the sweeps do not yet
+  reach* — what the specs mandate that no sweep asserts.
 
 ## Elsewhere in the tree
 

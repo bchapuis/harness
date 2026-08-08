@@ -299,19 +299,24 @@ impl Allocation {
 pub(crate) const SHARDMAP: compat::Stamp =
     compat::Stamp::new(b"GRSMAP", compat::Window::at("granary.shardmap", 1));
 
-/// Encode a command for the map group's log.
+/// Encode a command for the map group's log: the stamped form ([`SHARDMAP`]).
 ///
-/// **Still unstamped, deliberately** — this is **V4**'s read release, and the
-/// writer flips in a later one. The ordering is not ceremony here, it is the
-/// whole safety argument: a peer on a build that predates [`admit`]'s stamp
-/// handling meets `GRSMAP…` and cannot read it, and what it does then is worse
-/// the older it is. A build with the fail-closed apply loop halts the node; a
-/// build older than *that* answers with `continue` and silently diverges, which
-/// is the defect this boundary was opened to close. So the stamped form goes on
-/// the wire only once every build in the field reads it, exactly as the sidecars
-/// were sequenced (`granary.store.fence` and friends).
+/// **V4's two-release ordering does not apply to a boundary's introduction here**,
+/// because the thing it protects does not exist. Read-new-first buys one release in
+/// which every peer learns to read a form before any peer writes it, and it is worth
+/// its cost exactly when there are peers in the field on the older build — a
+/// deployment mid-rollout, whose oldest node halts on `GRSMAP…` or, older still,
+/// skips the entry and diverges. This tree has no such deployment: a build of it
+/// meets only its own peers. So the boundary lands in one step, and V4 becomes live
+/// again the moment there is a fleet to roll.
+///
+/// What that does **not** change is [`admit`]'s adoption of the unstamped
+/// predecessor. That obligation is **V5**'s and it is about bytes at rest, not about
+/// release cadence: commands committed by any earlier build of this tree are still
+/// in the map group's log on disk, and a build that refused them would refuse its
+/// own history on the next replay.
 fn encode(command: &ShardMapCommand) -> Vec<u8> {
-    serde_json::to_vec(command).expect("a ShardMapCommand always serializes")
+    SHARDMAP.stamp(&serde_json::to_vec(command).expect("a ShardMapCommand always serializes"))
 }
 
 /// What one committed observation means for this map, decided **before** any of it
@@ -2027,7 +2032,7 @@ mod tests {
 
     /// A stamped command, encoded the way this build reads one — written here
     /// rather than taken from `encode`, so the fixture cannot move with the
-    /// writer. That the writer agrees is asserted separately, by
+    /// writer. That the writer agrees with it is asserted separately, by
     /// `a_command_is_written_stamped`.
     fn stamped(command: &ShardMapCommand) -> Vec<u8> {
         let body = serde_json::to_vec(command).expect("encode a command");
@@ -2054,22 +2059,20 @@ mod tests {
         );
     }
 
-    /// **V4**, read-new first: this release reads both forms and still writes the
-    /// unstamped one, so a peer that has not yet learned the stamp keeps applying
-    /// the log. Inverts in the release that flips the writer.
+    /// The writer emits the stamped form, and this build reads back what it writes
+    /// (**V3**). Both halves matter: a writer that stopped stamping would leave
+    /// every new command indistinguishable from the predecessor, and a stamp the
+    /// reader did not accept would stop the node on its own output.
     #[test]
-    fn a_command_is_still_written_unstamped_until_the_write_release() {
+    fn a_command_is_written_stamped() {
         let bytes = encode(&ShardMapCommand::SplitCommitted { parent: 7 });
         assert!(
-            !SHARDMAP.is_stamped(&bytes),
-            "commands must still go on the wire unstamped in the read release: a \
-             peer that predates the stamp halts on one it cannot read, and a peer \
-             older than the fail-closed apply loop skips it and diverges",
+            SHARDMAP.is_stamped(&bytes),
+            "commands must go on the wire stamped, or the boundary names nothing",
         );
-        // And this build reads back what it writes (**V3**).
         assert!(
             matches!(
-                admit(&applied(1, bytes), "acct").expect("its own form still decodes"),
+                admit(&applied(1, bytes), "acct").expect("its own form decodes"),
                 Some(ShardMapCommand::SplitCommitted { parent: 7 })
             ),
             "the writer's own form did not survive a round trip through `admit`",
