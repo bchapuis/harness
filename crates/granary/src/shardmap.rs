@@ -281,6 +281,35 @@ impl Allocation {
     }
 }
 
+/// The stamp on a committed `ShardMapCommand` (compatibility §3,
+/// `granary.shardmap`).
+///
+/// The payload rides `EntryPayload::App` inside the stamped `actor.raft.log`,
+/// whose revision covers the **envelope** and not this, so without a stamp of its
+/// own a build meeting a command from a later build stops on a serde error —
+/// indistinguishable from a damaged log. With one it stops naming a revision, and
+/// the difference is what an operator reads: a mixed-version rollout, or
+/// corruption.
+///
+/// `GRSMAP` cannot be confused with the unstamped predecessor, which is bare
+/// `serde_json` and so begins with `{` — the one byte a JSON object must open
+/// with, and one this magic does not. The confusion the magic has to rule out is
+/// therefore ruled out by construction rather than by arithmetic, which is the
+/// easier half of the job `wal`'s header does the hard way.
+pub(crate) const SHARDMAP: compat::Stamp =
+    compat::Stamp::new(b"GRSMAP", compat::Window::at("granary.shardmap", 1));
+
+/// Encode a command for the map group's log.
+///
+/// **Still unstamped, deliberately** — this is **V4**'s read release, and the
+/// writer flips in a later one. The ordering is not ceremony here, it is the
+/// whole safety argument: a peer on a build that predates [`admit`]'s stamp
+/// handling meets `GRSMAP…` and cannot read it, and what it does then is worse
+/// the older it is. A build with the fail-closed apply loop halts the node; a
+/// build older than *that* answers with `continue` and silently diverges, which
+/// is the defect this boundary was opened to close. So the stamped form goes on
+/// the wire only once every build in the field reads it, exactly as the sidecars
+/// were sequenced (`granary.store.fence` and friends).
 fn encode(command: &ShardMapCommand) -> Vec<u8> {
     serde_json::to_vec(command).expect("a ShardMapCommand always serializes")
 }
@@ -298,6 +327,15 @@ fn encode(command: &ShardMapCommand) -> Vec<u8> {
 /// running the shard map through consensus was supposed to make impossible.
 /// [`apply_loop`] stops on it; see there for why stopping is safe where skipping
 /// was not.
+///
+/// **An unstamped payload is adopted as revision 1** ([`SHARDMAP`]). Every command
+/// committed before the stamp existed is still in some cluster's log, and a build
+/// that refused them would refuse its own history — the first rolling upgrade
+/// would stop every node on the oldest entry it replayed. The adoption is asked
+/// the way every other boundary in the tree asks it (compatibility §3): `is_stamped`
+/// first, so a *stamped* payload at an unreadable revision is still refused rather
+/// than handed to the old decoder, which is the misparse a bare
+/// "try the previous format" fallback would introduce.
 fn admit(
     observation: &Committed,
     grain_type: &'static str,
@@ -308,14 +346,27 @@ fn admit(
     let Committed::Apply { index, command, .. } = observation else {
         return Ok(None);
     };
-    match serde_json::from_slice(command) {
-        Ok(command) => Ok(Some(command)),
-        Err(err) => Err(format!(
+    let refusal = |what: String| {
+        format!(
             "shard map {grain_type}: committed entry {index} is not a ShardMapCommand \
-             this build can decode ({err}), so this node stopped applying the map's \
-             log rather than skip an entry its peers will apply"
-        )),
-    }
+             this build can read ({what}), so this node stopped applying the map's log \
+             rather than skip an entry its peers will apply"
+        )
+    };
+    let body = if SHARDMAP.is_stamped(command) {
+        // Stamped: the revision is admitted before the body is looked at (**V2**),
+        // so a later revision is refused by name rather than half-parsed.
+        SHARDMAP
+            .unstamp(command)
+            .map_err(|err| refusal(err.to_string()))?
+            .1
+    } else {
+        // The unstamped predecessor, read by its own decoder.
+        command.as_slice()
+    };
+    serde_json::from_slice(body)
+        .map(Some)
+        .map_err(|err| refusal(err.to_string()))
 }
 
 // --- the `Local` tier: the single node replicates everything ---------------------------
@@ -1972,6 +2023,99 @@ mod tests {
             inner: Arc::new(Mutex::new(inner)),
             handoff: Arc::new(|| Box::pin(std::future::ready(0usize)) as BoxFuture<'static, usize>),
         }
+    }
+
+    /// A stamped command, encoded the way this build reads one — written here
+    /// rather than taken from `encode`, so the fixture cannot move with the
+    /// writer. That the writer agrees is asserted separately, by
+    /// `a_command_is_written_stamped`.
+    fn stamped(command: &ShardMapCommand) -> Vec<u8> {
+        let body = serde_json::to_vec(command).expect("encode a command");
+        let mut bytes = SHARDMAP.magic().to_vec();
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    #[test]
+    fn granary_shardmap_v1_still_applies() {
+        // The golden corpus (compatibility §4): bytes checked in at this
+        // boundary's current revision, decoded by this build.
+        let bytes = crate::corpus::golden("granary.shardmap", 1, || {
+            stamped(&ShardMapCommand::SplitCommitted { parent: 7 })
+        });
+        let admitted = admit(&applied(1, bytes), "acct").expect("the fixture still decodes");
+        assert!(
+            matches!(
+                admitted,
+                Some(ShardMapCommand::SplitCommitted { parent: 7 })
+            ),
+            "the v1 fixture no longer decodes to the command it recorded",
+        );
+    }
+
+    /// **V4**, read-new first: this release reads both forms and still writes the
+    /// unstamped one, so a peer that has not yet learned the stamp keeps applying
+    /// the log. Inverts in the release that flips the writer.
+    #[test]
+    fn a_command_is_still_written_unstamped_until_the_write_release() {
+        let bytes = encode(&ShardMapCommand::SplitCommitted { parent: 7 });
+        assert!(
+            !SHARDMAP.is_stamped(&bytes),
+            "commands must still go on the wire unstamped in the read release: a \
+             peer that predates the stamp halts on one it cannot read, and a peer \
+             older than the fail-closed apply loop skips it and diverges",
+        );
+        // And this build reads back what it writes (**V3**).
+        assert!(
+            matches!(
+                admit(&applied(1, bytes), "acct").expect("its own form still decodes"),
+                Some(ShardMapCommand::SplitCommitted { parent: 7 })
+            ),
+            "the writer's own form did not survive a round trip through `admit`",
+        );
+    }
+
+    #[test]
+    fn an_unstamped_command_is_adopted_as_revision_1() {
+        // Every command committed before the stamp existed is still in some
+        // cluster's log. A build that refused them would refuse its own history.
+        let command = ShardMapCommand::SplitCommitted { parent: 7 };
+        let bare = serde_json::to_vec(&command).expect("encode a command");
+        assert!(
+            !SHARDMAP.is_stamped(&bare),
+            "bare JSON must not read as stamped, or adoption is untestable",
+        );
+        let admitted = admit(&applied(1, bare), "acct").expect("an unstamped payload is adopted");
+        assert!(
+            matches!(
+                admitted,
+                Some(ShardMapCommand::SplitCommitted { parent: 7 })
+            ),
+            "the unstamped predecessor was not adopted",
+        );
+    }
+
+    #[test]
+    fn a_stamped_command_from_a_later_revision_is_refused_by_name() {
+        // The whole point of the boundary: a payload this build cannot read stops
+        // it on a *revision*, not on a parse failure that reads like corruption.
+        // Note the body is valid JSON for a known variant — only the revision is
+        // out of range — so nothing but the stamp can be doing the refusing.
+        let mut future = SHARDMAP.magic().to_vec();
+        future.extend_from_slice(&2u16.to_le_bytes());
+        future.extend_from_slice(
+            &serde_json::to_vec(&ShardMapCommand::SplitCommitted { parent: 7 })
+                .expect("encode a command"),
+        );
+        let why = match admit(&applied(9, future), "acct") {
+            Err(why) => why,
+            Ok(_) => panic!("a revision this build does not accept was admitted"),
+        };
+        assert!(
+            why.contains("granary.shardmap") && why.contains("v1"),
+            "the refusal names neither the boundary nor the revisions it accepts: {why}",
+        );
     }
 
     #[test]
