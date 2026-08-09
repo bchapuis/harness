@@ -148,10 +148,14 @@ async fn a_restarted_voter_recovers_its_persisted_raft_state() {
             "B persisted the term it participated in"
         );
         assert!(
+            // Read the way the apply path reads (`ClusterSystem::apply_membership_commits`):
+            // `admit` takes the stamped payload a commit actually writes, where `decode`
+            // takes only the unstamped predecessor and reads the stamp's first byte as a
+            // tag it has never heard of.
             persisted.log.iter().any(|e| matches!(
                 &e.payload,
                 EntryPayload::App(bytes)
-                    if MembershipCommand::decode(bytes) == Some(MembershipCommand::Drain(C))
+                    if MembershipCommand::admit(bytes) == Ok(MembershipCommand::Drain(C))
             )),
             "B persisted the committed Drain entry: {:?}",
             persisted.log,
