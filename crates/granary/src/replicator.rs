@@ -8,10 +8,12 @@
 //! read-repair — highest-term record per slot, written back under its own term — so
 //! no acknowledged write is lost across a leadership change (**G14**).
 //!
-//! Two tiers (§7.4): [`LocalReplicator`] is one local store, no term, no quorum — the
-//! single-node `Local` journal; [`QuorumReplicator`] is the clustered `Quorum` path
-//! over a [`LeaderElection`] group and the [`ReplicaTransport`] to the shard's
-//! replicas. Both rest on the [`GrainStore`] seam for per-node durability.
+//! This is the clustered `Quorum` tier's durability, and only that: a
+//! [`QuorumReplicator`] per shard, over a [`LeaderElection`] group and the
+//! [`ReplicaTransport`] to the shard's replicas. The single-node `Local` tier needs
+//! none of it — one store, no term, no quorum — so it is written out in full as
+//! [`LocalGrainJournal`](crate::memory::LocalGrainJournal) rather than as a second
+//! replicator here. Both rest on the [`GrainStore`] seam for per-node durability.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,156 +129,6 @@ pub struct Deadlines {
     pub quorum: Duration,
     /// A recovery read quorum, before the read-your-leader fallback (§7.5, §8).
     pub recover: Duration,
-}
-
-// --- Local tier: one node, one store -----------------------------------------
-
-/// The single-node `Local` replicator (spec §7.4): one [`GrainStore`], no term, no
-/// quorum. An append commits on the local store; recovery is a local head read.
-///
-/// It mirrors [`QuorumReplicator`]'s shape so both journal tiers wrap a replicator
-/// behind the same seam.
-pub(crate) struct LocalReplicator {
-    store: Arc<dyn GrainStore>,
-    shard: u32,
-    /// Where the store's blocking writes run (§7.4). On this tier the local fsync is
-    /// the commit, so it is the entire cost of an append.
-    io: Arc<dyn BlockingIo>,
-}
-
-impl LocalReplicator {
-    pub(crate) fn new(
-        store: Arc<dyn GrainStore>,
-        shard: u32,
-        io: Arc<dyn BlockingIo>,
-    ) -> LocalReplicator {
-        LocalReplicator { store, shard, io }
-    }
-
-    pub(crate) async fn append(
-        &self,
-        grain: &GrainName,
-        after: Seq,
-        events: Vec<Vec<u8>>,
-    ) -> AppendOutcome {
-        // A single writer at term 0 is never fenced or stale (its fence stays 0 and
-        // `after` always equals the head behind the input gate, §6). On this tier the
-        // local fsync IS the commit (§7.4), so the await is the durability the
-        // `Committed` outcome asserts.
-        let (name, shard) = (grain.clone(), self.shard);
-        let stored = on_store(&self.io, &self.store, move |store| {
-            store.store_record(shard, &name, after, Term::ZERO, events, WriteKind::Append)
-        })
-        .await;
-        match stored {
-            StoreAck::Stored(head) => AppendOutcome::Committed(head),
-            other => {
-                AppendOutcome::Unavailable(format!("local store rejected the append: {other:?}"))
-            }
-        }
-    }
-
-    pub(crate) async fn head(&self, grain: &GrainName) -> Result<Seq, GrainJournalError> {
-        Ok(self.store.head(self.shard, grain))
-    }
-
-    pub(crate) async fn load(
-        &self,
-        grain: &GrainName,
-        from: Seq,
-        limit: usize,
-    ) -> Result<Vec<(Seq, Vec<u8>)>, GrainJournalError> {
-        Ok(self.store.read_from(self.shard, grain, from, limit))
-    }
-
-    pub(crate) async fn save_snapshot(
-        &self,
-        grain: &GrainName,
-        at: Seq,
-        state: Vec<u8>,
-    ) -> AppendOutcome {
-        let (name, shard) = (grain.clone(), self.shard);
-        let stored = on_store(&self.io, &self.store, move |store| {
-            store.store_snapshot(shard, &name, at, Term::ZERO, state, WriteKind::Append)
-        })
-        .await;
-        match stored {
-            StoreAck::Stored(seq) => AppendOutcome::Committed(seq),
-            other => {
-                AppendOutcome::Unavailable(format!("local store rejected the snapshot: {other:?}"))
-            }
-        }
-    }
-
-    pub(crate) async fn load_snapshot(
-        &self,
-        grain: &GrainName,
-    ) -> Result<Option<(Seq, Vec<u8>)>, GrainJournalError> {
-        Ok(self.store.snapshot(self.shard, grain))
-    }
-
-    // --- The grain-native content-addressed blob store (single-node) --------------
-
-    pub(crate) async fn put_blob(
-        &self,
-        grain: &GrainName,
-        id: BlobId,
-        bytes: Vec<u8>,
-    ) -> Result<(), GrainJournalError> {
-        let (name, shard) = (grain.clone(), self.shard);
-        match on_store(&self.io, &self.store, move |store| {
-            store.put_blob(shard, &name, id, bytes)
-        })
-        .await
-        {
-            BlobAck::Stored => Ok(()),
-            // The single store IS the durability on this tier (§7.4), so a store that
-            // could not write means the blob is not durable anywhere.
-            BlobAck::Failed => Err(GrainJournalError::Unavailable(
-                "local store could not persist the blob".into(),
-            )),
-        }
-    }
-
-    pub(crate) async fn get_blob(
-        &self,
-        grain: &GrainName,
-        id: BlobId,
-    ) -> Result<Option<Vec<u8>>, GrainJournalError> {
-        // Verify the stored bytes against the id (B1): a single store can still suffer
-        // on-disk bit-rot, which must surface as an error, never as wrong bytes.
-        match self.store.get_blob(self.shard, grain, id) {
-            Some(bytes) if id.verifies(&bytes) => Ok(Some(bytes)),
-            Some(_) => Err(GrainJournalError::Unavailable(format!(
-                "blob {id} failed verification"
-            ))),
-            None => Ok(None),
-        }
-    }
-
-    pub(crate) async fn has_blob(
-        &self,
-        grain: &GrainName,
-        id: BlobId,
-    ) -> Result<bool, GrainJournalError> {
-        Ok(self.store.has_blob(self.shard, grain, id))
-    }
-
-    pub(crate) async fn retain_blobs(&self, grain: &GrainName, retain: Vec<BlobId>) {
-        let (name, shard) = (grain.clone(), self.shard);
-        on_store(&self.io, &self.store, move |store| {
-            store.retain_blobs(shard, &name, &retain.into_iter().collect())
-        })
-        .await;
-    }
-
-    pub(crate) async fn delete_blobs(&self, grain: &GrainName) {
-        let (name, shard) = (grain.clone(), self.shard);
-        on_store(&self.io, &self.store, move |store| {
-            store.delete_blobs(shard, &name)
-        })
-        .await;
-    }
 }
 
 // --- Quorum tier: per-grain quorum append over the shard's replicas ----------
