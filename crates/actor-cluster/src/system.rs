@@ -170,6 +170,35 @@ struct Inner<C, E, S, T> {
     authorizer: Option<Arc<dyn Authorizer>>,
 }
 
+/// Which way a single-server voter-set change moves a node (spec §9.4.3 item 2).
+///
+/// One value rather than an entry plus a flag saying what to wait for: the entry
+/// proposed and the local view that confirms it are two readings of the same
+/// intent, and separate parameters let a call site state them differently.
+#[derive(Clone, Copy, Debug)]
+enum VoterChange {
+    /// Into the Raft quorum.
+    Add,
+    /// Out of it — e.g. a voter declared `down` that must leave the quorum.
+    Remove,
+}
+
+impl VoterChange {
+    /// The engine-level entry that carries this change for `node`.
+    fn payload(self, node: NodeId) -> EntryPayload {
+        match self {
+            VoterChange::Add => EntryPayload::AddVoter(node),
+            VoterChange::Remove => EntryPayload::RemoveVoter(node),
+        }
+    }
+
+    /// Whether `node` is a voter once this change has taken — the local view the
+    /// proposer polls for.
+    fn leaves_node_voting(self) -> bool {
+        matches!(self, VoterChange::Add)
+    }
+}
+
 /// A networked, multi-node actor system (spec §4, §7). Cloning shares the same
 /// underlying node.
 pub struct ClusterSystem<C, E, S, T> {
@@ -423,21 +452,19 @@ where
     /// item 2) — a committed single-server configuration change. Leader-only:
     /// `false` anywhere else (call it on [`leader`](Self::leader)).
     pub async fn add_voter(&self, node: NodeId) -> bool {
-        self.voter_change(EntryPayload::AddVoter(node), node, true)
-            .await
+        self.voter_change(node, VoterChange::Add).await
     }
 
     /// **Remove a voter** from the Raft quorum (spec §9.4.3 item 2) — e.g. a
     /// voter that was declared `down` and must leave the quorum. Leader-only.
     pub async fn remove_voter(&self, node: NodeId) -> bool {
-        self.voter_change(EntryPayload::RemoveVoter(node), node, false)
-            .await
+        self.voter_change(node, VoterChange::Remove).await
     }
 
     /// Propose a single-server voter-set change to the **control group** and wait
     /// for it to take effect. Voter changes are engine-level entries (not app
     /// commands), so this proposes the `EntryPayload` directly.
-    async fn voter_change(&self, change: EntryPayload, node: NodeId, desired: bool) -> bool {
+    async fn voter_change(&self, node: NodeId, change: VoterChange) -> bool {
         let MembershipMode::Leader(leader) = &self.inner.mode else {
             return false;
         };
@@ -448,10 +475,10 @@ where
         if !control.is_leader() {
             return false;
         }
-        control.propose(change);
+        control.propose(change.payload(node));
         let deadline = self.inner.clock.now() + 10 * leader.raft.election_timeout;
         while self.inner.clock.now() < deadline {
-            if control.has_voter(node) == desired {
+            if control.has_voter(node) == change.leaves_node_voting() {
                 return true;
             }
             self.inner.clock.sleep(leader.raft.heartbeat_interval).await;

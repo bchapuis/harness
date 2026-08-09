@@ -187,13 +187,25 @@ struct DiskState {
     pending: Vec<DiskManifest>,
 }
 
+/// How much of the image a manifest accounts for (§7.15) — what
+/// [`DiskState::apply`] needs to know to fold it, and the one difference between
+/// an import and a capture on that path.
+#[derive(Clone, Copy, Debug)]
+enum Coverage {
+    /// Every block of the image, at its new size: an import. The committed index
+    /// is cleared first, so a block the *previous* image had at an index this one
+    /// does not reach is forgotten rather than surviving under the new image.
+    WholeImage,
+    /// Only the blocks that changed: a capture, layered onto the committed index.
+    ChangedBlocks,
+}
+
 impl DiskState {
     /// Fold one manifest's ids into the committed state — size, index, roots.
-    /// `replace` clears the index first (an import covers the whole image; a
-    /// capture is incremental). Shared by the live commit path and the
-    /// replay/restore apply path, so the two can never drift.
-    fn apply(&mut self, manifest: &DiskManifest, replace: bool) {
-        if replace {
+    /// Shared by the live commit path and the replay/restore apply path, so the
+    /// two can never drift.
+    fn apply(&mut self, manifest: &DiskManifest, coverage: Coverage) {
+        if matches!(coverage, Coverage::WholeImage) {
             self.index.clear();
         }
         self.image_bytes = manifest.image_bytes;
@@ -269,7 +281,7 @@ impl DiskImage {
                 .map_err(io_facet_err("disk"))?;
             file.write_all(&bytes).map_err(io_facet_err("disk"))?;
         }
-        self.state().apply(manifest, false);
+        self.state().apply(manifest, Coverage::ChangedBlocks);
         Ok(())
     }
 
@@ -552,7 +564,7 @@ where
                 block_bytes: BLOCK_BYTES as u32,
                 blocks,
             },
-            true,
+            Coverage::WholeImage,
         );
         Ok(stats)
     }
@@ -666,7 +678,7 @@ where
                 block_bytes: BLOCK_BYTES as u32,
                 blocks,
             },
-            false,
+            Coverage::ChangedBlocks,
         );
         Ok(stats)
     }
@@ -695,9 +707,9 @@ where
     /// Fold a finished capture into the committed form (interior mutability; a
     /// non-committed outcome discards the whole materialization, G20, so no
     /// rollback is needed) — and stage its manifest into the command's batch.
-    /// `replace` is [`DiskState::apply`]'s, shared with the replay/restore path.
-    fn commit_staged_op(&self, image: &Arc<DiskImage>, manifest: DiskManifest, replace: bool) {
-        image.state().apply(&manifest, replace);
+    /// `coverage` is [`DiskState::apply`]'s, shared with the replay/restore path.
+    fn commit_staged_op(&self, image: &Arc<DiskImage>, manifest: DiskManifest, coverage: Coverage) {
+        image.state().apply(&manifest, coverage);
         self.ctx.facet_cell().with_stage::<Disk, I, _>(|stage| {
             stage.manifest = Some(crate::facet::encode_payload(&manifest));
         });
