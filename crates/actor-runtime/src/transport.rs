@@ -26,6 +26,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -75,6 +76,40 @@ pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// further sends fail fast with `Unreachable` rather than growing memory without
 /// bound (spec §6, §7.2).
 pub const DEFAULT_OUTBOUND_CAPACITY: usize = 1024;
+
+/// The transport address of node `id`: `host` at port `port_base + id - 1`.
+///
+/// The one place a node id becomes a port. A deployment configures its roster as
+/// hosts plus a single port base rather than as a list of addresses, so every
+/// process that stands up a [`TcpTransport`] — a voter, a non-voting client
+/// gateway — has to derive the same port from the same id. A second copy of this
+/// arithmetic is how one of them ends up dialing a port nobody is listening on,
+/// with a plain `Unreachable` as the only symptom.
+///
+/// `host` may be an IP literal, used as-is, or a name — a container or pod DNS
+/// name like `harness-0.harness` — resolved through the system resolver, which is
+/// what lets a roster span machines instead of loopback.
+///
+/// An id whose port would not fit is an error, not a panic: ids reach here from an
+/// operator's `--peer`/`--client` flag, so they are input to validate rather than
+/// an invariant to assert.
+pub fn node_addr(host: &str, port_base: u16, id: u64) -> Result<SocketAddr, String> {
+    let port = id
+        .checked_sub(1)
+        .and_then(|offset| u16::try_from(offset).ok())
+        .and_then(|offset| port_base.checked_add(offset))
+        .ok_or_else(|| {
+            format!(
+                "node id {id} has no transport port at base {port_base}: ids start at 1, and \
+                 base + id - 1 must fit a port"
+            )
+        })?;
+    (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve {host}:{port}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("resolve {host}:{port}: no address"))
+}
 
 /// The TLS material for mutually-authenticated associations (spec §15). Both
 /// the acceptor and the connector require a peer certificate, so every
@@ -694,6 +729,31 @@ mod tests {
             advertised: "127.0.0.1:2".parse().expect("a literal address"),
             codec_name: "json".to_string(),
             cluster_secret: "secret".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_node_id_lands_on_its_own_port_above_the_base() {
+        // The convention the roster is configured against: id 1 sits *on* the base,
+        // and each id after it one port higher. Every process standing up a
+        // transport derives its dial map this way, so the mapping is the contract.
+        for (id, expected) in [(1, 7401), (2, 7402), (9, 7409)] {
+            assert_eq!(
+                node_addr("127.0.0.1", 7401, id),
+                Ok(format!("127.0.0.1:{expected}")
+                    .parse()
+                    .expect("a literal address"))
+            );
+        }
+    }
+
+    #[test]
+    fn an_id_with_no_port_is_refused_rather_than_wrapped() {
+        // Ids arrive from `--peer`/`--client`, so these are operator typos, not
+        // invariants: each must come back as the error the caller already handles,
+        // never as a panic or a silently wrapped port pointing at some other node.
+        for (base, id) in [(7401u16, 0u64), (7401, 1 << 20), (u16::MAX, 2)] {
+            assert!(node_addr("127.0.0.1", base, id).is_err());
         }
     }
 

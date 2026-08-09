@@ -14,7 +14,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +33,7 @@ use actor_runtime::TcpConfig;
 use actor_runtime::TcpTransport;
 use actor_runtime::TokioClock;
 use actor_runtime::TokioSpawner;
+use actor_runtime::node_addr;
 use actor_serialization::JsonCodec;
 
 /// How the gateway joins the transport: its own (non-voting) id, the roster it
@@ -85,17 +85,17 @@ pub async fn join(opts: ClusterOptions) -> Result<TcpCluster, String> {
         .map(|peer| {
             Ok((
                 *peer,
-                resolve(host_of(peer.uid()), opts.port_base, peer.uid())?,
+                node_addr(host_of(peer.uid()), opts.port_base, peer.uid())?,
             ))
         })
         .collect::<Result<_, String>>()?;
     let advertise_host = opts.advertise_host.as_deref().unwrap_or(&opts.bind_host);
-    let advertised = resolve(advertise_host, opts.port_base, opts.node_id)?;
+    let advertised = node_addr(advertise_host, opts.port_base, opts.node_id)?;
     peers.insert(node, advertised);
     // The allowlist admits the voters and self; only these may complete the
     // handshake (core spec §15).
     let admitted: BTreeSet<NodeId> = peers.keys().copied().collect();
-    let bind = resolve(&opts.bind_host, opts.port_base, opts.node_id)?;
+    let bind = node_addr(&opts.bind_host, opts.port_base, opts.node_id)?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|e| format!("bind transport {bind}: {e}"))?;
@@ -145,17 +145,6 @@ pub async fn join(opts: ClusterOptions) -> Result<TcpCluster, String> {
         opts.nodes
     );
     Ok(system)
-}
-
-/// Resolve id `id`'s address on `host` at port `base + id - 1` — the same
-/// derivation the nodes use, so a client id maps to one transport port.
-fn resolve(host: &str, base: u16, id: u64) -> Result<SocketAddr, String> {
-    let port = base + (id - 1) as u16;
-    (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("resolve {host}:{port}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("resolve {host}:{port}: no address"))
 }
 
 /// Membership and reachability transitions on stderr — enough for an operator to

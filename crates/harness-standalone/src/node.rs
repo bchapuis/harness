@@ -16,7 +16,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,6 +41,7 @@ use actor_runtime::TcpConfig;
 use actor_runtime::TcpTransport;
 use actor_runtime::TokioClock;
 use actor_runtime::TokioSpawner;
+use actor_runtime::node_addr;
 use actor_serialization::Codec;
 use actor_serialization::JsonCodec;
 use granary::Granary;
@@ -207,7 +207,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         .map(|peer| {
             Ok((
                 *peer,
-                resolve(host_of(peer.uid()), opts.port_base, peer.uid())?,
+                node_addr(host_of(peer.uid()), opts.port_base, peer.uid())?,
             ))
         })
         .collect::<Result<_, String>>()?;
@@ -217,7 +217,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // not up yet when the node boots), the client still dials in and gossip flows
     // over that connection — so an unresolvable client host never blocks startup.
     for (id, host) in &opts.clients {
-        match resolve(host, opts.port_base, *id) {
+        match node_addr(host, opts.port_base, *id) {
             Ok(addr) => {
                 peers.insert(NodeId::new(*id), addr);
             }
@@ -237,7 +237,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // Advertise the routable host (what peers dial back), but bind the local
     // interface — they differ when bound to the 0.0.0.0 wildcard in a container.
     let advertised = peers[&node];
-    let bind = resolve(&opts.bind_host, opts.port_base, opts.id)?;
+    let bind = node_addr(&opts.bind_host, opts.port_base, opts.id)?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|e| format!("bind transport {bind}: {e}"))?;
@@ -402,19 +402,6 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // Park forever; the process exits on a signal.
     std::future::pending::<()>().await;
     Ok(())
-}
-
-/// Resolve node `id`'s address on `host` at port `base + id - 1`. An IP literal
-/// passes straight through; a hostname (a container or pod DNS name like
-/// `harness-0.harness`) resolves through the system resolver, which is what lets
-/// the roster span machines instead of loopback.
-fn resolve(host: &str, base: u16, id: u64) -> Result<SocketAddr, String> {
-    let port = base + (id - 1) as u16;
-    (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("resolve {host}:{port}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("resolve {host}:{port}: no address"))
 }
 
 /// The cluster-wide kind map (harness spec §7.1). One pure function of the

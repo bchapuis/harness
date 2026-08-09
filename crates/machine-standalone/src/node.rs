@@ -17,7 +17,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,6 +43,7 @@ use actor_runtime::TcpConfig;
 use actor_runtime::TcpTransport;
 use actor_runtime::TokioClock;
 use actor_runtime::TokioSpawner;
+use actor_runtime::node_addr;
 use actor_serialization::Codec;
 use actor_serialization::PostcardCodec;
 use granary::AlarmIndex;
@@ -206,13 +206,13 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         .map(|peer| {
             Ok((
                 *peer,
-                resolve(host_of(peer.uid()), opts.port_base, peer.uid())?,
+                node_addr(host_of(peer.uid()), opts.port_base, peer.uid())?,
             ))
         })
         .collect::<Result<_, String>>()?;
     let admitted: BTreeSet<NodeId> = peers.keys().copied().collect();
     let advertised = peers[&node];
-    let bind = resolve(&opts.bind_host, opts.port_base, opts.id)?;
+    let bind = node_addr(&opts.bind_host, opts.port_base, opts.id)?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|e| format!("bind transport {bind}: {e}"))?;
@@ -503,16 +503,6 @@ fn machine_host(
         }
     };
     Ok(Some(mechanism))
-}
-
-/// Resolve node `id`'s address on `host` at port `base + id - 1`.
-fn resolve(host: &str, base: u16, id: u64) -> Result<SocketAddr, String> {
-    let port = base + (id - 1) as u16;
-    (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("resolve {host}:{port}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("resolve {host}:{port}: no address"))
 }
 
 /// Hold startup open until the cluster has converged enough to serve. A
