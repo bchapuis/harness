@@ -585,17 +585,19 @@ impl RaftShardMap {
         let handles: Arc<Mutex<ShardHandles<R>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
         consensus.launch(Box::pin(apply_loop(
-            consensus.clone(),
-            grain_type,
-            self_node,
+            ShardApply {
+                consensus: consensus.clone(),
+                grain_type,
+                self_node,
+                inner: Arc::clone(&inner),
+                handles: Arc::clone(&handles),
+                local: Arc::clone(&local),
+                transport,
+                io,
+                deadlines,
+                emit: Arc::clone(&emit),
+            },
             commits,
-            Arc::clone(&inner),
-            Arc::clone(&handles),
-            Arc::clone(&local),
-            transport,
-            io,
-            deadlines,
-            Arc::clone(&emit),
         )));
         consensus.launch(Box::pin(allocator_loop(
             consensus.clone(),
@@ -802,25 +804,30 @@ impl ShardMapSource for RaftShardMap {
     }
 }
 
-/// Apply the map group's committed allocation records (spec §7.6, §7.7).
+/// The node-local half of the map group's committed commands (spec §7.6, §7.7),
+/// and the state performing them takes.
 ///
-/// Each command's committed meaning is on [`ShardMapCommand`]; this loop performs
-/// the node-local half: creating and retiring shard groups, building and dropping
-/// [`QuorumGrainJournal`]s, and flipping the live [`ReplicaSets`] so every
-/// in-flight journal switches to the joint quorum (a majority of current AND of
-/// target) the moment a migration commits. A node newly involved creates the shard
-/// group as a non-member over the *current* voters, so it never disrupts an
-/// election; the reconcile loop promotes it. A node leaving a set drops its
-/// journal — an active `Host` keeps its own `Arc`, so an in-flight append still
-/// completes or fails cleanly as `NotLeader`.
+/// One value rather than a parameter list per command: the consensus handle, the
+/// grain type, this node, the map, the per-shard handles, the local store, the
+/// replica transport, the blocking pool, the deadlines, and the event sink are the
+/// *same ten* whichever command committed, so threading them into each method
+/// would be ten pass-through parameters written out six times.
 ///
-/// Runs until the map group's commit stream closes.
-#[allow(clippy::too_many_arguments)]
-async fn apply_loop<R: RaftConsensus>(
+/// Each method is one committed command's local effect: creating and retiring
+/// shard groups, building and dropping [`QuorumGrainJournal`]s, and flipping the
+/// live [`ReplicaSets`] so every in-flight journal switches to the joint quorum (a
+/// majority of current AND of target) the moment a migration commits. A node newly
+/// involved creates the shard group as a non-member over the *current* voters, so
+/// it never disrupts an election; the reconcile loop promotes it. A node leaving a
+/// set drops its journal — an active `Host` keeps its own `Arc`, so an in-flight
+/// append still completes or fails cleanly as `NotLeader`.
+///
+/// Every method runs on [`apply_loop`]'s single task, in committed order, so none
+/// of them races another.
+struct ShardApply<R: RaftConsensus> {
     consensus: R,
     grain_type: &'static str,
     self_node: NodeId,
-    commits: Receiver<Committed>,
     inner: Arc<Mutex<Inner>>,
     handles: Arc<Mutex<ShardHandles<R>>>,
     local: Arc<dyn GrainStore>,
@@ -828,34 +835,408 @@ async fn apply_loop<R: RaftConsensus>(
     io: Arc<dyn crate::BlockingIo>,
     deadlines: crate::replicator::Deadlines,
     emit: EmitEvent,
-) {
-    // Build this node's journal + live control for `shard` and register them.
-    let build = |shard: u32, sets: ReplicaSets, range: KeyRange| {
-        let shard_group = shard_group_id(grain_type, shard);
+}
+
+impl<R: RaftConsensus> ShardApply<R> {
+    /// Build this node's journal + live control for `shard` and register them.
+    fn build(&self, shard: u32, sets: ReplicaSets, range: KeyRange) {
+        let shard_group = shard_group_id(self.grain_type, shard);
         let control = Arc::new(std::sync::Mutex::new(ShardControl::new(sets, range)));
         let journal = QuorumGrainJournal::new(
-            consensus.clone(),
+            self.consensus.clone(),
             shard_group,
             shard,
             Arc::clone(&control),
-            Arc::clone(&local),
-            Arc::clone(&transport),
-            Arc::clone(&io),
-            deadlines,
+            Arc::clone(&self.local),
+            Arc::clone(&self.transport),
+            Arc::clone(&self.io),
+            self.deadlines,
         );
-        handles
+        self.handles
             .lock()
             .expect("shard handles mutex poisoned")
             .insert(shard, (control, journal.replicator()));
-        inner
+        self.inner
             .lock()
             .expect("shard map mutex poisoned")
             .journals
             .insert(shard, Arc::new(journal) as Arc<dyn DynGrainJournal>);
-    };
+    }
 
+    /// The founding allocation for a shard, or the start of a migration toward
+    /// `replicas` (§7.7).
+    fn assign(&self, shard: u32, replicas: Vec<NodeId>, range: KeyRange) {
+        // Record the transition under the map lock; act on it below.
+        enum Change {
+            /// The founding allocation for this shard.
+            Founding,
+            /// A migration toward `replicas` began; carries the current
+            /// set and the shard's committed range (migration never
+            /// moves the range, so the command's `range` is ignored).
+            Migration(Vec<NodeId>, KeyRange),
+            /// A re-proposed identical allocation — nothing changed.
+            Noop,
+        }
+        let change = {
+            let mut guard = self.inner.lock().expect("shard map mutex poisoned");
+            match guard.allocation.get_mut(&shard) {
+                None => {
+                    guard.allocation.insert(
+                        shard,
+                        Allocation {
+                            range,
+                            current: replicas.clone(),
+                            target: None,
+                            split: None,
+                            merge: None,
+                        },
+                    );
+                    Change::Founding
+                }
+                Some(alloc)
+                    if alloc.current == replicas && alloc.target.is_none()
+                        || alloc.target.as_ref() == Some(&replicas) =>
+                {
+                    Change::Noop
+                }
+                Some(alloc) => {
+                    alloc.target = Some(replicas.clone());
+                    Change::Migration(alloc.current.clone(), alloc.range)
+                }
+            }
+        };
+        let shard_group = shard_group_id(self.grain_type, shard);
+        match change {
+            Change::Noop => {}
+            Change::Founding => {
+                if replicas.contains(&self.self_node) {
+                    self.consensus
+                        .create_group(shard_group, replicas.clone(), Vec::new());
+                    self.build(shard, ReplicaSets::new(replicas), range);
+                }
+            }
+            Change::Migration(current, committed_range) => {
+                let involved =
+                    current.contains(&self.self_node) || replicas.contains(&self.self_node);
+                let has_handles = self
+                    .handles
+                    .lock()
+                    .expect("shard handles mutex poisoned")
+                    .contains_key(&shard);
+                if has_handles {
+                    // A continuing participant: flip its live sets so every
+                    // in-flight journal switches to the joint quorum (§7.7).
+                    if let Some((control, _)) = self
+                        .handles
+                        .lock()
+                        .expect("shard handles mutex poisoned")
+                        .get(&shard)
+                    {
+                        control.lock().expect("shard control poisoned").sets = ReplicaSets {
+                            current: current.clone(),
+                            target: Some(replicas.clone()),
+                        };
+                    }
+                } else if involved {
+                    // Newly a target member: form the shard group as a
+                    // non-member over the CURRENT voters (no election
+                    // disruption; the reconcile loop promotes it) and build
+                    // the journal over the joint sets.
+                    self.consensus
+                        .create_group(shard_group, current.clone(), Vec::new());
+                    self.build(
+                        shard,
+                        ReplicaSets {
+                            current,
+                            target: Some(replicas),
+                        },
+                        committed_range,
+                    );
+                }
+            }
+        }
+    }
+
+    /// A migration finished: the target set becomes the current one (§7.7).
+    fn migrated(&self, shard: u32) {
+        // Flip `current = target` (a duplicate `Migrated` finds no target
+        // and is a no-op).
+        let flipped = {
+            let mut guard = self.inner.lock().expect("shard map mutex poisoned");
+            match guard.allocation.get_mut(&shard) {
+                Some(alloc) => {
+                    let target = alloc.target.take();
+                    if let Some(target) = &target {
+                        alloc.current = target.clone();
+                    }
+                    target
+                }
+                None => None,
+            }
+        };
+        let Some(current) = flipped else { return };
+        if current.contains(&self.self_node) {
+            if let Some((control, _)) = self
+                .handles
+                .lock()
+                .expect("shard handles mutex poisoned")
+                .get(&shard)
+            {
+                control.lock().expect("shard control poisoned").sets = ReplicaSets::new(current);
+            }
+        } else {
+            // Leaving the set: drop the journal and handles (the reconcile
+            // loop removes this node from the group's voters).
+            self.inner
+                .lock()
+                .expect("shard map mutex poisoned")
+                .journals
+                .remove(&shard);
+            self.handles
+                .lock()
+                .expect("shard handles mutex poisoned")
+                .remove(&shard);
+        }
+    }
+
+    /// A split was proposed: record the plan and freeze the moving range (§7.7).
+    fn split_started(&self, parent: u32, child: u32, boundary: u64) {
+        // Deterministic validation against committed state — a pure
+        // function of (command, map state), so every node accepts or
+        // rejects identically. Rejection is a silent no-op: the proposer
+        // raced a migration, another split, or a stale request.
+        let started = {
+            let mut guard = self.inner.lock().expect("shard map mutex poisoned");
+            let child_free = !guard.allocation.contains_key(&child)
+                && child != MAP_SHARD_INDEX
+                && guard
+                    .allocation
+                    .values()
+                    .all(|a| a.split.is_none_or(|p| p.child != child));
+            match guard.allocation.get_mut(&parent) {
+                Some(alloc)
+                    if alloc.idle()
+                        && alloc.range.start < boundary
+                        && boundary <= alloc.range.end
+                        && child_free =>
+                {
+                    alloc.split = Some(SplitPlan { child, boundary });
+                    true
+                }
+                _ => false,
+            }
+        };
+        if started {
+            // A parent replica arms the leader-local freeze and bounds
+            // its own store as apply-time catch-up; the driver's
+            // majority-acked seal fan is the authoritative barrier.
+            let handles = self.handles.lock().expect("shard handles mutex poisoned");
+            if let Some((control, _)) = handles.get(&parent) {
+                control.lock().expect("shard control poisoned").frozen_from = Some(boundary);
+                self.local.seal_range(parent, boundary);
+            }
+        }
+    }
+
+    /// A split committed: the child becomes a shard of its own (§7.7).
+    fn split_committed(&self, parent: u32) {
+        // Flip the mapping: shrink the parent's range, allocate the
+        // child on the parent's replicas. A duplicate commit finds no
+        // plan and is a no-op.
+        let committed = {
+            let mut guard = self.inner.lock().expect("shard map mutex poisoned");
+            match guard.allocation.get_mut(&parent) {
+                Some(alloc) => match alloc.split.take() {
+                    Some(plan) => {
+                        let old_end = alloc.range.end;
+                        alloc.range.end = plan.boundary - 1;
+                        let current = alloc.current.clone();
+                        let child_range = KeyRange {
+                            start: plan.boundary,
+                            end: old_end,
+                        };
+                        guard.allocation.insert(
+                            plan.child,
+                            Allocation {
+                                range: child_range,
+                                current: current.clone(),
+                                target: None,
+                                split: None,
+                                merge: None,
+                            },
+                        );
+                        Some((plan, child_range, current))
+                    }
+                    None => None,
+                },
+                None => None,
+            }
+        };
+        let Some((plan, child_range, current)) = committed else {
+            return;
+        };
+        // Parent replicas: shrink the live control range (appends to the
+        // moved range now refuse `NotLeader` at the leader), drop the
+        // freeze (the shrunken range subsumes it), catch up the durable
+        // bound in case this replica missed the driver's fan, and GC the
+        // moved grains' parent-keyed data — the child copy is
+        // quorum-durable, that is what licensed `SplitCommitted`.
+        {
+            let handles = self.handles.lock().expect("shard handles mutex poisoned");
+            if let Some((control, _)) = handles.get(&parent) {
+                {
+                    let mut control = control.lock().expect("shard control poisoned");
+                    control.range.end = plan.boundary - 1;
+                    control.frozen_from = None;
+                }
+                // One bound and one range reclamation, rather than a walk
+                // of every grain in the shard (§7.7).
+                self.local.seal_range(parent, plan.boundary);
+                self.local.remove_range(parent, plan.boundary);
+            }
+        }
+        // Child replicas (the parent's set, inherited): create the
+        // child's leader-election group and journal — only now, so no
+        // child term exists during the transfer and neither side served
+        // the moved range early (§7.7's commit-before-serve ordering).
+        if current.contains(&self.self_node) {
+            let child_group = shard_group_id(self.grain_type, plan.child);
+            self.consensus
+                .create_group(child_group, current.clone(), Vec::new());
+            self.build(plan.child, ReplicaSets::new(current), child_range);
+        }
+        (self.emit)(GrainEvent::ShardSplit {
+            node: self.self_node,
+            grain_type: self.grain_type,
+            parent,
+            child: plan.child,
+            boundary: plan.boundary,
+        });
+    }
+
+    /// A merge was proposed: record both roles and freeze the right shard (§7.7).
+    fn merge_started(&self, left: u32, right: u32) {
+        // Deterministic validation: both allocated, both idle, adjacent
+        // (left's range ends just below right's). Replica sets need not
+        // match — the right driver recovers from right's quorum and
+        // transfers to left's replicas, exactly as migration crosses
+        // sets. An invalid proposal is a silent no-op on every node.
+        let started = {
+            let mut guard = self.inner.lock().expect("shard map mutex poisoned");
+            let ok = match (guard.allocation.get(&left), guard.allocation.get(&right)) {
+                (Some(l), Some(r)) => {
+                    l.idle() && r.idle() && l.range.end.checked_add(1) == Some(r.range.start)
+                }
+                _ => false,
+            };
+            if ok {
+                guard.allocation.get_mut(&left).expect("checked").merge =
+                    Some(MergeRole::Absorbing(right));
+                guard.allocation.get_mut(&right).expect("checked").merge =
+                    Some(MergeRole::Absorbed(left));
+            }
+            ok
+        };
+        if started {
+            // Right replicas: freeze the whole right range and bound the
+            // store (the driver's majority-acked seal is authoritative).
+            let right_start = {
+                let guard = self.inner.lock().expect("shard map mutex poisoned");
+                guard.allocation.get(&right).map(|a| a.range.start)
+            };
+            let handles = self.handles.lock().expect("shard handles mutex poisoned");
+            if let (Some(start), Some((control, _))) = (right_start, handles.get(&right)) {
+                control.lock().expect("shard control poisoned").frozen_from = Some(start);
+                self.local.seal_range(right, start);
+            }
+        }
+    }
+
+    /// A merge committed: left absorbs right's range, right is retired (§7.7).
+    fn merge_committed(&self, left: u32, right: u32) {
+        // Flip the mapping: extend left over right, drop right. A
+        // duplicate commit finds no merge role and is a no-op.
+        let committed = {
+            let mut guard = self.inner.lock().expect("shard map mutex poisoned");
+            // Left must still be absorbing exactly this right (a duplicate
+            // or crossed commit otherwise finds a mismatched role).
+            let matches = matches!(
+                guard.allocation.get(&left).and_then(|l| l.merge),
+                Some(MergeRole::Absorbing(r)) if r == right
+            );
+            if matches && guard.allocation.contains_key(&right) {
+                let right_end = guard.allocation[&right].range.end;
+                let left_alloc = guard.allocation.get_mut(&left).expect("checked");
+                left_alloc.range.end = right_end;
+                left_alloc.merge = None;
+                let new_end = right_end;
+                guard.allocation.remove(&right);
+                Some(new_end)
+            } else {
+                None
+            }
+        };
+        let Some(new_end) = committed else { return };
+        // Left replicas: extend the live range, then re-establish the
+        // store bound. `unseal` clears any prior split boundary; a fresh
+        // seal at `new_end + 1` protects whatever shards still lie above
+        // left (a no-op-safe backstop when none do), so a stale
+        // higher-term leader can never append past left's committed range
+        // (G15). Left keeps its journal/group.
+        {
+            let handles = self.handles.lock().expect("shard handles mutex poisoned");
+            if let Some((control, _)) = handles.get(&left) {
+                control.lock().expect("shard control poisoned").range.end = new_end;
+                self.local.unseal(left);
+                if let Some(bound) = new_end.checked_add(1) {
+                    self.local.seal_range(left, bound);
+                }
+            }
+        }
+        // Right replicas: GC the now-unreachable right-keyed data (the
+        // grains live under left's keys after the transfer), drop the
+        // journal/handles, and retire the group — it holds no data
+        // (§7.1), so no in-group consensus is needed; every node retires
+        // it as it applies this commit (G7).
+        let had_right = self
+            .inner
+            .lock()
+            .expect("shard map mutex poisoned")
+            .journals
+            .remove(&right)
+            .is_some();
+        if had_right {
+            // The whole shard goes, so drop it in one call rather than
+            // walking its grains; `drop_shard` also clears right's fence
+            // and bound.
+            self.local.drop_shard(right);
+        }
+        self.handles
+            .lock()
+            .expect("shard handles mutex poisoned")
+            .remove(&right);
+        self.consensus
+            .remove_group(shard_group_id(self.grain_type, right));
+        (self.emit)(GrainEvent::ShardMerged {
+            node: self.self_node,
+            grain_type: self.grain_type,
+            left,
+            right,
+        });
+    }
+}
+
+/// Apply the map group's committed allocation records (spec §7.6, §7.7).
+///
+/// Each command's committed meaning is on [`ShardMapCommand`]; its node-local
+/// effect is the [`ShardApply`] method of the same name. This loop is the
+/// dispatch and the two things every command shares: refusing an entry this build
+/// cannot read, and counting the applied change.
+///
+/// Runs until the map group's commit stream closes.
+async fn apply_loop<R: RaftConsensus>(apply: ShardApply<R>, commits: Receiver<Committed>) {
     while let Ok(observation) = commits.recv().await {
-        let command = match admit(&observation, grain_type) {
+        let command = match admit(&observation, apply.grain_type) {
             Ok(Some(command)) => command,
             Ok(None) => continue, // no allocation in it (see `admit`)
             Err(why) => {
@@ -883,8 +1264,17 @@ async fn apply_loop<R: RaftConsensus>(
                 // build having applied it: the entries are on disk, and a restart
                 // onto a build that can read them applies them. Dropping out would
                 // cost availability and buy no safety.
-                inner.lock().expect("shard map mutex poisoned").poison(why);
-                hand_off_all(consensus.clone(), grain_type, Arc::clone(&inner)).await;
+                apply
+                    .inner
+                    .lock()
+                    .expect("shard map mutex poisoned")
+                    .poison(why);
+                hand_off_all(
+                    apply.consensus.clone(),
+                    apply.grain_type,
+                    Arc::clone(&apply.inner),
+                )
+                .await;
                 return;
             }
         };
@@ -894,7 +1284,8 @@ async fn apply_loop<R: RaftConsensus>(
         // command that changes nothing still bumps) only costs the allocator one
         // redundant sweep, while under-counting would leave a real drift unnoticed —
         // so the safe direction is to bump unconditionally.
-        inner
+        apply
+            .inner
             .lock()
             .expect("shard map mutex poisoned")
             .allocation_generation += 1;
@@ -903,356 +1294,16 @@ async fn apply_loop<R: RaftConsensus>(
                 shard,
                 replicas,
                 range,
-            } => {
-                // Record the transition under the map lock; act on it below.
-                enum Change {
-                    /// The founding allocation for this shard.
-                    Founding,
-                    /// A migration toward `replicas` began; carries the current
-                    /// set and the shard's committed range (migration never
-                    /// moves the range, so the command's `range` is ignored).
-                    Migration(Vec<NodeId>, KeyRange),
-                    /// A re-proposed identical allocation — nothing changed.
-                    Noop,
-                }
-                let change = {
-                    let mut guard = inner.lock().expect("shard map mutex poisoned");
-                    match guard.allocation.get_mut(&shard) {
-                        None => {
-                            guard.allocation.insert(
-                                shard,
-                                Allocation {
-                                    range,
-                                    current: replicas.clone(),
-                                    target: None,
-                                    split: None,
-                                    merge: None,
-                                },
-                            );
-                            Change::Founding
-                        }
-                        Some(alloc)
-                            if alloc.current == replicas && alloc.target.is_none()
-                                || alloc.target.as_ref() == Some(&replicas) =>
-                        {
-                            Change::Noop
-                        }
-                        Some(alloc) => {
-                            alloc.target = Some(replicas.clone());
-                            Change::Migration(alloc.current.clone(), alloc.range)
-                        }
-                    }
-                };
-                let shard_group = shard_group_id(grain_type, shard);
-                match change {
-                    Change::Noop => {}
-                    Change::Founding => {
-                        if replicas.contains(&self_node) {
-                            consensus.create_group(shard_group, replicas.clone(), Vec::new());
-                            build(shard, ReplicaSets::new(replicas), range);
-                        }
-                    }
-                    Change::Migration(current, committed_range) => {
-                        let involved =
-                            current.contains(&self_node) || replicas.contains(&self_node);
-                        let has_handles = handles
-                            .lock()
-                            .expect("shard handles mutex poisoned")
-                            .contains_key(&shard);
-                        if has_handles {
-                            // A continuing participant: flip its live sets so every
-                            // in-flight journal switches to the joint quorum (§7.7).
-                            if let Some((control, _)) = handles
-                                .lock()
-                                .expect("shard handles mutex poisoned")
-                                .get(&shard)
-                            {
-                                control.lock().expect("shard control poisoned").sets =
-                                    ReplicaSets {
-                                        current: current.clone(),
-                                        target: Some(replicas.clone()),
-                                    };
-                            }
-                        } else if involved {
-                            // Newly a target member: form the shard group as a
-                            // non-member over the CURRENT voters (no election
-                            // disruption; the reconcile loop promotes it) and build
-                            // the journal over the joint sets.
-                            consensus.create_group(shard_group, current.clone(), Vec::new());
-                            build(
-                                shard,
-                                ReplicaSets {
-                                    current,
-                                    target: Some(replicas),
-                                },
-                                committed_range,
-                            );
-                        }
-                    }
-                }
-            }
-            ShardMapCommand::Migrated { shard } => {
-                // Flip `current = target` (a duplicate `Migrated` finds no target
-                // and is a no-op).
-                let flipped = {
-                    let mut guard = inner.lock().expect("shard map mutex poisoned");
-                    match guard.allocation.get_mut(&shard) {
-                        Some(alloc) => {
-                            let target = alloc.target.take();
-                            if let Some(target) = &target {
-                                alloc.current = target.clone();
-                            }
-                            target
-                        }
-                        None => None,
-                    }
-                };
-                let Some(current) = flipped else { continue };
-                if current.contains(&self_node) {
-                    if let Some((control, _)) = handles
-                        .lock()
-                        .expect("shard handles mutex poisoned")
-                        .get(&shard)
-                    {
-                        control.lock().expect("shard control poisoned").sets =
-                            ReplicaSets::new(current);
-                    }
-                } else {
-                    // Leaving the set: drop the journal and handles (the reconcile
-                    // loop removes this node from the group's voters).
-                    inner
-                        .lock()
-                        .expect("shard map mutex poisoned")
-                        .journals
-                        .remove(&shard);
-                    handles
-                        .lock()
-                        .expect("shard handles mutex poisoned")
-                        .remove(&shard);
-                }
-            }
+            } => apply.assign(shard, replicas, range),
+            ShardMapCommand::Migrated { shard } => apply.migrated(shard),
             ShardMapCommand::SplitStarted {
                 parent,
                 child,
                 boundary,
-            } => {
-                // Deterministic validation against committed state — a pure
-                // function of (command, map state), so every node accepts or
-                // rejects identically. Rejection is a silent no-op: the proposer
-                // raced a migration, another split, or a stale request.
-                let started = {
-                    let mut guard = inner.lock().expect("shard map mutex poisoned");
-                    let child_free = !guard.allocation.contains_key(&child)
-                        && child != MAP_SHARD_INDEX
-                        && guard
-                            .allocation
-                            .values()
-                            .all(|a| a.split.is_none_or(|p| p.child != child));
-                    match guard.allocation.get_mut(&parent) {
-                        Some(alloc)
-                            if alloc.idle()
-                                && alloc.range.start < boundary
-                                && boundary <= alloc.range.end
-                                && child_free =>
-                        {
-                            alloc.split = Some(SplitPlan { child, boundary });
-                            true
-                        }
-                        _ => false,
-                    }
-                };
-                if started {
-                    // A parent replica arms the leader-local freeze and bounds
-                    // its own store as apply-time catch-up; the driver's
-                    // majority-acked seal fan is the authoritative barrier.
-                    let handles = handles.lock().expect("shard handles mutex poisoned");
-                    if let Some((control, _)) = handles.get(&parent) {
-                        control.lock().expect("shard control poisoned").frozen_from =
-                            Some(boundary);
-                        local.seal_range(parent, boundary);
-                    }
-                }
-            }
-            ShardMapCommand::SplitCommitted { parent } => {
-                // Flip the mapping: shrink the parent's range, allocate the
-                // child on the parent's replicas. A duplicate commit finds no
-                // plan and is a no-op.
-                let committed = {
-                    let mut guard = inner.lock().expect("shard map mutex poisoned");
-                    match guard.allocation.get_mut(&parent) {
-                        Some(alloc) => match alloc.split.take() {
-                            Some(plan) => {
-                                let old_end = alloc.range.end;
-                                alloc.range.end = plan.boundary - 1;
-                                let current = alloc.current.clone();
-                                let child_range = KeyRange {
-                                    start: plan.boundary,
-                                    end: old_end,
-                                };
-                                guard.allocation.insert(
-                                    plan.child,
-                                    Allocation {
-                                        range: child_range,
-                                        current: current.clone(),
-                                        target: None,
-                                        split: None,
-                                        merge: None,
-                                    },
-                                );
-                                Some((plan, child_range, current))
-                            }
-                            None => None,
-                        },
-                        None => None,
-                    }
-                };
-                let Some((plan, child_range, current)) = committed else {
-                    continue;
-                };
-                // Parent replicas: shrink the live control range (appends to the
-                // moved range now refuse `NotLeader` at the leader), drop the
-                // freeze (the shrunken range subsumes it), catch up the durable
-                // bound in case this replica missed the driver's fan, and GC the
-                // moved grains' parent-keyed data — the child copy is
-                // quorum-durable, that is what licensed `SplitCommitted`.
-                {
-                    let handles = handles.lock().expect("shard handles mutex poisoned");
-                    if let Some((control, _)) = handles.get(&parent) {
-                        {
-                            let mut control = control.lock().expect("shard control poisoned");
-                            control.range.end = plan.boundary - 1;
-                            control.frozen_from = None;
-                        }
-                        // One bound and one range reclamation, rather than a walk
-                        // of every grain in the shard (§7.7).
-                        local.seal_range(parent, plan.boundary);
-                        local.remove_range(parent, plan.boundary);
-                    }
-                }
-                // Child replicas (the parent's set, inherited): create the
-                // child's leader-election group and journal — only now, so no
-                // child term exists during the transfer and neither side served
-                // the moved range early (§7.7's commit-before-serve ordering).
-                if current.contains(&self_node) {
-                    let child_group = shard_group_id(grain_type, plan.child);
-                    consensus.create_group(child_group, current.clone(), Vec::new());
-                    build(plan.child, ReplicaSets::new(current), child_range);
-                }
-                emit(GrainEvent::ShardSplit {
-                    node: self_node,
-                    grain_type,
-                    parent,
-                    child: plan.child,
-                    boundary: plan.boundary,
-                });
-            }
-            ShardMapCommand::MergeStarted { left, right } => {
-                // Deterministic validation: both allocated, both idle, adjacent
-                // (left's range ends just below right's). Replica sets need not
-                // match — the right driver recovers from right's quorum and
-                // transfers to left's replicas, exactly as migration crosses
-                // sets. An invalid proposal is a silent no-op on every node.
-                let started = {
-                    let mut guard = inner.lock().expect("shard map mutex poisoned");
-                    let ok = match (guard.allocation.get(&left), guard.allocation.get(&right)) {
-                        (Some(l), Some(r)) => {
-                            l.idle()
-                                && r.idle()
-                                && l.range.end.checked_add(1) == Some(r.range.start)
-                        }
-                        _ => false,
-                    };
-                    if ok {
-                        guard.allocation.get_mut(&left).expect("checked").merge =
-                            Some(MergeRole::Absorbing(right));
-                        guard.allocation.get_mut(&right).expect("checked").merge =
-                            Some(MergeRole::Absorbed(left));
-                    }
-                    ok
-                };
-                if started {
-                    // Right replicas: freeze the whole right range and bound the
-                    // store (the driver's majority-acked seal is authoritative).
-                    let right_start = {
-                        let guard = inner.lock().expect("shard map mutex poisoned");
-                        guard.allocation.get(&right).map(|a| a.range.start)
-                    };
-                    let handles = handles.lock().expect("shard handles mutex poisoned");
-                    if let (Some(start), Some((control, _))) = (right_start, handles.get(&right)) {
-                        control.lock().expect("shard control poisoned").frozen_from = Some(start);
-                        local.seal_range(right, start);
-                    }
-                }
-            }
-            ShardMapCommand::MergeCommitted { left, right } => {
-                // Flip the mapping: extend left over right, drop right. A
-                // duplicate commit finds no merge role and is a no-op.
-                let committed = {
-                    let mut guard = inner.lock().expect("shard map mutex poisoned");
-                    // Left must still be absorbing exactly this right (a duplicate
-                    // or crossed commit otherwise finds a mismatched role).
-                    let matches = matches!(
-                        guard.allocation.get(&left).and_then(|l| l.merge),
-                        Some(MergeRole::Absorbing(r)) if r == right
-                    );
-                    if matches && guard.allocation.contains_key(&right) {
-                        let right_end = guard.allocation[&right].range.end;
-                        let left_alloc = guard.allocation.get_mut(&left).expect("checked");
-                        left_alloc.range.end = right_end;
-                        left_alloc.merge = None;
-                        let new_end = right_end;
-                        guard.allocation.remove(&right);
-                        Some(new_end)
-                    } else {
-                        None
-                    }
-                };
-                let Some(new_end) = committed else { continue };
-                // Left replicas: extend the live range, then re-establish the
-                // store bound. `unseal` clears any prior split boundary; a fresh
-                // seal at `new_end + 1` protects whatever shards still lie above
-                // left (a no-op-safe backstop when none do), so a stale
-                // higher-term leader can never append past left's committed range
-                // (G15). Left keeps its journal/group.
-                {
-                    let handles = handles.lock().expect("shard handles mutex poisoned");
-                    if let Some((control, _)) = handles.get(&left) {
-                        control.lock().expect("shard control poisoned").range.end = new_end;
-                        local.unseal(left);
-                        if let Some(bound) = new_end.checked_add(1) {
-                            local.seal_range(left, bound);
-                        }
-                    }
-                }
-                // Right replicas: GC the now-unreachable right-keyed data (the
-                // grains live under left's keys after the transfer), drop the
-                // journal/handles, and retire the group — it holds no data
-                // (§7.1), so no in-group consensus is needed; every node retires
-                // it as it applies this commit (G7).
-                let had_right = inner
-                    .lock()
-                    .expect("shard map mutex poisoned")
-                    .journals
-                    .remove(&right)
-                    .is_some();
-                if had_right {
-                    // The whole shard goes, so drop it in one call rather than
-                    // walking its grains; `drop_shard` also clears right's fence
-                    // and bound.
-                    local.drop_shard(right);
-                }
-                handles
-                    .lock()
-                    .expect("shard handles mutex poisoned")
-                    .remove(&right);
-                consensus.remove_group(shard_group_id(grain_type, right));
-                emit(GrainEvent::ShardMerged {
-                    node: self_node,
-                    grain_type,
-                    left,
-                    right,
-                });
-            }
+            } => apply.split_started(parent, child, boundary),
+            ShardMapCommand::SplitCommitted { parent } => apply.split_committed(parent),
+            ShardMapCommand::MergeStarted { left, right } => apply.merge_started(left, right),
+            ShardMapCommand::MergeCommitted { left, right } => apply.merge_committed(left, right),
         }
     }
 }
