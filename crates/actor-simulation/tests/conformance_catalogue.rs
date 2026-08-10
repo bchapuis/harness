@@ -163,7 +163,7 @@ fn every_file_pointer_references_a_real_file() {
                         crates_dir.display(),
                     );
                 }
-                Verify::Checker(_) | Verify::CompileTime(_) => {}
+                Verify::Checker(_) | Verify::CompileTime(_) | Verify::Deferred(_) => {}
             }
         }
     }

@@ -4,10 +4,54 @@
 
 mod support;
 
+use std::path::Path;
+
 use actor_simulation::Verify;
 use spec_xref::catalogue;
 
 use support::s_catalogue;
+
+/// Every suite the catalogue names still exists.
+///
+/// The sibling catalogues have had this gate all along; this one could not, because
+/// its pointers were prose with the file names buried in them and nothing could tell
+/// a renamed suite from a reworded sentence. Now that they are file lists, a rename
+/// that misses this table fails the build here, as it does everywhere else.
+///
+/// A bare name is a file under this crate's `tests/`; a name with a slash is
+/// relative to `crates/`, which is how S4 reaches the harness suite that owns it.
+#[test]
+fn every_file_pointer_references_a_real_file() {
+    let tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crate dir has a parent");
+
+    for entry in s_catalogue() {
+        for v in entry.verify {
+            let files = match v {
+                Verify::SimTest(files) | Verify::Differential(files) => files,
+                Verify::CompileFail(_)
+                | Verify::Checker(_)
+                | Verify::CompileTime(_)
+                | Verify::Deferred(_) => continue,
+            };
+            for file in files.split(',').map(str::trim) {
+                let path = if file.contains('/') {
+                    crates_dir.join(file)
+                } else {
+                    tests_dir.join(file)
+                };
+                assert!(
+                    path.exists(),
+                    "S{} points at {file:?}, which does not exist at {}",
+                    entry.invariant,
+                    path.display(),
+                );
+            }
+        }
+    }
+}
 
 #[test]
 fn the_catalogue_covers_s1_through_s5() {

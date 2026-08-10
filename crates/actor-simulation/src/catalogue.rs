@@ -16,9 +16,14 @@ pub enum Verify {
     /// live checker set.
     Checker(&'static str),
     /// One or more example/conformance tests, named as comma-separated files
-    /// under this crate's `tests/` directory. The `conformance_catalogue` test
-    /// machine-verifies each named file exists, so a renamed or deleted test
-    /// fails the build.
+    /// under this crate's `tests/` directory — or, where the suite that decides an
+    /// invariant lives in another crate, as a path relative to `crates/`. The
+    /// `conformance_catalogue` test machine-verifies each named file exists, so a
+    /// renamed or deleted test fails the build.
+    ///
+    /// Files and nothing else. What a given suite contributes belongs in the spec
+    /// row, which has the room for it; a payload that mixes the two cannot be
+    /// checked, which is the whole point of writing it here as well.
     SimTest(&'static str),
     /// A `trybuild` compile-fail case asserting invalid code is rejected (#20).
     CompileFail(&'static str),
@@ -27,24 +32,35 @@ pub enum Verify {
     /// Enforced at compile time by a trait bound or exhaustive enum — no runtime
     /// test is possible or needed.
     CompileTime(&'static str),
+    /// Nothing verifies this yet, and the string says why not.
+    ///
+    /// Distinct from the others because it is the one entry that names no test,
+    /// no checker, and no guarantee. It was a `SimTest` whose payload was a
+    /// sentence beginning "future:", which reads as verification to anything that
+    /// does not parse the prose — including the drift tests, which found a file
+    /// list with no files in it and had nothing to say. A deferral is a real state
+    /// for an invariant to be in (sandbox §7 keeps a list of them); it just has to
+    /// be able to announce itself.
+    Deferred(&'static str),
 }
 
 impl Verify {
     /// The text this entry carries, whatever it names.
     ///
     /// Every variant wraps one string — a checker's name, a comma-separated file
-    /// list, a trybuild path, a sentence explaining a compile-time guarantee. The
-    /// spec↔catalogue comparison
-    /// ([`spec_xref::catalogue`](https://docs.rs/spec-xref)) wants them all and
-    /// picks out the suite names itself, since several of these are prose with
-    /// the file names embedded rather than a clean list.
+    /// list, a trybuild path, a sentence explaining a compile-time guarantee or a
+    /// deferral. The spec↔catalogue comparison
+    /// ([`spec_xref::catalogue`](https://docs.rs/spec-xref)) takes them all and
+    /// picks out the suite names itself, so a caller need not sort by variant to
+    /// hand it the pointers.
     pub const fn text(&self) -> &'static str {
         match self {
             Self::Checker(t)
             | Self::SimTest(t)
             | Self::CompileFail(t)
             | Self::Differential(t)
-            | Self::CompileTime(t) => t,
+            | Self::CompileTime(t)
+            | Self::Deferred(t) => t,
         }
     }
 }
@@ -140,13 +156,17 @@ const CATALOGUE: &[CatalogueEntry] = &[
         // §10's confirmed `unreachable` only MAY complete the ask early (§18.5 #2).
         spec: "§7.2, §9.4",
         property: "An ask to a downed node completes with Unreachable, never hangs",
-        verify: &[Verify::SimTest("conformance_faults.rs, conformance_membership.rs")],
+        verify: &[Verify::SimTest(
+            "conformance_faults.rs, conformance_membership.rs",
+        )],
     },
     CatalogueEntry {
         invariant: 3,
         spec: "§6",
         property: "Per-pair FIFO: messages from one sender to one recipient observed in send order",
-        verify: &[Verify::SimTest("conformance_messaging.rs, conformance_faults.rs")],
+        verify: &[Verify::SimTest(
+            "conformance_messaging.rs, conformance_faults.rs",
+        )],
     },
     CatalogueEntry {
         invariant: 4,
