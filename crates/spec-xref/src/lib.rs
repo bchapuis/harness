@@ -202,14 +202,16 @@ pub const DOCUMENTS: &[DocSpec] = &[
         aliases: &["hw", "hardware-envelope"],
         unprefixed: Unprefixed::Own,
     },
-    // Numbers nothing of its own. Written against the actor spec's §16–§18 (see its
-    // opening paragraph), and cites granary's read and commit contracts bare where
-    // it explains what a workload may assert.
+    // Numbers nothing of its own, and is written against the actor spec's §16–§18
+    // (see its opening paragraph): every bare `§N` in it is an actor citation. It
+    // cites granary as well, and says so with a prefix each time — this list stays
+    // one document long so that remains true rather than becoming a convention a
+    // reader has to infer per sentence.
     DocSpec {
         id: "simulation",
         path: "docs/simulation-testing.md",
         aliases: &["simulation-testing"],
-        unprefixed: Unprefixed::Other(&["actor", "granary"]),
+        unprefixed: Unprefixed::Other(&["actor"]),
     },
     // A deployment guide for the harness; its bare `spec §6.1` is the harness spec.
     DocSpec {

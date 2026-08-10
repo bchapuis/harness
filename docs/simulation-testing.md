@@ -522,10 +522,10 @@ recur in workloads that assert one:
 - **A no-op commits nothing.** Granary's `Unchanged` reports what the serving
   activation believed; it journals no record, so the output gate never held a
   reply for it and a quorum-less recovery may have seeded that belief with an
-  uncommitted record (§7.5). Only outcomes that journal — `Created`, `Updated` —
+  uncommitted record (grain §7.5). Only outcomes that journal — `Created`, `Updated` —
   are acknowledgements.
 - **A read is not a probe.** Granary's read contract is read-your-leader
-  (relaxed), *not* linearizable under partition (§7.5). To observe committed
+  (relaxed), *not* linearizable under partition (grain §7.5). To observe committed
   state, issue a trivial *writing* command rather than a query.
 - **A mutating command needs an idempotency key.** At-most-once delivery means a
   duplicated frame runs the command twice (§7.2); a deposit without a key
