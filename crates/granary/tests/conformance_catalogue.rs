@@ -13,8 +13,44 @@ mod support;
 use std::path::Path;
 
 use actor_simulation::Verify;
+use spec_xref::catalogue;
 
 use support::catalogue::g_catalogue;
+
+/// The table above and the spec's §15 copy of it are the same table.
+///
+/// The rest of this file holds the Rust copy internally consistent. This holds it
+/// equal to the prose one, which is the copy a reader trusts: an invariant added
+/// to one, a defining section moved in one, or a suite renamed in one is caught
+/// here rather than left to be noticed.
+#[test]
+fn the_specification_and_this_catalogue_agree() {
+    let site = catalogue::site("granary");
+    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let documented = catalogue::documented(&root, site).expect("granary §15 parses");
+    let implemented: Vec<catalogue::Row> = g_catalogue()
+        .iter()
+        .map(|e| {
+            catalogue::Row::new(
+                e.invariant,
+                e.spec,
+                site.pointers,
+                e.verify.iter().map(Verify::text),
+            )
+        })
+        .collect();
+
+    let found = catalogue::compare(site, &documented, &implemented);
+    assert!(
+        found.is_empty(),
+        "granary spec §15 and g_catalogue() disagree:\n  {}\n",
+        found
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n  "),
+    );
+}
 
 #[test]
 fn every_invariant_g1_through_g21_is_present_exactly_once() {

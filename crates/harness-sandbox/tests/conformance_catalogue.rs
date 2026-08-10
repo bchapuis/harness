@@ -5,6 +5,7 @@
 mod support;
 
 use actor_simulation::Verify;
+use spec_xref::catalogue;
 
 use support::s_catalogue;
 
@@ -35,4 +36,40 @@ fn no_entry_claims_a_continuous_checker() {
             entry.invariant
         );
     }
+}
+
+/// The table above and the sandbox spec's §6 copy of it are the same
+/// table.
+///
+/// The rest of this file holds the Rust copy internally consistent. This holds it
+/// equal to the prose one, which is the copy a reader trusts: an invariant added
+/// to one, or a defining section moved in one, is caught here rather than left to
+/// be noticed.
+#[test]
+fn the_specification_and_this_catalogue_agree() {
+    let site = catalogue::site("sandbox");
+    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let documented = catalogue::documented(&root, site).expect("sandbox spec §6 parses");
+    let implemented: Vec<catalogue::Row> = s_catalogue()
+        .iter()
+        .map(|e| {
+            catalogue::Row::new(
+                e.invariant,
+                e.spec,
+                site.pointers,
+                e.verify.iter().map(Verify::text),
+            )
+        })
+        .collect();
+
+    let found = catalogue::compare(site, &documented, &implemented);
+    assert!(
+        found.is_empty(),
+        "sandbox spec §6 and s_catalogue() disagree:\n  {}\n",
+        found
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n  "),
+    );
 }

@@ -23,6 +23,8 @@
 
 use std::path::Path;
 
+use spec_xref::catalogue;
+
 /// One row of the W-catalogue: the invariant number, the spec sections defining
 /// it, a one-line property, and the test functions verifying it.
 struct CatalogueEntry {
@@ -182,4 +184,35 @@ fn every_crash_point_test_is_claimed_by_an_invariant() {
              either record it in the catalogue or say why it verifies nothing",
         );
     }
+}
+
+/// The table above and the wal spec's §7 copy of it are the same table.
+///
+/// The gates above hold this copy internally consistent and its names real. This
+/// holds it equal to the prose one, which is the copy a reader trusts.
+///
+/// `spec-xref` is safe to take here where `actor-simulation` was not (see the
+/// header): it reads `docs/` and depends on nothing, so it adds no layer beneath
+/// this crate and closes no cycle. Both copies name test *functions*, which makes
+/// this the one catalogue whose "Verified by" column compares as written.
+#[test]
+fn the_specification_and_this_catalogue_agree() {
+    let site = catalogue::site("wal");
+    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let documented = catalogue::documented(&root, site).expect("wal spec §7 parses");
+    let implemented: Vec<catalogue::Row> = W_CATALOGUE
+        .iter()
+        .map(|e| catalogue::Row::new(e.invariant, e.spec, site.pointers, e.tests.iter().copied()))
+        .collect();
+
+    let found = catalogue::compare(site, &documented, &implemented);
+    assert!(
+        found.is_empty(),
+        "wal spec §7 and W_CATALOGUE disagree:\n  {}\n",
+        found
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n  "),
+    );
 }

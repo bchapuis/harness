@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 use actor_simulation::Verify;
 use actor_simulation::default_invariants;
 use harness::testing::checker_coverage;
+use spec_xref::catalogue;
 
 use support::harness_catalogue;
 use support::harness_invariants;
@@ -84,4 +85,44 @@ fn the_catalogue_covers_the_live_h_invariants() {
             entry.invariant
         );
     }
+}
+
+/// The table above and the agentic-harness spec's §11 copy of it are the same
+/// table.
+///
+/// The rest of this file holds the Rust copy internally consistent. This holds it
+/// equal to the prose one, which is the copy a reader trusts: an invariant added
+/// to one, or a defining section moved in one, is caught here rather than left to
+/// be noticed.
+///
+/// The suite axis is not compared here: the spec's column describes the verification in prose, naming no suite a build could resolve. So this
+/// gate covers the numbering and the defining sections, and the "Verified by"
+/// column stays a human's to keep true.
+#[test]
+fn the_specification_and_this_catalogue_agree() {
+    let site = catalogue::site("harness");
+    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let documented = catalogue::documented(&root, site).expect("agentic-harness spec §11 parses");
+    let implemented: Vec<catalogue::Row> = harness_catalogue()
+        .iter()
+        .map(|e| {
+            catalogue::Row::new(
+                e.invariant,
+                e.spec,
+                site.pointers,
+                e.verify.iter().map(Verify::text),
+            )
+        })
+        .collect();
+
+    let found = catalogue::compare(site, &documented, &implemented);
+    assert!(
+        found.is_empty(),
+        "agentic-harness spec §11 and harness_catalogue() disagree:\n  {}\n",
+        found
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n  "),
+    );
 }

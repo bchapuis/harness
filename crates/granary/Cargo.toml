@@ -31,6 +31,7 @@ async-channel.workspace = true
 rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
+spec-xref.workspace = true
 # Its own `testing` module, for this crate's swarm suites.
 granary = { path = ".", features = ["testing"] }
 actor-simulation.workspace = true

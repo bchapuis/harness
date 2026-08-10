@@ -77,7 +77,8 @@ const S_CATALOGUE: &[CatalogueEntry] = &[
         spec: "sandbox §2.3; harness §5.3",
         property: "Per-tier release: release tears down every provisioned tier's environment and is idempotent; deactivation releases all held tiers (the per-tier face of harness H8)",
         verify: &[Verify::SimTest(
-            "harness-sandbox/tests/workspace.rs (open/release accounting); tests/native.rs \
+            "harness-sandbox/tests/workspace.rs (open/release accounting); tests/compute.rs \
+             (the engine is built on first use and dropped on release); tests/native.rs \
              (container removed on release, idempotent); tests/firecracker.rs (VM killed and \
              control directory removed on release, idempotent); the harness's existing H8 \
              checker covers the binding window",

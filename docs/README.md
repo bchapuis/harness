@@ -8,7 +8,8 @@ testing conventions.
 
 Normative, RFC 2119, each carrying its own invariant catalogue and a drift test
 that keeps the catalogue mechanically true. They layer bottom-up: every spec
-cites the ones beneath it by a short prefix (`core §N`, `grain §N`, and so on).
+cites the ones beneath it by a short prefix (`core §N`, `grain §N`, and so on) —
+citations the build resolves rather than trusts (`spec-xref`, under Testing).
 
 | | Spec | Owns | Invariants |
 |---|---|---|---|
@@ -52,6 +53,39 @@ One layer has a design note rather than a spec:
 
 ## Testing
 
+- [`../crates/spec-xref/`](../crates/spec-xref/) — the drift gate for this
+  directory. The layering above is made of citations, two thousand-odd of them,
+  and `cargo test -p spec-xref` resolves every one against a section that
+  exists. It is the `docs/` analogue of a crate's `conformance_catalogue.rs`,
+  and it is there for the same reason: renumbering a section is a local edit
+  whose citations are not local, so prose that points at nothing fails nothing.
+  A document missing from its `DOCUMENTS` table is checked by nothing, so a new
+  spec is registered there — with the convention its own unprefixed `§N` follows
+  — as part of adding it.
+
+  It also reads each spec's **invariant catalogue**, so the table a reader trusts
+  and the machine-readable one beside the suite are held equal rather than
+  maintained twice. Each crate's `conformance_catalogue.rs` runs the comparison,
+  because a Rust catalogue lives in a `tests/` module only its own crate can
+  import. All eight are compared on which invariants exist and which sections
+  define them; the "Verified by" column is compared where the two copies name the
+  same kind of thing, which is granary, utilities, sandbox, and wal. The other
+  four say why not, at the site: blob and machine name test *functions* in the
+  spec and *files* in the catalogue, harness states its verification in prose,
+  and the core catalogue names no suites at all (actor §18.6 carries that).
+
+  Its third gate is the **identifiers**. These documents are written in the
+  code's vocabulary — `GrainHandler`, `ReadReply::head`, `load_snapshot()` — and
+  a rename moves the code while the prose keeps the old word. Every backticked
+  token of a shape the tree would own is checked against an index of every name
+  declared under `crates/`. The index is a scan rather than rustdoc, because
+  rustdoc's JSON needs nightly and the toolchain is pinned; it knows a name
+  exists somewhere, not where or what it is, which is the whole of what the
+  check claims. Names that are right and absent — std's, another system's, a
+  table column, and the ones a spec writes to say the tree has no such thing —
+  are listed with their reasons, and the list is checked in that direction too:
+  an exemption the tree starts defining fails the build, so it cannot outlive
+  its reason.
 - [simulation-testing](simulation-testing.md) — the whole verification story:
   why the simulator is owned rather than imported, the primitives, the
   strategies, the four shapes a test can take, seed sizing, the regression

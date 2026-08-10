@@ -21,5 +21,6 @@ rand.workspace = true
 rand_chacha.workspace = true
 
 [dev-dependencies]
+spec-xref.workspace = true
 futures.workspace = true
 serde = { workspace = true }

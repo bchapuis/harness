@@ -11,6 +11,7 @@ mod support;
 use std::path::Path;
 
 use actor_simulation::Verify;
+use spec_xref::catalogue;
 
 use support::b_catalogue;
 
@@ -130,4 +131,44 @@ fn no_entry_claims_a_continuous_checker() {
             e.invariant
         );
     }
+}
+
+/// The table above and the blob-store spec's §9 copy of it are the same
+/// table.
+///
+/// The rest of this file holds the Rust copy internally consistent. This holds it
+/// equal to the prose one, which is the copy a reader trusts: an invariant added
+/// to one, or a defining section moved in one, is caught here rather than left to
+/// be noticed.
+///
+/// The suite axis is not compared here: the spec's column names test functions where this table names the files that hold them. So this
+/// gate covers the numbering and the defining sections, and the "Verified by"
+/// column stays a human's to keep true.
+#[test]
+fn the_specification_and_this_catalogue_agree() {
+    let site = catalogue::site("blob");
+    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let documented = catalogue::documented(&root, site).expect("blob-store spec §9 parses");
+    let implemented: Vec<catalogue::Row> = b_catalogue()
+        .iter()
+        .map(|e| {
+            catalogue::Row::new(
+                e.invariant,
+                e.spec,
+                site.pointers,
+                e.verify.iter().map(Verify::text),
+            )
+        })
+        .collect();
+
+    let found = catalogue::compare(site, &documented, &implemented);
+    assert!(
+        found.is_empty(),
+        "blob-store spec §9 and b_catalogue() disagree:\n  {}\n",
+        found
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n  "),
+    );
 }

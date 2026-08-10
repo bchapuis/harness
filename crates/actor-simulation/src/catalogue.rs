@@ -29,6 +29,26 @@ pub enum Verify {
     CompileTime(&'static str),
 }
 
+impl Verify {
+    /// The text this entry carries, whatever it names.
+    ///
+    /// Every variant wraps one string — a checker's name, a comma-separated file
+    /// list, a trybuild path, a sentence explaining a compile-time guarantee. The
+    /// spec↔catalogue comparison
+    /// ([`spec_xref::catalogue`](https://docs.rs/spec-xref)) wants them all and
+    /// picks out the suite names itself, since several of these are prose with
+    /// the file names embedded rather than a clean list.
+    pub const fn text(&self) -> &'static str {
+        match self {
+            Self::Checker(t)
+            | Self::SimTest(t)
+            | Self::CompileFail(t)
+            | Self::Differential(t)
+            | Self::CompileTime(t) => t,
+        }
+    }
+}
+
 /// One row of the §18.5 invariant catalogue: the invariant number, the spec
 /// sections that define it, a one-line property, and how it is verified.
 #[derive(Clone, Copy, Debug)]

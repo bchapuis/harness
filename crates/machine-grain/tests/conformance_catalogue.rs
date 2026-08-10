@@ -12,6 +12,7 @@ mod support;
 use std::path::Path;
 
 use actor_simulation::Verify;
+use spec_xref::catalogue;
 
 use support::m_catalogue;
 
@@ -105,4 +106,44 @@ fn the_ingress_and_egress_invariants_are_verified_outside_the_grain_suites() {
             "M{invariant} must cite verification outside this crate's tests/",
         );
     }
+}
+
+/// The table above and the machine spec's §7 copy of it are the same
+/// table.
+///
+/// The rest of this file holds the Rust copy internally consistent. This holds it
+/// equal to the prose one, which is the copy a reader trusts: an invariant added
+/// to one, or a defining section moved in one, is caught here rather than left to
+/// be noticed.
+///
+/// The suite axis is not compared here: the spec's column names test functions where this table names the files that hold them. So this
+/// gate covers the numbering and the defining sections, and the "Verified by"
+/// column stays a human's to keep true.
+#[test]
+fn the_specification_and_this_catalogue_agree() {
+    let site = catalogue::site("machine");
+    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let documented = catalogue::documented(&root, site).expect("machine spec §7 parses");
+    let implemented: Vec<catalogue::Row> = m_catalogue()
+        .iter()
+        .map(|e| {
+            catalogue::Row::new(
+                e.invariant,
+                e.spec,
+                site.pointers,
+                e.verify.iter().map(Verify::text),
+            )
+        })
+        .collect();
+
+    let found = catalogue::compare(site, &documented, &implemented);
+    assert!(
+        found.is_empty(),
+        "machine spec §7 and m_catalogue() disagree:\n  {}\n",
+        found
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n  "),
+    );
 }

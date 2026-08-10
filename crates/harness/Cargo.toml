@@ -19,6 +19,7 @@ serde_json.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
+spec-xref.workspace = true
 # Its own `testing` module, for this crate's swarm suites.
 harness = { path = ".", features = ["testing"] }
 actor-simulation.workspace = true

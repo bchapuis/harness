@@ -18,6 +18,7 @@ use actor_simulation::checker_coverage;
 use actor_simulation::core_catalogue;
 use actor_simulation::default_invariants;
 use actor_simulation::utilities_catalogue;
+use spec_xref::catalogue;
 
 #[test]
 fn every_invariant_1_through_22_is_present_exactly_once() {
@@ -180,5 +181,81 @@ fn invariant_20_is_verified_by_a_compile_fail_test() {
             .iter()
             .any(|v| matches!(v, Verify::CompileFail(_))),
         "invariant #20 (type-safety) must be verified by a compile-fail test"
+    );
+}
+
+/// The table above and the actor spec's §18.5 copy of it are the same
+/// table.
+///
+/// The rest of this file holds the Rust copy internally consistent. This holds it
+/// equal to the prose one, which is the copy a reader trusts: an invariant added
+/// to one, or a defining section moved in one, is caught here rather than left to
+/// be noticed.
+///
+/// The suite axis is not compared here: §18.5 is a numbered list that names no suites at all; §18.6 describes the layering instead. So this
+/// gate covers the numbering and the defining sections, and the "Verified by"
+/// column stays a human's to keep true.
+#[test]
+fn the_specification_and_the_core_catalogue_agree() {
+    let site = catalogue::site("core");
+    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let documented = catalogue::documented(&root, site).expect("actor spec §18.5 parses");
+    let implemented: Vec<catalogue::Row> = core_catalogue()
+        .iter()
+        .map(|e| {
+            catalogue::Row::new(
+                e.invariant,
+                e.spec,
+                site.pointers,
+                e.verify.iter().map(Verify::text),
+            )
+        })
+        .collect();
+
+    let found = catalogue::compare(site, &documented, &implemented);
+    assert!(
+        found.is_empty(),
+        "actor spec §18.5 and core_catalogue() disagree:\n  {}\n",
+        found
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n  "),
+    );
+}
+
+/// The table above and the cluster-utilities spec's §6 copy of it are the same
+/// table.
+///
+/// The rest of this file holds the Rust copy internally consistent. This holds it
+/// equal to the prose one, which is the copy a reader trusts: an invariant added
+/// to one, or a defining section moved in one, is caught here rather than left to
+/// be noticed.
+#[test]
+fn the_specification_and_the_utilities_catalogue_agree() {
+    let site = catalogue::site("utilities");
+    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let documented = catalogue::documented(&root, site).expect("cluster-utilities spec §6 parses");
+    let implemented: Vec<catalogue::Row> = utilities_catalogue()
+        .iter()
+        .map(|e| {
+            catalogue::Row::new(
+                e.invariant,
+                e.spec,
+                site.pointers,
+                e.verify.iter().map(Verify::text),
+            )
+        })
+        .collect();
+
+    let found = catalogue::compare(site, &documented, &implemented);
+    assert!(
+        found.is_empty(),
+        "cluster-utilities spec §6 and utilities_catalogue() disagree:\n  {}\n",
+        found
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n  "),
     );
 }
