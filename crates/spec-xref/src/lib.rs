@@ -48,11 +48,11 @@
 //! - **A markdown link is a prefix.** The compatibility spec's boundary table
 //!   writes `[granary](granary-spec.md) §7.12`, naming the document by link rather
 //!   than by short prefix.
-//! - **A prefix carries across separators, as a preference.** `actor §18.5/§18.6`
-//!   cites the actor spec twice and only the first says so. An inherited prefix is
-//!   tried first and the citing document's own convention second, because the
-//!   inheritance is this crate's inference rather than the author's statement:
-//!   `grain §6, §6.2` mixes the two in one parenthesis.
+//! - **A prefix carries across separators.** `actor §18.5/§18.6` cites the actor
+//!   spec twice and only the first says so. The inheritance is this crate's
+//!   inference, but it binds like a written prefix, which means a citation that
+//!   changes document mid-list has to say so. One did — `grain §6, §6.2`, where
+//!   the second is the harness's own — and saying so was the cheaper fix.
 //! - **An unprefixed citation follows the citing document's own convention**,
 //!   declared per document as [`Unprefixed`]. Most specs number their own sections
 //!   and mean themselves. Some number nothing and mean one particular spec
@@ -264,8 +264,8 @@ pub struct Citation {
     /// The [`DocSpec::id`] the citation names, if it named one.
     pub target: Option<&'static str>,
     /// Whether [`Citation::target`] was inherited from the citation before it
-    /// rather than written at this one. An inherited target is a preference; a
-    /// written one is binding.
+    /// rather than written at this one. Both bind; the flag records which the
+    /// prose said out loud, so a failure can be read against what is written.
     pub inherited: bool,
     /// The dotted section number, without the `§` and without a trailing period.
     pub number: String,
@@ -384,10 +384,10 @@ impl Registry {
 
     /// The documents a citation could name, most specific first.
     ///
-    /// A written prefix is taken at its word and is the only candidate: `grain
-    /// §7.99` is wrong even if some other spec happens to have a §7.99. An
-    /// inherited one is a preference and the citing document's own convention
-    /// follows it.
+    /// A prefix is the only candidate, whether written or inherited: `grain §7.99`
+    /// is wrong even if some other spec happens to have a §7.99, and a `§6.2`
+    /// following `grain §6` across a comma is granary's too. Only an unprefixed
+    /// citation falls to the citing document's own convention.
     fn targets(&self, doc: &Document, cite: &Citation) -> Vec<&'static str> {
         let own: Vec<&'static str> = match doc.spec.unprefixed {
             Unprefixed::Own => vec![doc.spec.id],
@@ -397,8 +397,7 @@ impl Registry {
             Unprefixed::Other(others) => others.to_vec(),
         };
         let mut targets = match cite.target {
-            Some(id) if !cite.inherited => return vec![id],
-            Some(id) => std::iter::once(id).chain(own).collect::<Vec<_>>(),
+            Some(id) => return vec![id],
             None => own,
         };
         targets.dedup();
