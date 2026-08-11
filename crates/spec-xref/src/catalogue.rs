@@ -146,16 +146,13 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         shape: Shape::Table,
         pointers: Pointers::Functions,
     },
-    // The spec describes verification in prose — "differential resume-vs-
-    // uninterrupted test; seed-reproducibility sweep" — naming no suite a build
-    // could resolve.
     CatalogueSite {
         id: "harness",
         doc: "harness",
         section: "11",
         label: "H",
         shape: Shape::Table,
-        pointers: Pointers::Prose,
+        pointers: Pointers::Files,
     },
     CatalogueSite {
         id: "sandbox",

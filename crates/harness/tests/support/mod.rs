@@ -585,7 +585,7 @@ const HARNESS_CATALOGUE: &[CatalogueEntry] = &[
         spec: "harness §6.2, §7.5",
         property: "Deterministic fold and resume: state is a pure fold of the journal; a session resumed from any committed prefix behaves identically to one that never stopped, given the same subsequent outcomes",
         verify: &[Verify::SimTest(
-            "harness/tests/conformance_resume.rs (differential), harness/tests/reproducibility.rs (seed sweep)",
+            "harness/tests/conformance_resume.rs, harness/tests/harness_swarm.rs",
         )],
     },
     CatalogueEntry {
@@ -603,7 +603,7 @@ const HARNESS_CATALOGUE: &[CatalogueEntry] = &[
         property: "Budget bound: no model call after exhaustion; output spend never exceeds the remainder at call time; own spend plus carve-outs never exceeds the budget at every tree level",
         verify: &[
             Verify::Checker("harness-run-discipline"),
-            Verify::SimTest("harness/tests/conformance_budget.rs (journal audit, tree scenario)"),
+            Verify::SimTest("harness/tests/conformance_budget.rs"),
         ],
     },
     CatalogueEntry {
@@ -621,7 +621,7 @@ const HARNESS_CATALOGUE: &[CatalogueEntry] = &[
         property: "Single autonomous activation: per-node activations never overlap; a converged healed cluster runs at most one activation per session; an addressed session activates within bounded logical time of contact",
         verify: &[
             Verify::Checker("harness-event-grammar"),
-            Verify::SimTest("harness/tests/cluster.rs (converged and liveness halves)"),
+            Verify::SimTest("harness/tests/cluster.rs"),
         ],
     },
     CatalogueEntry {
@@ -630,7 +630,7 @@ const HARNESS_CATALOGUE: &[CatalogueEntry] = &[
         property: "Idempotent submission: a re-submitted TurnId never starts a second run — it returns the recorded outcome or attaches to the live run",
         verify: &[
             Verify::Checker("harness-run-discipline"),
-            Verify::SimTest("harness/tests/conformance_run.rs (retry scenarios)"),
+            Verify::SimTest("harness/tests/conformance_run.rs"),
         ],
     },
     CatalogueEntry {
@@ -639,7 +639,7 @@ const HARNESS_CATALOGUE: &[CatalogueEntry] = &[
         property: "Effect containment: at most one live sandbox per activation, released on deactivation; sandboxed calls execute in their activation's sandbox; loss surfaces in the journal, never as silent corruption",
         verify: &[
             Verify::Checker("harness-event-grammar"),
-            Verify::SimTest("harness/tests/conformance_sandbox.rs (crash/loss scenarios)"),
+            Verify::SimTest("harness/tests/conformance_sandbox.rs"),
         ],
     },
 ];

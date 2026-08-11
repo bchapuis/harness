@@ -19,6 +19,44 @@ use harness::testing::checker_coverage;
 use spec_xref::catalogue;
 
 use support::harness_catalogue;
+
+/// Every suite the catalogue names still exists.
+///
+/// Its pointers are paths relative to `crates/`: the harness's own suites plus the
+/// ones it shares with the sandbox provider. A rename that misses this table fails
+/// here, as it does in the sibling catalogues.
+#[test]
+fn every_file_pointer_references_a_real_file() {
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crate dir has a parent");
+
+    for entry in harness_catalogue() {
+        for v in entry.verify {
+            let files = match v {
+                Verify::SimTest(files) | Verify::Differential(files) => files,
+                Verify::TestFn(_) => panic!(
+                    "H{} points at a test function, and this catalogue points at \
+                     files: nothing here scans for a function's definition.",
+                    entry.invariant
+                ),
+                Verify::CompileFail(_)
+                | Verify::Checker(_)
+                | Verify::CompileTime(_)
+                | Verify::Deferred(_) => continue,
+            };
+            for file in files.split(',').map(str::trim) {
+                assert!(
+                    crates_dir.join(file).exists(),
+                    "H{} points at {file:?}, which does not exist under {}",
+                    entry.invariant,
+                    crates_dir.display(),
+                );
+            }
+        }
+    }
+}
+
 use support::harness_invariants;
 
 /// The pairs the catalogue asserts: every `Verify::Checker` row, with the
