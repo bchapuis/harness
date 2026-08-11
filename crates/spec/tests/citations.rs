@@ -15,16 +15,16 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use spec_xref::DOCUMENTS;
-use spec_xref::Registry;
-use spec_xref::Unprefixed;
+use spec::DOCUMENTS;
+use spec::Unprefixed;
+use spec::citations::Registry;
 
-/// The workspace root: this crate sits at `crates/spec-xref`.
+/// The workspace root: this crate sits at `crates/spec`.
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
-        .expect("crates/spec-xref has a workspace root two levels up")
+        .expect("crates/spec has a workspace root two levels up")
         .to_path_buf()
 }
 

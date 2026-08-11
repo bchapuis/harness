@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use actor_simulation::Verify;
 use actor_simulation::default_invariants;
 use harness::testing::checker_coverage;
-use spec_xref::catalogue;
+use spec::catalogue;
 
 use support::harness_catalogue;
 
@@ -139,7 +139,7 @@ fn the_catalogue_covers_the_live_h_invariants() {
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("harness");
-    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
     let documented = catalogue::documented(&root, site).expect("agentic-harness spec §11 parses");
     let implemented: Vec<catalogue::Row> = harness_catalogue()
         .iter()

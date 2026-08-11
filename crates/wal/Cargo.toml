@@ -18,7 +18,7 @@ postcard.workspace = true
 xxhash-rust.workspace = true
 
 [dev-dependencies]
-spec-xref.workspace = true
+spec.workspace = true
 serde = { workspace = true }
 tempfile.workspace = true
 divan.workspace = true

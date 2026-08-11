@@ -11,15 +11,15 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use spec_xref::catalogue::CATALOGUES;
-use spec_xref::catalogue::Pointers;
-use spec_xref::catalogue::documented;
+use spec::catalogue::CATALOGUES;
+use spec::catalogue::Pointers;
+use spec::catalogue::documented;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
-        .expect("crates/spec-xref has a workspace root two levels up")
+        .expect("crates/spec has a workspace root two levels up")
         .to_path_buf()
 }
 

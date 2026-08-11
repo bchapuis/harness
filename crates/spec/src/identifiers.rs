@@ -235,7 +235,7 @@ impl Index {
         let mut names = BTreeSet::new();
         for entry in std::fs::read_dir(root.join("crates"))? {
             let dir = entry?.path();
-            if dir.file_name().is_some_and(|n| n == "spec-xref") {
+            if dir.file_name().is_some_and(|n| n == "spec") {
                 continue;
             }
             for sub in ["src", "tests"] {

@@ -13,7 +13,7 @@ mod support;
 use std::path::Path;
 
 use actor_simulation::Verify;
-use spec_xref::catalogue;
+use spec::catalogue;
 
 use support::catalogue::g_catalogue;
 
@@ -26,7 +26,7 @@ use support::catalogue::g_catalogue;
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("granary");
-    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
     let documented = catalogue::documented(&root, site).expect("granary §15 parses");
     let implemented: Vec<catalogue::Row> = g_catalogue()
         .iter()

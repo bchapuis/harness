@@ -12,7 +12,7 @@ mod support;
 use std::path::Path;
 
 use actor_simulation::Verify;
-use spec_xref::catalogue;
+use spec::catalogue;
 
 use support::m_catalogue;
 
@@ -152,7 +152,7 @@ fn the_ingress_and_egress_invariants_are_verified_outside_the_grain_suites() {
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("machine");
-    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
     let documented = catalogue::documented(&root, site).expect("machine spec §7 parses");
     let implemented: Vec<catalogue::Row> = m_catalogue()
         .iter()

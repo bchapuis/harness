@@ -11,12 +11,12 @@
 //! not define, and belongs in `EXEMPT` with its reason; or the scan does not
 //! recognize how the name is declared, and `harvest` needs to.
 
-use spec_xref::identifiers::EXEMPT;
-use spec_xref::identifiers::Index;
-use spec_xref::identifiers::Why;
-use spec_xref::identifiers::stale;
-use spec_xref::identifiers::unknown;
-use spec_xref::workspace_root;
+use spec::identifiers::EXEMPT;
+use spec::identifiers::Index;
+use spec::identifiers::Why;
+use spec::identifiers::stale;
+use spec::identifiers::unknown;
+use spec::workspace_root;
 
 fn index() -> Index {
     Index::build(&workspace_root(env!("CARGO_MANIFEST_DIR"))).expect("crates/ is readable")

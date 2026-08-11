@@ -9,7 +9,8 @@ testing conventions.
 Normative, RFC 2119, each carrying its own invariant catalogue and a drift test
 that keeps the catalogue mechanically true. They layer bottom-up: every spec
 cites the ones beneath it by a short prefix (`core §N`, `grain §N`, and so on) —
-citations the build resolves rather than trusts (`spec-xref`, under Testing).
+citations the build resolves rather than trusts (the `spec` crate, under
+Testing).
 
 | | Spec | Owns | Invariants |
 |---|---|---|---|
@@ -53,15 +54,15 @@ One layer has a design note rather than a spec:
 
 ## Testing
 
-- [`../crates/spec-xref/`](../crates/spec-xref/) — the drift gate for this
-  directory. The layering above is made of citations, two thousand-odd of them,
-  and `cargo test -p spec-xref` resolves every one against a section that
-  exists. It is the `docs/` analogue of a crate's `conformance_catalogue.rs`,
-  and it is there for the same reason: renumbering a section is a local edit
-  whose citations are not local, so prose that points at nothing fails nothing.
-  A document missing from its `DOCUMENTS` table is checked by nothing, so a new
-  spec is registered there — with the convention its own unprefixed `§N` follows
-  — as part of adding it.
+- [`../crates/spec/`](../crates/spec/) — the drift gate for this directory.
+  The layering above is made of citations, two thousand-odd of them, and
+  `cargo test -p spec` resolves every one against a section that exists. It is
+  the `docs/` analogue of a crate's `conformance_catalogue.rs`, and it is there
+  for the same reason: renumbering a section is a local edit whose citations are
+  not local, so prose that points at nothing fails nothing. A document missing
+  from its `DOCUMENTS` table is checked by nothing, so a new spec is registered
+  there — with the convention its own unprefixed `§N` follows — as part of
+  adding it.
 
   It also reads each spec's **invariant catalogue**, so the table a reader trusts
   and the machine-readable one beside the suite are held equal rather than

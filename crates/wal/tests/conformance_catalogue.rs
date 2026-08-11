@@ -23,7 +23,7 @@
 
 use std::path::Path;
 
-use spec_xref::catalogue;
+use spec::catalogue;
 
 /// One row of the W-catalogue: the invariant number, the spec sections defining
 /// it, a one-line property, and the test functions verifying it.
@@ -191,14 +191,14 @@ fn every_crash_point_test_is_claimed_by_an_invariant() {
 /// The gates above hold this copy internally consistent and its names real. This
 /// holds it equal to the prose one, which is the copy a reader trusts.
 ///
-/// `spec-xref` is safe to take here where `actor-simulation` was not (see the
+/// `spec` is safe to take here where `actor-simulation` was not (see the
 /// header): it reads `docs/` and depends on nothing, so it adds no layer beneath
 /// this crate and closes no cycle. Both copies name test *functions*, which makes
 /// this the one catalogue whose "Verified by" column compares as written.
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("wal");
-    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
     let documented = catalogue::documented(&root, site).expect("wal spec §7 parses");
     let implemented: Vec<catalogue::Row> = W_CATALOGUE
         .iter()

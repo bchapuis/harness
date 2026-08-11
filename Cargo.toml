@@ -26,10 +26,11 @@ actor-simulation = { path = "crates/actor-simulation", version = "0.1.0" }
 actor-runtime = { path = "crates/actor-runtime", version = "0.1.0" }
 
 # Reads `docs/` mechanically, for tests only: resolves the section citations the
-# specs make of each other, and parses each spec's invariant catalogue so the
-# owning crate's drift test can hold it equal to the Rust copy. Depends on nothing,
-# so any crate may take it as a dev-dependency without acquiring a layer.
-spec-xref = { path = "crates/spec-xref", version = "0.1.0" }
+# specs make of each other, checks the identifiers they name against the tree, and
+# parses each spec's invariant catalogue so the owning crate's drift test can hold
+# it equal to the Rust copy. Depends on nothing, so any crate may take it as a
+# dev-dependency without acquiring a layer.
+spec = { path = "crates/spec", version = "0.1.0" }
 
 # The compatibility-boundary vocabulary (compatibility spec §2): one definition of
 # a format revision, the window of revisions a build accepts, the negotiation rule,

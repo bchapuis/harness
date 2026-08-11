@@ -63,7 +63,7 @@ impl Verify {
     /// Every variant wraps one string — a checker's name, a comma-separated file
     /// list, a trybuild path, a sentence explaining a compile-time guarantee or a
     /// deferral. The spec↔catalogue comparison
-    /// ([`spec_xref::catalogue`](https://docs.rs/spec-xref)) takes them all and
+    /// ([`spec::catalogue`](https://docs.rs/spec)) takes them all and
     /// picks out the suite names itself, so a caller need not sort by variant to
     /// hand it the pointers.
     pub const fn text(&self) -> &'static str {

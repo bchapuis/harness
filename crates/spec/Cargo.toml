@@ -1,0 +1,12 @@
+[package]
+name = "spec"
+description = "Reads the specifications mechanically so prose that no longer describes the tree fails the build: section citations that resolve nowhere, identifiers the code no longer declares, and invariant catalogues that disagree with their Rust copy."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true

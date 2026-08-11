@@ -7,7 +7,7 @@ mod support;
 use std::path::Path;
 
 use actor_simulation::Verify;
-use spec_xref::catalogue;
+use spec::catalogue;
 
 use support::s_catalogue;
 
@@ -98,7 +98,7 @@ fn no_entry_claims_a_continuous_checker() {
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("sandbox");
-    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
     let documented = catalogue::documented(&root, site).expect("sandbox spec §6 parses");
     let implemented: Vec<catalogue::Row> = s_catalogue()
         .iter()

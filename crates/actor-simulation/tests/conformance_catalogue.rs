@@ -18,7 +18,7 @@ use actor_simulation::checker_coverage;
 use actor_simulation::core_catalogue;
 use actor_simulation::default_invariants;
 use actor_simulation::utilities_catalogue;
-use spec_xref::catalogue;
+use spec::catalogue;
 
 #[test]
 fn every_invariant_1_through_22_is_present_exactly_once() {
@@ -204,7 +204,7 @@ fn invariant_20_is_verified_by_a_compile_fail_test() {
 #[test]
 fn the_specification_and_the_core_catalogue_agree() {
     let site = catalogue::site("core");
-    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
     let documented = catalogue::documented(&root, site).expect("actor spec §18.5 parses");
     let implemented: Vec<catalogue::Row> = core_catalogue()
         .iter()
@@ -240,7 +240,7 @@ fn the_specification_and_the_core_catalogue_agree() {
 #[test]
 fn the_specification_and_the_utilities_catalogue_agree() {
     let site = catalogue::site("utilities");
-    let root = spec_xref::workspace_root(env!("CARGO_MANIFEST_DIR"));
+    let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
     let documented = catalogue::documented(&root, site).expect("cluster-utilities spec §6 parses");
     let implemented: Vec<catalogue::Row> = utilities_catalogue()
         .iter()
