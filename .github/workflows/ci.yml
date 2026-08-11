@@ -49,16 +49,18 @@ jobs:
       - name: Test (conformance suite + swarm regression corpus)
         run: cargo test --workspace
 
-  # The microVM-grade suites (sandbox spec §3.5, machine spec §2.1): boot real
-  # Firecracker VMs, so they need /dev/kvm — available on GitHub's x86_64
-  # Linux runners once the udev rule below widens the device's permissions.
+  # The guest-backed suites (sandbox spec §3.5, machine spec §2.1): boot real
+  # guests. The microVM mechanism needs /dev/kvm — available on GitHub's
+  # x86_64 Linux runners once the udev rule below widens the device's
+  # permissions — and the container mechanism needs the runner image.
   # The assets (kernel, rootfs with each guest agent, VMM binary) are built by
   # the guest build scripts, which also run each agent's own test suite inside
   # rust:alpine; asset builds are cached on the script plus agent sources, so
   # an agent change rebuilds (and re-tests) while everything else reuses.
-  # E2E_REQUIRE turns the KVM-gated tests' skip-on-missing-prerequisite
-  # conduct into a failure here: this job exists to run them, so a broken
-  # environment must not read as green.
+  # E2E_REQUIRE turns the e2e tests' skip-on-missing-prerequisite conduct into
+  # a failure here: this job exists to run them, so a broken environment must
+  # not read as green — which is also why every prerequisite they name has to
+  # be built below, and not just the KVM-gated ones.
   firecracker:
     name: firecracker microVM conformance
     runs-on: ubuntu-latest
@@ -105,6 +107,14 @@ jobs:
         if: steps.machine-assets.outputs.cache-hit != 'true'
         run: guest/machine-rootfs/build.sh
 
+      # The container mechanism's half of the machine e2e: the runner image
+      # that loop-mounts the machine's disk. Built unconditionally rather than
+      # cached — it is alpine plus two packages, and the runner's docker daemon
+      # starts empty every run anyway. The rootfs it chroots into is the
+      # machine.ext4 built above, so this step follows that one.
+      - name: Build the container mechanism's runner image
+        run: guest/machine-docker/build.sh
+
       - name: Clippy (feature firecracker)
         run: |
           cargo clippy -p harness-sandbox --features firecracker --all-targets -- -D warnings
@@ -113,6 +123,6 @@ jobs:
       - name: Test the sandbox tier (protocol suite + KVM-gated conformance)
         run: cargo test -p harness-sandbox --features firecracker
 
-      - name: Test the machine binding (ws sync suite + KVM-gated e2e)
+      - name: Test the machine binding (ws sync suite + microVM and container e2e)
         if: ${{ !cancelled() }}
         run: cargo test -p machine-grain --features host --lib --test hosted_e2e
