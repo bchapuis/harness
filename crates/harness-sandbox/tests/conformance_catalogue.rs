@@ -31,6 +31,12 @@ fn every_file_pointer_references_a_real_file() {
         for v in entry.verify {
             let files = match v {
                 Verify::SimTest(files) | Verify::Differential(files) => files,
+                Verify::TestFn(_) => panic!(
+                    "S{} points at a test function, and this catalogue points at \
+                     files: nothing here scans for a function's definition. Give it a \
+                     name gate of its own first, as blob-store and machine-grain have.",
+                    entry.invariant
+                ),
                 Verify::CompileFail(_)
                 | Verify::Checker(_)
                 | Verify::CompileTime(_)

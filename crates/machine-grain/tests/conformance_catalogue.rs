@@ -43,46 +43,70 @@ fn every_entry_has_spec_property_and_a_verification_method() {
     }
 }
 
-/// A pointer containing a `/` is a path relative to `crates/` — the machine's
-/// verification spans three crates (§7) — and a bare filename is relative to this
-/// crate's `tests/`. Either way a renamed or deleted suite must fail here rather
-/// than drift out from under the catalogue unnoticed.
+/// Every test the catalogue names is still defined, somewhere across the three
+/// crates the machine's verification spans (§7). A rename that misses this table
+/// fails here rather than drifting out from under it unnoticed.
 #[test]
-fn every_file_pointer_references_a_real_file() {
-    let tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
-    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate dir has a parent");
-
+fn every_named_test_exists() {
     for e in m_catalogue() {
-        for v in e.verify {
-            match v {
-                Verify::SimTest(files) | Verify::Differential(files) => {
-                    for file in files.split(',').map(str::trim) {
-                        let path = if file.contains('/') {
-                            crates_dir.join(file)
-                        } else {
-                            tests_dir.join(file)
-                        };
-                        assert!(
-                            path.exists(),
-                            "M{} points at {file:?}, which does not exist at {}",
-                            e.invariant,
-                            path.display(),
-                        );
-                    }
-                }
-                Verify::CompileFail(path) => {
-                    assert!(
-                        crates_dir.join(path).exists(),
-                        "M{} points at compile-fail path {path:?}, which does not exist",
-                        e.invariant,
-                    );
-                }
-                Verify::Checker(_) | Verify::CompileTime(_) | Verify::Deferred(_) => {}
+        for name in named_tests(e.verify) {
+            assert!(
+                defined_in(&name).is_some(),
+                "M{} names test {name:?}, which is defined in none of the machine \
+                 crates — a rename left the spec's \"Verified by\" column pointing \
+                 at nothing",
+                e.invariant,
+            );
+        }
+    }
+}
+
+/// The test functions an entry names.
+fn named_tests(verify: &[Verify]) -> Vec<String> {
+    verify
+        .iter()
+        .filter_map(|v| match v {
+            Verify::TestFn(names) => Some(names),
+            _ => None,
+        })
+        .flat_map(|names| names.split(',').map(|n| n.trim().to_string()))
+        .collect()
+}
+
+/// Where a test function is defined, relative to `crates/`.
+///
+/// The machine spans `machine-grain`, `machine-frontdoor`, and `machine-host`, and
+/// half the point of M4 and M6 is that they are decided outside the grain's own
+/// suites — so the search covers the siblings, and the answer says which file.
+fn defined_in(name: &str) -> Option<String> {
+    fn walk(dir: &Path, needle: &str, out: &mut Option<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, needle, out);
+            } else if out.is_none()
+                && path.extension().is_some_and(|x| x == "rs")
+                && std::fs::read_to_string(&path).is_ok_and(|s| s.contains(needle))
+            {
+                *out = Some(path.to_string_lossy().into_owned());
             }
         }
     }
+    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crate dir has a parent");
+    let needle = format!("fn {name}(");
+    let mut found = None;
+    for krate in ["machine-grain", "machine-frontdoor", "machine-host"] {
+        walk(&crates_dir.join(krate), &needle, &mut found);
+        if found.is_some() {
+            break;
+        }
+    }
+    found
 }
 
 #[test]
@@ -92,18 +116,24 @@ fn the_ingress_and_egress_invariants_are_verified_outside_the_grain_suites() {
     // crate, and the egress rules are a pure generator with no grain in the loop.
     // Pinning that here keeps a future edit from "simplifying" them into a
     // grain-only pointer that no longer covers what the invariant claims.
+    // Asked of where the named tests actually live rather than of how the pointer
+    // is spelled: the catalogue names functions, and a function says nothing about
+    // its file until you go and find it.
     for invariant in [4u8, 6] {
         let entry = m_catalogue()
             .iter()
             .find(|e| e.invariant == invariant)
             .expect("M4 and M6 must be catalogued");
+        let outside: Vec<String> = named_tests(entry.verify)
+            .iter()
+            .filter_map(|name| defined_in(name))
+            .filter(|path| !path.contains("machine-grain/tests/"))
+            .collect();
         assert!(
-            entry.verify.iter().any(|v| match v {
-                Verify::SimTest(files) | Verify::Differential(files) =>
-                    files.split(',').any(|f| f.trim().contains('/')),
-                _ => false,
-            }),
-            "M{invariant} must cite verification outside this crate's tests/",
+            !outside.is_empty(),
+            "M{invariant} is verified only from this crate's tests/, which cannot \
+             decide it: {:?}",
+            named_tests(entry.verify),
         );
     }
 }

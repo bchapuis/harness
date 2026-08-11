@@ -52,9 +52,21 @@ fn every_file_pointer_references_a_real_file() {
         .parent()
         .expect("crate dir has a parent");
 
+    let sources = crate_sources();
+
     for e in b_catalogue() {
         for v in e.verify {
             match v {
+                Verify::TestFn(names) => {
+                    for name in names.split(',').map(str::trim) {
+                        assert!(
+                            sources.contains(&format!("fn {name}(")),
+                            "B{} names test {name:?}, which is not defined in this crate — \
+                             a rename left the spec's \"Verified by\" column pointing at nothing",
+                            e.invariant,
+                        );
+                    }
+                }
                 Verify::SimTest(files) | Verify::Differential(files) => {
                     for file in files.split(',').map(str::trim) {
                         let path = if file.contains('/') {
@@ -81,6 +93,33 @@ fn every_file_pointer_references_a_real_file() {
             }
         }
     }
+}
+
+/// Every `.rs` file under this crate, concatenated, for the name scan above.
+///
+/// The catalogue points at test *functions* rather than files, as blob §9 does and
+/// for the reason wal §7 gives: several of these cases live in `src/`, beside the
+/// code they pin, where asserting that the file still exists asserts nothing.
+fn crate_sources() -> String {
+    fn walk(dir: &Path, out: &mut String) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                out.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+                out.push('\n');
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut all = String::new();
+    walk(&root.join("src"), &mut all);
+    walk(&root.join("tests"), &mut all);
+    all
 }
 
 /// **B4**, checked rather than asserted: the data path runs no consensus because

@@ -138,16 +138,13 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         shape: Shape::Table,
         pointers: Pointers::Files,
     },
-    // The spec names test *functions* where `b_catalogue()` names the files that
-    // hold them. Both are true and neither is derivable from the other, so the
-    // suite axis waits on one side adopting the other's vocabulary.
     CatalogueSite {
         id: "blob",
         doc: "blob",
         section: "9",
         label: "B",
         shape: Shape::Table,
-        pointers: Pointers::Prose,
+        pointers: Pointers::Functions,
     },
     // The spec describes verification in prose — "differential resume-vs-
     // uninterrupted test; seed-reproducibility sweep" — naming no suite a build
@@ -168,14 +165,13 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         shape: Shape::Table,
         pointers: Pointers::Files,
     },
-    // Test functions in the spec, files in `m_catalogue()`; the blob case again.
     CatalogueSite {
         id: "machine",
         doc: "machine",
         section: "7",
         label: "M",
         shape: Shape::Table,
-        pointers: Pointers::Prose,
+        pointers: Pointers::Functions,
     },
 ];
 

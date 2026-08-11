@@ -25,6 +25,19 @@ pub enum Verify {
     /// row, which has the room for it; a payload that mixes the two cannot be
     /// checked, which is the whole point of writing it here as well.
     SimTest(&'static str),
+    /// One or more test *functions*, comma-separated, defined anywhere in the
+    /// owning crate.
+    ///
+    /// The alternative to [`SimTest`](Verify::SimTest) for a catalogue whose spec
+    /// names its verification the same way — blob §9 and machine §7 both do, and
+    /// so does wal §7, which pointed at functions before this variant existed. A
+    /// function name states the property; a file name says where to look. Where a
+    /// suite is a whole file the file is the better pointer, and where it is one
+    /// case among many in `src/lib.rs` only the function is worth anything.
+    ///
+    /// Its `conformance_catalogue` test scans the crate for `fn <name>(`, so a
+    /// renamed case fails the build the way a renamed file does.
+    TestFn(&'static str),
     /// A `trybuild` compile-fail case asserting invalid code is rejected (#20).
     CompileFail(&'static str),
     /// A local-vs-remote differential test (#21).
@@ -57,6 +70,7 @@ impl Verify {
         match self {
             Self::Checker(t)
             | Self::SimTest(t)
+            | Self::TestFn(t)
             | Self::CompileFail(t)
             | Self::Differential(t)
             | Self::CompileTime(t)

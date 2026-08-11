@@ -68,11 +68,11 @@ One layer has a design note rather than a spec:
   maintained twice. Each crate's `conformance_catalogue.rs` runs the comparison,
   because a Rust catalogue lives in a `tests/` module only its own crate can
   import. All eight are compared on which invariants exist and which sections
-  define them; the "Verified by" column is compared where the two copies name the
-  same kind of thing, which is granary, utilities, sandbox, and wal. The other
-  four say why not, at the site: blob and machine name test *functions* in the
-  spec and *files* in the catalogue, harness states its verification in prose,
-  and the core catalogue names no suites at all (actor §18.6 carries that).
+  define them, and seven on their "Verified by" column as well — by file for
+  granary, utilities, and sandbox, by test function for wal, blob, and machine,
+  whichever the spec itself names. The two that are not say why at the site: the
+  core catalogue names no suites at all (actor §18.6 carries that), and the
+  harness's column is prose naming nothing a build can resolve.
 
   Its third gate is the **identifiers**. These documents are written in the
   code's vocabulary — `GrainHandler`, `ReadReply::head`, `load_snapshot()` — and

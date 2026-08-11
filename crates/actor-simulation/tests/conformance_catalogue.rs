@@ -163,6 +163,12 @@ fn every_file_pointer_references_a_real_file() {
                         crates_dir.display(),
                     );
                 }
+                Verify::TestFn(_) => panic!(
+                    "invariant #{} points at a test function, and this catalogue points at \
+                     files: nothing here scans for a function's definition. Give it a \
+                     name gate of its own first, as blob-store and machine-grain have.",
+                    e.invariant
+                ),
                 Verify::Checker(_) | Verify::CompileTime(_) | Verify::Deferred(_) => {}
             }
         }
