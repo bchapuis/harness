@@ -24,12 +24,12 @@
 //! catalogue (actor §18.5) is a numbered list instead ([`Shape`]).
 //!
 //! The `Verified by` columns are not written alike, which is worth knowing before
-//! trusting one: granary, utilities, and sandbox name test **files**, wal names
-//! test **functions**, blob and machine name functions where their Rust
-//! catalogues name files, and harness describes the verification in prose. Only
-//! matching vocabularies can be compared, and [`Pointers`] records which is which
-//! per site — so where the suite axis is skipped, it is skipped by a declaration
-//! naming the reason rather than by a comparison that finds nothing.
+//! trusting one: granary, utilities, sandbox, and harness name test **files**,
+//! wal names test **functions**, and blob and machine name functions where their
+//! Rust catalogues name files. Only matching vocabularies can be compared, and
+//! [`Pointers`] records which is which per site — so where the suite axis is
+//! skipped, it is skipped by a declaration naming the reason rather than by a
+//! comparison that finds nothing.
 //!
 //! # What is compared, and what is not
 //!
@@ -62,7 +62,7 @@ pub enum Shape {
 /// What the `Verified by` column names, and so what can be compared against the
 /// Rust catalogue's `verify` entries.
 ///
-/// The columns are not written in one vocabulary. Three of the eight cannot be
+/// The columns are not written in one vocabulary. One of the eight cannot be
 /// compared at all, and [`Prose`](Pointers::Prose) says so at the site rather than
 /// leaving the comparison quietly empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

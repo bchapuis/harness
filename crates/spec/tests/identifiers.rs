@@ -1,10 +1,11 @@
 //! The spec↔code identifier gate: every Rust name the specifications use is still
 //! declared somewhere under `crates/`.
 //!
-//! The third of the three gates in this crate, and the loosest. The citation gate
-//! resolves `§` references exactly; the catalogue gate compares two tables field
-//! by field. This one only asks whether a name still exists, because the index
-//! behind it is a scan rather than a compiler (see the module docs for why).
+//! The loosest of the four gates in this crate. The citation gate resolves `§`
+//! references exactly; the catalogue gate compares two tables field by field; the
+//! range gate holds a catalogue's cited extent against its real one. This one only
+//! asks whether a name still exists, because the index behind it is a scan rather
+//! than a compiler (see the module docs for why).
 //!
 //! A failure means one of three things, in rough order of likelihood: the code was
 //! renamed and the prose was not; the spec always meant something the tree does

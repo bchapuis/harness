@@ -629,9 +629,12 @@ crate wants one, it has become a contract claim and moves up a tier.
 inline in the spec. The [cluster utilities](cluster-utilities-spec.md) carry
 their own, separately numbered catalogue (U1, U2, …; machine-readable as
 `utilities_catalogue()`), held to the same drift discipline, as do the layers
-above: granary (G1–G20, plus the facet contract F1–F4), the harness (H1–H8), the
-sandbox (S1–S5), the machine (M1–M6), the blob store (B1–B7), and format
-compatibility (V1–V6). Assert them; do not re-derive them.
+above: the wal (W1–W5), granary (G1–G21, plus the facet contract F1–F4), the
+harness (H1–H8), the sandbox (S1–S5), the machine (M1–M6), and the blob store
+(B1–B7). Format compatibility (V1–V6) is the one catalogue with no Rust copy to
+drift from: V3 is a compile-time assertion inside `compat::Window`, and V4 and V5
+are policy, held by the golden corpus and the mixed-version sweep (compatibility
+§4). Assert them; do not re-derive them.
 
 The core catalogue's properties are framework ones, not database ones: there is
 no durability, serializability, or lost-update notion at that layer (the actor

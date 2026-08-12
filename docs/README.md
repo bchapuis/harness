@@ -6,18 +6,21 @@ testing conventions.
 
 ## Specifications
 
-Normative, RFC 2119, each carrying its own invariant catalogue and a drift test
-that keeps the catalogue mechanically true. They layer bottom-up: every spec
-cites the ones beneath it by a short prefix (`core §N`, `grain §N`, and so on) —
-citations the build resolves rather than trusts (the `spec` crate, under
-Testing).
+Normative, RFC 2119, each carrying its own invariant catalogue, and all but one
+a drift test that keeps the catalogue mechanically true — the exception is
+compatibility, whose table names neither a defining section nor a verifying
+suite, so there is no Rust copy to hold it against (its V3 is asserted at compile
+time and its V4/V5 by the golden corpus instead, compatibility §4). They layer
+bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`,
+`grain §N`, and so on) — citations the build resolves rather than trusts (the
+`spec` crate, under Testing).
 
 | | Spec | Owns | Invariants |
 |---|---|---|---|
 | substrate | [distributed-actor-spec](distributed-actor-spec.md) | actors, messages, transport, membership, SWIM, supervision, receptionist, deterministic simulation | #1–#22 |
 | | [cluster-utilities-spec](cluster-utilities-spec.md) | rendezvous placement, group routers, the cluster singleton | U1–U2 |
-| storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | — |
-| | [granary-spec](granary-spec.md) | durable objects ("grains"): the journal, the single-writer fence, shards, snapshots, the facet model | G1–G20, F1–F4 |
+| storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | W1–W5 |
+| | [granary-spec](granary-spec.md) | durable objects ("grains"): the journal, the single-writer fence, shards, snapshots, the facet model | G1–G21, F1–F4 |
 | | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside granary (standalone; no in-tree consumer yet) | B1–B7 |
 | consumers | [agentic-harness-spec](agentic-harness-spec.md) | the agent: a grain plus a run loop, a model seam, and a sandbox | H1–H8 |
 | | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the harness's sandbox seam | S1–S5 |
@@ -70,12 +73,24 @@ One layer has a design note rather than a spec:
   because a Rust catalogue lives in a `tests/` module only its own crate can
   import. All eight are compared on which invariants exist and which sections
   define them, and seven on their "Verified by" column as well — by file for
-  granary, utilities, and sandbox, by test function for wal, blob, and machine,
-  whichever the spec itself names. The two that are not say why at the site: the
-  core catalogue names no suites at all (actor §18.6 carries that), and the
-  harness's column is prose naming nothing a build can resolve.
+  granary, utilities, sandbox, and the harness, by test function for wal, blob,
+  and machine, whichever the spec itself names. The one that is not says why at
+  the site: the core catalogue is a numbered list and names no suites at all
+  (actor §18.6 carries that).
 
-  Its third gate is the **identifiers**. These documents are written in the
+  Its third gate is the **ranges**. A spec names a sibling's catalogue by its
+  extent — `grain §N` (its invariants as `G1–G21`) — and that is a citation like
+  any other, pointing at a catalogue and saying how far it runs. Two checks pin
+  it from both sides: no range reaches past the catalogue it names, and across
+  the whole set some range reaches its last invariant. Neither is the obvious
+  rule, and the module says why both obvious ones are wrong — `H1–H8` spans an H2
+  that harness §11 deliberately retires, and `M1–M3` is a true claim about three
+  of six. The pair is what catches a catalogue that *grows*: `G21` was added at
+  granary §7.16 and six citations across four documents went on describing
+  granary as ending at G20, each of them resolving, parsing, and passing every
+  other gate.
+
+  Its fourth gate is the **identifiers**. These documents are written in the
   code's vocabulary — `GrainHandler`, `ReadReply::head`, `load_snapshot()` — and
   a rename moves the code while the prose keeps the old word. Every backticked
   token of a shape the tree would own is checked against an index of every name
@@ -101,13 +116,16 @@ One layer has a design note rather than a spec:
 
 ## Unfinished work
 
-The tree carries no TODO backlog: a sweep of `crates/` finds zero `todo!()`,
-zero `unimplemented!()`, zero `#[ignore]`, and zero `TODO`/`FIXME`/`HACK`
-comments. That is deliberate. Unfinished work is **declared in the spec that
-owns it**, where a reader sees its cost and its blast radius, rather than
-dropped as a comment beside the code that would have to change. The consequence
-is that "what is left here?" cannot be answered by grepping the code, and is
-answered by reading these sections instead:
+The tree carries no TODO backlog: a sweep of `crates/` finds zero `todo!()` and
+zero `unimplemented!()`, and every hit for `#[ignore]` or `TODO`/`FIXME`/`HACK`
+is in the `spec` crate, where the word is the subject rather than the marker —
+two `#[ignore = "diagnostic"]` dumps that print what a parser saw when one is
+being changed, and the identifier gate's own list of words that look like names
+the tree would own and are not. That is deliberate. Unfinished work is
+**declared in the spec that owns it**, where a reader sees its cost and its
+blast radius, rather than dropped as a comment beside the code that would have
+to change. The consequence is that "what is left here?" cannot be answered by
+grepping the code, and is answered by reading these sections instead:
 
 - [compatibility §5](compatibility-spec.md) — the format machinery that waits on
   a boundary having a second revision. Every format in the tree is stamped, and

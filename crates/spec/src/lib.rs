@@ -18,21 +18,26 @@
 //!   that verifies it agree on which invariants exist, where they are defined, and
 //!   what verifies them. Two hand-maintained copies of one fact, previously
 //!   compared by nothing.
+//! - [`ranges`] — a spec naming a sibling's catalogue by its extent, `G1–G20`,
+//!   still names the whole of it. The third way one document falls behind another:
+//!   the citation resolves, the identifiers resolve, and the extent is a release
+//!   out of date because the catalogue it names grew a row.
 //!
-//! All three read [`DOCUMENTS`], the table of what the specification set contains.
+//! All four read [`DOCUMENTS`], the table of what the specification set contains.
 //! A spec absent from that table is checked by nothing, which is why
 //! `tests/citations.rs` holds the table equal to `docs/`.
 //!
 //! Nothing here is used at run time. Whatever a gate can decide from `docs/`
-//! alone runs from this crate's own `tests/`, which is all of the first two and
-//! the half of the third that holds each catalogue site parsing. The comparison
-//! against a Rust catalogue runs from the owning crate's
+//! alone runs from this crate's own `tests/`, which is all of the first two, all
+//! of the fourth, and the half of the third that holds each catalogue site
+//! parsing. The comparison against a Rust catalogue runs from the owning crate's
 //! `conformance_catalogue.rs` instead, because a Rust catalogue lives in a
 //! `tests/` module only its own crate can import.
 
 pub mod catalogue;
 pub mod citations;
 pub mod identifiers;
+pub mod ranges;
 
 use std::path::Path;
 use std::path::PathBuf;

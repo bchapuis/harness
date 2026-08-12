@@ -5,7 +5,7 @@
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
 
-Sections of the granary specification are cited as **grain §N** (its invariants as **G1–G20**, the facet contract as **F1–F4**); the actor framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)) as **core §N** or **actor §N**; the sandbox specification as **sandbox §N** (its invariants as **S1–S5**); the agentic harness as **harness §N**. Sections of this document are plain **§N**. Invariants defined here are numbered **M1, M2, …**, kept apart from every sibling catalogue.
+Sections of the granary specification are cited as **grain §N** (its invariants as **G1–G21**, the facet contract as **F1–F4**); the actor framework ([`distributed-actor-spec.md`](distributed-actor-spec.md)) as **core §N** or **actor §N**; the sandbox specification as **sandbox §N** (its invariants as **S1–S5**); the agentic harness as **harness §N**. Sections of this document are plain **§N**. Invariants defined here are numbered **M1, M2, …**, kept apart from every sibling catalogue.
 
 > **Design stance.** Granary's idea is that **an object is an actor plus three things**: a name-based virtual identity, a durable event-sourced journal, and a durability barrier on the reply. The harness's idea is that **an agent is a grain plus three things**: a self-driving loop, a model seam, and a sandbox. **A machine is a grain plus two things**: durable storage — the rootfs as a disk facet (grain §7.15), the `/workspace` volume as a workspace facet (grain §7.11, §3) — and a network seam (§5). Everything else is inherited from the grain unchanged: identity (`GrainName`), the journal, the single-writer fence, placement on a shard leader, virtual activation, idle hibernation, and lossless failover.
 >
@@ -127,9 +127,9 @@ Everything here is a grain primitive; the machine adds only what the microVM and
 
 ## 7. Invariant catalogue and conformance
 
-These invariants appear as MUSTs above; collected here, they are the machine's contract, each holding under the faults of grain §14. They ride the grain's own catalogue (G1–G20) and the facet contract (F1–F4); the M-invariants add only what is the machine's own.
+These invariants appear as MUSTs above; collected here, they are the machine's contract, each holding under the faults of grain §14. They ride the grain's own catalogue (G1–G21) and the facet contract (F1–F4); the M-invariants add only what is the machine's own.
 
-The catalogue is machine-readable as `m_catalogue()` beside this crate's conformance suite, guarded by the same drift-test pattern as its siblings (`conformance_catalogue.rs`). The machine's verification spans three crates — the grain's own suites, the front door's in `machine-frontdoor`, and the egress rule generator's unit tests in `machine-grain/src/net.rs` — so the drift test resolves a pointer containing a `/` against `crates/`, and M4 and M6 are asserted to cite verification outside the grain suites, since neither seam is provable from the grain's simulation alone.
+The catalogue is machine-readable as `m_catalogue()` beside this crate's conformance suite, guarded by the same drift-test pattern as its siblings (`conformance_catalogue.rs`). The machine's verification spans three sites across two crates — the grain's own suites, the front door's in `machine-frontdoor`, and the egress rule generator's unit tests in `machine-grain/src/net.rs` — so the drift test resolves a pointer containing a `/` against `crates/`, and M4 and M6 are asserted to cite verification outside the grain suites, since neither seam is provable from the grain's simulation alone.
 
 | | Invariant | Defined in | Verified by |
 |---|---|---|---|

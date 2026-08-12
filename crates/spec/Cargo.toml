@@ -1,6 +1,6 @@
 [package]
 name = "spec"
-description = "Reads the specifications mechanically so prose that no longer describes the tree fails the build: section citations that resolve nowhere, identifiers the code no longer declares, and invariant catalogues that disagree with their Rust copy."
+description = "Reads the specifications mechanically so prose that no longer describes the tree fails the build: section citations that resolve nowhere, identifiers the code no longer declares, invariant catalogues that disagree with their Rust copy, and invariant ranges that name a catalogue shorter than the one on disk."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
