@@ -73,6 +73,11 @@ authenticated form with opaque per-tenant tokens.
   ownership-index grain (`tenancy`, itself another journaled actor). The gateway
   is where auth terminates, so it joins inside the cluster's trust boundary;
   untrusted callers reach it only over HTTP with a bearer token.
+- **Two clients** (`crates/harness-tui`, `clients/harness-vscode`): the only
+  parts of the tree that are not in the cluster. Both sit on the gateway's
+  HTTP/SSE surface and speak nothing else — a terminal chat UI, and a VS Code
+  extension that surfaces a session as an agent in the Agents window. Each lists
+  a tenant's sessions, submits a prompt, and streams the run's records live.
 - **Persistent machines** (`crates/machine-grain`, `crates/machine-host`,
   `crates/machine-frontdoor`): the agent's sibling. Same grain, different
   consumer — a lightweight VM you address by name and reach over SSH, whose

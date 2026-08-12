@@ -140,6 +140,14 @@ grepping the code, and is answered by reading these sections instead:
 
 ## Elsewhere in the tree
 
+- **The clients** — the two front ends on the gateway's HTTP/SSE edge, neither
+  of them part of the cluster:
+  [`../crates/harness-tui/`](../crates/harness-tui/), a terminal chat UI, and
+  [`../clients/harness-vscode/`](../clients/harness-vscode/), a VS Code
+  extension that surfaces a session as an agent in the Agents window. Each
+  carries its own README. Neither has a spec: they hold no durable state and
+  define no invariant, so what binds them is the gateway's surface, described in
+  [multi-tenant-edge](multi-tenant-edge.md).
 - [../design-principles.md](../design-principles.md) — the design rubric the
   specs were written against; defaults for writing and reviewing code here.
 - [../research/](../research/) — background notes the specs cite as `DO §N`:
