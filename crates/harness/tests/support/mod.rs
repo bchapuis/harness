@@ -71,17 +71,21 @@ pub fn harness_on(
     Harness::cluster(system, &kinds, model, sandboxes)
 }
 
-/// Read a session's whole journal via `Tail` (§10.2) — the journal is the
-/// grain's, so the transcript is read back through the activation, not a
-/// test-held store.
+/// Read a session's whole journal via `Tail` (§10.2), paging from the last
+/// `Seq` of each full page (the server clamps one page to `TAIL_PAGE`) — the
+/// journal is the grain's, so the transcript is read back through the
+/// activation, not a test-held store.
 pub async fn tail_records(session: &harness::SessionRef<SimSystem>) -> Vec<harness::Record> {
-    session
-        .tail(granary::Seq::new(0), 1_000_000)
-        .await
-        .expect("tail")
-        .into_iter()
-        .map(|(_, record)| record)
-        .collect()
+    let mut records = Vec::new();
+    let mut from = granary::Seq::new(0);
+    loop {
+        let page = session.tail(from, harness::TAIL_PAGE).await.expect("tail");
+        let Some((last, _)) = page.last() else {
+            return records;
+        };
+        from = *last;
+        records.extend(page.into_iter().map(|(_, record)| record));
+    }
 }
 
 /// A short label for a record body, for asserting write-ahead order (§6.4).

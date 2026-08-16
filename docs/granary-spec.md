@@ -250,7 +250,7 @@ The `G: GrainHandler<M>` bound proves at compile time that the grain accepts `M`
 
 The `M: Clone` bound lets the runtime re-issue the command when the first attempt provably did not run: a stale cached host that hibernated (`DeadLetter`) or whose leadership moved (`NotLeader`), neither of which commits (§6, §8). An *ambiguous* transport failure (`Unreachable`/`Timeout`) is never auto-retried, because the command may have committed before the reply was lost (at-most-once, §2.2). The clone is of the caller's own small command value.
 
-`GrainCtx<G>` is the handler/lifecycle context. It exposes the grain's name, its colocated blob area (the content-addressed blob primitive, §7.10), a `GrainRef` self-reference, the system handle, and death watch. (Surfacing the full actor `Ctx` underneath for the remaining inherited capabilities, such as child spawning, is a deferred addition, §16; the context exposes the five accessors below, plus one accessor per declared facet, §7.12.)
+`GrainCtx<G>` is the handler/lifecycle context. It exposes the grain's name, its colocated blob area (the content-addressed blob primitive, §7.10), a `GrainRef` self-reference, the system handle, a read of its own committed events, and death watch. (Surfacing the full actor `Ctx` underneath for the remaining inherited capabilities, such as child spawning, is a deferred addition, §16; the context exposes the six accessors below, plus one accessor per declared facet, §7.12.)
 
 ```rust
 impl<G: Grain> GrainCtx<G> {
@@ -258,6 +258,15 @@ impl<G: Grain> GrainCtx<G> {
     fn blobs(&self) -> GrainBlobs;       // the grain's content-addressed blob area (§7.10)
     fn this(&self) -> GrainRef<G>;
     fn system(&self) -> &G::System;
+    /// Up to `limit` of this grain's committed events after `from`, decoded,
+    /// in ascending `Seq` order: the load-path form of the subscription's
+    /// event projection (§7.9). Facet records (§7.12) are skipped, so the
+    /// returned `Seq`s are the journal's real slots, with gaps where other
+    /// facets' records sit; fewer than `limit` events come back only at the
+    /// head. A local, fence-free journal read (§7.3), read-your-leader like
+    /// any query (§7.5) — read-only, so the no-`persist` rule below holds.
+    fn events(&self, from: Seq, limit: usize)
+        -> BoxFuture<'static, Result<Vec<(Seq, G::Event)>, GrainJournalError>>;
     /// Death-watch an actor by id (actor §12): when it terminates — including
     /// its node going down — the grain's `on_peer_terminated` runs as a
     /// callerless decision through the §6 barrier, the alarm protocol's

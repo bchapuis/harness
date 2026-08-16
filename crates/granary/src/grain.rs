@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use actor_core::ActorId;
 use actor_core::ActorRef;
+use actor_core::ActorSystem;
 use actor_core::BoxError;
+use actor_core::BoxFuture;
 use actor_core::HandlerRegistry;
 use actor_core::Message;
 use actor_core::TerminationReason;
@@ -17,13 +19,17 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::blobs::GrainBlobs;
+use crate::facet::EVENT_TAG;
 use crate::facet::FacetCell;
 use crate::facet::FacetSet;
+use crate::facet::split_record;
 use crate::gateway::Gateway;
 use crate::grainref::GrainRef;
 use crate::host::Host;
 use crate::host::RunTyped;
 use crate::journal::DynGrainJournal;
+use crate::journal::GrainJournalError;
+use crate::journal::Seq;
 use crate::system::GranarySystem;
 
 /// The stable, cluster-wide identity of a grain (spec §3): a `(grain type, key)`
@@ -193,6 +199,10 @@ pub trait GrainHandler<M: Message>: Grain {
     ) -> impl Future<Output = (Vec<Self::Event>, M::Reply)> + Send;
 }
 
+/// The boxed result of [`GrainCtx::events`]: the grain's committed events after
+/// a `Seq`, decoded, at the journal's real slots.
+pub type EventsFuture<E> = BoxFuture<'static, Result<Vec<(Seq, E)>, GrainJournalError>>;
+
 /// The handler/lifecycle context (spec §4.3). It deliberately exposes **no**
 /// `persist` method and no state mutation — state changes only through events
 /// folded by [`Grain::apply`] (§4.2).
@@ -299,6 +309,53 @@ impl<G: Grain> GrainCtx<G> {
 
     pub fn system(&self) -> &G::System {
         &self.system
+    }
+
+    /// Up to `limit` of this grain's committed **events** after `from`
+    /// (exclusive), decoded, in ascending `Seq` order — the load-path form of
+    /// the subscription's event projection (spec §7.9): facet records (§7.12)
+    /// are skipped, so the returned `Seq`s are the journal's real slots and may
+    /// have gaps between consecutive events. A local, fence-free read of the
+    /// leader's journal (§7.3), read-your-leader like any query (§7.5).
+    ///
+    /// Returns fewer than `limit` events only when the head is reached, so an
+    /// empty page means no event follows `from` — the loop pages past facet
+    /// records rather than surfacing them as short pages. A record that will
+    /// not split or decode is [`GrainJournalError::Unavailable`]: corruption,
+    /// never silently skipped.
+    pub fn events(&self, from: Seq, limit: usize) -> EventsFuture<G::Event> {
+        /// Journal entries per `load` page: sized to a subscription batch, not
+        /// to `limit`, so a caller's large `limit` cannot force one huge read.
+        const LOAD_PAGE: usize = 256;
+        let journal = Arc::clone(&self.journal);
+        let name = self.name.clone();
+        let codec = self.system.codec();
+        Box::pin(async move {
+            let mut events = Vec::new();
+            let mut cursor = from;
+            while events.len() < limit {
+                let page = journal.load(&name, cursor, LOAD_PAGE).await?;
+                let at_head = page.len() < LOAD_PAGE;
+                for (seq, bytes) in page {
+                    cursor = seq;
+                    let (tag, payload) = split_record(&bytes)
+                        .map_err(|e| GrainJournalError::Unavailable(e.to_string()))?;
+                    if tag != EVENT_TAG {
+                        continue;
+                    }
+                    let event = actor_serialization::decode::<G::Event>(&*codec, payload)
+                        .map_err(|e| GrainJournalError::Unavailable(e.to_string()))?;
+                    events.push((seq, event));
+                    if events.len() == limit {
+                        break;
+                    }
+                }
+                if at_head {
+                    break;
+                }
+            }
+            Ok(events)
+        })
     }
 }
 

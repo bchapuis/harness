@@ -162,6 +162,7 @@ pub use facet::HasFacet;
 pub use facet::Here;
 pub use facet::There;
 pub use file_store::FileGrainStore;
+pub use grain::EventsFuture;
 pub use grain::Grain;
 pub use grain::GrainCtx;
 pub use grain::GrainHandler;

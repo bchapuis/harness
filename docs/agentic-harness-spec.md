@@ -352,11 +352,13 @@ A session is addressed as a grain, and its commands are grain commands (grain §
 |---|---|---|
 | `Submit { kind, turn, parent?, reply_to: Option<ActorRef<…>> }` | `Result<Accepted, SubmitReject>`† | `harness.Submit` |
 | `Cancel { turn }` | `()` | `harness.Cancel` |
-| `Tail { from, limit }` | `Vec<(Seq, Record)>` | `harness.Tail` |
+| `Tail { from, limit }` | `Result<Vec<(Seq, Record)>, TailError>`‡ | `harness.Tail` |
 
 The session names no payload field: it is the grain name the command is addressed to (grain §5.4). `parent` carries a delegating parent's lineage (§8.1, §10.3) and is absent on a root submit.
 
 †`Submit` replies with an **ack, not the run's outcome**: `Accepted { turn: TurnId, status: Started | Attached | Ended }`, released by the output gate the moment the `TurnSubmitted` record commits, an ordinary output-gated grain reply (grain §6). Its `Err` arm, `SubmitReject`, is an *application* failure carried as a value inside the reply, kept distinct from the transport `GrainError` outside it (core §3.2, §14): a caller-contract violation is permanent — the same submit always rejects the same way — where a transport failure a peer move could clear. The two cases are `KindMismatch` and `ContentConflict` (§7.4). Each command is delivered through `GrainRef::ask` (grain §4.3), so the call surfaces `GrainError` (transport — including an unregistered manifest — `NotLeader`, `Unavailable`, grain §12) outside the reply. `Cancel` likewise commits one `RunEnded { Cancelled }` record and acks; `Tail` emits no record and reads (grain §6, §7.5).
+
+‡`Tail`'s `Err` arm, `TailError`, is the leader's local journal read failing (I/O or corruption): an application value in the reply like `SubmitReject`, but **transient where `SubmitReject` is permanent** — a read commits nothing, so re-asking the same `Tail` is always safe. The client surface (`SessionRef::tail`) folds it into the same unavailability the caller already handles outside the reply.
 
 The run's outcome travels separately, as an **outbound notification** the activation `tell`s when the run's `RunEnded` commits:
 
@@ -372,7 +374,7 @@ The `Submit` `ask` returns promptly (it commits one record), and nothing a calle
 
 `Submit` carries `kind` on every call though it binds only on the first: creation is implicit in a session's first turn. After creation the field is a checked redundancy, rejected on mismatch (§7.4).
 
-A read-only command (`Tail`, and any future query that emits no record) commits nothing (grain §6 step 2, §7.5) and is served from the leader's in-memory activation: a local, replication-free read. Its consistency is **read-your-leader**, not linearizable under partition (grain §7.5): an isolated minority leader, deposed but not yet fenced, MAY serve a slightly stale `Tail` until its activation steps down. Writes never fork; only these reads can be momentarily stale, and only on the minority side. A linearizable read is a deferred grain upgrade (grain §7.5, §16), not a harness mechanism.
+A read-only command (`Tail`, and any future query that emits no record) commits nothing (grain §6 step 2, §7.5) and is served by the leader's activation as a local, replication-free read of the shard's journal (§10.2). Its consistency is **read-your-leader**, not linearizable under partition (grain §7.5): an isolated minority leader, deposed but not yet fenced, MAY serve a slightly stale `Tail` until its activation steps down. Writes never fork; only these reads can be momentarily stale, and only on the minority side. A linearizable read is a deferred grain upgrade (grain §7.5, §16), not a harness mechanism.
 
 ### 7.4 The client view (`SessionRef`) and idempotent submission
 
@@ -462,9 +464,15 @@ Each record carries the leader's `Clock` reading at write time. The timestamp is
 
 ### 10.2 Reading a run (`Tail`)
 
-`Tail { session, from: Seq, limit } → Vec<(Seq, Record)>` (§7.3) returns at most `limit` committed records after `from`: an idempotent, replication-free read served from the leader's activation (grain §7.5). It is read-your-leader, not linearizable under partition (§7.3): an isolated minority leader serves slightly stale tails until it steps down, and an unreachable shard takes observation of its sessions with it until a new leader is elected. Polling `Tail` follows a live run at whatever cadence the client chooses; `Submit`-and-await remains the one-shot form.
+`Tail { session, from: Seq, limit } → Result<Vec<(Seq, Record)>, TailError>` (§7.3) returns at most `limit` committed records after `from`: an idempotent, replication-free **read of the leader's journal** (grain §7.3 `load`), through the grain's event projection (grain §4.3 `events`). The activation keeps no mirror of the raw records — the fold holds projections only (§6.2), so session memory and snapshots do not grow a second copy of the transcript. Three consequences of reading the journal itself:
 
-A `Tail` MUST NOT trigger a write or change activation lifecycle beyond an ordinary read; the leader serves it from the activation (or, after hibernation, by a local journal read, grain §7.3 `load`). Push-based observation is future work (§13); `Tail` is deliberately the smallest interface that makes a run watchable.
+- **The `Seq`s are the journal's.** A session's journal interleaves its records with its workspace facet's records (grain §7.11, §7.12), which occupy their own slots; the projection skips them, so consecutive records need not carry consecutive `Seq`s. Page by re-asking from the last `Seq` returned — never by arithmetic on `Seq`s. (These are the same slots the record subscription delivers (grain §7.9), so a follower reconciling `Tail` pages against pushed batches compares like with like.)
+- **`limit` is clamped.** The leader clamps one page to a server-side cap (SHOULD default to about **1024** records), so no single read materializes an unbounded reply; a short page — fewer records than asked — occurs only at the head, so an empty page means no record follows `from`.
+- **The read can fail.** A journal read that fails (I/O, corruption) is the reply's `TailError` (§7.3‡): transient, safe to re-ask, never masked as an empty page.
+
+It is read-your-leader, not linearizable under partition (§7.3): an isolated minority leader serves slightly stale tails until it steps down, and an unreachable shard takes observation of its sessions with it until a new leader is elected. Polling `Tail` follows a live run at whatever cadence the client chooses; `Submit`-and-await remains the one-shot form.
+
+A `Tail` MUST NOT trigger a write or change activation lifecycle beyond an ordinary read: today it is served through the activation (the gateway gets-or-activates on any command, grain §5.3), so a poll against a hibernated session reactivates it — a gateway-level read that leaves hibernated sessions asleep is deferred work (§13). Push-based observation is future work (§13); `Tail` is deliberately the smallest interface that makes a run watchable.
 
 ### 10.3 Tree correlation
 
@@ -549,6 +557,7 @@ A run with no faults is the simplest case and MUST still pass.
 - **Durable alarms for the agent.** A stored timer that re-activates a session to advance a run with no caller present: the basis for scheduled runs, server-side timeouts, and proactive agents. The grain half now exists (the alarm facet and its per-shard index, grain §7.16); what remains is the harness-side integration: v1's resumption is strictly caller-driven (§7.5), and alarms would lift that.
 - **Scheduler singleton.** Queued and recurring agent runs feeding ordinary `Submit`s; deliberately out of v1, and a natural client of durable alarms above.
 - **Linearizable and follower reads.** A `Tail` (or a future query) that reflects committed state on the minority side of a partition, via the grain's deferred leader-lease upgrade (grain §7.5, §16); follower reads for read scale likewise ride the grain's extension.
+- **Reads that leave hibernated sessions asleep.** A gateway-level `Tail` served straight from the shard's journal without get-or-activating the session (§10.2): today a poll against a hibernated session reactivates it — rehydration plus workspace rematerialization — so continuous observation defeats hibernation's economics (§7.2).
 - **Sandbox providers, snapshots, and pooling.** The first per-tier provider ships as `harness-sandbox` (sandbox §3.1–§3.5). Still open: a network dataplane behind the profile's allowlist (sandbox §3.3) and warm pools to cut open latency.
 - **Multi-tenant scheduling.** Quotas, fair-share scheduling, and accounting across tenants sharing the cluster: the economics of mutualization (§1.1).
 - **Context compaction.** Summarizing the transcript into a journaled checkpoint record so the fold, and the model request, start from it; must preserve H1. The grain's snapshot (grain §9) bounds *replay* cost; compaction bounds *context* cost, a separate concern.

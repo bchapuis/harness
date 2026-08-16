@@ -159,7 +159,7 @@ fn sessions_run_once_across_a_converged_cluster() {
         let session = harness.session("worker", SessionId::new(format!("s-{i}")));
         let records: Vec<RecordBody> = drive(&sim, Duration::from_secs(10), async move {
             loop {
-                if let Ok(page) = session.tail(granary::Seq::new(0), 1_000_000).await {
+                if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
                     return page.into_iter().map(|(_, r)| r.body).collect();
                 }
             }
@@ -223,7 +223,7 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
         let session = harnesses[2].session("worker", SessionId::new("s-crash"));
         async move {
             loop {
-                if let Ok(page) = session.tail(granary::Seq::new(0), 1_000_000).await {
+                if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
                     return page.into_iter().map(|(_, r)| r.body).collect();
                 }
             }

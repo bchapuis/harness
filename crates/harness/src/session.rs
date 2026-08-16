@@ -15,7 +15,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use granary::Seq;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -397,27 +396,15 @@ pub struct SessionState {
     /// Whether the journal records sandboxed activity since the last
     /// `WorkspaceReset` — the §5.5 trigger for journaling the next one.
     pub sandbox_activity: bool,
-    /// Every committed record, in `Seq` order: the grain owns the journal, so
-    /// the activation mirrors it here to serve `Tail` (§10.2) — the one read
-    /// that needs the raw records, not the [`transcript`](Self::transcript)
-    /// projection. Index→`Seq` is [`seq_of`](Self::seq_of).
-    pub records: Vec<Record>,
 }
 
 impl SessionState {
-    /// The `Seq` of the record at `index` in [`records`](Self::records). The
-    /// grain commits one event per `Seq`, contiguously from `Seq(1)`, so it is
-    /// `index + 1`. The one place this index→`Seq` rule lives; `Tail` reads it.
-    pub fn seq_of(index: usize) -> Seq {
-        Seq::new(index as u64 + 1)
-    }
-
     /// Fold one committed record — the grain's `apply` (granary §4.1), pure and
     /// deterministic, run on the live commit path and on every replay. Total: a
     /// record that fits no transition (a malformed journal) is ignored rather
-    /// than panicking.
+    /// than panicking. The fold keeps projections only — the raw records stay
+    /// in the grain's journal, which serves `Tail` directly (§10.2).
     pub fn apply(&mut self, record: &Record) {
-        self.records.push(record.clone());
         match &record.body {
             RecordBody::SessionCreated {
                 kind,
@@ -612,8 +599,6 @@ mod tests {
         }));
         assert!(state.live.is_none());
         assert!(state.turns[&TurnId::new("t1")].outcome.is_some());
-        // Four records committed; the grain serves them by Seq for `Tail`.
-        assert_eq!(state.records.len(), 4);
     }
 
     #[test]

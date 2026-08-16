@@ -549,10 +549,20 @@ impl<S: HarnessSystem> SessionRef<S> {
         self.grain.ask(Cancel { turn: turn.clone() }).await
     }
 
-    /// Read committed records (harness spec §10.2): at most `limit` records after
-    /// `from`. An idempotent, replication-free read served from the activation.
+    /// Read committed records (harness spec §10.2): at most `limit` records
+    /// after `from` (`limit` clamped to the server's page cap,
+    /// [`TAIL_PAGE`](crate::TAIL_PAGE)) — an idempotent, replication-free read
+    /// of the leader's journal. The returned `Seq`s are the journal's real
+    /// slots (facet records occupy interleaved ones); fewer than `limit`
+    /// records come back only at the head, so page by re-asking from the last
+    /// `Seq` returned. A leader-side read failure surfaces as the grain's
+    /// `Unavailable`: transient, and — a read commits nothing — always safe to
+    /// retry.
     pub async fn tail(&self, from: Seq, limit: u32) -> Result<Vec<(Seq, Record)>, GrainError> {
-        self.grain.ask(Tail { from, limit }).await
+        self.grain
+            .ask(Tail { from, limit })
+            .await?
+            .map_err(|e| GrainError::Unavailable(e.to_string()))
     }
 
     /// Follow the session's records live from `from` (granary §7.9). See
@@ -659,7 +669,8 @@ impl<S: HarnessSystem> Follower<S> {
                 from: self.last,
                 limit: FOLLOW_PAGE,
             })
-            .await?;
+            .await?
+            .map_err(|e| GrainError::Unavailable(e.to_string()))?;
         match page.last() {
             Some((seq, _)) => {
                 self.last = *seq;
