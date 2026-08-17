@@ -16,8 +16,8 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
 use granary::Grain;
 use granary::GrainCtx;
@@ -178,13 +178,15 @@ fn a_non_hosting_client_routes_to_a_cluster_grain() {
         found.expect("the client discovered a host gateway via the receptionist gossip")
     };
 
-    // Route an Add (a write that must reach the shard leader and commit) and a
-    // Read, from the non-hosting client.
-    let (after_add, after_read) = drive(&sim, Duration::from_secs(8), async move {
+    // Route an Add (a write that must reach the shard leader and commit), a
+    // Read, and a gateway-level event read (§7.5) — the last never touching the
+    // activation — from the non-hosting client.
+    let (after_add, after_read, tailed) = drive(&sim, Duration::from_secs(8), async move {
         let counter = client_granary.grain("counter/1");
         let added = counter.ask(Add(7)).await;
         let read = counter.ask(Read).await;
-        (added, read)
+        let tailed = counter.events(granary::Seq::ZERO, 16).await;
+        (added, read, tailed)
     });
 
     assert_eq!(
@@ -193,6 +195,11 @@ fn a_non_hosting_client_routes_to_a_cluster_grain() {
         "the client's Add routed to the leader and committed"
     );
     assert_eq!(after_read, Ok(7), "the client reads the committed value");
+    let tailed = tailed.expect("the client's event read routed to the leader's gateway");
+    assert!(
+        matches!(tailed.as_slice(), [(_, CounterEvent::Added(7))]),
+        "the non-activating read returns the committed event over the wire",
+    );
 }
 
 #[test]

@@ -142,6 +142,20 @@ enum IndexSync {
     Acked { due: Option<u64> },
 }
 
+/// The value a [`CommittedCell`] holds before its activation has recovered the
+/// grain's head: `Seq` is a `u64` that can never reach it, so the sentinel is
+/// unambiguous.
+pub(crate) const HEAD_UNPUBLISHED: u64 = u64::MAX;
+
+/// The committed head a resident activation publishes for its gateway (spec
+/// §7.5): the floor of the non-activating read. Written by the host — at the
+/// end of head recovery and after each commit — and read by the serial gateway
+/// without touching the host's mailbox, so a read never queues behind the
+/// input gate. It only ever holds *committed* heads (it is set from journal
+/// returns, never from an in-flight append), so a value read even from a
+/// stopping host is safe to serve at or below.
+pub(crate) type CommittedCell = std::sync::Arc<std::sync::atomic::AtomicU64>;
+
 /// A grain's live activation (spec §10): state folded from the journal, plus the
 /// machinery of the §6 durability protocol. Disposable — rebuilt from the journal
 /// on the next activation (invariant **G3**).
@@ -151,6 +165,11 @@ pub struct Host<G: Grain> {
     /// The grain's committed head. Set **only** from journal/snapshot returns,
     /// never trusted across an activation (invariant **G3**).
     head: Seq,
+    /// The gateway-visible mirror of `head` ([`CommittedCell`]): published at the
+    /// end of head recovery and after each commit, so the gateway's
+    /// non-activating read (§7.5) serves at or below it without asking this
+    /// actor. [`HEAD_UNPUBLISHED`] until recovery completes.
+    committed: CommittedCell,
     /// The seq of the latest persisted snapshot, to decide when to snapshot again.
     last_snapshot: Seq,
     /// The runtime type name (spec §5.1), threaded into [`GrainCtx`] so a
@@ -220,11 +239,13 @@ impl<G: Grain> Host<G> {
         capabilities: &crate::node::NodeCapabilities,
         gateway: ActorRef<Gateway<G>>,
         alarm_index: Option<Granary<AlarmIndex<G::System>>>,
+        committed: CommittedCell,
     ) -> Host<G> {
         Host {
             grain,
             state: G::State::default(),
             head: Seq::ZERO,
+            committed,
             last_snapshot: Seq::ZERO,
             grain_type,
             name,
@@ -379,6 +400,8 @@ impl<G: Grain> Host<G> {
         }
 
         self.head = head;
+        self.committed
+            .store(head.value(), std::sync::atomic::Ordering::Release);
         self.last_active = ctx.system().now();
 
         // Resolve blob-referencing facet records into their materializations (spec
@@ -615,6 +638,8 @@ impl<G: Grain> Host<G> {
                     }
                 }
                 self.head = new_head;
+                self.committed
+                    .store(new_head.value(), std::sync::atomic::Ordering::Release);
                 ctx.system().emit_grain_event(GrainEvent::Committed {
                     node: ctx.system().node(),
                     name: self.name.clone(),

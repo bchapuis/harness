@@ -47,7 +47,6 @@ use granary::GrainError;
 use granary::GrainHandler;
 use granary::GrainRegistry;
 use granary::LaunchGuard;
-use granary::Seq;
 use granary::Ws;
 use granary::WsError;
 use serde::Deserialize;
@@ -192,42 +191,6 @@ pub struct Cancel {
 impl Message for Cancel {
     type Reply = ();
     const MANIFEST: Manifest = Manifest::new("harness.Cancel");
-}
-
-/// Server-side cap on one `Tail` page (§10.2): a caller's `limit` is clamped to
-/// it, so no single read materializes an unbounded reply on the leader. A caller
-/// wanting more pages by advancing `from` past the last `Seq` returned.
-pub const TAIL_PAGE: u32 = 1024;
-
-/// Read committed records (§7.3, §10.2): at most `limit` records after `from`
-/// (`limit` clamped to [`TAIL_PAGE`]), served as a local read of the leader's
-/// journal. The returned `Seq`s are the journal's real slots: the workspace
-/// facet's records (granary §7.11) occupy interleaved slots, so consecutive
-/// records need not carry consecutive `Seq`s. Fewer than `limit` records come
-/// back only at the head, so an empty page means no record follows `from`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Tail {
-    pub from: Seq,
-    pub limit: u32,
-}
-
-impl Message for Tail {
-    type Reply = Result<Vec<(Seq, Record)>, TailError>;
-    const MANIFEST: Manifest = Manifest::new("harness.Tail");
-}
-
-/// A `Tail` read failure (§10.2): the leader's local journal read failed (I/O
-/// or corruption). An application error carried as a value in the reply, like
-/// [`SubmitReject`] — but transient, not permanent: a read commits nothing, so
-/// re-asking is always safe. [`SessionRef`](crate::SessionRef) surfaces it as
-/// the grain's outer `Unavailable`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TailError(pub String);
-
-impl std::fmt::Display for TailError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "journal read failed: {}", self.0)
-    }
 }
 
 /// The outbound notification carrying a run's outcome to a registered `reply_to`
@@ -1642,10 +1605,11 @@ impl<S: HarnessSystem> Grain for Agent<S> {
     fn register(registry: &mut GrainRegistry<Self>) {
         // The network allowlist: only the wire commands (§7.3). The internal
         // self-tells (Advance/ModelDone/ToolDone) are local-only, so no peer can
-        // inject them.
+        // inject them. Reading a run is not here: `tail` rides granary's
+        // gateway-level event read (granary §7.5), a framework built-in that
+        // never touches the activation (§10.2).
         registry.accept::<Submit<S>>();
         registry.accept::<Cancel>();
-        registry.accept::<Tail>();
     }
 
     async fn on_activate(&mut self, ctx: &GrainCtx<Self>) -> Result<(), BoxError> {
@@ -1719,27 +1683,6 @@ impl<S: HarnessSystem> GrainHandler<Cancel> for Agent<S> {
         ctx: &GrainCtx<Self>,
     ) -> (Vec<Record>, ()) {
         (self.on_cancel(state, msg.turn, ctx), ())
-    }
-}
-
-impl<S: HarnessSystem> GrainHandler<Tail> for Agent<S> {
-    async fn handle(
-        &self,
-        _state: &SessionState,
-        msg: Tail,
-        ctx: &GrainCtx<Self>,
-    ) -> (Vec<Record>, Result<Vec<(Seq, Record)>, TailError>) {
-        // A read: no records, commits nothing (granary §7.5), served straight
-        // from the leader's journal by the grain's event projection (granary
-        // §4.3 `events`), so the `Seq`s are the journal's own — the slots the
-        // record subscription delivers, gaps where facet records sit (§10.2).
-        // The await is a local read, bounded by the page cap.
-        let limit = msg.limit.min(TAIL_PAGE) as usize;
-        let page = ctx
-            .events(msg.from, limit)
-            .await
-            .map_err(|e| TailError(e.to_string()));
-        (Vec::new(), page)
     }
 }
 

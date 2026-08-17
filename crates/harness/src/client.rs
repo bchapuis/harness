@@ -45,7 +45,6 @@ use crate::agent::Agent;
 use crate::agent::AttachOutcome;
 use crate::agent::Cancel;
 use crate::agent::RunCompleted;
-use crate::agent::Tail;
 use crate::agent::submit_and_attach;
 use crate::kind::Kind;
 use crate::kind::Kinds;
@@ -550,19 +549,18 @@ impl<S: HarnessSystem> SessionRef<S> {
     }
 
     /// Read committed records (harness spec §10.2): at most `limit` records
-    /// after `from` (`limit` clamped to the server's page cap,
-    /// [`TAIL_PAGE`](crate::TAIL_PAGE)) — an idempotent, replication-free read
-    /// of the leader's journal. The returned `Seq`s are the journal's real
-    /// slots (facet records occupy interleaved ones); fewer than `limit`
-    /// records come back only at the head, so page by re-asking from the last
-    /// `Seq` returned. A leader-side read failure surfaces as the grain's
-    /// `Unavailable`: transient, and — a read commits nothing — always safe to
-    /// retry.
+    /// after `from` (`limit` clamped to [`TAIL_PAGE`](crate::TAIL_PAGE)) — an
+    /// idempotent, replication-free read of the leader's journal, riding
+    /// granary's gateway-level event read (granary §7.5). It never
+    /// get-or-activates the session, so **polling a hibernated session leaves
+    /// it asleep** — observation costs a journal read, not a rehydration. The
+    /// returned `Seq`s are the journal's real slots (facet records occupy
+    /// interleaved ones); fewer than `limit` records come back only at the
+    /// head, so page by re-asking from the last `Seq` returned. A leader-side
+    /// read failure surfaces as the grain's `Unavailable`: transient, and — a
+    /// read commits nothing — always safe to retry.
     pub async fn tail(&self, from: Seq, limit: u32) -> Result<Vec<(Seq, Record)>, GrainError> {
-        self.grain
-            .ask(Tail { from, limit })
-            .await?
-            .map_err(|e| GrainError::Unavailable(e.to_string()))
+        self.grain.events(from, limit.min(TAIL_PAGE) as usize).await
     }
 
     /// Follow the session's records live from `from` (granary §7.9). See
@@ -577,8 +575,15 @@ impl<S: HarnessSystem> SessionRef<S> {
     }
 }
 
+/// One page bound for a caller's tail reads (§10.2): [`SessionRef::tail`]
+/// clamps `limit` to it, so no single call asks the journal for an unbounded
+/// reply. A caller wanting more pages by advancing `from` past the last `Seq`
+/// returned. (The gateway additionally bounds each wire page server-side,
+/// granary §7.5, so the clamp here is the API contract, not the safety.)
+pub const TAIL_PAGE: u32 = 1024;
+
 /// Journal page size for a follower's backfill reads.
-const FOLLOW_PAGE: u32 = 256;
+const FOLLOW_PAGE: usize = 256;
 
 /// How long a caught-up follower waits for a live record before re-checking the
 /// journal. A silent leader move or crash leaves the old sink alive but idle —
@@ -660,17 +665,11 @@ impl<S: HarnessSystem> Follower<S> {
         }
     }
 
-    /// One page of records after the cursor, read from the journal, advancing the
-    /// cursor. `None` when already at the head.
+    /// One page of records after the cursor, read from the journal (the
+    /// non-activating gateway read, granary §7.5), advancing the cursor. `None`
+    /// when already at the head.
     async fn backfill(&mut self) -> Result<Option<Vec<(Seq, Record)>>, GrainError> {
-        let page = self
-            .grain
-            .ask(Tail {
-                from: self.last,
-                limit: FOLLOW_PAGE,
-            })
-            .await?
-            .map_err(|e| GrainError::Unavailable(e.to_string()))?;
+        let page = self.grain.events(self.last, FOLLOW_PAGE).await?;
         match page.last() {
             Some((seq, _)) => {
                 self.last = *seq;

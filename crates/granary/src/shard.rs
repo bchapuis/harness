@@ -24,6 +24,7 @@ use crate::journal::AppendOutcome;
 use crate::journal::GrainJournal;
 use crate::journal::GrainJournalError;
 use crate::journal::Seq;
+use crate::journal::Term;
 use crate::replica_store::ReplicaTransport;
 use crate::replicator::QuorumReplicator;
 use crate::replicator::ShardControl;
@@ -98,6 +99,10 @@ impl<R: RaftConsensus> GrainJournal for QuorumGrainJournal<R> {
         // recovers the grain's head from a write quorum by read-repair, so a fresh
         // leader never folds onto a stale head.
         self.replicator.recover(grain).await
+    }
+
+    fn term(&self) -> Option<Term> {
+        self.replicator.leadership_term()
     }
 
     async fn save_snapshot(&self, grain: &GrainName, at: Seq, state: Vec<u8>) -> AppendOutcome {

@@ -151,6 +151,18 @@ pub trait GrainJournal: Clone + Send + Sync + 'static {
         grain: &GrainName,
     ) -> impl Future<Output = Result<Seq, GrainJournalError>> + Send;
 
+    /// The shard term this journal is writing under **right now** (spec §8): the
+    /// leader-election group's term while this node leads the shard, `None`
+    /// otherwise. A cheap local read, never a network round.
+    ///
+    /// This is the *validity token* of the gateway's non-activating read (§7.5):
+    /// a [`head`](GrainJournal::head) recovery is trustworthy only while the
+    /// leadership it ran under persists — leadership regained is a **higher**
+    /// term, so an unchanged term proves no other node could have appended in
+    /// between. The `Local` tier never elects and so always leads at
+    /// [`Term::ZERO`].
+    fn term(&self) -> Option<Term>;
+
     /// Persist a snapshot for one grain at a committed seq (§9). Returns
     /// `Committed(at)` on success, or `NotLeader` if this node no longer leads.
     fn save_snapshot(
@@ -239,6 +251,8 @@ pub trait DynGrainJournal: Send + Sync + 'static {
 
     fn head(&self, grain: &GrainName) -> BoxFuture<'static, Result<Seq, GrainJournalError>>;
 
+    fn term(&self) -> Option<Term>;
+
     fn save_snapshot(
         &self,
         grain: &GrainName,
@@ -294,6 +308,10 @@ impl<J: GrainJournal> DynGrainJournal for J {
         let journal = self.clone();
         let grain = grain.clone();
         Box::pin(async move { journal.head(&grain).await })
+    }
+
+    fn term(&self) -> Option<Term> {
+        GrainJournal::term(self)
     }
 
     fn save_snapshot(

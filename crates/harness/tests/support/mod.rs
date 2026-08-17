@@ -71,10 +71,10 @@ pub fn harness_on(
     Harness::cluster(system, &kinds, model, sandboxes)
 }
 
-/// Read a session's whole journal via `Tail` (§10.2), paging from the last
-/// `Seq` of each full page (the server clamps one page to `TAIL_PAGE`) — the
-/// journal is the grain's, so the transcript is read back through the
-/// activation, not a test-held store.
+/// Read a session's whole journal via `tail` (§10.2), paging from the last
+/// `Seq` of each full page (one call is clamped to `TAIL_PAGE`) — the journal
+/// is the grain's, so the transcript is read back through the gateway's
+/// journal read (granary §7.5), not a test-held store.
 pub async fn tail_records(session: &harness::SessionRef<SimSystem>) -> Vec<harness::Record> {
     let mut records = Vec::new();
     let mut from = granary::Seq::new(0);

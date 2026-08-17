@@ -102,6 +102,12 @@ impl GrainJournal for LocalGrainJournal {
         Ok(self.store.head(self.shard, grain))
     }
 
+    fn term(&self) -> Option<Term> {
+        // The single node always leads and never elects (§7.4), so the gateway
+        // read's leadership token never expires here.
+        Some(Term::ZERO)
+    }
+
     async fn save_snapshot(&self, grain: &GrainName, at: Seq, state: Vec<u8>) -> AppendOutcome {
         let (name, shard) = (grain.clone(), self.shard);
         let stored = on_store(&self.io, &self.store, move |store| {

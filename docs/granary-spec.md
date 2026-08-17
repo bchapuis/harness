@@ -243,10 +243,20 @@ impl<G: Grain> GrainRef<G> {
     /// framework built-in, available for every grain type without the author
     /// registering it — the analogue of `load`/`head`, surfaced as a push.
     pub async fn subscribe(&self, from: Seq) -> Result<Subscription<G>, GrainError>;
+
+    /// Up to `limit` of the grain's committed events after `from` (exclusive),
+    /// decoded, in ascending `Seq` order — the remote form of `GrainCtx::events`
+    /// below, served by the shard leader's gateway straight from the journal
+    /// **without get-or-activating the grain** (§7.5): polling a hibernated
+    /// grain leaves it hibernated (§10). A framework built-in like `subscribe`.
+    /// Same projection contract as `GrainCtx::events`: real `Seq`s with facet
+    /// gaps, fewer than `limit` only at the head; a failed or corrupt journal
+    /// read is `GrainError::Unavailable` — transient, always safe to re-ask.
+    pub async fn events(&self, from: Seq, limit: usize) -> Result<Vec<(Seq, G::Event)>, GrainError>;
 }
 ```
 
-The `G: GrainHandler<M>` bound proves at compile time that the grain accepts `M`, so an invalid call does not compile (invariant **G10**, the grain analogue of actor §3.3). The call site is identical whether the activation is local or on another node (§5). `subscribe` is grain-type-agnostic and so carries no such bound (§7.9).
+The `G: GrainHandler<M>` bound proves at compile time that the grain accepts `M`, so an invalid call does not compile (invariant **G10**, the grain analogue of actor §3.3). The call site is identical whether the activation is local or on another node (§5). `subscribe` and `events` are grain-type-agnostic and so carry no such bound (§7.9, §7.5).
 
 The `M: Clone` bound lets the runtime re-issue the command when the first attempt provably did not run: a stale cached host that hibernated (`DeadLetter`) or whose leadership moved (`NotLeader`), neither of which commits (§6, §8). An *ambiguous* transport failure (`Unreachable`/`Timeout`) is never auto-retried, because the command may have committed before the reply was lost (at-most-once, §2.2). The clone is of the caller's own small command value.
 
@@ -307,6 +317,8 @@ Each node runs one **gateway** actor per grain *type*, registered in the recepti
 A gateway is mandatory: the runtime mints an activation's `ActorId` at `spawn` (actor §4.2), and that id is **not** derivable from the `GrainName`, so the name-to-activation mapping must live in an explicit table, and the gateway is that table plus the actor that guards it.
 
 Activation is **exactly-once per node by construction.** The gateway is a serial actor (actor §6), so getting-or-activating a name is a critical section: the gateway processes two concurrent requests for a not-yet-active name in sequence, the first activating the host, the second finding it. No lock is needed (invariant **G6**).
+
+Beside routing, the gateway serves the **non-activating event read** (§7.5): one bounded page of a grain's committed events straight from the shard's journal, touching no host. Because it is a page bounded server-side and the leader's `load` is a local read (§7.3), serving it inline costs the serial gateway one bounded local copy, never I/O it must wait out — the one slow step the read can need, a hibernated grain's committed-head recovery (§7.5), runs on a spawned task while the caller retries, so it too never holds the gateway.
 
 ### 5.4 Routing a call
 
@@ -501,6 +513,10 @@ The durability concern is the **Replicator** (§7.3), and it admits multiple imp
 ### 7.5 Reads
 
 A command that emits no events (a query) commits nothing (§6 step 2). The leader serves it from the grain's in-memory activation, a local, replication-free read with **no per-read consensus** (DO §4.3, §4.4). Reads scale with the leaders' capacity and never wait on replication.
+
+**The non-activating event read (`GrainRef::events`, §4.3).** A second read form skips the activation entirely: the shard leader's **gateway** (§5.3) serves a grain's committed events straight from the journal's `load` (§7.3), without get-or-activating the grain — so observation never wakes a hibernated grain (§10), which is what makes continuous polling compatible with hibernation's economics. It applies the same record-to-event projection as the subscription sink and `GrainCtx::events` (§7.9, §4.3): facet records (§7.12) are skipped, the returned `Seq`s are the journal's real slots, and a record that will not split or decode surfaces as `Unavailable` — corruption, never silently dropped (`Unavailable` here reports a failed local read; a read commits nothing, so re-asking is always safe). Each wire page is bounded server-side (the gateway scans at most a fixed number of records per ask, SHOULD default to about **1024**) and carries an explicit cursor and at-head flag, so a page diluted by facet records still makes progress and the caller-side loop preserves the "fewer than `limit` only at the head" contract; the paging loop and the event decode run on the **caller**, keeping the serial gateway to one bounded local read per ask (§5.3). Like `Activate`, the read is answered only on the shard's leader — a non-leader replies `NotLeader(hint)` for the caller's bounded redirect (§5.4) — so its consistency is exactly the read-your-leader contract below, stale only where every read is.
+
+**The read serves at or below a committed-head floor, never the raw store.** The local store alone cannot tell a committed record from a tentative one: a leader writes its own replica before its quorum resolves (§7.2), and a fresh leader's store may hold undecided records — or miss committed ones — until a `head` recovery read-repairs it (§8). The activation path is shielded by construction (rehydration runs the recovery, and the input gate orders reads behind in-flight appends, §6); the gateway read, which bypasses both, MUST therefore bound every page by the grain's committed head. A **resident** activation publishes its committed head to the gateway (updated at recovery and on each commit), so reads of an active grain serve up to the last commit and never an in-flight slot. For a **hibernated** name the gateway recovers a floor once per leadership — a spawned `head` recovery (§8), which also backfills this leader's store, so the subsequent local reads are complete — cached under the shard term it ran under: the term is the validity token, since regained leadership is always a higher term (§8.1) and an activation starting locally invalidates the entry. While the floor is being established the caller sees a transient *warming* reply and re-asks under its own deadline, exactly as it waits out an election (§5.4). Records above the floor are simply not served yet — the next poll sees them once committed — so no observer is ever shown an unacknowledged write (**G5**), and the anomaly budget stays what read-your-leader already grants: staleness, never invention.
 
 **The contract is read-your-leader (relaxed), not linearizable under partition.** Because the activation is colocated with the shard leader (§5.2) and the read path does not reconfirm leadership per call, a leader that has been deposed but not yet fenced, an isolated minority leader that has not yet learned it lost the election, MAY serve a stale read until its activation stops. Writes never fork (the shard term fences the commit, §8); only reads can be stale, and only on the minority side of a partition. A caller that needs a linearizable read in the meantime issues a trivial *writing* command (one that emits an event): it rides the §6 output gate, so it commits through the shard leader and reflects committed state, or fails (`NotLeader`/`Unavailable`) on a deposed leader.
 
@@ -783,7 +799,7 @@ activate → rehydrate (snapshot + replay, §9) → on_activate → serve comman
 
 - **Activation** is triggered by the first message for the name reaching its shard leader's gateway (§5.3). The leader rehydrates the grain (§9), runs `on_activate`, then serves. Activation takes no consensus: no election, no agreement round; on the `Quorum` tier it costs one quorum-recovery round-trip to confirm the grain's head (§9), and on the `Local` tier it is fully local.
 - **Migration** follows shard leadership. When the shard's leader changes (§8.3), the grain's activation moves to the new leader and rehydrates there. In-memory state is never preserved across the move; the journal rebuilds it.
-- **Hibernation (deactivate-on-idle).** After an idle interval the leader MAY, *if the grain's `can_passivate` permits it*, run `on_passivate`, snapshot **if §9's trigger has been crossed**, and `ctx.stop()`, dropping the grain's in-memory state. (`on_passivate` cannot mutate state, §4.3, so it runs before or after the snapshot indistinguishably; the implementation runs it first.) The snapshot MUST go through the same trigger the write path uses and MUST NOT be unconditional: on the `Quorum` tier it reaches every replica (§9), so an unconditional one would turn every grain that is written once and then left alone into a replication per idle window, for O(1) of change — smaller since facet 0's state is chunked (§7.12), but never free. A grain that vetoes eviction (`can_passivate` returns false, e.g. an autonomous grain with a live run) is left running and the idle check rescheduled. The gateway prunes the name from its activation table (it watches its hosts via death watch, actor §12). The next message re-activates and rehydrates. Hibernation reclaims memory; persisted storage survives; in-memory state was only ever a cache (§1).
+- **Hibernation (deactivate-on-idle).** After an idle interval the leader MAY, *if the grain's `can_passivate` permits it*, run `on_passivate`, snapshot **if §9's trigger has been crossed**, and `ctx.stop()`, dropping the grain's in-memory state. (`on_passivate` cannot mutate state, §4.3, so it runs before or after the snapshot indistinguishably; the implementation runs it first.) The snapshot MUST go through the same trigger the write path uses and MUST NOT be unconditional: on the `Quorum` tier it reaches every replica (§9), so an unconditional one would turn every grain that is written once and then left alone into a replication per idle window, for O(1) of change — smaller since facet 0's state is chunked (§7.12), but never free. A grain that vetoes eviction (`can_passivate` returns false, e.g. an autonomous grain with a live run) is left running and the idle check rescheduled. The gateway prunes the name from its activation table (it watches its hosts via death watch, actor §12). The next command (or subscribe) re-activates and rehydrates; the gateway-level event read deliberately does **not** (§7.5), so a hibernated grain can be observed without paying a rehydration. Hibernation reclaims memory; persisted storage survives; in-memory state was only ever a cache (§1).
 - **Forced step-down.** When leadership moves (§8) or the shard goes unavailable (§11), the activation deactivates involuntarily: it runs `on_passivate` (to release non-durable per-activation resources) but takes **no snapshot**, since the journal may be unwritable, then emits `Passivated` and stops. The journal is the authority; the next access rehydrates.
   - **Default and tuning.** The *mechanism* is the Durable Objects eviction window (DO §5); the *number* is not, because DO's ten seconds prices resident memory on shared multi-tenant hosts and this deployment's does not ([hardware-envelope](hardware-envelope.md) §1, §3.6). Reactivation is cheap but not free — a quorum head-recovery round trip plus a snapshot-bounded replay (§9) — while what eviction reclaims is a grain's state on a node with memory to spare, so `idle_after` SHOULD default to **minutes** rather than seconds, long enough that a grain in intermittent use stays resident between touches. A deployment whose grains are many, rarely touched, and individually large SHOULD shorten it. To avoid thrashing when a grain is accessed just slower than the timer, an implementation SHOULD apply a small minimum residency or jitter so a barely-idle grain is not evicted and reloaded repeatedly.
 - **Eviction races.** If a command reaches the gateway for a name whose host has stopped but whose `Terminated` has not yet pruned the table, the host `ask` returns `CallError::DeadLetter`; the gateway MUST treat that as "reactivate" (drop the stale entry and activate afresh), bounded to avoid a loop.
@@ -818,7 +834,9 @@ pub enum GrainError {
     Call(CallError),       // transport/system failure reaching the activation (actor §14.1),
                            //   including CallError::Unhandled for an unregistered manifest (§5.5)
     NotLeader(NodeId),     // leadership moved; the runtime retries against the hint, surfacing this only if retries are exhausted
-    Unavailable(String),   // the grain's shard cannot reach a quorum; the write did not commit (§11)
+    Unavailable(String),   // the grain's shard cannot reach a quorum; the write did not commit (§11).
+                           //   On the non-activating read (§7.5): the leader's local journal read
+                           //   failed — transient, and a read commits nothing, so re-asking is safe
 }
 ```
 
@@ -999,7 +1017,7 @@ granary/                 # the grain runtime, built on actor-core + actor-cluste
   grain.rs               # Grain, GrainHandler, GrainCtx, GrainName,
                          #   GrainRegistry (the per-grain dispatch builder, §4, §5.5)
   host.rs                # the host actor: durability protocol, rehydrate, hibernate (§6, §9, §10)
-  gateway.rs             # per-node gateway: routing, activation table, NotLeader redirect (§5.3, §5.4)
+  gateway.rs             # per-node gateway: routing, activation table, NotLeader redirect, non-activating read (§5.3, §5.4, §7.5)
   grainref.rs            # GrainRef + Granary handle + the system extension (`granary`/`grain`) (§4.3, §5.4)
   journal.rs             # the GrainJournal seam + AppendOutcome + Seq + DynGrainJournal (§7.3)
   election.rs            # the per-shard leader-election group: a small Raft group owning leadership/term/replica-set (§8)

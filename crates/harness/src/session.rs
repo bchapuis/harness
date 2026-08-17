@@ -403,7 +403,7 @@ impl SessionState {
     /// deterministic, run on the live commit path and on every replay. Total: a
     /// record that fits no transition (a malformed journal) is ignored rather
     /// than panicking. The fold keeps projections only — the raw records stay
-    /// in the grain's journal, which serves `Tail` directly (§10.2).
+    /// in the grain's journal, which serves `tail` directly (§10.2).
     pub fn apply(&mut self, record: &Record) {
         match &record.body {
             RecordBody::SessionCreated {

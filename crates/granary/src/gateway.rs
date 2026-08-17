@@ -19,10 +19,17 @@
 //! job, driven by [`GrainRef`](crate::GrainRef) and bounded by the caller's own
 //! deadline, so a slow resolution never blocks another grain's activation on this
 //! node.
+//!
+//! Beside routing, the gateway serves the **non-activating read** ([`ReadEvents`],
+//! §7.5): one bounded page of a grain's committed events straight from the
+//! shard's journal, so observation never wakes a hibernated grain (§10).
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use actor_core::Actor;
 use actor_core::ActorRef;
@@ -43,8 +50,13 @@ use crate::config::GranaryConfig;
 use crate::error::GrainError;
 use crate::grain::Grain;
 use crate::grain::GrainName;
+use crate::grain::events_in_page;
 use crate::grainref::Granary;
+use crate::host::CommittedCell;
+use crate::host::HEAD_UNPUBLISHED;
 use crate::host::Host;
+use crate::journal::Seq;
+use crate::journal::Term;
 use crate::shardmap::ShardMapSource;
 use crate::shardmap::resolve_shard;
 use crate::system::GranarySystem;
@@ -94,12 +106,124 @@ impl<G: Grain> Message for Activate<G> {
     const MANIFEST: Manifest = Manifest::new("granary.Activate");
 }
 
+/// Server-side bound on one [`ReadEvents`] page (spec §7.5): the most journal
+/// **records** one ask scans. It caps both the reply and the time the serial
+/// gateway spends serving a read, so no caller can hold activations behind one
+/// huge scan; a caller wanting more pages by re-asking from the returned cursor.
+pub(crate) const READ_PAGE: usize = 1024;
+
+/// Read one page of a grain's committed events straight from the shard's
+/// journal (spec §7.5) — the **non-activating read**: the gateway serves it from
+/// `GrainJournal::load` without get-or-activating the grain, so polling a
+/// hibernated grain leaves it hibernated (§10). Like [`Activate`], it is
+/// answered only on the shard's leader (read-your-leader, §7.5); elsewhere it
+/// returns `NotLeader(hint)` for the caller's bounded redirect (§5.4).
+///
+/// `limit` bounds the **records scanned** (clamped to [`READ_PAGE`]), which
+/// upper-bounds the events returned — facet records (§7.12) among the scanned
+/// page are skipped, not surfaced. The events come back as their undecoded
+/// payload bytes at the journal's real slots; the caller decodes with its own
+/// codec ([`GrainRef::events`](crate::GrainRef::events)), so the serial gateway
+/// pays one bounded local read and no decode.
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "")]
+pub(crate) struct ReadEvents<G: Grain> {
+    pub(crate) name: GrainName,
+    pub(crate) from: Seq,
+    pub(crate) limit: u32,
+    #[serde(skip)]
+    _marker: PhantomData<fn() -> G>,
+}
+
+impl<G: Grain> ReadEvents<G> {
+    pub(crate) fn new(name: GrainName, from: Seq, limit: u32) -> ReadEvents<G> {
+        ReadEvents {
+            name,
+            from,
+            limit,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<G: Grain> Message for ReadEvents<G> {
+    type Reply = Result<ReadReply, GrainError>;
+    const MANIFEST: Manifest = Manifest::new("granary.ReadEvents");
+}
+
+/// A [`ReadEvents`] reply.
+#[derive(Serialize, Deserialize)]
+pub(crate) enum ReadReply {
+    /// One served page.
+    Page(EventPage),
+    /// The gateway is still establishing the grain's committed-head floor — a
+    /// spawned per-leadership `head` recovery for a hibernated name, or a
+    /// resident activation mid-rehydration (§7.5). Transient by construction:
+    /// the caller retries after a short backoff, bounded by its own deadline.
+    Warming,
+}
+
+/// One [`ReadEvents`] page. `cursor` is the last **record** scanned — event or
+/// not — so the next page begins after the facet records this one skipped, and
+/// a page of only facet records still makes progress; `at_head` reports whether
+/// the scan reached the end of what this leader may serve (the journal's head,
+/// or its committed-head floor), the explicit form of the "short page only at
+/// head" contract a filtered page cannot carry on its own.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct EventPage {
+    pub(crate) events: Vec<(Seq, Vec<u8>)>,
+    pub(crate) cursor: Seq,
+    pub(crate) at_head: bool,
+}
+
+/// The gateway's note-to-self completing a spawned floor recovery (§7.5): a
+/// **local-only** tell from the task [`Gateway::warm`] launched — never accepted
+/// off the wire (absent from [`Gateway::register`]), like any internal
+/// self-drive. `head` is `None` when the recovery failed or leadership lapsed
+/// while it ran; the term, shard, and epoch are re-checked on the serial actor
+/// either way.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Recovered {
+    name: GrainName,
+    shard: u32,
+    term: Term,
+    head: Option<Seq>,
+    /// The gateway's `warm_epoch` when this recovery was spawned: stale if any
+    /// activation was created since (its appends move the head this recovery
+    /// measured — even if that activation has already hibernated again).
+    epoch: u64,
+}
+
+impl Message for Recovered {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("granary.GatewayRecovered");
+}
+
 /// The node-local gateway for grain type `G` (spec §5.3).
 pub(crate) struct Gateway<G: Grain> {
     /// Names this node currently hosts, each with the shard index it activated
-    /// under. The serial actor is the only writer, so no lock guards it (**G6**).
-    /// The stored index guards against a stale entry after a split/merge (§7.7).
-    table: HashMap<GrainName, (u32, ActorRef<Host<G>>)>,
+    /// under and the activation's published committed head ([`CommittedCell`]) —
+    /// the resident floor of the non-activating read (§7.5). The serial actor is
+    /// the only writer, so no lock guards it (**G6**). The stored index guards
+    /// against a stale entry after a split/merge (§7.7).
+    table: HashMap<GrainName, (u32, ActorRef<Host<G>>, CommittedCell)>,
+    /// Committed-head floors for **non-resident** names (§7.5), each stamped with
+    /// the shard index and shard term its `head` recovery ran under: valid while
+    /// that exact leadership persists — leadership regained is a higher term
+    /// (§8), and a split/merge changes the shard index (§7.7, indexes are never
+    /// reused), so neither can alias — and no activation has started since
+    /// ([`get_or_activate`](Gateway::get_or_activate) removes the entry).
+    /// Bounded by `host_cache_capacity`: on overflow the map is cleared, which
+    /// only costs the next read a fresh recovery.
+    floors: HashMap<GrainName, (u32, Term, Seq)>,
+    /// Names whose floor recovery is in flight, so concurrent reads spawn one
+    /// recovery, not one each. Cleared when its [`Recovered`] lands.
+    warming: HashSet<GrainName>,
+    /// Bumped whenever a fresh activation is spawned ([`get_or_activate`]): a
+    /// [`Recovered`] carrying an older epoch is discarded, closing the window
+    /// where an activation is created — and appends, and even hibernates —
+    /// while a floor recovery is still in flight.
+    warm_epoch: u64,
     /// The runtime type name (spec §5.1), as passed to [`gateway_key`]. Used to
     /// map a name to its shard.
     grain_type: &'static str,
@@ -135,6 +259,9 @@ impl<G: Grain> Gateway<G> {
     ) -> Gateway<G> {
         Gateway {
             table: HashMap::new(),
+            floors: HashMap::new(),
+            warming: HashSet::new(),
+            warm_epoch: 0,
             grain_type,
             shard_map,
             shards,
@@ -161,7 +288,7 @@ impl<G: Grain> Gateway<G> {
         // `Terminated` pruned the table must not be handed back. The shard check
         // closes the split/merge race (§7.7): a host activated over the old
         // shard's journal must not serve the name once the partition moved it.
-        if let Some((activated_shard, host)) = self.table.get(&name) {
+        if let Some((activated_shard, host, _)) = self.table.get(&name) {
             if *activated_shard == shard.index
                 && ctx.system().resolve_local::<Host<G>>(host.id()).is_some()
             {
@@ -169,6 +296,12 @@ impl<G: Grain> Gateway<G> {
             }
             self.table.remove(&name);
         }
+        // The activation may append, so a non-resident read floor recorded for
+        // the name is stale from here on (§7.5): the resident cell replaces it.
+        // The epoch bump likewise retires any floor recovery still in flight —
+        // its measured head predates whatever this activation commits.
+        self.floors.remove(&name);
+        self.warm_epoch += 1;
 
         // Otherwise spawn a restartable host that rehydrates from its shard's
         // journal (§9).
@@ -184,6 +317,10 @@ impl<G: Grain> Gateway<G> {
         let grain_type = self.grain_type;
         let alarm_index = self.alarm_index.clone();
         let shard_index = shard.index;
+        // The activation's published committed head (§7.5): unpublished until its
+        // rehydration recovers the grain's head.
+        let committed: CommittedCell = Arc::new(AtomicU64::new(HEAD_UNPUBLISHED));
+        let cell = Arc::clone(&committed);
         let host = ctx.spawn_with(move || {
             Host::new(
                 grain_type,
@@ -195,11 +332,13 @@ impl<G: Grain> Gateway<G> {
                 &capabilities,
                 gateway.clone(),
                 alarm_index.clone(),
+                Arc::clone(&cell),
             )
         });
         // Prune the table when the host stops — idle hibernation or fault (§10).
         ctx.watch(&host);
-        self.table.insert(name, (shard.index, host.clone()));
+        self.table
+            .insert(name, (shard.index, host.clone(), committed));
         host
     }
 
@@ -214,11 +353,13 @@ impl<G: Grain> Gateway<G> {
 impl<G: Grain> Actor for Gateway<G> {
     type System = G::System;
 
-    /// Accept [`Activate`] over the network (spec §5.4). This is the gateway's
-    /// whole network surface — the typed command then travels straight to the
-    /// host (`RunTyped`, registered on [`Host`]).
+    /// Accept [`Activate`] and [`ReadEvents`] over the network (spec §5.4,
+    /// §7.5). This is the gateway's whole network surface — a typed command
+    /// then travels straight to the host (`RunTyped`, registered on [`Host`]),
+    /// while the non-activating read is answered here, touching no host.
     fn register(registry: &mut HandlerRegistry<Gateway<G>>) {
         registry.accept::<Activate<G>>();
+        registry.accept::<ReadEvents<G>>();
     }
 }
 
@@ -237,6 +378,167 @@ impl<G: Grain> Handler<Activate<G>> for Gateway<G> {
         } else {
             Err(GrainError::NotLeader(self.redirect_hint(shard, ctx)))
         }
+    }
+}
+
+impl<G: Grain> Handler<ReadEvents<G>> for Gateway<G> {
+    /// Serve one page of the grain's committed events from the shard's journal
+    /// (spec §7.5), **without** get-or-activating the grain — a poll against a
+    /// hibernated name leaves it hibernated (§10). Single-shot like
+    /// [`Activate`]: a non-leader answers `NotLeader(hint)` at once.
+    ///
+    /// The local store alone cannot tell a committed record from a tentative
+    /// one: a leader writes its own replica before the quorum resolves (§7.2),
+    /// and a fresh leader's store may hold undecided records — or miss committed
+    /// ones — until a `head` recovery read-repairs it (§8). So every page is
+    /// bounded by the grain's **committed-head floor**: the resident
+    /// activation's published head, or, for a hibernated name, a floor recovered
+    /// once per leadership by [`warm`](Gateway::warm) — which also backfills the
+    /// local store, making the read below complete. Records above the floor are
+    /// simply not served yet; no observer sees an unacknowledged write (**G5**).
+    ///
+    /// The await below never leaves this node: `load` is a local, fence-free
+    /// read of the leader's own store (§7.3), resolved from memory on both
+    /// tiers, and the clamp bounds it to one page — so the serial gateway is
+    /// held for a bounded local copy, not for I/O. The recovery, which *is*
+    /// I/O, runs on a spawned task with the caller retrying ([`ReadReply::Warming`]).
+    async fn handle(
+        &mut self,
+        msg: ReadEvents<G>,
+        ctx: &Ctx<Gateway<G>>,
+    ) -> Result<ReadReply, GrainError> {
+        let shard = self.shard_of(msg.name.key());
+        let journal = match self.shard_map.journal(shard.index) {
+            Some(journal) if ctx.system().leads_shard(shard) => journal,
+            _ => return Err(GrainError::NotLeader(self.redirect_hint(shard, ctx))),
+        };
+        let floor = match self.table.get(&msg.name) {
+            // Resident (even if just stopped — the cell only ever holds
+            // committed heads): the activation's published head is the floor.
+            Some((activated_shard, _, committed)) if *activated_shard == shard.index => {
+                let published = committed.load(Ordering::Acquire);
+                if published == HEAD_UNPUBLISHED {
+                    // Mid-rehydration: the head is being recovered; the caller
+                    // retries, exactly as the input gate would have made it wait.
+                    return Ok(ReadReply::Warming);
+                }
+                Seq::new(published)
+            }
+            // Hibernated (or never activated here): a recovered floor, valid
+            // while the leadership it ran under persists (§8 — regaining is a
+            // higher term) and no activation started since (`get_or_activate`
+            // removes it).
+            _ => {
+                let Some(term) = journal.term() else {
+                    return Err(GrainError::NotLeader(self.redirect_hint(shard, ctx)));
+                };
+                match self.floors.get(&msg.name) {
+                    Some((under_shard, under_term, head))
+                        if *under_shard == shard.index && *under_term == term =>
+                    {
+                        *head
+                    }
+                    _ => {
+                        self.warm(msg.name.clone(), shard.index, term, journal, ctx);
+                        return Ok(ReadReply::Warming);
+                    }
+                }
+            }
+        };
+        // At least one record per page, or an empty non-head page could send
+        // the caller's paging loop nowhere forever.
+        let limit = (msg.limit as usize).clamp(1, READ_PAGE);
+        let page = journal
+            .load(&msg.name, msg.from, limit)
+            .await
+            .map_err(|e| GrainError::Unavailable(e.to_string()))?;
+        let loaded = page.len();
+        // Serve only the committed prefix: slots above the floor are an
+        // in-flight append's tentative writes (or undecided leftovers) and are
+        // not served until a commit or recovery raises the floor.
+        let page: Vec<(Seq, Vec<u8>)> = page
+            .into_iter()
+            .take_while(|(seq, _)| *seq <= floor)
+            .collect();
+        let at_head = page.len() < loaded || loaded < limit;
+        let cursor = page.last().map(|(seq, _)| *seq).unwrap_or(msg.from);
+        let events = events_in_page(&page)
+            .map_err(|e| GrainError::Unavailable(e.to_string()))?
+            .into_iter()
+            .map(|(seq, payload)| (seq, payload.to_vec()))
+            .collect();
+        Ok(ReadReply::Page(EventPage {
+            events,
+            cursor,
+            at_head,
+        }))
+    }
+}
+
+impl<G: Grain> Gateway<G> {
+    /// Launch the once-per-leadership floor recovery for a non-resident name
+    /// (§7.5): `journal.head` — on the `Quorum` tier the §8 quorum read-repair,
+    /// which both decides the committed head and backfills this leader's store;
+    /// on the `Local` tier a local read. Runs on a spawned task so the serial
+    /// gateway never awaits it; the result comes back as a local [`Recovered`]
+    /// tell. Deduplicated by `warming`, so a poll storm spawns one recovery.
+    fn warm(
+        &mut self,
+        name: GrainName,
+        shard: u32,
+        term: Term,
+        journal: Arc<dyn crate::journal::DynGrainJournal>,
+        ctx: &Ctx<Gateway<G>>,
+    ) {
+        if !self.warming.insert(name.clone()) {
+            return;
+        }
+        let epoch = self.warm_epoch;
+        let gateway = ctx.this();
+        ctx.system().launch(Box::pin(async move {
+            let head = journal.head(&name).await.ok();
+            // Leadership must have held for the whole recovery: a term still
+            // equal afterwards proves no other node could have appended while
+            // it ran (§8). The serial handler re-checks on arrival, closing the
+            // gap between this check and delivery.
+            let head = head.filter(|_| journal.term() == Some(term));
+            let _ = gateway
+                .tell(Recovered {
+                    name,
+                    shard,
+                    term,
+                    head,
+                    epoch,
+                })
+                .await;
+        }));
+    }
+}
+
+impl<G: Grain> Handler<Recovered> for Gateway<G> {
+    /// Land a spawned floor recovery (§7.5). The floor is recorded only if it is
+    /// still trustworthy on arrival: no activation was spawned since it started
+    /// (the epoch — an activation's appends move the head, even if it already
+    /// hibernated again), the name still resolves to the shard it was recovered
+    /// under (§7.7), and that shard's term is unchanged (no other leadership
+    /// could have appended, §8).
+    async fn handle(&mut self, msg: Recovered, _ctx: &Ctx<Gateway<G>>) {
+        self.warming.remove(&msg.name);
+        let Some(head) = msg.head else { return };
+        if msg.epoch != self.warm_epoch || self.table.contains_key(&msg.name) {
+            return;
+        }
+        let shard = self.shard_of(msg.name.key());
+        let current = self.shard_map.journal(shard.index).and_then(|j| j.term());
+        if shard.index != msg.shard || current != Some(msg.term) {
+            return;
+        }
+        // Bounded like the host cache (§5.4): overflow clears the map, costing
+        // the next read of a dropped name one fresh recovery.
+        if self.floors.len() >= self.config.host_cache_capacity {
+            self.floors.clear();
+        }
+        self.floors.insert(msg.name, (msg.shard, msg.term, head));
     }
 }
 
@@ -273,6 +575,6 @@ impl<G: Grain> Gateway<G> {
 impl<G: Grain> Handler<Terminated> for Gateway<G> {
     async fn handle(&mut self, signal: Terminated, _ctx: &Ctx<Gateway<G>>) {
         // The next message for that name re-activates it (§10).
-        self.table.retain(|_, (_, host)| *host.id() != signal.id);
+        self.table.retain(|_, (_, host, _)| *host.id() != signal.id);
     }
 }

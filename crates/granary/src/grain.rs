@@ -203,6 +203,26 @@ pub trait GrainHandler<M: Message>: Grain {
 /// a `Seq`, decoded, at the journal's real slots.
 pub type EventsFuture<E> = BoxFuture<'static, Result<Vec<(Seq, E)>, GrainJournalError>>;
 
+/// The events among one loaded journal page — the record-to-event projection
+/// (spec §7.9) applied to a `load` page: each record split into facet tag and
+/// payload, facet records (§7.12) skipped, the events returned at the journal's
+/// real slots. Shared by the activation's [`GrainCtx::events`] and the gateway's
+/// non-activating read (§7.5), so the two projections cannot drift. A record
+/// that will not split is corruption — an error, never silently skipped.
+pub(crate) fn events_in_page(
+    page: &[(Seq, Vec<u8>)],
+) -> Result<Vec<(Seq, &[u8])>, GrainJournalError> {
+    let mut events = Vec::new();
+    for (seq, bytes) in page {
+        let (tag, payload) =
+            split_record(bytes).map_err(|e| GrainJournalError::Unavailable(e.to_string()))?;
+        if tag == EVENT_TAG {
+            events.push((*seq, payload));
+        }
+    }
+    Ok(events)
+}
+
 /// The handler/lifecycle context (spec §4.3). It deliberately exposes **no**
 /// `persist` method and no state mutation — state changes only through events
 /// folded by [`Grain::apply`] (§4.2).
@@ -336,13 +356,10 @@ impl<G: Grain> GrainCtx<G> {
             while events.len() < limit {
                 let page = journal.load(&name, cursor, LOAD_PAGE).await?;
                 let at_head = page.len() < LOAD_PAGE;
-                for (seq, bytes) in page {
-                    cursor = seq;
-                    let (tag, payload) = split_record(&bytes)
-                        .map_err(|e| GrainJournalError::Unavailable(e.to_string()))?;
-                    if tag != EVENT_TAG {
-                        continue;
-                    }
+                if let Some((seq, _)) = page.last() {
+                    cursor = *seq;
+                }
+                for (seq, payload) in events_in_page(&page)? {
                     let event = actor_serialization::decode::<G::Event>(&*codec, payload)
                         .map_err(|e| GrainJournalError::Unavailable(e.to_string()))?;
                     events.push((seq, event));

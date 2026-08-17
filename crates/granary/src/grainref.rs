@@ -20,7 +20,10 @@ use crate::alarm_index::index_key;
 use crate::config::GranaryConfig;
 use crate::error::GrainError;
 use crate::gateway::Activate;
+use crate::gateway::EventPage;
 use crate::gateway::Gateway;
+use crate::gateway::ReadEvents;
+use crate::gateway::ReadReply;
 use crate::gateway::gateway_key;
 use crate::grain::Grain;
 use crate::grain::GrainHandler;
@@ -436,20 +439,78 @@ impl<G: Grain> GrainRef<G> {
         }
     }
 
+    /// Up to `limit` of the grain's committed events after `from` (exclusive),
+    /// decoded, in ascending `Seq` order — the remote form of the activation's
+    /// own event projection ([`GrainCtx::events`](crate::GrainCtx::events)),
+    /// served by the shard leader's **gateway** straight from the journal,
+    /// **without get-or-activating the grain** (§7.5): polling a hibernated
+    /// grain leaves it hibernated (§10). A framework built-in like
+    /// [`subscribe`](Self::subscribe), available for every grain type with no
+    /// `GrainHandler` bound.
+    ///
+    /// The returned `Seq`s are the journal's real slots — facet records (§7.12)
+    /// occupy interleaved ones, so consecutive events need not carry consecutive
+    /// `Seq`s. Fewer than `limit` events come back only at the head, so an empty
+    /// result means no event follows `from`; page by re-asking from the last
+    /// `Seq` returned. Read-your-leader like any read (§7.5). A failed or
+    /// corrupt journal read surfaces as [`GrainError::Unavailable`]: transient
+    /// — a read commits nothing, so re-asking is always safe.
+    pub async fn events(
+        &self,
+        from: Seq,
+        limit: usize,
+    ) -> Result<Vec<(Seq, G::Event)>, GrainError> {
+        let deadline = self.system.now() + DEFAULT_ASK_TIMEOUT;
+        let codec = self.system.codec();
+        let mut events = Vec::new();
+        let mut cursor = from;
+        // One redirect-resolved gateway serves every page; a leader move between
+        // pages is re-discovered by the engine, and a read commits nothing, so
+        // re-asking from the cursor is always safe.
+        let mut target = self.gateway.clone();
+        while events.len() < limit {
+            // The wire `limit` bounds the *records scanned* server-side, which
+            // upper-bounds the events returned — one page never overshoots what
+            // this loop still wants.
+            let want = (limit - events.len()).min(u32::MAX as usize) as u32;
+            let reply: ReadReply = self
+                .gateway_ask(
+                    &mut target,
+                    || ReadEvents::new(self.name.clone(), cursor, want),
+                    deadline,
+                )
+                .await?;
+            let page: EventPage = match reply {
+                ReadReply::Page(page) => page,
+                // The gateway is establishing the grain's committed-head floor
+                // (§7.5): back off and re-ask, bounded by the one deadline.
+                ReadReply::Warming => {
+                    if deadline.duration_since(self.system.now()).is_zero() {
+                        return Err(GrainError::Unavailable(
+                            "read deadline exhausted while the gateway recovered the floor".into(),
+                        ));
+                    }
+                    self.system.sleep(RESOLVE_BACKOFF).await;
+                    continue;
+                }
+            };
+            for (seq, payload) in page.events {
+                let event = actor_serialization::decode::<G::Event>(&*codec, &payload)
+                    .map_err(|e| GrainError::Unavailable(e.to_string()))?;
+                events.push((seq, event));
+            }
+            cursor = page.cursor;
+            if page.at_head {
+                break;
+            }
+        }
+        Ok(events)
+    }
+
     /// Resolve the name to its live host (§5.4). With `use_cache`, a cached handle
     /// is returned without touching the gateway (the steady-state fast path);
-    /// otherwise this drives the **client-side bounded redirect** (§5.4 step 4):
-    /// the single-shot gateway answers `Ok(host)` if its node leads the shard, else
-    /// `NotLeader(hint)`, which this follows to that node's gateway, backing off
-    /// while the shard elects, until the leader is found or `deadline` expires. A
-    /// transient miss is waited out rather than surfaced, so a remote call stays
-    /// observably identical to a local one across a failover (invariant **G13**).
-    /// Driving the loop here, not in the gateway's serial handler, keeps one slow
-    /// resolution from blocking another grain's activation on that node.
-    ///
-    /// Bounded by the **caller's** `deadline`, not a per-attempt window, so a
-    /// dispatch that resolves, fails, and re-resolves still returns within the one
-    /// budget (§5.4).
+    /// otherwise the [`gateway_ask`](Self::gateway_ask) redirect engine drives
+    /// [`Activate`] to the leader's gateway and the returned handle is cached.
     async fn resolve(
         &self,
         use_cache: bool,
@@ -459,32 +520,58 @@ impl<G: Grain> GrainRef<G> {
         {
             return Ok(host);
         }
-        // Start at this ref's own gateway: local for a `Granary`-minted ref, the
-        // source node's for a wire-arrived one. Hints and re-discovery move it
-        // toward the leader.
         let mut target = self.gateway.clone();
+        let host = self
+            .gateway_ask(&mut target, || Activate::new(self.name.clone()), deadline)
+            .await?;
+        if let Some(cache) = &self.cache {
+            cache.put(self.name.clone(), host.clone());
+        }
+        Ok(host)
+    }
+
+    /// The **client-side bounded redirect** (§5.4 step 4), generic over the
+    /// gateway request: the single-shot gateway answers `Ok` if its node leads the
+    /// shard, else `NotLeader(hint)`, which this follows to that node's gateway,
+    /// backing off while the shard elects, until the leader answers or `deadline`
+    /// expires. A transient miss is waited out rather than surfaced, so a remote
+    /// call stays observably identical to a local one across a failover (invariant
+    /// **G13**). Driving the loop here, not in the gateway's serial handler, keeps
+    /// one slow resolution from blocking another grain's activation on that node.
+    ///
+    /// `target` starts at this ref's own gateway — local for a `Granary`-minted
+    /// ref, the source node's for a wire-arrived one — and is moved toward the
+    /// leader by hints and re-discovery; it is a `&mut` so a caller issuing
+    /// several requests (a paging read, [`events`](Self::events)) keeps the
+    /// found leader across them. Bounded by the **caller's** `deadline`, not a
+    /// per-attempt window, so a dispatch that resolves, fails, and re-resolves
+    /// still returns within the one budget (§5.4). Safe for the gateway's whole
+    /// surface: an `Activate` commits nothing and a read commits nothing, so
+    /// re-asking after a transport failure cannot double-apply (§2.2).
+    async fn gateway_ask<M, T>(
+        &self,
+        target: &mut ActorRef<Gateway<G>>,
+        make: impl Fn() -> M,
+        deadline: actor_core::Instant,
+    ) -> Result<T, GrainError>
+    where
+        M: Message<Reply = Result<T, GrainError>>,
+        Gateway<G>: actor_core::Handler<M>,
+    {
         for _ in 0..RESOLVE_ATTEMPTS {
             let remaining = deadline.duration_since(self.system.now());
             if remaining.is_zero() {
                 break;
             }
             let attempt = remaining.min(FORWARD_TIMEOUT);
-            match target
-                .ask_timeout(Activate::new(self.name.clone()), attempt)
-                .await
-            {
-                Ok(Ok(host)) => {
-                    if let Some(cache) = &self.cache {
-                        cache.put(self.name.clone(), host.clone());
-                    }
-                    return Ok(host);
-                }
+            match target.ask_timeout(make(), attempt).await {
+                Ok(Ok(reply)) => return Ok(reply),
                 // Follow the leader hint. If that gateway is not (yet) discoverable,
                 // keep the current target and back off — the shard is still electing
                 // or the gateway has not gossiped in.
                 Ok(Err(GrainError::NotLeader(hint))) => {
                     if let Some(gateway) = self.gateway_on(hint) {
-                        target = gateway;
+                        *target = gateway;
                     }
                 }
                 // A genuine durability outcome (quorum loss / unhandled): surface it.
@@ -493,7 +580,7 @@ impl<G: Grain> GrainRef<G> {
                 // gateway to redirect from, excluding the one that just failed.
                 Err(_) => {
                     if let Some(gateway) = self.gateway_excluding(target.id().node()) {
-                        target = gateway;
+                        *target = gateway;
                     }
                 }
             }

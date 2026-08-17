@@ -321,6 +321,70 @@ fn committed_state_survives_shard_leader_failover() {
 }
 
 #[test]
+fn a_gateway_read_on_a_fresh_leader_serves_the_committed_journal() {
+    // §7.5: after a failover, the new leader's local store may be missing
+    // committed records (it was not necessarily in every write quorum) and may
+    // hold undecided ones. The non-activating read must therefore recover its
+    // committed-head floor — the §8 read-repair, which backfills the store —
+    // before serving, and then return exactly the committed sequence: nothing
+    // omitted, nothing invented, and no activation triggered to get it.
+    let sim = Simulation::new(5);
+    let (net, systems, granaries) = cluster(&sim);
+    let key = "account/9";
+    let leader = granaries[0]
+        .leader(key)
+        .expect("the shard elected a leader");
+    let caller = systems
+        .iter()
+        .position(|s| s.node() != leader)
+        .expect("a non-leader caller survives the crash");
+
+    // Commit three deposits through the original leader.
+    for cents in [1u64, 2, 3] {
+        let granary = granaries[caller].clone();
+        let committed = drive(&sim, Duration::from_secs(8), async move {
+            granary.grain(key).ask(Deposit { cents }).await
+        });
+        assert!(
+            committed.is_ok(),
+            "deposit of {cents} commits: {committed:?}"
+        );
+    }
+
+    // Crash the leader; the surviving quorum re-elects.
+    net.crash(leader);
+    sim.run_for(Duration::from_secs(6));
+
+    // Tail the journal from a survivor with no activating command in between:
+    // the fresh leader's gateway warms the floor and serves the exact history.
+    let events = {
+        let granary = granaries[caller].clone();
+        drive(&sim, Duration::from_secs(30), async move {
+            loop {
+                // Transient failures (still electing, the floor recovery
+                // outliving one read deadline) and a stale-empty page are
+                // retried; every await advances virtual time.
+                match granary.grain(key).events(granary::Seq::ZERO, 16).await {
+                    Ok(events) if !events.is_empty() => return events,
+                    _ => {}
+                }
+            }
+        })
+    };
+    assert_eq!(
+        events
+            .iter()
+            .map(|(seq, event)| match event {
+                Ledger::Deposited(n) => (seq.value(), *n),
+                Ledger::Withdrew(n) => panic!("no withdrawal was committed: {n}"),
+            })
+            .collect::<Vec<_>>(),
+        vec![(1, 1), (2, 2), (3, 3)],
+        "the committed sequence reads back whole from the fresh leader",
+    );
+}
+
+#[test]
 fn a_graceful_handoff_moves_shard_leadership_without_an_election_timeout() {
     // §8.3: a departing node hands its shards to caught-up replicas instead of
     // stopping and letting each shard wait out a leader-election timeout. The

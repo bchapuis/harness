@@ -183,6 +183,74 @@ fn hibernated_grain_reactivates_with_state() {
     );
 }
 
+// --- The non-activating read: observation leaves hibernation alone (§7.5) -----
+
+#[test]
+fn a_gateway_read_leaves_a_hibernated_grain_asleep() {
+    let sim = Simulation::new(11);
+    let recorder = Recorder::new();
+    let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
+        .events(sink)
+        .build();
+    let counters = system.granary::<CounterGrain>(GranaryConfig {
+        idle_after: Duration::from_millis(10),
+        ..GranaryConfig::default()
+    });
+
+    let counter = counters.grain("counter/0");
+    sim.block_on(async move {
+        for _ in 0..3 {
+            counter.ask(Add(1)).await.expect("add commits");
+        }
+    });
+
+    // Drive past the idle window: the grain hibernates.
+    sim.run();
+    assert!(
+        recorder.events().iter().any(|e| matches!(
+            e.as_app::<GrainEvent>(),
+            Some(GrainEvent::Passivated { .. })
+        )),
+        "the idle grain must hibernate",
+    );
+
+    // The gateway serves the committed events from the journal (§7.5): correct
+    // content, ascending real slots, short only at the head.
+    let reread = counters.grain("counter/0");
+    let events = sim.block_on(async move {
+        reread
+            .events(granary::Seq::ZERO, 100)
+            .await
+            .expect("a read after hibernation succeeds")
+    });
+    assert_eq!(events.len(), 3, "all committed events come back");
+    assert!(
+        events
+            .iter()
+            .all(|(_, e)| matches!(e, CounterEvent::Added(1))),
+        "the events decode to what was committed",
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|(seq, _)| seq.value())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "a facetless grain's events sit at consecutive journal slots",
+    );
+
+    // ...and reading woke nothing: the one activation is the write-time one,
+    // and no rehydration followed the hibernation (§10).
+    sim.run();
+    let activated = recorder
+        .events()
+        .iter()
+        .filter(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Activated { .. })))
+        .count();
+    assert_eq!(activated, 1, "a poll must not wake a hibernated grain");
+}
+
 // --- can_passivate: a grain that vetoes idle hibernation (§10) ----------------
 
 /// A grain that never permits idle hibernation. The agentic harness overrides

@@ -328,6 +328,13 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         AppendOutcome::NotLeader(self.election.leader_hint())
     }
 
+    /// The term this node leads the shard under right now, or `None` when it
+    /// does not lead — the journal seam's leadership token
+    /// ([`GrainJournal::term`](crate::journal::GrainJournal::term)).
+    pub(crate) fn leadership_term(&self) -> Option<Term> {
+        self.election.term().filter(|_| self.election.is_leader())
+    }
+
     /// The fan-out peers of `sets` other than this node (the leader writes its own
     /// store locally, §5.2): `current ∪ target` during a migration.
     fn peers_of(&self, sets: &ReplicaSets) -> Vec<NodeId> {
