@@ -29,7 +29,6 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -80,9 +79,9 @@ use crate::session::SessionId;
 use crate::session::SessionState;
 use crate::session::Turn;
 use crate::session::TurnId;
-use crate::session::content_digest;
 use crate::session::derive_child;
 use crate::session::outcome_label;
+use crate::session::turn_digest;
 use crate::tool::DELEGATE;
 use crate::tool::DelegateInput;
 use crate::tool::OnDangling;
@@ -138,9 +137,11 @@ pub struct Accepted {
 /// What a `Submit` did (§7.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubmitStatus {
-    /// A fresh run was started (its turn newly journaled or queued).
+    /// A fresh turn was accepted and journaled; its run starts when it
+    /// reaches the head of the session's queue (§7.3).
     Started,
-    /// The `TurnId` named a live run; the `reply_to` was registered on it (H7).
+    /// The `TurnId` named a queued or live turn; the `reply_to` was registered
+    /// on it (H7).
     Attached,
     /// The `TurnId` named an ended run; its recorded outcome is delivered to the
     /// `reply_to` immediately (H7).
@@ -160,8 +161,10 @@ pub enum SubmitReject {
         addressed: KindId,
         submitted: KindId,
     },
-    /// The `TurnId` was already used for different content (§7.4): turn ids are
-    /// the dedup key, so reusing one for new content is a bug, never a retry.
+    /// The `TurnId` was already used for a different turn (§7.4): the equality
+    /// check covers the content and the literal budget field (`None` ≠
+    /// `Some(default)`), and turn ids are the dedup key, so reusing one for a
+    /// changed turn is a bug, never a retry.
     ContentConflict { turn: TurnId },
 }
 
@@ -176,7 +179,10 @@ impl std::fmt::Display for SubmitReject {
                 "kind mismatch: addressed grain type '{addressed}', submitted as '{submitted}'"
             ),
             SubmitReject::ContentConflict { turn } => {
-                write!(f, "turn {turn} re-submitted with different content")
+                write!(
+                    f,
+                    "turn {turn} re-submitted with different content or budget"
+                )
             }
         }
     }
@@ -385,9 +391,6 @@ struct Activation<S: HarnessSystem> {
     run: RunScope,
     /// Run-boundary events awaiting their records' commit (§10.4).
     events: EventOutbox,
-    /// Turns accepted but not yet journaled — they start when the journal shows
-    /// no live run (§3.1): the runs are serialized, one at a time.
-    queue: VecDeque<(Turn, Option<Lineage>)>,
     /// Callers registered for a run's outcome (§7.4): notified on `RunEnded`,
     /// rebuilt by callers re-contacting after a resume.
     subscribers: BTreeMap<TurnId, Vec<ActorRef<ReplyMailbox<S>>>>,
@@ -420,7 +423,6 @@ impl<S: HarnessSystem> Default for Activation<S> {
             env: SandboxState::default(),
             run: RunScope::default(),
             events: EventOutbox::default(),
-            queue: VecDeque::new(),
             subscribers: BTreeMap::new(),
             cancels_launched: BTreeSet::new(),
         }
@@ -531,11 +533,13 @@ impl<S: HarnessSystem> Agent<S> {
             );
         }
         let turn_id = msg.turn.id.clone();
-        let digest = content_digest(&msg.turn.content);
+        let digest = turn_digest(&msg.turn.content, msg.turn.budget);
         let mut act = self.lock();
 
-        // Dedup against the journal (§7.4): the recorded outcome, or an attach to
-        // the live run — never a second run (H7).
+        // Dedup against the journal (§7.4): every accepted turn — queued, live,
+        // or ended — has folded facts, so one check covers all three (H7). The
+        // digest spans content and the literal budget, so a re-submission that
+        // changes either is a conflict, never a silent attach.
         if let Some(facts) = state.turns.get(&turn_id) {
             if facts.content_digest != digest {
                 return (
@@ -559,8 +563,8 @@ impl<S: HarnessSystem> Agent<S> {
                 }
                 None => {
                     act.subscribe(&turn_id, msg.reply_to);
-                    // A live run with a fresh attachment may be resuming on this
-                    // activation: nudge it forward.
+                    // A queued or live turn re-contacted after a resume may be
+                    // waiting on this very nudge (§7.5): drive the dispatcher.
                     drop(act);
                     self.schedule_advance(ctx);
                     (
@@ -574,54 +578,26 @@ impl<S: HarnessSystem> Agent<S> {
             };
         }
 
-        // Dedup against a queued-but-unstarted turn (ephemeral, §7.4).
-        if act.queue.iter().any(|(t, _)| t.id == turn_id) {
-            act.subscribe(&turn_id, msg.reply_to);
-            return (
-                Vec::new(),
-                Ok(Accepted {
-                    turn: turn_id,
-                    status: SubmitStatus::Attached,
-                }),
-            );
-        }
-
-        // A new turn.
+        // A new turn: journal its acceptance — the committing append releases
+        // the ack, so an acked turn is durable (§7.3). The run itself starts
+        // in the dispatcher when the turn reaches the queue's head with no run
+        // live (`start_next_turn`, the one run-start site); the post-commit
+        // `Advance` gets it there without a second caller contact.
         act.subscribe(&turn_id, msg.reply_to);
-        if state.live.is_none() && act.queue.is_empty() {
-            // Start now: journal SessionCreated (if first) + TurnSubmitted.
-            // This submit may be processed between the previous run's terminal
-            // commit and the post-end `Advance` that would have swept the
-            // per-run state (`start_next_turn`), so sweep it here too: stale
-            // `launched` claims / `resolved` ids from the ended run must not
-            // suppress this run's calls — synthesized `call-{step}-{i}` ids
-            // repeat across runs, and so do the step-keyed model claims.
-            let batch = self.begin_turn(state, ctx, self.kind(), &mut act, msg.turn, msg.parent);
-            drop(act);
-            self.schedule_advance(ctx);
-            (
-                batch,
-                Ok(Accepted {
-                    turn: turn_id,
-                    status: SubmitStatus::Started,
-                }),
-            )
-        } else {
-            // Serialize behind the live/queued run (§3.1).
-            act.queue.push_back((msg.turn, msg.parent));
-            (
-                Vec::new(),
-                Ok(Accepted {
-                    turn: turn_id,
-                    status: SubmitStatus::Started,
-                }),
-            )
-        }
+        drop(act);
+        self.schedule_advance(ctx);
+        (
+            self.accept_records(state, ctx, self.kind(), msg.turn, msg.parent),
+            Ok(Accepted {
+                turn: turn_id,
+                status: SubmitStatus::Started,
+            }),
+        )
     }
 
-    /// The records that start a turn: `SessionCreated` on the very first turn,
-    /// then `TurnSubmitted` (§3.1, §7.1).
-    fn start_records(
+    /// The records that accept a turn: `SessionCreated` on the very first turn,
+    /// then `TurnSubmitted` (§7.1, §7.3) — the enqueue, not the run start.
+    fn accept_records(
         &self,
         state: &SessionState,
         ctx: &GrainCtx<Agent<S>>,
@@ -643,6 +619,7 @@ impl<S: HarnessSystem> Agent<S> {
                 },
             ));
         }
+        let explicit = turn.budget.is_some();
         let budget = turn.budget.unwrap_or(kind.default_budget);
         batch.push(self.rec(
             ctx,
@@ -650,6 +627,7 @@ impl<S: HarnessSystem> Agent<S> {
                 turn: turn.id,
                 content: turn.content,
                 budget,
+                explicit,
             },
         ));
         batch
@@ -661,14 +639,15 @@ impl<S: HarnessSystem> Agent<S> {
         turn: TurnId,
         ctx: &GrainCtx<Agent<S>>,
     ) -> Vec<Record> {
-        let mut act = self.lock();
-        // A cancel naming the live run ends it; one naming an ended, queued, or
-        // unknown run is an idempotent no-op (§9.2 item 1). The run's recorded
+        // A cancel naming the live run ends it; one naming a queued turn ends
+        // that turn before it ever starts; one naming an ended or unknown run
+        // is an idempotent no-op (§9.2 item 1). The live run's recorded
         // children are not captured here: the fold moves them into
         // `cancels_owed` when the `RunEnded { Cancelled }` commits, and the
         // post-commit `Advance` propagates from that (§9.2 item 2) — so the
         // debt survives a crash in between.
         if state.live.as_ref().is_some_and(|l| l.turn == turn) {
+            let mut act = self.lock();
             act.events.ended.push(turn.clone());
             drop(act);
             self.schedule_advance(ctx);
@@ -679,20 +658,23 @@ impl<S: HarnessSystem> Agent<S> {
                     outcome: Err(RunError::Cancelled),
                 },
             )]
-        } else if let Some(i) = act.queue.iter().position(|(t, _)| t.id == turn) {
-            // Not yet journaled: drop it and notify any attached caller.
-            act.queue.remove(i);
-            let subs = act.subscribers.remove(&turn).unwrap_or_default();
-            drop(act);
-            for sub in subs {
-                self.notify_one(ctx, sub, &turn, Err(RunError::Cancelled));
-            }
-            Vec::new()
+        } else if state.queue.iter().any(|q| q.turn == turn) {
+            // Queued, never started (§9.2): the terminal record alone moves
+            // the fold — the queue entry drops, and the post-commit `Advance`
+            // notifies subscribers off the recorded outcome. No run began, so
+            // no `RunStarted`/`RunEnded` event pair is owed (§10.4).
+            self.schedule_advance(ctx);
+            vec![self.rec(
+                ctx,
+                RecordBody::RunEnded {
+                    turn,
+                    outcome: Err(RunError::Cancelled),
+                },
+            )]
         } else {
             // A re-sent cancel is a documented resume trigger (§7.5): if this
             // session still owes propagations (a crash lost the earlier send),
             // drive them now.
-            drop(act);
             if !state.cancels_owed.is_empty() {
                 self.schedule_advance(ctx);
             }
@@ -890,7 +872,7 @@ impl<S: HarnessSystem> Agent<S> {
 
         // (b) No live run: reset per-run flags and start the next queued turn.
         let Some(live) = state.live.as_ref() else {
-            return self.start_next_turn(state, ctx, kind, &mut act);
+            return self.start_next_turn(state, ctx, &mut act);
         };
         let turn = live.turn.clone();
 
@@ -909,40 +891,31 @@ impl<S: HarnessSystem> Agent<S> {
         self.dispatch_pending(state, ctx, kind, &mut act, live, &turn)
     }
 
-    /// Begin a run: sweep the per-run scope, enqueue the `RunStarted` boundary
-    /// event, and produce the turn's start records. The three steps stay in this
-    /// order — `run.reset()` must precede producing records, or stale
-    /// `launched`/`resolved` claims from the ended run suppress the new run's
-    /// synthesized calls (see the note in [`on_submit`](Self::on_submit)). Shared
-    /// by the fresh-submit and queued-turn paths.
-    fn begin_turn(
-        &self,
-        state: &SessionState,
-        ctx: &GrainCtx<Agent<S>>,
-        kind: &Kind,
-        act: &mut Activation<S>,
-        turn: Turn,
-        parent: Option<Lineage>,
-    ) -> Vec<Record> {
-        act.run.reset();
-        act.events.started.push(turn.id.clone());
-        self.start_records(state, ctx, kind, turn, parent)
-    }
-
-    /// (b) No live run: clear the per-run flags, then start the next queued turn
-    /// if one is waiting (§3.1). Returns the records to journal — empty when the
-    /// queue is empty and the grain goes idle.
+    /// (b) No live run: sweep the per-run scope, then start the fold queue's
+    /// head turn if one waits (§3.1) — the **one** place a run starts.
+    /// Committing the returned `TurnStarted` folds the head into `live` and is
+    /// what makes `RunStarted` fire exactly once per turn (§10.4); the
+    /// post-commit re-advance dispatches the new run's first model call. The
+    /// sweep precedes the record: stale `launched`/`resolved` claims from the
+    /// ended run must not suppress the new run's calls — synthesized
+    /// `call-{step}-{i}` ids repeat across runs, and so do the step-keyed
+    /// model claims.
     fn start_next_turn(
         &self,
         state: &SessionState,
         ctx: &GrainCtx<Agent<S>>,
-        kind: &Kind,
         act: &mut Activation<S>,
     ) -> Vec<Record> {
-        if let Some((turn, parent)) = act.queue.pop_front() {
-            return self.begin_turn(state, ctx, kind, act, turn, parent);
-        }
         act.run.reset();
+        if let Some(next) = state.queue.front() {
+            act.events.started.push(next.turn.clone());
+            return vec![self.rec(
+                ctx,
+                RecordBody::TurnStarted {
+                    turn: next.turn.clone(),
+                },
+            )];
+        }
         Vec::new()
     }
 
@@ -1744,16 +1717,15 @@ impl<S: HarnessSystem> Grain for Agent<S> {
     }
 
     fn can_passivate(&self, state: &SessionState) -> bool {
-        // Never hibernate a session whose run is live (§7.2): no live run, no
-        // queued turn, and no launched effect whose outcome could still arrive
-        // (the guard's claims are swept by the post-end `Advance`).
-        if state.live.is_some() {
+        // Never hibernate a session whose run is live or whose fold queue
+        // holds an accepted turn (§7.2) — both mean work is owed now — nor one
+        // with a launched effect whose outcome could still arrive (the guard's
+        // claims are swept by the post-end `Advance`).
+        if state.live.is_some() || !state.queue.is_empty() {
             return false;
         }
         let act = self.lock();
-        act.queue.is_empty()
-            && act.run.launched.is_idle()
-            && !matches!(act.env.slot, SandboxSlot::Opening)
+        act.run.launched.is_idle() && !matches!(act.env.slot, SandboxSlot::Opening)
     }
 }
 

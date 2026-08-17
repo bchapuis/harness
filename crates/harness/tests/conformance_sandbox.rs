@@ -170,7 +170,7 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
     assert_eq!(
         record_kinds(&records.lock().unwrap()),
         vec![
-            "created", "turn", "model", "tool", "reset", "model", "tool", "model", "ended"
+            "created", "turn", "started", "model", "tool", "reset", "model", "tool", "model", "ended"
         ],
     );
     // The loss tore down one environment; the next call opened a fresh one (§5.5)
@@ -225,7 +225,7 @@ fn a_durable_workspace_still_resets_on_a_genuine_mid_run_loss() {
     assert_eq!(
         record_kinds(&records.lock().unwrap()),
         vec![
-            "created", "turn", "model", "tool", "reset", "model", "tool", "model", "ended"
+            "created", "turn", "started", "model", "tool", "reset", "model", "tool", "model", "ended"
         ],
     );
 }
@@ -380,7 +380,7 @@ fn a_tier_is_acquired_under_a_journaled_record_before_its_first_effect() {
     assert_eq!(
         record_kinds(&records),
         vec![
-            "created", "turn", "model", "tool", "model", "tier", "tool", "model", "ended"
+            "created", "turn", "started", "model", "tool", "model", "tier", "tool", "model", "ended"
         ],
     );
     let acquired: Vec<Tier> = records
@@ -479,7 +479,7 @@ fn a_reset_restarts_the_held_set_and_reacquisition_is_rejournaled() {
     assert_eq!(
         record_kinds(&records),
         vec![
-            "created", "turn", "model", "tier", "tool", "reset", "model", "tier", "tool", "model",
+            "created", "turn", "started", "model", "tier", "tool", "reset", "model", "tier", "tool", "model",
             "ended"
         ],
     );

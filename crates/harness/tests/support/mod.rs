@@ -93,6 +93,7 @@ pub fn record_kind(body: &harness::RecordBody) -> &'static str {
     match body {
         harness::RecordBody::SessionCreated { .. } => "created",
         harness::RecordBody::TurnSubmitted { .. } => "turn",
+        harness::RecordBody::TurnStarted { .. } => "started",
         harness::RecordBody::ModelResponse { .. } => "model",
         harness::RecordBody::ToolOutcome { .. } => "tool",
         harness::RecordBody::ChildRun { .. } => "child",

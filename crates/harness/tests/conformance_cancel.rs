@@ -97,6 +97,94 @@ fn a_cancel_takes_effect_during_a_model_call() {
 }
 
 #[test]
+fn a_cancel_of_a_queued_turn_is_a_journaled_terminal_without_a_run() {
+    // Timeline (10s model calls): t=0 run A starts and its call flies to t=10;
+    // t=1 turn B is accepted behind it — fold state, not activation memory
+    // (§7.3); t=2 a re-submission of B with different content is rejected off
+    // the journal (§7.4 — the dedup covers queued turns); t=3 B is cancelled:
+    // its `RunEnded { Cancelled }` journals with no run ever starting (§9.2),
+    // and B's waiting prompt resolves from the recorded outcome. A is
+    // untouched and completes at t=10.
+    let records: Arc<Mutex<Vec<Record>>> = Arc::default();
+    let sink = Arc::clone(&records);
+    let make_model = |system: &SimSystem| -> Arc<dyn Model> {
+        Arc::new(SlowModel {
+            inner: Arc::new(ScriptedModel::new(|_| Ok(final_message("done")))),
+            clock: system.clock().clone(),
+            delay: Duration::from_secs(10),
+        })
+    };
+    let workload = Scenario::from_factories(
+        "cancel-queued",
+        Kinds::new().register("echo", Kind::new("agent")),
+        Arc::new(make_model),
+        Arc::new(|_| Arc::new(ScriptedSandboxes::echo())),
+        move |harness, system| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move {
+                let clock = system.clock().clone();
+                let session = harness.session("echo", SessionId::new("s-q"));
+                let prompt_a = session.prompt(Turn::new(TurnId::new("t-a"), "a"));
+                let prompt_b = {
+                    let session = session.clone();
+                    let clock = clock.clone();
+                    async move {
+                        clock.sleep(Duration::from_secs(1)).await;
+                        session.prompt(Turn::new(TurnId::new("t-b"), "b")).await
+                    }
+                };
+                let driver = {
+                    let session = session.clone();
+                    let clock = clock.clone();
+                    async move {
+                        clock.sleep(Duration::from_secs(2)).await;
+                        // The queued turn is dedup-checked like any other (§7.4):
+                        // same TurnId, different content — a caller bug, rejected.
+                        let conflict = session.prompt(Turn::new(TurnId::new("t-b"), "not b")).await;
+                        assert!(conflict.is_err(), "queued re-submit content-checked");
+                        clock.sleep(Duration::from_secs(1)).await;
+                        session.cancel(&TurnId::new("t-b")).await.expect("cancel");
+                    }
+                };
+                let (a, b, ()) = futures::join!(prompt_a, prompt_b, driver);
+                assert_eq!(a.expect("submit a").expect("run a").text(), "done");
+                assert_eq!(b.expect("submit b"), Err(RunError::Cancelled));
+                // The recorded outcome survives for any later re-contact (H7).
+                let again = session.prompt(Turn::new(TurnId::new("t-b"), "b")).await;
+                assert_eq!(again.expect("re-submit b"), Err(RunError::Cancelled));
+                flush(&system).await;
+                *sink.lock().unwrap() = tail_records(&session).await;
+            })
+        },
+    );
+    run_seed(&workload, 59).expect("invariants hold");
+
+    // B ends by record without ever starting: its terminal commits mid-run-A,
+    // and only A has a `TurnStarted` (§9.2; the checkers verify no event pair
+    // fired for B).
+    let records = records.lock().unwrap();
+    assert_eq!(
+        support::record_kinds(&records),
+        vec![
+            "created", "turn", "started", "turn", "ended", "model", "ended"
+        ],
+        "the queued cancel is a journaled transition; journal was: {records:#?}"
+    );
+    let started: Vec<_> = records
+        .iter()
+        .filter_map(|r| match &r.body {
+            RecordBody::TurnStarted { turn } => Some(turn.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        started,
+        vec!["t-a"],
+        "the cancelled queued turn never started"
+    );
+}
+
+#[test]
 fn a_cancel_for_an_ended_or_unknown_run_is_a_no_op() {
     let model = Arc::new(ScriptedModel::steps(vec![Ok(final_message("done"))]));
     let sandboxes = Arc::new(ScriptedSandboxes::echo());

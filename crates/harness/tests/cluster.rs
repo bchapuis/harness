@@ -518,6 +518,149 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
     assert_invariants(&sink.events());
 }
 
+// -- crash-window queued turn (§7.3, §7.5) -----------------------------------
+
+/// The R2 crash window: a turn acked *behind* a live run is fold state
+/// (`TurnSubmitted` enqueues, §7.3), so a leader crash between the ack and the
+/// run start loses nothing. The sharpest form is asserted here: after the
+/// crash, only the *first* turn's caller ever re-contacts the session, yet the
+/// queued second turn still runs to completion — any contact drives the
+/// dispatcher, which starts the queue head once no run is live (§7.5).
+#[test]
+fn an_acked_queued_turn_survives_a_leader_crash_and_runs_on_resume() {
+    let sim = Simulation::new(31);
+    let sink = CollectingSink::default();
+    let net = SimNetwork::new(&sim)
+        .with_leader(SwimConfig::default(), raft(), DowningPolicy::Conservative)
+        .with_events(Arc::new(sink.clone()));
+    let systems = [net.join(A), net.join(B), net.join(C)];
+    sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
+    // Every model call is a 600s final message: long enough to hold the queue
+    // open across the crash, short enough for the settle windows below.
+    let model: Arc<dyn harness::Model> = Arc::new(SlowModel {
+        inner: Arc::new(ScriptedModel::new(|_| Ok(final_message("done")))),
+        clock: sim.clock(),
+        delay: Duration::from_secs(600),
+    });
+    let harnesses: Vec<Harness<SimNode>> = systems
+        .iter()
+        .map(|s| {
+            Harness::cluster(
+                s.clone(),
+                &kinds(),
+                Arc::clone(&model),
+                Arc::new(ScriptedSandboxes::echo()),
+            )
+        })
+        .collect();
+    sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
+
+    // t-1 starts its 600s model call; t-2 is then accepted behind it. Both
+    // submitters fire and forget — neither returns after the crash.
+    for turn in ["t-1", "t-2"] {
+        let session = harnesses[0].session("worker", SessionId::new("s-queued"));
+        sim.spawner().launch(Box::pin(async move {
+            let _ = session
+                .prompt_within(
+                    Turn::new(TurnId::new(turn), "go"),
+                    Duration::from_secs(30_000),
+                )
+                .await;
+        }));
+        sim.run_for(Duration::from_secs(2));
+    }
+    // The ack committed: both turns are journaled, one started, none ended.
+    let before = await_journal(
+        &sim,
+        &harnesses[0],
+        "worker",
+        &SessionId::new("s-queued"),
+        Duration::from_secs(10),
+        |bodies| {
+            bodies
+                .iter()
+                .filter(|b| matches!(b, RecordBody::TurnSubmitted { .. }))
+                .count()
+                == 2
+        },
+    );
+    assert_eq!(
+        before
+            .iter()
+            .filter(|b| matches!(b, RecordBody::TurnStarted { .. }))
+            .count(),
+        1,
+        "t-2 is accepted but not started while t-1's run is live"
+    );
+
+    // Crash the session's leader mid-run, with t-2 still queued.
+    let leader = last_activation(&sink, "s-queued").expect("session activated");
+    net.crash(leader);
+    sim.run_for(Duration::from_secs(3)); // re-elect
+
+    let spare = *[A, B, C].iter().find(|n| **n != leader).expect("survivor");
+    let surviving = harnesses[[A, B, C].iter().position(|n| *n == spare).unwrap()].clone();
+
+    // Only t-1's caller re-contacts (§7.5): the attach resumes the run on the
+    // new leader; its re-issued 600s call completes it.
+    let first = drive(&sim, Duration::from_secs(700), {
+        let session = surviving.session("worker", SessionId::new("s-queued"));
+        async move {
+            loop {
+                if let Ok(Ok(c)) = session
+                    .prompt_within(
+                        Turn::new(TurnId::new("t-1"), "go"),
+                        Duration::from_secs(650),
+                    )
+                    .await
+                {
+                    return c.text().to_string();
+                }
+            }
+        }
+    });
+    assert_eq!(first, "done");
+
+    // Nobody ever re-contacts t-2, yet it runs: the dispatcher starts the
+    // fold's queue head once t-1's terminal record commits.
+    let bodies = await_journal(
+        &sim,
+        &surviving,
+        "worker",
+        &SessionId::new("s-queued"),
+        Duration::from_secs(700),
+        |bodies| {
+            bodies
+                .iter()
+                .filter(|b| matches!(b, RecordBody::RunEnded { .. }))
+                .count()
+                == 2
+        },
+    );
+    let submitted = bodies
+        .iter()
+        .filter(|b| matches!(b, RecordBody::TurnSubmitted { .. }))
+        .count();
+    let started: Vec<&TurnId> = bodies
+        .iter()
+        .filter_map(|b| match b {
+            RecordBody::TurnStarted { turn } => Some(turn),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        submitted, 2,
+        "the re-contact deduped, never re-journaled (H7)"
+    );
+    assert_eq!(started.len(), 2, "each turn started exactly once");
+    assert!(
+        started.iter().any(|t| t.as_str() == "t-2"),
+        "the acked queued turn started without its caller returning"
+    );
+
+    assert_invariants(&sink.events());
+}
+
 fn assert_invariants(events: &[Event]) {
     let violations = check_events(events);
     assert!(violations.is_empty(), "checkers: {violations:?}");

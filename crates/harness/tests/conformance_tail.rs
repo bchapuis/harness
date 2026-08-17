@@ -103,7 +103,7 @@ fn tail_leaves_a_hibernated_session_asleep() {
     let kinds_seen = record_kinds(&page.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>());
     assert_eq!(
         kinds_seen,
-        vec!["created", "turn", "model", "tool", "model", "ended"],
+        vec!["created", "turn", "started", "model", "tool", "model", "ended"],
         "the full record sequence reads back across hibernation",
     );
     assert!(

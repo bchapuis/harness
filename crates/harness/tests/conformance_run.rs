@@ -86,7 +86,7 @@ fn a_final_message_completes_the_run() {
     // The journal is the session (§2.1): audit the record order (§6.4).
     assert_eq!(
         record_kinds(&records.lock().unwrap()),
-        vec!["created", "turn", "model", "ended"],
+        vec!["created", "turn", "started", "model", "ended"],
         "write-ahead order (§6.4)"
     );
 }
@@ -125,7 +125,9 @@ fn the_tool_loop_journals_intent_before_effect() {
 
     assert_eq!(
         record_kinds(&records.lock().unwrap()),
-        vec!["created", "turn", "model", "tool", "model", "ended"],
+        vec![
+            "created", "turn", "started", "model", "tool", "model", "ended"
+        ],
         "intent precedes effect; outcome precedes the next step (§6.4)"
     );
     // The workspace executed exactly the declared call (§5.2) and was released by
@@ -189,6 +191,77 @@ fn resubmitting_a_turn_never_starts_a_second_run() {
 }
 
 #[test]
+fn a_resubmission_that_changes_the_budget_is_a_conflict() {
+    // §7.4: the turn-equality check covers the literal budget field, so a
+    // re-submitted TurnId with a different budget is a caller bug, not a
+    // silent attach — and `None` is not `Some(default)`, so the rejection
+    // never depends on the kind's current default.
+    let model = Arc::new(ScriptedModel::new(|_| Ok(final_message("once"))));
+    let sandboxes = Arc::new(ScriptedSandboxes::echo());
+    let records: Arc<Mutex<Vec<Record>>> = Arc::default();
+    let sink = Arc::clone(&records);
+    let workload = Scenario::new(
+        "budget-conflict",
+        echo_kind(),
+        model,
+        sandboxes,
+        move |harness, system| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move {
+                let session = harness.session("echo", SessionId::new("s-6"));
+                let outcome = session
+                    .prompt(Turn::new(TurnId::new("t-1"), "go"))
+                    .await
+                    .expect("call")
+                    .expect("run");
+                assert_eq!(outcome.text(), "once");
+                // Same content, explicit budget equal to the kind's default:
+                // the literal differs (None vs Some), so it conflicts.
+                let some_default = session
+                    .prompt(
+                        Turn::new(TurnId::new("t-1"), "go").with_budget(Budget::new(10_000, 10)),
+                    )
+                    .await;
+                assert!(
+                    matches!(some_default, Err(GrainError::Call(CallError::System(_)))),
+                    "Some(default) is not None (§7.4)"
+                );
+                // An identical literal budget re-attaches and returns the
+                // recorded outcome; a changed one conflicts.
+                let budgeted =
+                    Turn::new(TurnId::new("t-2"), "go").with_budget(Budget::new(9_000, 9));
+                let first = session
+                    .prompt(budgeted.clone())
+                    .await
+                    .expect("call")
+                    .expect("run");
+                assert_eq!(first.text(), "once");
+                let again = session.prompt(budgeted).await.expect("call").expect("run");
+                assert_eq!(again.text(), "once");
+                let changed = session
+                    .prompt(Turn::new(TurnId::new("t-2"), "go").with_budget(Budget::new(8_000, 9)))
+                    .await;
+                assert!(matches!(
+                    changed,
+                    Err(GrainError::Call(CallError::System(_)))
+                ));
+                *sink.lock().unwrap() = tail_records(&session).await;
+                flush(&system).await;
+            })
+        },
+    );
+    run_seed(&workload, 29).expect("invariants hold");
+
+    let turns = records
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| matches!(r.body, RecordBody::TurnSubmitted { .. }))
+        .count();
+    assert_eq!(turns, 2, "the conflicting re-submissions journaled nothing");
+}
+
+#[test]
 fn turns_are_serialized_by_the_journal() {
     let model = Arc::new(ScriptedModel::new(|req| {
         let user_turns = req
@@ -230,12 +303,29 @@ fn turns_are_serialized_by_the_journal() {
     );
     run_seed(&workload, 17).expect("invariants hold");
 
+    // Acceptance and start are distinct facts (§7.3): both `TurnSubmitted`s
+    // commit as they arrive (this seed acks both before either run begins),
+    // while the runs themselves stay serialized — the second `TurnStarted`
+    // commits only after the first's terminal record (§3.1).
+    let records = records.lock().unwrap();
     assert_eq!(
-        record_kinds(&records.lock().unwrap()),
+        record_kinds(&records),
         vec![
-            "created", "turn", "model", "ended", "turn", "model", "ended"
+            "created", "turn", "turn", "started", "model", "ended", "started", "model", "ended"
         ],
-        "the second run starts only after the first's terminal record (§3.1)"
+        "acceptance interleaves; starts serialize (§3.1)"
+    );
+    let started: Vec<_> = records
+        .iter()
+        .filter_map(|r| match &r.body {
+            RecordBody::TurnStarted { turn } => Some(turn.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        started,
+        vec!["t-1", "t-2"],
+        "queue order is acceptance order"
     );
 }
 

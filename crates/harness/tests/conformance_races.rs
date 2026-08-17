@@ -197,7 +197,7 @@ fn a_straggler_model_done_never_unlocks_a_second_call() {
     assert_eq!(
         record_kinds(&records),
         vec![
-            "created", "turn", "ended", "turn", "model", "tool", "model", "ended"
+            "created", "turn", "started", "ended", "turn", "started", "model", "tool", "model", "ended"
         ],
         "one model response per step; journal was: {records:#?}"
     );

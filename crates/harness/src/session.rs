@@ -13,6 +13,7 @@
 //! name→shard→leader resolution.
 
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -79,7 +80,9 @@ id_string! {
 
 /// One submitted input (harness spec §2.2): a user prompt, or a parent
 /// agent's delegation (§8). The `id` is the idempotency key (§7.4); `budget`
-/// overrides the kind's default for the run it triggers (§9.1).
+/// overrides the kind's default for the run it triggers (§9.1) and joins the
+/// re-submission equality check as the literal option (§7.4): `None` is not
+/// `Some(default)`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
     pub id: TurnId,
@@ -206,13 +209,23 @@ pub enum RecordBody {
         parent: Option<Lineage>,
         root: SessionId,
     },
-    /// A turn was accepted and its run began (§3.1). The committing append is
-    /// what makes `RunStarted` fire exactly once per turn (§10.4).
+    /// A turn was accepted into the session's queue (§7.3): the committing
+    /// append is what releases the `Submit` ack, so an acked turn is durable
+    /// before any caller learns of it. `budget` is the run's effective budget
+    /// (the turn's explicit one, else the kind's default — resolved here so
+    /// replay never depends on the kind's current default, H1); `explicit`
+    /// records which, so the fold can rebuild the literal `Option<Budget>` the
+    /// caller sent for the §7.4 equality check (`None` ≠ `Some(default)`).
     TurnSubmitted {
         turn: TurnId,
         content: String,
         budget: Budget,
+        explicit: bool,
     },
+    /// The queue's head turn left the queue and its run began (§3.1): the
+    /// committing append is what makes `RunStarted` fire exactly once per turn
+    /// (§10.4). Journaled only by the dispatcher — the one place a run starts.
+    TurnStarted { turn: TurnId },
     /// One model response — journaled before any of its tool calls execute
     /// (intent before effect, §6.4), each requested call identified by its
     /// `CallId`.
@@ -256,7 +269,9 @@ pub enum RecordBody {
     /// journaled before effect. A record, not a §10.4 event: it is the audit
     /// trail, verified by journal audit (sandbox spec S4).
     TierAcquired { turn: TurnId, tier: Tier },
-    /// The run's exactly-one terminal outcome (§3.1, invariant H3).
+    /// The turn's exactly-one terminal outcome (§3.1, invariant H3). For a
+    /// turn cancelled while still queued (§9.2) it is the only record after
+    /// acceptance: the turn ends without a run ever starting.
     RunEnded { turn: TurnId, outcome: RunOutcome },
     /// A cancelled run's propagated `Cancel` reached the child of `(turn,
     /// call)` (§9.2): journaled when the child's ack releases, clearing the
@@ -315,11 +330,11 @@ pub(crate) mod arc_transcript {
     }
 }
 
-/// FNV-1a 64 over a string. Used by the turn-content dedup (§7.4, fold-local:
-/// rebuilt on every replay, never journaled) and by
-/// [`Kind::digest`](crate::Kind::digest), which **is** journaled and compared
-/// cluster-wide. Because of that second use the algorithm must stay stable across
-/// versions — do not swap it for a different hash without re-versioning kind digests.
+/// FNV-1a 64 over a string. Used by the turn-equality dedup (§7.4, via
+/// [`turn_digest`]) and by [`Kind::digest`](crate::Kind::digest), which **is**
+/// journaled and compared cluster-wide. Because of that second use the
+/// algorithm must stay stable across versions — do not swap it for a different
+/// hash without re-versioning kind digests.
 pub fn content_digest(content: &str) -> u64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -331,13 +346,50 @@ pub fn content_digest(content: &str) -> u64 {
     hash
 }
 
+/// The §7.4 turn-equality digest: the content plus the **literal** budget field
+/// (`None` ≠ `Some(default)`, so whether a re-submission conflicts never depends
+/// on the kind's *current* default). Length-prefixed canonical form like
+/// [`Kind::digest`](crate::Kind::digest), so no two distinct turns collide by
+/// juxtaposition. Fold-local: recomputed from the journaled `TurnSubmitted` on
+/// every replay, never journaled itself.
+pub fn turn_digest(content: &str, budget: Option<Budget>) -> u64 {
+    let mut canon = String::new();
+    let mut frame = |field: &str| {
+        canon.push_str(&field.len().to_string());
+        canon.push(':');
+        canon.push_str(field);
+    };
+    frame(content);
+    match budget {
+        None => frame("none"),
+        Some(budget) => {
+            frame("some");
+            frame(&budget.tokens.to_string());
+            frame(&budget.steps.to_string());
+        }
+    }
+    content_digest(&canon)
+}
+
 /// What the fold knows about a turn (harness spec §7.4): enough to dedup a
 /// re-submission and return the recorded outcome.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TurnFacts {
+    /// [`turn_digest`] of the submitted content and literal budget.
     pub content_digest: u64,
-    /// `None` while the run is unfinished.
+    /// `None` while the turn is queued or its run is unfinished.
     pub outcome: Option<RunOutcome>,
+}
+
+/// One accepted turn awaiting its run (harness spec §7.3): journal-derived
+/// (`TurnSubmitted` enqueues, `TurnStarted` dequeues), so an acked turn
+/// survives crash and migration and the next activation's dispatcher starts it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QueuedTurn {
+    pub turn: TurnId,
+    pub content: String,
+    /// The run's effective budget, resolved at acceptance.
+    pub budget: Budget,
 }
 
 /// A journaled call intent whose outcome is not yet journaled. While the run
@@ -397,6 +449,11 @@ pub struct SessionState {
     #[serde(with = "arc_transcript")]
     pub transcript: Arc<Vec<Entry>>,
     pub turns: BTreeMap<TurnId, TurnFacts>,
+    /// Accepted turns not yet started (§7.3), in acceptance order: the fold's
+    /// projection of `TurnSubmitted` minus `TurnStarted` (and minus a queued
+    /// turn cancelled before starting, §9.2). Fold state, so an acked turn is
+    /// as durable as its record.
+    pub queue: VecDeque<QueuedTurn>,
     /// At most one unfinished run; the journal's total order serializes runs.
     pub live: Option<LiveRun>,
     /// Children still owed a propagated `Cancel` (§9.2), by the delegating
@@ -436,21 +493,37 @@ impl SessionState {
                 turn,
                 content,
                 budget,
+                explicit,
             } => {
                 self.turns.insert(
                     turn.clone(),
                     TurnFacts {
-                        content_digest: content_digest(content),
+                        content_digest: turn_digest(content, explicit.then_some(*budget)),
                         outcome: None,
                     },
                 );
-                self.live = Some(LiveRun {
+                self.queue.push_back(QueuedTurn {
                     turn: turn.clone(),
+                    content: content.clone(),
                     budget: *budget,
-                    spend: Spend::default(),
-                    pending: BTreeMap::new(),
                 });
-                Arc::make_mut(&mut self.transcript).push(Entry::User(content.clone()));
+            }
+            RecordBody::TurnStarted { turn } => {
+                // Start the named queued turn — the dispatcher only ever starts
+                // the head while no run is live, so anything else is a
+                // malformed journal, ignored (the fold is total).
+                if self.live.is_none()
+                    && let Some(i) = self.queue.iter().position(|q| &q.turn == turn)
+                {
+                    let queued = self.queue.remove(i).expect("position found");
+                    self.live = Some(LiveRun {
+                        turn: queued.turn,
+                        budget: queued.budget,
+                        spend: Spend::default(),
+                        pending: BTreeMap::new(),
+                    });
+                    Arc::make_mut(&mut self.transcript).push(Entry::User(queued.content));
+                }
             }
             RecordBody::ModelResponse {
                 turn,
@@ -546,6 +619,10 @@ impl SessionState {
                         }
                     }
                 }
+                // A turn cancelled while still queued (§9.2) ends without ever
+                // starting: it leaves the queue with no run, no transcript
+                // entry, and no event pair — only the recorded outcome below.
+                self.queue.retain(|q| &q.turn != turn);
                 if let Some(facts) = self.turns.get_mut(turn) {
                     facts.outcome = Some(outcome.clone());
                 }
@@ -579,10 +656,28 @@ impl SessionState {
 /// the turn, is the unit of derivation. A re-executed delegation re-derives
 /// the same pair, which is what lets the child's journaled `TurnId` dedup the
 /// re-submission into an attach (§7.4).
+///
+/// Each component is length-prefixed (like [`Kind::digest`](crate::Kind::digest)'s
+/// canonical form), so distinct triples always derive distinct ids: a bare
+/// `/`-join would read `("s", "t/c", "d")` and `("s/t", "c", "d")` as the same
+/// child session, and ids are application-chosen, so the collision is
+/// constructible.
 pub fn derive_child(parent: &SessionId, turn: &TurnId, call: &CallId) -> (SessionId, TurnId) {
+    fn join(parts: &[&str]) -> String {
+        let mut out = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                out.push('/');
+            }
+            out.push_str(&part.len().to_string());
+            out.push(':');
+            out.push_str(part);
+        }
+        out
+    }
     (
-        SessionId::new(format!("{parent}/{turn}/{call}")),
-        TurnId::new(format!("{turn}/{call}")),
+        SessionId::new(join(&[parent.as_str(), turn.as_str(), call.as_str()])),
+        TurnId::new(join(&[turn.as_str(), call.as_str()])),
     )
 }
 
@@ -594,14 +689,24 @@ mod tests {
         Record { at_nanos: 7, body }
     }
 
+    /// Accept and start a turn: the two-record shape every run begins with
+    /// (§7.3) — `TurnSubmitted` enqueues, `TurnStarted` dequeues to live.
+    fn start_turn(state: &mut SessionState, turn: &str, content: &str, budget: Budget) {
+        state.apply(&rec(RecordBody::TurnSubmitted {
+            turn: TurnId::new(turn),
+            content: content.into(),
+            budget,
+            explicit: false,
+        }));
+        state.apply(&rec(RecordBody::TurnStarted {
+            turn: TurnId::new(turn),
+        }));
+    }
+
     #[test]
     fn fold_tracks_a_run_through_its_step() {
         let mut state = SessionState::default();
-        state.apply(&rec(RecordBody::TurnSubmitted {
-            turn: TurnId::new("t1"),
-            content: "go".into(),
-            budget: Budget::new(100, 5),
-        }));
+        start_turn(&mut state, "t1", "go", Budget::new(100, 5));
         let call = CallId::new("c1");
         state.apply(&rec(RecordBody::ModelResponse {
             turn: TurnId::new("t1"),
@@ -644,11 +749,7 @@ mod tests {
         let turn = TurnId::new("t1");
         let call = CallId::new("d1");
         let mut state = SessionState::default();
-        state.apply(&rec(RecordBody::TurnSubmitted {
-            turn: turn.clone(),
-            content: "go".into(),
-            budget: Budget::new(1_000, 5),
-        }));
+        start_turn(&mut state, "t1", "go", Budget::new(1_000, 5));
         state.apply(&rec(RecordBody::ModelResponse {
             turn: turn.clone(),
             content: "delegating".into(),
@@ -694,11 +795,7 @@ mod tests {
         let turn = TurnId::new("t1");
         let call = CallId::new("d1");
         let mut base = SessionState::default();
-        base.apply(&rec(RecordBody::TurnSubmitted {
-            turn: turn.clone(),
-            content: "go".into(),
-            budget: Budget::new(1_000, 5),
-        }));
+        start_turn(&mut base, "t1", "go", Budget::new(1_000, 5));
         base.apply(&rec(RecordBody::ModelResponse {
             turn: turn.clone(),
             content: "delegating".into(),
@@ -745,11 +842,101 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_submitted_behind_a_live_run_queues_until_started() {
+        let mut state = SessionState::default();
+        start_turn(&mut state, "t1", "first", Budget::new(100, 5));
+        state.apply(&rec(RecordBody::TurnSubmitted {
+            turn: TurnId::new("t2"),
+            content: "second".into(),
+            budget: Budget::new(50, 2),
+            explicit: true,
+        }));
+        // Accepted: dedup facts exist, but no run, no transcript entry.
+        assert!(state.turns.contains_key(&TurnId::new("t2")));
+        assert_eq!(state.queue.len(), 1);
+        assert_eq!(
+            state.live.as_ref().expect("t1 live").turn,
+            TurnId::new("t1")
+        );
+        assert_eq!(state.transcript.len(), 1, "queued content is not visible");
+
+        state.apply(&rec(RecordBody::RunEnded {
+            turn: TurnId::new("t1"),
+            outcome: Ok(Completion::new("done", 10)),
+        }));
+        assert!(
+            state.live.is_none(),
+            "the fold does not auto-start the head"
+        );
+        state.apply(&rec(RecordBody::TurnStarted {
+            turn: TurnId::new("t2"),
+        }));
+        assert!(state.queue.is_empty());
+        let live = state.live.as_ref().expect("t2 live");
+        assert_eq!(live.turn, TurnId::new("t2"));
+        assert_eq!(live.budget, Budget::new(50, 2));
+        assert_eq!(state.transcript.last(), Some(&Entry::User("second".into())));
+    }
+
+    #[test]
+    fn a_run_ended_on_a_queued_turn_removes_it_without_starting() {
+        // Cancel-of-queued (§9.2): the terminal record alone clears the queue
+        // entry and records the outcome — no live run, no transcript entry.
+        let mut state = SessionState::default();
+        start_turn(&mut state, "t1", "first", Budget::new(100, 5));
+        state.apply(&rec(RecordBody::TurnSubmitted {
+            turn: TurnId::new("t2"),
+            content: "second".into(),
+            budget: Budget::new(50, 2),
+            explicit: false,
+        }));
+        state.apply(&rec(RecordBody::RunEnded {
+            turn: TurnId::new("t2"),
+            outcome: Err(RunError::Cancelled),
+        }));
+        assert!(state.queue.is_empty());
+        assert_eq!(
+            state.live.as_ref().expect("t1 unaffected").turn,
+            TurnId::new("t1")
+        );
+        assert_eq!(
+            state.turns[&TurnId::new("t2")].outcome,
+            Some(Err(RunError::Cancelled))
+        );
+        assert_eq!(state.transcript.len(), 1);
+    }
+
+    #[test]
+    fn the_turn_digest_covers_the_literal_budget() {
+        // §7.4: the budget joins the equality check as the literal option —
+        // `None` is not `Some(default)`, and framing prevents content/budget
+        // juxtaposition collisions.
+        let d = |content: &str, budget: Option<Budget>| turn_digest(content, budget);
+        assert_eq!(d("go", None), d("go", None));
+        assert_ne!(d("go", None), d("go", Some(Budget::new(100_000, 25))));
+        assert_ne!(
+            d("go", Some(Budget::new(1, 2))),
+            d("go", Some(Budget::new(2, 1)))
+        );
+        assert_ne!(d("gonone", None), d("go", None), "framed, not concatenated");
+    }
+
+    #[test]
     fn child_derivation_is_deterministic_per_call() {
         let a = derive_child(&SessionId::new("s"), &TurnId::new("t"), &CallId::new("c1"));
         let b = derive_child(&SessionId::new("s"), &TurnId::new("t"), &CallId::new("c1"));
         let c = derive_child(&SessionId::new("s"), &TurnId::new("t"), &CallId::new("c2"));
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn child_derivation_is_unambiguous_across_separator_collisions() {
+        // A bare '/'-join would derive the same child session for both triples;
+        // the length prefixes keep every component boundary explicit.
+        let a = derive_child(&SessionId::new("s"), &TurnId::new("t/c"), &CallId::new("d"));
+        let b = derive_child(&SessionId::new("s/t"), &TurnId::new("c"), &CallId::new("d"));
+        assert_ne!(a.0, b.0);
+        assert_ne!(a.1, b.1);
     }
 }
