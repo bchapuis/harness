@@ -23,15 +23,17 @@ use actor_cluster::SwimConfig;
 use actor_core::Event;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use granary::GrainEvent;
 use granary::GranaryConfig;
 use harness::Budget;
 use harness::Harness;
 use harness::Kind;
 use harness::Kinds;
 use harness::RecordBody;
+use harness::RunError;
 use harness::SessionId;
 use harness::Tier;
 use harness::Turn;
@@ -41,6 +43,7 @@ use serde_json::json;
 use support::CollectingSink;
 use support::ScriptedModel;
 use support::ScriptedSandboxes;
+use support::SlowModel;
 use support::check_events;
 use support::final_message;
 use support::tool_call;
@@ -238,6 +241,279 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
         .filter(|b| matches!(b, RecordBody::RunEnded { .. }))
         .count();
     assert_eq!((submitted, ended), (1, 1), "one run survives the crash");
+
+    assert_invariants(&sink.events());
+}
+
+// -- crash-window cancel propagation (§9.2, H5) ------------------------------
+
+fn delegation_kinds() -> Kinds {
+    let grain = || GranaryConfig {
+        shards: 2,
+        replication_factor: 3,
+        idle_after: Duration::from_secs(600),
+        ..GranaryConfig::default()
+    };
+    Kinds::new()
+        .register(
+            "parent",
+            Kind::new("parent agent")
+                .delegates_to(&["child"])
+                .budget(Budget::new(100_000, 10))
+                .grain(grain()),
+        )
+        .register(
+            "child",
+            Kind::new("child agent")
+                .budget(Budget::new(50_000, 10))
+                .grain(grain()),
+        )
+}
+
+/// The parent delegates immediately; every model call takes an hour of logical
+/// time, so inside the test window the child's run can only end by cancel.
+fn delegation_model(sim: &Simulation) -> Arc<dyn harness::Model> {
+    let script = ScriptedModel::new(|req| {
+        if req.system_prompt == "child agent" {
+            Ok(final_message("child-answer"))
+        } else {
+            let step = req
+                .transcript
+                .iter()
+                .filter(|e| matches!(e, harness::Entry::Assistant { .. }))
+                .count();
+            if step == 0 {
+                Ok(tool_call(
+                    "d1",
+                    "delegate",
+                    json!({ "kind": "child", "prompt": "sub-task" }),
+                ))
+            } else {
+                Ok(final_message("parent-answer"))
+            }
+        }
+    });
+    Arc::new(SlowModel {
+        inner: Arc::new(script),
+        clock: sim.clock(),
+        delay: Duration::from_secs(3_600),
+    })
+}
+
+/// The node of `key`'s most recent grain activation (grain §13).
+fn last_activation(sink: &CollectingSink, key: &str) -> Option<NodeId> {
+    sink.events()
+        .iter()
+        .filter_map(|e| e.as_app::<GrainEvent>())
+        .filter_map(|e| match e {
+            GrainEvent::Activated { node, name } if name.key() == key => Some(*node),
+            _ => None,
+        })
+        .last()
+}
+
+/// Poll a session's journal until `ready` holds over its record bodies;
+/// panics ("did not complete in the settle window") if it never does.
+fn await_journal(
+    sim: &Simulation,
+    harness: &Harness<SimNode>,
+    kind: &str,
+    session: &SessionId,
+    settle: Duration,
+    ready: impl Fn(&[RecordBody]) -> bool + Send + Sync + 'static,
+) -> Vec<RecordBody> {
+    let session = harness.session(kind, session.clone());
+    drive(sim, settle, async move {
+        loop {
+            if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
+                let bodies: Vec<RecordBody> = page.into_iter().map(|(_, r)| r.body).collect();
+                if ready(&bodies) {
+                    return bodies;
+                }
+            }
+        }
+    })
+}
+
+/// The R1 crash window (§9.2, H5): `RunEnded { Cancelled }` commits, and the
+/// leader crashes before the propagating send reaches the recorded child. The
+/// owed propagation is a fold fact (`cancels_owed`), so the next contact —
+/// a re-sent `Cancel`, the §7.5 resume trigger — re-derives it on the new
+/// leader and drives it to the child, which ends `Cancelled`; the delivery
+/// then journals `CancelDelivered`, retiring the debt.
+#[test]
+fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
+    let sim = Simulation::new(23);
+    let sink = CollectingSink::default();
+    let net = SimNetwork::new(&sim)
+        .with_leader(SwimConfig::default(), raft(), DowningPolicy::Conservative)
+        .with_events(Arc::new(sink.clone()));
+    let systems = [net.join(A), net.join(B), net.join(C)];
+    sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
+    let model = delegation_model(&sim);
+    let harnesses: Vec<Harness<SimNode>> = systems
+        .iter()
+        .map(|s| {
+            Harness::cluster(
+                s.clone(),
+                &delegation_kinds(),
+                Arc::clone(&model),
+                Arc::new(ScriptedSandboxes::echo()),
+            )
+        })
+        .collect();
+    sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
+
+    // Start the parent, fire-and-forget: its hour-long first model call
+    // journals the delegation at 3600s, and the child's own hour-long call is
+    // then in flight.
+    {
+        let session = harnesses[0].session("parent", SessionId::new("root-p"));
+        sim.spawner().launch(Box::pin(async move {
+            let _ = session
+                .prompt_within(
+                    Turn::new(TurnId::new("t-1"), "go"),
+                    Duration::from_secs(50_000),
+                )
+                .await;
+        }));
+    }
+    sim.run_for(Duration::from_secs(3_700));
+
+    // The journaled delegation names the child (§8.1).
+    let parent_bodies = await_journal(
+        &sim,
+        &harnesses[0],
+        "parent",
+        &SessionId::new("root-p"),
+        Duration::from_secs(10),
+        |bodies| {
+            bodies
+                .iter()
+                .any(|b| matches!(b, RecordBody::ChildRun { .. }))
+        },
+    );
+    let (child_kind, child_session) = parent_bodies
+        .iter()
+        .find_map(|b| match b {
+            RecordBody::ChildRun {
+                child_kind,
+                child_session,
+                ..
+            } => Some((child_kind.clone(), child_session.clone())),
+            _ => None,
+        })
+        .expect("journaled delegation");
+
+    // Hold the propagation window open: isolate the child's leader so the
+    // propagating send cannot land, cancel the parent (its `RunEnded {
+    // Cancelled }` commits on the majority side — the ack is the output
+    // gate's release), and crash the parent's leader before the child shard
+    // could re-elect a reachable leader (the ack arrives well inside the
+    // 500ms election timeout). The crash therefore destroys the send after
+    // the terminal record committed — exactly the R1 window.
+    let leader = last_activation(&sink, "root-p").expect("parent activated");
+    let child_leader = last_activation(&sink, child_session.as_str()).expect("child activated");
+    assert_ne!(
+        leader, child_leader,
+        "this seed must place the parent's and the child's shard leaders apart"
+    );
+    let spare = *[A, B, C]
+        .iter()
+        .find(|n| **n != leader && **n != child_leader)
+        .expect("a third node");
+    let surviving = harnesses[[A, B, C].iter().position(|n| *n == spare).unwrap()].clone();
+    net.partition(&[leader, spare], &[child_leader]);
+    let acked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let acked = Arc::clone(&acked);
+        let session = surviving.session("parent", SessionId::new("root-p"));
+        sim.spawner().launch(Box::pin(async move {
+            loop {
+                if session.cancel(&TurnId::new("t-1")).await.is_ok() {
+                    acked.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+            }
+        }));
+    }
+    for _ in 0..100 {
+        if acked.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        sim.run_for(Duration::from_millis(100));
+    }
+    assert!(
+        acked.load(std::sync::atomic::Ordering::SeqCst),
+        "the cancel was acked"
+    );
+    net.crash(leader);
+    net.heal();
+
+    // Let the shard groups re-elect, then check the window is real: the
+    // child's run must still be live — the crash destroyed the send, and with
+    // it the old design's only copy of the propagation.
+    sim.run_for(Duration::from_secs(3));
+    let child_before = await_journal(
+        &sim,
+        &surviving,
+        child_kind.as_str(),
+        &child_session,
+        Duration::from_secs(10),
+        |_| true,
+    );
+    assert!(
+        !child_before
+            .iter()
+            .any(|b| matches!(b, RecordBody::RunEnded { .. })),
+        "crash-window: the child is still live before the parent is re-contacted"
+    );
+
+    // Re-contact the cancelled session (a re-sent Cancel, §7.5): the new
+    // leader's fold still owes the propagation, and drives it to the child.
+    drive(&sim, Duration::from_secs(30), {
+        let session = surviving.session("parent", SessionId::new("root-p"));
+        async move {
+            loop {
+                if session.cancel(&TurnId::new("t-1")).await.is_ok() {
+                    return;
+                }
+            }
+        }
+    });
+
+    // The child's run ends Cancelled (H5)…
+    await_journal(
+        &sim,
+        &surviving,
+        child_kind.as_str(),
+        &child_session,
+        Duration::from_secs(120),
+        |bodies| {
+            bodies.iter().any(|b| {
+                matches!(
+                    b,
+                    RecordBody::RunEnded {
+                        outcome: Err(RunError::Cancelled),
+                        ..
+                    }
+                )
+            })
+        },
+    );
+    // …and the parent journals the `CancelDelivered` that retires the debt.
+    await_journal(
+        &sim,
+        &surviving,
+        "parent",
+        &SessionId::new("root-p"),
+        Duration::from_secs(60),
+        |bodies| {
+            bodies
+                .iter()
+                .any(|b| matches!(b, RecordBody::CancelDelivered { .. }))
+        },
+    );
 
     assert_invariants(&sink.events());
 }

@@ -393,6 +393,9 @@ fn record_lines(record: &Record) -> Vec<Line<'static>> {
             };
             vec![Line::styled(detail, Style::default().fg(color))]
         }
+        RecordBody::CancelDelivered { call, .. } => {
+            vec![dim(format!("— cancel delivered · child of {call}"))]
+        }
     }
 }
 

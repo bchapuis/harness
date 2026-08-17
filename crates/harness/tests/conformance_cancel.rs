@@ -176,7 +176,9 @@ fn a_cancel_propagates_down_the_delegation_tree() {
         })
     };
     let child_records: Arc<Mutex<Vec<Record>>> = Arc::default();
+    let parent_records: Arc<Mutex<Vec<Record>>> = Arc::default();
     let sink = Arc::clone(&child_records);
+    let parent_sink = Arc::clone(&parent_records);
     let workload = Scenario::from_factories(
         "cancel-propagation",
         kinds(),
@@ -184,6 +186,7 @@ fn a_cancel_propagates_down_the_delegation_tree() {
         Arc::new(|_| Arc::new(ScriptedSandboxes::echo())),
         move |harness, system| {
             let sink = Arc::clone(&sink);
+            let parent_sink = Arc::clone(&parent_sink);
             Box::pin(async move {
                 let session = harness.session("parent", SessionId::new("root"));
                 let prompting = session.prompt_within(
@@ -207,8 +210,8 @@ fn a_cancel_propagates_down_the_delegation_tree() {
 
                 // The parent's journal names the child (§8.1); read the child's
                 // journal through its own session.
-                let parent_records = tail_records(&session).await;
-                let (child_kind, child_session) = parent_records
+                let records = tail_records(&session).await;
+                let (child_kind, child_session) = records
                     .iter()
                     .find_map(|r| match &r.body {
                         RecordBody::ChildRun {
@@ -221,6 +224,7 @@ fn a_cancel_propagates_down_the_delegation_tree() {
                     .expect("journaled delegation");
                 let child = harness.session(child_kind.as_str(), child_session);
                 *sink.lock().unwrap() = tail_records(&child).await;
+                *parent_sink.lock().unwrap() = records;
             })
         },
     )
@@ -242,5 +246,17 @@ fn a_cancel_propagates_down_the_delegation_tree() {
             }
         )),
         "the child's run ended Cancelled (§9.2 item 2)"
+    );
+
+    // The delivered propagation cleared its owed fact durably: the parent
+    // journaled `CancelDelivered` for the delegation once the child acked
+    // (§9.2), so no later activation re-owes the send.
+    assert!(
+        parent_records
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| matches!(&r.body, RecordBody::CancelDelivered { .. })),
+        "the parent journaled CancelDelivered for the propagated cancel (§9.2)"
     );
 }

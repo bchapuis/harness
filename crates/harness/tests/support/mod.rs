@@ -99,6 +99,7 @@ pub fn record_kind(body: &harness::RecordBody) -> &'static str {
         harness::RecordBody::WorkspaceReset => "reset",
         harness::RecordBody::TierAcquired { .. } => "tier",
         harness::RecordBody::RunEnded { .. } => "ended",
+        harness::RecordBody::CancelDelivered { .. } => "delivered",
     }
 }
 
@@ -616,7 +617,7 @@ const HARNESS_CATALOGUE: &[CatalogueEntry] = &[
         property: "Cancellation: after a cancel is journaled, the run and (once faults cease) every descendant run end Cancelled in bounded logical time, issuing no further model calls",
         verify: &[
             Verify::Checker("harness-run-discipline"),
-            Verify::SimTest("harness/tests/conformance_cancel.rs"),
+            Verify::SimTest("harness/tests/conformance_cancel.rs, harness/tests/cluster.rs"),
         ],
     },
     CatalogueEntry {

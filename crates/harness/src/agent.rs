@@ -257,6 +257,20 @@ impl Message for ToolDone {
     const MANIFEST: Manifest = Manifest::new("harness.agent.ToolDone");
 }
 
+/// One propagated `Cancel` was acked by the child of `(turn, call)` (§9.2):
+/// back on the loop to journal the `CancelDelivered` record that clears the
+/// owed fact — the ack itself is not durable, only the record is.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CancelDone {
+    pub turn: TurnId,
+    pub call: CallId,
+}
+
+impl Message for CancelDone {
+    type Reply = ();
+    const MANIFEST: Manifest = Manifest::new("harness.agent.CancelDone");
+}
+
 // ===========================================================================
 // The grain
 // ===========================================================================
@@ -377,9 +391,11 @@ struct Activation<S: HarnessSystem> {
     /// Callers registered for a run's outcome (§7.4): notified on `RunEnded`,
     /// rebuilt by callers re-contacting after a resume.
     subscribers: BTreeMap<TurnId, Vec<ActorRef<ReplyMailbox<S>>>>,
-    /// Children to cancel once a `RunEnded { Cancelled }` commits (§9.2):
-    /// captured before the fold clears the live run.
-    cancel_children: Vec<ChildRef>,
+    /// Owed cancels whose propagation this activation already launched (§9.2):
+    /// a launch-once guard over the fold's `cancels_owed`, so repeated
+    /// `Advance`s do not stack duplicate sends. Per-activation, like every
+    /// launch guard: a resume re-launches whatever is still owed.
+    cancels_launched: BTreeSet<(TurnId, CallId)>,
 }
 
 impl<S: HarnessSystem> Activation<S> {
@@ -406,7 +422,7 @@ impl<S: HarnessSystem> Default for Activation<S> {
             events: EventOutbox::default(),
             queue: VecDeque::new(),
             subscribers: BTreeMap::new(),
-            cancel_children: Vec::new(),
+            cancels_launched: BTreeSet::new(),
         }
     }
 }
@@ -647,17 +663,12 @@ impl<S: HarnessSystem> Agent<S> {
     ) -> Vec<Record> {
         let mut act = self.lock();
         // A cancel naming the live run ends it; one naming an ended, queued, or
-        // unknown run is an idempotent no-op (§9.2 item 1).
+        // unknown run is an idempotent no-op (§9.2 item 1). The run's recorded
+        // children are not captured here: the fold moves them into
+        // `cancels_owed` when the `RunEnded { Cancelled }` commits, and the
+        // post-commit `Advance` propagates from that (§9.2 item 2) — so the
+        // debt survives a crash in between.
         if state.live.as_ref().is_some_and(|l| l.turn == turn) {
-            // Capture the live children before the fold clears the run, so the
-            // committed cancel propagates to them (§9.2 item 2).
-            if let Some(live) = &state.live {
-                act.cancel_children = live
-                    .pending
-                    .values()
-                    .filter_map(|p| p.child.clone())
-                    .collect();
-            }
             act.events.ended.push(turn.clone());
             drop(act);
             self.schedule_advance(ctx);
@@ -678,6 +689,13 @@ impl<S: HarnessSystem> Agent<S> {
             }
             Vec::new()
         } else {
+            // A re-sent cancel is a documented resume trigger (§7.5): if this
+            // session still owes propagations (a crash lost the earlier send),
+            // drive them now.
+            drop(act);
+            if !state.cancels_owed.is_empty() {
+                self.schedule_advance(ctx);
+            }
             Vec::new()
         }
     }
@@ -864,11 +882,11 @@ impl<S: HarnessSystem> Agent<S> {
         let mut act = self.lock();
 
         // (a) Emit the run-boundary events this activation owes (§10.4), notify
-        //     callers of any finished run, and propagate a committed cancel to
-        //     the captured children (§9.2).
+        //     callers of any finished run, and propagate the cancels the fold
+        //     still owes (§9.2).
         self.emit_run_events(&mut act, state, ctx, &session);
         self.notify_finished(&mut act, state, ctx, &session);
-        self.propagate_cancels(&mut act, ctx);
+        self.propagate_cancels(&mut act, state, ctx);
 
         // (b) No live run: reset per-run flags and start the next queued turn.
         let Some(live) = state.live.as_ref() else {
@@ -1127,10 +1145,14 @@ impl<S: HarnessSystem> Agent<S> {
             .as_ref()
             .map(|c| c.root.clone())
             .unwrap_or_else(|| Self::session(ctx));
+        // A ready call that cannot launch after claiming resolves as a failure
+        // instead of dangling (see `launch_call`); those records commit like
+        // any synthesized outcome.
+        let mut failed = Vec::new();
         for (call, pending) in ready {
-            self.launch_call(act, ctx, kind, turn, &root, call, pending);
+            failed.extend(self.launch_call(act, ctx, kind, turn, &root, call, pending));
         }
-        Vec::new()
+        failed
     }
 
     /// The recovery policy for a dangling call (§5.5): `delegate` re-executes by
@@ -1190,7 +1212,10 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// Launch one ready call (§3.1): a sandboxed tool, or a delegation. The
-    /// `delegate` exception executes in the loop (§5.2, §8).
+    /// `delegate` exception executes in the loop (§5.2, §8). Returns the
+    /// records to journal — normally none, but a call that cannot launch
+    /// *after* claiming resolves as a failure here: a claimed call that bailed
+    /// silently would suppress every relaunch and stall the run forever.
     #[allow(clippy::too_many_arguments)]
     fn launch_call(
         &self,
@@ -1201,16 +1226,37 @@ impl<S: HarnessSystem> Agent<S> {
         root: &SessionId,
         call: CallId,
         pending: PendingCall,
-    ) {
+    ) -> Vec<Record> {
         if pending.name == DELEGATE {
             if !act.run.launched.claim(StepKey::Call(call.clone())) {
-                return; // already in flight this activation
+                return Vec::new(); // already in flight this activation
             }
             let Some(child) = pending.child.clone() else {
-                return;
+                // Unreachable by construction — `dispatch_pending` journals the
+                // `ChildRun` intent before a delegation is ready — but claimed,
+                // so it must resolve rather than dangle.
+                return vec![self.fail_call(
+                    act,
+                    ctx,
+                    turn,
+                    &call,
+                    ToolError::Delegation("delegation intent lost its ChildRun record".into()),
+                )];
             };
-            let Ok(request) = serde_json::from_value::<DelegateInput>(pending.input.clone()) else {
-                return;
+            let request = match serde_json::from_value::<DelegateInput>(pending.input.clone()) {
+                Ok(request) => request,
+                Err(e) => {
+                    // Same shape: `plan_delegation` validated this input when it
+                    // journaled the intent, so a failure here is a drifted
+                    // schema — resolve the claimed call, never strand it.
+                    return vec![self.fail_call(
+                        act,
+                        ctx,
+                        turn,
+                        &call,
+                        ToolError::InvalidArguments(e.to_string()),
+                    )];
+                }
             };
             let lineage = Lineage {
                 session: Self::session(ctx),
@@ -1218,18 +1264,18 @@ impl<S: HarnessSystem> Agent<S> {
                 root: root.clone(),
             };
             self.launch_delegation(act, ctx, turn.clone(), call, request, child, lineage);
-            return;
+            return Vec::new();
         }
 
         let Some(decl) = kind.tools.get(&pending.name) else {
-            return;
+            return Vec::new();
         };
         let tier = decl.tier;
         let timeout = decl.timeout.unwrap_or(self.shared.config.tool_timeout);
         match &act.env.slot {
             SandboxSlot::Open(sandbox) => {
                 if !act.run.launched.claim(StepKey::Call(call.clone())) {
-                    return; // already in flight this activation
+                    return Vec::new(); // already in flight this activation
                 }
                 let sandbox = Arc::clone(sandbox);
                 let this = act.this.clone().expect("self-ref set in on_activate");
@@ -1273,6 +1319,7 @@ impl<S: HarnessSystem> Agent<S> {
                 }
             }
         }
+        Vec::new()
     }
 
     /// Open the sandbox off the command path (§5.3): the task fills the
@@ -1482,36 +1529,82 @@ impl<S: HarnessSystem> Agent<S> {
         );
     }
 
-    /// Propagate a committed cancel to every recorded child (§9.2 item 2).
-    fn propagate_cancels(&self, act: &mut Activation<S>, ctx: &GrainCtx<Agent<S>>) {
-        let children = std::mem::take(&mut act.cancel_children);
-        for child in children {
-            let Some(granary) = self.shared.granaries().get(&child.kind).cloned() else {
-                continue;
-            };
-            let system = ctx.system().clone();
-            let child_turn = child.turn.clone();
-            let session = child.session.clone();
-            system.clone().launch(Box::pin(async move {
-                let child_ref = granary.grain(session.as_str());
-                let mut attempt = 0;
-                loop {
-                    match child_ref
-                        .ask(Cancel {
-                            turn: child_turn.clone(),
-                        })
-                        .await
-                    {
-                        Ok(()) => return,
-                        Err(_) if attempt < TRANSPORT_RETRIES => {
-                            attempt += 1;
-                            system.sleep(propagation_backoff(attempt)).await;
-                        }
-                        Err(_) => return,
-                    }
+    /// Propagate every cancel the fold still owes (§9.2 item 2): the owed set
+    /// is journal-derived (`cancels_owed`), so a crash between the
+    /// `RunEnded { Cancelled }` commit and the send loses nothing — the next
+    /// activation's first `Advance` lands here and re-sends the undelivered
+    /// remainder (H5). Each ack comes back as [`CancelDone`] and journals the
+    /// `CancelDelivered` that clears the debt; until then a re-send is safe (a
+    /// cancel of an ended or unknown run is an idempotent no-op, §9.2 item 1).
+    fn propagate_cancels(
+        &self,
+        act: &mut Activation<S>,
+        state: &SessionState,
+        ctx: &GrainCtx<Agent<S>>,
+    ) {
+        for (turn, owed) in &state.cancels_owed {
+            for (call, child) in owed {
+                if !act.cancels_launched.insert((turn.clone(), call.clone())) {
+                    continue; // launched this activation already
                 }
-            }));
+                let Some(granary) = self.shared.granaries().get(&child.kind).cloned() else {
+                    // No route to the child's kind: the debt stays in the fold
+                    // for a better-configured activation; the child's budget is
+                    // the backstop meanwhile (§9.2 item 3).
+                    continue;
+                };
+                let this = act.this.clone().expect("self-ref set in on_activate");
+                let system = ctx.system().clone();
+                let turn = turn.clone();
+                let call = call.clone();
+                let child_turn = child.turn.clone();
+                let session = child.session.clone();
+                system.clone().launch(Box::pin(async move {
+                    let child_ref = granary.grain(session.as_str());
+                    let mut attempt = 0;
+                    loop {
+                        match child_ref
+                            .ask(Cancel {
+                                turn: child_turn.clone(),
+                            })
+                            .await
+                        {
+                            Ok(()) => break,
+                            Err(_) if attempt < TRANSPORT_RETRIES => {
+                                attempt += 1;
+                                system.sleep(propagation_backoff(attempt)).await;
+                            }
+                            // Give up for this activation only: the fold keeps
+                            // owing, so the next activation retries (H5); the
+                            // child's budget bounds the meantime (§9.2 item 3).
+                            Err(_) => return,
+                        }
+                    }
+                    let _ = this.tell(CancelDone { turn, call }).await;
+                }));
+            }
         }
+    }
+
+    /// A propagated cancel was acked (§9.2): journal the `CancelDelivered`
+    /// that clears the owed fact — unless a concurrent delivery (an old
+    /// activation's straggler) already cleared it, in which case commit
+    /// nothing.
+    fn on_cancel_done(
+        &self,
+        state: &SessionState,
+        turn: TurnId,
+        call: CallId,
+        ctx: &GrainCtx<Agent<S>>,
+    ) -> Vec<Record> {
+        if !state
+            .cancels_owed
+            .get(&turn)
+            .is_some_and(|owed| owed.contains_key(&call))
+        {
+            return Vec::new();
+        }
+        vec![self.rec(ctx, RecordBody::CancelDelivered { turn, call })]
     }
 
     // -- sandbox lifecycle ---------------------------------------------------
@@ -1604,8 +1697,8 @@ impl<S: HarnessSystem> Grain for Agent<S> {
 
     fn register(registry: &mut GrainRegistry<Self>) {
         // The network allowlist: only the wire commands (§7.3). The internal
-        // self-tells (Advance/ModelDone/ToolDone) are local-only, so no peer can
-        // inject them. Reading a run is not here: `tail` rides granary's
+        // self-tells (Advance/ModelDone/ToolDone/CancelDone) are local-only, so
+        // no peer can inject them. Reading a run is not here: `tail` rides granary's
         // gateway-level event read (granary §7.5), a framework built-in that
         // never touches the activation (§10.2).
         registry.accept::<Submit<S>>();
@@ -1726,6 +1819,17 @@ impl<S: HarnessSystem> GrainHandler<ToolDone> for Agent<S> {
             self.on_tool_done(state, msg.turn, msg.call, msg.outcome, ctx),
             (),
         )
+    }
+}
+
+impl<S: HarnessSystem> GrainHandler<CancelDone> for Agent<S> {
+    async fn handle(
+        &self,
+        state: &SessionState,
+        msg: CancelDone,
+        ctx: &GrainCtx<Self>,
+    ) -> (Vec<Record>, ()) {
+        (self.on_cancel_done(state, msg.turn, msg.call, ctx), ())
     }
 }
 

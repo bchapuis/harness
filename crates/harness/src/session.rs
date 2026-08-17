@@ -258,6 +258,12 @@ pub enum RecordBody {
     TierAcquired { turn: TurnId, tier: Tier },
     /// The run's exactly-one terminal outcome (§3.1, invariant H3).
     RunEnded { turn: TurnId, outcome: RunOutcome },
+    /// A cancelled run's propagated `Cancel` reached the child of `(turn,
+    /// call)` (§9.2): journaled when the child's ack releases, clearing the
+    /// owed fact the `RunEnded { Cancelled }` fold captured. Until this record
+    /// commits, every activation re-owes the propagation — that is what makes
+    /// H5 survive a crash between the terminal commit and the send.
+    CancelDelivered { turn: TurnId, call: CallId },
 }
 
 /// One transcript item, as the model request carries it (harness spec §4.1).
@@ -393,6 +399,13 @@ pub struct SessionState {
     pub turns: BTreeMap<TurnId, TurnFacts>,
     /// At most one unfinished run; the journal's total order serializes runs.
     pub live: Option<LiveRun>,
+    /// Children still owed a propagated `Cancel` (§9.2), by the delegating
+    /// `(turn, call)`: captured by the fold when a `RunEnded { Cancelled }`
+    /// clears a run whose `ChildRun` intents lack outcomes, cleared per child
+    /// by `CancelDelivered`. Journal-derived, so a crash between the terminal
+    /// commit and the propagating send loses nothing — the next activation's
+    /// `advance` finds the debt here and re-sends (H5).
+    pub cancels_owed: BTreeMap<TurnId, BTreeMap<CallId, ChildRef>>,
     /// Whether the journal records sandboxed activity since the last
     /// `WorkspaceReset` — the §5.5 trigger for journaling the next one.
     pub sandbox_activity: bool,
@@ -517,10 +530,32 @@ impl SessionState {
             }
             RecordBody::RunEnded { turn, outcome } => {
                 if self.live.as_ref().is_some_and(|l| &l.turn == turn) {
-                    self.live = None;
+                    let live = self.live.take().expect("checked live");
+                    // A cancel is the one outcome that can end a run over
+                    // unresolved calls (every other terminal commits at a step
+                    // boundary, §3.1), so its recorded children become owed
+                    // propagations (§9.2): the durable debt `advance` drains.
+                    if outcome == &Err(RunError::Cancelled) {
+                        let owed: BTreeMap<CallId, ChildRef> = live
+                            .pending
+                            .into_iter()
+                            .filter_map(|(call, p)| Some((call, p.child?)))
+                            .collect();
+                        if !owed.is_empty() {
+                            self.cancels_owed.insert(turn.clone(), owed);
+                        }
+                    }
                 }
                 if let Some(facts) = self.turns.get_mut(turn) {
                     facts.outcome = Some(outcome.clone());
+                }
+            }
+            RecordBody::CancelDelivered { turn, call } => {
+                if let Some(owed) = self.cancels_owed.get_mut(turn) {
+                    owed.remove(call);
+                    if owed.is_empty() {
+                        self.cancels_owed.remove(turn);
+                    }
                 }
             }
         }
@@ -599,6 +634,114 @@ mod tests {
         }));
         assert!(state.live.is_none());
         assert!(state.turns[&TurnId::new("t1")].outcome.is_some());
+    }
+
+    #[test]
+    fn a_cancelled_run_folds_its_unresolved_children_into_owed_cancels() {
+        // The crash-window prefix (§9.2): a delegation intent committed, then
+        // `RunEnded { Cancelled }` — and nothing after. The fold alone must
+        // carry the propagation debt (H5).
+        let turn = TurnId::new("t1");
+        let call = CallId::new("d1");
+        let mut state = SessionState::default();
+        state.apply(&rec(RecordBody::TurnSubmitted {
+            turn: turn.clone(),
+            content: "go".into(),
+            budget: Budget::new(1_000, 5),
+        }));
+        state.apply(&rec(RecordBody::ModelResponse {
+            turn: turn.clone(),
+            content: "delegating".into(),
+            calls: vec![ToolCall {
+                id: call.clone(),
+                name: DELEGATE.into(),
+                input: Value::Null,
+            }],
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+        }));
+        state.apply(&rec(RecordBody::ChildRun {
+            turn: turn.clone(),
+            call: call.clone(),
+            child_kind: KindId::new("child"),
+            child_session: SessionId::new("s/t1/d1"),
+            child_turn: TurnId::new("t1/d1"),
+            budget: Budget::new(100, 2),
+        }));
+        state.apply(&rec(RecordBody::RunEnded {
+            turn: turn.clone(),
+            outcome: Err(RunError::Cancelled),
+        }));
+        assert!(state.live.is_none());
+        let child = &state.cancels_owed[&turn][&call];
+        assert_eq!(child.session, SessionId::new("s/t1/d1"));
+        assert_eq!(child.turn, TurnId::new("t1/d1"));
+
+        // `CancelDelivered` clears the debt, and only then.
+        state.apply(&rec(RecordBody::CancelDelivered {
+            turn: turn.clone(),
+            call,
+        }));
+        assert!(state.cancels_owed.is_empty());
+    }
+
+    #[test]
+    fn only_a_cancelled_outcome_owes_propagation() {
+        // A resolved delegation (its `ToolOutcome` journaled) owes nothing,
+        // and a non-cancelled terminal never captures.
+        let turn = TurnId::new("t1");
+        let call = CallId::new("d1");
+        let mut base = SessionState::default();
+        base.apply(&rec(RecordBody::TurnSubmitted {
+            turn: turn.clone(),
+            content: "go".into(),
+            budget: Budget::new(1_000, 5),
+        }));
+        base.apply(&rec(RecordBody::ModelResponse {
+            turn: turn.clone(),
+            content: "delegating".into(),
+            calls: vec![ToolCall {
+                id: call.clone(),
+                name: DELEGATE.into(),
+                input: Value::Null,
+            }],
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+        }));
+        base.apply(&rec(RecordBody::ChildRun {
+            turn: turn.clone(),
+            call: call.clone(),
+            child_kind: KindId::new("child"),
+            child_session: SessionId::new("s/t1/d1"),
+            child_turn: TurnId::new("t1/d1"),
+            budget: Budget::new(100, 2),
+        }));
+
+        let mut resolved = base.clone();
+        resolved.apply(&rec(RecordBody::ToolOutcome {
+            turn: turn.clone(),
+            call: call.clone(),
+            outcome: Ok(Value::String("child-answer".into())),
+        }));
+        resolved.apply(&rec(RecordBody::RunEnded {
+            turn: turn.clone(),
+            outcome: Err(RunError::Cancelled),
+        }));
+        assert!(resolved.cancels_owed.is_empty(), "resolved child not owed");
+
+        let mut exhausted = base;
+        exhausted.apply(&rec(RecordBody::RunEnded {
+            turn,
+            outcome: Err(RunError::BudgetExhausted),
+        }));
+        assert!(
+            exhausted.cancels_owed.is_empty(),
+            "only a cancel owes propagation (§9.2)"
+        );
     }
 
     #[test]
