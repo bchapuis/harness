@@ -68,7 +68,7 @@ fn a_final_message_completes_the_run() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("echo", SessionId::new("s-1"));
+                let session = harness.session("echo", SessionId::new("s-1")).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await
@@ -109,7 +109,7 @@ fn the_tool_loop_journals_intent_before_effect() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("echo", SessionId::new("s-2"));
+                let session = harness.session("echo", SessionId::new("s-2")).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "use the tool"))
                     .await
@@ -151,7 +151,7 @@ fn resubmitting_a_turn_never_starts_a_second_run() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("echo", SessionId::new("s-3"));
+                let session = harness.session("echo", SessionId::new("s-3")).unwrap();
                 let turn = Turn::new(TurnId::new("t-1"), "go");
                 // Concurrent duplicate submissions attach to one run (§7.4).
                 let (a, b) =
@@ -208,7 +208,7 @@ fn a_resubmission_that_changes_the_budget_is_a_conflict() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("echo", SessionId::new("s-6"));
+                let session = harness.session("echo", SessionId::new("s-6")).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await
@@ -286,7 +286,7 @@ fn turns_are_serialized_by_the_journal() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("echo", SessionId::new("s-4"));
+                let session = harness.session("echo", SessionId::new("s-4")).unwrap();
                 let (a, b) = futures::join!(
                     session.prompt(Turn::new(TurnId::new("t-1"), "one")),
                     session.prompt(Turn::new(TurnId::new("t-2"), "two"))
@@ -345,7 +345,7 @@ fn an_unknown_tool_is_a_transcript_value_not_a_run_failure() {
         sandboxes,
         move |harness, system| {
             Box::pin(async move {
-                let session = harness.session("echo", SessionId::new("s-5"));
+                let session = harness.session("echo", SessionId::new("s-5")).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await

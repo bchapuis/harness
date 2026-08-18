@@ -59,7 +59,7 @@ fn tail_leaves_a_hibernated_session_asleep() {
             .grain(brisk_idle()),
     );
     let harness = Harness::cluster(system.clone(), &kinds, model, sandboxes);
-    let session = harness.session("worker", SessionId::new("s1"));
+    let session = harness.session("worker", SessionId::new("s1")).unwrap();
 
     let out = sim.block_on({
         let session = session.clone();

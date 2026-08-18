@@ -4,8 +4,13 @@
 //! regardless of where it executes. A kind's [`ToolRegistry`] is the allowlist —
 //! a model's tool call dispatches by name against it and nothing else, so no
 //! path leads from model output to code outside the declared set. An unknown
-//! name or schema-rejected input is a synthesized [`ToolError`] outcome (§5.4),
-//! not a protocol failure: nothing was executed.
+//! name or malformed input is a synthesized [`ToolError`] outcome (§5.4),
+//! not a protocol failure: nothing was executed. Malformed is structural, not
+//! schematic: the loop rejects a non-object input (and a `delegate` input
+//! that does not deserialize, §8.1) before dispatch, but does not validate
+//! arguments against the declared `input_schema` — the schema is interface
+//! metadata for the model (§4.1) and digest-covered agreement (§7.1), and
+//! validation beyond shape is the executing tool's own.
 //!
 //! Every declared tool is sandboxed (§5.3). The single built-in exception is
 //! [`DELEGATE`] (§8): a delegation is control flow — a child `Submit`, confined
@@ -155,8 +160,10 @@ pub enum ToolError {
     /// The model named a tool outside the registry — synthesized, nothing was
     /// executed (§5.4).
     UnknownTool { name: String },
-    /// The model's arguments failed the declared schema — synthesized,
-    /// nothing was executed (§5.4).
+    /// The model's arguments were structurally malformed — not a JSON object,
+    /// or a `delegate` input that does not deserialize (§8.1) — synthesized
+    /// before dispatch, nothing was executed (§5.4). Conformance to the
+    /// declared `input_schema` beyond shape is the executing tool's check.
     InvalidArguments(String),
     /// The sandbox failed the call (open failure, or a sandbox-side crash).
     Sandbox(String),

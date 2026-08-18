@@ -98,7 +98,7 @@ fn a_submit_racing_the_post_end_advance_starts_clean() {
                 move |harness, system| {
                     Box::pin(async move {
                         let clock = system.clock().clone();
-                        let session = harness.session("echo", SessionId::new("s-race"));
+                        let session = harness.session("echo", SessionId::new("s-race")).unwrap();
                         let a = session.prompt(Turn::new(TurnId::new("t-a"), "go"));
                         let b = {
                             let session = session.clone();
@@ -159,7 +159,7 @@ fn a_straggler_model_done_never_unlocks_a_second_call() {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let clock = system.clock().clone();
-                let session = harness.session("echo", SessionId::new("s-straggler"));
+                let session = harness.session("echo", SessionId::new("s-straggler")).unwrap();
                 let prompt_a = session.prompt(Turn::new(TurnId::new("t-a"), "go-a"));
                 let driver = {
                     let session = session.clone();

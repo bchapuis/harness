@@ -81,7 +81,7 @@ fn run_two_turns(seed: u64, session: &'static str, hibernate: bool) -> (Vec<Reco
     );
     let clock = system.clock().clone();
     let records = sim.block_on(async move {
-        let s = harness.session("worker", SessionId::new(session));
+        let s = harness.session("worker", SessionId::new(session)).unwrap();
         let first = s
             .prompt(Turn::new(TurnId::new("t-1"), "one"))
             .await

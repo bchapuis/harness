@@ -334,7 +334,10 @@ pub(crate) mod arc_transcript {
 /// [`turn_digest`]) and by [`Kind::digest`](crate::Kind::digest), which **is**
 /// journaled and compared cluster-wide. Because of that second use the
 /// algorithm must stay stable across versions — do not swap it for a different
-/// hash without re-versioning kind digests.
+/// hash without re-versioning kind digests. Fast, not collision-resistant:
+/// both uses treat digest equality as content equality as a guard against
+/// *accident* (a reused `TurnId`, a drifted kind), never as a security
+/// boundary (§7.4, §10.5).
 pub fn content_digest(content: &str) -> u64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;

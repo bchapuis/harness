@@ -147,7 +147,7 @@ fn a_rejected_resubmission_leaks_no_reply_mailbox() {
     let clock = system.clock().clone();
     let observer = sink.clone();
     sim.block_on(async move {
-        let s = harness.session("worker", SessionId::new("s-reject"));
+        let s = harness.session("worker", SessionId::new("s-reject")).unwrap();
         s.prompt(Turn::new(TurnId::new("t-1"), "one"))
             .await
             .expect("call")
@@ -215,7 +215,7 @@ fn run_abandoned_child(cycles: u32) -> usize {
     let clock = system.clock().clone();
     let observer = sink.clone();
     sim.block_on(async move {
-        let s = harness.session("parent", SessionId::new("root-wait"));
+        let s = harness.session("parent", SessionId::new("root-wait")).unwrap();
         let outcome = s
             .prompt_within(
                 Turn::new(TurnId::new("t-1"), "go"),
@@ -303,7 +303,7 @@ fn the_child_wait_scales_with_the_carved_steps() {
         .build();
     let clock = system.clock().clone();
     sim.block_on(async move {
-        let s = harness.session("parent", SessionId::new("root-scale"));
+        let s = harness.session("parent", SessionId::new("root-scale")).unwrap();
         let outcome = s
             .prompt_within(
                 Turn::new(TurnId::new("t-1"), "go"),

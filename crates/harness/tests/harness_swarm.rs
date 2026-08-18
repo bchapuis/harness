@@ -111,7 +111,7 @@ impl Workload for FaultyWorkload {
             let clock = system.clock().clone();
             let mut waiting = Vec::new();
             for i in 0..sessions {
-                let session = harness.session("worker", SessionId::new(format!("s-{i}")));
+                let session = harness.session("worker", SessionId::new(format!("s-{i}"))).unwrap();
                 let clock = clock.clone();
                 waiting.push(async move {
                     let turn = Turn::new(TurnId::new("t-1"), "go");

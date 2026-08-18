@@ -95,7 +95,7 @@ fn a_failed_open_fails_the_calls_not_the_run() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("worker", SessionId::new("s-1"));
+                let session = harness.session("worker", SessionId::new("s-1")).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await
@@ -151,7 +151,7 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("worker", SessionId::new("s-2"));
+                let session = harness.session("worker", SessionId::new("s-2")).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await
@@ -207,7 +207,7 @@ fn a_durable_workspace_still_resets_on_a_genuine_mid_run_loss() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("worker", SessionId::new("s-durable-loss"));
+                let session = harness.session("worker", SessionId::new("s-durable-loss")).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await
@@ -266,7 +266,7 @@ fn a_slow_tool_is_bounded_by_its_declared_timeout() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("worker", SessionId::new("s-3"));
+                let session = harness.session("worker", SessionId::new("s-3")).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await
@@ -348,7 +348,7 @@ fn run_tiered(
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let s = harness.session("worker", SessionId::new(session));
+                let s = harness.session("worker", SessionId::new(session)).unwrap();
                 let outcome = s
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await
@@ -458,7 +458,7 @@ fn a_reset_restarts_the_held_set_and_reacquisition_is_rejournaled() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let s = harness.session("worker", SessionId::new("s-6"));
+                let s = harness.session("worker", SessionId::new("s-6")).unwrap();
                 let outcome = s
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await

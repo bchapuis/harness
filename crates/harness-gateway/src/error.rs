@@ -57,6 +57,12 @@ impl GatewayError {
         GatewayError::new(StatusCode::BAD_REQUEST, "bad_request", message)
     }
 
+    /// `404 Not Found` — the request path names a kind this deployment does not
+    /// serve (neither hosted nor routed by the gateway's harness).
+    pub fn unknown_kind(message: impl Into<String>) -> GatewayError {
+        GatewayError::new(StatusCode::NOT_FOUND, "unknown_kind", message)
+    }
+
     /// The HTTP status this error maps to.
     pub fn status(&self) -> StatusCode {
         self.status

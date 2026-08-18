@@ -47,6 +47,7 @@ use tenancy::Directory;
 use crate::auth::PrincipalId;
 use crate::auth::TokenVerifier;
 use crate::auth::scoped_session;
+use crate::error::GatewayError;
 
 /// The kinds the gateway addresses. They MUST name the same kinds with the same
 /// `GranaryConfig.shards` the nodes host (so a session name hashes to the same
@@ -160,10 +161,17 @@ impl<S: HarnessSystem> Gateway<S> {
     /// scoped under its principal for tenant isolation, resolved to a routing
     /// `SessionRef`. The principal-scoping of a session name is the gateway's
     /// secret — a handler addresses a session by the tenant-facing triple and never
-    /// mints a scoped id itself.
-    pub fn session(&self, principal: &PrincipalId, kind: &str, session: &str) -> SessionRef<S> {
+    /// mints a scoped id itself. The kind comes off the request path, so a name
+    /// this deployment does not serve is the client's `404`, not a panic.
+    pub fn session(
+        &self,
+        principal: &PrincipalId,
+        kind: &str,
+        session: &str,
+    ) -> Result<SessionRef<S>, GatewayError> {
         self.harness
             .session(kind, SessionId::new(scoped_session(principal, session)))
+            .map_err(|e| GatewayError::unknown_kind(e.to_string()))
     }
 
     /// Record the tenant's ownership of a session in the directory index, keyed by

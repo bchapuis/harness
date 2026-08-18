@@ -183,7 +183,7 @@ async fn prompt<S: HarnessSystem>(
     // Record ownership before the run (best-effort and idempotent — see
     // `Gateway::record_ownership`); the run proceeds regardless.
     gw.record_ownership(&principal, &kind, &session).await;
-    let session_ref = gw.session(&principal, &kind, &session);
+    let session_ref = gw.session(&principal, &kind, &session)?;
     if wants_sse(&headers) {
         // A reconnect resumes at `Last-Event-ID` (the last seq the client saw);
         // re-submitting the same turn id reattaches the run (idempotent, §7.4).
@@ -213,7 +213,7 @@ async fn records<S: HarnessSystem>(
 ) -> Result<Response, GatewayError> {
     let principal = principal(&gw, &headers)?;
     reject_bad_session(&session)?;
-    let session_ref = gw.session(&principal, &kind, &session);
+    let session_ref = gw.session(&principal, &kind, &session)?;
     let records = session_ref.tail(Seq::new(q.from), q.limit).await?;
     Ok(Json(json!({ "records": records })).into_response())
 }
@@ -227,7 +227,7 @@ async fn cancel<S: HarnessSystem>(
 ) -> Result<Response, GatewayError> {
     let principal = principal(&gw, &headers)?;
     reject_bad_session(&session)?;
-    let session_ref = gw.session(&principal, &kind, &session);
+    let session_ref = gw.session(&principal, &kind, &session)?;
     session_ref.cancel(&TurnId::new(q.turn)).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -267,7 +267,7 @@ async fn stream<S: HarnessSystem>(
 ) -> Result<Response, GatewayError> {
     let principal = principal(&gw, &headers)?;
     reject_bad_session(&session)?;
-    let session_ref = gw.session(&principal, &kind, &session);
+    let session_ref = gw.session(&principal, &kind, &session)?;
     let follower = session_ref.follow(Seq::new(resume_from(&headers, q.from)));
     let body = futures::stream::unfold(
         SessionStream::Streaming {

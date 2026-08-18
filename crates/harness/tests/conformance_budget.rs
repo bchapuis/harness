@@ -78,7 +78,7 @@ fn run_single(
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("looper", SessionId::new(session));
+                let session = harness.session("looper", SessionId::new(session)).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await
@@ -236,7 +236,7 @@ fn run_tree(
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("parent", SessionId::new(root));
+                let session = harness.session("parent", SessionId::new(root)).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "do the task"))
                     .await
@@ -252,7 +252,9 @@ fn run_tree(
                     } => Some((child_kind.clone(), child_session.clone())),
                     _ => None,
                 }) {
-                    Some((kind, id)) => tail_records(&harness.session(kind.as_str(), id)).await,
+                    Some((kind, id)) => {
+                        tail_records(&harness.session(kind.as_str(), id).unwrap()).await
+                    }
                     None => Vec::new(),
                 };
                 *sink.lock().unwrap() = (parent, child);
@@ -373,7 +375,7 @@ fn delegating_outside_the_allowlist_is_synthesized_not_executed() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("parent", SessionId::new("root-3"));
+                let session = harness.session("parent", SessionId::new("root-3")).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await

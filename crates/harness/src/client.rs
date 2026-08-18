@@ -13,6 +13,7 @@
 //! ride.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -265,22 +266,23 @@ impl<S: HarnessSystem> Harness<S> {
     }
 
     /// A client view of `session` under `kind` (harness spec §7.4). Pure:
-    /// name→shard is a local hash, no I/O. Creation is implicit in the first turn.
-    pub fn session(&self, kind: &str, session: SessionId) -> SessionRef<S> {
+    /// name→shard is a local hash, no I/O — the one failure is a directory
+    /// miss, a kind this node neither hosts nor routes ([`UnknownKind`]).
+    /// Kind names reach clients from outside (a URL path at the gateway), so
+    /// the miss is an error value, not a panic. Creation is implicit in the
+    /// first turn.
+    pub fn session(&self, kind: &str, session: SessionId) -> Result<SessionRef<S>, UnknownKind> {
         let kind = KindId::new(kind);
-        let grain = self
-            .shared
-            .granaries()
-            .get(&kind)
-            .expect("kind hosted or routed on this node")
-            .grain(session.as_str());
-        SessionRef {
-            grain,
+        let Some(granary) = self.shared.granaries().get(&kind) else {
+            return Err(UnknownKind { kind });
+        };
+        Ok(SessionRef {
+            grain: granary.grain(session.as_str()),
             kind,
             session,
             system: self.system.clone(),
             config: self.shared.config.clone(),
-        }
+        })
     }
 
     /// The actor system this harness runs on.
@@ -288,6 +290,28 @@ impl<S: HarnessSystem> Harness<S> {
         &self.system
     }
 }
+
+/// The error of [`Harness::session`]: the named kind is in neither this node's
+/// hosted nor its routed set, so there is no granary to address the session
+/// through. Permanent for this node's directory — a retry cannot clear it; the
+/// fix is configuration (host or route the kind) or the caller's spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownKind {
+    /// The kind the caller named.
+    pub kind: KindId,
+}
+
+impl std::fmt::Display for UnknownKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "kind '{}' is neither hosted nor routed on this node",
+            self.kind
+        )
+    }
+}
+
+impl std::error::Error for UnknownKind {}
 
 /// [`HarnessBuilder`] type-state: no routed kinds yet, so `build` is infallible —
 /// hosting starts no discovery.
@@ -416,7 +440,29 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
     /// Resolve routed kinds, then host hosted kinds, then publish the directory.
     /// Resolving routed kinds first means a `None` return (one not yet discovered)
     /// starts no hosting, so a poll loop never double-hosts.
+    ///
+    /// Panics unless every hosted kind's delegation allowlist is contained in
+    /// this node's directory (hosted ∪ routed, §7.1): the parent's node launches
+    /// the child `Submit` (§8.1) and delivers owed cancels (§9.2) through its
+    /// own granary for the child's kind, so an uncovered allowlist would fail
+    /// every delegation per-call and leave a cancel owed until a
+    /// better-configured node leads the shard. A deployment configuration
+    /// error, surfaced as loudly as a duplicate tool name (§5.2).
     fn assemble(self) -> Option<Harness<S>> {
+        let directory: BTreeSet<&KindId> = self
+            .hosted
+            .iter()
+            .map(|(id, _, _)| id)
+            .chain(self.routed.iter().map(|(id, _)| id))
+            .collect();
+        for (id, def, _) in &self.hosted {
+            for child in &def.delegates {
+                assert!(
+                    directory.contains(child),
+                    "kind '{id}' delegates to '{child}', which this node neither hosts nor routes"
+                );
+            }
+        }
         let mut granaries: BTreeMap<KindId, Granary<Agent<S>>> = BTreeMap::new();
         for (id, shards) in &self.routed {
             let grain_type = leak_grain_type(id);
@@ -465,7 +511,9 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
 }
 
 impl<S: HarnessSystem> HarnessBuilder<S, NoRoutes> {
-    /// Build the harness. Infallible: there is nothing to discover.
+    /// Build the harness. Infallible: there is nothing to discover. Panics if a
+    /// hosted kind's delegation allowlist names a kind this node neither hosts
+    /// nor routes (§7.1) — a deployment configuration error.
     pub fn build(self) -> Harness<S> {
         self.assemble()
             .expect("a host-only build has no routed kinds to discover")
@@ -475,7 +523,9 @@ impl<S: HarnessSystem> HarnessBuilder<S, NoRoutes> {
 impl<S: HarnessSystem> HarnessBuilder<S, HasRoutes> {
     /// Build the harness, or `None` until every routed kind's host gateway has
     /// gossiped into this node's receptionist (poll). Hosting side effects run
-    /// only once all routed kinds resolve.
+    /// only once all routed kinds resolve. Panics if a hosted kind's delegation
+    /// allowlist names a kind this node neither hosts nor routes (§7.1) — a
+    /// deployment configuration error.
     pub fn build(self) -> Option<Harness<S>> {
         self.assemble()
     }

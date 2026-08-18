@@ -50,6 +50,7 @@ pub use client::HasRoutes;
 pub use client::NoRoutes;
 pub use client::SessionRef;
 pub use client::TAIL_PAGE;
+pub use client::UnknownKind;
 pub use event::HarnessEvent;
 pub use kind::Kind;
 pub use kind::Kinds;

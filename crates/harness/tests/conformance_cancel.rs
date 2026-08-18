@@ -56,7 +56,7 @@ fn a_cancel_takes_effect_during_a_model_call() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("echo", SessionId::new("s-1"));
+                let session = harness.session("echo", SessionId::new("s-1")).unwrap();
                 let prompting = session.prompt(Turn::new(TurnId::new("t-1"), "go"));
                 let canceller = {
                     let session = session.clone();
@@ -123,7 +123,7 @@ fn a_cancel_of_a_queued_turn_is_a_journaled_terminal_without_a_run() {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let clock = system.clock().clone();
-                let session = harness.session("echo", SessionId::new("s-q"));
+                let session = harness.session("echo", SessionId::new("s-q")).unwrap();
                 let prompt_a = session.prompt(Turn::new(TurnId::new("t-a"), "a"));
                 let prompt_b = {
                     let session = session.clone();
@@ -195,7 +195,7 @@ fn a_cancel_for_an_ended_or_unknown_run_is_a_no_op() {
         sandboxes,
         move |harness, system| {
             Box::pin(async move {
-                let session = harness.session("echo", SessionId::new("s-2"));
+                let session = harness.session("echo", SessionId::new("s-2")).unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await
@@ -276,7 +276,7 @@ fn a_cancel_propagates_down_the_delegation_tree() {
             let sink = Arc::clone(&sink);
             let parent_sink = Arc::clone(&parent_sink);
             Box::pin(async move {
-                let session = harness.session("parent", SessionId::new("root"));
+                let session = harness.session("parent", SessionId::new("root")).unwrap();
                 let prompting = session.prompt_within(
                     Turn::new(TurnId::new("t-1"), "go"),
                     Duration::from_secs(20_000),
@@ -310,7 +310,7 @@ fn a_cancel_propagates_down_the_delegation_tree() {
                         _ => None,
                     })
                     .expect("journaled delegation");
-                let child = harness.session(child_kind.as_str(), child_session);
+                let child = harness.session(child_kind.as_str(), child_session).unwrap();
                 *sink.lock().unwrap() = tail_records(&child).await;
                 *parent_sink.lock().unwrap() = records;
             })

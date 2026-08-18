@@ -801,9 +801,12 @@ impl<S: HarnessSystem> Agent<S> {
         // the staged records join this command's batch, so the tool outcome
         // and the files it wrote commit atomically (G19). Every sandboxed call
         // captures, success or failure (a failed shell can still have
-        // written); a delegation never touched the directory, and a reported
-        // environment loss must not capture — the root may be gone, and a
-        // vanished root is never a mass deletion.
+        // written; a timed-out one may still be writing, so its capture can be
+        // torn — the next capture diffs against the last committed index and
+        // folds in what the straggler finished, §5.3 item 3); a delegation
+        // never touched the directory, and a reported environment loss must
+        // not capture — the root may be gone, and a vanished root is never a
+        // mass deletion.
         let sandboxed = state
             .live
             .as_ref()
@@ -1358,6 +1361,10 @@ impl<S: HarnessSystem> Agent<S> {
         let granary = self.shared.granaries().get(&child.kind).cloned();
         system.clone().launch(Box::pin(async move {
             let outcome = match granary {
+                // Unreachable on a node built through `HarnessBuilder`, which
+                // requires every hosted kind's delegates in the directory;
+                // kept as defense so a missing route degrades to a tool
+                // failure, never a panic in a launched task.
                 None => Err(ToolError::Delegation(format!(
                     "child kind '{}' is not hosted on this node",
                     child.kind
@@ -1534,9 +1541,12 @@ impl<S: HarnessSystem> Agent<S> {
                     continue; // launched this activation already
                 }
                 let Some(granary) = self.shared.granaries().get(&child.kind).cloned() else {
-                    // No route to the child's kind: the debt stays in the fold
-                    // for a better-configured activation; the child's budget is
-                    // the backstop meanwhile (§9.2 item 3).
+                    // No route to the child's kind — unreachable on a node
+                    // built through `HarnessBuilder`, which requires every
+                    // hosted kind's delegates in the directory. Kept as
+                    // defense: the debt stays in the fold for a
+                    // better-configured activation; the child's budget is the
+                    // backstop meanwhile (§9.2 item 3).
                     continue;
                 };
                 let this = act.this.clone().expect("self-ref set in on_activate");
