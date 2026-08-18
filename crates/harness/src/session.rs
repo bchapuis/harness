@@ -349,6 +349,19 @@ pub fn content_digest(content: &str) -> u64 {
     hash
 }
 
+/// Append one length-prefixed (netstring-style) field to a canonical form:
+/// `len:field`, so no juxtaposition of two fields collides ("fo"+"obar" reads
+/// as "foo"+"bar" under bare concatenation). The one framing primitive behind
+/// every canonical encoding in this crate — [`turn_digest`], [`derive_child`],
+/// and [`Kind::digest`](crate::Kind::digest) — so the encodings cannot drift.
+/// The digests it feeds are journaled or compared cluster-wide, so the framing
+/// must stay stable across versions.
+pub(crate) fn frame_field(canon: &mut String, field: &str) {
+    canon.push_str(&field.len().to_string());
+    canon.push(':');
+    canon.push_str(field);
+}
+
 /// The §7.4 turn-equality digest: the content plus the **literal** budget field
 /// (`None` ≠ `Some(default)`, so whether a re-submission conflicts never depends
 /// on the kind's *current* default). Length-prefixed canonical form like
@@ -357,11 +370,7 @@ pub fn content_digest(content: &str) -> u64 {
 /// every replay, never journaled itself.
 pub fn turn_digest(content: &str, budget: Option<Budget>) -> u64 {
     let mut canon = String::new();
-    let mut frame = |field: &str| {
-        canon.push_str(&field.len().to_string());
-        canon.push(':');
-        canon.push_str(field);
-    };
+    let mut frame = |field: &str| frame_field(&mut canon, field);
     frame(content);
     match budget {
         None => frame("none"),
@@ -512,13 +521,13 @@ impl SessionState {
                 });
             }
             RecordBody::TurnStarted { turn } => {
-                // Start the named queued turn — the dispatcher only ever starts
+                // Start the queue's head turn — the dispatcher only ever starts
                 // the head while no run is live, so anything else is a
                 // malformed journal, ignored (the fold is total).
                 if self.live.is_none()
-                    && let Some(i) = self.queue.iter().position(|q| &q.turn == turn)
+                    && self.queue.front().is_some_and(|q| &q.turn == turn)
                 {
-                    let queued = self.queue.remove(i).expect("position found");
+                    let queued = self.queue.pop_front().expect("checked front");
                     self.live = Some(LiveRun {
                         turn: queued.turn,
                         budget: queued.budget,
@@ -672,9 +681,7 @@ pub fn derive_child(parent: &SessionId, turn: &TurnId, call: &CallId) -> (Sessio
             if i > 0 {
                 out.push('/');
             }
-            out.push_str(&part.len().to_string());
-            out.push(':');
-            out.push_str(part);
+            frame_field(&mut out, part);
         }
         out
     }

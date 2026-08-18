@@ -180,10 +180,13 @@ async fn prompt<S: HarnessSystem>(
     // A malformed body is the edge's own `400`, in the structured envelope (not
     // axum's default plain-text rejection).
     let Json(body) = body.map_err(|e| GatewayError::bad_request(e.body_text()))?;
+    // Resolve the kind first (a pure, local check): an unknown kind is the
+    // client's `404` before any side effect, so a typo or a probing client
+    // never writes a phantom entry into the tenant's directory index.
+    let session_ref = gw.session(&principal, &kind, &session)?;
     // Record ownership before the run (best-effort and idempotent — see
     // `Gateway::record_ownership`); the run proceeds regardless.
     gw.record_ownership(&principal, &kind, &session).await;
-    let session_ref = gw.session(&principal, &kind, &session)?;
     if wants_sse(&headers) {
         // A reconnect resumes at `Last-Event-ID` (the last seq the client saw);
         // re-submitting the same turn id reattaches the run (idempotent, §7.4).

@@ -147,11 +147,7 @@ impl Kind {
     /// ("fo"+"obar" reads as "foo"+"bar").
     pub fn digest(&self) -> u64 {
         let mut canon = String::new();
-        let mut frame = |field: &str| {
-            canon.push_str(&field.len().to_string());
-            canon.push(':');
-            canon.push_str(field);
-        };
+        let mut frame = |field: &str| crate::session::frame_field(&mut canon, field);
         frame(&self.system_prompt);
         frame(&self.params.model);
         frame(&self.params.max_tokens.to_string());
