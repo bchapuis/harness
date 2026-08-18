@@ -397,7 +397,10 @@ struct Activation<S: HarnessSystem> {
     /// Owed cancels whose propagation this activation already launched (§9.2):
     /// a launch-once guard over the fold's `cancels_owed`, so repeated
     /// `Advance`s do not stack duplicate sends. Per-activation, like every
-    /// launch guard: a resume re-launches whatever is still owed.
+    /// launch guard: a resume re-launches whatever is still owed. A send that
+    /// exhausts its transport retries removes its own entry, so the next
+    /// message that drives the session re-launches it without waiting for a
+    /// fresh activation.
     cancels_launched: BTreeSet<(TurnId, CallId)>,
 }
 
@@ -1555,6 +1558,7 @@ impl<S: HarnessSystem> Agent<S> {
                 let call = call.clone();
                 let child_turn = child.turn.clone();
                 let session = child.session.clone();
+                let launched = Arc::clone(&self.act);
                 system.clone().launch(Box::pin(async move {
                     let child_ref = granary.grain(session.as_str());
                     let mut attempt = 0;
@@ -1570,10 +1574,20 @@ impl<S: HarnessSystem> Agent<S> {
                                 attempt += 1;
                                 system.sleep(propagation_backoff(attempt)).await;
                             }
-                            // Give up for this activation only: the fold keeps
-                            // owing, so the next activation retries (H5); the
+                            // Give up for this attempt only, and re-arm the
+                            // launch-once guard: the fold keeps owing, so the
+                            // next message that drives the session — the §7.5
+                            // resume nudge, a re-sent `Cancel` — re-launches
+                            // the send even on this same activation (H5); the
                             // child's budget bounds the meantime (§9.2 item 3).
-                            Err(_) => return,
+                            Err(_) => {
+                                launched
+                                    .lock()
+                                    .expect("agent activation mutex poisoned")
+                                    .cancels_launched
+                                    .remove(&(turn.clone(), call.clone()));
+                                return;
+                            }
                         }
                     }
                     let _ = this.tell(CancelDone { turn, call }).await;
