@@ -123,12 +123,15 @@ impl GatewayClient {
     }
 
     /// Read a page of a session's committed records, from sequence `from`.
+    /// Also returns the journal's compaction base (§10.2): a `from` below it
+    /// asked for records the session's snapshot has subsumed, so the history
+    /// shown starts truncated.
     pub async fn fetch_records(
         &self,
         kind: &str,
         session: &str,
         from: u64,
-    ) -> Result<Vec<(Seq, Record)>, String> {
+    ) -> Result<(Seq, Vec<(Seq, Record)>), String> {
         let path = format!(
             "/v1/{}/{}/records?from={from}",
             encode(kind),
@@ -138,9 +141,11 @@ impl GatewayClient {
         #[derive(Deserialize)]
         struct Resp {
             records: Vec<(Seq, Record)>,
+            #[serde(default)]
+            base: Seq,
         }
         let resp: Resp = parse(&body)?;
-        Ok(resp.records)
+        Ok((resp.base, resp.records))
     }
 
     /// Cancel an in-flight run (idempotent).

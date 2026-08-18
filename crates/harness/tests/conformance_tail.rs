@@ -100,14 +100,14 @@ fn tail_leaves_a_hibernated_session_asleep() {
             async move { session.tail(Seq::ZERO, harness::TAIL_PAGE).await }
         })
         .expect("tail after hibernation succeeds");
-    let kinds_seen = record_kinds(&page.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>());
+    let kinds_seen = record_kinds(&page.events.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>());
     assert_eq!(
         kinds_seen,
         vec!["created", "turn", "started", "model", "tool", "model", "ended"],
         "the full record sequence reads back across hibernation",
     );
     assert!(
-        page.windows(2).all(|w| w[0].0 < w[1].0),
+        page.events.windows(2).all(|w| w[0].0 < w[1].0),
         "the Seqs are the journal's own, strictly ascending",
     );
 
@@ -124,5 +124,108 @@ fn tail_leaves_a_hibernated_session_asleep() {
     assert_eq!(
         activated, 1,
         "a tail poll must not wake a hibernated session"
+    );
+}
+
+/// A kind config that snapshots aggressively, so a short run crosses the
+/// compaction trigger (granary §9) and truncates the journal's prefix.
+fn compacting(snapshot_every: u64) -> granary::GranaryConfig {
+    granary::GranaryConfig {
+        snapshot_every,
+        // The workspace facet materializes a real directory per grain; a fresh
+        // tempdir keeps parallel tests from sharing scratch paths (see
+        // `support::brisk_idle`).
+        data_dir: Some(
+            tempfile::tempdir()
+                .expect("workspace scratch tempdir")
+                .keep(),
+        ),
+        ..granary::GranaryConfig::default()
+    }
+}
+
+#[test]
+fn a_compacted_session_announces_truncation_to_tail_and_follower() {
+    let sim = Simulation::new(7);
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
+
+    // Every model call ends the turn; each turn appends a handful of records,
+    // so four turns cross the snapshot trigger mid-history and the tail of the
+    // journal stays readable past the last snapshot.
+    let model = Arc::new(ScriptedModel::steps(Vec::new()));
+    let sandboxes = Arc::new(ScriptedSandboxes::echo());
+    let kinds = Kinds::new().register("worker", Kind::new("worker").grain(compacting(6)));
+    let harness = Harness::cluster(system.clone(), &kinds, model, sandboxes);
+    let session = harness.session("worker", SessionId::new("s1")).unwrap();
+
+    for turn in ["t1", "t2", "t3", "t4"] {
+        let out = sim.block_on({
+            let session = session.clone();
+            let turn = Turn::new(TurnId::new(turn), "go");
+            async move { session.prompt(turn).await }
+        });
+        assert!(matches!(out, Ok(Ok(_))), "the run completes: {out:?}");
+    }
+
+    // A tail from ZERO asked for records the session's snapshot has subsumed:
+    // the reply announces the truncation (§10.2) instead of serving a short
+    // history a reader would mistake for the whole transcript.
+    let page = sim
+        .block_on({
+            let session = session.clone();
+            async move { session.tail(Seq::ZERO, harness::TAIL_PAGE).await }
+        })
+        .expect("tail of a compacted session succeeds");
+    assert!(
+        page.base > Seq::ZERO,
+        "compaction ran and the reply reports its base",
+    );
+    assert!(
+        !page.events.is_empty(),
+        "the post-snapshot suffix is still readable (else lower snapshot_every's crossings)",
+    );
+    assert!(
+        page.events.iter().all(|(seq, _)| *seq > page.base),
+        "every record served lies above the base",
+    );
+
+    // Completeness above the base: reading from the base returns byte-identical
+    // history, and its reply says nothing after `from` was compacted.
+    let from_base = sim
+        .block_on({
+            let session = session.clone();
+            let base = page.base;
+            async move { session.tail(base, harness::TAIL_PAGE).await }
+        })
+        .expect("tail from the base succeeds");
+    assert!(
+        from_base.base <= page.base,
+        "nothing after the base was compacted",
+    );
+    assert_eq!(
+        from_base.events, page.events,
+        "the readable suffix is identical from ZERO and from the base",
+    );
+
+    // The follower surfaces the same fact as an explicit step — told *before*
+    // the stream resumes past the gap — then yields the surviving suffix.
+    let (first, second) = sim.block_on({
+        let session = session.clone();
+        async move {
+            let mut follower = session.follow(Seq::ZERO);
+            let first = follower.next().await.expect("follow attaches");
+            let second = follower.next().await.expect("follow resumes");
+            (first, second)
+        }
+    });
+    assert_eq!(
+        first,
+        harness::Followed::Truncated { base: page.base },
+        "the follower announces the truncation first",
+    );
+    assert_eq!(
+        second,
+        harness::Followed::Batch(page.events.clone()),
+        "the stream resumes with the records after the base",
     );
 }

@@ -199,9 +199,28 @@ pub trait GrainHandler<M: Message>: Grain {
     ) -> impl Future<Output = (Vec<Self::Event>, M::Reply)> + Send;
 }
 
+/// A completed event read ([`GrainCtx::events`], [`GrainRef::events`]
+/// (crate::GrainRef::events)): the decoded events, plus the highest compaction
+/// **base** the read observed (§9). A slot at `Seq <= base` that is absent from
+/// `events` is truncated history — compacted away, subsumed by the grain's
+/// snapshot — not one of the interleaved records the projection skips (§7.12);
+/// a read whose `from` lay below `base` therefore did **not** see the events in
+/// `(from, base]`, and `base <= from` means nothing the caller asked after was
+/// compacted. Every page carries the base because compaction is not bounded by
+/// any reader's cursor (a snapshot at the head can outrun a slow pager), so a
+/// multi-page read reports the highest it saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventHistory<E> {
+    /// The compaction base: absent slots at or below it are truncation, and
+    /// `base > from` means the read's own history starts truncated.
+    pub base: Seq,
+    /// The committed events after `from`, decoded, at the journal's real slots.
+    pub events: Vec<(Seq, E)>,
+}
+
 /// The boxed result of [`GrainCtx::events`]: the grain's committed events after
-/// a `Seq`, decoded, at the journal's real slots.
-pub type EventsFuture<E> = BoxFuture<'static, Result<Vec<(Seq, E)>, GrainJournalError>>;
+/// a `Seq` ([`EventHistory`]), decoded, at the journal's real slots.
+pub type EventsFuture<E> = BoxFuture<'static, Result<EventHistory<E>, GrainJournalError>>;
 
 /// The events among one loaded journal page — the record-to-event projection
 /// (spec §7.9) applied to a `load` page: each record split into facet tag and
@@ -356,6 +375,10 @@ impl<G: Grain> GrainCtx<G> {
     /// not split or decode is [`GrainJournalError::Unavailable`]: corruption,
     /// never silently skipped.
     ///
+    /// The returned [`EventHistory`] carries the store's compaction base (§9):
+    /// a `from` below it asked for history the snapshot has subsumed, and the
+    /// events in `(from, base]` are not — and can no longer be — served.
+    ///
     /// Every page is bounded by the activation's **committed head**, exactly
     /// like the gateway's non-activating read (§7.5): the local store may hold
     /// an in-flight append's tentative slots (§7.2), and this future is
@@ -380,23 +403,28 @@ impl<G: Grain> GrainCtx<G> {
                 ));
             }
             let floor = Seq::new(floor);
+            let mut base = Seq::ZERO;
             let mut events = Vec::new();
             let mut cursor = from;
             while events.len() < limit {
                 let page = journal.load(&name, cursor, LOAD_PAGE).await?;
-                let loaded = page.len();
+                // The store's base only advances, so the last page's is the
+                // highest this read observed.
+                base = page.base;
+                let loaded = page.records.len();
                 // Serve only the committed prefix (§7.5): slots above the
                 // floor are an in-flight append's tentative writes (or
                 // undecided leftovers) and are not served until they commit.
-                let page: Vec<(Seq, Vec<u8>)> = page
+                let records: Vec<(Seq, Vec<u8>)> = page
+                    .records
                     .into_iter()
                     .take_while(|(seq, _)| *seq <= floor)
                     .collect();
-                let at_head = page.len() < loaded || loaded < LOAD_PAGE;
-                if let Some((seq, _)) = page.last() {
+                let at_head = records.len() < loaded || loaded < LOAD_PAGE;
+                if let Some((seq, _)) = records.last() {
                     cursor = *seq;
                 }
-                for (seq, payload) in events_in_page(page)? {
+                for (seq, payload) in events_in_page(records)? {
                     let event = actor_serialization::decode::<G::Event>(&*codec, &payload)
                         .map_err(|e| GrainJournalError::Unavailable(e.to_string()))?;
                     events.push((seq, event));
@@ -408,7 +436,7 @@ impl<G: Grain> GrainCtx<G> {
                     break;
                 }
             }
-            Ok(events)
+            Ok(EventHistory { base, events })
         })
     }
 }

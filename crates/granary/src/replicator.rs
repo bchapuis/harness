@@ -31,6 +31,7 @@ use crate::election::LeaderElection;
 use crate::grain::GrainName;
 use crate::journal::AppendOutcome;
 use crate::journal::GrainJournalError;
+use crate::journal::RecordPage;
 use crate::journal::Seq;
 use crate::journal::Term;
 use crate::replica_store::ReplicaTransport;
@@ -722,7 +723,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> Result<Vec<(Seq, Vec<u8>)>, GrainJournalError> {
+    ) -> Result<RecordPage, GrainJournalError> {
         Ok(self.local.read_from(self.shard, grain, from, limit))
     }
 

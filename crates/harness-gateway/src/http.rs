@@ -5,7 +5,10 @@
 //! verifies it to a principal, then scopes the session key under it). Endpoints:
 //! `prompt`/`records`/`cancel`/`sessions` are request-response; `stream` (and a
 //! `prompt` with `Accept: text/event-stream`) ride a harness [`Follower`] as
-//! Server-Sent Events.
+//! Server-Sent Events (event types: `records`, `truncated`, `outcome`,
+//! `error`, `end`). Both read forms surface snapshot compaction (§10.2):
+//! `records` returns the journal's `base` beside the page, and a stream whose
+//! cursor the compactor overtakes emits `truncated` before resuming.
 //!
 //! There is no control protocol underneath: the handler holds a `GrainRef` and
 //! calls the grain directly ([`SessionRef::prompt_within`], [`SessionRef::tail`],
@@ -40,6 +43,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::task::JoinHandle;
 
+use harness::Followed;
 use harness::Follower;
 use harness::GrainError;
 use harness::HarnessSystem;
@@ -217,8 +221,12 @@ async fn records<S: HarnessSystem>(
     let principal = principal(&gw, &headers)?;
     reject_bad_session(&session)?;
     let session_ref = gw.session(&principal, &kind, &session)?;
-    let records = session_ref.tail(Seq::new(q.from), q.limit).await?;
-    Ok(Json(json!({ "records": records })).into_response())
+    let history = session_ref.tail(Seq::new(q.from), q.limit).await?;
+    // `base` is the compaction floor (§10.2): a `from` below it asked for
+    // records the session's snapshot has subsumed, so the page's history
+    // starts truncated — the client's one way to tell that from the journal
+    // slots the projection legally skips.
+    Ok(Json(json!({ "records": history.events, "base": history.base })).into_response())
 }
 
 /// Cancel a run (idempotent).
@@ -345,7 +353,7 @@ async fn next_event<S: HarnessSystem>(
             turn,
             tail,
         } => match follower.next().await {
-            Ok(records) => {
+            Ok(Followed::Batch(records)) => {
                 let event = records_event(&records);
                 let next = if ends_turn(&records, &turn) {
                     SessionStream::Terminal(tail)
@@ -357,6 +365,25 @@ async fn next_event<S: HarnessSystem>(
                     }
                 };
                 Some((Ok(event), next))
+            }
+            // Compaction outran the stream's cursor (§10.2): the records up to
+            // `base` are subsumed by the session's snapshot and cannot be
+            // replayed. Tell the client rather than silently resuming past the
+            // gap; the event id is the base, so a `Last-Event-ID` reconnect
+            // also resumes after it.
+            Ok(Followed::Truncated { base }) => {
+                let event = Event::default()
+                    .event("truncated")
+                    .data(json!({ "base": base }).to_string())
+                    .id(base.value().to_string());
+                Some((
+                    Ok(event),
+                    SessionStream::Streaming {
+                        follower,
+                        turn,
+                        tail,
+                    },
+                ))
             }
             Err(e) => Some((Ok(error_event(e)), SessionStream::Done)),
         },

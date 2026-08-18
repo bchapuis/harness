@@ -224,20 +224,27 @@ fn a_gateway_read_leaves_a_hibernated_grain_asleep() {
             .await
             .expect("a read after hibernation succeeds")
     });
-    assert_eq!(events.len(), 3, "all committed events come back");
+    assert_eq!(events.events.len(), 3, "all committed events come back");
     assert!(
         events
+            .events
             .iter()
             .all(|(_, e)| matches!(e, CounterEvent::Added(1))),
         "the events decode to what was committed",
     );
     assert_eq!(
         events
+            .events
             .iter()
             .map(|(seq, _)| seq.value())
             .collect::<Vec<_>>(),
         vec![1, 2, 3],
         "a facetless grain's events sit at consecutive journal slots",
+    );
+    assert_eq!(
+        events.base,
+        granary::Seq::ZERO,
+        "nothing was compacted, and the page says so",
     );
 
     // ...and reading woke nothing: the one activation is the write-time one,
@@ -249,6 +256,75 @@ fn a_gateway_read_leaves_a_hibernated_grain_asleep() {
         .filter(|e| matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Activated { .. })))
         .count();
     assert_eq!(activated, 1, "a poll must not wake a hibernated grain");
+}
+
+// --- Compaction is visible to readers: the base rides every page (§7.5, §9) ---
+
+#[test]
+fn a_compacted_grain_reports_its_base_instead_of_a_silent_gap() {
+    let sim = Simulation::new(13);
+    let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
+    // Snapshot every third event: after four Adds the snapshot at 3 has
+    // compacted events 1..=3 away, and only event 4 is still readable.
+    let counters = system.granary::<CounterGrain>(GranaryConfig {
+        snapshot_every: 3,
+        ..GranaryConfig::default()
+    });
+
+    let counter = counters.grain("counter/0");
+    sim.block_on(async move {
+        for _ in 0..4 {
+            counter.ask(Add(1)).await.expect("add commits");
+        }
+    });
+
+    // A read from ZERO asked for history the snapshot has subsumed: the page
+    // reports the base, so the missing prefix is announced truncation, not a
+    // silent gap the caller would misread as facet slots (§7.5).
+    let reread = counters.grain("counter/0");
+    let history = sim.block_on(async move {
+        reread
+            .events(granary::Seq::ZERO, 100)
+            .await
+            .expect("a read of a compacted grain succeeds")
+    });
+    assert_eq!(
+        history.base,
+        granary::Seq::new(3),
+        "the compaction base is the snapshot's seq",
+    );
+    assert_eq!(
+        history
+            .events
+            .iter()
+            .map(|(seq, _)| seq.value())
+            .collect::<Vec<_>>(),
+        vec![4],
+        "only the post-snapshot suffix is still readable",
+    );
+
+    // A read from the base asked for nothing that was compacted: complete
+    // history from `from`, and the base says so (base <= from).
+    let reread = counters.grain("counter/0");
+    let from_base = sim.block_on(async move {
+        reread
+            .events(granary::Seq::new(3), 100)
+            .await
+            .expect("a read from the base succeeds")
+    });
+    assert!(
+        from_base.base <= granary::Seq::new(3),
+        "nothing after `from` was compacted",
+    );
+    assert_eq!(
+        from_base
+            .events
+            .iter()
+            .map(|(seq, _)| seq.value())
+            .collect::<Vec<_>>(),
+        vec![4],
+        "the suffix reads back identically from the base",
+    );
 }
 
 // --- can_passivate: a grain that vetoes idle hibernation (§10) ----------------
@@ -677,10 +753,14 @@ fn a_snapshot_never_outruns_the_head_it_is_measured_against() {
 
 /// The guard's half of **G4**: given a snapshot seq the head does not cover — a
 /// state the identity above makes unreachable — the host takes the journal's
-/// authority (**G3**) instead of folding a state no committed prefix supports.
+/// authority (**G3**) and never folds a state no committed prefix supports.
+/// With an untruncated journal that means replaying whole from `ZERO`; here the
+/// real snapshot's compaction has already drained the prefix, so no committed
+/// prefix exists to replay — the base guard (§9) fails the activation loudly
+/// rather than fold the 2 surviving records of 10 and serve the wrong count.
 #[test]
 fn a_snapshot_beyond_the_committed_head_is_refused_in_favour_of_the_journal() {
-    fn run(ahead: u64, recorder: &Recorder, sim: &Simulation) {
+    fn run(ahead: u64, recorder: &Recorder, sim: &Simulation) -> Result<i64, granary::GrainError> {
         let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());
         let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
             .events(sink)
@@ -709,7 +789,7 @@ fn a_snapshot_beyond_the_committed_head_is_refused_in_favour_of_the_journal() {
             "a snapshot must actually be taken, or the rule is never consulted",
         );
         let reread = counters.grain("counter/g4");
-        sim.block_on(async move { reread.ask(ReadCount).await.expect("read after rehydrate") });
+        sim.block_on(async move { reread.ask(ReadCount).await })
     }
 
     fn rehydrations(recorder: &Recorder) -> Vec<bool> {
@@ -724,21 +804,34 @@ fn a_snapshot_beyond_the_committed_head_is_refused_in_favour_of_the_journal() {
     }
 
     // Control: an honest seq. The reactivation seeds from the snapshot — so the
-    // refusal below is a real refusal, not an absent snapshot.
+    // refusal below is a real refusal, not an absent snapshot — and reads back
+    // the true count.
     let control = Recorder::new();
-    run(0, &control, &Simulation::new(23));
+    let count = run(0, &control, &Simulation::new(23));
+    assert_eq!(
+        count,
+        Ok(10),
+        "with an honest snapshot seq, the rehydrated fold is the true count",
+    );
     assert_eq!(
         rehydrations(&control),
         vec![false, true],
         "with an honest snapshot seq, reactivation seeds from the snapshot",
     );
 
-    // A seq 100 slots past a ten-record head: refused, and the journal replayed.
+    // A seq 100 slots past a ten-record head: refused — and because the real
+    // snapshot's compaction already drained the journal's prefix, no committed
+    // prefix remains to replay. The base guard fails the activation (G3):
+    // unavailability, never the truncated fold (a count of 2) the old
+    // replay-from-ZERO fallback would have served as truth.
     let overstated = Recorder::new();
-    run(100, &overstated, &Simulation::new(23));
-    assert_eq!(
-        rehydrations(&overstated),
-        vec![false, false],
-        "a snapshot beyond the committed head must be ignored, not folded (G4)",
+    let count = run(100, &overstated, &Simulation::new(23));
+    assert!(
+        count.is_err(),
+        "a lying snapshot over a compacted journal must fail the read, not fold: {count:?}",
+    );
+    assert!(
+        !rehydrations(&overstated).contains(&true),
+        "the overstated snapshot is never folded from (G4)",
     );
 }

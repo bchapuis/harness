@@ -23,6 +23,7 @@ use crate::grain::GrainName;
 use crate::journal::AppendOutcome;
 use crate::journal::GrainJournal;
 use crate::journal::GrainJournalError;
+use crate::journal::RecordPage;
 use crate::journal::Seq;
 use crate::journal::Term;
 use crate::replica_store::ReplicaTransport;
@@ -90,7 +91,7 @@ impl<R: RaftConsensus> GrainJournal for QuorumGrainJournal<R> {
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> Result<Vec<(Seq, Vec<u8>)>, GrainJournalError> {
+    ) -> Result<RecordPage, GrainJournalError> {
         self.replicator.load(grain, from, limit).await
     }
 

@@ -41,6 +41,7 @@ pub use agent::SubmitStatus;
 pub use budget::Budget;
 pub use budget::Spend;
 pub use budget::Usage;
+pub use client::Followed;
 pub use client::Follower;
 pub use client::Harness;
 pub use client::HarnessBuilder;
@@ -89,6 +90,7 @@ pub use tool::ToolRegistry;
 
 // Re-exported granary types that appear in the harness's public surface, so a
 // consumer needs no direct granary dependency for ordinary use.
+pub use granary::EventHistory;
 pub use granary::FileGrainStore;
 pub use granary::GrainError;
 pub use granary::GrainStoreFactory;

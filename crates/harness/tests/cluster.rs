@@ -163,7 +163,7 @@ fn sessions_run_once_across_a_converged_cluster() {
         let records: Vec<RecordBody> = drive(&sim, Duration::from_secs(10), async move {
             loop {
                 if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
-                    return page.into_iter().map(|(_, r)| r.body).collect();
+                    return page.events.into_iter().map(|(_, r)| r.body).collect();
                 }
             }
         });
@@ -227,7 +227,7 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
         async move {
             loop {
                 if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
-                    return page.into_iter().map(|(_, r)| r.body).collect();
+                    return page.events.into_iter().map(|(_, r)| r.body).collect();
                 }
             }
         }
@@ -326,7 +326,7 @@ fn await_journal(
     drive(sim, settle, async move {
         loop {
             if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
-                let bodies: Vec<RecordBody> = page.into_iter().map(|(_, r)| r.body).collect();
+                let bodies: Vec<RecordBody> = page.events.into_iter().map(|(_, r)| r.body).collect();
                 if ready(&bodies) {
                     return bodies;
                 }

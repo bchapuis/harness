@@ -34,6 +34,7 @@ use serde::Serialize;
 
 use crate::blobs::BlobId;
 use crate::grain::GrainName;
+use crate::journal::RecordPage;
 use crate::journal::Seq;
 use crate::journal::Term;
 
@@ -308,10 +309,12 @@ pub trait GrainStore: GrainBlobStore {
     }
 
     /// Up to `limit` records for a grain after `from` (exclusive), ascending by
-    /// `Seq`, as `(Seq, bytes)` — the `load` seam (§7.3). Only the returned window's
-    /// bytes are cloned, so paging a grain's tail on replay costs `O(limit)`. Records
-    /// the snapshot already subsumes (`Seq <= base`) are absent, as in
-    /// [`read`](GrainStore::read).
+    /// `Seq`, with the grain's compaction base — the `load` seam (§7.3), as one
+    /// consistent [`RecordPage`] read under the segment's lock. Only the returned
+    /// window's bytes are cloned, so paging a grain's tail on replay costs
+    /// `O(limit)`. Records the snapshot already subsumes (`Seq <= base`) are
+    /// absent, as in [`read`](GrainStore::read); the base is what lets a reader
+    /// tell that compacted prefix from the interleaved slots it legally skips.
     #[must_use = "the answer is the whole point of the call"]
     fn read_from(
         &self,
@@ -319,7 +322,7 @@ pub trait GrainStore: GrainBlobStore {
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> Vec<(Seq, Vec<u8>)>;
+    ) -> RecordPage;
 
     /// A **fenced** read for recovery (§8): promise not to accept a shard term below
     /// `term` (so a deposed leader cannot commit on this replica once a new leader
@@ -542,9 +545,11 @@ impl GrainRecords {
         }
     }
 
-    /// Up to `limit` occupied records after `from` (exclusive), ascending. Clones
-    /// only the returned window — the ranged `load` read (§7.3).
-    pub(crate) fn read_from(&self, from: Seq, limit: usize) -> Vec<(Seq, Vec<u8>)> {
+    /// Up to `limit` occupied records after `from` (exclusive), ascending, with
+    /// this segment's compaction base — one consistent view under the segment's
+    /// lock ([`RecordPage`]). Clones only the returned window — the ranged
+    /// `load` read (§7.3).
+    pub(crate) fn read_from(&self, from: Seq, limit: usize) -> RecordPage {
         let base = self.base.value();
         // Records at or below `from` (and the compacted prefix) are skipped; start at
         // the first slot above `max(from, base)`.
@@ -558,7 +563,10 @@ impl GrainRecords {
                 out.push((Seq::new(base + i as u64 + 1), record.bytes.clone()));
             }
         }
-        out
+        RecordPage {
+            base: self.base,
+            records: out,
+        }
     }
 
     /// Apply a fenced record store (the fence is checked by the caller). Mirrors the
@@ -993,13 +1001,16 @@ impl GrainStore for MemoryGrainStore {
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> Vec<(Seq, Vec<u8>)> {
+    ) -> RecordPage {
         match self.existing(shard, grain) {
             Some(segment) => segment
                 .lock()
                 .expect("grain segment poisoned")
                 .read_from(from, limit),
-            None => Vec::new(),
+            None => RecordPage {
+                base: Seq::ZERO,
+                records: Vec::new(),
+            },
         }
     }
 
@@ -1434,19 +1445,33 @@ mod tests {
         );
         assert_eq!(
             store.read_from(0, &n, Seq::ZERO, 10),
-            vec![
-                (Seq::new(1), b"e1".to_vec()),
-                (Seq::new(2), b"e2".to_vec()),
-                (Seq::new(3), b"e3".to_vec()),
-            ]
+            RecordPage {
+                base: Seq::ZERO,
+                records: vec![
+                    (Seq::new(1), b"e1".to_vec()),
+                    (Seq::new(2), b"e2".to_vec()),
+                    (Seq::new(3), b"e3".to_vec()),
+                ],
+            }
         );
         // Exclusive of `from`, bounded by `limit`.
         assert_eq!(
             store.read_from(0, &n, Seq::new(1), 1),
-            vec![(Seq::new(2), b"e2".to_vec())]
+            RecordPage {
+                base: Seq::ZERO,
+                records: vec![(Seq::new(2), b"e2".to_vec())],
+            }
         );
-        assert_eq!(store.read_from(0, &n, Seq::new(3), 10), Vec::new());
-        // A read past a compacted base returns the live tail only.
+        assert_eq!(
+            store.read_from(0, &n, Seq::new(3), 10),
+            RecordPage {
+                base: Seq::ZERO,
+                records: Vec::new(),
+            }
+        );
+        // A read past a compacted base returns the live tail only, and the page
+        // reports the base — the reader's one way to tell the drained prefix
+        // from slots that were never occupied.
         let _ = store.store_snapshot(
             0,
             &n,
@@ -1457,7 +1482,10 @@ mod tests {
         );
         assert_eq!(
             store.read_from(0, &n, Seq::ZERO, 10),
-            vec![(Seq::new(3), b"e3".to_vec())]
+            RecordPage {
+                base: Seq::new(2),
+                records: vec![(Seq::new(3), b"e3".to_vec())],
+            }
         );
     }
 

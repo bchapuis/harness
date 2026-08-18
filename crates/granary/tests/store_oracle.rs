@@ -466,7 +466,7 @@ fn a_read_of_a_removed_grain_does_not_resurrect_it() {
 
     // The read that used to bring it back.
     assert!(store.read(0, &g).slots.is_empty());
-    assert!(store.read_from(0, &g, Seq::ZERO, 10).is_empty());
+    assert!(store.read_from(0, &g, Seq::ZERO, 10).records.is_empty());
 
     assert!(
         !store.grains(0).contains(&g),

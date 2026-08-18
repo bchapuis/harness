@@ -137,6 +137,7 @@ use wal::Wal;
 
 use crate::blobs::BlobId;
 use crate::grain::GrainName;
+use crate::journal::RecordPage;
 use crate::journal::Seq;
 use crate::journal::Term;
 use crate::store::BlobAck;
@@ -1215,7 +1216,7 @@ impl GrainStore for FileGrainStore {
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> Vec<(Seq, Vec<u8>)> {
+    ) -> RecordPage {
         match self.segment_existing(shard, grain) {
             Some(segment) => segment
                 .inner
@@ -1223,7 +1224,10 @@ impl GrainStore for FileGrainStore {
                 .expect("grain segment poisoned")
                 .records
                 .read_from(from, limit),
-            None => Vec::new(),
+            None => RecordPage {
+                base: Seq::ZERO,
+                records: Vec::new(),
+            },
         }
     }
 

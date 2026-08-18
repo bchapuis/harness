@@ -365,7 +365,7 @@ fn a_gateway_read_on_a_fresh_leader_serves_the_committed_journal() {
                 // outliving one read deadline) and a stale-empty page are
                 // retried; every await advances virtual time.
                 match granary.grain(key).events(granary::Seq::ZERO, 16).await {
-                    Ok(events) if !events.is_empty() => return events,
+                    Ok(history) if !history.events.is_empty() => return history.events,
                     _ => {}
                 }
             }

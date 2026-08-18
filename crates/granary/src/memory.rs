@@ -21,6 +21,7 @@ use crate::grain::GrainName;
 use crate::journal::AppendOutcome;
 use crate::journal::GrainJournal;
 use crate::journal::GrainJournalError;
+use crate::journal::RecordPage;
 use crate::journal::Seq;
 use crate::journal::Term;
 use crate::store::BlobAck;
@@ -94,7 +95,7 @@ impl GrainJournal for LocalGrainJournal {
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> Result<Vec<(Seq, Vec<u8>)>, GrainJournalError> {
+    ) -> Result<RecordPage, GrainJournalError> {
         Ok(self.store.read_from(self.shard, grain, from, limit))
     }
 
@@ -239,17 +240,29 @@ mod tests {
         ));
         assert_eq!(
             run(j.load(&n, Seq::ZERO, 10)),
-            Ok(vec![
-                (Seq::new(1), b"e1".to_vec()),
-                (Seq::new(2), b"e2".to_vec()),
-                (Seq::new(3), b"e3".to_vec()),
-            ])
+            Ok(RecordPage {
+                base: Seq::ZERO,
+                records: vec![
+                    (Seq::new(1), b"e1".to_vec()),
+                    (Seq::new(2), b"e2".to_vec()),
+                    (Seq::new(3), b"e3".to_vec()),
+                ],
+            })
         );
         assert_eq!(
             run(j.load(&n, Seq::new(1), 1)),
-            Ok(vec![(Seq::new(2), b"e2".to_vec())])
+            Ok(RecordPage {
+                base: Seq::ZERO,
+                records: vec![(Seq::new(2), b"e2".to_vec())],
+            })
         );
-        assert_eq!(run(j.load(&n, Seq::new(3), 10)), Ok(Vec::new()));
+        assert_eq!(
+            run(j.load(&n, Seq::new(3), 10)),
+            Ok(RecordPage {
+                base: Seq::ZERO,
+                records: Vec::new(),
+            })
+        );
     }
 
     #[test]

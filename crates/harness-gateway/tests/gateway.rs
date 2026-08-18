@@ -93,7 +93,16 @@ fn host_kinds() -> Kinds {
     };
     Kinds::new()
         .register("assistant", build("assistant"))
-        .register("worker", build("worker"))
+        // `worker` snapshots aggressively, so the records test below crosses
+        // the compaction trigger (granary §9) in a handful of turns. The
+        // config is host-side policy: the client-side registry needs no match.
+        .register(
+            "worker",
+            build("worker").grain(GranaryConfig {
+                snapshot_every: 6,
+                ..GranaryConfig::default()
+            }),
+        )
 }
 
 /// Stand up one LocalSystem hosting the grains, then build the gateway as a client
@@ -222,6 +231,60 @@ async fn prompt_runs_the_grain_and_isolates_tenants() {
             .len(),
         0,
         "bob must not see alice's sessions: {listing}"
+    );
+}
+
+/// `GET /records` surfaces the journal's compaction base (§10.2): once a
+/// session's snapshot has subsumed its oldest records, the page reports
+/// `base > 0` beside the surviving records, so a client reading from 0 learns
+/// its history starts truncated instead of mistaking the short page for the
+/// whole transcript.
+#[tokio::test]
+async fn records_reports_the_compaction_base() {
+    let gw = gateway().await;
+
+    // Four turns against the compacting `worker` kind cross its snapshot
+    // trigger (`snapshot_every: 6` in `host_kinds`) mid-history.
+    for turn in ["t-1", "t-2", "t-3", "t-4"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/worker/demo/prompt")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer alice")
+            .body(Body::from(format!(
+                r#"{{"turn":"{turn}","content":"hi","within_secs":30}}"#
+            )))
+            .unwrap();
+        let resp = harness_gateway::http::router(gw.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/worker/demo/records?from=0")
+        .header("authorization", "Bearer alice")
+        .body(Body::empty())
+        .unwrap();
+    let resp = harness_gateway::http::router(gw.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let base = body["base"].as_u64().expect("the page carries the base");
+    assert!(base > 0, "compaction ran and the page reports it: {body}");
+    let records = body["records"].as_array().expect("records array");
+    assert!(
+        !records.is_empty(),
+        "the post-snapshot suffix is still readable: {body}"
+    );
+    let first_seq = records[0][0].as_u64().expect("a [seq, record] tuple");
+    assert!(
+        first_seq > base,
+        "every record served lies above the base: {body}"
     );
 }
 

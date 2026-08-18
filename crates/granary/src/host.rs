@@ -60,6 +60,7 @@ use crate::alarm_index::index_key;
 use crate::grainref::Granary;
 use crate::journal::AppendOutcome;
 use crate::journal::DynGrainJournal;
+use crate::journal::GrainJournalError;
 use crate::journal::Seq;
 use crate::subscription::RecordBatch;
 use crate::subscription::SUB_BUFFER;
@@ -379,10 +380,21 @@ impl<G: Grain> Host<G> {
                 .load(&self.name, seq, REPLAY_BATCH)
                 .await
                 .map_err(boxed)?;
-            if batch.is_empty() {
+            // Defence in depth for the fold (G3): the replay cursor starts at the
+            // loaded snapshot's seq, and compaction never passes the newest
+            // snapshot (§9), so a base above the cursor means the store and the
+            // snapshot disagree about where history begins — folding on would
+            // silently skip the gap, so abort the activation instead.
+            if batch.base > seq {
+                return Err(boxed(GrainJournalError::Unavailable(format!(
+                    "records compacted past the loaded snapshot ({} > {seq})",
+                    batch.base
+                ))));
+            }
+            if batch.records.is_empty() {
                 break;
             }
-            for (s, bytes) in batch {
+            for (s, bytes) in batch.records {
                 // Dispatch each record by its facet tag (spec §7.12). A tag no
                 // declared facet claims aborts the activation (**G19**): a grain's
                 // history must never be silently misread by a runtime missing one

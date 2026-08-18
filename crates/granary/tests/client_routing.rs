@@ -197,7 +197,7 @@ fn a_non_hosting_client_routes_to_a_cluster_grain() {
     assert_eq!(after_read, Ok(7), "the client reads the committed value");
     let tailed = tailed.expect("the client's event read routed to the leader's gateway");
     assert!(
-        matches!(tailed.as_slice(), [(_, CounterEvent::Added(7))]),
+        matches!(tailed.events.as_slice(), [(_, CounterEvent::Added(7))]),
         "the non-activating read returns the committed event over the wire",
     );
 }

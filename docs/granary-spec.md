@@ -250,9 +250,21 @@ impl<G: Grain> GrainRef<G> {
     /// **without get-or-activating the grain** (§7.5): polling a hibernated
     /// grain leaves it hibernated (§10). A framework built-in like `subscribe`.
     /// Same projection contract as `GrainCtx::events`: real `Seq`s with facet
-    /// gaps, fewer than `limit` only at the head; a failed or corrupt journal
+    /// gaps, fewer than `limit` only at the head, the compaction `base` on
+    /// every reply (§9); a failed or corrupt journal
     /// read is `GrainError::Unavailable` — transient, always safe to re-ask.
-    pub async fn events(&self, from: Seq, limit: usize) -> Result<Vec<(Seq, G::Event)>, GrainError>;
+    pub async fn events(&self, from: Seq, limit: usize)
+        -> Result<EventHistory<G::Event>, GrainError>;
+}
+
+/// A completed event read: the decoded events, plus the highest compaction
+/// `base` the read observed (§9). An absent slot at or below `base` is
+/// truncated history — subsumed by the grain's snapshot — never one of the
+/// interleaved records the projection skips (§7.12); `base <= from` means
+/// nothing the caller asked after was compacted.
+pub struct EventHistory<E> {
+    pub base: Seq,
+    pub events: Vec<(Seq, E)>,
 }
 ```
 
@@ -273,10 +285,12 @@ impl<G: Grain> GrainCtx<G> {
     /// event projection (§7.9). Facet records (§7.12) are skipped, so the
     /// returned `Seq`s are the journal's real slots, with gaps where other
     /// facets' records sit; fewer than `limit` events come back only at the
-    /// head. A local, fence-free journal read (§7.3), read-your-leader like
-    /// any query (§7.5) — read-only, so the no-`persist` rule below holds.
+    /// head, and the reply carries the compaction `base` (§9) like the
+    /// gateway read's. A local, fence-free journal read (§7.3), bounded by
+    /// the activation's committed head (§7.5), read-your-leader like
+    /// any query — read-only, so the no-`persist` rule below holds.
     fn events(&self, from: Seq, limit: usize)
-        -> BoxFuture<'static, Result<Vec<(Seq, G::Event)>, GrainJournalError>>;
+        -> BoxFuture<'static, Result<EventHistory<G::Event>, GrainJournalError>>;
     /// Death-watch an actor by id (actor §12): when it terminates — including
     /// its node going down — the grain's `on_peer_terminated` runs as a
     /// callerless decision through the §6 barrier, the alarm protocol's
@@ -416,10 +430,12 @@ pub trait GrainJournal: Clone + Send + Sync + 'static {
         -> impl Future<Output = AppendOutcome> + Send;
 
     /// Up to `limit` committed events for one grain from `from` (exclusive)
-    /// toward its head. Local on the leader once `head` has recovered the grain
+    /// toward its head, with the store's compaction `base` (§9) — the two read
+    /// under one segment lock, so the base always explains the page's missing
+    /// prefix. Local on the leader once `head` has recovered the grain
     /// (records up to the recovered head are present locally).
     fn load(&self, grain: &GrainName, from: Seq, limit: usize)
-        -> impl Future<Output = Result<Vec<(Seq, Vec<u8>)>, GrainJournalError>> + Send;
+        -> impl Future<Output = Result<RecordPage, GrainJournalError>> + Send;
 
     /// The grain's committed head — the authoritative source of `head` on
     /// rehydration (§9, invariant G3/G4), and the rehydration barrier itself.
@@ -483,6 +499,11 @@ pub enum AppendOutcome {
     Unavailable(String),     // quorum unreachable, OR the commit timed out (ambiguous); pause (§11)
 }
 
+pub struct RecordPage {
+    pub base: Seq,                     // the compaction base (§9): slots at or below it are gone
+    pub records: Vec<(Seq, Vec<u8>)>,  // the records after max(from, base), ascending
+}
+
 pub enum GrainJournalError {
     Unavailable(String),     // a local read could not complete (I/O or corruption)
 }
@@ -514,7 +535,7 @@ The durability concern is the **Replicator** (§7.3), and it admits multiple imp
 
 A command that emits no events (a query) commits nothing (§6 step 2). The leader serves it from the grain's in-memory activation, a local, replication-free read with **no per-read consensus** (DO §4.3, §4.4). Reads scale with the leaders' capacity and never wait on replication.
 
-**The non-activating event read (`GrainRef::events`, §4.3).** A second read form skips the activation entirely: the shard leader's **gateway** (§5.3) serves a grain's committed events straight from the journal's `load` (§7.3), without get-or-activating the grain — so observation never wakes a hibernated grain (§10), which is what makes continuous polling compatible with hibernation's economics. It applies the same record-to-event projection as the subscription sink and `GrainCtx::events` (§7.9, §4.3): facet records (§7.12) are skipped, the returned `Seq`s are the journal's real slots, and a record that will not split or decode surfaces as `Unavailable` — corruption, never silently dropped (`Unavailable` here reports a failed local read; a read commits nothing, so re-asking is always safe). Each wire page is bounded server-side (the gateway scans at most a fixed number of records per ask, SHOULD default to about **1024**) and carries an explicit cursor and at-head flag, so a page diluted by facet records still makes progress and the caller-side loop preserves the "fewer than `limit` only at the head" contract; the paging loop and the event decode run on the **caller**, keeping the serial gateway to one bounded local read per ask (§5.3). Like `Activate`, the read is answered only on the shard's leader — a non-leader replies `NotLeader(hint)` for the caller's bounded redirect (§5.4) — so its consistency is exactly the read-your-leader contract below, stale only where every read is.
+**The non-activating event read (`GrainRef::events`, §4.3).** A second read form skips the activation entirely: the shard leader's **gateway** (§5.3) serves a grain's committed events straight from the journal's `load` (§7.3), without get-or-activating the grain — so observation never wakes a hibernated grain (§10), which is what makes continuous polling compatible with hibernation's economics. It applies the same record-to-event projection as the subscription sink and `GrainCtx::events` (§7.9, §4.3): facet records (§7.12) are skipped, the returned `Seq`s are the journal's real slots, and a record that will not split or decode surfaces as `Unavailable` — corruption, never silently dropped (`Unavailable` here reports a failed local read; a read commits nothing, so re-asking is always safe). Each wire page is bounded server-side (the gateway scans at most a fixed number of records per ask, SHOULD default to about **1024**) and carries an explicit cursor, an at-head flag, and the store's compaction **base** (§9) — slots at or below the base are subsumed by the grain's snapshot, so a caller reading from below it learns its history starts truncated instead of mistaking the drained prefix for facet gaps; the base MUST ride **every** page, not just the first, because compaction is bounded by no reader's cursor (a snapshot at the head can outrun a slow pager mid-read). With those three fields a page diluted by facet records still makes progress and the caller-side loop preserves the "fewer than `limit` only at the head" contract; the paging loop and the event decode run on the **caller**, keeping the serial gateway to one bounded local read per ask (§5.3). Like `Activate`, the read is answered only on the shard's leader — a non-leader replies `NotLeader(hint)` for the caller's bounded redirect (§5.4) — so its consistency is exactly the read-your-leader contract below, stale only where every read is.
 
 **The read serves at or below a committed-head floor, never the raw store.** The local store alone cannot tell a committed record from a tentative one: a leader writes its own replica before its quorum resolves (§7.2), and a fresh leader's store may hold undecided records — or miss committed ones — until a `head` recovery read-repairs it (§8). The activation path is shielded by construction (rehydration runs the recovery, and the input gate orders reads behind in-flight appends, §6); the gateway read, which bypasses both, MUST therefore bound every page by the grain's committed head. A **resident** activation publishes its committed head to the gateway (updated at recovery and on each commit), so reads of an active grain serve up to the last commit and never an in-flight slot. For a **hibernated** name the gateway recovers a floor once per leadership — a spawned `head` recovery (§8), which also backfills this leader's store, so the subsequent local reads are complete — cached under the shard term it ran under: the term is the validity token, since regained leadership is always a higher term (§8.1) and an activation starting locally invalidates the entry. While the floor is being established the caller sees a transient *warming* reply and re-asks under its own deadline, exactly as it waits out an election (§5.4). Records above the floor are simply not served yet — the next poll sees them once committed — so no observer is ever shown an unacknowledged write (**G5**), and the anomaly budget stays what read-your-leader already grants: staleness, never invention.
 
@@ -783,9 +804,9 @@ Replaying a long event history on every activation is wasteful, so a grain perio
 - **What a snapshot costs, and therefore how often.** On the `Quorum` tier the composite record goes to every replica and is quorum-counted like a record append (§7.3), so its cost is multiplied by *R−1*. What that record *contains* is the lever: bulk facet bytes and, past 64 KiB, facet 0's state itself are content-addressed chunks in the blob area, and only the chunks that changed are put (§7.12), so a snapshot is roughly O(delta) plus a manifest rather than O(state). What it buys is a shorter replay — and replay reads are served from the **local** store (§9 rehydration, §7.5), costing no round trips at all. A deployment SHOULD still set the trigger high rather than low: chunking lowers the per-snapshot bytes, not the round trips, and a snapshot is a round of puts plus a record however little changed. The counter-pressure is failover rather than steady state: a new leader recovers the records above the last snapshot from a quorum (§8), so a larger gap means a larger one-off recovery read per grain, once per leadership change. See [hardware-envelope](hardware-envelope.md) §3.9 for the arithmetic these defaults are derived from. A grain type whose events are large relative to its state inverts the trade and SHOULD lower it.
 - **The rehydration barrier (§10).** Before reading a grain's head, the leader MUST recover it from a write quorum of the shard's replicas; it does not hold the grain's records merely by winning the shard (§8). This recovery is `head` (§7.3): it returns the quorum-confirmed head and backfills any records the leader is missing, so a freshly-activated grain never rebuilds from a stale or partial local view and then folds onto a short head or serves stale reads. It is a no-op on the `Local` tier, whose single store *is* the committed state.
 - **Rehydration (§10).** On activation, after the barrier, the leader loads the grain's latest snapshot `(s_seq, s_state)`, itself recovered from a quorum on the `Quorum` tier (`load_snapshot`, §7.3), and the records after `s_seq` up to the recovered head, replaying them and folding via `apply` (§4.1) to reach the head. The head is set **only** from journal/snapshot returns, never trusted from a prior activation's memory (invariant **G3**).
-- **A snapshot MUST NOT shorten the effective log** (invariant **G4**). This holds *structurally*: a head is defined as the best snapshot's `Seq` plus the contiguous run of records above it — `ReadReply::head` on the `Local` tier, the recovery merge's base on the `Quorum` tier (§8) — so a snapshot can never outrun the head it is measured against, and the ordering needs no runtime check. The host nonetheless refuses a snapshot whose `s_seq` exceeds the recovered head, replaying from `ZERO` instead: defence in depth against a future store whose two answers could disagree, and the safe direction to fail in, since the journal is the authority on where a grain ends (**G3**). Refusing is not a *recovery*, though, and the snapshot is not merely an optimization: once compaction has run, the subsumed prefix exists **only** in the snapshot (below), so a grain that discarded one would fold a truncated state rather than the true head. G4 rests on the head always covering the snapshot, not on the guard being able to rebuild what the snapshot alone still holds.
+- **A snapshot MUST NOT shorten the effective log** (invariant **G4**). This holds *structurally*: a head is defined as the best snapshot's `Seq` plus the contiguous run of records above it — `ReadReply::head` on the `Local` tier, the recovery merge's base on the `Quorum` tier (§8) — so a snapshot can never outrun the head it is measured against, and the ordering needs no runtime check. The host nonetheless refuses a snapshot whose `s_seq` exceeds the recovered head: defence in depth against a future store whose two answers could disagree, and the safe direction to fail in, since the journal is the authority on where a grain ends (**G3**). Refusing is not a *recovery*, though, and the snapshot is not merely an optimization: once compaction has run, the subsumed prefix exists **only** in the snapshot (below), so a replay that discarded one would fold a truncated state rather than the true head. The replay therefore checks the store's base against its cursor: an untruncated journal replays whole from `ZERO`, and a compacted one **fails the activation** — a base above the replay cursor is history the store can no longer serve, surfaced as unavailability rather than folded over, the same loud-failure rule as an unrecognized facet tag (**G19**). G4 rests on the head always covering the snapshot, not on the guard being able to rebuild what the snapshot alone still holds.
 
-Compaction — truncating a grain's record prefix once a snapshot subsumes it — is a per-replica operation of the Replicator, below the seam: a replica drops the records up to a snapshot's `Seq` when it stores that snapshot, advancing a per-grain **base** (the file-backed store then rewrites its on-disk log to a single checkpoint, reclaiming the space). Its safety rests on two facts, so it need not wait for the snapshot to be durable on a quorum. First, a snapshot is only ever taken at the **committed head** (§9), so every record it subsumes was already quorum-committed. Second, a fresh leader recovers a grain's head by taking the **highest snapshot `Seq` any replica in its read quorum holds** as the head base and merging the records above it (§8). A replica has dropped a record prefix only if it holds a snapshot covering that prefix, so any recovery quorum finds, for every committed record, *either* the record itself *or* a snapshot that subsumes it — never neither. Quorum intersection thus still loses no acknowledged write (invariant **G14**). Per-grain snapshots let a grain's history compact independently of its shard-mates.
+Compaction — truncating a grain's record prefix once a snapshot subsumes it — is a per-replica operation of the Replicator, below the seam: a replica drops the records up to a snapshot's `Seq` when it stores that snapshot, advancing a per-grain **base** (the file-backed store then rewrites its on-disk log to a single checkpoint, reclaiming the space). The base is not internal bookkeeping: every `load` page reports it, read together with the records under one segment lock (§7.3), and every event read carries it to the caller (§7.5, §4.3) — compaction changes what a reader of *history* can see (folded state is untouched; the snapshot subsumes the prefix), and a contract that silently served a truncated log as if complete would turn every long-lived grain's first snapshot into invisible data loss for its observers. Its safety rests on two facts, so it need not wait for the snapshot to be durable on a quorum. First, a snapshot is only ever taken at the **committed head** (§9), so every record it subsumes was already quorum-committed. Second, a fresh leader recovers a grain's head by taking the **highest snapshot `Seq` any replica in its read quorum holds** as the head base and merging the records above it (§8). A replica has dropped a record prefix only if it holds a snapshot covering that prefix, so any recovery quorum finds, for every committed record, *either* the record itself *or* a snapshot that subsumes it — never neither. Quorum intersection thus still loses no acknowledged write (invariant **G14**). Per-grain snapshots let a grain's history compact independently of its shard-mates.
 
 ---
 

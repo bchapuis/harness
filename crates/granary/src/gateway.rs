@@ -167,12 +167,19 @@ pub(crate) enum ReadReply {
 /// a page of only facet records still makes progress; `at_head` reports whether
 /// the scan reached the end of what this leader may serve (the journal's head,
 /// or its committed-head floor), the explicit form of the "short page only at
-/// head" contract a filtered page cannot carry on its own.
+/// head" contract a filtered page cannot carry on its own. `base` is the
+/// store's compaction base when the page was served (§9): slots at
+/// `Seq <= base` are subsumed by the grain's snapshot and no longer readable,
+/// so a caller whose ask began below it is looking at truncated history, not
+/// at the facet slots the projection legally skips (§7.12). Every page carries
+/// it because compaction is not bounded by any reader's cursor — a snapshot at
+/// the head can outrun a slow pager mid-read.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EventPage {
     pub(crate) events: Vec<(Seq, Vec<u8>)>,
     pub(crate) cursor: Seq,
     pub(crate) at_head: bool,
+    pub(crate) base: Seq,
 }
 
 /// The gateway's note-to-self completing a spawned floor recovery (§7.5): a
@@ -462,24 +469,27 @@ impl<G: Grain> Handler<ReadEvents<G>> for Gateway<G> {
             .load(&msg.name, msg.from, limit)
             .await
             .map_err(|e| GrainError::Unavailable(e.to_string()))?;
-        let loaded = page.len();
+        let base = page.base;
+        let loaded = page.records.len();
         // Serve only the committed prefix: slots above the floor are an
         // in-flight append's tentative writes (or undecided leftovers) and are
         // not served until a commit or recovery raises the floor.
-        let page: Vec<(Seq, Vec<u8>)> = page
+        let records: Vec<(Seq, Vec<u8>)> = page
+            .records
             .into_iter()
             .take_while(|(seq, _)| *seq <= floor)
             .collect();
-        let at_head = page.len() < loaded || loaded < limit;
-        let cursor = page.last().map(|(seq, _)| *seq).unwrap_or(msg.from);
+        let at_head = records.len() < loaded || loaded < limit;
+        let cursor = records.last().map(|(seq, _)| *seq).unwrap_or(msg.from);
         // The projection consumes the page in place — the serial gateway pays
         // one bounded local copy from the store, never a second allocation.
         let events =
-            events_in_page(page).map_err(|e| GrainError::Unavailable(e.to_string()))?;
+            events_in_page(records).map_err(|e| GrainError::Unavailable(e.to_string()))?;
         Ok(ReadReply::Page(EventPage {
             events,
             cursor,
             at_head,
+            base,
         }))
     }
 }

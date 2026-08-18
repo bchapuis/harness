@@ -94,6 +94,22 @@ pub enum AppendOutcome {
     Unavailable(String),
 }
 
+/// One [`load`](GrainJournal::load) page (spec §7.3): up to `limit` records
+/// after `from`, plus the store's compaction **base** at the moment of the read
+/// (§9) — read together under one segment lock, so the base always explains
+/// this page's missing prefix. Slots at `Seq <= base` are compacted: subsumed
+/// by the grain's snapshot and gone from every read path. Without the base a
+/// reader below it cannot tell truncated history from the interleaved slots a
+/// projection legally skips (§7.12), so every read reply carries it (§7.5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordPage {
+    /// The compaction base: records at `Seq <= base` are no longer readable.
+    /// `Seq::ZERO` when nothing has been compacted.
+    pub base: Seq,
+    /// The records after `max(from, base)`, ascending by `Seq`.
+    pub records: Vec<(Seq, Vec<u8>)>,
+}
+
 /// A failure of a *local* journal read (spec §7.3): I/O or corruption.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GrainJournalError {
@@ -128,14 +144,14 @@ pub trait GrainJournal: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = AppendOutcome> + Send;
 
     /// Up to `limit` committed events for one grain from `from` (exclusive)
-    /// toward its head, in ascending `Seq` order. A local, fence-free read on the
-    /// leader.
+    /// toward its head, in ascending `Seq` order, with the store's compaction
+    /// base ([`RecordPage`]). A local, fence-free read on the leader.
     fn load(
         &self,
         grain: &GrainName,
         from: Seq,
         limit: usize,
-    ) -> impl Future<Output = Result<Vec<(Seq, Vec<u8>)>, GrainJournalError>> + Send;
+    ) -> impl Future<Output = Result<RecordPage, GrainJournalError>> + Send;
 
     /// The grain's committed head — the authoritative source of `head` on
     /// rehydration (§9, invariant **G3**), and the **rehydration barrier** itself.
@@ -228,7 +244,7 @@ pub trait GrainJournal: Clone + Send + Sync + 'static {
 }
 
 /// The boxed result of [`DynGrainJournal::load`].
-pub type LoadFuture = BoxFuture<'static, Result<Vec<(Seq, Vec<u8>)>, GrainJournalError>>;
+pub type LoadFuture = BoxFuture<'static, Result<RecordPage, GrainJournalError>>;
 /// The boxed result of [`DynGrainJournal::load_snapshot`].
 pub type LoadSnapshotFuture = BoxFuture<'static, Result<Option<(Seq, Vec<u8>)>, GrainJournalError>>;
 

@@ -36,6 +36,7 @@ use actor_core::HandlerRegistry;
 use actor_core::LocalSystem;
 use actor_core::Spawner;
 use futures::channel::oneshot;
+use granary::EventHistory;
 use granary::GrainError;
 use granary::GrainRef;
 use granary::Granary;
@@ -634,7 +635,15 @@ impl<S: HarnessSystem> SessionRef<S> {
     /// head, so page by re-asking from the last `Seq` returned. A leader-side
     /// read failure surfaces as the grain's `Unavailable`: transient, and — a
     /// read commits nothing — always safe to retry.
-    pub async fn tail(&self, from: Seq, limit: u32) -> Result<Vec<(Seq, Record)>, GrainError> {
+    ///
+    /// The returned [`EventHistory`]'s `base` reports how far snapshot
+    /// compaction has truncated the journal (granary §9): a `from` below it
+    /// asked for records the session's snapshot has subsumed, and the records
+    /// in `(from, base]` are not — and can no longer be — served. `base <=
+    /// from` means the page is complete history from `from`; without the base,
+    /// truncation would be indistinguishable from the facet slots the
+    /// projection legally skips.
+    pub async fn tail(&self, from: Seq, limit: u32) -> Result<EventHistory<Record>, GrainError> {
         self.grain.events(from, limit.min(TAIL_PAGE) as usize).await
     }
 
@@ -666,12 +675,29 @@ const FOLLOW_PAGE: usize = 256;
 /// backfill is the liveness net that detects the move and re-subscribes (grain §7.9).
 const FOLLOW_RESYNC: Duration = Duration::from_secs(2);
 
+/// What one [`Follower::next`] yields: the next records, or the one thing that
+/// breaks the exact-sequence contract — snapshot compaction truncating the
+/// journal past the follower's cursor (granary §9).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Followed {
+    /// The next in-order records after the cursor, at least one.
+    Batch(Vec<(Seq, Record)>),
+    /// The journal compacted past the cursor: the records in `(cursor, base]`
+    /// are subsumed by the session's snapshot and can no longer be read — by
+    /// this follower or anyone. The stream resumes after `base`; the signal is
+    /// surfaced (rather than silently jumped) so an observer never mistakes
+    /// truncated history for a complete transcript.
+    Truncated { base: Seq },
+}
+
 /// A live follower over a session's journal (granary §7.9). It rides a grain
 /// record subscription and reconciles by `Seq`: it backfills from the journal on
 /// first attach, on any gap, and after the stream closes (a leader move, a
 /// lag-drop, or hibernation), so [`next`](Self::next) yields the exact committed
-/// sequence — in order, with no gap or duplicate (granary G16). Push is the fast
-/// path; the journal is the authority.
+/// sequence — in order, with no gap or duplicate (granary G16) — except where
+/// compaction has truncated it, which it reports as [`Followed::Truncated`]
+/// rather than papering over. Push is the fast path; the journal is the
+/// authority.
 pub struct Follower<S: HarnessSystem> {
     grain: GrainRef<Agent<S>>,
     /// For the re-sync liveness timer (a silent move leaves the stream open).
@@ -683,12 +709,13 @@ pub struct Follower<S: HarnessSystem> {
 }
 
 impl<S: HarnessSystem> Follower<S> {
-    /// The next batch of in-order records after the last one returned, with at
-    /// least one record. Blocks until records are available, attaching,
-    /// backfilling, and re-subscribing transparently. A `GrainError` is a real
-    /// durability outcome (the shard cannot serve right now) the caller may
-    /// surface and retry.
-    pub async fn next(&mut self) -> Result<Vec<(Seq, Record)>, GrainError> {
+    /// The next in-order records after the last ones returned (at least one),
+    /// or a [`Followed::Truncated`] when compaction has outrun the cursor.
+    /// Blocks until records are available, attaching, backfilling, and
+    /// re-subscribing transparently. A `GrainError` is a real durability
+    /// outcome (the shard cannot serve right now) the caller may surface and
+    /// retry.
+    pub async fn next(&mut self) -> Result<Followed, GrainError> {
         loop {
             // (Re)attach if needed: subscribe registers a sink and returns the
             // head, so any commit from here on is pushed; the backfill below
@@ -698,8 +725,8 @@ impl<S: HarnessSystem> Follower<S> {
             }
             // Backfill straight from the journal (the source of truth) until the
             // cursor reaches the head; return as soon as a page has records.
-            if let Some(batch) = self.backfill().await? {
-                return Ok(batch);
+            if let Some(step) = self.backfill().await? {
+                return Ok(step);
             }
             // Caught up: race the next live batch against a re-sync timer. Clone
             // the receiver so no borrow of `self.sub` is held across the await.
@@ -718,7 +745,7 @@ impl<S: HarnessSystem> Follower<S> {
                             .collect();
                         if let Some((seq, _)) = fresh.last() {
                             self.last = *seq;
-                            return Ok(fresh);
+                            return Ok(Followed::Batch(fresh));
                         }
                     }
                     // A gap (`from > last`, a lag-drop) or all duplicates (a
@@ -731,9 +758,9 @@ impl<S: HarnessSystem> Follower<S> {
                 // leader (the old sink is orphaned) and return the backfill; else
                 // we are simply idle — keep the subscription, no churn.
                 futures::future::Either::Right(_) => {
-                    if let Some(batch) = self.backfill().await? {
+                    if let Some(step) = self.backfill().await? {
                         self.sub = None;
-                        return Ok(batch);
+                        return Ok(step);
                     }
                 }
             }
@@ -742,13 +769,21 @@ impl<S: HarnessSystem> Follower<S> {
 
     /// One page of records after the cursor, read from the journal (the
     /// non-activating gateway read, granary §7.5), advancing the cursor. `None`
-    /// when already at the head.
-    async fn backfill(&mut self) -> Result<Option<Vec<(Seq, Record)>>, GrainError> {
-        let page = self.grain.events(self.last, FOLLOW_PAGE).await?;
-        match page.last() {
+    /// when already at the head. A compaction base above the cursor is the
+    /// truncation signal: the cursor jumps to the base and the fetched records
+    /// are dropped — the next call re-reads from the base, so the one-page
+    /// waste buys a caller that always hears about the gap *before* any record
+    /// past it.
+    async fn backfill(&mut self) -> Result<Option<Followed>, GrainError> {
+        let history = self.grain.events(self.last, FOLLOW_PAGE).await?;
+        if history.base > self.last {
+            self.last = history.base;
+            return Ok(Some(Followed::Truncated { base: history.base }));
+        }
+        match history.events.last() {
             Some((seq, _)) => {
                 self.last = *seq;
-                Ok(Some(page))
+                Ok(Some(Followed::Batch(history.events)))
             }
             None => Ok(None),
         }

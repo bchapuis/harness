@@ -25,6 +25,7 @@ use crate::gateway::Gateway;
 use crate::gateway::ReadEvents;
 use crate::gateway::ReadReply;
 use crate::gateway::gateway_key;
+use crate::grain::EventHistory;
 use crate::grain::Grain;
 use crate::grain::GrainHandler;
 use crate::grain::GrainName;
@@ -459,17 +460,23 @@ impl<G: Grain> GrainRef<G> {
     /// The returned `Seq`s are the journal's real slots — facet records (§7.12)
     /// occupy interleaved ones, so consecutive events need not carry consecutive
     /// `Seq`s. Fewer than `limit` events come back only at the head, so an empty
-    /// result means no event follows `from`; page by re-asking from the last
-    /// `Seq` returned. Read-your-leader like any read (§7.5). A failed or
-    /// corrupt journal read surfaces as [`GrainError::Unavailable`]: transient
-    /// — a read commits nothing, so re-asking is always safe.
+    /// result means no event follows `from` **that the journal still holds**:
+    /// the returned [`EventHistory`]'s `base` reports how far compaction has
+    /// truncated the log (§9), and a `from` below it asked for events the
+    /// grain's snapshot has subsumed — absent slots at or below `base` are
+    /// truncated history, not the interleaved records the projection skips.
+    /// Page by re-asking from the last `Seq` returned. Read-your-leader like
+    /// any read (§7.5). A failed or corrupt journal read surfaces as
+    /// [`GrainError::Unavailable`]: transient — a read commits nothing, so
+    /// re-asking is always safe.
     pub async fn events(
         &self,
         from: Seq,
         limit: usize,
-    ) -> Result<Vec<(Seq, G::Event)>, GrainError> {
+    ) -> Result<EventHistory<G::Event>, GrainError> {
         let deadline = self.system.now() + DEFAULT_ASK_TIMEOUT;
         let codec = self.system.codec();
+        let mut base = Seq::ZERO;
         let mut events = Vec::new();
         let mut cursor = from;
         // One redirect-resolved gateway serves every page; a leader move between
@@ -508,11 +515,16 @@ impl<G: Grain> GrainRef<G> {
                     continue;
                 }
             };
+            // Pages can come from different leaders (a redirect mid-read), whose
+            // stores may have compacted differently — report the highest base
+            // any page carried, the honest bound on what this read may have
+            // missed.
+            base = base.max(page.base);
             for (seq, payload) in page.events {
                 if events.len() == limit {
                     // The floored scan overshot the caller's `limit`: stop
                     // here, before advancing the cursor past the remainder.
-                    return Ok(events);
+                    return Ok(EventHistory { base, events });
                 }
                 let event = actor_serialization::decode::<G::Event>(&*codec, &payload)
                     .map_err(|e| GrainError::Unavailable(e.to_string()))?;
@@ -523,7 +535,7 @@ impl<G: Grain> GrainRef<G> {
                 break;
             }
         }
-        Ok(events)
+        Ok(EventHistory { base, events })
     }
 
     /// Resolve the name to its live host (§5.4). With `use_cache`, a cached handle

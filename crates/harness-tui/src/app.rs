@@ -52,10 +52,12 @@ pub enum View {
 pub enum Update {
     /// The tenant's session list (re)loaded.
     Sessions(Result<Vec<SessionEntry>, String>),
-    /// A session's history loaded; replaces the transcript.
+    /// A session's history loaded; replaces the transcript. `base` is the
+    /// journal's compaction base (§10.2): above zero, the transcript's oldest
+    /// records were subsumed by a snapshot and the view starts truncated.
     Loaded {
         session: String,
-        records: Result<Vec<(Seq, Record)>, String>,
+        records: Result<(Seq, Vec<(Seq, Record)>), String>,
     },
     /// A batch of new records from the live run.
     Records(Vec<(Seq, Record)>),
@@ -427,9 +429,16 @@ impl App {
                     return; // a stale load for a session we've since left.
                 }
                 match records {
-                    Ok(records) => {
+                    Ok((base, records)) => {
                         self.records = records;
-                        self.status = self.idle_status();
+                        // A non-zero base means the oldest records were
+                        // compacted away (§10.2): say so, or the short
+                        // transcript reads as the whole history.
+                        self.status = if base.value() > 0 {
+                            format!("history truncated: records ≤ {} compacted", base.value())
+                        } else {
+                            self.idle_status()
+                        };
                     }
                     Err(e) => self.status = format!("load {session}: {e}"),
                 }

@@ -228,8 +228,11 @@ impl crate::GrainStore for StaticGrainStore {
         _grain: &GrainName,
         _from: crate::Seq,
         _limit: usize,
-    ) -> Vec<(crate::Seq, Vec<u8>)> {
-        Vec::new()
+    ) -> crate::RecordPage {
+        crate::RecordPage {
+            base: crate::Seq::ZERO,
+            records: Vec::new(),
+        }
     }
 
     fn prepare(&self, _shard: u32, _grain: &GrainName, _term: crate::Term) -> crate::ReadOutcome {
@@ -390,7 +393,7 @@ impl crate::GrainStore for SnapshotAheadOfHeadStore {
         grain: &GrainName,
         from: crate::Seq,
         limit: usize,
-    ) -> Vec<(crate::Seq, Vec<u8>)> {
+    ) -> crate::RecordPage {
         self.inner.read_from(shard, grain, from, limit)
     }
 

@@ -80,6 +80,7 @@ pub async fn tail_records(session: &harness::SessionRef<SimSystem>) -> Vec<harne
     let mut from = granary::Seq::new(0);
     loop {
         let page = session.tail(from, harness::TAIL_PAGE).await.expect("tail");
+        let page = page.events;
         let Some((last, _)) = page.last() else {
             return records;
         };
