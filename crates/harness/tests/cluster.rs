@@ -309,7 +309,7 @@ fn last_activation(sink: &CollectingSink, key: &str) -> Option<NodeId> {
             GrainEvent::Activated { node, name } if name.key() == key => Some(*node),
             _ => None,
         })
-        .last()
+        .next_back()
 }
 
 /// Poll a session's journal until `ready` holds over its record bodies;

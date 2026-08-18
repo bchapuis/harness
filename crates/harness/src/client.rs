@@ -24,6 +24,7 @@ use std::time::Duration;
 use actor_cluster::ClusterSystem;
 use actor_cluster::Transport;
 use actor_core::Actor;
+use actor_core::ActorRef;
 use actor_core::CallError;
 use actor_core::Clock;
 use actor_core::Ctx;
@@ -119,6 +120,28 @@ pub struct HarnessConfig {
     /// run stops rather than issue a final call that cannot fit a full-size
     /// response; set to 0 to disable the floor.
     pub budget_floor: u64,
+    /// Floor of a delegating parent's total wait on a child run (§8.1): the
+    /// wait is this floor plus [`child_wait_per_step`](Self::child_wait_per_step)
+    /// × the child's carved `steps`, so even a zero-step carve gets a grace
+    /// window for queueing and transport.
+    pub child_wait_floor: Duration,
+    /// Per-step allowance in the child wait (§8.1). The carve's `steps` bound
+    /// the whole subtree's model calls (§9.1 item 3), so steps are the right
+    /// scale for how long a child may legitimately take; the allowance covers
+    /// one model call plus its tool round, so it SHOULD be at least the tool
+    /// timeout.
+    pub child_wait_per_step: Duration,
+}
+
+impl HarnessConfig {
+    /// A delegating parent's total wait on a child run (§8.1), scaled to the
+    /// child's carved budget: `child_wait_floor + child_wait_per_step × steps`.
+    /// Past it the delegation resolves as a `ToolError` for the parent's model;
+    /// the child run continues, its budget the backstop (§9.2 item 3).
+    pub fn child_wait(&self, budget: &crate::Budget) -> Duration {
+        self.child_wait_floor
+            .saturating_add(self.child_wait_per_step.saturating_mul(budget.steps))
+    }
 }
 
 impl Default for HarnessConfig {
@@ -127,6 +150,8 @@ impl Default for HarnessConfig {
             submit_deadline: Duration::from_secs(30),
             tool_timeout: Duration::from_secs(300),
             budget_floor: crate::ModelParams::default().max_tokens,
+            child_wait_floor: Duration::from_secs(600),
+            child_wait_per_step: Duration::from_secs(300),
         }
     }
 }
@@ -684,6 +709,9 @@ impl<S: HarnessSystem> Follower<S> {
 /// on one [`RunCompleted`] notification, hands its outcome to a one-shot channel,
 /// and stops. Its `ActorRef` is what rides in `Submit { reply_to }`; the run's
 /// outcome is delivered to it whether the run is still live or already ended.
+/// Its lifetime is its caller's wait, not the delivery: an attempt that ends
+/// without an outcome stops it through [`MailboxGuard`], so no path — a lapse,
+/// a rejection, a transport failure, an abandoned caller — leaks the actor.
 pub struct ReplyMailbox<S: HarnessSystem> {
     tx: Option<oneshot::Sender<RunOutcome>>,
     _marker: std::marker::PhantomData<S>,
@@ -702,6 +730,8 @@ impl<S: HarnessSystem> Actor for ReplyMailbox<S> {
     type System = S;
 
     fn register(registry: &mut HandlerRegistry<Self>) {
+        // `RunCompleted` only: `Discard` stays local-only (§7.4) — the caller's
+        // own guard stops the mailbox, never a peer.
         registry.accept::<RunCompleted>();
     }
 }
@@ -712,5 +742,62 @@ impl<S: HarnessSystem> Handler<RunCompleted> for ReplyMailbox<S> {
             let _ = tx.send(msg.outcome);
         }
         ctx.stop();
+    }
+}
+
+/// Stop an ephemeral reply mailbox whose caller's wait has ended (§7.4).
+/// Local-only: never in `register`'s allowlist, so no peer can stop another
+/// caller's mailbox; only [`MailboxGuard`] sends it.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Discard;
+
+impl actor_core::Message for Discard {
+    type Reply = ();
+    const MANIFEST: actor_core::Manifest = actor_core::Manifest::new("harness.ReplyDiscard");
+}
+
+impl<S: HarnessSystem> Handler<Discard> for ReplyMailbox<S> {
+    async fn handle(&mut self, _msg: Discard, ctx: &Ctx<Self>) {
+        ctx.stop();
+    }
+}
+
+/// Ties a [`ReplyMailbox`] to its caller's wait (§7.4): dropping the guard —
+/// every exit from a submit-and-attach attempt, including the caller dropping
+/// the future mid-await — launches a [`Discard`] at the mailbox. Disarmed on
+/// the one path where the mailbox has already delivered and stopped itself; a
+/// discard racing a late delivery is harmless either way (a `tell` to a
+/// stopped actor fails quietly, and a lost notification is recovered by
+/// re-contact, §7.3).
+pub(crate) struct MailboxGuard<S: HarnessSystem> {
+    system: S,
+    mailbox: ActorRef<ReplyMailbox<S>>,
+    armed: bool,
+}
+
+impl<S: HarnessSystem> MailboxGuard<S> {
+    pub(crate) fn new(system: S, mailbox: ActorRef<ReplyMailbox<S>>) -> MailboxGuard<S> {
+        MailboxGuard {
+            system,
+            mailbox,
+            armed: true,
+        }
+    }
+
+    /// The outcome was delivered: the mailbox stopped itself, nothing to stop.
+    pub(crate) fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl<S: HarnessSystem> Drop for MailboxGuard<S> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mailbox = self.mailbox.clone();
+        self.system.launch(Box::pin(async move {
+            let _ = mailbox.tell(Discard).await;
+        }));
     }
 }

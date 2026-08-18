@@ -326,6 +326,9 @@ fn record_lines(record: &Record) -> Vec<Line<'static>> {
             lines.extend(labelled("you", content, USER, true));
             lines
         }
+        RecordBody::TurnStarted { turn } => {
+            vec![dim(format!("— turn {turn} started"))]
+        }
         RecordBody::ModelResponse {
             content,
             calls,

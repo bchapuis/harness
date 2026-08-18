@@ -53,6 +53,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::client::HarnessSystem;
+use crate::client::MailboxGuard;
 use crate::client::ReplyMailbox;
 use crate::client::Seams;
 use crate::client::Shared;
@@ -87,15 +88,14 @@ use crate::tool::DelegateInput;
 use crate::tool::OnDangling;
 use crate::tool::ToolError;
 
-/// How many times an unreachable peer is retried before a delegation/cancel
-/// gives up (§8.1, §9.2): past it the child surfaces as a tool failure (§5.4)
-/// rather than looping forever — the child's budget is the ultimate backstop
-/// (§9.2 item 3). A transport bound, backed off between tries.
+/// How many *consecutive* times an unreachable peer is retried before a
+/// delegation/cancel gives up (§8.1, §9.2): past it the child surfaces as a
+/// tool failure (§5.4) rather than looping forever — the child's budget is the
+/// ultimate backstop (§9.2 item 3). A transport bound, backed off between
+/// tries; any successful contact resets it. Distinct from the wait on a
+/// reachable-but-slow child, which is budget-scaled config
+/// ([`HarnessConfig::child_wait`](crate::HarnessConfig::child_wait), §8.1).
 const TRANSPORT_RETRIES: u32 = 32;
-/// How many times a delegating parent re-attaches to a reachable-but-slow child
-/// before giving up (§8.1). Distinct from [`TRANSPORT_RETRIES`]: this bounds the
-/// *wait* on a child that accepts but has not finished, so it does not back off.
-const CHILD_WAIT_ATTEMPTS: u32 = 32;
 /// Backoff cap for the transport-retry loop.
 const PROPAGATION_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
@@ -1350,7 +1350,11 @@ impl<S: HarnessSystem> Agent<S> {
     ) {
         let this = act.this.clone().expect("self-ref set in on_activate");
         let system = ctx.system().clone();
-        let within = self.shared.config.submit_deadline;
+        let cadence = self.shared.config.submit_deadline;
+        // Scaled to the carve (§8.1): the child's steps bound its whole
+        // subtree's model calls (§9.1 item 3), so they are the right scale for
+        // how long the parent waits before surfacing a tool failure.
+        let wait = self.shared.config.child_wait(&child.budget);
         let granary = self.shared.granaries().get(&child.kind).cloned();
         system.clone().launch(Box::pin(async move {
             let outcome = match granary {
@@ -1360,7 +1364,16 @@ impl<S: HarnessSystem> Agent<S> {
                 ))),
                 Some(granary) => {
                     let child_ref = granary.grain(child.session.as_str());
-                    run_child(system, child_ref, &child, request.prompt, lineage, within).await
+                    run_child(
+                        system,
+                        child_ref,
+                        &child,
+                        request.prompt,
+                        lineage,
+                        cadence,
+                        wait,
+                    )
+                    .await
                 }
             };
             let _ = this
@@ -1827,7 +1840,11 @@ pub(crate) enum AttachOutcome {
 /// One submit-and-await-outcome attempt against a grain (§7.4): spawn an
 /// ephemeral reply mailbox, `Submit` the turn carrying it, and await the run's
 /// `RunCompleted` bounded by `within`. Wrapping it in a retry loop is safe
-/// because re-submitting the same `TurnId` is idempotent (H7).
+/// because re-submitting the same `TurnId` is idempotent (H7). The mailbox
+/// lives exactly as long as the attempt: a [`MailboxGuard`] stops it on every
+/// path that ends without an outcome — including this future being dropped —
+/// so a re-attach replaces the mailbox rather than accumulating one per
+/// attempt (§7.4).
 pub(crate) async fn submit_and_attach<S: HarnessSystem>(
     system: &S,
     grain: &granary::GrainRef<Agent<S>>,
@@ -1838,6 +1855,7 @@ pub(crate) async fn submit_and_attach<S: HarnessSystem>(
 ) -> AttachOutcome {
     let (tx, rx) = oneshot::channel::<RunOutcome>();
     let mailbox = system.spawn(ReplyMailbox::new(tx));
+    let guard = MailboxGuard::new(system.clone(), mailbox.clone());
     let submit = Submit {
         kind: kind.clone(),
         turn: turn.clone(),
@@ -1848,7 +1866,11 @@ pub(crate) async fn submit_and_attach<S: HarnessSystem>(
         Ok(Ok(_accepted)) => {
             let sleep = system.sleep(within);
             match futures::future::select(rx, sleep).await {
-                Either::Left((Ok(outcome), _)) => AttachOutcome::Completed(outcome),
+                Either::Left((Ok(outcome), _)) => {
+                    // Delivered: the mailbox already stopped itself.
+                    guard.disarm();
+                    AttachOutcome::Completed(outcome)
+                }
                 Either::Left((Err(_), _)) | Either::Right(((), _)) => AttachOutcome::Lapsed,
             }
         }
@@ -1858,33 +1880,44 @@ pub(crate) async fn submit_and_attach<S: HarnessSystem>(
 }
 
 /// Submit to a child and await its outcome (§8.1 step 2), with the derived
-/// `TurnId` keeping every re-attempt safe (H7). Bounds the wait on a slow child
-/// by [`CHILD_WAIT_ATTEMPTS`] and retries an unreachable one up to
-/// [`TRANSPORT_RETRIES`] with backoff. Maps the child's `RunOutcome` onto this
-/// delegation's tool outcome (§5.4).
+/// `TurnId` keeping every re-attempt safe (H7). Re-attaches on the `cadence`
+/// (each lapse re-registers on whatever activation now hosts the child, §7.5)
+/// until the budget-scaled `wait` lapses; retries a consecutively unreachable
+/// child up to [`TRANSPORT_RETRIES`] with backoff. Maps the child's
+/// `RunOutcome` onto this delegation's tool outcome (§5.4). A give-up resolves
+/// the call only for the parent: the child run continues, its budget the
+/// backstop (§9.2 item 3).
 async fn run_child<S: HarnessSystem>(
     system: S,
     child_ref: granary::GrainRef<Agent<S>>,
     child: &ChildRef,
     prompt: String,
     parent: Lineage,
-    within: Duration,
+    cadence: Duration,
+    wait: Duration,
 ) -> Result<Value, ToolError> {
     let turn = Turn {
         id: child.turn.clone(),
         content: prompt,
         budget: Some(child.budget),
     };
-    let mut waits = 0;
-    let mut retries = 0;
+    let started = system.now();
+    let mut unreachable = 0;
     loop {
+        let elapsed = system.now().duration_since(started);
+        let Some(remaining) = wait.checked_sub(elapsed).filter(|d| !d.is_zero()) else {
+            return Err(ToolError::Delegation(format!(
+                "child run did not complete within its {}s budget-scaled wait",
+                wait.as_secs()
+            )));
+        };
         match submit_and_attach(
             &system,
             &child_ref,
             &child.kind,
             &turn,
             Some(&parent),
-            within,
+            cadence.min(remaining),
         )
         .await
         {
@@ -1894,27 +1927,21 @@ async fn run_child<S: HarnessSystem>(
                     Err(run_error) => Err(ToolError::Delegation(run_error.to_string())),
                 };
             }
-            AttachOutcome::Lapsed => {
-                waits += 1;
-                if waits >= CHILD_WAIT_ATTEMPTS {
-                    return Err(ToolError::Delegation(
-                        "child run did not complete in time".into(),
-                    ));
-                }
-            }
+            // The child accepted: it is reachable, whatever came before.
+            AttachOutcome::Lapsed => unreachable = 0,
             AttachOutcome::Rejected(reject) => {
                 return Err(ToolError::Delegation(format!(
                     "child rejected the submit: {reject}"
                 )));
             }
             AttachOutcome::Unreachable(call_error) => {
-                retries += 1;
-                if retries >= TRANSPORT_RETRIES {
+                unreachable += 1;
+                if unreachable >= TRANSPORT_RETRIES {
                     return Err(ToolError::Delegation(format!(
                         "child unreachable: {call_error:?}"
                     )));
                 }
-                system.sleep(propagation_backoff(retries)).await;
+                system.sleep(propagation_backoff(unreachable)).await;
             }
         }
     }

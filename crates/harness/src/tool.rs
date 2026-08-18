@@ -164,9 +164,10 @@ pub enum ToolError {
     /// mid-call. The agent releases the binding and journals a
     /// `WorkspaceReset` before the next model call (§5.5).
     EnvironmentLost(String),
-    /// A delegation failed: the child run's terminal `RunError`, or the child
-    /// staying unreachable past the retry bound — formatted for the parent's
-    /// model to react to (§8.2).
+    /// A delegation failed: the child run's terminal `RunError`, the
+    /// budget-scaled wait lapsing on a slow child (§8.1), or the child staying
+    /// consecutively unreachable past the retry bound — formatted for the
+    /// parent's model to react to (§8.2).
     Delegation(String),
 }
 
