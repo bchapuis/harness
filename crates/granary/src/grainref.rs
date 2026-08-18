@@ -67,6 +67,14 @@ const RESOLVE_ATTEMPTS: usize = 200;
 /// fails fast instead of stalling the redirect for the full deadline.
 const FORWARD_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Floor on the records one [`GrainRef::events`] page scans, whatever few
+/// events the caller still wants: the wire `limit` bounds records *scanned*
+/// (facet records among them are skipped, §7.12), so an unfloored want of one
+/// or two events would cross a dense facet run one record per round trip and
+/// exhaust the read's one deadline. Events scanned past the caller's `limit`
+/// are dropped client-side, so the floor never overshoots the API contract.
+const EVENT_SCAN_FLOOR: usize = 256;
+
 /// The cached handles, in two generations so the cache stays **bounded** without an
 /// intrusive recency list (spec §5.4).
 ///
@@ -469,10 +477,16 @@ impl<G: Grain> GrainRef<G> {
         // re-asking from the cursor is always safe.
         let mut target = self.gateway.clone();
         while events.len() < limit {
-            // The wire `limit` bounds the *records scanned* server-side, which
-            // upper-bounds the events returned — one page never overshoots what
-            // this loop still wants.
-            let want = (limit - events.len()).min(u32::MAX as usize) as u32;
+            // The wire `limit` bounds the *records scanned* server-side, and
+            // facet records among them are skipped, not surfaced — so a want
+            // shrunk to the few events this loop still misses would crawl a
+            // dense facet run one record per round trip, all under the one
+            // deadline. Scan a floored page instead and drop any events past
+            // the caller's `limit` below; the caller re-pages from the last
+            // `Seq` returned, so the drop only moves its resume point earlier.
+            let want = (limit - events.len())
+                .max(EVENT_SCAN_FLOOR)
+                .min(u32::MAX as usize) as u32;
             let reply: ReadReply = self
                 .gateway_ask(
                     &mut target,
@@ -495,6 +509,11 @@ impl<G: Grain> GrainRef<G> {
                 }
             };
             for (seq, payload) in page.events {
+                if events.len() == limit {
+                    // The floored scan overshot the caller's `limit`: stop
+                    // here, before advancing the cursor past the remainder.
+                    return Ok(events);
+                }
                 let event = actor_serialization::decode::<G::Event>(&*codec, &payload)
                     .map_err(|e| GrainError::Unavailable(e.to_string()))?;
                 events.push((seq, event));

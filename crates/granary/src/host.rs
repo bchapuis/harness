@@ -274,6 +274,7 @@ impl<G: Grain> Host<G> {
             ctx.system().clone(),
             self.gateway.clone(),
             Arc::clone(&self.journal),
+            Arc::clone(&self.committed),
             Arc::clone(&self.facets),
             Arc::clone(&self.pending_watches),
             Arc::clone(&self.blocking_io),

@@ -25,7 +25,6 @@
 //! shard's journal, so observation never wakes a hibernated grain (§10).
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -188,9 +187,11 @@ pub(crate) struct Recovered {
     shard: u32,
     term: Term,
     head: Option<Seq>,
-    /// The gateway's `warm_epoch` when this recovery was spawned: stale if any
-    /// activation was created since (its appends move the head this recovery
-    /// measured — even if that activation has already hibernated again).
+    /// The `warming` token this recovery was spawned under: stale if an
+    /// activation of **this name** was created since (its appends move the
+    /// head this recovery measured — even if that activation has already
+    /// hibernated again). Per-name, so unrelated activations never invalidate
+    /// it.
     epoch: u64,
 }
 
@@ -213,16 +214,21 @@ pub(crate) struct Gateway<G: Grain> {
     /// (§8), and a split/merge changes the shard index (§7.7, indexes are never
     /// reused), so neither can alias — and no activation has started since
     /// ([`get_or_activate`](Gateway::get_or_activate) removes the entry).
-    /// Bounded by `host_cache_capacity`: on overflow the map is cleared, which
-    /// only costs the next read a fresh recovery.
+    /// Bounded by `host_cache_capacity`: on overflow one arbitrary entry is
+    /// evicted, which only costs the next read of that name a fresh recovery.
     floors: HashMap<GrainName, (u32, Term, Seq)>,
     /// Names whose floor recovery is in flight, so concurrent reads spawn one
-    /// recovery, not one each. Cleared when its [`Recovered`] lands.
-    warming: HashSet<GrainName>,
-    /// Bumped whenever a fresh activation is spawned ([`get_or_activate`]): a
-    /// [`Recovered`] carrying an older epoch is discarded, closing the window
-    /// where an activation is created — and appends, and even hibernates —
-    /// while a floor recovery is still in flight.
+    /// recovery, not one each — each carrying the token its recovery was
+    /// spawned with. Cleared when its [`Recovered`] lands. **Per-name**
+    /// invalidation: [`get_or_activate`](Gateway::get_or_activate) for the name
+    /// rotates the token, so a [`Recovered`] carrying the old one is discarded
+    /// — closing the window where an activation is created — and appends, and
+    /// even hibernates — while that name's floor recovery is still in flight,
+    /// without discarding recoveries of unrelated names (an activation of B
+    /// cannot move A's head, so it must not starve A's read).
+    warming: HashMap<GrainName, u64>,
+    /// Allocator for the per-name `warming` tokens: bumped once per spawn and
+    /// once per invalidation, never compared globally.
     warm_epoch: u64,
     /// The runtime type name (spec §5.1), as passed to [`gateway_key`]. Used to
     /// map a name to its shard.
@@ -260,7 +266,7 @@ impl<G: Grain> Gateway<G> {
         Gateway {
             table: HashMap::new(),
             floors: HashMap::new(),
-            warming: HashSet::new(),
+            warming: HashMap::new(),
             warm_epoch: 0,
             grain_type,
             shard_map,
@@ -298,10 +304,14 @@ impl<G: Grain> Gateway<G> {
         }
         // The activation may append, so a non-resident read floor recorded for
         // the name is stale from here on (§7.5): the resident cell replaces it.
-        // The epoch bump likewise retires any floor recovery still in flight —
-        // its measured head predates whatever this activation commits.
+        // Rotating the name's warming token likewise retires any floor recovery
+        // still in flight for it — its measured head predates whatever this
+        // activation commits. Per-name, so recoveries of other names survive.
         self.floors.remove(&name);
-        self.warm_epoch += 1;
+        if let Some(token) = self.warming.get_mut(&name) {
+            self.warm_epoch += 1;
+            *token = self.warm_epoch;
+        }
 
         // Otherwise spawn a restartable host that rehydrates from its shard's
         // journal (§9).
@@ -462,11 +472,10 @@ impl<G: Grain> Handler<ReadEvents<G>> for Gateway<G> {
             .collect();
         let at_head = page.len() < loaded || loaded < limit;
         let cursor = page.last().map(|(seq, _)| *seq).unwrap_or(msg.from);
-        let events = events_in_page(&page)
-            .map_err(|e| GrainError::Unavailable(e.to_string()))?
-            .into_iter()
-            .map(|(seq, payload)| (seq, payload.to_vec()))
-            .collect();
+        // The projection consumes the page in place — the serial gateway pays
+        // one bounded local copy from the store, never a second allocation.
+        let events =
+            events_in_page(page).map_err(|e| GrainError::Unavailable(e.to_string()))?;
         Ok(ReadReply::Page(EventPage {
             events,
             cursor,
@@ -490,10 +499,12 @@ impl<G: Grain> Gateway<G> {
         journal: Arc<dyn crate::journal::DynGrainJournal>,
         ctx: &Ctx<Gateway<G>>,
     ) {
-        if !self.warming.insert(name.clone()) {
+        if self.warming.contains_key(&name) {
             return;
         }
+        self.warm_epoch += 1;
         let epoch = self.warm_epoch;
+        self.warming.insert(name.clone(), epoch);
         let gateway = ctx.this();
         ctx.system().launch(Box::pin(async move {
             let head = journal.head(&name).await.ok();
@@ -517,15 +528,25 @@ impl<G: Grain> Gateway<G> {
 
 impl<G: Grain> Handler<Recovered> for Gateway<G> {
     /// Land a spawned floor recovery (§7.5). The floor is recorded only if it is
-    /// still trustworthy on arrival: no activation was spawned since it started
-    /// (the epoch — an activation's appends move the head, even if it already
-    /// hibernated again), the name still resolves to the shard it was recovered
-    /// under (§7.7), and that shard's term is unchanged (no other leadership
-    /// could have appended, §8).
+    /// still trustworthy on arrival: no activation of **this name** was spawned
+    /// since it started (the rotated warming token — an activation's appends
+    /// move the head, even if it already hibernated again; the check is
+    /// per-name so activations of unrelated names cannot starve this read), no
+    /// host activated under this shard is resident (its cell is the floor
+    /// then — a **stale-shard** entry left by a split/merge must not block the
+    /// recovered floor, or reads of the moved name would warm forever, §7.7),
+    /// the name still resolves to the shard it was recovered under (§7.7), and
+    /// that shard's term is unchanged (no other leadership could have
+    /// appended, §8).
     async fn handle(&mut self, msg: Recovered, _ctx: &Ctx<Gateway<G>>) {
-        self.warming.remove(&msg.name);
+        let token = self.warming.remove(&msg.name);
         let Some(head) = msg.head else { return };
-        if msg.epoch != self.warm_epoch || self.table.contains_key(&msg.name) {
+        if token != Some(msg.epoch)
+            || self
+                .table
+                .get(&msg.name)
+                .is_some_and(|(activated_shard, _, _)| *activated_shard == msg.shard)
+        {
             return;
         }
         let shard = self.shard_of(msg.name.key());
@@ -533,10 +554,15 @@ impl<G: Grain> Handler<Recovered> for Gateway<G> {
         if shard.index != msg.shard || current != Some(msg.term) {
             return;
         }
-        // Bounded like the host cache (§5.4): overflow clears the map, costing
-        // the next read of a dropped name one fresh recovery.
-        if self.floors.len() >= self.config.host_cache_capacity {
-            self.floors.clear();
+        // Bounded by the same knob as the host cache (§5.4). Overflow evicts
+        // one arbitrary entry, not the map: a full map means many hibernated
+        // names are being polled, and clearing would send every poller into a
+        // simultaneous fresh quorum recovery; one eviction costs one name one
+        // recovery.
+        if self.floors.len() >= self.config.host_cache_capacity
+            && let Some(evict) = self.floors.keys().next().cloned()
+        {
+            self.floors.remove(&evict);
         }
         self.floors.insert(msg.name, (msg.shard, msg.term, head));
     }

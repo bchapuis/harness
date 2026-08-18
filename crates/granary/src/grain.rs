@@ -209,15 +209,18 @@ pub type EventsFuture<E> = BoxFuture<'static, Result<Vec<(Seq, E)>, GrainJournal
 /// real slots. Shared by the activation's [`GrainCtx::events`] and the gateway's
 /// non-activating read (§7.5), so the two projections cannot drift. A record
 /// that will not split is corruption — an error, never silently skipped.
+/// Consumes the page and strips each event's one-byte envelope in place, so
+/// the serial gateway pays a memmove per event, never a second allocation.
 pub(crate) fn events_in_page(
-    page: &[(Seq, Vec<u8>)],
-) -> Result<Vec<(Seq, &[u8])>, GrainJournalError> {
+    page: Vec<(Seq, Vec<u8>)>,
+) -> Result<Vec<(Seq, Vec<u8>)>, GrainJournalError> {
     let mut events = Vec::new();
-    for (seq, bytes) in page {
-        let (tag, payload) =
-            split_record(bytes).map_err(|e| GrainJournalError::Unavailable(e.to_string()))?;
+    for (seq, mut bytes) in page {
+        let (tag, _) =
+            split_record(&bytes).map_err(|e| GrainJournalError::Unavailable(e.to_string()))?;
         if tag == EVENT_TAG {
-            events.push((*seq, payload));
+            bytes.drain(..1);
+            events.push((seq, bytes));
         }
     }
     Ok(events)
@@ -234,6 +237,13 @@ pub struct GrainCtx<G: Grain> {
     /// The journal seam, so the grain can reach its colocated blob area
     /// ([`blobs`](GrainCtx::blobs)).
     journal: Arc<dyn DynGrainJournal>,
+    /// The host's published committed head (spec §7.5): the floor of
+    /// [`events`](GrainCtx::events). The local store alone cannot tell a
+    /// committed record from a tentative one (a leader writes its own replica
+    /// before the quorum resolves, §7.2), and the returned future is `'static`
+    /// — a grain may launch it, racing the host's own in-flight append — so
+    /// the read clamps to this cell rather than trusting the input gate.
+    committed: crate::host::CommittedCell,
     /// The host's facet cell (spec §7.12): committed forms plus the per-command
     /// stage, shared so the facet accessors (`kv()`, `ws()`, …) read and stage
     /// through it.
@@ -254,6 +264,7 @@ impl<G: Grain> GrainCtx<G> {
         system: G::System,
         gateway: ActorRef<Gateway<G>>,
         journal: Arc<dyn DynGrainJournal>,
+        committed: crate::host::CommittedCell,
         facets: Arc<FacetCell<G::Facets>>,
         watches: Arc<std::sync::Mutex<Vec<ActorId>>>,
         blocking_io: Arc<dyn crate::BlockingIo>,
@@ -264,6 +275,7 @@ impl<G: Grain> GrainCtx<G> {
             system,
             gateway,
             journal,
+            committed,
             facets,
             watches,
             blocking_io,
@@ -343,24 +355,49 @@ impl<G: Grain> GrainCtx<G> {
     /// records rather than surfacing them as short pages. A record that will
     /// not split or decode is [`GrainJournalError::Unavailable`]: corruption,
     /// never silently skipped.
+    ///
+    /// Every page is bounded by the activation's **committed head**, exactly
+    /// like the gateway's non-activating read (§7.5): the local store may hold
+    /// an in-flight append's tentative slots (§7.2), and this future is
+    /// `'static` — a grain may launch it, so it can race the host's own
+    /// append. Slots above the head are simply not served (**G5**).
     pub fn events(&self, from: Seq, limit: usize) -> EventsFuture<G::Event> {
         /// Journal entries per `load` page: sized to a subscription batch, not
         /// to `limit`, so a caller's large `limit` cannot force one huge read.
         const LOAD_PAGE: usize = 256;
         let journal = Arc::clone(&self.journal);
+        let committed = Arc::clone(&self.committed);
         let name = self.name.clone();
         let codec = self.system.codec();
         Box::pin(async move {
+            let floor = committed.load(std::sync::atomic::Ordering::Acquire);
+            if floor == crate::host::HEAD_UNPUBLISHED {
+                // Only reachable from a future that escaped a host still
+                // rehydrating: the head is being recovered — transient, and a
+                // read commits nothing, so re-asking is safe.
+                return Err(GrainJournalError::Unavailable(
+                    "the grain's committed head is not yet recovered".into(),
+                ));
+            }
+            let floor = Seq::new(floor);
             let mut events = Vec::new();
             let mut cursor = from;
             while events.len() < limit {
                 let page = journal.load(&name, cursor, LOAD_PAGE).await?;
-                let at_head = page.len() < LOAD_PAGE;
+                let loaded = page.len();
+                // Serve only the committed prefix (§7.5): slots above the
+                // floor are an in-flight append's tentative writes (or
+                // undecided leftovers) and are not served until they commit.
+                let page: Vec<(Seq, Vec<u8>)> = page
+                    .into_iter()
+                    .take_while(|(seq, _)| *seq <= floor)
+                    .collect();
+                let at_head = page.len() < loaded || loaded < LOAD_PAGE;
                 if let Some((seq, _)) = page.last() {
                     cursor = *seq;
                 }
-                for (seq, payload) in events_in_page(&page)? {
-                    let event = actor_serialization::decode::<G::Event>(&*codec, payload)
+                for (seq, payload) in events_in_page(page)? {
+                    let event = actor_serialization::decode::<G::Event>(&*codec, &payload)
                         .map_err(|e| GrainJournalError::Unavailable(e.to_string()))?;
                     events.push((seq, event));
                     if events.len() == limit {
