@@ -2,41 +2,29 @@
 //! Completions API client.
 //!
 //! This crate is the single place the Chat Completions protocol exists: the
-//! request and response JSON, the transcript encoding, the error taxonomy,
-//! and the retry policy — with backoff and jitter drawn from `Clock` and
-//! `Entropy` (§4.2 rule 1), never from the wall clock or an OS RNG. It is the
-//! sibling of `harness-anthropic`: same seam, same retry shape, a different
-//! wire protocol. A completion request is side-effect-free, so internal
-//! retries do not violate the core no-transparent-retry rule (core spec §1.2,
-//! §4.3); a failure that survives the policy surfaces as `ModelError` for the
-//! run to end on, never silently.
+//! request and response JSON, the transcript encoding, and the error
+//! taxonomy (OpenAI's `context_length_exceeded` and friends). It is the
+//! sibling of `harness-anthropic`: same seam, a different wire protocol.
+//! Everything that is not protocol — the socket, the key, the
+//! `Clock`/`Entropy` seams, the bounded retry engine (§4.2 rule 1) — is the
+//! shared [`ProtocolModel`] shell from `harness::http`, held there once for
+//! every sibling adapter.
 //!
-//! The socket is a seam ([`HttpPost`]) and the host owns the base URL, so the
-//! same client speaks to OpenAI, xAI (Grok), OpenRouter, Together, Groq, vLLM,
-//! llama.cpp, Ollama, or any server that serves `/v1/chat/completions`
-//! ([`base_url`] lists the known ones).
-//!
-//! The transport plumbing ([`HttpPost`], [`RetryPolicy`], the retry engine)
-//! is `harness::http`, shared with every sibling adapter; this crate is only
-//! the protocol — the wire JSON and the `classify` taxonomy (OpenAI's
-//! `context_length_exceeded` and friends).
+//! The socket is a seam ([`HttpPost`](harness::HttpPost)) and the host owns
+//! the base URL, so the same client speaks to OpenAI, xAI (Grok), OpenRouter,
+//! Together, Groq, vLLM, llama.cpp, Ollama, or any server that serves
+//! `/v1/chat/completions` ([`base_url`] lists the known ones).
 
-use std::sync::Arc;
-
-use actor_core::BoxFuture;
-use actor_core::Clock;
-use actor_core::Entropy;
 use harness::Entry;
-use harness::HttpPost;
 use harness::HttpResponse;
-use harness::Model;
 use harness::ModelError;
 use harness::ModelRequest;
 use harness::ModelResponse;
-use harness::RetryPolicy;
 use harness::ToolCall;
 use harness::Usage;
-use harness::http::complete_with_retry;
+use harness::http::Protocol;
+use harness::http::ProtocolModel;
+use harness::http::tool_result_text;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -64,64 +52,33 @@ pub mod base_url {
     pub const GROQ: &str = "https://api.groq.com/openai";
 }
 
-/// The OpenAI-compatible Chat Completions model (harness spec §4.1).
-pub struct OpenAiModel<C: Clock, E: Entropy> {
-    http: Arc<dyn HttpPost>,
-    api_key: String,
-    clock: C,
-    entropy: Arc<E>,
-    retry: RetryPolicy,
-}
+/// The Chat Completions protocol: the wire-specific four this crate owns. The
+/// shell around it — socket, key, seams, retry — is the shared
+/// [`ProtocolModel`].
+pub struct ChatCompletions;
 
-impl<C: Clock, E: Entropy> OpenAiModel<C, E> {
-    pub fn new(
-        http: Arc<dyn HttpPost>,
-        api_key: impl Into<String>,
-        clock: C,
-        entropy: Arc<E>,
-    ) -> Self {
-        OpenAiModel {
-            http,
-            api_key: api_key.into(),
-            clock,
-            entropy,
-            retry: RetryPolicy::default(),
-        }
-    }
+impl Protocol for ChatCompletions {
+    const PATH: &'static str = COMPLETIONS_PATH;
 
-    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
-        self.retry = retry;
-        self
-    }
-
-    fn headers(&self) -> Vec<(String, String)> {
+    fn headers(api_key: &str) -> Vec<(String, String)> {
         vec![
-            (
-                "authorization".to_string(),
-                format!("Bearer {}", self.api_key),
-            ),
+            ("authorization".to_string(), format!("Bearer {api_key}")),
             ("content-type".to_string(), "application/json".to_string()),
         ]
     }
-}
 
-impl<C: Clock, E: Entropy> Model for OpenAiModel<C, E> {
-    fn complete(&self, req: ModelRequest) -> BoxFuture<'static, Result<ModelResponse, ModelError>> {
-        let body = serde_json::to_vec(&encode_request(&req)).expect("request encodes");
-        // The engine is shared (`harness::http`); this crate's protocol is the
-        // encoding above and `classify` below.
-        complete_with_retry(
-            Arc::clone(&self.http),
-            COMPLETIONS_PATH,
-            self.headers(),
-            body,
-            &self.clock,
-            self.entropy.as_ref(),
-            &self.retry,
-            classify,
-        )
+    fn encode(req: &ModelRequest) -> Value {
+        encode_request(req)
+    }
+
+    fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
+        classify(response)
     }
 }
+
+/// The OpenAI-compatible Chat Completions model (harness spec §4.1): the
+/// shared shell bound to this crate's protocol.
+pub type OpenAiModel<C, E> = ProtocolModel<ChatCompletions, C, E>;
 
 // ---------------------------------------------------------------------------
 // Request encoding (harness Entry → Chat Completions API)
@@ -169,7 +126,7 @@ pub fn encode_request(req: &ModelRequest) -> Value {
                 // The protocol has no `is_error` flag on a tool message, so a
                 // failure rides as marked content the model can react to.
                 let content = match outcome {
-                    Ok(value) => render(value),
+                    Ok(value) => tool_result_text(value),
                     Err(error) => format!("[error] {error}"),
                 };
                 messages.push(json!({
@@ -212,15 +169,6 @@ pub fn encode_request(req: &ModelRequest) -> Value {
         );
     }
     body
-}
-
-/// A tool result's wire form: a bare string rides as-is, anything structured
-/// as JSON text.
-fn render(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -359,11 +307,15 @@ fn is_context_message(message: &str) -> bool {
 mod tests {
     use super::*;
     use harness::HttpError;
+    use std::sync::Arc;
     use std::sync::Mutex;
 
+    use actor_core::BoxFuture;
     use actor_simulation::SimEntropy;
     use actor_simulation::Simulation;
     use harness::CallId;
+    use harness::HttpPost;
+    use harness::Model;
     use harness::ModelParams;
     use harness::ToolError;
     use harness::ToolSpec;
