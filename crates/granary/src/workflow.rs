@@ -141,15 +141,12 @@ where
     /// map (read-your-staged-writes, §7.12). A completed step returns `Some` on every
     /// re-drive and after any replay.
     pub fn result<T: DeserializeOwned>(&self, id: StepId) -> Result<Option<T>, GrainError> {
-        let bytes = self
-            .cell
-            .with_form_and_stage::<Workflow, I, _>(|form, stage| {
-                stage
-                    .staged
-                    .get(&id)
-                    .or_else(|| form.steps.get(&id))
-                    .cloned()
-            });
+        let bytes = self.cell.with_overlay::<Workflow, I, _>(|form, stage| {
+            stage
+                .and_then(|s| s.staged.get(&id))
+                .or_else(|| form.steps.get(&id))
+                .cloned()
+        });
         match bytes {
             None => Ok(None),
             Some(bytes) => decode_payload("workflow result", &bytes)
@@ -160,10 +157,9 @@ where
 
     /// Whether step `id` has completed (committed or staged this command).
     pub fn is_done(&self, id: StepId) -> bool {
-        self.cell
-            .with_form_and_stage::<Workflow, I, _>(|form, stage| {
-                stage.staged.contains_key(&id) || form.steps.contains_key(&id)
-            })
+        self.cell.with_overlay::<Workflow, I, _>(|form, stage| {
+            stage.is_some_and(|s| s.staged.contains_key(&id)) || form.steps.contains_key(&id)
+        })
     }
 
     /// Record step `id`'s result, staged into this command's atomic batch (§7.12).

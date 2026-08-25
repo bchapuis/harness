@@ -162,10 +162,11 @@ where
     G::Facets: HasFacet<Alarm, I>,
 {
     /// The pending deadline, resolving a staged arm/cancel over the committed
-    /// form (read-your-staged-writes, §7.12).
+    /// form (read-your-staged-writes, §7.12). Valid anywhere the form is
+    /// folded; outside a command only the committed form answers.
     pub fn pending(&self) -> Option<Instant> {
         self.cell
-            .with_form_and_stage::<Alarm, I, _>(|form, stage| match &stage.op {
+            .with_overlay::<Alarm, I, _>(|form, stage| match stage.and_then(|s| s.op.as_ref()) {
                 Some(AlarmOp::Set(nanos)) => Some(Instant::from_nanos(*nanos)),
                 Some(AlarmOp::Clear) => None,
                 None => form.due(),

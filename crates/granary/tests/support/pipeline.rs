@@ -335,6 +335,10 @@ impl<S: GranarySystem> Grain for Pipeline<S> {
 
     async fn on_activate(&mut self, ctx: &GrainCtx<Self>) -> Result<(), actor_core::BoxError> {
         self.eph.lock().unwrap().guard.reset();
+        // Regression net: activation has no command stage armed, so this read
+        // must answer from the committed form, not panic about command scope
+        // (workflow reads are valid anywhere, granary §7.17).
+        let _ = ctx.workflow().is_done(STEP_FETCH);
         // Resume an in-flight workflow after a (re)activation — and start one on the
         // first, so the workflow needs no message of its own to begin.
         self.schedule_drive(ctx);

@@ -67,6 +67,17 @@ impl Grain for AlarmGrain {
     async fn on_alarm(&self, _state: &AlarmState, _ctx: &GrainCtx<Self>) -> Vec<AlarmEvent> {
         vec![AlarmEvent::Fired]
     }
+
+    // Regression net: activation has no command stage armed, so this read must
+    // answer from the committed form, not panic about command scope (alarm
+    // reads are valid anywhere the form is folded, granary §7.16).
+    fn on_activate(
+        &mut self,
+        ctx: &GrainCtx<Self>,
+    ) -> impl std::future::Future<Output = Result<(), actor_core::BoxError>> + Send {
+        let _ = ctx.alarm().pending();
+        async { Ok(()) }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
