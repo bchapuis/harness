@@ -23,7 +23,6 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
@@ -46,6 +45,10 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::pki_types::ServerName;
 
+use crate::association::Admitted;
+use crate::association::Association;
+use crate::association::Book;
+use crate::association::Slots;
 use crate::wire::Hello;
 use crate::wire::Wire;
 use crate::wire::read_hello;
@@ -188,13 +191,15 @@ pub enum Encryption {
 struct Shared {
     config: TcpConfig,
     inbound: async_channel::Sender<(NodeId, Frame)>,
-    /// Outbound connections this node dialed, one per peer. Held only briefly to
-    /// look up or insert; dialing happens with the lock released. The queue is
-    /// bounded (backpressure, spec §6).
-    conns: Mutex<HashMap<NodeId, Conn>>,
-    /// The runtime address book (spec §9.3): seeded from config, then grown as
-    /// handshakes and gossip reveal more peers.
-    endpoints: Mutex<BTreeMap<NodeId, SocketAddr>>,
+    /// The per-peer association slots ([`Slots`]): outbound connections this
+    /// node dialed, one live per peer. Held only briefly to decide; dialing
+    /// happens with the lock released. The queue is bounded (backpressure,
+    /// spec §6). The arbitration and eviction *rules* live socket-free in
+    /// [`crate::association`], where they are deterministically tested.
+    slots: Mutex<Slots<Conn>>,
+    /// The runtime address book ([`Book`], spec §9.3): seeded from config,
+    /// then grown as handshakes and gossip reveal more peers.
+    book: Mutex<Book>,
     /// Flipped to `true` on [`shutdown`](TcpTransport::shutdown); the accept loop,
     /// gossip loop, and connection tasks watch it and stop (spec §9.3).
     shutdown: watch::Sender<bool>,
@@ -215,6 +220,16 @@ struct Conn {
     version: compat::Version,
 }
 
+impl Association for Conn {
+    fn is_live(&self) -> bool {
+        !self.tx.is_closed()
+    }
+
+    fn is_same(&self, other: &Self) -> bool {
+        self.tx.same_channel(&other.tx)
+    }
+}
+
 impl Shared {
     fn hello(&self) -> Hello {
         Hello {
@@ -226,45 +241,29 @@ impl Shared {
         }
     }
 
-    /// Record `node`'s address, unless it is ourselves under a different address
-    /// (our own advertised address is authoritative).
+    /// Record `node`'s address in the [`Book`] (which ignores claims about
+    /// ourselves — our advertised address is authoritative).
     fn learn(&self, node: NodeId, addr: SocketAddr) {
-        if node == self.config.node {
-            return;
-        }
-        self.endpoints
+        self.book
             .lock()
-            .expect("endpoints mutex poisoned")
-            .insert(node, addr);
+            .expect("book mutex poisoned")
+            .learn(node, addr);
     }
 
     /// Merge a gossiped `(node, address)` table.
     fn learn_all(&self, table: Vec<(NodeId, SocketAddr)>) {
-        for (node, addr) in table {
-            self.learn(node, addr);
-        }
+        self.book
+            .lock()
+            .expect("book mutex poisoned")
+            .learn_all(table);
     }
 
     /// Look up a peer's address from the runtime book.
     fn address_of(&self, node: NodeId) -> Option<SocketAddr> {
-        self.endpoints
+        self.book
             .lock()
-            .expect("endpoints mutex poisoned")
-            .get(&node)
-            .copied()
-    }
-
-    /// The full known table, including our own advertised address, for gossip.
-    fn endpoint_table(&self) -> Vec<(NodeId, SocketAddr)> {
-        let mut table = vec![(self.config.node, self.config.advertised)];
-        table.extend(
-            self.endpoints
-                .lock()
-                .expect("endpoints mutex poisoned")
-                .iter()
-                .map(|(n, a)| (*n, *a)),
-        );
-        table
+            .expect("book mutex poisoned")
+            .address_of(node)
     }
 
     /// Validate a peer's handshake against our policy, returning the peer's node
@@ -324,18 +323,17 @@ impl TcpTransport {
     ) -> (TcpTransport, async_channel::Receiver<(NodeId, Frame)>) {
         let (inbound_tx, inbound_rx) = async_channel::unbounded();
         // Seed the runtime address book from the configured peers.
-        let endpoints: BTreeMap<NodeId, SocketAddr> = config
-            .peers
-            .iter()
-            .filter(|(n, _)| **n != config.node)
-            .map(|(n, a)| (*n, *a))
-            .collect();
+        let book = Book::new(
+            config.node,
+            config.advertised,
+            config.peers.iter().map(|(n, a)| (*n, *a)),
+        );
         let gossip_interval = config.endpoint_gossip_interval;
         let shared = Arc::new(Shared {
             config,
             inbound: inbound_tx,
-            conns: Mutex::new(HashMap::new()),
-            endpoints: Mutex::new(endpoints),
+            slots: Mutex::new(Slots::new()),
+            book: Mutex::new(book),
             shutdown: watch::channel(false).0,
         });
         tokio::spawn(accept_loop(listener, Arc::clone(&shared)));
@@ -394,8 +392,11 @@ impl TcpTransport {
     }
 
     fn lookup(&self, peer: NodeId) -> Option<Conn> {
-        let conns = self.shared.conns.lock().expect("conns mutex poisoned");
-        conns.get(&peer).filter(|c| !c.tx.is_closed()).cloned()
+        self.shared
+            .slots
+            .lock()
+            .expect("slots mutex poisoned")
+            .reuse(peer)
     }
 
     /// Register a freshly dialed connection under the revision its handshake
@@ -410,23 +411,29 @@ impl TcpTransport {
             tx: tx.clone(),
             version,
         };
-        let mut conns = self.shared.conns.lock().expect("conns mutex poisoned");
-        // A concurrent dial that won carries its own negotiated revision, and it is
-        // that association's frames that will travel, so its `Conn` is the one to
-        // keep whole.
-        if let Some(existing) = conns.get(&peer).filter(|c| !c.tx.is_closed()) {
-            return existing.clone();
+        // The arbitration is [`Slots::admit`]'s: a concurrent dial that won
+        // carries its own negotiated revision, and it is that association's
+        // frames that will travel, so its `Conn` is kept whole and this
+        // stream is dropped without ever starting.
+        let admitted = self
+            .shared
+            .slots
+            .lock()
+            .expect("slots mutex poisoned")
+            .admit(peer, conn);
+        match admitted {
+            Admitted::Won(conn) => {
+                tokio::spawn(dialed_connection(
+                    stream,
+                    rx,
+                    peer,
+                    Arc::clone(&self.shared),
+                    conn.clone(),
+                ));
+                conn
+            }
+            Admitted::Lost(winner) => winner,
         }
-        conns.insert(peer, conn.clone());
-        drop(conns);
-        tokio::spawn(dialed_connection(
-            stream,
-            rx,
-            peer,
-            Arc::clone(&self.shared),
-            tx,
-        ));
-        conn
     }
 }
 
@@ -439,13 +446,11 @@ impl Transport for TcpTransport {
         // this frame is never resent (spec §7.2), and a dropped frame an `ask` was
         // awaiting completes it as `Unreachable`, so nothing is silently lost.
         conn.tx.try_send(Wire::Frame(frame)).map_err(|_| {
-            let mut conns = self.shared.conns.lock().expect("conns mutex poisoned");
-            if conns
-                .get(&peer)
-                .is_some_and(|cur| cur.tx.same_channel(&conn.tx))
-            {
-                conns.remove(&peer);
-            }
+            self.shared
+                .slots
+                .lock()
+                .expect("slots mutex poisoned")
+                .evict_if_same(peer, &conn);
             TransportError::Unreachable
         })
     }
@@ -470,9 +475,9 @@ impl Transport for TcpTransport {
         let _ = self.shared.shutdown.send(true);
         self.shared.inbound.close();
         self.shared
-            .conns
+            .slots
             .lock()
-            .expect("conns mutex poisoned")
+            .expect("slots mutex poisoned")
             .clear();
     }
 }
@@ -534,7 +539,7 @@ async fn dialed_connection<S>(
     mut rx: mpsc::Receiver<Wire>,
     peer: NodeId,
     shared: Arc<Shared>,
-    self_tx: mpsc::Sender<Wire>,
+    self_conn: Conn,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -567,16 +572,14 @@ async fn dialed_connection<S>(
         _ = shutdown.changed() => {} // node stopping (spec §9.3)
     }
 
-    // Deregister so the next send re-dials — and so the revision this association
-    // settled on stops being served as the peer's, since the re-dial negotiates
-    // its own.
-    let mut conns = shared.conns.lock().expect("conns mutex poisoned");
-    if conns
-        .get(&peer)
-        .is_some_and(|cur| cur.tx.same_channel(&self_tx))
-    {
-        conns.remove(&peer);
-    }
+    // Deregister so the next send re-dials — and so the revision this
+    // association settled on stops being served as the peer's, since the
+    // re-dial negotiates its own. `evict_if_same` leaves a successor alone.
+    shared
+        .slots
+        .lock()
+        .expect("slots mutex poisoned")
+        .evict_if_same(peer, &self_conn);
 }
 
 /// Read messages from a receive-only (accepted) connection until it closes.
@@ -675,20 +678,21 @@ async fn endpoint_gossip(shared: Arc<Shared>, interval: Duration) {
             _ = tokio::time::sleep(interval) => {}
             _ = shutdown.changed() => return, // node stopping (spec §9.3)
         }
-        let table = shared.endpoint_table();
-        let sends = table
-            .iter()
-            .map(|(n, _)| *n)
-            .filter(|n| *n != shared.config.node)
-            .map(|peer| {
-                let transport = transport.clone();
-                let table = table.clone();
-                async move {
-                    if let Ok(conn) = transport.connection(peer).await {
-                        let _ = conn.tx.try_send(Wire::Endpoints(table));
-                    }
+        // One lock: the table to push and who to push it to (the book minus
+        // ourselves, connected or not) are one consistent snapshot.
+        let (table, targets) = {
+            let book = shared.book.lock().expect("book mutex poisoned");
+            (book.table(), book.gossip_targets())
+        };
+        let sends = targets.into_iter().map(|peer| {
+            let transport = transport.clone();
+            let table = table.clone();
+            async move {
+                if let Ok(conn) = transport.connection(peer).await {
+                    let _ = conn.tx.try_send(Wire::Endpoints(table));
                 }
-            });
+            }
+        });
         futures::future::join_all(sends).await;
     }
 }
@@ -716,8 +720,12 @@ mod tests {
                 encryption: Encryption::PlaintextTrusted,
             },
             inbound: async_channel::unbounded().0,
-            conns: Mutex::new(HashMap::new()),
-            endpoints: Mutex::new(BTreeMap::new()),
+            slots: Mutex::new(Slots::new()),
+            book: Mutex::new(Book::new(
+                NodeId::new(1),
+                "127.0.0.1:1".parse().expect("a literal address"),
+                [],
+            )),
             shutdown: watch::channel(false).0,
         }
     }

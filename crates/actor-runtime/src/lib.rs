@@ -30,6 +30,7 @@
 // build deterministic; this allow is the determinism boundary.
 #![allow(clippy::disallowed_methods)]
 
+mod association;
 mod clock;
 #[cfg(test)]
 mod corpus;
