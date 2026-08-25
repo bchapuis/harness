@@ -10,20 +10,17 @@
 //!   and hand back an [`Events`] iterator that yields the run's records live off
 //!   the chunked SSE body, so the TUI renders as the agent works.
 //!
-//! TLS (for an `https://` gateway behind no ingress) reuses rustls with webpki
-//! trust anchors; a plain `http://` base — the loopback demo — skips it.
+//! The socket plumbing — origin parsing, TCP/TLS connect, request framing,
+//! and the incremental response [`Reader`] — is the shared [`harness_http`]
+//! substrate; this module owns only the gateway protocol: the REST paths, the
+//! bearer token, and the SSE frame vocabulary.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustls::pki_types::ServerName;
+use harness_http::Origin;
+use harness_http::Reader;
 use serde::Deserialize;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWrite;
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
 
 use harness::Record;
 use harness::RunOutcome;
@@ -48,11 +45,6 @@ pub enum Event {
     End,
 }
 
-/// Any byte stream the client talks HTTP over — a bare `TcpStream` or a rustls
-/// `TlsStream` on top of one.
-trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
-
 /// Bound on a whole request-response exchange. The streaming prompt is *not*
 /// bound by this — a run can take minutes — only the unary calls are.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -61,52 +53,17 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// every request authenticates with.
 #[derive(Clone)]
 pub struct GatewayClient {
-    host: String,
-    port: u16,
+    origin: Origin,
     token: String,
-    tls: Option<(TlsConnector, ServerName<'static>)>,
 }
 
 impl GatewayClient {
     /// Build a client for `base` (`http://host[:port]` or `https://host[:port]`)
     /// acting as the tenant `token` names.
     pub fn new(base: &str, token: impl Into<String>) -> Result<Arc<GatewayClient>, String> {
-        let (https, rest) = if let Some(rest) = base.strip_prefix("https://") {
-            (true, rest)
-        } else if let Some(rest) = base.strip_prefix("http://") {
-            (false, rest)
-        } else {
-            return Err(format!("unsupported url (expected http(s)://host): {base}"));
-        };
-        let rest = rest.trim_end_matches('/');
-        if rest.is_empty() || rest.contains('/') {
-            return Err(format!("expected a bare host[:port], got: {base}"));
-        }
-        let (host, port) = match rest.rsplit_once(':') {
-            Some((host, port)) => (
-                host.to_string(),
-                port.parse().map_err(|e| format!("bad port: {e}"))?,
-            ),
-            None => (rest.to_string(), if https { 443 } else { 80 }),
-        };
-        let tls = https
-            .then(|| {
-                let roots = rustls::RootCertStore {
-                    roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-                };
-                let config = rustls::ClientConfig::builder()
-                    .with_root_certificates(roots)
-                    .with_no_client_auth();
-                let name = ServerName::try_from(host.clone())
-                    .map_err(|e| format!("bad server name: {e}"))?;
-                Ok::<_, String>((TlsConnector::from(Arc::new(config)), name))
-            })
-            .transpose()?;
         Ok(Arc::new(GatewayClient {
-            host,
-            port,
+            origin: Origin::parse(base)?,
             token: token.into(),
-            tls,
         }))
     }
 
@@ -186,7 +143,7 @@ impl GatewayClient {
             ],
             Some(body.into_bytes()),
         );
-        let stream = self.connect().await?;
+        let stream = self.origin.connect().await?;
         let mut reader = Reader::new(stream);
         reader.write_all(&request).await?;
         let status = reader.read_headers().await?;
@@ -215,7 +172,7 @@ impl GatewayClient {
         let request =
             self.build_request(method, path, &[("content-type", "application/json")], body);
         let exchange = async {
-            let stream = self.connect().await?;
+            let stream = self.origin.connect().await?;
             let mut reader = Reader::new(stream);
             reader.write_all(&request).await?;
             let status = reader.read_headers().await?;
@@ -235,9 +192,9 @@ impl GatewayClient {
         }
     }
 
-    /// Frame an HTTP/1.1 request. `connection: close` keeps unary replies a
-    /// single read-to-EOF; the streaming prompt overrides nothing here — the
-    /// gateway streams the body chunked regardless and closes at the run's end.
+    /// Frame a request against the gateway origin, carrying the tenant's
+    /// bearer token; the framing itself (`connection: close`, content-length)
+    /// is the shared substrate's.
     fn build_request(
         &self,
         method: &str,
@@ -245,38 +202,11 @@ impl GatewayClient {
         headers: &[(&str, &str)],
         body: Option<Vec<u8>>,
     ) -> Vec<u8> {
-        let body = body.unwrap_or_default();
-        let mut request = format!(
-            "{method} {path} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\n\
-             authorization: Bearer {}\r\ncontent-length: {}\r\n",
-            self.host,
-            self.token,
-            body.len()
-        )
-        .into_bytes();
-        for (name, value) in headers {
-            request.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
-        }
-        request.extend_from_slice(b"\r\n");
-        request.extend_from_slice(&body);
-        request
-    }
-
-    /// Open a transport connection to the gateway (TLS when configured).
-    async fn connect(&self) -> Result<Box<dyn Io>, String> {
-        let tcp = TcpStream::connect((self.host.as_str(), self.port))
-            .await
-            .map_err(|e| format!("connect {}:{}: {e}", self.host, self.port))?;
-        match &self.tls {
-            Some((connector, name)) => {
-                let stream = connector
-                    .connect(name.clone(), tcp)
-                    .await
-                    .map_err(|e| format!("tls: {e}"))?;
-                Ok(Box::new(stream))
-            }
-            None => Ok(Box::new(tcp)),
-        }
+        let auth = format!("Bearer {}", self.token);
+        let mut all = vec![("authorization", auth.as_str())];
+        all.extend_from_slice(headers);
+        self.origin
+            .request(method, path, &all, &body.unwrap_or_default())
     }
 }
 
@@ -345,151 +275,8 @@ fn parse_frame(frame: &[u8]) -> Option<Event> {
     }
 }
 
-/// A buffered reader over the connection: HTTP header parsing, then either a
-/// whole-body read (unary) or a chunked stream (SSE).
-struct Reader {
-    stream: Box<dyn Io>,
-    /// Bytes read off the socket but not yet consumed.
-    buf: Vec<u8>,
-    chunked: bool,
-    content_length: Option<usize>,
-}
-
-impl Reader {
-    fn new(stream: Box<dyn Io>) -> Reader {
-        Reader {
-            stream,
-            buf: Vec::new(),
-            chunked: false,
-            content_length: None,
-        }
-    }
-
-    async fn write_all(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.stream
-            .write_all(bytes)
-            .await
-            .map_err(|e| format!("send: {e}"))
-    }
-
-    /// Read and parse the status line and headers, leaving the body bytes (any
-    /// already buffered) in `buf`. Returns the status code and records whether
-    /// the body is chunked / its content-length.
-    async fn read_headers(&mut self) -> Result<u16, String> {
-        let head = loop {
-            if let Some(end) = find(&self.buf, b"\r\n\r\n") {
-                let head: Vec<u8> = self.buf.drain(..end + 4).collect();
-                break head;
-            }
-            if !self.fill().await? {
-                return Err("connection closed before headers completed".to_string());
-            }
-        };
-        let head = String::from_utf8_lossy(&head);
-        let mut lines = head.split("\r\n");
-        let status_line = lines.next().unwrap_or_default();
-        let status: u16 = status_line
-            .split_whitespace()
-            .nth(1)
-            .and_then(|c| c.parse().ok())
-            .ok_or_else(|| format!("malformed status line: {status_line}"))?;
-        for line in lines {
-            let Some((name, value)) = line.split_once(':') else {
-                continue;
-            };
-            let value = value.trim();
-            if name.eq_ignore_ascii_case("transfer-encoding")
-                && value.to_ascii_lowercase().contains("chunked")
-            {
-                self.chunked = true;
-            } else if name.eq_ignore_ascii_case("content-length") {
-                self.content_length = value.parse().ok();
-            }
-        }
-        Ok(status)
-    }
-
-    /// Read the whole response body (chunked, content-length, or to-EOF).
-    async fn read_body(&mut self) -> Result<Vec<u8>, String> {
-        if self.chunked {
-            let mut body = Vec::new();
-            while let Some(chunk) = self.next_chunk().await? {
-                body.extend_from_slice(&chunk);
-            }
-            Ok(body)
-        } else if let Some(len) = self.content_length {
-            while self.buf.len() < len {
-                if !self.fill().await? {
-                    return Err(format!("truncated body: {} of {len} bytes", self.buf.len()));
-                }
-            }
-            Ok(self.buf.drain(..len).collect())
-        } else {
-            self.drain_to_end().await
-        }
-    }
-
-    /// Read whatever remains until the peer closes (best-effort; for error
-    /// bodies and content-length-less replies).
-    async fn drain_to_end(&mut self) -> Result<Vec<u8>, String> {
-        while self.fill().await? {}
-        Ok(std::mem::take(&mut self.buf))
-    }
-
-    /// The next decoded chunk of a chunked body, or `None` at the terminating
-    /// zero-length chunk.
-    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, String> {
-        let header = match self.read_line().await? {
-            Some(line) => line,
-            None => return Ok(None),
-        };
-        let size_str = header.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_str, 16)
-            .map_err(|e| format!("bad chunk size {size_str:?}: {e}"))?;
-        if size == 0 {
-            return Ok(None);
-        }
-        // The chunk's `size` bytes, then the trailing CRLF.
-        while self.buf.len() < size + 2 {
-            if !self.fill().await? {
-                return Err("truncated chunk".to_string());
-            }
-        }
-        let data: Vec<u8> = self.buf.drain(..size).collect();
-        self.buf.drain(..2); // CRLF
-        Ok(Some(data))
-    }
-
-    /// Read up to and consuming the next CRLF, returning the line without it.
-    async fn read_line(&mut self) -> Result<Option<String>, String> {
-        loop {
-            if let Some(end) = find(&self.buf, b"\r\n") {
-                let line: Vec<u8> = self.buf.drain(..end + 2).collect();
-                return Ok(Some(String::from_utf8_lossy(&line[..end]).into_owned()));
-            }
-            if !self.fill().await? {
-                return Ok(None);
-            }
-        }
-    }
-
-    /// Pull more bytes from the socket into `buf`; `false` at EOF.
-    async fn fill(&mut self) -> Result<bool, String> {
-        let mut tmp = [0u8; 8192];
-        let n = self
-            .stream
-            .read(&mut tmp)
-            .await
-            .map_err(|e| format!("receive: {e}"))?;
-        if n == 0 {
-            return Ok(false);
-        }
-        self.buf.extend_from_slice(&tmp[..n]);
-        Ok(true)
-    }
-}
-
-/// The first index of `needle` in `haystack`, or `None`.
+/// The first index of `needle` in `haystack`, or `None` — for splitting SSE
+/// frames out of the decoded stream.
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())

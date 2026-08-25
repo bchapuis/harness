@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use actor_core::ActorSystem;
 use actor_core::Clock;
 use actor_simulation::SimSystem;
 use actor_simulation::run_seed;
@@ -170,7 +171,8 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
     assert_eq!(
         record_kinds(&records.lock().unwrap()),
         vec![
-            "created", "turn", "started", "model", "tool", "reset", "model", "tool", "model", "ended"
+            "created", "turn", "started", "model", "tool", "reset", "model", "tool", "model",
+            "ended"
         ],
     );
     // The loss tore down one environment; the next call opened a fresh one (§5.5)
@@ -207,7 +209,9 @@ fn a_durable_workspace_still_resets_on_a_genuine_mid_run_loss() {
         move |harness, system| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
-                let session = harness.session("worker", SessionId::new("s-durable-loss")).unwrap();
+                let session = harness
+                    .session("worker", SessionId::new("s-durable-loss"))
+                    .unwrap();
                 let outcome = session
                     .prompt(Turn::new(TurnId::new("t-1"), "go"))
                     .await
@@ -225,7 +229,8 @@ fn a_durable_workspace_still_resets_on_a_genuine_mid_run_loss() {
     assert_eq!(
         record_kinds(&records.lock().unwrap()),
         vec![
-            "created", "turn", "started", "model", "tool", "reset", "model", "tool", "model", "ended"
+            "created", "turn", "started", "model", "tool", "reset", "model", "tool", "model",
+            "ended"
         ],
     );
 }
@@ -380,7 +385,8 @@ fn a_tier_is_acquired_under_a_journaled_record_before_its_first_effect() {
     assert_eq!(
         record_kinds(&records),
         vec![
-            "created", "turn", "started", "model", "tool", "model", "tier", "tool", "model", "ended"
+            "created", "turn", "started", "model", "tool", "model", "tier", "tool", "model",
+            "ended"
         ],
     );
     let acquired: Vec<Tier> = records
@@ -479,8 +485,8 @@ fn a_reset_restarts_the_held_set_and_reacquisition_is_rejournaled() {
     assert_eq!(
         record_kinds(&records),
         vec![
-            "created", "turn", "started", "model", "tier", "tool", "reset", "model", "tier", "tool", "model",
-            "ended"
+            "created", "turn", "started", "model", "tier", "tool", "reset", "model", "tier",
+            "tool", "model", "ended"
         ],
     );
     audit_tier_acquisition(&records, &worker_kind());

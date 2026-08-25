@@ -11,18 +11,15 @@
 //! system that can host shards implements it the same way (the `Quorum` tier).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use actor_cluster::ClusterSystem;
 use actor_cluster::GroupId;
 use actor_cluster::RaftConsensus;
 use actor_cluster::Transport;
 use actor_core::ActorSystem;
-use actor_core::BoxFuture;
 use actor_core::Clock;
 use actor_core::Entropy;
 use actor_core::Event;
-use actor_core::Instant;
 use actor_core::LocalSystem;
 use actor_core::NodeId;
 use actor_core::Spawner;
@@ -310,20 +307,13 @@ pub(crate) fn select_replicas(
 /// for [`LocalSystem`] (the `Local` tier, single-node) and [`ClusterSystem`] (the
 /// `Quorum` tier, sharded Raft).
 pub trait GranarySystem: ActorSystem {
-    /// The current virtual time (for the idle/hibernation clock, §10).
-    fn now(&self) -> Instant;
-
-    /// A future that completes after `dur` of virtual time — the host's
-    /// hibernation timer (§10).
-    fn sleep(&self, dur: Duration) -> BoxFuture<'static, ()>;
-
-    /// Launch a detached background task (drives the idle timer).
-    fn launch(&self, task: BoxFuture<'static, ()>);
-
     /// Emit a grain event onto the framework's observability stream (§13),
     /// wrapped as an application event so the checkers and the reproducibility
-    /// recorder observe it in the one ordered stream.
-    fn emit_grain_event(&self, event: GrainEvent);
+    /// recorder observe it in the one ordered stream. (Time, sleeping, and
+    /// task launching come from the [`ActorSystem`] supertrait.)
+    fn emit_grain_event(&self, event: GrainEvent) {
+        self.emit(Event::app(event));
+    }
 
     /// Build the **shard map** for a grain type (spec §7.6): the consensus-agreed
     /// record of which nodes replicate each of its `shards`, and this node's local
@@ -361,23 +351,6 @@ pub trait GranarySystem: ActorSystem {
 }
 
 impl<C: Clock, E: Entropy, S: Spawner> GranarySystem for LocalSystem<C, E, S> {
-    fn now(&self) -> Instant {
-        self.clock().now()
-    }
-
-    fn sleep(&self, dur: Duration) -> BoxFuture<'static, ()> {
-        let clock = self.clock().clone();
-        Box::pin(async move { clock.sleep(dur).await })
-    }
-
-    fn launch(&self, task: BoxFuture<'static, ()>) {
-        self.spawner().launch(task);
-    }
-
-    fn emit_grain_event(&self, event: GrainEvent) {
-        self.emit(Event::app(event));
-    }
-
     fn shard_map(
         &self,
         _grain_type: &'static str,
@@ -414,23 +387,6 @@ where
     S: Spawner,
     T: Transport,
 {
-    fn now(&self) -> Instant {
-        self.clock().now()
-    }
-
-    fn sleep(&self, dur: Duration) -> BoxFuture<'static, ()> {
-        let clock = self.clock().clone();
-        Box::pin(async move { clock.sleep(dur).await })
-    }
-
-    fn launch(&self, task: BoxFuture<'static, ()>) {
-        self.launch_task(task);
-    }
-
-    fn emit_grain_event(&self, event: GrainEvent) {
-        self.emit(Event::app(event));
-    }
-
     fn shard_map(
         &self,
         grain_type: &'static str,

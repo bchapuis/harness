@@ -337,6 +337,37 @@ pub struct RaftBeat {
     pub commit: u64,
 }
 
+impl RaftBeat {
+    /// The batching lift (spec §9.4.3): an **empty** [`Frame::RaftAppend`] —
+    /// a pure heartbeat — reduced to its beat; `None` for anything else,
+    /// including an append that carries entries (real replication, never
+    /// batched). This constructor and [`RaftBeatReply::from_reply`] are the
+    /// whole correspondence between the batched and unbatched forms; they
+    /// live beside the types so a new append field fails compilation here
+    /// instead of drifting past the two call sites silently.
+    pub(crate) fn from_empty_append(frame: &Frame) -> Option<RaftBeat> {
+        match frame {
+            Frame::RaftAppend {
+                group,
+                term,
+                leader,
+                prev_index,
+                prev_term,
+                entries,
+                commit,
+            } if entries.is_empty() => Some(RaftBeat {
+                group: *group,
+                term: *term,
+                leader: *leader,
+                prev_index: *prev_index,
+                prev_term: *prev_term,
+                commit: *commit,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// One group's reply inside a [`Frame::RaftHeartbeatReplies`] — the fields of a
 /// [`Frame::RaftAppendReply`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +376,28 @@ pub struct RaftBeatReply {
     pub term: u64,
     pub ok: bool,
     pub match_index: u64,
+}
+
+impl RaftBeatReply {
+    /// The reply-side lift: a [`Frame::RaftAppendReply`] gathered into a
+    /// heartbeat-reply batch; `None` for any other frame. See
+    /// [`RaftBeat::from_empty_append`].
+    pub(crate) fn from_reply(frame: &Frame) -> Option<RaftBeatReply> {
+        match frame {
+            Frame::RaftAppendReply {
+                group,
+                term,
+                ok,
+                match_index,
+            } => Some(RaftBeatReply {
+                group: *group,
+                term: *term,
+                ok: *ok,
+                match_index: *match_index,
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

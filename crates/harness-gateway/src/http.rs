@@ -183,7 +183,11 @@ async fn prompt<S: HarnessSystem>(
     reject_bad_session(&session)?;
     // A malformed body is the edge's own `400`, in the structured envelope (not
     // axum's default plain-text rejection).
-    let Json(body) = body.map_err(|e| GatewayError::bad_request(e.body_text()))?;
+    let Json(mut body) = body.map_err(|e| GatewayError::bad_request(e.body_text()))?;
+    // Clamp the caller's timeout to the edge ceiling once, before the
+    // buffered/streaming branch, so a client cannot park a run — and the
+    // resources behind it — indefinitely on either path.
+    body.within_secs = body.within_secs.min(gw.limits().max_within_secs);
     // Resolve the kind first (a pure, local check): an unknown kind is the
     // client's `404` before any side effect, so a typo or a probing client
     // never writes a phantom entry into the tenant's directory index.
@@ -200,13 +204,11 @@ async fn prompt<S: HarnessSystem>(
             resume_from(&headers, q.from),
         ));
     }
-    // Clamp the caller's timeout to the edge ceiling so a run cannot be parked
-    // indefinitely; a run that *ran* and failed is a `200` outcome below, only a
-    // transport failure becomes a non-2xx status.
-    let within = body.within_secs.min(gw.limits().max_within_secs);
+    // A run that *ran* and failed is a `200` outcome below; only a transport
+    // failure becomes a non-2xx status.
     let turn = Turn::new(TurnId::new(body.turn), body.content);
     let outcome = session_ref
-        .prompt_within(turn, Duration::from_secs(within))
+        .prompt_within(turn, Duration::from_secs(body.within_secs))
         .await?;
     Ok(Json(json!({ "outcome": outcome })).into_response())
 }

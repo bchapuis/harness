@@ -1333,7 +1333,7 @@ impl<S: HarnessSystem> Agent<S> {
                 }
             };
             if bound {
-                system.emit_app(HarnessEvent::SandboxBound { session, node }.into());
+                system.emit(HarnessEvent::SandboxBound { session, node }.into());
             }
             let _ = this.tell(Advance).await;
         }));
@@ -1416,7 +1416,7 @@ impl<S: HarnessSystem> Agent<S> {
                 .as_ref()
                 .and_then(|c| c.parent.as_ref())
                 .map(|l| l.session.clone());
-            ctx.system().emit_app(
+            ctx.system().emit(
                 HarnessEvent::RunStarted {
                     session: session.clone(),
                     turn,
@@ -1426,7 +1426,7 @@ impl<S: HarnessSystem> Agent<S> {
             );
         }
         for (turn, usage) in std::mem::take(&mut act.events.model) {
-            ctx.system().emit_app(
+            ctx.system().emit(
                 HarnessEvent::ModelCompleted {
                     session: session.clone(),
                     turn,
@@ -1437,7 +1437,7 @@ impl<S: HarnessSystem> Agent<S> {
             );
         }
         for turn in std::mem::take(&mut act.events.tools) {
-            ctx.system().emit_app(
+            ctx.system().emit(
                 HarnessEvent::ToolCompleted {
                     session: session.clone(),
                     turn,
@@ -1448,7 +1448,7 @@ impl<S: HarnessSystem> Agent<S> {
         }
         for turn in std::mem::take(&mut act.events.ended) {
             if let Some(outcome) = state.turns.get(&turn).and_then(|f| f.outcome.as_ref()) {
-                ctx.system().emit_app(
+                ctx.system().emit(
                     HarnessEvent::RunEnded {
                         session: session.clone(),
                         turn,
@@ -1623,7 +1623,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// built, shared by [`release_sandbox`](Self::release_sandbox) and the
     /// passivation teardown.
     fn emit_sandbox_released(&self, ctx: &GrainCtx<Agent<S>>) {
-        ctx.system().emit_app(
+        ctx.system().emit(
             HarnessEvent::SandboxReleased {
                 session: Self::session(ctx),
                 node: ctx.system().node(),

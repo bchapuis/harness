@@ -12,28 +12,15 @@
 //! `TlsConfig`.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
-use actor_cluster::ClusterConfig;
-use actor_cluster::ClusterSystem;
 use actor_cluster::MembershipMode;
 use actor_core::Event;
 use actor_core::EventSink;
 use actor_core::NodeId;
-use actor_runtime::DEFAULT_CONNECT_TIMEOUT;
-use actor_runtime::DEFAULT_HANDSHAKE_TIMEOUT;
-use actor_runtime::DEFAULT_OUTBOUND_CAPACITY;
 use actor_runtime::Encryption;
-use actor_runtime::OsEntropy;
+use actor_runtime::JoinOptions;
 use actor_runtime::TcpCluster;
-use actor_runtime::TcpConfig;
-use actor_runtime::TcpTransport;
-use actor_runtime::TokioClock;
-use actor_runtime::TokioSpawner;
-use actor_runtime::node_addr;
 use actor_serialization::JsonCodec;
 
 /// How the gateway joins the transport: its own (non-voting) id, the roster it
@@ -72,74 +59,27 @@ pub async fn join(opts: ClusterOptions) -> Result<TcpCluster, String> {
         ));
     }
     let node = NodeId::new(opts.node_id);
-    let roster: Vec<NodeId> = (1..=opts.nodes).map(NodeId::new).collect();
-    let host_of = |id: u64| -> &str {
-        opts.peer_hosts
-            .get(&id)
-            .map(String::as_str)
-            .unwrap_or("127.0.0.1")
-    };
-    // Dial map: every voter at its host, plus this gateway at its advertised host.
-    let mut peers: BTreeMap<NodeId, SocketAddr> = roster
-        .iter()
-        .map(|peer| {
-            Ok((
-                *peer,
-                node_addr(host_of(peer.uid()), opts.port_base, peer.uid())?,
-            ))
-        })
-        .collect::<Result<_, String>>()?;
-    let advertise_host = opts.advertise_host.as_deref().unwrap_or(&opts.bind_host);
-    let advertised = node_addr(advertise_host, opts.port_base, opts.node_id)?;
-    peers.insert(node, advertised);
-    // The allowlist admits the voters and self; only these may complete the
-    // handshake (core spec §15).
-    let admitted: BTreeSet<NodeId> = peers.keys().copied().collect();
-    let bind = node_addr(&opts.bind_host, opts.port_base, opts.node_id)?;
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .map_err(|e| format!("bind transport {bind}: {e}"))?;
-    let (transport, inbound) = TcpTransport::start(
-        TcpConfig {
-            node,
-            advertised,
-            peers,
-            endpoint_gossip_interval: Duration::from_secs(1),
-            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-            outbound_capacity: DEFAULT_OUTBOUND_CAPACITY,
-            codec: Arc::new(JsonCodec),
-            cluster_secret: opts.secret.clone(),
-            allowlist: Some(admitted),
-            // The gateway joins inside the cluster's trust boundary (see
-            // `docs/multi-tenant-edge.md`); the same plaintext caveat applies.
-            encryption: Encryption::PlaintextTrusted,
-        },
-        listener,
-    );
-    let system: TcpCluster = ClusterSystem::start(
-        node,
-        TokioClock::new(),
-        OsEntropy::new(),
-        TokioSpawner::current(),
-        transport,
-        inbound,
-        ClusterConfig {
-            events: Arc::new(GatewayEvents { node }),
-            // No Raft, no SWIM voting: a client observes membership but does not
-            // drive it. `Static` without a detector is the non-participating mode
-            // (system.rs) — the gateway never hosts, so it has no shard groups to
-            // elect and nothing to down.
-            membership: MembershipMode::Static { detector: None },
-            ..ClusterConfig::default()
-        },
-    );
-    // Bring the voters into the membership view so their receptionist gossip — the
-    // host gateway refs the client routes through — reaches us. We are never added
-    // to their Raft roster, so we never vote or host.
-    for peer in &roster {
-        system.add_member(*peer);
-    }
+    let system: TcpCluster = actor_runtime::join(JoinOptions {
+        node: opts.node_id,
+        voters: opts.nodes,
+        peer_hosts: opts.peer_hosts.clone(),
+        clients: BTreeMap::new(),
+        bind_host: opts.bind_host.clone(),
+        advertise_host: opts.advertise_host.clone(),
+        port_base: opts.port_base,
+        secret: opts.secret.clone(),
+        codec: Arc::new(JsonCodec),
+        events: Arc::new(GatewayEvents { node }),
+        // The gateway joins inside the cluster's trust boundary (see
+        // `docs/multi-tenant-edge.md`); the same plaintext caveat applies.
+        encryption: Encryption::PlaintextTrusted,
+        // No Raft, no SWIM voting: a client observes membership but does not
+        // drive it. `Static` without a detector is the non-participating mode
+        // (system.rs) — the gateway never hosts, so it has no shard groups to
+        // elect and nothing to down.
+        membership: Box::new(|_| MembershipMode::Static { detector: None }),
+    })
+    .await?;
     eprintln!(
         "[gateway {node}] joined the cluster (client of nodes 1..={})",
         opts.nodes

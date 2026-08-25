@@ -177,7 +177,7 @@ impl std::fmt::Display for RunError {
 pub type RunOutcome = Result<Completion, RunError>;
 
 /// The label a terminal outcome carries on the event stream (§10.4).
-pub fn outcome_label(outcome: &RunOutcome) -> &'static str {
+pub(crate) fn outcome_label(outcome: &RunOutcome) -> &'static str {
     match outcome {
         Ok(_) => "ok",
         Err(RunError::BudgetExhausted) => "budget",
@@ -368,7 +368,7 @@ pub(crate) fn frame_field(canon: &mut String, field: &str) {
 /// [`Kind::digest`](crate::Kind::digest), so no two distinct turns collide by
 /// juxtaposition. Fold-local: recomputed from the journaled `TurnSubmitted` on
 /// every replay, never journaled itself.
-pub fn turn_digest(content: &str, budget: Option<Budget>) -> u64 {
+pub(crate) fn turn_digest(content: &str, budget: Option<Budget>) -> u64 {
     let mut canon = String::new();
     let mut frame = |field: &str| frame_field(&mut canon, field);
     frame(content);
@@ -386,7 +386,7 @@ pub fn turn_digest(content: &str, budget: Option<Budget>) -> u64 {
 /// What the fold knows about a turn (harness spec §7.4): enough to dedup a
 /// re-submission and return the recorded outcome.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TurnFacts {
+pub(crate) struct TurnFacts {
     /// [`turn_digest`] of the submitted content and literal budget.
     pub content_digest: u64,
     /// `None` while the turn is queued or its run is unfinished.
@@ -397,7 +397,7 @@ pub struct TurnFacts {
 /// (`TurnSubmitted` enqueues, `TurnStarted` dequeues), so an acked turn
 /// survives crash and migration and the next activation's dispatcher starts it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct QueuedTurn {
+pub(crate) struct QueuedTurn {
     pub turn: TurnId,
     pub content: String,
     /// The run's effective budget, resolved at acceptance.
@@ -408,7 +408,7 @@ pub struct QueuedTurn {
 /// is live these are the in-flight calls of the current step; at activation
 /// they are the **dangling calls** resume must resolve (§5.5).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PendingCall {
+pub(crate) struct PendingCall {
     pub name: String,
     pub input: Value,
     /// Set once the delegation's `ChildRun` intent committed (§8.1).
@@ -418,7 +418,7 @@ pub struct PendingCall {
 /// A recorded delegation target (§8.1, §9.2): the child's kind (grain type),
 /// session, turn, and carved budget — enough to address it and cancel it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ChildRef {
+pub(crate) struct ChildRef {
     pub kind: KindId,
     pub session: SessionId,
     pub turn: TurnId,
@@ -428,7 +428,7 @@ pub struct ChildRef {
 /// The unfinished run, as the fold sees it (harness spec §3.1): the step is a
 /// state the fold tracks, not a stack frame the executor holds (§3.2).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LiveRun {
+pub(crate) struct LiveRun {
     pub turn: TurnId,
     pub budget: Budget,
     pub spend: Spend,
@@ -439,7 +439,7 @@ pub struct LiveRun {
 
 /// The session's creation facts (§7.1, §10.3).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Created {
+pub(crate) struct Created {
     pub kind: KindId,
     pub digest: u64,
     pub parent: Option<Lineage>,
@@ -452,32 +452,32 @@ pub struct Created {
 /// resume (invariant H1).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
-    pub created: Option<Created>,
+    pub(crate) created: Option<Created>,
     /// The model-facing conversation projection (§4.1), `Arc`-shared so each
     /// model request takes a pointer to it rather than a deep copy. The fold
     /// appends with copy-on-write ([`Arc::make_mut`]); since an in-flight request
     /// has dropped its clone by the time its response folds, the append is in
     /// place. Serialized as its inner slice (see [`arc_transcript`]).
     #[serde(with = "arc_transcript")]
-    pub transcript: Arc<Vec<Entry>>,
-    pub turns: BTreeMap<TurnId, TurnFacts>,
+    pub(crate) transcript: Arc<Vec<Entry>>,
+    pub(crate) turns: BTreeMap<TurnId, TurnFacts>,
     /// Accepted turns not yet started (§7.3), in acceptance order: the fold's
     /// projection of `TurnSubmitted` minus `TurnStarted` (and minus a queued
     /// turn cancelled before starting, §9.2). Fold state, so an acked turn is
     /// as durable as its record.
-    pub queue: VecDeque<QueuedTurn>,
+    pub(crate) queue: VecDeque<QueuedTurn>,
     /// At most one unfinished run; the journal's total order serializes runs.
-    pub live: Option<LiveRun>,
+    pub(crate) live: Option<LiveRun>,
     /// Children still owed a propagated `Cancel` (§9.2), by the delegating
     /// `(turn, call)`: captured by the fold when a `RunEnded { Cancelled }`
     /// clears a run whose `ChildRun` intents lack outcomes, cleared per child
     /// by `CancelDelivered`. Journal-derived, so a crash between the terminal
     /// commit and the propagating send loses nothing — the next activation's
     /// `advance` finds the debt here and re-sends (H5).
-    pub cancels_owed: BTreeMap<TurnId, BTreeMap<CallId, ChildRef>>,
+    pub(crate) cancels_owed: BTreeMap<TurnId, BTreeMap<CallId, ChildRef>>,
     /// Whether the journal records sandboxed activity since the last
     /// `WorkspaceReset` — the §5.5 trigger for journaling the next one.
-    pub sandbox_activity: bool,
+    pub(crate) sandbox_activity: bool,
 }
 
 impl SessionState {
@@ -486,7 +486,7 @@ impl SessionState {
     /// record that fits no transition (a malformed journal) is ignored rather
     /// than panicking. The fold keeps projections only — the raw records stay
     /// in the grain's journal, which serves `tail` directly (§10.2).
-    pub fn apply(&mut self, record: &Record) {
+    pub(crate) fn apply(&mut self, record: &Record) {
         match &record.body {
             RecordBody::SessionCreated {
                 kind,
@@ -524,9 +524,7 @@ impl SessionState {
                 // Start the queue's head turn — the dispatcher only ever starts
                 // the head while no run is live, so anything else is a
                 // malformed journal, ignored (the fold is total).
-                if self.live.is_none()
-                    && self.queue.front().is_some_and(|q| &q.turn == turn)
-                {
+                if self.live.is_none() && self.queue.front().is_some_and(|q| &q.turn == turn) {
                     let queued = self.queue.pop_front().expect("checked front");
                     self.live = Some(LiveRun {
                         turn: queued.turn,
@@ -649,17 +647,6 @@ impl SessionState {
             }
         }
     }
-
-    /// Fold a sequence of records — `state = fold(records)` (§6.3). The runtime
-    /// folds via granary's per-event `apply` on the commit/replay path; this
-    /// whole-prefix helper exists for tests and reconstruction (§10.5).
-    pub fn fold(records: &[Record]) -> SessionState {
-        let mut state = SessionState::default();
-        for record in records {
-            state.apply(record);
-        }
-        state
-    }
 }
 
 /// Derive a delegation's child identifiers (harness spec §8.1):
@@ -674,7 +661,11 @@ impl SessionState {
 /// `/`-join would read `("s", "t/c", "d")` and `("s/t", "c", "d")` as the same
 /// child session, and ids are application-chosen, so the collision is
 /// constructible.
-pub fn derive_child(parent: &SessionId, turn: &TurnId, call: &CallId) -> (SessionId, TurnId) {
+pub(crate) fn derive_child(
+    parent: &SessionId,
+    turn: &TurnId,
+    call: &CallId,
+) -> (SessionId, TurnId) {
     fn join(parts: &[&str]) -> String {
         let mut out = String::new();
         for (i, part) in parts.iter().enumerate() {

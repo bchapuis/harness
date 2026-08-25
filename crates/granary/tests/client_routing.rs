@@ -12,6 +12,7 @@ use std::time::Duration;
 use actor_cluster::DowningPolicy;
 use actor_cluster::RaftConfig;
 use actor_cluster::SwimConfig;
+use actor_core::ActorSystem;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
@@ -217,7 +218,6 @@ fn ask_timeout_is_bounded_by_its_deadline_even_while_the_shard_cannot_elect() {
 
     let system = a.clone();
     let (result, elapsed) = drive(&sim, Duration::from_secs(30), async move {
-        use granary::GranarySystem;
         let g = granary.grain("counter/1");
         let start = system.now();
         let result = g.ask_timeout(Add(1), Duration::from_millis(300)).await;

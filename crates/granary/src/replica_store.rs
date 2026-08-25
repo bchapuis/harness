@@ -46,7 +46,6 @@ use crate::store::GrainStore;
 use crate::store::ReadOutcome;
 use crate::store::StoreAck;
 use crate::store::WriteKind;
-use crate::system::GranarySystem;
 
 /// Per-grain-type interned key strings for the replica store. The receptionist keys
 /// purely by string, so the replica store MUST register under a string distinct from
@@ -502,7 +501,7 @@ pub trait ReplicaTransport: Send + Sync + 'static {
     /// the straggler peer asks of an append that already committed on a quorum, so the
     /// commit returns at quorum latency while every issued ask still runs to
     /// completion — its `AskIssued`/`AskOutcome` bracket closes, preserving
-    /// no-silent-loss (§14). Backed by [`GranarySystem::launch`](crate::GranarySystem).
+    /// no-silent-loss (§14). Backed by the system's `launch` (actor §4.6).
     fn launch(&self, task: BoxFuture<'static, ()>);
 }
 

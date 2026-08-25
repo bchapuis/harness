@@ -31,6 +31,7 @@ use std::time::Duration;
 use actor_cluster::DowningPolicy;
 use actor_cluster::RaftConfig;
 use actor_cluster::SwimConfig;
+use actor_core::ActorSystem;
 use actor_core::Clock;
 use actor_core::Entropy;
 use actor_core::Manifest;

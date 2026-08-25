@@ -232,26 +232,3 @@ impl<A: Actor> ActorRef<A> {
         }
     }
 }
-
-/// Await **every** future, then report the first error — the non-abandoning
-/// counterpart to `futures::future::try_join_all`.
-///
-/// `try_join_all` returns the moment one future fails and **drops** the rest.
-/// That is fine for pure computation and wrong for anything that has issued an
-/// [`ask`](ActorRef::ask): dropping the future abandons the call, which then
-/// never reaches a reply or a definite [`CallError`] — exactly what no-silent-
-/// loss forbids (spec §7.2, §18.5 #1).
-///
-/// ```ignore
-/// // not `try_join_all`: a failing chunk would drop its siblings' asks
-/// let ids = join_all_results(chunks.into_iter().map(|c| store.put(c))).await?;
-/// ```
-pub async fn join_all_results<F, T, E>(futures: impl IntoIterator<Item = F>) -> Result<Vec<T>, E>
-where
-    F: std::future::Future<Output = Result<T, E>>,
-{
-    futures::future::join_all(futures)
-        .await
-        .into_iter()
-        .collect()
-}

@@ -15,14 +15,11 @@
 //! are granary's; this file only chooses the bindings and opens the ports.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use actor_cluster::ClusterConfig;
-use actor_cluster::ClusterSystem;
 use actor_cluster::DowningPolicy;
 use actor_cluster::LeaderMode;
 use actor_cluster::MembershipMode;
@@ -32,18 +29,10 @@ use actor_core::ActorSystem;
 use actor_core::Event;
 use actor_core::EventSink;
 use actor_core::NodeId;
-use actor_runtime::DEFAULT_CONNECT_TIMEOUT;
-use actor_runtime::DEFAULT_HANDSHAKE_TIMEOUT;
-use actor_runtime::DEFAULT_OUTBOUND_CAPACITY;
 use actor_runtime::Encryption;
 use actor_runtime::FileRaftWAL;
-use actor_runtime::OsEntropy;
+use actor_runtime::JoinOptions;
 use actor_runtime::TcpCluster;
-use actor_runtime::TcpConfig;
-use actor_runtime::TcpTransport;
-use actor_runtime::TokioClock;
-use actor_runtime::TokioSpawner;
-use actor_runtime::node_addr;
 use actor_serialization::Codec;
 use actor_serialization::PostcardCodec;
 use granary::AlarmIndex;
@@ -194,79 +183,37 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
          isolation), or `fake` (no guest — durability only, machine §7)",
     )?;
     let node = NodeId::new(opts.id);
-    let roster: Vec<NodeId> = (1..=opts.nodes).map(NodeId::new).collect();
-    let host_of = |id: u64| -> &str {
-        opts.peer_hosts
-            .get(&id)
-            .map(String::as_str)
-            .unwrap_or("127.0.0.1")
-    };
-    let peers: BTreeMap<NodeId, SocketAddr> = roster
-        .iter()
-        .map(|peer| {
-            Ok((
-                *peer,
-                node_addr(host_of(peer.uid()), opts.port_base, peer.uid())?,
-            ))
-        })
-        .collect::<Result<_, String>>()?;
-    let admitted: BTreeSet<NodeId> = peers.keys().copied().collect();
-    let advertised = peers[&node];
-    let bind = node_addr(&opts.bind_host, opts.port_base, opts.id)?;
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .map_err(|e| format!("bind transport {bind}: {e}"))?;
     // One codec value for the three places that must agree: the transport's
     // framing, the message layer granary encodes records and snapshots with, and
-    // the grain store's stamp naming that codec (granary §7.4).
+    // the grain store's stamp naming that codec (granary §7.4). Binary, not the
+    // library's JSON default: a machine's disk moves as 1 MiB blocks through the
+    // blob path, and a payload is encoded twice — once as the message, again as
+    // the frame field carrying it. Under JSON that pair costs ~10.7 MiB and over
+    // a second of CPU per copy, so a block's replication misses the quorum
+    // timeout on an unremarkable host and provisioning fails as `Unavailable`.
+    // Nothing on this system's wire needs a self-describing format.
     let codec: Arc<dyn Codec> = Arc::new(PostcardCodec);
-    let (transport, inbound) = TcpTransport::start(
-        TcpConfig {
-            node,
-            advertised,
-            peers: peers.clone(),
-            endpoint_gossip_interval: Duration::from_secs(1),
-            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-            outbound_capacity: DEFAULT_OUTBOUND_CAPACITY,
-            // Binary, not the library's JSON default: a machine's disk moves as
-            // 1 MiB blocks through the blob path, and a payload is encoded
-            // twice — once as the message, again as the frame field carrying
-            // it. Under JSON that pair costs ~10.7 MiB and over a second of CPU
-            // per copy, so a block's replication misses the quorum timeout on
-            // an unremarkable host and provisioning fails as `Unavailable`.
-            // Nothing on this system's wire needs a self-describing format.
-            codec: Arc::clone(&codec),
-            cluster_secret: opts.secret.clone(),
-            allowlist: Some(admitted),
-            // Plaintext, guarded by the cluster secret: fine on loopback or a
-            // trusted cluster network. Note what this is *not* protecting —
-            // the SSH connection is terminated at the door and bridged over a
-            // node-local socket, so no session bytes cross this transport.
-            // See the note in `harness-standalone`: plaintext is a stated choice,
-            // valid only on a network the operator controls.
-            encryption: Encryption::PlaintextTrusted,
-        },
-        listener,
-    );
-    let system: TcpCluster = ClusterSystem::start(
-        node,
-        TokioClock::new(),
-        OsEntropy::new(),
-        TokioSpawner::current(),
-        transport,
-        inbound,
-        ClusterConfig {
-            // The message layer, matching the transport's above: a blob's bytes
-            // are encoded here first and framed there second, so both have to
-            // be binary for either to help. This is also the codec granary
-            // encodes a grain's records and snapshots with, so a deployment that
-            // changes it cannot read journals written under the old one — which
-            // the store's stamp now enforces at open rather than leaving to this
-            // comment (granary §7.4).
-            codec: Arc::clone(&codec),
-            events: Arc::new(StderrEvents { node }),
-            membership: MembershipMode::Leader(LeaderMode {
+    let raft_dir = opts.data.join("raft");
+    let system: TcpCluster = actor_runtime::join(JoinOptions {
+        node: opts.id,
+        voters: opts.nodes,
+        peer_hosts: opts.peer_hosts.clone(),
+        clients: BTreeMap::new(),
+        bind_host: opts.bind_host.clone(),
+        advertise_host: None,
+        port_base: opts.port_base,
+        secret: opts.secret.clone(),
+        codec: Arc::clone(&codec),
+        events: Arc::new(StderrEvents { node }),
+        // Plaintext, guarded by the cluster secret: fine on loopback or a
+        // trusted cluster network. Note what this is *not* protecting — the SSH
+        // connection is terminated at the door and bridged over a node-local
+        // socket, so no session bytes cross this transport. See the note in
+        // `harness-standalone`: plaintext is a stated choice, valid only on a
+        // network the operator controls.
+        encryption: Encryption::PlaintextTrusted,
+        membership: Box::new(move |roster| {
+            MembershipMode::Leader(LeaderMode {
                 // A machine's shard leader is where its microVM runs, so a
                 // *spurious* election is not free here the way it is for a
                 // stateless service: it resigns the activation that owns the
@@ -288,25 +235,20 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
                     indirect_count: 2,
                 },
                 raft: {
-                    let mut raft = RaftConfig::new(roster.clone());
-                    raft.storage = FileRaftWAL::factory(opts.data.join("raft"));
-                    // See the constants: these were an order of magnitude more patient
-                    // to survive a capture that blocked the executor, which it no
-                    // longer does.
+                    let mut raft = RaftConfig::new(roster.to_vec());
+                    raft.storage = FileRaftWAL::factory(raft_dir);
+                    // See the constants: these were an order of magnitude more
+                    // patient to survive a capture that blocked the executor,
+                    // which it no longer does.
                     raft.election_timeout = RAFT_ELECTION_TIMEOUT;
                     raft.heartbeat_interval = RAFT_HEARTBEAT_INTERVAL;
                     raft
                 },
                 downing: DowningPolicy::Conservative,
-            }),
-            ..ClusterConfig::default()
-        },
-    );
-    for peer in &roster {
-        if *peer != node {
-            system.add_member(*peer);
-        }
-    }
+            })
+        }),
+    })
+    .await?;
 
     // The mechanism this node holds guests with, built from `--machine` before
     // anything durable starts: a mechanism the operator named but this build or
@@ -355,7 +297,9 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         Some(mechanism) => format!(" ({} grade)", mechanism.isolation()),
     };
     eprintln!(
-        "[{node}] transport {advertised}, data {}, machine {machine_kind:?}{grade}",
+        "[{node}] joined (voter {}/{}), data {}, machine {machine_kind:?}{grade}",
+        opts.id,
+        opts.nodes,
         opts.data.display()
     );
     wait_for_hosts(&system, opts.nodes as usize).await;

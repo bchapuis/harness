@@ -23,7 +23,6 @@ use actor_simulation::Simulation;
 use granary::GrainEvent;
 use granary::GranaryConfig;
 use granary::GranaryExt;
-use granary::GranarySystem;
 use machine_grain::Attach;
 use machine_grain::Detach;
 use machine_grain::Machine;

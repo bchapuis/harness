@@ -12,6 +12,7 @@
 //! latency optimization and correctness rests on the journal, so a sink that
 //! trusted delivery would be asserting the wrong thing.
 
+use actor_core::ActorSystem;
 use std::time::Duration;
 
 use actor_core::Manifest;

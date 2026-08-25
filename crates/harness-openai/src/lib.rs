@@ -16,24 +16,27 @@
 //! llama.cpp, Ollama, or any server that serves `/v1/chat/completions`
 //! ([`base_url`] lists the known ones).
 //!
-//! The transport plumbing (`HttpPost`, `RetryPolicy`, the backoff curve) is
-//! duplicated from `harness-anthropic` rather than shared: each retry policy is
-//! part of its own protocol contract (Anthropic's `529`/`overloaded_error`,
-//! OpenAI's `context_length_exceeded`).
+//! The transport plumbing ([`HttpPost`], [`RetryPolicy`], the retry engine)
+//! is `harness::http`, shared with every sibling adapter; this crate is only
+//! the protocol — the wire JSON and the `classify` taxonomy (OpenAI's
+//! `context_length_exceeded` and friends).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use actor_core::BoxFuture;
 use actor_core::Clock;
 use actor_core::Entropy;
 use harness::Entry;
+use harness::HttpPost;
+use harness::HttpResponse;
 use harness::Model;
 use harness::ModelError;
 use harness::ModelRequest;
 use harness::ModelResponse;
+use harness::RetryPolicy;
 use harness::ToolCall;
 use harness::Usage;
+use harness::http::complete_with_retry;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -59,51 +62,6 @@ pub mod base_url {
     pub const TOGETHER: &str = "https://api.together.xyz";
     /// Groq: `https://api.groq.com/openai/v1/chat/completions`.
     pub const GROQ: &str = "https://api.groq.com/openai";
-}
-
-/// An HTTP response, reduced to what the protocol layer decides on.
-#[derive(Clone, Debug)]
-pub struct HttpResponse {
-    pub status: u16,
-    pub body: Vec<u8>,
-}
-
-/// A transport-level failure to complete the POST (connection refused, TLS
-/// failure, timeout): retried like an overload, surfaced as `Api` past the
-/// policy.
-#[derive(Clone, Debug)]
-pub struct HttpError(pub String);
-
-/// The one operation the client needs from its host: POST `body` to `path`
-/// with `headers`, return the status and body. Implementations supply the
-/// socket and the base URL (hyper, reqwest, raw rustls — and OpenAI, a local
-/// server, or any compatible endpoint); this crate supplies everything else.
-pub trait HttpPost: Send + Sync + 'static {
-    fn post(
-        &self,
-        path: &str,
-        headers: &[(String, String)],
-        body: Vec<u8>,
-    ) -> BoxFuture<'static, Result<HttpResponse, HttpError>>;
-}
-
-/// Retry tuning: attempts and the backoff curve, timed by the injected
-/// `Clock` with jitter from the injected `Entropy` (§4.2 rule 1).
-#[derive(Clone, Debug)]
-pub struct RetryPolicy {
-    pub attempts: u32,
-    pub base_backoff: Duration,
-    pub max_backoff: Duration,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        RetryPolicy {
-            attempts: 4,
-            base_backoff: Duration::from_millis(500),
-            max_backoff: Duration::from_secs(8),
-        }
-    }
 }
 
 /// The OpenAI-compatible Chat Completions model (harness spec §4.1).
@@ -145,54 +103,24 @@ impl<C: Clock, E: Entropy> OpenAiModel<C, E> {
             ("content-type".to_string(), "application/json".to_string()),
         ]
     }
-
-    /// Backoff before the `attempt`-th retry (1-based): exponential, capped,
-    /// with up to one base of seeded jitter.
-    fn backoff(&self, attempt: u32) -> Duration {
-        let factor = 2u32.saturating_pow(attempt.saturating_sub(1).min(16));
-        let base = (self.retry.base_backoff * factor).min(self.retry.max_backoff);
-        let jitter_nanos =
-            self.entropy.next_u64() % self.retry.base_backoff.as_nanos().max(1) as u64;
-        (base + Duration::from_nanos(jitter_nanos)).min(self.retry.max_backoff)
-    }
 }
 
 impl<C: Clock, E: Entropy> Model for OpenAiModel<C, E> {
     fn complete(&self, req: ModelRequest) -> BoxFuture<'static, Result<ModelResponse, ModelError>> {
         let body = serde_json::to_vec(&encode_request(&req)).expect("request encodes");
-        let headers = self.headers();
-        let http = Arc::clone(&self.http);
-        let clock = self.clock.clone();
-        let attempts = self.retry.attempts.max(1);
-        // Pre-draw the jitter schedule so the future owns no entropy handle.
-        let backoffs: Vec<Duration> = (1..attempts).map(|a| self.backoff(a)).collect();
-        Box::pin(async move {
-            let mut attempt = 0;
-            loop {
-                attempt += 1;
-                let outcome = match http.post(COMPLETIONS_PATH, &headers, body.clone()).await {
-                    Ok(response) => classify(&response),
-                    Err(HttpError(e)) => Err(ModelError::Api(format!("transport: {e}"))),
-                };
-                match outcome {
-                    Ok(response) => return Ok(response),
-                    Err(error) if attempt < attempts && retryable(&error) => {
-                        clock.sleep(backoffs[(attempt - 1) as usize]).await;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        })
+        // The engine is shared (`harness::http`); this crate's protocol is the
+        // encoding above and `classify` below.
+        complete_with_retry(
+            Arc::clone(&self.http),
+            COMPLETIONS_PATH,
+            self.headers(),
+            body,
+            &self.clock,
+            self.entropy.as_ref(),
+            &self.retry,
+            classify,
+        )
     }
-}
-
-/// Which failures the bounded policy absorbs (§4.3): pressure and transport
-/// blips, never a request the API called malformed.
-fn retryable(error: &ModelError) -> bool {
-    matches!(
-        error,
-        ModelError::RateLimited | ModelError::Overloaded | ModelError::Api(_)
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +358,7 @@ fn is_context_message(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harness::HttpError;
     use std::sync::Mutex;
 
     use actor_simulation::SimEntropy;
@@ -493,7 +422,10 @@ mod tests {
     fn request() -> ModelRequest {
         ModelRequest {
             system_prompt: "be terse".to_string(),
-            params: ModelParams::default(),
+            params: ModelParams {
+                model: "gpt-4o".to_string(),
+                max_tokens: 4_096,
+            },
             tools: vec![ToolSpec {
                 name: "shell".to_string(),
                 description: "run".to_string(),
@@ -539,7 +471,7 @@ mod tests {
     #[test]
     fn the_request_encoding_matches_the_chat_completions_api() {
         let body = encode_request(&request());
-        assert_eq!(body["model"], "claude-sonnet-4-6");
+        assert_eq!(body["model"], "gpt-4o");
         assert_eq!(body["max_tokens"], 1234);
         let messages = body["messages"].as_array().expect("messages");
         // system → user(hello) → assistant(text + tool_calls) →

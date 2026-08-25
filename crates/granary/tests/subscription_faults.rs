@@ -18,6 +18,7 @@ use std::time::Duration;
 use actor_cluster::DowningPolicy;
 use actor_cluster::RaftConfig;
 use actor_cluster::SwimConfig;
+use actor_core::ActorSystem;
 use actor_core::NodeId;
 use actor_core::Spawner;
 use actor_simulation::SimNode;
@@ -27,7 +28,6 @@ use granary::GrainRef;
 use granary::Granary;
 use granary::GranaryConfig;
 use granary::GranaryExt;
-use granary::GranarySystem;
 
 use support::log::Append;
 use support::log::LogGrain;

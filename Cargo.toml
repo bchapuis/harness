@@ -49,6 +49,12 @@ wal = { path = "crates/wal", version = "0.1.0" }
 # stronger check of the two — 64 bits of avalanche against a torn write.
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
+# The hand-rolled HTTP/1.1 client substrate shared by the deployment binaries
+# (the TUI's gateway client, the standalone node's model-seam socket): origins,
+# TCP/TLS connect, request framing, and an incremental response reader serving
+# both unary read-to-EOF calls and live chunked streams.
+harness-http = { path = "crates/harness-http", version = "0.1.0" }
+
 # Granary: durable objects ("grains") built on the actor framework (granary spec).
 granary = { path = "crates/granary", version = "0.1.0" }
 

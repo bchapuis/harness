@@ -8,9 +8,9 @@
 //! §2.2), injecting the node's model and sandbox seams into every activation
 //! through the factory.
 //!
-//! [`HarnessSystem`] is what the harness needs over [`GranarySystem`]: a way to
-//! emit its §10.4 events onto the same observability stream the grain's events
-//! ride.
+//! [`HarnessSystem`] is the harness's name for the system it runs on — exactly
+//! a [`GranarySystem`]; its §10.4 events ride the core `emit` seam onto the
+//! same observability stream the grain's events use.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -22,19 +22,12 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use actor_cluster::ClusterSystem;
-use actor_cluster::Transport;
 use actor_core::Actor;
 use actor_core::ActorRef;
 use actor_core::CallError;
-use actor_core::Clock;
 use actor_core::Ctx;
-use actor_core::Entropy;
-use actor_core::Event;
 use actor_core::Handler;
 use actor_core::HandlerRegistry;
-use actor_core::LocalSystem;
-use actor_core::Spawner;
 use futures::channel::oneshot;
 use granary::EventHistory;
 use granary::GrainError;
@@ -84,25 +77,16 @@ fn leak_grain_type(kind_id: &KindId) -> &'static str {
     id
 }
 
-/// What the harness needs from the actor system beyond [`GranarySystem`]: a way
-/// to emit its observability events (§10.4) onto the framework's stream — the
-/// same stream the grain's events ride, so checkers see one ordered sequence.
-pub trait HarnessSystem: GranarySystem {
-    /// Emit a harness event onto the observability stream (§10.4).
-    fn emit_app(&self, event: Event);
-}
+/// The system a harness runs on — exactly a [`GranarySystem`] (the agent is a
+/// grain, §2.1; its events ride [`ActorSystem::emit`]). The name is the
+/// harness's own vocabulary for the requirement, so a consumer writes
+/// `S: HarnessSystem` without naming the storage layer; the blanket impl makes
+/// every grain-hosting system one.
+///
+/// [`ActorSystem::emit`]: actor_core::ActorSystem::emit
+pub trait HarnessSystem: GranarySystem {}
 
-impl<C: Clock, E: Entropy, S: Spawner> HarnessSystem for LocalSystem<C, E, S> {
-    fn emit_app(&self, event: Event) {
-        self.emit(event);
-    }
-}
-
-impl<C: Clock, E: Entropy, S: Spawner, T: Transport> HarnessSystem for ClusterSystem<C, E, S, T> {
-    fn emit_app(&self, event: Event) {
-        self.emit(event);
-    }
-}
+impl<S: GranarySystem> HarnessSystem for S {}
 
 /// Harness tuning (harness spec §7.2, §9.1): the few knobs the spec calls
 /// configurable. Idle/snapshot/shard policy is per-kind `GranaryConfig` (§7.1),
@@ -213,20 +197,16 @@ impl<S: HarnessSystem> Harness<S> {
     /// Start building a harness on this node over the cluster-wide `kinds`
     /// registry (§7.1, identical on every node). Select which kinds this node
     /// hosts with [`host`](HarnessBuilder::host) / [`host_all`](HarnessBuilder::host_all)
-    /// and which it only routes with [`route`](HarnessBuilder::route) /
-    /// [`route_all`](HarnessBuilder::route_all), then `build`. The common full node
-    /// hosts every kind:
+    /// and which it only routes with
+    /// [`route_kind`](HarnessBuilder::route_kind), then `build`. The common
+    /// full node hosts every kind:
     ///
     /// ```ignore
     /// let h = Harness::builder(system, &kinds).host_all(model, sandbox).build();
     /// ```
     ///
-    /// A routing-only gateway tier (the Orleans cluster-client) routes every kind
-    /// and polls until the hosts have gossiped in:
-    ///
-    /// ```ignore
-    /// let h: Option<_> = Harness::builder(system, &kinds).route_all().build();
-    /// ```
+    /// A routing-only gateway tier (the Orleans cluster-client) states its
+    /// `(name, shards)` roster instead — see [`Harness::client`].
     pub fn builder(system: S, kinds: &Kinds) -> HarnessBuilder<S, NoRoutes> {
         HarnessBuilder {
             granary_node: system.granary_node(),
@@ -257,13 +237,19 @@ impl<S: HarnessSystem> Harness<S> {
 
     /// Build a routing-only **client** harness (the Orleans cluster-client): it
     /// hosts no grains, it only *addresses* sessions hosted elsewhere on the
-    /// cluster. Shorthand for `Harness::builder(system, kinds).route_all().build()`.
-    /// Returns `None` until every kind's host gateway has gossiped into this node's
-    /// receptionist — the caller polls, as a node waits for its peers. The model
-    /// params/tools in `kinds` are ignored (a client never activates); only the
-    /// names and `GranaryConfig.shards` matter, and they MUST match the hosts'.
-    pub fn client(system: S, kinds: &Kinds) -> Option<Harness<S>> {
-        Harness::builder(system, kinds).route_all().build()
+    /// cluster. `roster` pairs each kind's name with its `GranaryConfig.shards`
+    /// on the hosting nodes — the two facts a router needs (a session name must
+    /// hash to the same shard here as there), and the only two it may know:
+    /// prompts, tools, and model params stay the hosts' concern. Both MUST
+    /// match the hosts' deployment. Returns `None` until every kind's host
+    /// gateway has gossiped into this node's receptionist — the caller polls,
+    /// as a node waits for its peers.
+    pub fn client(system: S, roster: &[(String, usize)]) -> Option<Harness<S>> {
+        let mut builder = Harness::builder(system, &Kinds::new()).into_has_routes();
+        for (kind, shards) in roster {
+            builder.routed.push((KindId::new(kind), (*shards).max(1)));
+        }
+        builder.build()
     }
 
     /// A client view of `session` under `kind` (harness spec §7.4). Pure:
@@ -394,34 +380,17 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
         self
     }
 
-    /// Route to a host of the registered kind named `kind` instead of hosting it
-    /// (the Orleans cluster-client path). Shards come from the kind's
-    /// `GranaryConfig` so a name hashes to the same shard as on the hosts. Panics
-    /// if `kind` is not registered. Moves the builder to the `HasRoutes`
-    /// type-state, so `build` then returns `Option`.
-    pub fn route(self, kind: &str) -> HarnessBuilder<S, HasRoutes> {
-        let id = KindId::new(kind);
-        let shards = self
-            .kinds
-            .get(&id)
-            .unwrap_or_else(|| panic!("kind '{kind}' is not registered"))
-            .config
-            .shards
-            .max(1);
+    /// Route to a host of the kind named `kind` instead of hosting it (the
+    /// Orleans cluster-client path). `shards` is the kind's `GranaryConfig.shards`
+    /// on the hosting nodes, so a session name hashes to the same shard here as
+    /// there. A routing tier addresses sessions — it never activates a grain — so
+    /// a kind's name and shard count are the only two facts it takes, and the
+    /// only two it may know: prompts, tools, and model params stay the hosts'
+    /// concern. Moves the builder to the `HasRoutes` type-state, so `build`
+    /// then returns `Option`.
+    pub fn route_kind(self, kind: &str, shards: usize) -> HarnessBuilder<S, HasRoutes> {
         let mut builder = self.into_has_routes();
-        builder.routed.push((id, shards));
-        builder
-    }
-
-    /// Route every registered kind — a routing-only tier (e.g. the gateway).
-    pub fn route_all(self) -> HarnessBuilder<S, HasRoutes> {
-        let routed: Vec<(KindId, usize)> = self
-            .kinds
-            .iter()
-            .map(|(id, def)| (id.clone(), def.config.shards.max(1)))
-            .collect();
-        let mut builder = self.into_has_routes();
-        builder.routed.extend(routed);
+        builder.routed.push((KindId::new(kind), shards.max(1)));
         builder
     }
 

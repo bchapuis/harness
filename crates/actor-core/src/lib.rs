@@ -25,8 +25,12 @@ pub mod supervision;
 pub mod system;
 
 pub use actor::{Actor, BoxError, Handler, StopReason, Terminated, TerminationReason};
+// The codec vocabulary, re-exported so a deployment choosing a wire codec
+// (spec §5) needs no direct `actor-serialization` dependency.
+pub use actor_serialization::{Codec, CodecError, JsonCodec, PostcardCodec};
 pub use context::Ctx;
 pub use error::CallError;
+pub use error::join_all_results;
 pub use event::{AppEvent, Event, EventSink, SupervisionDecision};
 pub use id::{ActorId, NodeId, Path};
 pub use mailbox::Mailbox;
@@ -34,7 +38,6 @@ pub use message::{Manifest, Message};
 pub use rebind::with_decoding_system;
 pub use receptionist::{Key, Listing, Receptionist};
 pub use refs::ActorRef;
-pub use refs::join_all_results;
 pub use registry::{DispatchFn, HandlerRegistry};
 pub use reply::{ReplyHandle, ReplyResult};
 pub use runtime::{BoxFuture, Clock, Elapsed, Entropy, Instant, Spawner};

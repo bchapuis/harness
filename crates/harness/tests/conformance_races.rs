@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use actor_core::ActorSystem;
 use actor_core::Clock;
 use actor_simulation::SimSystem;
 use actor_simulation::run_seed;
@@ -159,7 +160,9 @@ fn a_straggler_model_done_never_unlocks_a_second_call() {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 let clock = system.clock().clone();
-                let session = harness.session("echo", SessionId::new("s-straggler")).unwrap();
+                let session = harness
+                    .session("echo", SessionId::new("s-straggler"))
+                    .unwrap();
                 let prompt_a = session.prompt(Turn::new(TurnId::new("t-a"), "go-a"));
                 let driver = {
                     let session = session.clone();
@@ -197,7 +200,8 @@ fn a_straggler_model_done_never_unlocks_a_second_call() {
     assert_eq!(
         record_kinds(&records),
         vec![
-            "created", "turn", "started", "ended", "turn", "started", "model", "tool", "model", "ended"
+            "created", "turn", "started", "ended", "turn", "started", "model", "tool", "model",
+            "ended"
         ],
         "one model response per step; journal was: {records:#?}"
     );

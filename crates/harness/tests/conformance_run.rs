@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use actor_core::ActorSystem;
 use actor_core::CallError;
 use actor_core::Clock;
 use actor_simulation::SimSystem;

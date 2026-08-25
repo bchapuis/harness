@@ -8,7 +8,7 @@
 //! control protocol, no per-node listener, no forwarding hop.
 //!
 //! The gateway joins the actor transport as a non-voting, routing-only **member**
-//! (`Harness::builder(..).route_all()` /
+//! (`Harness::client(system, roster)` /
 //! [`granary_client`](granary::GranaryExt::granary_client)): a full local actor
 //! system that hosts no grains but is still a member — it holds `GrainRef`s
 //! discovered through the receptionist gossip, routes `ask`/`subscribe` to the
@@ -35,11 +35,8 @@ use granary::Grain;
 use granary::GrainName;
 use granary::Granary;
 use granary::GranaryExt;
-use harness::GranaryConfig;
 use harness::Harness;
 use harness::HarnessSystem;
-use harness::Kind;
-use harness::Kinds;
 use harness::SessionId;
 use harness::SessionRef;
 use tenancy::Directory;
@@ -48,18 +45,6 @@ use crate::auth::PrincipalId;
 use crate::auth::TokenVerifier;
 use crate::auth::scoped_session;
 use crate::error::GatewayError;
-
-/// The kinds the gateway addresses. They MUST name the same kinds with the same
-/// `GranaryConfig.shards` the nodes host (so a session name hashes to the same
-/// shard); the model params and tools are ignored — the client never activates a
-/// grain, it only addresses one. Keep this in step with `harness-standalone`'s
-/// `node::kinds` (the `assistant`/`worker` pair on the default four shards).
-pub fn client_kinds() -> Kinds {
-    let grain = |k: Kind| k.grain(GranaryConfig::default());
-    Kinds::new()
-        .register("assistant", grain(Kind::new("")))
-        .register("worker", grain(Kind::new("")))
-}
 
 /// The operational limits the edge enforces, so a client cannot exhaust the
 /// gateway. Defaults are generous; the CLI (`--max-within-secs`,
@@ -205,7 +190,7 @@ impl<S: HarnessSystem> Gateway<S> {
 /// complete within `timeout`.
 pub async fn connect<S: HarnessSystem>(
     system: S,
-    kinds: Kinds,
+    roster: &[(String, usize)],
     directory_shards: usize,
     tokens: Arc<dyn TokenVerifier>,
     limits: Limits,
@@ -214,7 +199,7 @@ pub async fn connect<S: HarnessSystem>(
     let directory_type = <Directory<S> as Grain>::GRAIN_TYPE;
     let deadline = system.now() + timeout;
     loop {
-        let harness = Harness::client(system.clone(), &kinds);
+        let harness = Harness::client(system.clone(), roster);
         let directory = system.granary_client::<Directory<S>>(directory_type, directory_shards);
         if let (Some(harness), Some(directory)) = (harness, directory) {
             return Ok(Gateway::new(harness, directory, tokens, limits));

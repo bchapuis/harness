@@ -1089,6 +1089,12 @@ impl RaftGroup {
     /// the caller supplies a snapshot of its applied prefix, so every replica
     /// produces an equivalent one without coordination. Ignores a stale or
     /// not-yet-applied `index` (only applied state is safe to compact).
+    ///
+    /// No production caller yet: the engine keeps the mechanism (and the
+    /// `RaftInstallSnapshot` wire path it feeds) unit-tested here, but the
+    /// external trigger was removed from `RaftConsensus` until a consumer
+    /// exists. Re-expose it there when one does.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn compact(&self, index: u64, snapshot: Vec<u8>) {
         let mut state = self.lock();
         if index <= state.snapshot_index || index > state.applied {

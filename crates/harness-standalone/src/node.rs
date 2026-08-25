@@ -14,14 +14,10 @@
 //! gossip reaches it, but never to the Raft roster, so it never votes or hosts.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use actor_cluster::ClusterConfig;
-use actor_cluster::ClusterSystem;
 use actor_cluster::DowningPolicy;
 use actor_cluster::LeaderMode;
 use actor_cluster::MembershipMode;
@@ -30,18 +26,12 @@ use actor_cluster::SwimConfig;
 use actor_core::Event;
 use actor_core::EventSink;
 use actor_core::NodeId;
-use actor_runtime::DEFAULT_CONNECT_TIMEOUT;
-use actor_runtime::DEFAULT_HANDSHAKE_TIMEOUT;
-use actor_runtime::DEFAULT_OUTBOUND_CAPACITY;
 use actor_runtime::Encryption;
 use actor_runtime::FileRaftWAL;
+use actor_runtime::JoinOptions;
 use actor_runtime::OsEntropy;
 use actor_runtime::TcpCluster;
-use actor_runtime::TcpConfig;
-use actor_runtime::TcpTransport;
 use actor_runtime::TokioClock;
-use actor_runtime::TokioSpawner;
-use actor_runtime::node_addr;
 use actor_serialization::Codec;
 use actor_serialization::JsonCodec;
 use granary::Granary;
@@ -68,18 +58,33 @@ use crate::http::HttpsPost;
 /// grain's own facet directory (granary §7.11): tool-call deltas are captured
 /// into the session journal, so the workspace survives hibernation, migration,
 /// and node loss in every mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SandboxMode {
     /// `harness-sandbox`'s container-backed `Native` tier: `shell` runs inside
     /// a per-session OCI container (the facet's workspace directory
     /// bind-mounted, no network — shared-kernel confinement, sandbox spec
-    /// §3.5's development fallback).
-    Docker,
+    /// §3.5's development fallback). Each variant carries exactly the
+    /// configuration its mode needs, so a flag for the wrong mode is a parse
+    /// error rather than a silently ignored field.
+    Docker {
+        /// Container image; digest-covered like `--model`.
+        image: String,
+        /// The container CLI binary.
+        cli: String,
+    },
     /// `harness-sandbox`'s microVM-backed `Native` tier: `shell` runs inside a
     /// per-session Firecracker VM (the workspace synced over vsock, no network
     /// device — hardware-virtualization confinement, sandbox spec §3.4's
     /// stronger grade; Linux with `/dev/kvm` only).
-    Firecracker,
+    Firecracker {
+        /// The firecracker executable.
+        binary: String,
+        /// The vmlinux kernel; digest-covered via the kind digest's profile.
+        kernel: String,
+        /// The base rootfs (ext4, containing `/sbin/fc-agent`); digest-covered
+        /// as the profile image.
+        rootfs: String,
+    },
     /// The typed file tools alone over the facet's workspace directory — no
     /// guest shell or compute.
     Durable,
@@ -124,23 +129,11 @@ pub struct NodeOptions {
     pub secret: String,
     /// The Messages API base; `http://…` points at a local fake.
     pub api_url: String,
-    /// The sandbox provider; every node must agree (the kind digest covers
-    /// the tool declarations and profile this choice selects). `None` fails
-    /// at startup (see [`NodeOptions`]).
+    /// The sandbox provider, with its mode-scoped configuration (image and
+    /// CLI for docker, binary/kernel/rootfs for firecracker); every node must
+    /// agree (the kind digest covers the tool declarations and profile this
+    /// choice selects). `None` fails at startup (see [`NodeOptions`]).
     pub sandbox: Option<SandboxMode>,
-    /// Container image for `--sandbox docker`; required there, and digest-
-    /// covered like `--model`.
-    pub sandbox_image: String,
-    /// The container CLI binary for `--sandbox docker`.
-    pub container_cli: String,
-    /// The firecracker executable for `--sandbox firecracker`.
-    pub fc_binary: String,
-    /// The vmlinux kernel for `--sandbox firecracker`; required there, and
-    /// digest-covered like `--model` via the kind digest's profile.
-    pub fc_kernel: String,
-    /// The base rootfs (ext4, containing `/sbin/fc-agent`) for `--sandbox
-    /// firecracker`; required there, digest-covered as the profile image.
-    pub fc_rootfs: String,
 }
 
 impl Default for NodeOptions {
@@ -153,15 +146,13 @@ impl Default for NodeOptions {
             peer_hosts: BTreeMap::new(),
             clients: BTreeMap::new(),
             port_base: 7401,
-            model: ModelParams::default().model,
+            // The deployment's choice, stated here beside the Anthropic adapter
+            // it is wired to; the neutral crate deliberately defaults to no
+            // real id.
+            model: "claude-sonnet-4-6".to_string(),
             secret: "harness-standalone".to_string(),
             api_url: "https://api.anthropic.com".to_string(),
             sandbox: None,
-            sandbox_image: String::new(),
-            container_cli: "docker".to_string(),
-            fc_binary: "firecracker".to_string(),
-            fc_kernel: String::new(),
-            fc_rootfs: String::new(),
         }
     }
 }
@@ -186,61 +177,11 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     }
     // Resolved before any port is bound: a missing confinement choice is a
     // configuration error the operator fixes, not a half-booted node.
-    let sandbox_mode = opts.sandbox.ok_or(
+    let sandbox_mode = opts.sandbox.clone().ok_or(
         "--sandbox is required: `docker` or `firecracker` (confined shell, durable \
          workspace), or `durable` (typed file tools, no shell)",
     )?;
     let node = NodeId::new(opts.id);
-    let roster: Vec<NodeId> = (1..=opts.nodes).map(NodeId::new).collect();
-    // Each node's reachable host: its `--peer` entry, or loopback if unset.
-    let host_of = |id: u64| -> &str {
-        opts.peer_hosts
-            .get(&id)
-            .map(String::as_str)
-            .unwrap_or("127.0.0.1")
-    };
-    // The transport's dial map: every voter at its host. A client's port derives
-    // from its id like a node's, so the gateway must bind its transport on
-    // `port_base + node_id - 1`.
-    let mut peers: BTreeMap<NodeId, SocketAddr> = roster
-        .iter()
-        .map(|peer| {
-            Ok((
-                *peer,
-                node_addr(host_of(peer.uid()), opts.port_base, peer.uid())?,
-            ))
-        })
-        .collect::<Result<_, String>>()?;
-    let client_ids: BTreeSet<NodeId> = opts.clients.keys().map(|id| NodeId::new(*id)).collect();
-    // A client's dial address is best-effort: if its host resolves now, add it so
-    // the node can also initiate to the client; if not (e.g. the gateway pod is
-    // not up yet when the node boots), the client still dials in and gossip flows
-    // over that connection — so an unresolvable client host never blocks startup.
-    for (id, host) in &opts.clients {
-        match node_addr(host, opts.port_base, *id) {
-            Ok(addr) => {
-                peers.insert(NodeId::new(*id), addr);
-            }
-            Err(e) => eprintln!(
-                "[{node}] --client {id}={host} does not resolve yet ({e}); admitting it anyway \
-                 — it will dial in"
-            ),
-        }
-    }
-    // The allowlist admits the voters and the clients (by id, address or not);
-    // only these ids may complete the transport handshake (core spec §15).
-    let admitted: BTreeSet<NodeId> = peers
-        .keys()
-        .copied()
-        .chain(client_ids.iter().copied())
-        .collect();
-    // Advertise the routable host (what peers dial back), but bind the local
-    // interface — they differ when bound to the 0.0.0.0 wildcard in a container.
-    let advertised = peers[&node];
-    let bind = node_addr(&opts.bind_host, opts.port_base, opts.id)?;
-    let listener = tokio::net::TcpListener::bind(bind)
-        .await
-        .map_err(|e| format!("bind transport {bind}: {e}"))?;
     // One codec value for this node, used in all three places that need to agree:
     // the transport's framing, the message layer granary encodes a grain's records
     // and snapshots with, and the grain store's stamp naming that codec (granary
@@ -248,68 +189,43 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // it, so a stamp taken from a *different* value than the message layer's would
     // be worse than none — it would enforce agreement with the wrong thing.
     let codec: Arc<dyn Codec> = Arc::new(JsonCodec);
-    let (transport, inbound) = TcpTransport::start(
-        TcpConfig {
-            node,
-            advertised,
-            peers: peers.clone(),
-            endpoint_gossip_interval: Duration::from_secs(1),
-            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-            outbound_capacity: DEFAULT_OUTBOUND_CAPACITY,
-            codec: Arc::clone(&codec),
-            cluster_secret: opts.secret.clone(),
-            allowlist: Some(admitted),
-            // Plaintext, guarded by the cluster secret. Fine on loopback or a
-            // trusted cluster network; a deployment crossing untrusted links
-            // provisions certificates and names `Encryption::MutualTls` here.
-            // Stated rather than defaulted: the cluster secret crosses the wire in
-            // the handshake, so anyone who can watch this traffic can join.
-            encryption: Encryption::PlaintextTrusted,
-        },
-        listener,
-    );
-    let system: TcpCluster = ClusterSystem::start(
-        node,
-        TokioClock::new(),
-        OsEntropy::new(),
-        TokioSpawner::current(),
-        transport,
-        inbound,
-        ClusterConfig {
-            // Explicit rather than inherited from `..default()`: this is the codec
-            // the grain store is stamped with, so it must be *this* value and not
-            // one that happens to match it.
-            codec: Arc::clone(&codec),
-            events: Arc::new(StderrEvents { node }),
-            // Granary's sharded journal rides Raft, so the node must run the
-            // consensus engine: leader-based membership is the only mode that
-            // builds one (system.rs). Voters are the full roster; the shard-map
-            // and per-shard groups seed from these. Disk-backed storage under
-            // --data keeps a restarted node's term/vote, so killing a node and
-            // re-attaching stays Raft-safe.
-            membership: MembershipMode::Leader(LeaderMode {
+    let raft_dir = opts.data.join("raft");
+    let system: TcpCluster = actor_runtime::join(JoinOptions {
+        node: opts.id,
+        voters: opts.nodes,
+        peer_hosts: opts.peer_hosts.clone(),
+        clients: opts.clients.clone(),
+        bind_host: opts.bind_host.clone(),
+        advertise_host: None,
+        port_base: opts.port_base,
+        secret: opts.secret.clone(),
+        codec: Arc::clone(&codec),
+        events: Arc::new(StderrEvents { node }),
+        // Plaintext, guarded by the cluster secret. Fine on loopback or a
+        // trusted cluster network; a deployment crossing untrusted links
+        // provisions certificates and names `Encryption::MutualTls` here.
+        // Stated rather than defaulted: the cluster secret crosses the wire in
+        // the handshake, so anyone who can watch this traffic can join.
+        encryption: Encryption::PlaintextTrusted,
+        // Granary's sharded journal rides Raft, so the node must run the
+        // consensus engine: leader-based membership is the only mode that
+        // builds one (system.rs). Voters are the roster `join` hands in; the
+        // shard-map and per-shard groups seed from these. Disk-backed storage
+        // under --data keeps a restarted node's term/vote, so killing a node
+        // and re-attaching stays Raft-safe.
+        membership: Box::new(move |roster| {
+            MembershipMode::Leader(LeaderMode {
                 swim: SwimConfig::default(),
                 raft: {
-                    let mut raft = RaftConfig::new(roster.clone());
-                    raft.storage = FileRaftWAL::factory(opts.data.join("raft"));
+                    let mut raft = RaftConfig::new(roster.to_vec());
+                    raft.storage = FileRaftWAL::factory(raft_dir);
                     raft
                 },
                 downing: DowningPolicy::Conservative,
-            }),
-            ..ClusterConfig::default()
-        },
-    );
-    // Bring every voter and every admitted client into the membership view. A
-    // client is added here but never to the Raft roster above.
-    for peer in &roster {
-        if *peer != node {
-            system.add_member(*peer);
-        }
-    }
-    for id in &client_ids {
-        system.add_member(*id);
-    }
+            })
+        }),
+    })
+    .await?;
 
     let http = Arc::new(HttpsPost::new(&opts.api_url)?);
     let model: Arc<dyn Model> = Arc::new(AnthropicModel::new(
@@ -338,44 +254,27 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         .metrics(Arc::new(granary::AtomicGrainMetrics::new()));
     // Every mode runs over the agent grain's own workspace facet (see `SandboxMode`);
     // the provider just opens the supplied directory.
-    let sandboxes: Arc<dyn SandboxProvider> = match sandbox_mode {
-        SandboxMode::Docker => {
-            if opts.sandbox_image.is_empty() {
-                return Err("--sandbox docker requires --sandbox-image".to_string());
-            }
-            Arc::new(
-                harness_sandbox::TieredSandboxes::new()
-                    .with_container_cli(opts.container_cli.clone())
-                    // The hermetic JS surface, so `run_js` runs without any
-                    // language runtime in the container (sandbox spec §3.2).
-                    .with_quickjs(),
-            )
-        }
-        SandboxMode::Firecracker => {
-            if opts.fc_kernel.is_empty() || opts.fc_rootfs.is_empty() {
-                return Err(
-                    "--sandbox firecracker requires --fc-kernel and --fc-rootfs \
-                     (guest/fc-rootfs/build.sh produces both)"
-                        .to_string(),
-                );
-            }
-            Arc::new(
-                harness_sandbox::TieredSandboxes::new()
-                    .with_firecracker(harness_sandbox::FirecrackerConfig::new(
-                        &opts.fc_binary,
-                        &opts.fc_kernel,
-                    ))
-                    // The hermetic JS surface, alongside the microVM shell.
-                    .with_quickjs(),
-            )
-        }
+    let sandboxes: Arc<dyn SandboxProvider> = match &sandbox_mode {
+        SandboxMode::Docker { cli, .. } => Arc::new(
+            harness_sandbox::TieredSandboxes::new()
+                .with_container_cli(cli.clone())
+                // The hermetic JS surface, so `run_js` runs without any
+                // language runtime in the container (sandbox spec §3.2).
+                .with_quickjs(),
+        ),
+        SandboxMode::Firecracker { binary, kernel, .. } => Arc::new(
+            harness_sandbox::TieredSandboxes::new()
+                .with_firecracker(harness_sandbox::FirecrackerConfig::new(binary, kernel))
+                // The hermetic JS surface, alongside the microVM shell.
+                .with_quickjs(),
+        ),
         // No guest shell or compute: the typed file tools alone, over the
         // facet-owned workspace directory.
         SandboxMode::Durable => Arc::new(harness_sandbox::TieredSandboxes::new()),
     };
     // The handle is bound for the node's life (this function never returns) to keep
     // the gateway actors alive, like `_directory` below.
-    let node_kinds = kinds(&opts, sandbox_mode, grain_store.clone());
+    let node_kinds = kinds(&opts, &sandbox_mode, grain_store.clone());
     let _harness = Harness::builder(system.clone(), &node_kinds)
         .granary_node(granary_node.clone())
         .config(harness_config())
@@ -390,7 +289,9 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     });
 
     eprintln!(
-        "[{node}] transport {advertised}, data {}, model {}",
+        "[{node}] joined (voter {}/{}), data {}, model {}",
+        opts.id,
+        opts.nodes,
         opts.data.display(),
         opts.model
     );
@@ -409,7 +310,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
 /// every node must register byte-identical kinds — the digest is pinned by
 /// `SessionCreated` — so all nodes must run with the same values for those
 /// flags.
-fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreFactory) -> Kinds {
+fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, grain_store: GrainStoreFactory) -> Kinds {
     let params = ModelParams {
         model: opts.model.to_string(),
         max_tokens: 4096,
@@ -428,18 +329,18 @@ fn kinds(opts: &NodeOptions, sandbox_mode: SandboxMode, grain_store: GrainStoreF
     };
     let tools = |kind: Kind| -> Kind {
         match sandbox_mode {
-            SandboxMode::Docker => with_file_tools(
+            SandboxMode::Docker { image, .. } => with_file_tools(
                 kind.tool(harness_sandbox::shell_tool())
                     .tool(harness_sandbox::run_js_tool())
-                    .sandbox(harness::SandboxProfile::image(&opts.sandbox_image)),
+                    .sandbox(harness::SandboxProfile::image(image)),
             ),
             // The microVM shell declaration differs from the docker one (sync
             // semantics are model-visible), and the profile image carries the
             // rootfs path; both are digest-covered.
-            SandboxMode::Firecracker => with_file_tools(
+            SandboxMode::Firecracker { rootfs, .. } => with_file_tools(
                 kind.tool(harness_sandbox::fc_shell_tool())
                     .tool(harness_sandbox::run_js_tool())
-                    .sandbox(harness::SandboxProfile::image(&opts.fc_rootfs)),
+                    .sandbox(harness::SandboxProfile::image(rootfs)),
             ),
             // No guest shell or compute: the typed file tools alone, over the durable
             // filesystem grain (granary §7.10).

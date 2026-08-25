@@ -144,7 +144,9 @@ fn sessions_run_once_across_a_converged_cluster() {
     // recorded outcome comes back (caller-driven resumption, §7.5).
     for i in 0..SESSIONS {
         let harness = harnesses[i % harnesses.len()].clone();
-        let session = harness.session("worker", SessionId::new(format!("s-{i}"))).unwrap();
+        let session = harness
+            .session("worker", SessionId::new(format!("s-{i}")))
+            .unwrap();
         let completed = drive(&sim, Duration::from_secs(30), async move {
             loop {
                 if let Ok(Ok(c)) = session.prompt(Turn::new(TurnId::new("t-1"), "go")).await {
@@ -159,7 +161,9 @@ fn sessions_run_once_across_a_converged_cluster() {
     // on the grain's fence (H7, H3, G1).
     for i in 0..SESSIONS {
         let harness = harnesses[i % harnesses.len()].clone();
-        let session = harness.session("worker", SessionId::new(format!("s-{i}"))).unwrap();
+        let session = harness
+            .session("worker", SessionId::new(format!("s-{i}")))
+            .unwrap();
         let records: Vec<RecordBody> = drive(&sim, Duration::from_secs(10), async move {
             loop {
                 if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
@@ -192,7 +196,9 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
     // (rehydrate + fold, §7.5) and returns the recorded outcome (H7) — the run
     // is not re-executed.
     let first = drive(&sim, Duration::from_secs(30), {
-        let session = harnesses[0].session("worker", SessionId::new("s-crash")).unwrap();
+        let session = harnesses[0]
+            .session("worker", SessionId::new("s-crash"))
+            .unwrap();
         async move {
             loop {
                 if let Ok(Ok(c)) = session.prompt(Turn::new(TurnId::new("t-1"), "go")).await {
@@ -210,7 +216,9 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
     // A surviving node re-contacts the session: it returns the recorded outcome,
     // never a second run.
     let again = drive(&sim, Duration::from_secs(30), {
-        let session = harnesses[2].session("worker", SessionId::new("s-crash")).unwrap();
+        let session = harnesses[2]
+            .session("worker", SessionId::new("s-crash"))
+            .unwrap();
         async move {
             loop {
                 if let Ok(Ok(c)) = session.prompt(Turn::new(TurnId::new("t-1"), "go")).await {
@@ -223,7 +231,9 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
 
     // Still exactly one run on the journal (H7, H3) despite the failover.
     let records: Vec<RecordBody> = drive(&sim, Duration::from_secs(10), {
-        let session = harnesses[2].session("worker", SessionId::new("s-crash")).unwrap();
+        let session = harnesses[2]
+            .session("worker", SessionId::new("s-crash"))
+            .unwrap();
         async move {
             loop {
                 if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
@@ -326,7 +336,8 @@ fn await_journal(
     drive(sim, settle, async move {
         loop {
             if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
-                let bodies: Vec<RecordBody> = page.events.into_iter().map(|(_, r)| r.body).collect();
+                let bodies: Vec<RecordBody> =
+                    page.events.into_iter().map(|(_, r)| r.body).collect();
                 if ready(&bodies) {
                     return bodies;
                 }
@@ -368,7 +379,9 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
     // journals the delegation at 3600s, and the child's own hour-long call is
     // then in flight.
     {
-        let session = harnesses[0].session("parent", SessionId::new("root-p")).unwrap();
+        let session = harnesses[0]
+            .session("parent", SessionId::new("root-p"))
+            .unwrap();
         sim.spawner().launch(Box::pin(async move {
             let _ = session
                 .prompt_within(
@@ -427,7 +440,9 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
     let acked = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let acked = Arc::clone(&acked);
-        let session = surviving.session("parent", SessionId::new("root-p")).unwrap();
+        let session = surviving
+            .session("parent", SessionId::new("root-p"))
+            .unwrap();
         sim.spawner().launch(Box::pin(async move {
             loop {
                 if session.cancel(&TurnId::new("t-1")).await.is_ok() {
@@ -472,7 +487,9 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
     // Re-contact the cancelled session (a re-sent Cancel, §7.5): the new
     // leader's fold still owes the propagation, and drives it to the child.
     drive(&sim, Duration::from_secs(30), {
-        let session = surviving.session("parent", SessionId::new("root-p")).unwrap();
+        let session = surviving
+            .session("parent", SessionId::new("root-p"))
+            .unwrap();
         async move {
             loop {
                 if session.cancel(&TurnId::new("t-1")).await.is_ok() {
@@ -558,7 +575,9 @@ fn an_acked_queued_turn_survives_a_leader_crash_and_runs_on_resume() {
     // t-1 starts its 600s model call; t-2 is then accepted behind it. Both
     // submitters fire and forget — neither returns after the crash.
     for turn in ["t-1", "t-2"] {
-        let session = harnesses[0].session("worker", SessionId::new("s-queued")).unwrap();
+        let session = harnesses[0]
+            .session("worker", SessionId::new("s-queued"))
+            .unwrap();
         sim.spawner().launch(Box::pin(async move {
             let _ = session
                 .prompt_within(
@@ -604,7 +623,9 @@ fn an_acked_queued_turn_survives_a_leader_crash_and_runs_on_resume() {
     // Only t-1's caller re-contacts (§7.5): the attach resumes the run on the
     // new leader; its re-issued 600s call completes it.
     let first = drive(&sim, Duration::from_secs(700), {
-        let session = surviving.session("worker", SessionId::new("s-queued")).unwrap();
+        let session = surviving
+            .session("worker", SessionId::new("s-queued"))
+            .unwrap();
         async move {
             loop {
                 if let Ok(Ok(c)) = session

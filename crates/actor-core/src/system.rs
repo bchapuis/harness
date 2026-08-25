@@ -16,9 +16,8 @@ use actor_serialization::Codec;
 use actor_serialization::JsonCodec;
 
 use crate::actor::Actor;
-use crate::actor::Terminated;
-use crate::actor::TerminationReason;
 use crate::error::CallError;
+use crate::event::Event;
 use crate::event::EventSink;
 use crate::host::LocalHost;
 use crate::host::WatchDelivery;
@@ -28,8 +27,10 @@ use crate::mailbox::Mailbox;
 use crate::receptionist::Receptionist;
 use crate::receptionist::ReceptionistState;
 use crate::refs::ActorRef;
+use crate::runtime::BoxFuture;
 use crate::runtime::Clock;
 use crate::runtime::Entropy;
+use crate::runtime::Instant;
 use crate::runtime::Spawner;
 
 /// The runtime an actor runs on (spec §4). A cloneable handle: cloning shares
@@ -43,6 +44,14 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     ///
     /// [`Ctx::spawn`]: crate::Ctx::spawn
     fn spawn_child<A: Actor<System = Self>>(&self, child: A, parent: ActorId) -> ActorRef<A>;
+
+    /// Spawn a root actor from a `factory` so a `Restart` directive can
+    /// re-create it (spec §11.2). The value-based [`spawn`](ActorSystem::spawn)
+    /// cannot reconstruct its actor, so a restart there degrades to `Stop`.
+    fn spawn_with<A, F>(&self, factory: F) -> ActorRef<A>
+    where
+        A: Actor<System = Self>,
+        F: FnMut() -> A + Send + 'static;
 
     /// Spawn a child from a `factory` so a `Restart` directive can re-create it
     /// (spec §11.2), parented to `parent`. The value-based [`spawn_child`] cannot
@@ -87,6 +96,14 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
 
     /// Send an already-encoded request to a remote actor and await its encoded
     /// reply (spec §4.1, transport boundary).
+    ///
+    /// **Contract (invariant #1):** the implementation must bracket every call
+    /// with [`Event::AskIssued`] before dispatch and exactly one
+    /// [`Event::AskOutcome`] when it resolves — success or [`CallError`] alike
+    /// — mirroring the bracket [`Mailbox::ask`] emits on the local path. The
+    /// checker proves no ask is silently lost from those pairs; an
+    /// implementation that skips them hides exactly the losses the invariant
+    /// exists to catch.
     fn remote_ask(
         &self,
         recipient: &ActorId,
@@ -120,12 +137,45 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// (§11.2) and by actors needing deterministic randomness.
     fn next_random(&self) -> u64;
 
+    /// The system's [`Clock`] (§4.6): the single source of time. Layered
+    /// runtimes read and schedule time through this — never a host clock — so
+    /// one seed reproduces their timing under simulation.
+    type Clock: Clock;
+
+    /// The system clock.
+    fn clock(&self) -> &Self::Clock;
+
+    /// The current logical time — [`clock`](ActorSystem::clock)`().now()`.
+    fn now(&self) -> Instant {
+        self.clock().now()
+    }
+
+    /// A future that completes after `dur` of logical time, detachable: unlike
+    /// [`Clock::sleep`], whose future borrows the clock, this one clones the
+    /// clock handle so the future is `'static` and can be
+    /// [`launch`](ActorSystem::launch)ed as a background task.
+    fn sleep(&self, dur: Duration) -> BoxFuture<'static, ()> {
+        let clock = self.clock().clone();
+        Box::pin(async move { clock.sleep(dur).await })
+    }
+
+    /// Launch a detached background task on the system's executor (§4.6) — the
+    /// same [`Spawner`](crate::Spawner) that runs the mailboxes, so layered
+    /// runtimes' loops are scheduled (and, under simulation, interleaved
+    /// deterministically) like everything else.
+    fn launch(&self, task: BoxFuture<'static, ()>);
+
+    /// Emit onto the observability stream (spec §16). Layered runtimes
+    /// extending the [`Event`] enum through [`Event::App`] emit into the same
+    /// ordered stream the checkers and the reproducibility recorder read.
+    fn emit(&self, event: Event);
+
     /// The shared receptionist registry backing [`receptionist`](Self::receptionist).
     fn receptionist_state(&self) -> Arc<ReceptionistState>;
 
-    /// Replicate a registration to the rest of the cluster (spec §13). A
-    /// single-node system has no peers and does nothing.
-    fn replicate_registration(&self, key: &str, origin: NodeId, id: ActorId);
+    /// Replicate a registration to the rest of the cluster (spec §13). The
+    /// default does nothing — a single-node system has no peers.
+    fn replicate_registration(&self, _key: &str, _origin: NodeId, _id: ActorId) {}
 
     /// The receptionist for service discovery (spec §13).
     fn receptionist(&self) -> Receptionist<Self>
@@ -234,11 +284,6 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystem<C, E, S> {
         LocalSystemBuilder::new(clock, entropy, spawner).build()
     }
 
-    /// The system clock.
-    pub fn clock(&self) -> &C {
-        &self.inner.clock
-    }
-
     /// The system entropy source.
     pub fn entropy(&self) -> &E {
         &self.inner.entropy
@@ -247,30 +292,6 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystem<C, E, S> {
     /// The system task spawner.
     pub fn spawner(&self) -> &S {
         &self.inner.spawner
-    }
-
-    /// Emit onto the observability stream (spec §16). Public so layered
-    /// runtimes extending the [`Event`](crate::Event) enum (harness spec §10.4)
-    /// emit into the same stream the checkers read.
-    pub fn emit(&self, event: crate::Event) {
-        self.inner.events.emit(event);
-    }
-
-    /// Spawn an actor from a `factory` so it can be restarted on fault (spec
-    /// §11.2). Unlike [`spawn`](ActorSystem::spawn), a `Restart` directive
-    /// re-creates the actor by calling `factory` again.
-    pub fn spawn_with<A, F>(&self, mut factory: F) -> ActorRef<A>
-    where
-        A: Actor<System = Self>,
-        F: FnMut() -> A + Send + 'static,
-    {
-        self.inner.host.spawn_actor(
-            self.clone(),
-            self.inner.clock.clone(),
-            &self.inner.spawner,
-            Box::new(move || Some(factory())),
-            None,
-        )
     }
 
     /// Spawn from a one-shot factory: the actor yields once, so a `Restart`
@@ -295,6 +316,20 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystem<C, E, S> {
 impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
     fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A> {
         self.spawn_one_shot(actor, None)
+    }
+
+    fn spawn_with<A, F>(&self, mut factory: F) -> ActorRef<A>
+    where
+        A: Actor<System = Self>,
+        F: FnMut() -> A + Send + 'static,
+    {
+        self.inner.host.spawn_actor(
+            self.clone(),
+            self.inner.clock.clone(),
+            &self.inner.spawner,
+            Box::new(move || Some(factory())),
+            None,
+        )
     }
 
     fn spawn_child<A: Actor<System = Self>>(&self, child: A, parent: ActorId) -> ActorRef<A> {
@@ -348,19 +383,14 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
     }
 
     fn watch(&self, target: ActorId, watcher: ActorId, deliver: WatchDelivery) {
-        // Single node: a target not currently live has already terminated.
-        if !self.inner.host.contains(&target) {
-            // Deliver the immediate `Terminated` (invariant #12) on a task rather
-            // than inline: delivery now applies mailbox backpressure, and a watcher
-            // calling `watch` from inside its own handler must not block on (or
-            // deadlock against) its own mailbox.
-            self.inner.spawner.launch(deliver(Terminated {
-                id: target,
-                reason: TerminationReason::Stopped,
-            }));
-            return;
+        // An already-terminated target is the host's case to judge (it holds the
+        // termination record, invariant #12); the immediate delivery it hands
+        // back is launched rather than run inline — delivery applies mailbox
+        // backpressure, and a watcher calling `watch` from inside its own
+        // handler must not block on (or deadlock against) its own mailbox.
+        if let Some(immediate) = self.inner.host.watch(target, watcher, deliver) {
+            self.inner.spawner.launch(immediate);
         }
-        self.inner.host.add_watch(target, watcher, deliver);
     }
 
     fn unwatch(&self, target: &ActorId, watcher: &ActorId) {
@@ -375,10 +405,21 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
         self.inner.entropy.next_u64()
     }
 
+    type Clock = C;
+
+    fn clock(&self) -> &C {
+        &self.inner.clock
+    }
+
+    fn launch(&self, task: BoxFuture<'static, ()>) {
+        self.inner.spawner.launch(task);
+    }
+
+    fn emit(&self, event: Event) {
+        self.inner.events.emit(event);
+    }
+
     fn receptionist_state(&self) -> Arc<ReceptionistState> {
         Arc::clone(&self.inner.receptionist)
     }
-
-    // Single node: no peers to replicate to.
-    fn replicate_registration(&self, _key: &str, _origin: NodeId, _id: ActorId) {}
 }

@@ -100,10 +100,18 @@ fn tail_leaves_a_hibernated_session_asleep() {
             async move { session.tail(Seq::ZERO, harness::TAIL_PAGE).await }
         })
         .expect("tail after hibernation succeeds");
-    let kinds_seen = record_kinds(&page.events.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>());
+    let kinds_seen = record_kinds(
+        &page
+            .events
+            .iter()
+            .map(|(_, r)| r.clone())
+            .collect::<Vec<_>>(),
+    );
     assert_eq!(
         kinds_seen,
-        vec!["created", "turn", "started", "model", "tool", "model", "ended"],
+        vec![
+            "created", "turn", "started", "model", "tool", "model", "ended"
+        ],
         "the full record sequence reads back across hibernation",
     );
     assert!(

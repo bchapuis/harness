@@ -34,9 +34,16 @@ pub struct ModelParams {
 }
 
 impl Default for ModelParams {
+    /// The default `model` is deliberately **not a real model id**: this crate
+    /// is provider-neutral, and a kind that reaches a real API without a
+    /// stated model should fail with the provider's clear "unknown model"
+    /// error — not silently call whichever vendor a default here happened to
+    /// name. Deployments state their id where they wire their adapter (e.g.
+    /// `harness-standalone`'s `--model` default); scripted test models ignore
+    /// it.
     fn default() -> Self {
         ModelParams {
-            model: "claude-sonnet-4-6".to_string(),
+            model: "unconfigured".to_string(),
             max_tokens: 4_096,
         }
     }

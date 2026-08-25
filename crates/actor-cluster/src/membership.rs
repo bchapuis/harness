@@ -515,7 +515,7 @@ impl Membership {
     /// Create an empty roster for `node` under `mode`. `joining` marks this node
     /// a joiner (starts `Joining`, awaiting admission by the mode's authority,
     /// spec §9.3); otherwise it is a founding member (`Up`).
-    pub fn new(
+    pub(crate) fn new(
         node: NodeId,
         mode: &MembershipMode,
         events: Arc<dyn EventSink>,
@@ -595,7 +595,7 @@ impl Membership {
     /// Announce that this node is leaving (spec §9.3): it advertises `Leaving` in
     /// its digest; the mode's authority finalizes it to `Down` and watchers are
     /// notified. The announcement itself decides nothing (spec §9.3).
-    pub fn begin_leaving(&self) {
+    pub(crate) fn begin_leaving(&self) {
         let mut s = self.self_status.lock().expect("self status mutex poisoned");
         if s.rank() < MemberStatus::Leaving.rank() {
             *s = MemberStatus::Leaving;
@@ -603,7 +603,7 @@ impl Membership {
     }
 
     /// Add a peer as `Up`/`Reachable` (idempotent — never resurrects a `Down`).
-    pub fn add_member(&self, node: NodeId, now: Instant) {
+    pub(crate) fn add_member(&self, node: NodeId, now: Instant) {
         if node == self.node {
             return;
         }
@@ -633,7 +633,7 @@ impl Membership {
     /// Pick a live peer to probe, chosen via `entropy` (spec §10). Suspect and
     /// unreachable peers are still probed, so recovery is detected; terminal
     /// (`down`/`removed`) peers are not.
-    pub fn pick_probe_target<E: Entropy>(&self, entropy: &E) -> Option<NodeId> {
+    pub(crate) fn pick_probe_target<E: Entropy>(&self, entropy: &E) -> Option<NodeId> {
         let members = self.members.lock().expect("members mutex poisoned");
         let candidates: Vec<NodeId> = members
             .iter()
@@ -647,7 +647,12 @@ impl Membership {
     /// Pick up to `k` distinct reachable peers to relay an indirect probe, none
     /// of them `exclude` (the probe target) — the `k` members of SWIM's indirect
     /// probing (spec §10 #2). Fewer than `k` if the cluster is small.
-    pub fn pick_helpers<E: Entropy>(&self, k: usize, exclude: NodeId, entropy: &E) -> Vec<NodeId> {
+    pub(crate) fn pick_helpers<E: Entropy>(
+        &self,
+        k: usize,
+        exclude: NodeId,
+        entropy: &E,
+    ) -> Vec<NodeId> {
         let members = self.members.lock().expect("members mutex poisoned");
         let mut candidates: Vec<NodeId> = members
             .iter()
@@ -672,7 +677,7 @@ impl Membership {
     /// ping/ack with it): mark it reachable, clearing any suspicion, and adopt
     /// the reported incarnation. Never resurrects a terminal (`down`/`removed`)
     /// node (invariant #15, spec §9.1).
-    pub fn mark_alive_direct(&self, node: NodeId, incarnation: u64, now: Instant) {
+    pub(crate) fn mark_alive_direct(&self, node: NodeId, incarnation: u64, now: Instant) {
         let mut members = self.members.lock().expect("members mutex poisoned");
         // Direct evidence proves liveness, not admission: a node we have never
         // heard of enters `Joining` until its digest or the mode's authority
@@ -700,7 +705,7 @@ impl Membership {
 
     /// A failed probe: mark a reachable `node` suspect (spec §10). Leaves an
     /// existing suspicion's timer running.
-    pub fn mark_suspect(&self, node: NodeId, now: Instant) {
+    pub(crate) fn mark_suspect(&self, node: NodeId, now: Instant) {
         let mut members = self.members.lock().expect("members mutex poisoned");
         if let Some(m) = members.get_mut(&node) {
             if m.status == MemberStatus::Down {
@@ -762,6 +767,48 @@ impl Membership {
     ///
     /// Returns whether `node` was **newly declared `down`**, in which case the
     /// caller runs the node-down cascade (spec §8.1).
+    /// Fold one status observation `(stamp, status)` into an existing member —
+    /// the **one** implementation of the status axis's merge rule (invariant
+    /// #15, spec §9.1, §9.2), shared by the authority path
+    /// ([`apply_stamped`](Membership::apply_stamped)) and the gossip path
+    /// (`merge_peer`) so the rule cannot drift between them. Terminal
+    /// stickiness first: a terminal member only advances toward `removed`,
+    /// never reverts. Then the authority-stamp rule (`status_supersedes`),
+    /// folding the stamp monotonically even when the status stands. Returns
+    /// the transition event to emit once outside the roster lock, and whether
+    /// this observation newly declared the member `down` (the caller runs the
+    /// cascade, spec §8.1).
+    fn apply_status(
+        &self,
+        node: NodeId,
+        member: &mut Member,
+        status: MemberStatus,
+        stamp: u64,
+        now: Instant,
+    ) -> (Option<Event>, bool) {
+        if member.status.is_terminal() {
+            if status.rank() > member.status.rank() {
+                member.status = status;
+                member.changed_at = now;
+            }
+            return (None, false);
+        }
+        if !status_supersedes((stamp, status), (member.stamp, member.status)) {
+            return (None, false);
+        }
+        member.stamp = member.stamp.max(stamp);
+        if member.status == status {
+            return (None, false);
+        }
+        let prev = member.status;
+        member.status = status;
+        member.changed_at = now;
+        (
+            self.transition_event(node, Some(prev), status),
+            status == MemberStatus::Down,
+        )
+    }
+
     pub(crate) fn apply_stamped(
         &self,
         node: NodeId,
@@ -776,7 +823,7 @@ impl Membership {
             }
             return false;
         }
-        let event = {
+        let (event, downed) = {
             let mut members = self.members.lock().expect("members mutex poisoned");
             let Some(member) = members.get_mut(&node) else {
                 // First sight: the decision itself introduces the member —
@@ -812,32 +859,12 @@ impl Membership {
                 }
                 return status == MemberStatus::Down;
             };
-            // Terminal stickiness comes before the stamp rule (invariant #15): a
-            // higher-stamped re-registration must not resurrect a downed member —
-            // re-admission after `down` is a new identity, never a revival.
-            if member.status.is_terminal() {
-                if status.rank() > member.status.rank() {
-                    member.status = status;
-                    member.changed_at = now;
-                }
-                return false;
-            }
-            if !status_supersedes((stamp, status), (member.stamp, member.status)) {
-                return false;
-            }
-            member.stamp = member.stamp.max(stamp);
-            if member.status == status {
-                return false;
-            }
-            let prev = member.status;
-            member.status = status;
-            member.changed_at = now;
-            self.transition_event(node, Some(prev), status)
+            self.apply_status(node, member, status, stamp, now)
         };
         if let Some(event) = event {
             self.events.emit(event);
         }
-        status == MemberStatus::Down
+        downed
     }
 
     /// The mapping from a **peer** status transition to the observability event
@@ -882,7 +909,7 @@ impl Membership {
     /// Returns the nodes newly declared `down`, so the caller can run the cascade
     /// (spec §8.1 step 3). The passes run under one lock, so the roster
     /// never changes underneath them within a tick.
-    pub fn tick(&self, now: Instant) -> Vec<NodeId> {
+    pub(crate) fn tick(&self, now: Instant) -> Vec<NodeId> {
         let mut downed = Vec::new();
         let mut members = self.members.lock().expect("members mutex poisoned");
         self.advance_reachability(&mut members, now, &mut downed);
@@ -1042,7 +1069,7 @@ impl Membership {
 
     /// This node's view of the cluster, for gossip (spec §9.2). Includes our own
     /// `alive` entry at our current incarnation.
-    pub fn digest(&self) -> Vec<MemberDigest> {
+    pub(crate) fn digest(&self) -> Vec<MemberDigest> {
         let members = self.members.lock().expect("members mutex poisoned");
         let mut out: Vec<MemberDigest> = members
             .iter()
@@ -1082,7 +1109,7 @@ impl Membership {
     ///
     /// Returns nodes newly declared `down`, for the caller to run the cascade
     /// (spec §8.1).
-    pub fn merge(&self, incoming: Vec<MemberDigest>, now: Instant) -> Vec<NodeId> {
+    pub(crate) fn merge(&self, incoming: Vec<MemberDigest>, now: Instant) -> Vec<NodeId> {
         let mut downed = Vec::new();
         let mut to_emit: Vec<Event> = Vec::new();
         {
@@ -1132,32 +1159,13 @@ impl Membership {
             return (d.status == MemberStatus::Down).then_some(d.node);
         };
 
-        // A terminal member is sticky: it only advances toward `removed` (the
-        // tombstone disseminating), never reverts (invariant #15), and carries no
-        // reachability.
-        if member.status.is_terminal() {
-            if d.status.rank() > member.status.rank() {
-                member.status = d.status;
-                member.changed_at = now;
-            }
-            return None;
+        // The status axis: one shared fold (`apply_status`) — terminal
+        // stickiness, then the stamp rule (invariant #15).
+        let (event, newly_down) = self.apply_status(d.node, member, d.status, d.stamp, now);
+        if let Some(event) = event {
+            to_emit.push(event);
         }
-
-        let mut downed = None;
-        if status_supersedes((d.stamp, d.status), (member.stamp, member.status)) {
-            member.stamp = member.stamp.max(d.stamp);
-            if d.status != member.status {
-                let prev = member.status;
-                member.status = d.status;
-                member.changed_at = now;
-                if let Some(event) = self.transition_event(d.node, Some(prev), d.status) {
-                    to_emit.push(event);
-                }
-                if d.status == MemberStatus::Down {
-                    downed = Some(d.node);
-                }
-            }
-        }
+        let downed = newly_down.then_some(d.node);
 
         if !member.status.is_terminal()
             && reachability_supersedes(

@@ -47,7 +47,7 @@ impl Usage {
 /// the slices carved out for children. Folded from the journal — the fold is
 /// the accountant, so a resumed run resumes its accounting too (H1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Spend {
+pub(crate) struct Spend {
     /// Tokens of this run's own journaled model calls.
     pub own_tokens: u64,
     /// Tokens reserved for children (`ChildRun` carve-outs, §9.1 item 3).

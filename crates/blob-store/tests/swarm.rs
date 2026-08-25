@@ -20,6 +20,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use actor_cluster::SwimConfig;
+use actor_core::ActorSystem;
 use actor_core::BoxFuture;
 use actor_core::Clock;
 use actor_core::Entropy;

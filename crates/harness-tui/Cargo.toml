@@ -25,12 +25,9 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-# The client opens its own TCP/TLS connection to the gateway (same hand-rolled
-# HTTP/1.1 approach as the standalone deployment's model seam — no `reqwest`),
-# but reads the response as a live stream for SSE rather than to EOF.
-rustls.workspace = true
-tokio-rustls.workspace = true
-webpki-roots.workspace = true
+# The shared hand-rolled HTTP/1.1 substrate (origins, TCP/TLS connect, request
+# framing, incremental reader) — no `reqwest`; SSE reads the chunked body live.
+harness-http.workspace = true
 
 [lints]
 workspace = true

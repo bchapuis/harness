@@ -40,7 +40,7 @@ use crate::facet::encode_payload;
 use crate::facet::sealed::Sealed;
 use crate::grain::Grain;
 use crate::grain::GrainCtx;
-use crate::system::GranarySystem;
+use actor_core::ActorSystem;
 
 /// The alarm facet marker (spec §7.16): declare `type Facets = (Alarm, …)` and
 /// reach the timer through [`GrainCtx::alarm`](crate::GrainCtx::alarm), pairing it

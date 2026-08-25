@@ -62,6 +62,12 @@ async fn main() {
 
 async fn run_node(args: &[String]) -> Result<(), String> {
     let mut opts = node::NodeOptions::default();
+    let mut sandbox: Option<String> = None;
+    let mut sandbox_image: Option<String> = None;
+    let mut container_cli = "docker".to_string();
+    let mut fc_binary = "firecracker".to_string();
+    let mut fc_kernel: Option<String> = None;
+    let mut fc_rootfs: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let flag = &args[i];
@@ -91,23 +97,19 @@ async fn run_node(args: &[String]) -> Result<(), String> {
             "--model" => opts.model = value.clone(),
             "--secret" => opts.secret = value.clone(),
             "--api-url" => opts.api_url = value.clone(),
-            "--sandbox" => {
-                opts.sandbox = Some(match value.as_str() {
-                    "docker" => node::SandboxMode::Docker,
-                    "firecracker" => node::SandboxMode::Firecracker,
-                    "durable" => node::SandboxMode::Durable,
-                    other => {
-                        return Err(format!(
-                            "--sandbox must be `docker`, `firecracker`, or `durable`, got {other}"
-                        ));
-                    }
-                })
-            }
-            "--sandbox-image" => opts.sandbox_image = value.clone(),
-            "--container-cli" => opts.container_cli = value.clone(),
-            "--fc-binary" => opts.fc_binary = value.clone(),
-            "--fc-kernel" => opts.fc_kernel = value.clone(),
-            "--fc-rootfs" => opts.fc_rootfs = value.clone(),
+            "--sandbox" => match value.as_str() {
+                "docker" | "firecracker" | "durable" => sandbox = Some(value.clone()),
+                other => {
+                    return Err(format!(
+                        "--sandbox must be `docker`, `firecracker`, or `durable`, got {other}"
+                    ));
+                }
+            },
+            "--sandbox-image" => sandbox_image = Some(value.clone()),
+            "--container-cli" => container_cli = value.clone(),
+            "--fc-binary" => fc_binary = value.clone(),
+            "--fc-kernel" => fc_kernel = Some(value.clone()),
+            "--fc-rootfs" => fc_rootfs = Some(value.clone()),
             other => return Err(format!("unknown flag: {other}")),
         }
         i += 2;
@@ -115,6 +117,45 @@ async fn run_node(args: &[String]) -> Result<(), String> {
     if opts.id == 0 {
         return Err("--id is required".to_string());
     }
+    // Assemble the sandbox mode from its flags once all are seen: each variant
+    // carries exactly its own configuration, so a flag for the wrong mode is
+    // rejected here instead of being silently ignored at boot.
+    opts.sandbox = match sandbox.as_deref() {
+        Some("docker") => {
+            if fc_kernel.is_some() || fc_rootfs.is_some() {
+                return Err("--fc-kernel/--fc-rootfs apply only to --sandbox firecracker".into());
+            }
+            Some(node::SandboxMode::Docker {
+                image: sandbox_image.ok_or("--sandbox docker requires --sandbox-image")?,
+                cli: container_cli,
+            })
+        }
+        Some("firecracker") => {
+            if sandbox_image.is_some() {
+                return Err("--sandbox-image applies only to --sandbox docker".into());
+            }
+            Some(node::SandboxMode::Firecracker {
+                binary: fc_binary,
+                kernel: fc_kernel.ok_or(
+                    "--sandbox firecracker requires --fc-kernel and --fc-rootfs \
+                     (guest/fc-rootfs/build.sh produces both)",
+                )?,
+                rootfs: fc_rootfs.ok_or(
+                    "--sandbox firecracker requires --fc-kernel and --fc-rootfs \
+                     (guest/fc-rootfs/build.sh produces both)",
+                )?,
+            })
+        }
+        Some("durable") => {
+            if sandbox_image.is_some() || fc_kernel.is_some() || fc_rootfs.is_some() {
+                return Err(
+                    "--sandbox durable takes no --sandbox-image/--fc-kernel/--fc-rootfs".into(),
+                );
+            }
+            Some(node::SandboxMode::Durable)
+        }
+        _ => None,
+    };
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "ANTHROPIC_API_KEY is not set; the node needs it for the model seam")?;
     node::run(opts, api_key).await

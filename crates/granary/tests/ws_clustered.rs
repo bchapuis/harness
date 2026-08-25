@@ -17,6 +17,7 @@ use std::time::Duration;
 use actor_cluster::DowningPolicy;
 use actor_cluster::RaftConfig;
 use actor_cluster::SwimConfig;
+use actor_core::ActorSystem;
 use actor_core::BoxError;
 use actor_core::Manifest;
 use actor_core::Message;

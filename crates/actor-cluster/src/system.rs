@@ -317,35 +317,16 @@ where
         self.inner.host.node()
     }
 
-    /// The system clock.
-    pub fn clock(&self) -> &C {
-        &self.inner.clock
-    }
-
     /// The system entropy source.
     pub fn entropy(&self) -> &E {
         &self.inner.entropy
     }
 
-    /// Read access to this node's membership view (for tests/inspection).
+    /// Read access to this node's membership view. The mutators are
+    /// crate-private — the detector loops are the only writers — so this view
+    /// cannot be used to bypass the control plane's authority rules.
     pub fn membership(&self) -> &Membership {
         &self.inner.membership
-    }
-
-    /// Spawn an actor from a `factory` so it can be restarted on fault (spec
-    /// §11.2).
-    pub fn spawn_with<A, F>(&self, mut factory: F) -> ActorRef<A>
-    where
-        A: Actor<System = Self>,
-        F: FnMut() -> A + Send + 'static,
-    {
-        self.inner.host.spawn_actor(
-            self.clone(),
-            self.inner.clock.clone(),
-            &self.inner.spawner,
-            Box::new(move || Some(factory())),
-            None,
-        )
     }
 
     /// Introduce a peer into this node's roster as a full `Up` member (spec §9.3).
@@ -611,13 +592,6 @@ where
         self.inner.spawner.launch(Box::pin(task));
     }
 
-    /// Emit onto the observability stream (spec §16). Public so layered
-    /// runtimes extending the [`Event`] enum (utilities spec §5, harness spec
-    /// §10.4) emit into the same stream the checkers read.
-    pub fn emit(&self, event: Event) {
-        self.inner.events.emit(event);
-    }
-
     /// The resolved SWIM probe interval — the cadence background utility loops
     /// reuse so they add no second tunable (utilities spec §4).
     pub(crate) fn probe_interval(&self) -> Duration {
@@ -691,6 +665,13 @@ where
             // *revision* where there is one (`actor.membership`, compatibility §3).
             // A version skew and a damaged entry have opposite fixes: run the node
             // on a build that accepts the entry, or repair a log.
+            //
+            // Two `admit`s meet here, one word from each spec's vocabulary:
+            // *this* one admits a payload's revision (compatibility §2, bytes
+            // at rest), while `ClusterSystem::admit` — whose committed
+            // `MembershipCommand::Admit` this decodes — admits a *member*
+            // (§9.3). Neither yields its name: each is the term of art in its
+            // own spec.
             let command = match MembershipCommand::admit(&command) {
                 Ok(command) => command,
                 Err(why) => {
@@ -778,6 +759,20 @@ where
             self.inner.clock.clone(),
             &self.inner.spawner,
             Box::new(move || once.take()),
+            None,
+        )
+    }
+
+    fn spawn_with<A, F>(&self, mut factory: F) -> ActorRef<A>
+    where
+        A: Actor<System = Self>,
+        F: FnMut() -> A + Send + 'static,
+    {
+        self.inner.host.spawn_actor(
+            self.clone(),
+            self.inner.clock.clone(),
+            &self.inner.spawner,
+            Box::new(move || Some(factory())),
             None,
         )
     }
@@ -883,45 +878,37 @@ where
         // and a watcher calling `watch` from inside its own handler must not
         // block on its own mailbox.
         if self.is_local(&target) {
-            if !self.inner.host.contains(&target) {
-                // Report the actual reason it died (Failed vs Stopped) when still
-                // remembered; otherwise default to a graceful stop (spec §12).
-                let reason = self
-                    .inner
-                    .host
-                    .termination_reason(&target)
-                    .unwrap_or(TerminationReason::Stopped);
-                self.inner
-                    .spawner
-                    .launch(deliver(Terminated { id: target, reason }));
-                return;
+            // The host judges the already-dead case and its recorded reason.
+            if let Some(immediate) = self.inner.host.watch(target, watcher, deliver) {
+                self.inner.spawner.launch(immediate);
             }
-        } else if self.inner.membership.is_down(target.node()) {
+            return;
+        }
+        if self.inner.membership.is_down(target.node()) {
             self.inner.spawner.launch(deliver(Terminated {
                 id: target,
                 reason: TerminationReason::NodeDown,
             }));
             return;
         }
-        // Track locally so a delivered `Terminated` (synthesized on node-down, or
-        // arriving as a frame from the target's node) reaches the watcher.
+        // A remote target the host cannot judge: track interest raw, so a
+        // delivered `Terminated` (synthesized on node-down, or arriving as a
+        // frame from the target's node) reaches the watcher.
         self.inner
             .host
             .add_watch(target.clone(), watcher.clone(), deliver);
 
-        // For a remote target, register interest with its node so a graceful
-        // per-actor stop — not just a node-down — notifies us (spec §12).
-        if !self.is_local(&target) {
-            let frame = Frame::Watch {
-                target: target.clone(),
-                watcher,
-            };
-            let transport = self.inner.transport.clone();
-            let node = target.node();
-            self.inner.spawner.launch(Box::pin(async move {
-                let _ = transport.send(node, frame).await;
-            }));
-        }
+        // And register interest with the target's node so a graceful per-actor
+        // stop — not just a node-down — notifies us (spec §12).
+        let frame = Frame::Watch {
+            target: target.clone(),
+            watcher,
+        };
+        let transport = self.inner.transport.clone();
+        let node = target.node();
+        self.inner.spawner.launch(Box::pin(async move {
+            let _ = transport.send(node, frame).await;
+        }));
     }
 
     fn unwatch(&self, target: &ActorId, watcher: &ActorId) {
@@ -945,6 +932,20 @@ where
 
     fn next_random(&self) -> u64 {
         self.inner.entropy.next_u64()
+    }
+
+    type Clock = C;
+
+    fn clock(&self) -> &C {
+        &self.inner.clock
+    }
+
+    fn launch(&self, task: BoxFuture<'static, ()>) {
+        self.inner.spawner.launch(task);
+    }
+
+    fn emit(&self, event: Event) {
+        self.inner.events.emit(event);
     }
 
     fn receptionist_state(&self) -> Arc<ReceptionistState> {
@@ -1139,23 +1140,14 @@ where
                     );
                     // Lift this group's reply out of the output and into the batch;
                     // anything else it produced still goes out on its own.
-                    out.frames.retain(|(_, frame)| match frame {
-                        Frame::RaftAppendReply {
-                            group,
-                            term,
-                            ok,
-                            match_index,
-                        } => {
-                            replies.push(RaftBeatReply {
-                                group: *group,
-                                term: *term,
-                                ok: *ok,
-                                match_index: *match_index,
-                            });
-                            false
-                        }
-                        _ => true,
-                    });
+                    out.frames
+                        .retain(|(_, frame)| match RaftBeatReply::from_reply(frame) {
+                            Some(reply) => {
+                                replies.push(reply);
+                                false
+                            }
+                            None => true,
+                        });
                     apply_raft_output(system, group, out).await;
                 }
             }
@@ -1422,45 +1414,33 @@ async fn handle_watch<C, E, S, T>(
     S: Spawner,
     T: Transport,
 {
-    if system.inner.host.contains(&target) {
-        // Deliver a `Terminated` frame back to the watcher's node when the
-        // target stops. A `Weak` handle avoids a reference cycle
-        // (system → host → watch closure → system).
-        let weak: Weak<Inner<C, E, S, T>> = Arc::downgrade(&system.inner);
-        let watcher_node = watcher.node();
-        let watcher_id = watcher.clone();
-        let deliver: WatchDelivery = Arc::new(move |signal: Terminated| {
-            if let Some(inner) = weak.upgrade() {
-                let frame = Frame::Terminated {
-                    target: signal.id,
-                    watcher: watcher_id.clone(),
-                    reason: signal.reason,
-                };
-                let transport = inner.transport.clone();
-                inner.spawner.launch(Box::pin(async move {
-                    let _ = transport.send(watcher_node, frame).await;
-                }));
-            }
-            // Forwarding the signal over the transport is fire-and-forget
-            // (the launched task carries it), so this resolves immediately.
-            Box::pin(async {}) as BoxFuture<'static, ()>
-        });
-        system.inner.host.add_watch(target, watcher, deliver);
-    } else {
-        // Already gone: report immediately (§12), with the true reason
-        // (Failed vs Stopped) when still remembered, else a graceful stop by
-        // default.
-        let reason = system
-            .inner
-            .host
-            .termination_reason(&target)
-            .unwrap_or(TerminationReason::Stopped);
-        let frame = Frame::Terminated {
-            target: target.clone(),
-            watcher: watcher.clone(),
-            reason,
-        };
-        let _ = system.inner.transport.send(watcher.node(), frame).await;
+    // Deliver a `Terminated` frame back to the watcher's node when the target
+    // stops. A `Weak` handle avoids a reference cycle
+    // (system → host → watch closure → system).
+    let weak: Weak<Inner<C, E, S, T>> = Arc::downgrade(&system.inner);
+    let watcher_node = watcher.node();
+    let watcher_id = watcher.clone();
+    let deliver: WatchDelivery = Arc::new(move |signal: Terminated| {
+        if let Some(inner) = weak.upgrade() {
+            let frame = Frame::Terminated {
+                target: signal.id,
+                watcher: watcher_id.clone(),
+                reason: signal.reason,
+            };
+            let transport = inner.transport.clone();
+            inner.spawner.launch(Box::pin(async move {
+                let _ = transport.send(watcher_node, frame).await;
+            }));
+        }
+        // Forwarding the signal over the transport is fire-and-forget
+        // (the launched task carries it), so this resolves immediately.
+        Box::pin(async {}) as BoxFuture<'static, ()>
+    });
+    // The host judges the already-gone case (invariant #12) and hands back the
+    // immediate delivery, carrying the true recorded reason; awaiting it here
+    // sends the `Terminated` frame through the same closure the live path uses.
+    if let Some(immediate) = system.inner.host.watch(target, watcher, deliver) {
+        immediate.await;
     }
 }
 
@@ -1640,12 +1620,6 @@ where
         rx
     }
 
-    fn compact(&self, group: GroupId, index: u64, snapshot: Vec<u8>) {
-        if let Some(raft) = self.group(group) {
-            raft.compact(index, snapshot);
-        }
-    }
-
     async fn propose_to(&self, group: GroupId, command: Vec<u8>) {
         let voters = self
             .group(group)
@@ -1673,10 +1647,6 @@ where
 
     fn group_leader(&self, group: GroupId) -> Option<NodeId> {
         self.group(group).and_then(|g| g.leader_hint())
-    }
-
-    fn next_u64(&self) -> u64 {
-        self.inner.entropy.next_u64()
     }
 
     fn sleep(&self, dur: Duration) -> BoxFuture<'static, ()> {
@@ -1789,30 +1759,16 @@ where
         let mut beats: BTreeMap<NodeId, Vec<RaftBeat>> = BTreeMap::new();
         let mut outputs = raft.tick_all(now, &system.inner.entropy);
         for (_, out) in &mut outputs {
-            out.frames.retain(|(to, frame)| match frame {
-                Frame::RaftAppend {
-                    group,
-                    term,
-                    leader,
-                    prev_index,
-                    prev_term,
-                    entries,
-                    commit,
-                } if entries.is_empty() => {
-                    beats.entry(*to).or_default().push(RaftBeat {
-                        group: *group,
-                        term: *term,
-                        leader: *leader,
-                        prev_index: *prev_index,
-                        prev_term: *prev_term,
-                        commit: *commit,
-                    });
-                    false // carried in the batch below
-                }
-                // An append with entries is real replication and goes as itself:
-                // batching it would bound one group's throughput by another's.
-                _ => true,
-            });
+            out.frames
+                .retain(|(to, frame)| match RaftBeat::from_empty_append(frame) {
+                    Some(beat) => {
+                        beats.entry(*to).or_default().push(beat);
+                        false // carried in the batch below
+                    }
+                    // An append with entries is real replication and goes as itself:
+                    // batching it would bound one group's throughput by another's.
+                    None => true,
+                });
         }
         // Heartbeats go out BEFORE the outputs are applied. Applying is a per-group
         // await, so with many groups it is the slowest part of the tick, and a

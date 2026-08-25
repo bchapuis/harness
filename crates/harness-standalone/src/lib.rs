@@ -4,5 +4,5 @@
 //! A node hosts grains and votes in Raft; it has no client-facing protocol. The
 //! public multi-tenant edge lives in `harness-gateway`.
 
-pub mod http;
+mod http;
 pub mod node;

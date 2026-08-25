@@ -1,0 +1,187 @@
+//! The composed production node bring-up — [`join`], the counterpart of the
+//! simulator's `SimNetwork::join` (spec §18.2): one call takes a deployment's
+//! genuine choices and absorbs the assembly the simulator already absorbs on
+//! its side — the dial map, the allowlist, the bind, the transport, the
+//! system, and the membership seeding.
+//!
+//! Before this existed every deployment binary hand-copied that recipe, and
+//! the roster was stated twice (once for Raft's voters, once for the
+//! `add_member` loop). Here the roster is computed once and handed to the
+//! caller's [`JoinOptions::membership`] closure, so the two can never drift.
+
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use actor_cluster::ClusterConfig;
+use actor_cluster::ClusterSystem;
+use actor_cluster::MembershipMode;
+use actor_core::EventSink;
+use actor_core::NodeId;
+use actor_serialization::Codec;
+
+use crate::TcpCluster;
+use crate::clock::TokioClock;
+use crate::entropy::OsEntropy;
+use crate::spawner::TokioSpawner;
+use crate::transport::DEFAULT_CONNECT_TIMEOUT;
+use crate::transport::DEFAULT_HANDSHAKE_TIMEOUT;
+use crate::transport::DEFAULT_OUTBOUND_CAPACITY;
+use crate::transport::Encryption;
+use crate::transport::TcpConfig;
+use crate::transport::TcpTransport;
+use crate::transport::node_addr;
+
+/// A deployment's genuine choices when a process joins a cluster — everything
+/// else about bring-up is [`join`]'s job. Ports follow the one address plan:
+/// node or client `i`'s transport port is `port_base + i - 1`.
+pub struct JoinOptions {
+    /// This process's id. A **voter** when inside `1..=voters`; a non-voting
+    /// **client** (an edge tier) otherwise.
+    pub node: u64,
+    /// The voter roster size: voters are `1..=voters`, identical on every node.
+    pub voters: u64,
+    /// Per-id reachable host overrides for the dial map; loopback when unset.
+    pub peer_hosts: BTreeMap<u64, String>,
+    /// Non-voting clients this node admits (id → host). A host that does not
+    /// resolve yet is admitted anyway — the client dials in and gossip flows
+    /// over its connection — so a not-yet-scheduled edge pod never blocks a
+    /// node's startup.
+    pub clients: BTreeMap<u64, String>,
+    /// The interface this process binds its transport on; `0.0.0.0` in a
+    /// container.
+    pub bind_host: String,
+    /// The host peers dial back, when it differs from the natural one — a
+    /// voter's default is its own `peer_hosts` entry (else loopback), a
+    /// client's is `bind_host`. They differ behind a `0.0.0.0` wildcard bind.
+    pub advertise_host: Option<String>,
+    /// Base of the port plan.
+    pub port_base: u16,
+    /// The cluster secret guarding the transport handshake (spec §15).
+    pub secret: String,
+    /// The **one** codec value for the three places that must agree: the
+    /// transport's framing, the message layer, and any store stamp derived
+    /// from it (granary §7.4).
+    pub codec: Arc<dyn Codec>,
+    /// The observability sink (spec §16).
+    pub events: Arc<dyn EventSink>,
+    /// Transport encryption. Stated rather than defaulted, because the choice
+    /// carries a threat model: `PlaintextTrusted` is valid only on a network
+    /// the operator controls — the secret crosses the wire in the handshake.
+    pub encryption: Encryption,
+    /// Build the membership mode from the computed voter roster — the one
+    /// place the roster reaches configuration, so Raft's voters and the
+    /// admitted member set cannot drift. A voter names
+    /// [`MembershipMode::Leader`] (seeding `RaftConfig` from the given
+    /// roster); a client names a non-participating mode.
+    #[allow(clippy::type_complexity)] // one closure type, named nowhere else
+    pub membership: Box<dyn FnOnce(&[NodeId]) -> MembershipMode>,
+}
+
+/// Bring one process into a cluster: resolve the address plan, bind, start the
+/// TCP transport, start the [`ClusterSystem`] over it, and seed the membership
+/// view with every admitted peer. The inbound frame channel never surfaces —
+/// transport and system are paired here, so a mismatched pairing cannot be
+/// expressed.
+pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
+    let node = NodeId::new(opts.node);
+    let roster: Vec<NodeId> = (1..=opts.voters).map(NodeId::new).collect();
+    let is_voter = roster.contains(&node);
+    let host_of = |id: u64| -> &str {
+        opts.peer_hosts
+            .get(&id)
+            .map(String::as_str)
+            .unwrap_or("127.0.0.1")
+    };
+
+    // Dial map: every voter at its host.
+    let mut peers: BTreeMap<NodeId, SocketAddr> = roster
+        .iter()
+        .map(|peer| {
+            Ok((
+                *peer,
+                node_addr(host_of(peer.uid()), opts.port_base, peer.uid())?,
+            ))
+        })
+        .collect::<Result<_, String>>()?;
+
+    // Clients are admitted by id; their dial address is best-effort (they can
+    // always dial in).
+    let client_ids: BTreeSet<NodeId> = opts.clients.keys().map(|id| NodeId::new(*id)).collect();
+    for (id, host) in &opts.clients {
+        match node_addr(host, opts.port_base, *id) {
+            Ok(addr) => {
+                peers.insert(NodeId::new(*id), addr);
+            }
+            Err(e) => eprintln!(
+                "[{node}] client {id}={host} does not resolve yet ({e}); admitting it anyway — \
+                 it will dial in"
+            ),
+        }
+    }
+
+    // What peers dial back: the stated override, else a voter's dial-map entry,
+    // else (a client) the bind host.
+    let advertised = match (&opts.advertise_host, is_voter) {
+        (Some(host), _) => node_addr(host, opts.port_base, opts.node)?,
+        (None, true) => peers[&node],
+        (None, false) => node_addr(&opts.bind_host, opts.port_base, opts.node)?,
+    };
+    peers.insert(node, advertised);
+
+    // The allowlist admits the voters, the clients, and self; only these ids
+    // may complete the transport handshake (spec §15).
+    let admitted: BTreeSet<NodeId> = peers
+        .keys()
+        .copied()
+        .chain(client_ids.iter().copied())
+        .collect();
+
+    let bind = node_addr(&opts.bind_host, opts.port_base, opts.node)?;
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .map_err(|e| format!("bind transport {bind}: {e}"))?;
+
+    let membership = (opts.membership)(&roster);
+    let (transport, inbound) = TcpTransport::start(
+        TcpConfig {
+            node,
+            advertised,
+            peers,
+            endpoint_gossip_interval: Duration::from_secs(1),
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            outbound_capacity: DEFAULT_OUTBOUND_CAPACITY,
+            codec: Arc::clone(&opts.codec),
+            cluster_secret: opts.secret,
+            allowlist: Some(admitted.clone()),
+            encryption: opts.encryption,
+        },
+        listener,
+    );
+    let system: TcpCluster = ClusterSystem::start(
+        node,
+        TokioClock::new(),
+        OsEntropy::new(),
+        TokioSpawner::current(),
+        transport,
+        inbound,
+        ClusterConfig {
+            codec: opts.codec,
+            events: opts.events,
+            membership,
+            ..ClusterConfig::default()
+        },
+    );
+
+    // Seed the membership view with every admitted peer. A client here is a
+    // member of the view, never of the Raft roster.
+    for peer in admitted {
+        if peer != node {
+            system.add_member(peer);
+        }
+    }
+    Ok(system)
+}

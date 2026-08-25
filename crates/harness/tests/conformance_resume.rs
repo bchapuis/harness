@@ -10,6 +10,7 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
+use actor_core::ActorSystem;
 use actor_core::Clock;
 use actor_core::Event;
 use actor_core::LocalSystemBuilder;

@@ -470,7 +470,37 @@ impl LocalHost {
         }
     }
 
-    /// Register a death-watch subscription (spec §12).
+    /// Register a death-watch subscription (spec §12) — or, when `target` has
+    /// already terminated, hand back the immediate `Terminated` delivery
+    /// (invariant #12) carrying the true recorded reason (`Failed` vs
+    /// `Stopped`; the graceful default once evicted). Judging the already-dead
+    /// case is the host's job — it owns the termination record — so every
+    /// system reports the same reason instead of each re-deriving it. The
+    /// caller launches the returned future rather than awaiting it inline:
+    /// delivery applies mailbox backpressure, and a watcher calling `watch`
+    /// from inside its own handler must not block on its own mailbox.
+    #[must_use = "launch the immediate delivery, or the watcher never learns the target is gone"]
+    pub fn watch(
+        &self,
+        target: ActorId,
+        watcher: ActorId,
+        deliver: WatchDelivery,
+    ) -> Option<BoxFuture<'static, ()>> {
+        if self.contains(&target) {
+            self.state.add_watch(target, watcher, deliver);
+            return None;
+        }
+        let reason = self
+            .termination_reason(&target)
+            .unwrap_or(TerminationReason::Stopped);
+        Some(deliver(Terminated { id: target, reason }))
+    }
+
+    /// Register a death-watch subscription **without** the already-dead check
+    /// (spec §12) — for a *remote* target this host cannot judge, tracked
+    /// locally so a synthesized node-down or a forwarded `Terminated` frame
+    /// reaches the watcher. For a local target use
+    /// [`watch`](LocalHost::watch), which owns the watch-after-death case.
     pub fn add_watch(&self, target: ActorId, watcher: ActorId, deliver: WatchDelivery) {
         self.state.add_watch(target, watcher, deliver);
     }

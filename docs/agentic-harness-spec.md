@@ -587,8 +587,8 @@ A run with no faults is the simplest case and MUST still pass.
 // --- what the declared tools require, here {Workspace, Native} (§5.3 item 4).
 let researcher = Kind::new("You are a research agent.")
     .model(ModelParams::default())
-    .sandboxed(Tier::Native, "shell", "Run a command in the workspace", &SHELL_SCHEMA)
-    .sandboxed(Tier::Workspace, "read_file", "Read a file from the workspace", &READ_SCHEMA)
+    .sandboxed("shell", "Run a command in the workspace", &SHELL_SCHEMA, Tier::Native)
+    .sandboxed("read_file", "Read a file from the workspace", &READ_SCHEMA, Tier::Workspace)
     .delegates_to(&["researcher"])          // the built-in `delegate` tool; allowlisted child kinds (§5.2, §8)
     .sandbox(SandboxProfile::image("workspace:base"))
     .grain(GranaryConfig {                  // the kind IS a grain type's config (§7.1, grain App. A)

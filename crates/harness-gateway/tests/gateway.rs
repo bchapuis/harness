@@ -77,9 +77,9 @@ impl SandboxProvider for NoSandbox {
     }
 }
 
-/// The hosting kinds: the same `assistant`/`worker` names and default (4) shards
-/// the gateway's `client_kinds` addresses, each carrying model params so the
-/// agent loop runs.
+/// The hosting kinds: the `assistant`/`worker` names and default (4) shards the
+/// client roster below addresses, each carrying model params so the agent loop
+/// runs.
 fn host_kinds() -> Kinds {
     let params = ModelParams {
         model: "test-model".to_string(),
@@ -120,9 +120,14 @@ async fn gateway() -> Arc<harness_gateway::Gateway<Sys>> {
     // The gateway joins as a client over the same system. On a single LocalSystem
     // the host gateways are in the receptionist immediately, so discovery returns
     // at once.
+    let shards = GranaryConfig::default().shards;
+    let roster = vec![
+        ("assistant".to_string(), shards),
+        ("worker".to_string(), shards),
+    ];
     harness_gateway::connect(
         system,
-        harness_gateway::client_kinds(),
+        &roster,
         GranaryConfig::default().shards,
         Arc::new(InsecureTokens),
         harness_gateway::Limits::default(),
