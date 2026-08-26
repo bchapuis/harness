@@ -24,7 +24,7 @@ use crate::workload::drive_local;
 
 /// The first point at which two same-seed runs disagreed (spec §18.1 #1). A
 /// `None` event means that run's stream ended first.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Divergence {
     /// The name of the workload that diverged.
     pub workload: &'static str,
@@ -60,6 +60,14 @@ impl std::fmt::Display for Divergence {
 }
 
 impl std::error::Error for Divergence {}
+
+/// `Debug` is the report too (see `RunFailure`), so `.unwrap()` prints the
+/// crafted account rather than two dumped events.
+impl std::fmt::Debug for Divergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
 
 /// Diff two event streams, returning the first index at which they differ.
 fn first_divergence(
@@ -127,22 +135,12 @@ fn sweep(
     seeds: impl IntoIterator<Item = u64>,
     mut check: impl FnMut(u64) -> Result<(), Box<Divergence>>,
 ) -> Result<(), Box<SweepDivergence>> {
-    let mut divergences: Vec<Divergence> = Vec::new();
-    let mut seeds_run = 0;
-    for seed in crate::corpus::regression_seeds(workload).chain(seeds) {
-        seeds_run += 1;
-        if let Err(divergence) = check(seed) {
-            // One line per seed, even when the corpus replay and the sweep range
-            // both reach it.
-            let already_seen = divergences.iter().any(|seen| seen.seed == seed);
-            if !already_seen {
-                divergences.push(*divergence);
-            }
-            if !crate::sweep::collect_all_failures() {
-                break;
-            }
-        }
-    }
+    let (seeds_run, divergences) = crate::sweep::sweep_generic(
+        crate::corpus::regression_seeds(workload).chain(seeds),
+        crate::sweep::collect_all_failures(),
+        |divergence: &Divergence| divergence.seed,
+        |seed| check(seed).map_err(|divergence| *divergence),
+    );
     if divergences.is_empty() {
         Ok(())
     } else {
@@ -156,7 +154,7 @@ fn sweep(
 /// Every seed at which a reproducibility sweep found a divergence. Boxed by its
 /// callers: each [`Divergence`] carries two full events, so the error dwarfs the
 /// `Ok` path.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SweepDivergence {
     /// How many seeds ran, including the ones that diverged.
     pub seeds_run: u64,
@@ -188,6 +186,13 @@ impl std::fmt::Display for SweepDivergence {
 }
 
 impl std::error::Error for SweepDivergence {}
+
+/// `Debug` is the report too (see `RunFailure`).
+impl std::fmt::Debug for SweepDivergence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
 
 /// Record the event stream of a single-node workload run under `seed`.
 pub fn record_seed<W: Workload>(workload: &W, seed: u64) -> Vec<Event> {

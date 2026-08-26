@@ -36,8 +36,8 @@ impl Default for FaultPolicy {
 }
 
 impl FaultPolicy {
-    /// Whether any fault dimension is enabled. The network takes a synchronous,
-    /// in-order fast path when this is false, so a no-fault run pays nothing.
+    /// Whether any fault dimension is enabled. Only then does routing draw
+    /// entropy, so a no-fault run's seeded stream is untouched by delivery.
     pub(crate) fn active(&self) -> bool {
         self.drop_num > 0 || self.duplicate_num > 0 || !self.max_latency.is_zero()
     }

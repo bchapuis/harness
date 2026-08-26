@@ -94,15 +94,17 @@ pub struct SimNetwork {
     /// so [`quiesce`](SimNetwork::quiesce) reaches the routing path a node is
     /// already sending on.
     pub(crate) faults: Arc<Mutex<FaultPolicy>>,
-    /// A fixed minimum delivery latency applied to every frame (spec §18.2).
-    /// **Not** a fault, and it draws no entropy: it exists so virtual time
-    /// always advances on delivery. Without it, zero-latency delivery completes
-    /// synchronously at the current instant (`SimClock::sleep(0)` is immediately
-    /// ready), and a burst of same-instant traffic can pin the clock and starve
-    /// future timers.
-    base_latency: Duration,
     stats: Arc<FaultCounters>,
 }
+
+/// The fixed minimum delivery latency applied to every frame (spec §18.2).
+/// **Not** a fault, and it draws no entropy: it exists so virtual time always
+/// advances on delivery. Without it, zero-latency delivery would complete
+/// synchronously at the current instant (`SimClock::sleep(0)` is immediately
+/// ready), and a burst of same-instant traffic could pin the clock and starve
+/// future timers. Small and realistic; a constant, so every run has exactly
+/// one delivery mode to reason about.
+const BASE_LATENCY: Duration = Duration::from_millis(1);
 
 impl SimNetwork {
     /// Create a network backed by a simulation's runtime seam (SWIM off,
@@ -125,9 +127,6 @@ impl SimNetwork {
             events: Arc::new(()),
             authorizer: None,
             faults: Arc::new(Mutex::new(FaultPolicy::default())),
-            // A small, realistic default so virtual time always advances on
-            // delivery (see the field doc). Deterministic and entropy-free.
-            base_latency: Duration::from_millis(1),
             stats: Arc::new(FaultCounters::default()),
         }
     }
@@ -135,15 +134,6 @@ impl SimNetwork {
     /// A snapshot of the faults this network has exercised so far (spec §18.3).
     pub fn fault_stats(&self) -> FaultStats {
         self.stats.snapshot()
-    }
-
-    /// Override the fixed minimum delivery latency (default 1 ms; see
-    /// [`base_latency`](Self::base_latency)). Set `Duration::ZERO` only for a test
-    /// that needs the old synchronous, same-instant delivery and is known not to
-    /// generate a starving message burst.
-    pub fn with_base_latency(mut self, base_latency: Duration) -> SimNetwork {
-        self.base_latency = base_latency;
-        self
     }
 
     /// Enable seed-controlled transport faults (spec §18.3).
@@ -284,9 +274,10 @@ impl SimNetwork {
 
     /// Route a frame from `from` to `to`. A blocked pair drops the frame
     /// silently (a partition is loss, not an error); an unknown node is
-    /// unreachable. With no faults the push is synchronous and in-order; under a
-    /// [`FaultPolicy`] the frame may be dropped, duplicated, or delayed, with
-    /// per-pair delivery kept strictly ordered so per-pair FIFO survives (#3).
+    /// unreachable. Every delivery advances virtual time by at least
+    /// [`BASE_LATENCY`]; under a [`FaultPolicy`] the frame may additionally be
+    /// dropped, duplicated, or delayed, with per-pair delivery kept strictly
+    /// ordered so per-pair FIFO survives (#3).
     fn route(&self, from: NodeId, to: NodeId, frame: Frame) -> Result<(), TransportError> {
         let faults = self.faults();
         let sender = {
@@ -301,19 +292,10 @@ impl SimNetwork {
             }
         };
 
-        // Fast synchronous path only when there is neither a fault nor a base
-        // latency to apply (spec §18.2). It draws no entropy; see
-        // `reserve_pair_slot` for why that matters.
-        if !faults.active() && self.base_latency.is_zero() {
-            return sender
-                .try_send((from, frame))
-                .map_err(|_| TransportError::Unreachable);
-        }
-
         // Drop/duplicate are applied **only when faults are configured**, so the
-        // base-latency-only default draws no entropy here and the seeded stream
-        // stays byte-identical to a zero-latency run. (`buggify` always consumes
-        // a draw, so it must not run otherwise.)
+        // no-fault default draws no entropy here and the seeded stream is not
+        // perturbed by routing. (`buggify` always consumes a draw, so it must
+        // not run otherwise.)
         let copies = if faults.active() {
             // Seeded loss (also models corruption / association loss): the node
             // never sees the frame, so it cannot be wedged by it (spec §7.3).
@@ -357,14 +339,13 @@ impl SimNetwork {
     /// FIFO under jitter: later-sent frames never get an earlier delivery time.
     ///
     /// This draws entropy **only** when `max_latency` is set, which keeps the
-    /// seeded stream byte-identical across latency configs: `route`'s fast path
-    /// returns before calling this, and a base-latency-only run reaches here
-    /// with `max_latency` zero, so neither path draws. Drawing unconditionally
-    /// would silently break reproducibility with no compile error to catch it,
-    /// so keep this gate in lockstep with `route`'s.
+    /// seeded stream byte-identical across latency configs: a no-fault run
+    /// reaches here with `max_latency` zero and draws nothing. Drawing
+    /// unconditionally would silently break reproducibility with no compile
+    /// error to catch it.
     fn reserve_pair_slot(&self, from: NodeId, to: NodeId, max_latency: Duration) -> Instant {
         // Seeded jitter only when `max_latency` is set (drawing entropy); floored by
-        // the fixed `base_latency` so every delivery is at least `now + base` — the
+        // the fixed [`BASE_LATENCY`] so every delivery is at least `now + base` — the
         // floor draws no entropy.
         let jitter = if max_latency.is_zero() {
             Duration::ZERO
@@ -372,7 +353,7 @@ impl SimNetwork {
             let span = max_latency.as_nanos() as u64 + 1;
             Duration::from_nanos(self.entropy.next_u64() % span)
         };
-        let earliest = self.clock.now() + jitter.max(self.base_latency);
+        let earliest = self.clock.now() + jitter.max(BASE_LATENCY);
         let mut inner = self.inner.lock().expect("network mutex poisoned");
         let deliver_at = match inner.pair_clock.get(&(from, to)) {
             Some(last) => earliest.max(*last + Duration::from_nanos(1)),

@@ -149,6 +149,35 @@ pub fn collect_all_failures() -> bool {
     }
 }
 
+/// The sweep loop every runner shares, generic over its failure type: run each
+/// seed, dedupe failures by seed (a seed the corpus replay and the sweep range
+/// both reach runs twice and reports once), and either stop at the first
+/// failure or collect them all. Returns how many seeds ran and the failures in
+/// sweep order; an empty list is success. What "failure" means — an invariant
+/// violation, a determinism divergence, a caught panic — stays the runner's,
+/// as does its report.
+pub(crate) fn sweep_generic<F>(
+    seeds: impl IntoIterator<Item = u64>,
+    collect: bool,
+    seed_of: impl Fn(&F) -> u64,
+    mut run: impl FnMut(u64) -> Result<(), F>,
+) -> (u64, Vec<F>) {
+    let mut failures: Vec<F> = Vec::new();
+    let mut seeds_run = 0;
+    for seed in seeds {
+        seeds_run += 1;
+        if let Err(failure) = run(seed) {
+            if !failures.iter().any(|seen| seed_of(seen) == seed) {
+                failures.push(failure);
+            }
+            if !collect {
+                break;
+            }
+        }
+    }
+    (seeds_run, failures)
+}
+
 /// Say once per test binary how sweeps are sized, so a narrow run is never
 /// mistaken for the corpus.
 fn announce_once() {
@@ -201,25 +230,19 @@ fn announce_once() {
 /// sweeps as well as a name.
 pub fn scenario_sweep(name: &str, seeds: impl IntoIterator<Item = u64>, mut run: impl FnMut(u64)) {
     let seeds = crate::corpus::regression_seeds(name).chain(seeds);
+    // The stop-at-first mode runs bare, so the failing seed's own panic (and
+    // backtrace) surfaces unwrapped.
     if !collect_all_failures() {
         for seed in seeds {
             run(seed);
         }
         return;
     }
-    let mut failed: Vec<(u64, String)> = Vec::new();
-    let mut seeds_run = 0;
-    for seed in seeds {
-        seeds_run += 1;
-        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(seed)));
-        if let Err(payload) = attempt
-            && !failed.iter().any(|(seen, _)| *seen == seed)
-        {
-            // One line per seed, even when the corpus replay and the sweep range
-            // both reach it.
-            failed.push((seed, crate::workload::panic_detail(payload.as_ref())));
-        }
-    }
+    let (seeds_run, failed) =
+        sweep_generic(seeds, true, |(seen, _): &(u64, String)| *seen, |seed| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(seed)))
+                .map_err(|payload| (seed, crate::workload::panic_detail(payload.as_ref())))
+        });
     if failed.is_empty() {
         return;
     }

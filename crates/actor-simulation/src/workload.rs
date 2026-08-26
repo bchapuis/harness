@@ -76,11 +76,20 @@ impl FaultConfig {
 /// A failing run, with everything needed to replay it (spec §18.6). The
 /// `(workload, seed)` pair alone replays a single-node or cluster run
 /// deterministically, since the seed regenerates the run's faults.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RunFailure {
     pub workload: &'static str,
     pub seed: u64,
     pub violations: Vec<Violation>,
+}
+
+/// `Debug` is the report too (the anyhow convention), so `.unwrap()` and
+/// `assert!(…, "{failure:?}")` print the crafted account rather than a
+/// struct dump — no call site needs a `panic!("{failure}")` dance.
+impl std::fmt::Debug for RunFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 impl std::fmt::Display for RunFailure {
@@ -105,7 +114,7 @@ impl std::error::Error for RunFailure {}
 /// exactly as one; under [`collect_all_failures`](crate::collect_all_failures)
 /// it carries every failing seed and prints them ready to paste into
 /// `corpus.txt`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SweepFailure {
     pub workload: &'static str,
     /// How many seeds ran, including the ones that failed. When the sweep stops
@@ -142,6 +151,13 @@ impl std::fmt::Display for SweepFailure {
 }
 
 impl std::error::Error for SweepFailure {}
+
+/// See [`RunFailure`]'s `Debug`: the report is the debug form.
+impl std::fmt::Debug for SweepFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
 
 /// Run one seed, turning a panic into a [`RunFailure`] against that seed.
 ///
@@ -190,21 +206,10 @@ pub(crate) fn sweep_collecting(
     collect: bool,
     mut run: impl FnMut(u64) -> Result<(), RunFailure>,
 ) -> Result<(), SweepFailure> {
-    let mut failures: Vec<RunFailure> = Vec::new();
-    let mut seeds_run = 0;
-    for seed in seeds {
-        seeds_run += 1;
-        if let Err(failure) = caught(workload, seed, || run(seed)) {
-            // A seed the corpus replay and the sweep range both reach ran twice;
-            // it reports once.
-            if !failures.iter().any(|seen| seen.seed == seed) {
-                failures.push(failure);
-            }
-            if !collect {
-                break;
-            }
-        }
-    }
+    let (seeds_run, failures) =
+        crate::sweep::sweep_generic(seeds, collect, |failure: &RunFailure| failure.seed, |seed| {
+            caught(workload, seed, || run(seed))
+        });
     if failures.is_empty() {
         Ok(())
     } else {

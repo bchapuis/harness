@@ -169,19 +169,13 @@ impl Rollout {
     }
 
     /// The window at `stage`, saturating at the newest release.
-    pub fn window(&self, stage: usize) -> compat::Window {
+    pub(crate) fn window(&self, stage: usize) -> compat::Window {
         self.stages[stage.min(self.stages.len() - 1)]
     }
 
     /// How many releases the rollout spans.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.stages.len()
-    }
-
-    /// Whether the rollout is empty. Never true — [`Rollout::new`] requires two
-    /// stages — and present because `len` without it is a clippy lint.
-    pub fn is_empty(&self) -> bool {
-        self.stages.is_empty()
     }
 }
 
@@ -214,19 +208,6 @@ pub enum ClusterModeSpec {
         heartbeat_interval: Duration,
         downing: DowningPolicy,
     },
-}
-
-impl ClusterModeSpec {
-    /// A short name for reporting, so one workload swept across modes yields
-    /// distinguishable run names.
-    pub fn name(&self) -> &'static str {
-        match self {
-            ClusterModeSpec::Static { .. } => "static",
-            ClusterModeSpec::Gossip { .. } => "gossip",
-            ClusterModeSpec::Registry { .. } => "registry",
-            ClusterModeSpec::Leader { .. } => "leader",
-        }
-    }
 }
 
 /// A distributed test scenario (spec §18.4). `setup` builds actors and
@@ -697,12 +678,9 @@ pub fn run_cluster_swarm<W: ClusterWorkload>(
     workload: &W,
     seeds: impl IntoIterator<Item = u64>,
 ) -> Result<(), SweepFailure> {
-    sweep_collecting(
-        workload.name(),
-        crate::corpus::regression_seeds(workload.name()).chain(seeds),
-        crate::sweep::collect_all_failures(),
-        |seed| run_cluster_seed(workload, seed),
-    )
+    // The coverage runner with the stats thrown away: one sweep path, two
+    // reported shapes.
+    run_cluster_swarm_coverage(workload, seeds).map(|_| ())
 }
 
 /// Sweep a cluster workload across many seeds, checking invariants on each run

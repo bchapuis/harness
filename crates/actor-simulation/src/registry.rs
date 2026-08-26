@@ -200,7 +200,7 @@ impl RegistryClient for SimRegistry {
                 let delay = Duration::from_nanos(registry.entropy.next_u64() % span);
                 registry.clock.sleep(delay).await;
             }
-            let state = registry.state.lock().expect("registry mutex poisoned");
+            let mut state = registry.state.lock().expect("registry mutex poisoned");
             if !state.available {
                 return Err(RegistryError::Unavailable);
             }
@@ -215,12 +215,7 @@ impl RegistryClient for SimRegistry {
                 let back = 1 + registry.entropy.next_u64() as usize
                     % registry.faults.max_staleness.max(1).min(lag_by);
                 let snapshot = state.history[state.history.len() - 1 - back].clone();
-                drop(state);
-                registry
-                    .state
-                    .lock()
-                    .expect("registry mutex poisoned")
-                    .stale_served += 1;
+                state.stale_served += 1;
                 return Ok(snapshot);
             }
             Ok(state.snapshot())
@@ -228,13 +223,7 @@ impl RegistryClient for SimRegistry {
     }
 
     fn register(&self, node: NodeId) -> BoxFuture<'static, Result<u64, RegistryError>> {
-        let registry = self.clone();
-        Box::pin(async move {
-            if !registry.available() {
-                return Err(RegistryError::Unavailable);
-            }
-            Ok(registry.register(node))
-        })
+        self.gated(move |registry| registry.register(node))
     }
 
     fn set_state(
@@ -242,23 +231,11 @@ impl RegistryClient for SimRegistry {
         node: NodeId,
         state: RegistryState,
     ) -> BoxFuture<'static, Result<u64, RegistryError>> {
-        let registry = self.clone();
-        Box::pin(async move {
-            if !registry.available() {
-                return Err(RegistryError::Unavailable);
-            }
-            Ok(registry.set_state(node, state))
-        })
+        self.gated(move |registry| registry.set_state(node, state))
     }
 
     fn deregister(&self, node: NodeId) -> BoxFuture<'static, Result<u64, RegistryError>> {
-        let registry = self.clone();
-        Box::pin(async move {
-            if !registry.available() {
-                return Err(RegistryError::Unavailable);
-            }
-            Ok(registry.deregister(node))
-        })
+        self.gated(move |registry| registry.deregister(node))
     }
 }
 
@@ -268,5 +245,20 @@ impl SimRegistry {
             .lock()
             .expect("registry mutex poisoned")
             .available
+    }
+
+    /// Run one mutating client call behind the availability gate — the one
+    /// place the gate lives, shared by `register`/`set_state`/`deregister`.
+    fn gated(
+        &self,
+        op: impl FnOnce(&SimRegistry) -> u64 + Send + 'static,
+    ) -> BoxFuture<'static, Result<u64, RegistryError>> {
+        let registry = self.clone();
+        Box::pin(async move {
+            if !registry.available() {
+                return Err(RegistryError::Unavailable);
+            }
+            Ok(op(&registry))
+        })
     }
 }
