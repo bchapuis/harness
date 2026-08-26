@@ -72,16 +72,10 @@ use actor_serialization::JsonCodec;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
-use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::ClientConfig;
-use tokio_rustls::rustls::RootCertStore;
-use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::CertificateDer;
 use tokio_rustls::rustls::pki_types::PrivateKeyDer;
 use tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer;
 use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::rustls::server::WebPkiClientVerifier;
 
 const CLUSTER_DNS: &str = "cluster.local";
 const SECRET: &str = "demo-cluster-secret";
@@ -406,29 +400,11 @@ fn load_tls(dir: &FsPath) -> TlsConfig {
     let read = |name: &str| {
         std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("cannot read {name}: {e}"))
     };
-    let ca = CertificateDer::from(read("ca.der"));
-    let leaf = CertificateDer::from(read("node.der"));
-    let key_bytes = read("node-key.der");
-    let key = || PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_bytes.clone()));
-
-    let mut roots = RootCertStore::empty();
-    roots.add(ca).unwrap();
-
-    let verifier = WebPkiClientVerifier::builder(Arc::new(roots.clone()))
-        .build()
-        .unwrap();
-    let server = ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(vec![leaf.clone()], key())
-        .unwrap();
-    let client = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_client_auth_cert(vec![leaf], key())
-        .unwrap();
-
-    TlsConfig {
-        acceptor: TlsAcceptor::from(Arc::new(server)),
-        connector: TlsConnector::from(Arc::new(client)),
-        server_name: ServerName::try_from(CLUSTER_DNS).unwrap(),
-    }
+    TlsConfig::mutual(
+        CertificateDer::from(read("ca.der")),
+        CertificateDer::from(read("node.der")),
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(read("node-key.der"))),
+        ServerName::try_from(CLUSTER_DNS).unwrap(),
+    )
+    .expect("assemble mutual TLS")
 }

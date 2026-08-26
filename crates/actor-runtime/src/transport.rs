@@ -43,6 +43,9 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls;
+use tokio_rustls::rustls::pki_types::CertificateDer;
+use tokio_rustls::rustls::pki_types::PrivateKeyDer;
 use tokio_rustls::rustls::pki_types::ServerName;
 
 use crate::association::Admitted;
@@ -117,7 +120,10 @@ pub fn node_addr(host: &str, port_base: u16, id: u64) -> Result<SocketAddr, Stri
 /// The TLS material for mutually-authenticated associations (spec §15). Both
 /// the acceptor and the connector require a peer certificate, so every
 /// association is mutually authenticated against the trusted roots baked into
-/// these configs. Constructing them (CA, certs, keys) is the caller's job.
+/// these configs. [`mutual`](TlsConfig::mutual) assembles them from the raw
+/// material; producing that material (CA, certs, keys) is the caller's job,
+/// and the fields stay public as the escape hatch for a deployment that needs
+/// a different rustls assembly.
 #[derive(Clone)]
 pub struct TlsConfig {
     /// Wraps inbound (accepted) connections; configured to demand client auth.
@@ -128,6 +134,42 @@ pub struct TlsConfig {
     /// for this name, so all nodes can share one cluster identity.
     pub server_name: ServerName<'static>,
 }
+
+impl TlsConfig {
+    /// Assemble the mutual-TLS material from one CA, this node's leaf `cert`
+    /// and `key`, and the cluster's shared `server_name` — the one rustls
+    /// ritual every deployment would otherwise copy: the CA becomes both the
+    /// client-auth verifier and the dial-side root store, and the leaf serves
+    /// both directions.
+    pub fn mutual(
+        ca: CertificateDer<'static>,
+        cert: CertificateDer<'static>,
+        key: PrivateKeyDer<'static>,
+        server_name: ServerName<'static>,
+    ) -> Result<TlsConfig, rustls::Error> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca)?;
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots.clone()))
+            .build()
+            .map_err(|e| rustls::Error::General(e.to_string()))?;
+        let server = rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(vec![cert.clone()], key.clone_key())?;
+        let client = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(vec![cert], key)?;
+        Ok(TlsConfig {
+            acceptor: TlsAcceptor::from(Arc::new(server)),
+            connector: TlsConnector::from(Arc::new(client)),
+            server_name,
+        })
+    }
+}
+
+/// The erased connection stream — TCP, or TLS over it — so the dial and accept
+/// sequences are written once per side rather than once per encryption mode.
+trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
 
 /// Static configuration for a [`TcpTransport`] (spec §7.1, §15).
 #[derive(Clone)]
@@ -365,30 +407,24 @@ impl TcpTransport {
         let handshake_timeout = self.shared.config.handshake_timeout;
 
         // Wrap in TLS if configured, then run the application handshake over the
-        // (possibly encrypted) stream, all under one handshake deadline.
-        match &self.shared.config.encryption {
-            Encryption::MutualTls(tls) => {
-                let handshake = async {
-                    let stream = tls.connector.connect(tls.server_name.clone(), tcp).await?;
-                    client_handshake(stream, &self.shared, peer).await
-                };
-                let (stream, version) = tokio::time::timeout(handshake_timeout, handshake)
-                    .await
-                    .map_err(|_| TransportError::Unreachable)?
-                    .map_err(|_| TransportError::Unreachable)?;
-                Ok(self.register_dialed(peer, stream, version))
-            }
-            Encryption::PlaintextTrusted => {
-                let (stream, version) = tokio::time::timeout(
-                    handshake_timeout,
-                    client_handshake(tcp, &self.shared, peer),
-                )
-                .await
-                .map_err(|_| TransportError::Unreachable)?
-                .map_err(|_| TransportError::Unreachable)?;
-                Ok(self.register_dialed(peer, stream, version))
-            }
-        }
+        // (possibly encrypted) stream, all under one handshake deadline. The
+        // stream type is erased first, so the deadline/handshake/registration
+        // sequence exists once for both encryption modes; a per-connection box
+        // is noise next to the TCP (and TLS) work on this path.
+        let handshake = async {
+            let stream: Box<dyn Duplex> = match &self.shared.config.encryption {
+                Encryption::MutualTls(tls) => {
+                    Box::new(tls.connector.connect(tls.server_name.clone(), tcp).await?)
+                }
+                Encryption::PlaintextTrusted => Box::new(tcp),
+            };
+            client_handshake(stream, &self.shared, peer).await
+        };
+        let (stream, version) = tokio::time::timeout(handshake_timeout, handshake)
+            .await
+            .map_err(|_| TransportError::Unreachable)?
+            .map_err(|_| TransportError::Unreachable)?;
+        Ok(self.register_dialed(peer, stream, version))
     }
 
     fn lookup(&self, peer: NodeId) -> Option<Conn> {
@@ -504,26 +540,19 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
 /// node (spec §7, §15).
 async fn serve_accepted(tcp: TcpStream, shared: Arc<Shared>) {
     // Bound the whole accept-side handshake: a peer that connects but never
-    // speaks must not tie up this task (spec §7, §15).
+    // speaks must not tie up this task (spec §7, §15). As on the dial side,
+    // the stream type is erased first so the sequence exists once for both
+    // encryption modes.
     let handshake_timeout = shared.config.handshake_timeout;
-    match shared.config.encryption.clone() {
-        Encryption::MutualTls(tls) => {
-            let handshake = async {
-                let stream = tls.acceptor.accept(tcp).await.map_err(|_| ())?;
-                server_handshake(stream, &shared).await.map_err(|_| ())
-            };
-            if let Ok(Ok((stream, peer))) = tokio::time::timeout(handshake_timeout, handshake).await
-            {
-                read_loop(stream, peer, &shared).await;
-            }
-        }
-        Encryption::PlaintextTrusted => {
-            if let Ok(Ok((stream, peer))) =
-                tokio::time::timeout(handshake_timeout, server_handshake(tcp, &shared)).await
-            {
-                read_loop(stream, peer, &shared).await;
-            }
-        }
+    let handshake = async {
+        let stream: Box<dyn Duplex> = match shared.config.encryption.clone() {
+            Encryption::MutualTls(tls) => Box::new(tls.acceptor.accept(tcp).await?),
+            Encryption::PlaintextTrusted => Box::new(tcp),
+        };
+        server_handshake(stream, &shared).await
+    };
+    if let Ok(Ok((stream, peer))) = tokio::time::timeout(handshake_timeout, handshake).await {
+        read_loop(stream, peer, &shared).await;
     }
 }
 

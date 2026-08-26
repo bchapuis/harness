@@ -37,16 +37,10 @@ use actor_serialization::JsonCodec;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
-use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::ClientConfig;
-use tokio_rustls::rustls::RootCertStore;
-use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::CertificateDer;
 use tokio_rustls::rustls::pki_types::PrivateKeyDer;
 use tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer;
 use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::rustls::server::WebPkiClientVerifier;
 
 // --- Messages and actors (generic over the system, as the spec allows) -------
 
@@ -316,31 +310,16 @@ impl TlsAuthority {
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_der.clone()))
     }
 
-    fn roots(&self) -> RootCertStore {
-        let mut roots = RootCertStore::empty();
-        roots.add(self.ca_der.clone()).unwrap();
-        roots
-    }
-
     /// A [`TlsConfig`] that presents this authority's leaf cert and trusts only
     /// this authority's CA.
     pub fn tls_config(&self) -> TlsConfig {
-        let verifier = WebPkiClientVerifier::builder(Arc::new(self.roots()))
-            .build()
-            .unwrap();
-        let server = ServerConfig::builder()
-            .with_client_cert_verifier(verifier)
-            .with_single_cert(vec![self.leaf_der.clone()], self.private_key())
-            .unwrap();
-        let client = ClientConfig::builder()
-            .with_root_certificates(self.roots())
-            .with_client_auth_cert(vec![self.leaf_der.clone()], self.private_key())
-            .unwrap();
-        TlsConfig {
-            acceptor: TlsAcceptor::from(Arc::new(server)),
-            connector: TlsConnector::from(Arc::new(client)),
-            server_name: ServerName::try_from(CLUSTER_DNS).unwrap(),
-        }
+        TlsConfig::mutual(
+            self.ca_der.clone(),
+            self.leaf_der.clone(),
+            self.private_key(),
+            ServerName::try_from(CLUSTER_DNS).unwrap(),
+        )
+        .unwrap()
     }
 }
 

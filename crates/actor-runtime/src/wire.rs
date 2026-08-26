@@ -121,7 +121,8 @@ pub async fn write_hello<W>(stream: &mut W, hello: &Hello) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let bytes = serde_json_to_vec(hello)?;
+    let bytes = serde_json::to_vec(hello)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     write_record(stream, &bytes).await
 }
 
@@ -131,19 +132,7 @@ where
     R: AsyncRead + Unpin,
 {
     let bytes = read_record(stream).await?;
-    serde_json_from_slice(&bytes)
-}
-
-// Framed with the bundled JSON codec, reached through the `Codec` trait to avoid
-// a direct serde_json dependency in this crate.
-fn serde_json_to_vec<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
-    let codec = actor_serialization::JsonCodec;
-    encode(&codec, value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
-}
-
-fn serde_json_from_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
-    let codec = actor_serialization::JsonCodec;
-    decode::<T>(&codec, bytes)
+    serde_json::from_slice(&bytes)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 

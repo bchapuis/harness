@@ -42,11 +42,6 @@ use actor_serialization::JsonCodec;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
-use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::ClientConfig;
-use tokio_rustls::rustls::RootCertStore;
-use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::PrivateKeyDer;
 use tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer;
 use tokio_rustls::rustls::pki_types::ServerName;
@@ -104,30 +99,14 @@ fn cluster_tls() -> TlsConfig {
         .push(rcgen::DnType::CommonName, "actor-cluster-node");
     let leaf_key = rcgen::KeyPair::generate().unwrap();
     let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
-    let leaf_der = leaf_cert.der().clone();
-    let key_der = leaf_key.serialize_der();
-    let key = || PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der.clone()));
 
-    let mut roots = RootCertStore::empty();
-    roots.add(ca_cert.der().clone()).unwrap();
-
-    let verifier = WebPkiClientVerifier::builder(Arc::new(roots.clone()))
-        .build()
-        .unwrap();
-    let server = ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(vec![leaf_der.clone()], key())
-        .unwrap();
-    let client = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_client_auth_cert(vec![leaf_der], key())
-        .unwrap();
-
-    TlsConfig {
-        acceptor: TlsAcceptor::from(Arc::new(server)),
-        connector: TlsConnector::from(Arc::new(client)),
-        server_name: ServerName::try_from(CLUSTER_DNS).unwrap(),
-    }
+    TlsConfig::mutual(
+        ca_cert.der().clone(),
+        leaf_cert.der().clone(),
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+        ServerName::try_from(CLUSTER_DNS).unwrap(),
+    )
+    .expect("assemble mutual TLS")
 }
 
 fn start_node(
