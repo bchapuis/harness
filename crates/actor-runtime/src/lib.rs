@@ -45,6 +45,7 @@ pub use clock::TokioClock;
 pub use entropy::OsEntropy;
 pub use join::JoinOptions;
 pub use join::join;
+pub use join::wait_for_cluster;
 pub use spawner::TokioSpawner;
 pub use storage::FileRaftWAL;
 pub use transport::DEFAULT_CONNECT_TIMEOUT;

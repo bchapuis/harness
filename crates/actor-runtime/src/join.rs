@@ -185,3 +185,43 @@ pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
     }
     Ok(system)
 }
+
+/// Hold startup open until the cluster has converged enough to serve: every
+/// peer is in the membership view and the control group has elected a leader
+/// (so shard groups can elect too). A convenience, not a correctness
+/// requirement — the layers above absorb a command issued before convergence
+/// (e.g. granary's bounded redirect, G13).
+///
+/// `expected` is the cluster size; `members()` reports peers only (never this
+/// node) plus any admitted client, so the bar is the peer quorum
+/// `expected - 1` (a client joining only raises the count). Counted polls
+/// rather than a wall-clock deadline: reading the host clock directly is what
+/// the `Clock` seam exists to prevent (spec §4.6), and the elapsed figure is
+/// derived from the count. Size `budget` to cover peer discovery plus the
+/// first election; exhausting it then means something is actually wrong — a
+/// peer that never appeared, or a group that cannot elect — reported with the
+/// member and leader state, and the node serves anyway.
+pub async fn wait_for_cluster(system: &TcpCluster, expected: usize, budget: Duration) {
+    const POLL: Duration = Duration::from_millis(100);
+    let peers = expected.saturating_sub(1);
+    let attempts = (budget.as_millis() / POLL.as_millis()).max(1) as u32;
+    for attempt in 0..attempts {
+        if system.membership().members().len() >= peers && system.leader().is_some() {
+            eprintln!(
+                "[{}] cluster ready (leader elected) after {:.1}s",
+                system.node(),
+                (POLL * attempt).as_secs_f64()
+            );
+            return;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    eprintln!(
+        "[{}] warning: cluster not ready after {:.0}s; serving anyway. \
+         Members {}/{peers}, leader {:?}",
+        system.node(),
+        budget.as_secs_f64(),
+        system.membership().members().len(),
+        system.leader(),
+    );
+}

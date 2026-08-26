@@ -295,7 +295,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         opts.data.display(),
         opts.model
     );
-    wait_for_hosts(&system, opts.nodes as usize).await;
+    actor_runtime::wait_for_cluster(&system, opts.nodes as usize, Duration::from_secs(15)).await;
     eprintln!(
         "[{node}] hosting grains; the public edge is harness-gateway (a cluster client). \
          No client-facing listener on this node."
@@ -409,30 +409,6 @@ fn harness_config() -> HarnessConfig {
         tool_timeout: Duration::from_secs(120),
         ..HarnessConfig::default()
     }
-}
-
-/// Hold startup open until the cluster has converged enough to serve: every peer
-/// is in the membership view and the control group has elected a leader (so
-/// granary's shard groups can elect too). granary's bounded redirect absorbs a
-/// prompt issued before the shard map converges (invariant G13), so this is a
-/// convenience, not a correctness requirement.
-///
-/// `expected` is the cluster size; `members()` reports peers only (never this
-/// node, membership.rs) plus any admitted client, so the bar is the peer quorum
-/// `expected - 1` (a client joining only raises the count).
-async fn wait_for_hosts(system: &TcpCluster, expected: usize) {
-    let peers = expected.saturating_sub(1);
-    for _ in 0..150 {
-        if system.membership().members().len() >= peers && system.leader().is_some() {
-            eprintln!("[{}] cluster ready (leader elected)", system.node());
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    eprintln!(
-        "[{}] warning: cluster not ready after 15s (no leader or peers missing); serving anyway",
-        system.node()
-    );
 }
 
 /// The observability stream on stderr (harness spec §10.4): membership and

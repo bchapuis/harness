@@ -151,7 +151,8 @@ const RAFT_ELECTION_TIMEOUT: Duration = Duration::from_secs(2);
 /// one, and small enough that a cold start is not quantized into multi-second steps.
 const RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(250);
 
-/// How long [`wait_for_hosts`] waits for the cluster to be ready before serving anyway.
+/// How long [`actor_runtime::wait_for_cluster`] waits for the cluster to be
+/// ready before serving anyway.
 ///
 /// Derived, not chosen. This was a flat 15 s against a 20 s election timeout, so a cold
 /// start could not possibly satisfy it: every boot printed "cluster not ready after
@@ -302,7 +303,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         opts.nodes,
         opts.data.display()
     );
-    wait_for_hosts(&system, opts.nodes as usize).await;
+    actor_runtime::wait_for_cluster(&system, opts.nodes as usize, READY_TIMEOUT).await;
 
     if let Some(addr) = &opts.admin {
         let listener = tokio::net::TcpListener::bind(addr)
@@ -332,7 +333,6 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
             Arc::clone(&authority),
             node,
             host.clone(),
-            node.to_string(),
         ));
     }
     if opts.doors.is_empty() {
@@ -351,9 +351,8 @@ async fn serve_door(
     authority: Arc<GrainAuthority>,
     node: NodeId,
     host: Option<Arc<dyn machine_host::MachineHost>>,
-    scope: String,
 ) {
-    let backend = Arc::new(LocalBackend::new(host, scope));
+    let backend = Arc::new(LocalBackend::new(host, node.to_string()));
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -447,41 +446,6 @@ fn machine_host(
         }
     };
     Ok(Some(mechanism))
-}
-
-/// Hold startup open until the cluster has converged enough to serve. A
-/// convenience: granary's bounded redirect absorbs a command issued before the
-/// shard map converges (G13).
-async fn wait_for_hosts(system: &TcpCluster, expected: usize) {
-    const POLL: Duration = Duration::from_millis(100);
-    let peers = expected.saturating_sub(1);
-    // Counted polls rather than a wall-clock deadline: reading the host clock directly
-    // is what the `Clock` seam exists to prevent (actor §4.6), and it is disallowed
-    // here for that reason. The elapsed figure below is derived from the count, which
-    // is exact enough for a startup line and owes nothing to the wall clock.
-    let attempts = (READY_TIMEOUT.as_millis() / POLL.as_millis()).max(1) as u32;
-    for attempt in 0..attempts {
-        if system.membership().members().len() >= peers && system.leader().is_some() {
-            eprintln!(
-                "[{}] cluster ready (leader elected) after {:.1}s",
-                system.node(),
-                (POLL * attempt).as_secs_f64()
-            );
-            return;
-        }
-        tokio::time::sleep(POLL).await;
-    }
-    // Reaching here now means something is actually wrong — a peer that never
-    // appeared, or a group that cannot elect — rather than the budget being shorter
-    // than the election it was waiting for.
-    eprintln!(
-        "[{}] warning: cluster not ready after {:.0}s; serving anyway. \
-         Members {}/{peers}, leader {:?}",
-        system.node(),
-        READY_TIMEOUT.as_secs_f64(),
-        system.membership().members().len(),
-        system.leader(),
-    );
 }
 
 /// The observability stream on stderr: membership and reachability
