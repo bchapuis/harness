@@ -20,7 +20,7 @@ use crate::system::ActorSystem;
 pub struct Ctx<A: Actor> {
     id: ActorId,
     system: A::System,
-    stopping: Arc<AtomicBool>,
+    stopping: AtomicBool,
 }
 
 impl<A: Actor> Ctx<A> {
@@ -28,7 +28,7 @@ impl<A: Actor> Ctx<A> {
         Ctx {
             id,
             system,
-            stopping: Arc::new(AtomicBool::new(false)),
+            stopping: AtomicBool::new(false),
         }
     }
 

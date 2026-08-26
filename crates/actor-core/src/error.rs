@@ -44,6 +44,15 @@ impl std::fmt::Display for CallError {
 
 impl std::error::Error for CallError {}
 
+/// How a codec failure surfaces on a call (spec §14.1): its message, under
+/// `Serialization`. The one definition every encode/decode site leans on
+/// through `?`, so the mapping cannot drift between them.
+impl From<actor_serialization::CodecError> for CallError {
+    fn from(e: actor_serialization::CodecError) -> Self {
+        CallError::Serialization(e.to_string())
+    }
+}
+
 /// Await **every** future, then report the first error — the non-abandoning
 /// counterpart to `futures::future::try_join_all`.
 ///

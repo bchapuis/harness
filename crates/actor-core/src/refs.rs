@@ -122,7 +122,7 @@ impl<A: Actor> ActorRef<A> {
         A: Handler<M>,
         M: Message,
     {
-        self.ask_within(msg, DEFAULT_ASK_TIMEOUT).await
+        self.ask_timeout(msg, DEFAULT_ASK_TIMEOUT).await
     }
 
     /// Request/response with an explicit deadline overriding the default (spec
@@ -132,7 +132,24 @@ impl<A: Actor> ActorRef<A> {
         A: Handler<M>,
         M: Message,
     {
-        self.ask_within(msg, within).await
+        match self.locate() {
+            Target::Local(mailbox) => mailbox.ask(msg).await,
+            Target::DeadLetter => Err(CallError::DeadLetter),
+            Target::Remote => {
+                let codec = self.system.codec();
+                let payload = actor_serialization::encode(&*codec, &msg)?;
+                let bytes = self
+                    .system
+                    .remote_ask(&self.id, M::MANIFEST.as_str(), payload, within)
+                    .await?;
+                // Decode under this system so an `ActorRef` in the reply rebinds
+                // here (spec §4.4).
+                crate::rebind::with_decoding_system(&self.system, || {
+                    actor_serialization::decode::<M::Reply>(&*codec, &bytes)
+                        .map_err(CallError::from)
+                })
+            }
+        }
     }
 
     /// Request/response that collapses the two error levels into one (spec
@@ -145,7 +162,7 @@ impl<A: Actor> ActorRef<A> {
         M: Message<Reply = Result<T, E>>,
         E: From<CallError>,
     {
-        match self.ask_within(msg, DEFAULT_ASK_TIMEOUT).await {
+        match self.ask_timeout(msg, DEFAULT_ASK_TIMEOUT).await {
             Ok(inner) => inner,
             Err(call_err) => Err(E::from(call_err)),
         }
@@ -168,32 +185,6 @@ impl<A: Actor> ActorRef<A> {
         }
     }
 
-    async fn ask_within<M>(&self, msg: M, within: Duration) -> Result<M::Reply, CallError>
-    where
-        A: Handler<M>,
-        M: Message,
-    {
-        match self.locate() {
-            Target::Local(mailbox) => mailbox.ask(msg).await,
-            Target::DeadLetter => Err(CallError::DeadLetter),
-            Target::Remote => {
-                let codec = self.system.codec();
-                let payload = actor_serialization::encode(&*codec, &msg)
-                    .map_err(|e| CallError::Serialization(e.to_string()))?;
-                let bytes = self
-                    .system
-                    .remote_ask(&self.id, M::MANIFEST.as_str(), payload, within)
-                    .await?;
-                // Decode under this system so an `ActorRef` in the reply rebinds
-                // here (spec §4.4).
-                crate::rebind::with_decoding_system(&self.system, || {
-                    actor_serialization::decode::<M::Reply>(&*codec, &bytes)
-                        .map_err(|e| CallError::Serialization(e.to_string()))
-                })
-            }
-        }
-    }
-
     /// Fire-and-forget (spec §3.3). Errors only for enqueue/transport failure,
     /// never the handler outcome. Applies backpressure on a local target.
     pub async fn tell<M>(&self, msg: M) -> Result<(), CallError>
@@ -206,8 +197,7 @@ impl<A: Actor> ActorRef<A> {
             Target::DeadLetter => Err(CallError::DeadLetter),
             Target::Remote => {
                 let codec = self.system.codec();
-                let payload = actor_serialization::encode(&*codec, &msg)
-                    .map_err(|e| CallError::Serialization(e.to_string()))?;
+                let payload = actor_serialization::encode(&*codec, &msg)?;
                 self.system
                     .remote_tell(&self.id, M::MANIFEST.as_str(), payload)
                     .await

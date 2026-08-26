@@ -45,8 +45,7 @@ where
     A: Handler<M>,
     M: Message,
 {
-    let msg: M = actor_serialization::decode(codec, payload)
-        .map_err(|e| CallError::Serialization(e.to_string()))?;
+    let msg: M = actor_serialization::decode(codec, payload)?;
     mailbox.enqueue_remote::<M>(msg, reply)
 }
 

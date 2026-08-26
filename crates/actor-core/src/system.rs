@@ -303,11 +303,21 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystem<C, E, S> {
         parent: Option<ActorId>,
     ) -> ActorRef<A> {
         let mut once = Some(actor);
+        self.spawn_factory(Box::new(move || once.take()), parent)
+    }
+
+    /// Spawn from `factory` on this system's host — the one invocation all four
+    /// spawn methods funnel through.
+    fn spawn_factory<A: Actor<System = Self>>(
+        &self,
+        factory: crate::host::ActorFactory<A>,
+        parent: Option<ActorId>,
+    ) -> ActorRef<A> {
         self.inner.host.spawn_actor(
             self.clone(),
             self.inner.clock.clone(),
             &self.inner.spawner,
-            Box::new(move || once.take()),
+            factory,
             parent,
         )
     }
@@ -323,13 +333,7 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
         A: Actor<System = Self>,
         F: FnMut() -> A + Send + 'static,
     {
-        self.inner.host.spawn_actor(
-            self.clone(),
-            self.inner.clock.clone(),
-            &self.inner.spawner,
-            Box::new(move || Some(factory())),
-            None,
-        )
+        self.spawn_factory(Box::new(move || Some(factory())), None)
     }
 
     fn spawn_child<A: Actor<System = Self>>(&self, child: A, parent: ActorId) -> ActorRef<A> {
@@ -341,13 +345,7 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
         A: Actor<System = Self>,
         F: FnMut() -> A + Send + 'static,
     {
-        self.inner.host.spawn_actor(
-            self.clone(),
-            self.inner.clock.clone(),
-            &self.inner.spawner,
-            Box::new(move || Some(factory())),
-            Some(parent),
-        )
+        self.spawn_factory(Box::new(move || Some(factory())), Some(parent))
     }
 
     fn resolve_local<A: Actor<System = Self>>(&self, id: &ActorId) -> Option<Mailbox<A>> {

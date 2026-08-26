@@ -233,14 +233,7 @@ impl<S: ActorSystem> Receptionist<S> {
     /// routed around: they stay registered but are omitted here, so a
     /// caller never discovers a cordoned node, and a later `resume` restores them.
     pub fn lookup<A: Actor<System = S>>(&self, key: Key<A>) -> Listing<A> {
-        let refs = self
-            .state
-            .snapshot(key.id())
-            .into_iter()
-            .filter(|id| self.system.is_serving(id.node()))
-            .map(|id| self.system.resolve::<A>(id))
-            .collect();
-        Listing { refs }
+        listing(&self.system, self.state.snapshot(key.id()))
     }
 
     /// Subscribe to `key` (spec §13): the stream yields the current listing
@@ -250,13 +243,9 @@ impl<S: ActorSystem> Receptionist<S> {
         key: Key<A>,
     ) -> impl Stream<Item = Listing<A>> + Send + use<A, S> {
         let system = self.system.clone();
-        self.state.subscribe(key.id()).map(move |ids| Listing {
-            refs: ids
-                .into_iter()
-                .filter(|id| system.is_serving(id.node()))
-                .map(|id| system.resolve::<A>(id))
-                .collect(),
-        })
+        self.state
+            .subscribe(key.id())
+            .map(move |ids| listing(&system, ids))
     }
 
     /// Apply a registration received from a peer (spec §13): record it without
@@ -277,5 +266,18 @@ impl<S: ActorSystem> Receptionist<S> {
             self.system.watch(id, receptionist_id(self.node), deliver);
             self.state.notify(key);
         }
+    }
+}
+
+/// Build the listing for a set of registered ids — the one place the
+/// route-around-non-serving-nodes rule lives (spec §9.4), shared by `lookup`
+/// and `subscribe`.
+fn listing<A: Actor<System = S>, S: ActorSystem>(system: &S, ids: Vec<ActorId>) -> Listing<A> {
+    Listing {
+        refs: ids
+            .into_iter()
+            .filter(|id| system.is_serving(id.node()))
+            .map(|id| system.resolve::<A>(id))
+            .collect(),
     }
 }

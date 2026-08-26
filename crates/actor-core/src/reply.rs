@@ -46,8 +46,8 @@ impl ReplyHandle {
     /// `R`). Non-blocking: the return channel never applies backpressure.
     pub fn send<R: SerializationRequirement>(mut self, reply: R) {
         if let Some(tx) = self.tx.take() {
-            let encoded = actor_serialization::encode(&*self.codec, &reply)
-                .map_err(|e| CallError::Serialization(e.to_string()));
+            let encoded =
+                actor_serialization::encode(&*self.codec, &reply).map_err(CallError::from);
             let _ = tx.send(encoded);
         }
     }
