@@ -25,7 +25,6 @@
 
 mod ssh;
 
-pub use machine_proto::AGENT_PORT;
 pub use machine_proto::ChannelKind;
 pub use ssh::serve_connection;
 

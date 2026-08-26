@@ -217,23 +217,16 @@ pub fn guest_ip_boot_arg(net: &GuestNet) -> String {
 /// machine that comes and goes never exhausts the pool.
 #[derive(Debug)]
 pub struct GuestPool {
-    base: Ipv4Addr,
     slots: u32,
     used: BTreeSet<u32>,
 }
 
 impl GuestPool {
-    pub fn new(base: Ipv4Addr, slots: u32) -> GuestPool {
+    pub fn new(slots: u32) -> GuestPool {
         GuestPool {
-            base,
             slots,
             used: BTreeSet::new(),
         }
-    }
-
-    /// The pool base, so a caller can derive addresses via [`guest_net`].
-    pub fn base(&self) -> Ipv4Addr {
-        self.base
     }
 
     /// Take the lowest free slot's index, or `None` when the pool is full.
@@ -420,7 +413,7 @@ mod tests {
 
     #[test]
     fn the_pool_hands_out_the_lowest_free_slot_and_reclaims_it() {
-        let mut pool = GuestPool::new("172.31.0.0".parse().unwrap(), 2);
+        let mut pool = GuestPool::new(2);
         assert_eq!(pool.allocate(), Some(0));
         assert_eq!(pool.allocate(), Some(1));
         assert_eq!(pool.allocate(), None, "full pool degrades, not collides");

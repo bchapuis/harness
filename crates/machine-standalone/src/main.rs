@@ -270,31 +270,35 @@ async fn run_key(args: &[String]) -> Result<(), String> {
     let common = common(args)?;
     let mut changed = 0;
     for (flag, value) in &common.rest {
-        let request = match flag.as_str() {
+        let (request, done) = match flag.as_str() {
             "--add" => {
                 let (fingerprint, key) = read_public_key(value)?;
-                AdminRequest::AddKey {
-                    machine: common.machine.clone(),
-                    fingerprint,
-                    key,
-                }
+                let done = format!("authorized {fingerprint}");
+                (
+                    AdminRequest::AddKey {
+                        machine: common.machine.clone(),
+                        fingerprint,
+                        key,
+                    },
+                    done,
+                )
             }
-            "--revoke" => AdminRequest::RevokeKey {
-                machine: common.machine.clone(),
-                fingerprint: value.clone(),
-            },
+            "--revoke" => (
+                AdminRequest::RevokeKey {
+                    machine: common.machine.clone(),
+                    fingerprint: value.clone(),
+                },
+                // A revoked key stops authorizing the *next* attach; it does
+                // not tear down a live connection (machine §3).
+                format!("revoked {value} (live connections are unaffected)"),
+            ),
             other => return Err(format!("key: unknown flag `{other}`")),
         };
         match admin::call(&common.admin, request).await? {
             AdminReply::Done => {}
             other => return Err(describe(other)),
         }
-        match flag.as_str() {
-            "--add" => println!("authorized {}", read_public_key(value)?.0),
-            // A revoked key stops authorizing the *next* attach; it does not
-            // tear down a live connection (machine §3).
-            _ => println!("revoked {value} (live connections are unaffected)"),
-        }
+        println!("{done}");
         changed += 1;
     }
     if changed == 0 {

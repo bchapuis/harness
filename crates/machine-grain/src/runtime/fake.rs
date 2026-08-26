@@ -181,10 +181,10 @@ impl MachineRuntime for FakeRuntime {
     ) -> actor_core::BoxFuture<'_, Result<(), RuntimeError>> {
         Box::pin(async move {
             if self.killed.load(Ordering::Relaxed) {
-                return Err(RuntimeError::Transport("fake runtime killed".to_string()));
+                return Err(RuntimeError("fake runtime killed".to_string()));
             }
             let map = FakeRuntime::read_dir_map(&ws)
-                .map_err(|e| RuntimeError::Transport(e.to_string()))?;
+                .map_err(|e| RuntimeError(e.to_string()))?;
             *self.lock_ws() = map;
             Ok(())
         })
@@ -196,7 +196,7 @@ impl MachineRuntime for FakeRuntime {
     ) -> actor_core::BoxFuture<'_, Result<(), RuntimeError>> {
         Box::pin(async move {
             if self.killed.load(Ordering::Relaxed) {
-                return Err(RuntimeError::Transport("fake runtime killed".to_string()));
+                return Err(RuntimeError("fake runtime killed".to_string()));
             }
             // All synchronous IO, so the guard is held across it — no clone
             // of the file bytes.
@@ -204,26 +204,26 @@ impl MachineRuntime for FakeRuntime {
             // Replace, never merge — the guest's view is authoritative
             // across a pull, as for the real agent.
             for entry in
-                std::fs::read_dir(&ws).map_err(|e| RuntimeError::Transport(e.to_string()))?
+                std::fs::read_dir(&ws).map_err(|e| RuntimeError(e.to_string()))?
             {
-                let entry = entry.map_err(|e| RuntimeError::Transport(e.to_string()))?;
+                let entry = entry.map_err(|e| RuntimeError(e.to_string()))?;
                 let kind = entry
                     .file_type()
-                    .map_err(|e| RuntimeError::Transport(e.to_string()))?;
+                    .map_err(|e| RuntimeError(e.to_string()))?;
                 let result = if kind.is_dir() {
                     std::fs::remove_dir_all(entry.path())
                 } else {
                     std::fs::remove_file(entry.path())
                 };
-                result.map_err(|e| RuntimeError::Transport(e.to_string()))?;
+                result.map_err(|e| RuntimeError(e.to_string()))?;
             }
             for (rel, bytes) in map.iter() {
                 let path = ws.join(rel);
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
-                        .map_err(|e| RuntimeError::Transport(e.to_string()))?;
+                        .map_err(|e| RuntimeError(e.to_string()))?;
                 }
-                std::fs::write(&path, bytes).map_err(|e| RuntimeError::Transport(e.to_string()))?;
+                std::fs::write(&path, bytes).map_err(|e| RuntimeError(e.to_string()))?;
             }
             Ok(())
         })

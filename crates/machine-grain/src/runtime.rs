@@ -14,9 +14,7 @@
 //!
 //! Named `runtime`, not `vm`: half the implementations are containers, and a
 //! seam that calls a container a VM misleads at every call site. The crate's
-//! vocabulary is `machine-host`'s (host / guest / agent), so
-//! [`RuntimeError::Refused`] is the *agent* declining and
-//! [`RuntimeError::Transport`] is the channel to it failing.
+//! vocabulary is `machine-host`'s (host / guest / agent).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,25 +30,16 @@ pub mod hosted;
 pub mod ws_proto;
 
 /// A runtime operation failed. An application-level outcome (the grain maps it
-/// into replies or retries), never a durability failure. The split is the
-/// caller's policy split: a refusal leaves a live guest the grain can keep
-/// serving; a transport failure means the guest may be gone.
+/// into replies or retries), never a durability failure. One message, not a
+/// refused-vs-transport split: the grain's policy for every failure here is
+/// the same — end the activation and let the next boot rehydrate (machine §4)
+/// — so the distinction lives in the message, never as a second code path.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RuntimeError {
-    /// The agent inside the guest answered and refused (e.g. a non-zero status
-    /// with its stderr): the guest and its transport still work.
-    Refused(String),
-    /// The transport, the mechanism, or host-side plumbing failed: the guest may be
-    /// wedged or gone.
-    Transport(String),
-}
+pub struct RuntimeError(pub String);
 
 impl std::fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RuntimeError::Refused(e) => write!(f, "agent refused: {e}"),
-            RuntimeError::Transport(e) => write!(f, "transport: {e}"),
-        }
+        write!(f, "{}", self.0)
     }
 }
 

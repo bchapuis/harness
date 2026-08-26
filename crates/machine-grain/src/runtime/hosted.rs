@@ -179,7 +179,6 @@ impl HostedRuntimeProvider {
             .filter(|_| host.accepts_tap())
             .map(|egress| {
                 Arc::new(std::sync::Mutex::new(crate::net::GuestPool::new(
-                    egress.guest_pool_base,
                     egress.guest_pool_slots,
                 )))
             });
@@ -288,7 +287,7 @@ impl MachineRuntimeProvider for HostedRuntimeProvider {
                 if let Some(egress) = &egress {
                     egress.teardown();
                 }
-                return Err(RuntimeError::Transport(if words.is_empty() {
+                return Err(RuntimeError(if words.is_empty() {
                     format!("{}: {e}", spec.machine)
                 } else {
                     format!("{}: {e}; guest said: {words}", spec.machine)
@@ -358,10 +357,10 @@ impl HostedRuntime {
             .guest
             .connect(AGENT_PORT)
             .await
-            .map_err(|e| RuntimeError::Transport(format!("open {kind:?} channel: {e}")))?;
+            .map_err(|e| RuntimeError(format!("open {kind:?} channel: {e}")))?;
         send_header(&mut channel, kind)
             .await
-            .map_err(|e| RuntimeError::Transport(format!("open {kind:?} channel: {e}")))?;
+            .map_err(|e| RuntimeError(format!("open {kind:?} channel: {e}")))?;
         Ok(channel)
     }
 }
@@ -397,7 +396,7 @@ impl MachineRuntime for HostedRuntime {
 
     fn push_ws(&self, ws: PathBuf) -> BoxFuture<'_, Result<(), RuntimeError>> {
         Box::pin(async move {
-            let transport = |e: String| RuntimeError::Transport(format!("ws push: {e}"));
+            let transport = |e: String| RuntimeError(format!("ws push: {e}"));
             let dir = cap_std::fs::Dir::open_ambient_dir(&ws, cap_std::ambient_authority())
                 .map_err(|e| transport(format!("open {}: {e}", ws.display())))?;
             let tar =
@@ -425,30 +424,23 @@ impl MachineRuntime for HostedRuntime {
             // workspace untouched, so nothing partial can be durably captured
             // as deletions.
             machine_host::ws_sync::restore_workspace(&ws, &tar)
-                .map_err(|e| RuntimeError::Transport(format!("ws pull: {e}")))
+                .map_err(|e| RuntimeError(format!("ws pull: {e}")))
         })
     }
 }
 
-/// Map a mechanism failure onto the runtime seam. Both arms land on
-/// [`RuntimeError::Transport`] deliberately: the machine's policy for a guest that is
-/// gone and for a mechanism that failed is the same one — end the activation and
-/// let the next boot rehydrate (machine §4) — so the distinction stays in the
-/// message rather than becoming a second code path.
+/// Map a mechanism failure onto the runtime seam ([`RuntimeError`] states why
+/// there is no refused-vs-transport split to preserve).
 fn runtime_error(e: GuestError) -> RuntimeError {
-    RuntimeError::Transport(e.to_string())
+    RuntimeError(e.to_string())
 }
 
 fn boot_error(machine: &GrainName, e: GuestError) -> RuntimeError {
-    RuntimeError::Transport(format!("{machine}: boot: {e}"))
+    RuntimeError(format!("{machine}: boot: {e}"))
 }
 
-/// Map a ws-channel error onto the runtime seam, preserving the refusal/transport
-/// policy split: a guest that answered and refused leaves a live guest the grain
-/// can keep serving.
+/// Map a ws-channel error onto the runtime seam. [`SyncError`]'s own Display
+/// says whether the agent refused or the channel failed.
 fn sync_error(op: &str, e: SyncError) -> RuntimeError {
-    match e {
-        SyncError::Refused(e) => RuntimeError::Refused(format!("{op}: {e}")),
-        SyncError::Transport(e) => RuntimeError::Transport(format!("{op}: {e}")),
-    }
+    RuntimeError(format!("{op}: {e}"))
 }
