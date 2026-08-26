@@ -45,7 +45,6 @@ use tokio::net::TcpListener;
 use tokio_rustls::rustls::pki_types::PrivateKeyDer;
 use tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer;
 use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::rustls::server::WebPkiClientVerifier;
 
 const CLUSTER_DNS: &str = "cluster.local";
 const SECRET: &str = "demo-cluster-secret";
@@ -117,19 +116,15 @@ fn start_node(
 ) -> TcpCluster {
     let codec: Arc<dyn Codec> = Arc::new(JsonCodec);
     let advertised = peers[&node];
-    let config = TcpConfig {
+    let mut config = TcpConfig::new(
         node,
         advertised,
         peers,
-        endpoint_gossip_interval: Duration::from_millis(500),
-        connect_timeout: actor_runtime::DEFAULT_CONNECT_TIMEOUT,
-        handshake_timeout: actor_runtime::DEFAULT_HANDSHAKE_TIMEOUT,
-        outbound_capacity: actor_runtime::DEFAULT_OUTBOUND_CAPACITY,
-        codec: Arc::clone(&codec),
-        cluster_secret: SECRET.to_string(),
-        allowlist: None,
-        encryption: actor_runtime::Encryption::MutualTls(Box::new(tls)),
-    };
+        Arc::clone(&codec),
+        SECRET.to_string(),
+        actor_runtime::Encryption::MutualTls(Box::new(tls)),
+    );
+    config.endpoint_gossip_interval = Duration::from_millis(500);
     let (transport, inbound) = TcpTransport::start(config, listener);
     ClusterSystem::start(
         node,

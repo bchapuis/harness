@@ -67,22 +67,6 @@ use crate::wire::write_wire;
 /// simulator's cannot drift apart on what a build speaks.
 pub use actor_cluster::WIRE;
 
-/// Default for [`TcpConfig::connect_timeout`]: how long to wait for a TCP
-/// connect before giving up (spec §7), so a dial to a black-holed peer cannot
-/// stall the detector or gossip.
-pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Default for [`TcpConfig::handshake_timeout`]: how long to wait for the (TLS +)
-/// `Hello` handshake before tearing the association down (spec §7, §15). Stops a
-/// silent peer from tying up a task.
-pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Default for [`TcpConfig::outbound_capacity`]: per-peer outbound queue depth. A
-/// bounded queue applies backpressure: when a peer is too slow to drain it,
-/// further sends fail fast with `Unreachable` rather than growing memory without
-/// bound (spec §6, §7.2).
-pub const DEFAULT_OUTBOUND_CAPACITY: usize = 1024;
-
 /// The transport address of node `id`: `host` at port `port_base + id - 1`.
 ///
 /// The one place a node id becomes a port. A deployment configures its roster as
@@ -183,15 +167,19 @@ pub struct TcpConfig {
     /// address book starts here and grows by handshake and gossip (spec §9.3).
     pub peers: BTreeMap<NodeId, SocketAddr>,
     /// How often to gossip the known endpoint table to peers (spec §9.3).
+    /// 1 second from [`TcpConfig::new`].
     pub endpoint_gossip_interval: Duration,
-    /// How long a TCP connect may take before it is `Unreachable` (spec §7).
-    /// See [`DEFAULT_CONNECT_TIMEOUT`].
+    /// How long a TCP connect may take before it is `Unreachable` (spec §7), so
+    /// a dial to a black-holed peer cannot stall the detector or gossip.
+    /// 5 seconds from [`TcpConfig::new`].
     pub connect_timeout: Duration,
     /// How long the association handshake may take before it is torn down (spec
-    /// §7, §15). See [`DEFAULT_HANDSHAKE_TIMEOUT`].
+    /// §7, §15), so a silent peer cannot tie up a task. 5 seconds from
+    /// [`TcpConfig::new`].
     pub handshake_timeout: Duration,
     /// Per-peer outbound queue depth before sends fail fast with backpressure
-    /// (spec §6). See [`DEFAULT_OUTBOUND_CAPACITY`].
+    /// (spec §6, §7.2): a bounded queue means a peer too slow to drain it costs
+    /// failed sends, never unbounded memory. 1024 from [`TcpConfig::new`].
     pub outbound_capacity: usize,
     /// The wire codec; both ends must agree (spec §5).
     pub codec: Arc<dyn Codec>,
@@ -209,6 +197,39 @@ pub struct TcpConfig {
     /// so a construction site has to name which it wants and a reader can see the
     /// answer without going to look for it.
     pub encryption: Encryption,
+}
+
+impl TcpConfig {
+    /// A config over a deployment's genuine choices, with everything that has a
+    /// sane default — the timeouts, the queue capacity, the gossip cadence, no
+    /// allowlist — filled in. The required arguments are the ones no default may
+    /// choose: identity and addressing, the codec both ends must agree on, and
+    /// the two security decisions (the secret, and [`Encryption`], which
+    /// deliberately has no default — see the field's docs). The fields stay
+    /// public, so a caller that needs a different timing overrides the one field
+    /// it means to change.
+    pub fn new(
+        node: NodeId,
+        advertised: SocketAddr,
+        peers: BTreeMap<NodeId, SocketAddr>,
+        codec: Arc<dyn Codec>,
+        cluster_secret: String,
+        encryption: Encryption,
+    ) -> TcpConfig {
+        TcpConfig {
+            node,
+            advertised,
+            peers,
+            endpoint_gossip_interval: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(5),
+            handshake_timeout: Duration::from_secs(5),
+            outbound_capacity: 1024,
+            codec,
+            cluster_secret,
+            allowlist: None,
+            encryption,
+        }
+    }
 }
 
 /// How a transport association is protected (spec §15).
@@ -379,8 +400,9 @@ impl TcpTransport {
             shutdown: watch::channel(false).0,
         });
         tokio::spawn(accept_loop(listener, Arc::clone(&shared)));
-        tokio::spawn(endpoint_gossip(Arc::clone(&shared), gossip_interval));
-        (TcpTransport { shared }, inbound_rx)
+        let transport = TcpTransport { shared };
+        tokio::spawn(endpoint_gossip(transport.clone(), gossip_interval));
+        (transport, inbound_rx)
     }
 
     /// Get a sender to `peer`'s outbound queue, dialing and handshaking if no
@@ -579,14 +601,17 @@ async fn dialed_connection<S>(
 
     let writer = async move {
         while let Some(msg) = rx.recv().await {
-            if write_wire(&mut write_half, &codec_w, &msg).await.is_err() {
+            if write_wire(&mut write_half, codec_w.as_ref(), &msg)
+                .await
+                .is_err()
+            {
                 break;
             }
         }
     };
     let reader = async move {
         // Reads until a malformed frame or the peer closes (the `Err` exit).
-        while let Ok(msg) = read_wire(&mut read_half, &codec_r).await {
+        while let Ok(msg) = read_wire(&mut read_half, codec_r.as_ref()).await {
             if !deliver(&reader_shared, peer, msg).await {
                 break;
             }
@@ -616,11 +641,10 @@ async fn read_loop<S>(mut stream: S, peer: NodeId, shared: &Arc<Shared>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let codec = shared.config.codec.clone();
     let mut shutdown = shared.shutdown.subscribe();
     loop {
         tokio::select! {
-            framed = read_wire(&mut stream, &codec) => match framed {
+            framed = read_wire(&mut stream, shared.config.codec.as_ref()) => match framed {
                 Ok(msg) => {
                     if !deliver(shared, peer, msg).await {
                         return;
@@ -692,16 +716,13 @@ where
 /// `(node, address)` table to each known peer, dialing it if not already
 /// connected. Gossip is the bootstrap, so it must be able to dial.
 ///
-/// The per-peer sends run **concurrently** (each dial bounded by
-/// [`CONNECT_TIMEOUT`]), so one black-holed peer cannot stall gossip to the live
+/// The per-peer sends run **concurrently** (each dial bounded by the configured
+/// connect timeout), so one black-holed peer cannot stall gossip to the live
 /// ones; awaiting them together caps in-flight dials at one per peer, with no
 /// cross-interval pile-up. A non-blocking `try_send` keeps a slow but connected
 /// peer from stalling the loop.
-async fn endpoint_gossip(shared: Arc<Shared>, interval: Duration) {
-    let transport = TcpTransport {
-        shared: Arc::clone(&shared),
-    };
-    let mut shutdown = shared.shutdown.subscribe();
+async fn endpoint_gossip(transport: TcpTransport, interval: Duration) {
+    let mut shutdown = transport.shared.shutdown.subscribe();
     loop {
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
@@ -710,7 +731,7 @@ async fn endpoint_gossip(shared: Arc<Shared>, interval: Duration) {
         // One lock: the table to push and who to push it to (the book minus
         // ourselves, connected or not) are one consistent snapshot.
         let (table, targets) = {
-            let book = shared.book.lock().expect("book mutex poisoned");
+            let book = transport.shared.book.lock().expect("book mutex poisoned");
             (book.table(), book.gossip_targets())
         };
         let sends = targets.into_iter().map(|peer| {
@@ -735,19 +756,14 @@ mod tests {
     /// [`Shared::accept_hello`]'s policy, which reads only the config.
     fn shared(secret: &str) -> Shared {
         Shared {
-            config: TcpConfig {
-                node: NodeId::new(1),
-                advertised: "127.0.0.1:1".parse().expect("a literal address"),
-                peers: BTreeMap::new(),
-                endpoint_gossip_interval: Duration::from_secs(1),
-                connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-                handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-                outbound_capacity: DEFAULT_OUTBOUND_CAPACITY,
-                codec: Arc::new(actor_serialization::JsonCodec),
-                cluster_secret: secret.to_string(),
-                allowlist: None,
-                encryption: Encryption::PlaintextTrusted,
-            },
+            config: TcpConfig::new(
+                NodeId::new(1),
+                "127.0.0.1:1".parse().expect("a literal address"),
+                BTreeMap::new(),
+                Arc::new(actor_serialization::JsonCodec),
+                secret.to_string(),
+                Encryption::PlaintextTrusted,
+            ),
             inbound: async_channel::unbounded().0,
             slots: Mutex::new(Slots::new()),
             book: Mutex::new(Book::new(

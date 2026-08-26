@@ -162,22 +162,20 @@ pub async fn bind_local() -> (TcpListener, SocketAddr) {
     (listener, addr)
 }
 
-/// Build a `TcpConfig` with the bundled JSON codec and the shared secret.
+/// Build a `TcpConfig` with the bundled JSON codec, the shared secret, and a
+/// gossip cadence quick enough for a test's patience.
 pub fn tcp_config(node: NodeId, peers: BTreeMap<NodeId, SocketAddr>) -> TcpConfig {
     let advertised = *peers.get(&node).expect("self must be in the seed peers");
-    TcpConfig {
+    let mut cfg = TcpConfig::new(
         node,
         advertised,
         peers,
-        endpoint_gossip_interval: Duration::from_millis(50),
-        connect_timeout: actor_runtime::DEFAULT_CONNECT_TIMEOUT,
-        handshake_timeout: actor_runtime::DEFAULT_HANDSHAKE_TIMEOUT,
-        outbound_capacity: actor_runtime::DEFAULT_OUTBOUND_CAPACITY,
-        codec: Arc::new(JsonCodec),
-        cluster_secret: SECRET.to_string(),
-        allowlist: None,
-        encryption: actor_runtime::Encryption::PlaintextTrusted,
-    }
+        Arc::new(JsonCodec),
+        SECRET.to_string(),
+        actor_runtime::Encryption::PlaintextTrusted,
+    );
+    cfg.endpoint_gossip_interval = Duration::from_millis(50);
+    cfg
 }
 
 /// Start a cluster node on `listener` with the production seam and a TCP

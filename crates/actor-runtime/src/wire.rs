@@ -12,7 +12,6 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use actor_cluster::Frame;
 use actor_core::NodeId;
@@ -94,23 +93,23 @@ where
 }
 
 /// Serialize and write one [`Wire`] message with `codec`.
-pub async fn write_wire<W>(stream: &mut W, codec: &Arc<dyn Codec>, msg: &Wire) -> io::Result<()>
+pub async fn write_wire<W>(stream: &mut W, codec: &dyn Codec, msg: &Wire) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let bytes = encode(codec.as_ref(), msg)
+    let bytes = encode(codec, msg)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     write_record(stream, &bytes).await
 }
 
 /// Read and decode one [`Wire`] message with `codec`. A decode failure is an
 /// `InvalidData` error: the association is malformed and must be torn down.
-pub async fn read_wire<R>(stream: &mut R, codec: &Arc<dyn Codec>) -> io::Result<Wire>
+pub async fn read_wire<R>(stream: &mut R, codec: &dyn Codec) -> io::Result<Wire>
 where
     R: AsyncRead + Unpin,
 {
     let bytes = read_record(stream).await?;
-    decode::<Wire>(codec.as_ref(), &bytes)
+    decode::<Wire>(codec, &bytes)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
@@ -142,14 +141,10 @@ mod tests {
     use actor_cluster::CallId;
     use actor_core::ActorId;
     use actor_core::Path;
-
-    fn json() -> Arc<dyn Codec> {
-        Arc::new(actor_serialization::JsonCodec)
-    }
+    use actor_serialization::JsonCodec;
 
     #[tokio::test]
     async fn frame_round_trips_over_a_duplex_stream() {
-        let codec = json();
         let msg = Wire::Frame(Frame::Envelope {
             recipient: ActorId::new(NodeId::new(7), Path::new("/user/greeter"), 1),
             manifest: "demo.Greet".to_string(),
@@ -158,8 +153,8 @@ mod tests {
         });
 
         let (mut a, mut b) = tokio::io::duplex(64 * 1024);
-        write_wire(&mut a, &codec, &msg).await.unwrap();
-        let got = read_wire(&mut b, &codec).await.unwrap();
+        write_wire(&mut a, &JsonCodec, &msg).await.unwrap();
+        let got = read_wire(&mut b, &JsonCodec).await.unwrap();
 
         match got {
             Wire::Frame(Frame::Envelope {
@@ -179,12 +174,11 @@ mod tests {
 
     #[tokio::test]
     async fn endpoints_message_round_trips() {
-        let codec = json();
         let addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
         let msg = Wire::Endpoints(vec![(NodeId::new(2), addr)]);
         let (mut a, mut b) = tokio::io::duplex(4096);
-        write_wire(&mut a, &codec, &msg).await.unwrap();
-        match read_wire(&mut b, &codec).await.unwrap() {
+        write_wire(&mut a, &JsonCodec, &msg).await.unwrap();
+        match read_wire(&mut b, &JsonCodec).await.unwrap() {
             Wire::Endpoints(table) => assert_eq!(table, vec![(NodeId::new(2), addr)]),
             other => panic!("unexpected message: {other:?}"),
         }
@@ -218,7 +212,7 @@ mod tests {
             .await
             .unwrap();
         a.flush().await.unwrap();
-        let err = read_wire(&mut b, &json()).await.unwrap_err();
+        let err = read_wire(&mut b, &JsonCodec).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 

@@ -26,9 +26,6 @@ use crate::TcpCluster;
 use crate::clock::TokioClock;
 use crate::entropy::OsEntropy;
 use crate::spawner::TokioSpawner;
-use crate::transport::DEFAULT_CONNECT_TIMEOUT;
-use crate::transport::DEFAULT_HANDSHAKE_TIMEOUT;
-use crate::transport::DEFAULT_OUTBOUND_CAPACITY;
 use crate::transport::Encryption;
 use crate::transport::TcpConfig;
 use crate::transport::TcpTransport;
@@ -145,22 +142,16 @@ pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
         .map_err(|e| format!("bind transport {bind}: {e}"))?;
 
     let membership = (opts.membership)(&roster);
-    let (transport, inbound) = TcpTransport::start(
-        TcpConfig {
-            node,
-            advertised,
-            peers,
-            endpoint_gossip_interval: Duration::from_secs(1),
-            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-            outbound_capacity: DEFAULT_OUTBOUND_CAPACITY,
-            codec: Arc::clone(&opts.codec),
-            cluster_secret: opts.secret,
-            allowlist: Some(admitted.clone()),
-            encryption: opts.encryption,
-        },
-        listener,
+    let mut tcp = TcpConfig::new(
+        node,
+        advertised,
+        peers,
+        Arc::clone(&opts.codec),
+        opts.secret,
+        opts.encryption,
     );
+    tcp.allowlist = Some(admitted.clone());
+    let (transport, inbound) = TcpTransport::start(tcp, listener);
     let system: TcpCluster = ClusterSystem::start(
         node,
         TokioClock::new(),

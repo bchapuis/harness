@@ -247,12 +247,7 @@ impl FileRaftWAL {
                 record
                     .ext
                     .admit(TERM.window().boundary(), TERM_EXT_KNOWN)
-                    .map_err(|err| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("raft term file {}: {err}", term_path.display()),
-                        )
-                    })?;
+                    .map_err(|err| ext_error("raft term file", &term_path, err))?;
                 (record.term, record.voted_for)
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => (0, None),
@@ -279,12 +274,7 @@ impl FileRaftWAL {
                 record
                     .ext
                     .admit(SNAPSHOT.window().boundary(), SNAPSHOT_EXT_KNOWN)
-                    .map_err(|err| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("raft snapshot file {}: {err}", snapshot_path.display()),
-                        )
-                    })?;
+                    .map_err(|err| ext_error("raft snapshot file", &snapshot_path, err))?;
                 (record.index, record.term, Some(record.data))
             }
             Ok(bytes) => {
@@ -382,11 +372,37 @@ impl FileRaftWAL {
         WalAck::Failed
     }
 
+    /// The one write path every [`RaftWAL`] method shares: refuse if poisoned,
+    /// run the fallible body, and poison this WAL on its first error — `what`
+    /// names the state that could not be made durable.
+    fn write(&self, what: &str, body: impl FnOnce() -> io::Result<()>) -> WalAck {
+        if self.poisoned().is_some() {
+            return WalAck::Failed;
+        }
+        if let Err(err) = body() {
+            return self.fail(format!(
+                "raft {what} persistence failed at {}: {err} — a voter that cannot \
+                 make its state durable cannot safely continue",
+                self.dir.display()
+            ));
+        }
+        WalAck::Persisted
+    }
+
     /// The fallible body of [`RaftWAL::save_term_and_vote`]: atomic
     /// replace of the `term` file.
-    fn persist_term(&self, record: &TermRecord) -> io::Result<()> {
-        let bytes = serde_json::to_vec(record).expect("a TermRecord always serializes");
-        wal::atomic_replace(&self.dir, "term", &TERM.stamp(&bytes))
+    fn persist_term(&self, term: u64, voted_for: Option<NodeId>) -> io::Result<()> {
+        let record = TermRecord {
+            term,
+            voted_for,
+            ext: compat::Extensions::new(),
+        };
+        let bytes = serde_json::to_vec(&record).expect("a TermRecord always serializes");
+        wal::atomic_replace(&self.dir, "term", &TERM.stamp(&bytes))?;
+        // In memory only after the disk write landed, so `load` after a failure
+        // still reports the last state this node can actually reconstruct.
+        self.lock().state.apply_term_and_vote(term, voted_for);
+        Ok(())
     }
 
     /// The fallible body of [`RaftWAL::append`]: truncate the log at `from_index`'s
@@ -470,6 +486,16 @@ fn skew_error(what: &str, path: &Path, err: impl std::fmt::Display) -> io::Error
     )
 }
 
+/// An extension refusal (compatibility spec §2.1): the file carries a critical
+/// extension this build does not implement, so reading on could silently skip
+/// state that matters. The `err` already names the key and the remedy.
+fn ext_error(what: &str, path: &Path, err: impl std::fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{what} {}: {err}", path.display()),
+    )
+}
+
 /// A corruption refusal: bytes this build should read and cannot. `guess`
 /// names what the WAL refuses to guess (and, where it matters, why guessing
 /// would be unsafe); the remedy is restore-or-remove.
@@ -503,39 +529,11 @@ impl RaftWAL for FileRaftWAL {
     }
 
     fn save_term_and_vote(&self, term: u64, voted_for: Option<NodeId>) -> WalAck {
-        if self.poisoned().is_some() {
-            return WalAck::Failed;
-        }
-        let record = TermRecord {
-            term,
-            voted_for,
-            ext: compat::Extensions::new(),
-        };
-        if let Err(err) = self.persist_term(&record) {
-            return self.fail(format!(
-                "raft term persistence failed at {}: {err} — a voter that cannot \
-                 persist its vote cannot safely continue",
-                self.dir.display()
-            ));
-        }
-        // In memory only after the disk write landed, so `load` after a failure still
-        // reports the last state this node can actually reconstruct.
-        self.lock().state.apply_term_and_vote(term, voted_for);
-        WalAck::Persisted
+        self.write("term", || self.persist_term(term, voted_for))
     }
 
     fn append(&self, from_index: u64, entries: &[RaftEntry]) -> WalAck {
-        if self.poisoned().is_some() {
-            return WalAck::Failed;
-        }
-        if let Err(err) = self.persist_append(from_index, entries) {
-            return self.fail(format!(
-                "raft log persistence failed at {}: {err} — a voter that cannot \
-                 persist its log cannot safely continue",
-                self.dir.display()
-            ));
-        }
-        WalAck::Persisted
+        self.write("log", || self.persist_append(from_index, entries))
     }
 
     fn poisoned(&self) -> Option<String> {
@@ -546,17 +544,7 @@ impl RaftWAL for FileRaftWAL {
     }
 
     fn save_snapshot(&self, index: u64, term: u64, data: &[u8]) -> WalAck {
-        if self.poisoned().is_some() {
-            return WalAck::Failed;
-        }
-        if let Err(err) = self.persist_snapshot(index, term, data) {
-            return self.fail(format!(
-                "raft snapshot persistence failed at {}: {err} — a voter that cannot \
-                 persist its snapshot cannot safely continue",
-                self.dir.display()
-            ));
-        }
-        WalAck::Persisted
+        self.write("snapshot", || self.persist_snapshot(index, term, data))
     }
 }
 

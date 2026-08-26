@@ -152,20 +152,14 @@ async fn run(args: &[String]) {
         .await
         .unwrap_or_else(|e| panic!("cannot bind {}: {e}", opts.bind));
     let codec: Arc<dyn Codec> = Arc::new(JsonCodec);
-    let advertised = opts.bind;
-    let config = TcpConfig {
-        node: opts.id,
-        advertised,
-        peers: opts.peers.clone(),
-        endpoint_gossip_interval: Duration::from_secs(1),
-        connect_timeout: actor_runtime::DEFAULT_CONNECT_TIMEOUT,
-        handshake_timeout: actor_runtime::DEFAULT_HANDSHAKE_TIMEOUT,
-        outbound_capacity: actor_runtime::DEFAULT_OUTBOUND_CAPACITY,
-        codec: Arc::clone(&codec),
-        cluster_secret: SECRET.to_string(),
-        allowlist: None,
-        encryption: actor_runtime::Encryption::MutualTls(Box::new(tls)),
-    };
+    let config = TcpConfig::new(
+        opts.id,
+        opts.bind, // advertised: what peers dial back
+        opts.peers.clone(),
+        Arc::clone(&codec),
+        SECRET.to_string(),
+        actor_runtime::Encryption::MutualTls(Box::new(tls)),
+    );
     let (transport, inbound) = TcpTransport::start(config, listener);
     let system = ClusterSystem::start(
         opts.id,
