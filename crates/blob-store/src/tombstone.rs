@@ -102,22 +102,6 @@ impl TombstoneSet {
         }
     }
 
-    /// Drop `ns` from the awareness set once it has been **reclaimed** (spec
-    /// §5.3). Driven only by [`AnchorTracker::reclaimable`], never by a timer.
-    pub fn remove(&self, ns: &Namespace) {
-        self.lock().remove(ns);
-    }
-
-    /// How many namespaces are tombstoned.
-    pub fn len(&self) -> usize {
-        self.lock().len()
-    }
-
-    /// Whether the set is empty.
-    pub fn is_empty(&self) -> bool {
-        self.lock().is_empty()
-    }
-
     fn lock(&self) -> MutexGuard<'_, BTreeMap<Namespace, u64>> {
         self.inner.lock().expect("tombstone set mutex poisoned")
     }
@@ -209,8 +193,9 @@ impl AnchorTracker {
         self.lock().contains_key(ns) && self.pending(ns, is_terminal).is_empty()
     }
 
-    /// Stop tracking `ns` (it has been reclaimed). Returns whether it was tracked.
-    /// Pair with [`TombstoneSet::remove`] to forget the namespace entirely.
+    /// Stop tracking `ns` (it has been reclaimed). Returns whether it was
+    /// tracked. The namespace's awareness entry in the [`TombstoneSet`] is
+    /// retained — cluster-wide set GC is not implemented (spec §5.3).
     pub fn reclaim(&self, ns: &Namespace) -> bool {
         self.lock().remove(ns).is_some()
     }
@@ -248,7 +233,7 @@ mod tests {
             !set.insert(&a, 9),
             "re-inserting an existing namespace is not new"
         );
-        assert_eq!(set.len(), 1);
+        assert_eq!(set.snapshot().len(), 1, "the re-insert added no entry");
     }
 
     #[test]

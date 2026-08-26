@@ -11,7 +11,6 @@ use std::fmt;
 use std::future::Future;
 use std::ops::Range;
 
-use actor_core::CallError;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -120,14 +119,6 @@ pub enum BlobError {
     /// The target namespace has been deleted (spec §5.3). Monotonic: once a
     /// namespace is gone it stays gone, so this never reverts to a live blob.
     Deleted(Namespace),
-    /// An underlying actor transport or system failure (actor §14.1).
-    Transport(CallError),
-}
-
-impl From<CallError> for BlobError {
-    fn from(err: CallError) -> Self {
-        BlobError::Transport(err)
-    }
 }
 
 impl fmt::Display for BlobError {
@@ -136,7 +127,6 @@ impl fmt::Display for BlobError {
             BlobError::Unavailable(why) => write!(f, "blob store unavailable: {why}"),
             BlobError::Corrupt(id) => write!(f, "no verifying copy of blob {id}"),
             BlobError::Deleted(ns) => write!(f, "namespace {ns} has been deleted"),
-            BlobError::Transport(e) => write!(f, "blob transport failed: {e}"),
         }
     }
 }

@@ -245,7 +245,6 @@ match blobs.get(&ws, &id, None).await {
     Err(BlobError::Unavailable(_)) => { /* fewer than the needed copies reachable; retry/failover */ }
     Err(BlobError::Corrupt(_))     => { /* every reachable copy failed verification: data loss */ }
     Err(BlobError::Deleted(_))     => { /* the namespace has been deleted (§5.3) */ }
-    Err(BlobError::Transport(e))   => eprintln!("transport: {e:?}"),
 }
 
 // --- Membership: presence is a durable-copy question (§5.2) ---
@@ -264,7 +263,6 @@ pub enum BlobError {
     Unavailable(String),   // could not reach W copies on put, or any owner on get (§5.2)
     Corrupt(BlobId),       // a copy was found but none verified against the id (§4)
     Deleted(Namespace),    // the target namespace has been deleted (§5.3)
-    Transport(CallError),  // underlying actor transport/system failure (actor §14.1)
 }
 ```
 
