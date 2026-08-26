@@ -418,7 +418,6 @@ pub struct ScriptedSandboxes {
     behavior: SandboxScript,
     fail_open: Arc<AtomicBool>,
     delay: Option<(SimClock, Duration)>,
-    durable: bool,
     pub stats: SandboxStats,
 }
 
@@ -430,7 +429,6 @@ impl ScriptedSandboxes {
             behavior: Arc::new(behavior),
             fail_open: Arc::new(AtomicBool::new(false)),
             delay: None,
-            durable: false,
             stats: SandboxStats::default(),
         }
     }

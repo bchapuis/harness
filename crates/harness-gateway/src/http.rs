@@ -51,6 +51,7 @@ use harness::Record;
 use harness::RecordBody;
 use harness::RunOutcome;
 use harness::Seq;
+use harness::SessionRef;
 use harness::Turn;
 use harness::TurnId;
 
@@ -89,6 +90,23 @@ fn reject_bad_session(session: &str) -> Result<(), GatewayError> {
     Err(GatewayError::bad_request(
         "session id must be non-empty and must not contain '/'",
     ))
+}
+
+/// The edge's tenant-isolation preamble, in its fixed order: verify the bearer
+/// token, reject a malformed session id, resolve the principal-scoped ref (an
+/// unknown kind is the client's `404`, a pure local check before any side
+/// effect). Every session handler starts here, so a new endpoint cannot skip
+/// a step and silently reopen the in-tenant collision hole `auth.rs` closes.
+fn authed_session<S: HarnessSystem>(
+    gw: &Gateway<S>,
+    headers: &HeaderMap,
+    kind: &str,
+    session: &str,
+) -> Result<(PrincipalId, SessionRef<S>), GatewayError> {
+    let principal = principal(gw, headers)?;
+    reject_bad_session(session)?;
+    let session_ref = gw.session(&principal, kind, session)?;
+    Ok((principal, session_ref))
 }
 
 /// Liveness: the process is up and serving. Unauthenticated, always `200`.
@@ -179,8 +197,10 @@ async fn prompt<S: HarnessSystem>(
     headers: HeaderMap,
     body: Result<Json<PromptBody>, JsonRejection>,
 ) -> Result<Response, GatewayError> {
-    let principal = principal(&gw, &headers)?;
-    reject_bad_session(&session)?;
+    // The preamble resolves the kind before any side effect, so a typo or a
+    // probing client never writes a phantom entry into the tenant's directory
+    // index below.
+    let (principal, session_ref) = authed_session(&gw, &headers, &kind, &session)?;
     // A malformed body is the edge's own `400`, in the structured envelope (not
     // axum's default plain-text rejection).
     let Json(mut body) = body.map_err(|e| GatewayError::bad_request(e.body_text()))?;
@@ -188,10 +208,6 @@ async fn prompt<S: HarnessSystem>(
     // buffered/streaming branch, so a client cannot park a run — and the
     // resources behind it — indefinitely on either path.
     body.within_secs = body.within_secs.min(gw.limits().max_within_secs);
-    // Resolve the kind first (a pure, local check): an unknown kind is the
-    // client's `404` before any side effect, so a typo or a probing client
-    // never writes a phantom entry into the tenant's directory index.
-    let session_ref = gw.session(&principal, &kind, &session)?;
     // Record ownership before the run (best-effort and idempotent — see
     // `Gateway::record_ownership`); the run proceeds regardless.
     gw.record_ownership(&principal, &kind, &session).await;
@@ -220,9 +236,7 @@ async fn records<S: HarnessSystem>(
     Query(q): Query<RecordsQuery>,
     headers: HeaderMap,
 ) -> Result<Response, GatewayError> {
-    let principal = principal(&gw, &headers)?;
-    reject_bad_session(&session)?;
-    let session_ref = gw.session(&principal, &kind, &session)?;
+    let (_, session_ref) = authed_session(&gw, &headers, &kind, &session)?;
     let history = session_ref.tail(Seq::new(q.from), q.limit).await?;
     // `base` is the compaction floor (§10.2): a `from` below it asked for
     // records the session's snapshot has subsumed, so the page's history
@@ -238,9 +252,7 @@ async fn cancel<S: HarnessSystem>(
     Query(q): Query<CancelQuery>,
     headers: HeaderMap,
 ) -> Result<Response, GatewayError> {
-    let principal = principal(&gw, &headers)?;
-    reject_bad_session(&session)?;
-    let session_ref = gw.session(&principal, &kind, &session)?;
+    let (_, session_ref) = authed_session(&gw, &headers, &kind, &session)?;
     session_ref.cancel(&TurnId::new(q.turn)).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -278,9 +290,7 @@ async fn stream<S: HarnessSystem>(
     Query(q): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, GatewayError> {
-    let principal = principal(&gw, &headers)?;
-    reject_bad_session(&session)?;
-    let session_ref = gw.session(&principal, &kind, &session)?;
+    let (_, session_ref) = authed_session(&gw, &headers, &kind, &session)?;
     let follower = session_ref.follow(Seq::new(resume_from(&headers, q.from)));
     let body = futures::stream::unfold(
         SessionStream::Streaming {

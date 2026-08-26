@@ -132,11 +132,6 @@ impl<S: HarnessSystem> Gateway<S> {
         self.ready.store(ready, Ordering::Relaxed);
     }
 
-    /// The routing-only client harness (no model/sandbox seams, never activates).
-    pub fn harness(&self) -> &Harness<S> {
-        &self.harness
-    }
-
     /// The client handle to the tenancy ownership index (one grain per principal).
     pub fn directory(&self) -> &Granary<Directory<S>> {
         &self.directory

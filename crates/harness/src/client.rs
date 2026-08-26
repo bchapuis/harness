@@ -247,7 +247,7 @@ impl<S: HarnessSystem> Harness<S> {
     pub fn client(system: S, roster: &[(String, usize)]) -> Option<Harness<S>> {
         let mut builder = Harness::builder(system, &Kinds::new()).into_has_routes();
         for (kind, shards) in roster {
-            builder.routed.push((KindId::new(kind), (*shards).max(1)));
+            builder = builder.route_kind(kind, *shards);
         }
         builder.build()
     }
