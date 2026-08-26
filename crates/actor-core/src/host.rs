@@ -43,7 +43,6 @@ use crate::id::Path;
 use crate::mailbox::Inbox;
 use crate::mailbox::Mailbox;
 use crate::refs::ActorRef;
-use crate::registry::DispatchFn;
 use crate::registry::HandlerRegistry;
 use crate::reply::ReplyHandle;
 use crate::runtime::BoxFuture;
@@ -70,11 +69,11 @@ pub type ActorFactory<A> = Box<dyn FnMut() -> Option<A> + Send>;
 /// a busy watcher is never skipped.
 pub type WatchDelivery = Arc<dyn Fn(Terminated) -> BoxFuture<'static, ()> + Send + Sync>;
 
-/// One live local actor: its mailbox plus the dispatch table that turns inbound
-/// `(manifest, payload)` pairs into typed handler calls.
+/// One live local actor: its mailbox plus the dispatch registry that turns
+/// inbound `(manifest, payload)` pairs into typed handler calls.
 struct ActorEntry<A: Actor> {
     mailbox: Mailbox<A>,
-    dispatch: BTreeMap<&'static str, DispatchFn<A>>,
+    registry: HandlerRegistry<A>,
 }
 
 /// Type-erased view of a live actor, so one map holds every actor type while
@@ -93,7 +92,7 @@ impl<A: Actor> ErasedActor for ActorEntry<A> {
     }
 
     fn deliver(&self, codec: &dyn Codec, manifest: &str, payload: &[u8], reply: ReplyHandle) {
-        match self.dispatch.get(manifest) {
+        match self.registry.dispatch(manifest) {
             Some(entry) => {
                 let _ = entry(codec, payload, reply, &self.mailbox);
             }
@@ -147,11 +146,11 @@ struct HostState {
     /// Escalation inboxes: actor id → a sender its children escalate failures to
     /// (spec §11.1). The value is the failed child's id, for context.
     escalators: Mutex<BTreeMap<ActorId, async_channel::Sender<ActorId>>>,
-    /// Per-actor-type dispatch tables, built once on first spawn of each type so
-    /// `Actor::register` runs at most once per type (spec §4.4), not per spawn.
-    /// Keyed lookups only (never iterated), so it adds no observable
+    /// Per-actor-type dispatch registries, built once on first spawn of each
+    /// type so `Actor::register` runs at most once per type (spec §4.4), not per
+    /// spawn. Keyed lookups only (never iterated), so it adds no observable
     /// nondeterminism.
-    dispatch_cache: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+    registry_cache: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
     next_path: AtomicU64,
     /// This process incarnation's stamp on every actor id it assigns — see
     /// [`LocalHost::with_incarnation`].
@@ -200,7 +199,7 @@ impl LocalHost {
                 watchers: Mutex::new(BTreeMap::new()),
                 terminations: Mutex::new(Terminations::default()),
                 escalators: Mutex::new(BTreeMap::new()),
-                dispatch_cache: Mutex::new(HashMap::new()),
+                registry_cache: Mutex::new(HashMap::new()),
                 next_path: AtomicU64::new(0),
                 incarnation,
             }),
@@ -248,26 +247,25 @@ impl LocalHost {
         id
     }
 
-    /// The dispatch table for actor type `A`, built on first use and cached by
-    /// type, so `Actor::register` runs at most once per type (spec §4.4).
-    fn dispatch_table<A: Actor>(&self) -> BTreeMap<&'static str, DispatchFn<A>> {
+    /// The dispatch registry for actor type `A`, built on first use and cached
+    /// by type, so `Actor::register` runs at most once per type (spec §4.4).
+    fn registry_for<A: Actor>(&self) -> HandlerRegistry<A> {
         let key = TypeId::of::<A>();
         let mut cache = self
             .state
-            .dispatch_cache
+            .registry_cache
             .lock()
-            .expect("dispatch cache mutex poisoned");
+            .expect("registry cache mutex poisoned");
         if let Some(cached) = cache.get(&key) {
             return cached
-                .downcast_ref::<BTreeMap<&'static str, DispatchFn<A>>>()
-                .expect("dispatch cache type mismatch")
+                .downcast_ref::<HandlerRegistry<A>>()
+                .expect("registry cache type mismatch")
                 .clone();
         }
         let mut registry = HandlerRegistry::<A>::default();
         A::register(&mut registry);
-        let table = registry.into_entries();
-        cache.insert(key, Arc::new(table.clone()));
-        table
+        cache.insert(key, Arc::new(registry.clone()));
+        registry
     }
 
     /// Spawn an actor from a `factory`, returning a handle (spec §4.1, §4.2). The
@@ -296,7 +294,7 @@ impl LocalHost {
 
         let entry = ActorEntry {
             mailbox: mailbox.clone(),
-            dispatch: self.dispatch_table::<A>(),
+            registry: self.registry_for::<A>(),
         };
         self.state
             .actors
@@ -816,4 +814,3 @@ fn jittered(base: std::time::Duration, rand: u64) -> std::time::Duration {
     let half = nanos / 2;
     std::time::Duration::from_nanos(half + rand % (half + 1))
 }
-

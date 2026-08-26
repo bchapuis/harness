@@ -103,7 +103,7 @@ pub trait Message: SerializationRequirement {
 }
 ```
 
-`Manifest` is a `const`-constructible newtype over `&'static str`. The transport boundary passes the inner `&'static str` (§4.1); in the envelope it travels as an owned `String` (§7.1), matched against the registered manifests on receipt (§4.4).
+`Manifest` is a `const`-constructible newtype over `&'static str`, and a `Manifest` value exists only for statically declared identities. The transport boundary passes the typed `Manifest` (§4.1); in the envelope it travels as an owned `String` (§7.1), which stays plain untrusted text until it is matched against the registered manifests on receipt (§4.4) — the allowlist lookup is where a claimed manifest becomes a recognized identity.
 
 An actor accepts a message by implementing `Handler<M>`:
 
@@ -255,16 +255,16 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {   // Clone: a system valu
 
     // ---- Outbound, transport boundary (§4.4) ----
     async fn remote_ask(
-        &self, recipient: &ActorId, manifest: &'static str, payload: Vec<u8>, within: Duration,
+        &self, recipient: &ActorId, manifest: Manifest, payload: Vec<u8>, within: Duration,
     ) -> Result<Vec<u8>, CallError>;
 
     async fn remote_tell(
-        &self, recipient: &ActorId, manifest: &'static str, payload: Vec<u8>,
+        &self, recipient: &ActorId, manifest: Manifest, payload: Vec<u8>,
     ) -> Result<(), CallError>;
 }
 ```
 
-The wire identity is the message's `MANIFEST` (§3.2), passed as its inner `&'static str`, and the payload is its codec-encoded bytes. The system also performs internal operations the contract orchestrates but does not expose as separately-called API: the lifecycle steps `assign_id` / `actor_ready` / `resign_id` (§4.2), and the inbound `deliver`, which the node's receive loop invokes to dispatch a decoded message to a local actor (§4.4).
+The wire identity is the message's `MANIFEST` (§3.2), passed as the typed `Manifest`, and the payload is its codec-encoded bytes. The system also performs internal operations the contract orchestrates but does not expose as separately-called API: the lifecycle steps `assign_id` / `actor_ready` / `resign_id` (§4.2), and the inbound `deliver`, which the node's receive loop invokes to dispatch a decoded message to a local actor (§4.4).
 
 The user-facing entry point is `spawn`, which composes the lifecycle steps in the order §4.2 specifies:
 
@@ -464,7 +464,7 @@ Two message families travel over an association: **actor envelopes** and **syste
 Envelope {
     recipient:   ActorId,
     manifest:    String,           // message type id; the dispatch key (§4.4). The sender's
-                                   //   `&'static str` const becomes an owned String on the wire.
+                                   //   `Manifest` const becomes an owned String on the wire.
     correlation: Option<CallId>,   // Some ⇒ a reply is expected (ask); None ⇒ one-way (tell)
     payload:     Vec<u8>,          // encoded message
 }

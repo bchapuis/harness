@@ -97,21 +97,13 @@ impl<A: Actor> Listing<A> {
 
 /// The node-local registry data shared between the receptionist handle, the
 /// receive loop (remote registrations), and the death-watch pruning closures.
+#[derive(Default)]
 pub struct ReceptionistState {
     /// key → set of (registering node, actor id). The node component is the
     /// OR-set tag; storing the actor id type-agnostically lets one registry
     /// hold every key.
     registry: Mutex<BTreeMap<String, BTreeSet<(NodeId, ActorId)>>>,
     subscribers: Mutex<BTreeMap<String, Vec<async_channel::Sender<Vec<ActorId>>>>>,
-}
-
-impl Default for ReceptionistState {
-    fn default() -> Self {
-        ReceptionistState {
-            registry: Mutex::new(BTreeMap::new()),
-            subscribers: Mutex::new(BTreeMap::new()),
-        }
-    }
 }
 
 impl ReceptionistState {
@@ -208,24 +200,20 @@ fn receptionist_id(node: NodeId) -> ActorId {
 pub struct Receptionist<S: ActorSystem> {
     system: S,
     state: Arc<ReceptionistState>,
-    node: NodeId,
 }
 
 impl<S: ActorSystem> Receptionist<S> {
-    pub(crate) fn new(system: S, state: Arc<ReceptionistState>, node: NodeId) -> Receptionist<S> {
-        Receptionist {
-            system,
-            state,
-            node,
-        }
+    pub(crate) fn new(system: S, state: Arc<ReceptionistState>) -> Receptionist<S> {
+        Receptionist { system, state }
     }
 
     /// Register `who` under `key` (spec §13), replicating to the cluster and
     /// arranging for pruning when `who` terminates.
     pub fn register<A: Actor<System = S>>(&self, key: Key<A>, who: &ActorRef<A>) {
-        self.record(key.id(), self.node, who.id().clone());
+        let node = self.system.node();
+        self.record(key.id(), node, who.id().clone());
         self.system
-            .replicate_registration(key.id(), self.node, who.id().clone());
+            .replicate_registration(key.id(), node, who.id().clone());
     }
 
     /// The current listing for `key` (spec §13). Actors on a node that is not
@@ -263,7 +251,8 @@ impl<S: ActorSystem> Receptionist<S> {
                 let state = Arc::clone(&state);
                 Box::pin(async move { state.remove_actor(&signal.id) })
             });
-            self.system.watch(id, receptionist_id(self.node), deliver);
+            self.system
+                .watch(id, receptionist_id(self.system.node()), deliver);
             self.state.notify(key);
         }
     }

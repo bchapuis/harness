@@ -20,6 +20,7 @@ use crate::actor::Actor;
 use crate::actor::Handler;
 use crate::error::CallError;
 use crate::mailbox::Mailbox;
+use crate::message::Manifest;
 use crate::message::Message;
 use crate::reply::ReplyHandle;
 
@@ -53,13 +54,22 @@ where
 /// typed builder behind [`Actor::register`](crate::Actor::register); also the
 /// deserialization allowlist.
 pub struct HandlerRegistry<A: Actor> {
-    entries: BTreeMap<&'static str, DispatchFn<A>>,
+    entries: BTreeMap<Manifest, DispatchFn<A>>,
 }
 
 impl<A: Actor> Default for HandlerRegistry<A> {
     fn default() -> Self {
         HandlerRegistry {
             entries: BTreeMap::new(),
+        }
+    }
+}
+
+// Manual `Clone`: `A` itself need not be `Clone` (the entries are `fn` pointers).
+impl<A: Actor> Clone for HandlerRegistry<A> {
+    fn clone(&self) -> Self {
+        HandlerRegistry {
+            entries: self.entries.clone(),
         }
     }
 }
@@ -72,24 +82,15 @@ impl<A: Actor> HandlerRegistry<A> {
         A: Handler<M>,
         M: Message,
     {
-        self.entries
-            .insert(M::MANIFEST.as_str(), dispatch_entry::<A, M>);
+        self.entries.insert(M::MANIFEST, dispatch_entry::<A, M>);
     }
 
-    /// The dispatch entry for `manifest`, or `None` if `(A, manifest)` is not
-    /// registered — the receive loop turns `None` into `CallError::Unhandled`.
+    /// The dispatch entry for a *claimed* manifest, or `None` if `(A, manifest)`
+    /// is not registered — the receive loop turns `None` into
+    /// `CallError::Unhandled`. Takes `&str`, not [`Manifest`]: the claim is
+    /// untrusted wire text, and this lookup is where it either matches a
+    /// declared identity or is refused (spec §5, §15).
     pub fn dispatch(&self, manifest: &str) -> Option<DispatchFn<A>> {
         self.entries.get(manifest).copied()
-    }
-
-    /// The manifests this actor accepts, in deterministic order.
-    pub fn accepted(&self) -> Vec<&'static str> {
-        self.entries.keys().copied().collect()
-    }
-
-    /// Consume the registry, yielding its `manifest → dispatch entry` map for
-    /// the host to store alongside the actor's mailbox.
-    pub fn into_entries(self) -> BTreeMap<&'static str, DispatchFn<A>> {
-        self.entries
     }
 }

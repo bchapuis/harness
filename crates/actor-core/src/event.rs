@@ -7,6 +7,7 @@
 use crate::actor::TerminationReason;
 use crate::id::ActorId;
 use crate::id::NodeId;
+use crate::message::Manifest;
 use crate::supervision::Fault;
 
 /// The decision supervision applied to a faulted actor (spec §11.2), as seen on
@@ -52,22 +53,13 @@ pub enum Event {
     /// holds across restarts.
     Restarted { actor: ActorId },
     /// A message was enqueued onto an actor's mailbox (spec §6).
-    Enqueue {
-        actor: ActorId,
-        manifest: &'static str,
-    },
+    Enqueue { actor: ActorId, manifest: Manifest },
     /// An actor's executor began handling a message (spec §6). Paired with
     /// [`Event::DispatchEnd`]; between the two, the actor is busy and must not
     /// start another message (serial, non-reentrant execution, invariant #4).
-    DispatchStart {
-        actor: ActorId,
-        manifest: &'static str,
-    },
+    DispatchStart { actor: ActorId, manifest: Manifest },
     /// An actor's executor finished handling a message (or it panicked).
-    DispatchEnd {
-        actor: ActorId,
-        manifest: &'static str,
-    },
+    DispatchEnd { actor: ActorId, manifest: Manifest },
     /// A request/response call was issued to an actor (spec §3.3). Paired with
     /// [`Event::AskOutcome`]; an issued ask that never reaches an outcome is a
     /// silently-lost call (invariant #1).
@@ -78,7 +70,7 @@ pub enum Event {
     AskIssued {
         actor: ActorId,
         caller: NodeId,
-        manifest: &'static str,
+        manifest: Manifest,
     },
     /// A request/response call terminated, in success or a [`CallError`]
     /// (spec §14). `failed` distinguishes the two.
@@ -87,7 +79,7 @@ pub enum Event {
     AskOutcome {
         actor: ActorId,
         caller: NodeId,
-        manifest: &'static str,
+        manifest: Manifest,
         failed: bool,
     },
     /// `observer` marked `node` suspect (spec §10). Reachability is per-observer

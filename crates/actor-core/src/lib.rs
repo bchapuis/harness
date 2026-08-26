@@ -38,7 +38,7 @@ pub use message::{Manifest, Message};
 pub use rebind::with_decoding_system;
 pub use receptionist::{Key, Listing, Receptionist};
 pub use refs::ActorRef;
-pub use registry::{DispatchFn, HandlerRegistry};
+pub use registry::HandlerRegistry;
 pub use reply::{ReplyHandle, ReplyResult};
 pub use runtime::{BoxFuture, Clock, Elapsed, Entropy, Instant, Spawner};
 pub use supervision::{Backoff, Fault, Supervision, SupervisionDirective};

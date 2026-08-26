@@ -7,7 +7,13 @@ use actor_serialization::SerializationRequirement;
 /// Author-controlled and stable across recompiles and renames. An explicit
 /// string such as `"myapp.Greet"` is RECOMMENDED; a breaking shape change should
 /// become a new message type with a new manifest, not a silent redefinition.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+///
+/// A `Manifest` value exists only for statically **declared** identities; text
+/// arriving off the wire stays `&str` until
+/// [`HandlerRegistry::dispatch`](crate::HandlerRegistry::dispatch) matches it
+/// against a declared one — the allowlist is the point where a claimed manifest
+/// becomes a recognized identity (spec §5, §15).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Manifest(&'static str);
 
 impl Manifest {
@@ -16,8 +22,17 @@ impl Manifest {
         Manifest(id)
     }
 
-    /// The manifest's string form, used as the dispatch and event key.
+    /// The manifest's string form — what a transport frame carries on the wire.
     pub const fn as_str(&self) -> &'static str {
+        self.0
+    }
+}
+
+/// Lets a registry keyed by `Manifest` answer a lookup for an untrusted wire
+/// `&str` without allocating. Sound because `Eq`/`Ord`/`Hash` all delegate to
+/// the string, as [`Borrow`](std::borrow::Borrow) requires.
+impl std::borrow::Borrow<str> for Manifest {
+    fn borrow(&self) -> &str {
         self.0
     }
 }

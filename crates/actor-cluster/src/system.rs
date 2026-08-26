@@ -31,12 +31,14 @@ use actor_core::Entropy;
 use actor_core::Event;
 use actor_core::EventSink;
 use actor_core::Mailbox;
+use actor_core::Manifest;
 use actor_core::NodeId;
 use actor_core::ReplyHandle;
 use actor_core::ReplyResult;
 use actor_core::Spawner;
 use actor_core::Terminated;
 use actor_core::TerminationReason;
+use actor_core::host::ActorFactory;
 use actor_core::host::LocalHost;
 use actor_core::host::WatchDelivery;
 use actor_core::receptionist::ReceptionistState;
@@ -699,7 +701,7 @@ where
     async fn remote_ask_inner(
         &self,
         recipient: &ActorId,
-        manifest: &'static str,
+        manifest: Manifest,
         payload: Vec<u8>,
         within: Duration,
     ) -> Result<Vec<u8>, CallError> {
@@ -752,53 +754,17 @@ where
     S: Spawner,
     T: Transport,
 {
-    fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A> {
-        let mut once = Some(actor);
+    fn spawn_factory<A: Actor<System = Self>>(
+        &self,
+        factory: ActorFactory<A>,
+        parent: Option<ActorId>,
+    ) -> ActorRef<A> {
         self.inner.host.spawn_actor(
             self.clone(),
             self.inner.clock.clone(),
             &self.inner.spawner,
-            Box::new(move || once.take()),
-            None,
-        )
-    }
-
-    fn spawn_with<A, F>(&self, mut factory: F) -> ActorRef<A>
-    where
-        A: Actor<System = Self>,
-        F: FnMut() -> A + Send + 'static,
-    {
-        self.inner.host.spawn_actor(
-            self.clone(),
-            self.inner.clock.clone(),
-            &self.inner.spawner,
-            Box::new(move || Some(factory())),
-            None,
-        )
-    }
-
-    fn spawn_child<A: Actor<System = Self>>(&self, child: A, parent: ActorId) -> ActorRef<A> {
-        let mut once = Some(child);
-        self.inner.host.spawn_actor(
-            self.clone(),
-            self.inner.clock.clone(),
-            &self.inner.spawner,
-            Box::new(move || once.take()),
-            Some(parent),
-        )
-    }
-
-    fn spawn_child_with<A, F>(&self, mut factory: F, parent: ActorId) -> ActorRef<A>
-    where
-        A: Actor<System = Self>,
-        F: FnMut() -> A + Send + 'static,
-    {
-        self.inner.host.spawn_actor(
-            self.clone(),
-            self.inner.clock.clone(),
-            &self.inner.spawner,
-            Box::new(move || Some(factory())),
-            Some(parent),
+            factory,
+            parent,
         )
     }
 
@@ -826,7 +792,7 @@ where
     async fn remote_ask(
         &self,
         recipient: &ActorId,
-        manifest: &'static str,
+        manifest: Manifest,
         payload: Vec<u8>,
         within: Duration,
     ) -> Result<Vec<u8>, CallError> {
@@ -852,7 +818,7 @@ where
     async fn remote_tell(
         &self,
         recipient: &ActorId,
-        manifest: &'static str,
+        manifest: Manifest,
         payload: Vec<u8>,
     ) -> Result<(), CallError> {
         if self.inner.membership.is_down(recipient.node()) {

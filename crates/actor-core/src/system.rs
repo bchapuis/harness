@@ -19,11 +19,13 @@ use crate::actor::Actor;
 use crate::error::CallError;
 use crate::event::Event;
 use crate::event::EventSink;
+use crate::host::ActorFactory;
 use crate::host::LocalHost;
 use crate::host::WatchDelivery;
 use crate::id::ActorId;
 use crate::id::NodeId;
 use crate::mailbox::Mailbox;
+use crate::message::Manifest;
 use crate::receptionist::Receptionist;
 use crate::receptionist::ReceptionistState;
 use crate::refs::ActorRef;
@@ -36,22 +38,51 @@ use crate::runtime::Spawner;
 /// The runtime an actor runs on (spec §4). A cloneable handle: cloning shares
 /// the same underlying system.
 pub trait ActorSystem: Clone + Send + Sync + 'static {
-    /// Spawn a root actor and return a handle to it (spec §4.1, §4.2).
-    fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A>;
+    /// Spawn an actor from `factory`, parented to `parent` (`None` for a root)
+    /// — the one spawn seam an implementation supplies (spec §4.1, §4.2). The
+    /// factory yields the initial instance and any restart re-creations, and
+    /// `None` once exhausted (spec §11.2). Callers use the four provided forms
+    /// ([`spawn`], [`spawn_with`], [`Ctx::spawn`], [`Ctx::spawn_with`]), which
+    /// are defined in terms of this.
+    ///
+    /// [`spawn`]: ActorSystem::spawn
+    /// [`spawn_with`]: ActorSystem::spawn_with
+    /// [`Ctx::spawn`]: crate::Ctx::spawn
+    /// [`Ctx::spawn_with`]: crate::Ctx::spawn_with
+    fn spawn_factory<A: Actor<System = Self>>(
+        &self,
+        factory: ActorFactory<A>,
+        parent: Option<ActorId>,
+    ) -> ActorRef<A>;
+
+    /// Spawn a root actor and return a handle to it (spec §4.1, §4.2). The
+    /// actor is value-spawned: it cannot be re-created, so a `Restart`
+    /// directive degrades to `Stop` (spec §11.2); use
+    /// [`spawn_with`](ActorSystem::spawn_with) for a restartable actor.
+    fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A> {
+        let mut once = Some(actor);
+        self.spawn_factory(Box::new(move || once.take()), None)
+    }
 
     /// Spawn an actor parented to `parent` (the supervisor), so a fault it
     /// escalates fails the parent (spec §11.1). Used by [`Ctx::spawn`].
     ///
     /// [`Ctx::spawn`]: crate::Ctx::spawn
-    fn spawn_child<A: Actor<System = Self>>(&self, child: A, parent: ActorId) -> ActorRef<A>;
+    fn spawn_child<A: Actor<System = Self>>(&self, child: A, parent: ActorId) -> ActorRef<A> {
+        let mut once = Some(child);
+        self.spawn_factory(Box::new(move || once.take()), Some(parent))
+    }
 
     /// Spawn a root actor from a `factory` so a `Restart` directive can
     /// re-create it (spec §11.2). The value-based [`spawn`](ActorSystem::spawn)
     /// cannot reconstruct its actor, so a restart there degrades to `Stop`.
-    fn spawn_with<A, F>(&self, factory: F) -> ActorRef<A>
+    fn spawn_with<A, F>(&self, mut factory: F) -> ActorRef<A>
     where
         A: Actor<System = Self>,
-        F: FnMut() -> A + Send + 'static;
+        F: FnMut() -> A + Send + 'static,
+    {
+        self.spawn_factory(Box::new(move || Some(factory())), None)
+    }
 
     /// Spawn a child from a `factory` so a `Restart` directive can re-create it
     /// (spec §11.2), parented to `parent`. The value-based [`spawn_child`] cannot
@@ -60,10 +91,13 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     ///
     /// [`spawn_child`]: ActorSystem::spawn_child
     /// [`Ctx::spawn_with`]: crate::Ctx::spawn_with
-    fn spawn_child_with<A, F>(&self, factory: F, parent: ActorId) -> ActorRef<A>
+    fn spawn_child_with<A, F>(&self, mut factory: F, parent: ActorId) -> ActorRef<A>
     where
         A: Actor<System = Self>,
-        F: FnMut() -> A + Send + 'static;
+        F: FnMut() -> A + Send + 'static,
+    {
+        self.spawn_factory(Box::new(move || Some(factory())), Some(parent))
+    }
 
     /// Resolve `id` to its local mailbox if a live local actor of type `A` owns
     /// it (spec §4.3). `None` for a remote or resigned id; performs no network
@@ -107,7 +141,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     fn remote_ask(
         &self,
         recipient: &ActorId,
-        manifest: &'static str,
+        manifest: Manifest,
         payload: Vec<u8>,
         within: Duration,
     ) -> impl Future<Output = Result<Vec<u8>, CallError>> + Send;
@@ -116,7 +150,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     fn remote_tell(
         &self,
         recipient: &ActorId,
-        manifest: &'static str,
+        manifest: Manifest,
         payload: Vec<u8>,
     ) -> impl Future<Output = Result<(), CallError>> + Send;
 
@@ -182,7 +216,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     where
         Self: Sized,
     {
-        Receptionist::new(self.clone(), self.receptionist_state(), self.node())
+        Receptionist::new(self.clone(), self.receptionist_state())
     }
 }
 
@@ -293,24 +327,12 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystem<C, E, S> {
     pub fn spawner(&self) -> &S {
         &self.inner.spawner
     }
+}
 
-    /// Spawn from a one-shot factory: the actor yields once, so a `Restart`
-    /// directive degrades to `Stop`. Shared by [`spawn`](ActorSystem::spawn)
-    /// (no parent) and [`spawn_child`](ActorSystem::spawn_child) (with parent).
-    fn spawn_one_shot<A: Actor<System = Self>>(
-        &self,
-        actor: A,
-        parent: Option<ActorId>,
-    ) -> ActorRef<A> {
-        let mut once = Some(actor);
-        self.spawn_factory(Box::new(move || once.take()), parent)
-    }
-
-    /// Spawn from `factory` on this system's host — the one invocation all four
-    /// spawn methods funnel through.
+impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
     fn spawn_factory<A: Actor<System = Self>>(
         &self,
-        factory: crate::host::ActorFactory<A>,
+        factory: ActorFactory<A>,
         parent: Option<ActorId>,
     ) -> ActorRef<A> {
         self.inner.host.spawn_actor(
@@ -320,32 +342,6 @@ impl<C: Clock, E: Entropy, S: Spawner> LocalSystem<C, E, S> {
             factory,
             parent,
         )
-    }
-}
-
-impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
-    fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A> {
-        self.spawn_one_shot(actor, None)
-    }
-
-    fn spawn_with<A, F>(&self, mut factory: F) -> ActorRef<A>
-    where
-        A: Actor<System = Self>,
-        F: FnMut() -> A + Send + 'static,
-    {
-        self.spawn_factory(Box::new(move || Some(factory())), None)
-    }
-
-    fn spawn_child<A: Actor<System = Self>>(&self, child: A, parent: ActorId) -> ActorRef<A> {
-        self.spawn_one_shot(child, Some(parent))
-    }
-
-    fn spawn_child_with<A, F>(&self, mut factory: F, parent: ActorId) -> ActorRef<A>
-    where
-        A: Actor<System = Self>,
-        F: FnMut() -> A + Send + 'static,
-    {
-        self.spawn_factory(Box::new(move || Some(factory())), Some(parent))
     }
 
     fn resolve_local<A: Actor<System = Self>>(&self, id: &ActorId) -> Option<Mailbox<A>> {
@@ -364,7 +360,7 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
     async fn remote_ask(
         &self,
         _recipient: &ActorId,
-        _manifest: &'static str,
+        _manifest: Manifest,
         _payload: Vec<u8>,
         _within: Duration,
     ) -> Result<Vec<u8>, CallError> {
@@ -374,7 +370,7 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
     async fn remote_tell(
         &self,
         _recipient: &ActorId,
-        _manifest: &'static str,
+        _manifest: Manifest,
         _payload: Vec<u8>,
     ) -> Result<(), CallError> {
         Err(CallError::Unreachable)

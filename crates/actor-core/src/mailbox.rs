@@ -26,6 +26,7 @@ use crate::error::CallError;
 use crate::event::Event;
 use crate::event::EventSink;
 use crate::id::ActorId;
+use crate::message::Manifest;
 use crate::message::Message;
 use crate::reply::ReplyHandle;
 use crate::runtime::BoxFuture;
@@ -37,7 +38,7 @@ type Runner<A> = Box<dyn for<'a> FnOnce(&'a mut A, &'a Ctx<A>) -> BoxFuture<'a, 
 /// Sentinel manifest for the `when_local` closure (spec §3.5.1). That closure
 /// carries no message type, yet the by-value envelope still needs a manifest for
 /// the `Enqueue`/`Dispatch` event stream.
-const WHEN_LOCAL_MANIFEST: &str = "core.when_local";
+const WHEN_LOCAL_MANIFEST: Manifest = Manifest::new("core.when_local");
 
 /// The fire-and-forget runner shared by [`Mailbox::tell`] and
 /// [`Mailbox::try_tell`]: drives the handler to completion and discards the reply.
@@ -58,7 +59,7 @@ where
 /// by-value** envelope (spec §6), holding a live closure rather than serialized
 /// bytes; the remote path rebuilds an equivalent `Envelope` after deserializing.
 pub(crate) struct Envelope<A: Actor> {
-    pub(crate) manifest: &'static str,
+    pub(crate) manifest: Manifest,
     pub(crate) run: Runner<A>,
 }
 
@@ -102,7 +103,7 @@ impl<A: Actor> Mailbox<A> {
         A: Handler<M>,
         M: Message,
     {
-        let manifest = M::MANIFEST.as_str();
+        let manifest = M::MANIFEST;
         // `AskIssued`/`AskOutcome` always pair, so a checker can prove every ask
         // terminates and none stays pending at quiescence (invariant #1).
         self.events.emit(Event::AskIssued {
@@ -138,7 +139,7 @@ impl<A: Actor> Mailbox<A> {
         A: Handler<M>,
         M: Message,
     {
-        self.enqueue(M::MANIFEST.as_str(), tell_runner(msg)).await
+        self.enqueue(M::MANIFEST, tell_runner(msg)).await
     }
 
     /// Non-blocking fire-and-forget: [`CallError::MailboxFull`] when full,
@@ -148,7 +149,7 @@ impl<A: Actor> Mailbox<A> {
         A: Handler<M>,
         M: Message,
     {
-        self.try_enqueue(M::MANIFEST.as_str(), tell_runner(msg))
+        self.try_enqueue(M::MANIFEST, tell_runner(msg))
     }
 
     /// Run `f` on the actor's serial executor with `&mut A` and return its
@@ -172,7 +173,7 @@ impl<A: Actor> Mailbox<A> {
     /// Awaiting enqueue (spec §6 default backpressure): blocks until the mailbox
     /// has room, failing only on a closed mailbox. Shared by `ask`, `tell`,
     /// `run_local`, and the death-watch signal.
-    async fn enqueue(&self, manifest: &'static str, run: Runner<A>) -> Result<(), CallError> {
+    async fn enqueue(&self, manifest: Manifest, run: Runner<A>) -> Result<(), CallError> {
         self.sender
             .send(Envelope { manifest, run })
             .await
@@ -184,7 +185,7 @@ impl<A: Actor> Mailbox<A> {
     /// Non-blocking enqueue: returns [`CallError::MailboxFull`] when the queue is
     /// full rather than awaiting. Shared by `try_tell` (local best-effort) and
     /// `enqueue_remote` (the receive loop, which must not stall on backpressure).
-    fn try_enqueue(&self, manifest: &'static str, run: Runner<A>) -> Result<(), CallError> {
+    fn try_enqueue(&self, manifest: Manifest, run: Runner<A>) -> Result<(), CallError> {
         match self.sender.try_send(Envelope { manifest, run }) {
             Ok(()) => {
                 self.emit_enqueue(manifest);
@@ -198,7 +199,7 @@ impl<A: Actor> Mailbox<A> {
     /// Record that an envelope reached the queue (spec §16). Both enqueue paths
     /// emit exactly one `Enqueue` here on success, so the event has a single
     /// origin.
-    fn emit_enqueue(&self, manifest: &'static str) {
+    fn emit_enqueue(&self, manifest: Manifest) {
         self.events.emit(Event::Enqueue {
             actor: self.id.clone(),
             manifest,
@@ -233,7 +234,7 @@ impl<A: Actor> Mailbox<A> {
                 reply.send(outcome);
             })
         });
-        self.try_enqueue(M::MANIFEST.as_str(), run)
+        self.try_enqueue(M::MANIFEST, run)
     }
 
     /// Enqueue a [`Terminated`] death-watch signal (spec §12). It rides the same
@@ -250,7 +251,7 @@ impl<A: Actor> Mailbox<A> {
     where
         A: Handler<Terminated>,
     {
-        let manifest = Terminated::MANIFEST.as_str();
+        let manifest = Terminated::MANIFEST;
         // Capture the signal's facts before it moves into the handler closure, so
         // we can mark the delivery on the event stream once it lands.
         let target = signal.id.clone();

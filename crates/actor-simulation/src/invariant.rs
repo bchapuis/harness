@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 
 use actor_core::ActorId;
 use actor_core::Event;
+use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Terminated;
@@ -310,8 +311,8 @@ pub struct SignalInBand {
 }
 
 impl SignalInBand {
-    fn is_terminated(manifest: &str) -> bool {
-        manifest == <Terminated as Message>::MANIFEST.as_str()
+    fn is_terminated(manifest: Manifest) -> bool {
+        manifest == <Terminated as Message>::MANIFEST
     }
 }
 
@@ -322,10 +323,10 @@ impl Invariant for SignalInBand {
 
     fn observe(&mut self, event: &Event) -> Result<(), String> {
         match event {
-            Event::Enqueue { actor, manifest } if Self::is_terminated(manifest) => {
+            Event::Enqueue { actor, manifest } if Self::is_terminated(*manifest) => {
                 *self.enqueued.entry(actor.clone()).or_default() += 1;
             }
-            Event::DispatchStart { actor, manifest } if Self::is_terminated(manifest) => {
+            Event::DispatchStart { actor, manifest } if Self::is_terminated(*manifest) => {
                 let dispatched = self.dispatched.entry(actor.clone()).or_default();
                 *dispatched += 1;
                 let enqueued = self.enqueued.get(actor).copied().unwrap_or(0);
@@ -459,27 +460,27 @@ mod tests {
         Event::AskIssued {
             actor: id(n),
             caller: NodeId::new(0),
-            manifest: "m",
+            manifest: Manifest::new("m"),
         }
     }
     fn outcome(n: u64) -> Event {
         Event::AskOutcome {
             actor: id(n),
             caller: NodeId::new(0),
-            manifest: "m",
+            manifest: Manifest::new("m"),
             failed: false,
         }
     }
     fn start(n: u64) -> Event {
         Event::DispatchStart {
             actor: id(n),
-            manifest: "m",
+            manifest: Manifest::new("m"),
         }
     }
     fn end(n: u64) -> Event {
         Event::DispatchEnd {
             actor: id(n),
-            manifest: "m",
+            manifest: Manifest::new("m"),
         }
     }
 
@@ -532,7 +533,7 @@ mod tests {
     #[test]
     fn signal_in_band_flags_out_of_band_dispatch() {
         let mut inv = SignalInBand::default();
-        let term = <Terminated as Message>::MANIFEST.as_str();
+        let term = <Terminated as Message>::MANIFEST;
         let enqueue = |n| Event::Enqueue {
             actor: id(n),
             manifest: term,
@@ -556,7 +557,7 @@ mod tests {
         assert!(
             inv.observe(&Event::DispatchStart {
                 actor: id(0),
-                manifest: "app.Greet",
+                manifest: Manifest::new("app.Greet"),
             })
             .is_ok()
         );

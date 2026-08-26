@@ -140,7 +140,7 @@ impl<A: Actor> ActorRef<A> {
                 let payload = actor_serialization::encode(&*codec, &msg)?;
                 let bytes = self
                     .system
-                    .remote_ask(&self.id, M::MANIFEST.as_str(), payload, within)
+                    .remote_ask(&self.id, M::MANIFEST, payload, within)
                     .await?;
                 // Decode under this system so an `ActorRef` in the reply rebinds
                 // here (spec §4.4).
@@ -199,7 +199,7 @@ impl<A: Actor> ActorRef<A> {
                 let codec = self.system.codec();
                 let payload = actor_serialization::encode(&*codec, &msg)?;
                 self.system
-                    .remote_tell(&self.id, M::MANIFEST.as_str(), payload)
+                    .remote_tell(&self.id, M::MANIFEST, payload)
                     .await
             }
         }

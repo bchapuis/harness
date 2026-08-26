@@ -22,8 +22,8 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Path;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
 use serde::Deserialize;
@@ -501,10 +501,11 @@ mod local_model {
     }
 
     #[test]
-    fn registration_lists_accepted_manifests() {
+    fn registration_captures_the_accepted_manifest() {
         let mut registry = HandlerRegistry::<Greeter>::default();
         Greeter::register(&mut registry);
-        assert_eq!(registry.accepted(), &["test.Greet"]);
+        assert!(registry.dispatch("test.Greet").is_some());
+        assert!(registry.dispatch("test.Unknown").is_none());
     }
 
     // --- Per-sender FIFO (spec §6, invariant #3) ----------------------------------
@@ -648,8 +649,8 @@ mod remote_routing {
     use actor_core::Message;
     use actor_core::NodeId;
     use actor_core::Path;
-    use actor_simulation::SimNode;
     use actor_simulation::SimNetwork;
+    use actor_simulation::SimNode;
     use actor_simulation::Simulation;
     use serde::Deserialize;
     use serde::Serialize;
