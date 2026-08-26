@@ -214,6 +214,17 @@ impl<G: Grain> HostCache<G> {
         })
     }
 
+    /// The shard `name` maps to — the map-first, founding-fallback resolution
+    /// (§5.1) behind one method, so no caller re-assembles its inputs.
+    pub(crate) fn shard_of(&self, name: &GrainName) -> ShardId {
+        resolve_shard(
+            self.shard_map.as_ref(),
+            self.grain_type,
+            name.key(),
+            self.shards,
+        )
+    }
+
     /// A cached host for `name`. On a node that **replicates** the name's shard the
     /// current leader is known locally, so a handle that no longer sits on it is
     /// proactively dropped (§5.4). A node that does **not** replicate the shard
@@ -226,12 +237,7 @@ impl<G: Grain> HostCache<G> {
             let mut hosts = self.hosts.lock().expect("host cache mutex poisoned");
             let (host, displaced) = hosts.get(name);
             let found = host.filter(|host| {
-                match self.system.shard_leader(resolve_shard(
-                    self.shard_map.as_ref(),
-                    self.grain_type,
-                    name.key(),
-                    self.shards,
-                )) {
+                match self.system.shard_leader(self.shard_of(name)) {
                     Some(leader) if host.id().node() != leader => {
                         hosts.remove(name);
                         false
@@ -799,12 +805,7 @@ impl<G: Grain> Granary<G> {
     /// observation, not a guarantee: leadership can move immediately after.
     pub fn leader(&self, key: impl Into<String>) -> Option<NodeId> {
         let name = GrainName::new(self.grain_type, key);
-        self.system.shard_leader(resolve_shard(
-            self.shard_map.as_ref(),
-            self.grain_type,
-            name.key(),
-            self.shards,
-        ))
+        self.system.shard_leader(self.cache.shard_of(&name))
     }
 
     /// Whether a live host handle is currently cached for `key` (spec §5.4). An
@@ -862,13 +863,7 @@ impl<G: Grain> Granary<G> {
     /// not a `granary()`-time snapshot.
     pub fn replicas(&self, key: impl Into<String>) -> Vec<NodeId> {
         let name = GrainName::new(self.grain_type, key);
-        let index = resolve_shard(
-            self.shard_map.as_ref(),
-            self.grain_type,
-            name.key(),
-            self.shards,
-        )
-        .index;
+        let index = self.cache.shard_of(&name).index;
         self.shard_map.replicas(index).unwrap_or_default()
     }
 }
@@ -1044,7 +1039,6 @@ where
     S: GranarySystem,
     G: Grain<System = S>,
 {
-    let shards = config.shards.max(1);
     let handle = build_granary::<S, G>(
         system,
         grain_type,
@@ -1057,8 +1051,6 @@ where
         system.clone(),
         handle.clone(),
         index,
-        grain_type,
-        shards,
     )));
     handle
 }
@@ -1172,16 +1164,14 @@ where
 /// **live** owner, so the alarm still fires and the grain re-registers into its new
 /// shard's index there. The driver clears the stale entry in the old index only
 /// *after* that successful re-activation, so it never orphans a wake.
-async fn alarm_driver_loop<S, G>(
-    system: S,
-    granary: Granary<G>,
-    index: Granary<AlarmIndex<S>>,
-    grain_type: &'static str,
-    shards: usize,
-) where
+async fn alarm_driver_loop<S, G>(system: S, granary: Granary<G>, index: Granary<AlarmIndex<S>>)
+where
     S: GranarySystem,
     G: Grain<System = S>,
 {
+    // The type name and founding shard count ride on the handle; this loop
+    // takes no copy of facts the `Granary` already carries.
+    let grain_type = granary.grain_type;
     loop {
         system.sleep(ALARM_DRIVE_INTERVAL).await;
         let now = system.now().as_nanos();
@@ -1190,7 +1180,7 @@ async fn alarm_driver_loop<S, G>(
         // still bootstrapping, fall back to the founding indices.
         let mut indices = granary.shard_map.shard_indices();
         if indices.is_empty() {
-            indices = (0..shards as u32).collect();
+            indices = (0..granary.shards as u32).collect();
         }
         for shard in indices {
             let id = ShardId {
@@ -1223,12 +1213,7 @@ async fn alarm_driver_loop<S, G>(
                 // — with a max head, so the clear always wins. Only after a
                 // successful re-activation, so a transient failure never orphans
                 // the wake.
-                let live = resolve_shard(
-                    granary.shard_map.as_ref(),
-                    grain_type,
-                    name.key(),
-                    granary.shards,
-                );
+                let live = granary.cache.shard_of(&name);
                 if reactivated && live.index != shard {
                     let _ = index
                         .grain(key.clone())

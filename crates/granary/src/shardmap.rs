@@ -40,7 +40,6 @@ use crate::replica_store::ReplicaTransport;
 use crate::replicator::QuorumReplicator;
 use crate::replicator::ReplicaSets;
 use crate::replicator::ShardControl;
-use crate::shard::QuorumGrainJournal;
 use crate::store::GrainStore;
 use crate::system::KeyRange;
 use crate::system::MAP_SHARD_INDEX;
@@ -814,7 +813,7 @@ impl ShardMapSource for RaftShardMap {
 /// would be ten pass-through parameters written out six times.
 ///
 /// Each method is one committed command's local effect: creating and retiring
-/// shard groups, building and dropping [`QuorumGrainJournal`]s, and flipping the
+/// shard groups, building and dropping shard journals, and flipping the
 /// live [`ReplicaSets`] so every in-flight journal switches to the joint quorum (a
 /// majority of current AND of target) the moment a migration commits. A node newly
 /// involved creates the shard group as a non-member over the *current* voters, so
@@ -839,10 +838,12 @@ struct ShardApply<R: RaftConsensus> {
 
 impl<R: RaftConsensus> ShardApply<R> {
     /// Build this node's journal + live control for `shard` and register them.
+    /// The replicator handle is the journal (`GrainJournal for
+    /// Arc<QuorumReplicator>`), so one value serves both maps.
     fn build(&self, shard: u32, sets: ReplicaSets, range: KeyRange) {
         let shard_group = shard_group_id(self.grain_type, shard);
         let control = Arc::new(std::sync::Mutex::new(ShardControl::new(sets, range)));
-        let journal = QuorumGrainJournal::new(
+        let replicator = QuorumReplicator::for_shard(
             self.consensus.clone(),
             shard_group,
             shard,
@@ -855,12 +856,12 @@ impl<R: RaftConsensus> ShardApply<R> {
         self.handles
             .lock()
             .expect("shard handles mutex poisoned")
-            .insert(shard, (control, journal.replicator()));
+            .insert(shard, (control, Arc::clone(&replicator)));
         self.inner
             .lock()
             .expect("shard map mutex poisoned")
             .journals
-            .insert(shard, Arc::new(journal) as Arc<dyn DynGrainJournal>);
+            .insert(shard, Arc::new(replicator) as Arc<dyn DynGrainJournal>);
     }
 
     /// The founding allocation for a shard, or the start of a migration toward

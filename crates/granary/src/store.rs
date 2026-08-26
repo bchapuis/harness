@@ -113,22 +113,31 @@ pub struct ReadReply {
     pub snapshot: Option<(Seq, Term, Vec<u8>)>,
 }
 
+/// The committed head over a `base` and the seqs of the occupied slots above
+/// it: `base` plus the leading gap-free run. A committed prefix is gap-free
+/// (quorum intersection, §8), so a gap marks an uncommitted tail and correctly
+/// ends the run. The one definition of the fold, shared by the store's live
+/// records and the wire [`ReadReply`], so the two answers cannot drift.
+pub(crate) fn fold_head(base: u64, occupied: impl IntoIterator<Item = u64>) -> Seq {
+    let mut head = base;
+    for seq in occupied {
+        if seq != head + 1 {
+            break;
+        }
+        head += 1;
+    }
+    Seq::new(head)
+}
+
 impl ReadReply {
     /// The head this reply describes: the snapshot's seq (or zero) plus the leading
-    /// gap-free run of records above it.
-    ///
-    /// A committed prefix is gap-free (quorum intersection, §8), so a gap marks an
-    /// uncommitted tail and correctly ends the run. Defined here, beside the reply it
-    /// folds, so the local tier and a recovering leader read a reply the same way.
+    /// gap-free run of records above it — [`fold_head`], read off the wire shape,
+    /// so the local tier and a recovering leader read a reply the same way.
     pub fn head(&self) -> Seq {
-        let mut head = self.snapshot.as_ref().map_or(0, |(seq, _, _)| seq.value());
-        for (seq, _, _) in &self.slots {
-            if seq.value() != head + 1 {
-                break;
-            }
-            head += 1;
-        }
-        Seq::new(head)
+        fold_head(
+            self.snapshot.as_ref().map_or(0, |(seq, _, _)| seq.value()),
+            self.slots.iter().map(|(seq, _, _)| seq.value()),
+        )
     }
 
     /// The latest snapshot as `(seq, state)` — what the `load_snapshot` seam needs,
@@ -196,7 +205,7 @@ pub trait GrainBlobStore: Send + Sync + 'static {
     /// The acknowledgement *is* the durability (**G18**): a `Stored` means the bytes
     /// are on this node's storage, and the only other answer is
     /// [`BlobAck::Failed`] — there is no fence and no ordering to refuse against.
-    #[must_use = "a store call can refuse to write (Fenced/Stale/Sealed/Failed); read the outcome (G14)"]
+    #[must_use = "a blob store can fail to persist (BlobAck::Failed); read the outcome (G18)"]
     fn put_blob(&self, shard: u32, grain: &GrainName, id: BlobId, bytes: Vec<u8>) -> BlobAck;
 
     /// The bytes of `id` for a grain, or `None` if this store does not hold it. The
@@ -496,19 +505,18 @@ impl GrainRecords {
         }
     }
 
-    /// The committed head: `base` plus the leading gap-free run of `slots`. A
-    /// committed prefix is gap-free (quorum intersection, §8); a gap marks an
-    /// uncommitted tail, correctly excluded from the head.
+    /// The committed head: `base` plus the leading gap-free run of `slots` —
+    /// [`fold_head`], with a vacant slot yielding a non-successor seq that ends
+    /// the run.
     pub(crate) fn head(&self) -> Seq {
-        let mut run = 0u64;
-        for slot in &self.slots {
-            if slot.is_some() {
-                run += 1;
-            } else {
-                break;
-            }
-        }
-        Seq::new(self.base.value() + run)
+        let base = self.base.value();
+        fold_head(
+            base,
+            self.slots
+                .iter()
+                .enumerate()
+                .filter_map(|(i, slot)| slot.as_ref().map(|_| base + i as u64 + 1)),
+        )
     }
 
     /// The latest snapshot as `(seq, state)`, cloning the snapshot's bytes and nothing
@@ -786,10 +794,19 @@ impl MemoryGrainStore {
 /// `prepare` serialize on the segment lock (the only fencing-critical race, §8). The
 /// `sealed`/`bump_fence` leaf locks are short critical sections taken beneath it.
 pub(crate) trait WriteGuard {
+    /// The shard's current seal bound — the name-hash floor appends are refused
+    /// from — or `None` while unsealed (§7.7). The store supplies only this
+    /// lookup; which grains a bound refuses is [`sealed`](WriteGuard::sealed)'s,
+    /// one interpretation for every store.
+    fn seal_bound(&self, shard: u32) -> Option<u64>;
+
     /// Whether the shard's append bound refuses this grain's appends (§7.7). An
     /// append that passed this check is durably applied before any observer can act
     /// on the bound, because it runs inside the segment lock.
-    fn sealed(&self, shard: u32, grain: &GrainName) -> bool;
+    fn sealed(&self, shard: u32, grain: &GrainName) -> bool {
+        self.seal_bound(shard)
+            .is_some_and(|from| crate::system::name_at_or_above(grain, from))
+    }
 
     /// Check the shard fence against `term`, bumping it durably to `term` on a strict
     /// advance. Returns the blocking (higher, already-acknowledged) fence on refusal,
@@ -849,13 +866,13 @@ pub(crate) enum BumpRefusal {
 }
 
 impl WriteGuard for MemoryGrainStore {
-    fn sealed(&self, shard: u32, grain: &GrainName) -> bool {
+    fn seal_bound(&self, shard: u32) -> Option<u64> {
         self.inner
             .seals
             .lock()
             .expect("grain store seals poisoned")
             .get(&shard)
-            .is_some_and(|&from| crate::system::name_at_or_above(grain, from))
+            .copied()
     }
 
     /// Never `Failed`: an in-memory store has nothing that can fail to persist.

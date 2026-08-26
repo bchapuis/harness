@@ -222,6 +222,31 @@ pub struct EventHistory<E> {
 /// a `Seq` ([`EventHistory`]), decoded, at the journal's real slots.
 pub type EventsFuture<E> = BoxFuture<'static, Result<EventHistory<E>, GrainJournalError>>;
 
+/// One loaded journal page clamped to the committed prefix (§7.5), with the
+/// at-head verdict derived from the clamp: slots above `floor` are an
+/// in-flight append's tentative writes (or undecided leftovers), served only
+/// once a commit or recovery raises the floor, and a page is at head exactly
+/// when the clamp cut it short or the store ran out before `limit`. Returns
+/// `(base, committed records, at_head)`. Shared by the activation's
+/// [`GrainCtx::events`] and the gateway's non-activating read, like
+/// [`events_in_page`] below, so the two reads cannot drift on the subtlest
+/// part of the contract.
+pub(crate) fn committed_prefix(
+    page: crate::journal::RecordPage,
+    floor: Seq,
+    limit: usize,
+) -> (Seq, Vec<(Seq, Vec<u8>)>, bool) {
+    let base = page.base;
+    let loaded = page.records.len();
+    let records: Vec<(Seq, Vec<u8>)> = page
+        .records
+        .into_iter()
+        .take_while(|(seq, _)| *seq <= floor)
+        .collect();
+    let at_head = records.len() < loaded || loaded < limit;
+    (base, records, at_head)
+}
+
 /// The events among one loaded journal page — the record-to-event projection
 /// (spec §7.9) applied to a `load` page: each record split into facet tag and
 /// payload, facet records (§7.12) skipped, the events returned at the journal's
@@ -408,19 +433,10 @@ impl<G: Grain> GrainCtx<G> {
             let mut cursor = from;
             while events.len() < limit {
                 let page = journal.load(&name, cursor, LOAD_PAGE).await?;
+                let (page_base, records, at_head) = committed_prefix(page, floor, LOAD_PAGE);
                 // The store's base only advances, so the last page's is the
                 // highest this read observed.
-                base = page.base;
-                let loaded = page.records.len();
-                // Serve only the committed prefix (§7.5): slots above the
-                // floor are an in-flight append's tentative writes (or
-                // undecided leftovers) and are not served until they commit.
-                let records: Vec<(Seq, Vec<u8>)> = page
-                    .records
-                    .into_iter()
-                    .take_while(|(seq, _)| *seq <= floor)
-                    .collect();
-                let at_head = records.len() < loaded || loaded < LOAD_PAGE;
+                base = page_base;
                 if let Some((seq, _)) = records.last() {
                     cursor = *seq;
                 }

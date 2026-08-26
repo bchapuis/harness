@@ -18,6 +18,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use actor_cluster::GroupId;
+
 use actor_cluster::RaftConsensus;
 use actor_core::NodeId;
 use futures::StreamExt;
@@ -30,6 +32,7 @@ use crate::blocking::on_store;
 use crate::election::LeaderElection;
 use crate::grain::GrainName;
 use crate::journal::AppendOutcome;
+use crate::journal::GrainJournal;
 use crate::journal::GrainJournalError;
 use crate::journal::RecordPage;
 use crate::journal::Seq;
@@ -46,6 +49,17 @@ use crate::store::WriteKind;
 /// set(s) during a replica-set migration (§7.7).
 type StoreAckFuture =
     actor_core::BoxFuture<'static, (NodeId, Result<StoreAck, actor_core::CallError>)>;
+
+/// How a blob-area copy treats an unreachable destination replica — the one
+/// difference between the migration and split-transfer paths, kept as a named
+/// policy because it is load-bearing: the migration barrier must not proceed
+/// past a target missing its blobs (G17), while a transfer's skipped replica
+/// heals via recovery-on-access (G18).
+#[derive(Clone, Copy)]
+enum OnUnreachable {
+    Fail,
+    Skip,
+}
 
 /// This node's own store outcome as one more replica's ack, so a quorum is counted
 /// uniformly over all R replicas (the leader is a replica, §5.2).
@@ -304,6 +318,32 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         }
     }
 
+    /// Build one shard's replicator over its leader-election group (spec §7.3,
+    /// §7.4): the group supplies placement — who may write, under which term —
+    /// holding no grain data (§7.1, §8); this replicator supplies durability.
+    /// `control` is the shard's **live** control state — replica sets, owned
+    /// range, split freeze — shared with the shard map's apply loop so a
+    /// committed reallocation or split reaches in-flight journals (§7.7). The
+    /// returned handle is the shard's `GrainJournal` (the `Quorum` tier) and
+    /// the migration driver's replicator in one.
+    #[allow(clippy::too_many_arguments)] // one call site, from the shard map
+    pub(crate) fn for_shard(
+        consensus: R,
+        group: GroupId,
+        shard: u32,
+        control: Arc<std::sync::Mutex<ShardControl>>,
+        local: Arc<dyn GrainStore>,
+        transport: Arc<dyn ReplicaTransport>,
+        io: Arc<dyn BlockingIo>,
+        deadlines: Deadlines,
+    ) -> Arc<QuorumReplicator<R>> {
+        let self_node = consensus.node();
+        let election = LeaderElection::new(consensus, group);
+        Arc::new(QuorumReplicator::new(
+            election, local, transport, control, shard, self_node, io, deadlines,
+        ))
+    }
+
     /// A point-in-time snapshot of the replica sets: one fan-out uses one snapshot,
     /// so its ack counting is coherent even if the allocation commits mid-flight
     /// (the next operation picks up the new sets).
@@ -379,23 +419,18 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // Fan out to the remote peers first, each cloning the payload for its own wire
         // message; then write this node's own replica, *moving* the payload in (§5.2).
         // The batch is deep-cloned R-1 times, never R.
-        let mut replicas: Vec<StoreAckFuture> = self
-            .peers_of(&sets)
-            .into_iter()
-            .map(|node| {
-                let ack = self.transport.store_record(
-                    node,
-                    self.shard,
-                    grain.clone(),
-                    after,
-                    term,
-                    events.clone(),
-                    WriteKind::Append,
-                    self.deadlines.quorum,
-                );
-                Box::pin(async move { (node, ack.await) }) as StoreAckFuture
-            })
-            .collect();
+        let mut replicas: Vec<StoreAckFuture> = self.fan(self.peers_of(&sets), |node| {
+            self.transport.store_record(
+                node,
+                self.shard,
+                grain.clone(),
+                after,
+                term,
+                events.clone(),
+                WriteKind::Append,
+                self.deadlines.quorum,
+            )
+        });
         // The local write joins the fan-out as one more replica's ack (the leader is a
         // replica, §5.2). All R acks are gathered the same way, so this node counts
         // toward the quorum exactly when its own bytes are stable.
@@ -677,23 +712,18 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             store.store_record(shard, &name, base, term, repaired, WriteKind::Repair)
         })
         .await;
-        let mut replicas: Vec<StoreAckFuture> = self
-            .peers_of(sets)
-            .into_iter()
-            .map(|node| {
-                let ack = self.transport.store_record(
-                    node,
-                    self.shard,
-                    grain.clone(),
-                    base,
-                    term,
-                    records.to_vec(),
-                    WriteKind::Repair,
-                    self.deadlines.recover,
-                );
-                Box::pin(async move { (node, ack.await) }) as StoreAckFuture
-            })
-            .collect();
+        let mut replicas: Vec<StoreAckFuture> = self.fan(self.peers_of(sets), |node| {
+            self.transport.store_record(
+                node,
+                self.shard,
+                grain.clone(),
+                base,
+                term,
+                records.to_vec(),
+                WriteKind::Repair,
+                self.deadlines.recover,
+            )
+        });
         replicas.push(local_ack(self.self_node, local));
         let (outcome, pending) = self.collect_store_quorum(sets, replicas).await;
         match outcome {
@@ -775,19 +805,17 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // Local copy first (the leader is a replica, §5.2): move the bytes into peers'
         // wire messages by clone, but the local write needs no copy beyond the fan-out.
         let pending: FuturesUnordered<BlobAckFuture> = self
-            .peers_of(&sets)
-            .into_iter()
-            .map(|node| {
-                let ack = self.transport.store_blob(
+            .fan(self.peers_of(&sets), |node| {
+                self.transport.store_blob(
                     node,
                     self.shard,
                     grain.clone(),
                     id,
                     bytes.clone(),
                     self.deadlines.quorum,
-                );
-                Box::pin(async move { (node, ack.await) }) as BlobAckFuture
+                )
             })
+            .into_iter()
             .collect();
         // Awaited *before* the peers are polled, rather than joining the fan-out as
         // one more ack the way the record path does: **G18** requires a blob's quorum
@@ -955,23 +983,18 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let sets = self.sets();
         // Clone the state for each remote peer's wire message, then move it into this
         // node's own replica write (§5.2) — R-1 copies, not R.
-        let mut replicas: Vec<StoreAckFuture> = self
-            .peers_of(&sets)
-            .into_iter()
-            .map(|node| {
-                let ack = self.transport.store_snapshot(
-                    node,
-                    self.shard,
-                    grain.clone(),
-                    at,
-                    term,
-                    state.clone(),
-                    WriteKind::Append,
-                    self.deadlines.quorum,
-                );
-                Box::pin(async move { (node, ack.await) }) as StoreAckFuture
-            })
-            .collect();
+        let mut replicas: Vec<StoreAckFuture> = self.fan(self.peers_of(&sets), |node| {
+            self.transport.store_snapshot(
+                node,
+                self.shard,
+                grain.clone(),
+                at,
+                term,
+                state.clone(),
+                WriteKind::Append,
+                self.deadlines.quorum,
+            )
+        });
         // Offloaded for the same reason as the record write above, and overlapped with
         // the fan-out for the same reason — more so here: a snapshot is the largest
         // single thing this node fsyncs, so it is both the worst one to run on an async
@@ -1070,54 +1093,23 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         let Some(target) = sets.target.clone() else {
             return Ok(());
         };
-        // Source ids: this replica's plus every reachable current peer's.
-        let mut ids: std::collections::BTreeSet<BlobId> =
-            self.local.blob_ids(self.shard, grain).into_iter().collect();
+        // Source: this replica plus the reachable *current* peers. Strict on an
+        // unreachable target: the flip must not proceed past a target missing
+        // its blobs (G17), so the failure is the migration's, not healed later.
         let current_peers: Vec<NodeId> = sets
             .current
             .iter()
             .copied()
             .filter(|&n| n != self.self_node)
             .collect();
-        let lists = current_peers.iter().map(|&node| {
-            self.transport
-                .list_blobs(node, self.shard, grain.clone(), self.deadlines.quorum)
-        });
-        for list in join_all(lists).await.into_iter().flatten() {
-            ids.extend(list);
-        }
-        // Per target peer: ship what it lacks.
-        for node in target.into_iter().filter(|&n| n != self.self_node) {
-            let held: std::collections::BTreeSet<BlobId> = self
-                .transport
-                .list_blobs(node, self.shard, grain.clone(), self.deadlines.quorum)
-                .await
-                .map_err(|_| GrainJournalError::Unavailable("target replica unreachable".into()))?
-                .into_iter()
-                .collect();
-            for &id in ids.difference(&held) {
-                // A verified fetch: local copy, else the first current peer holding
-                // it. `None` means no replica holds it any more (swept mid-copy) —
-                // an orphan, safely skipped.
-                let Some(bytes) = self.get_blob(grain, id).await? else {
-                    continue;
-                };
-                self.transport
-                    .store_blob(
-                        node,
-                        self.shard,
-                        grain.clone(),
-                        id,
-                        bytes,
-                        self.deadlines.quorum,
-                    )
-                    .await
-                    .map_err(|_| {
-                        GrainJournalError::Unavailable("blob copy to target failed".into())
-                    })?;
-            }
-        }
-        Ok(())
+        self.copy_blob_area(
+            grain,
+            self.shard,
+            target.into_iter().filter(|&n| n != self.self_node),
+            current_peers,
+            OnUnreachable::Fail,
+        )
+        .await
     }
 
     // --- Shard split/merge transfer (§7.7) -------------------------------------
@@ -1150,14 +1142,11 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // for the full timeout. A split's dest inherits the parent's replicas, so
         // one may be down; the seal barrier is a majority, not unanimity (G15).
         let mut pending: FuturesUnordered<_> = self
-            .peers_of(&sets)
-            .into_iter()
-            .map(|node| {
-                let ack = self
-                    .transport
-                    .seal_range(node, self.shard, from, self.deadlines.quorum);
-                Box::pin(async move { (node, ack.await) })
+            .fan(self.peers_of(&sets), |node| {
+                self.transport
+                    .seal_range(node, self.shard, from, self.deadlines.quorum)
             })
+            .into_iter()
             .collect();
         while !count.satisfied()
             && let Some((node, result)) = pending.next().await
@@ -1218,7 +1207,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             } else {
                 None
             };
-            let peers = self.fan_to_peers(dest_replicas, |node| {
+            let peers = self.fan(dest_replicas.iter().copied(), |node| {
                 self.transport.store_snapshot(
                     node,
                     dest,
@@ -1251,7 +1240,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             } else {
                 None
             };
-            let peers = self.fan_to_peers(dest_replicas, |node| {
+            let peers = self.fan(dest_replicas.iter().copied(), |node| {
                 self.transport.store_record(
                     node,
                     dest,
@@ -1305,35 +1294,36 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         true
     }
 
-    /// Fan a per-node `Transfer` store out to every destination replica but this
-    /// leader, tagging each ack with its node for the majority count. The differing
-    /// store call is supplied as `mk`.
-    fn fan_to_peers(
+    /// Fan one per-node store out to `nodes`, skipping this node and tagging
+    /// each ack with its node for the quorum count. The differing store call is
+    /// supplied as `mk`; every fan in this file — append, repair, blob,
+    /// snapshot, seal, transfer — is this shape around a different call.
+    fn fan<T: Send + 'static>(
         &self,
-        dest_replicas: &[NodeId],
-        mk: impl Fn(NodeId) -> actor_core::BoxFuture<'static, Result<StoreAck, actor_core::CallError>>,
-    ) -> Vec<StoreAckFuture> {
-        dest_replicas
-            .iter()
-            .copied()
+        nodes: impl IntoIterator<Item = NodeId>,
+        mk: impl Fn(NodeId) -> actor_core::BoxFuture<'static, T>,
+    ) -> Vec<actor_core::BoxFuture<'static, (NodeId, T)>> {
+        nodes
+            .into_iter()
             .filter(|&n| n != self.self_node)
             .map(|node| {
                 let ack = mk(node);
-                Box::pin(async move { (node, ack.await) }) as StoreAckFuture
+                Box::pin(async move { (node, ack.await) })
+                    as actor_core::BoxFuture<'static, (NodeId, T)>
             })
             .collect()
     }
 
     /// Copy a moved grain's blob area to the reachable destination replicas'
-    /// `dest`-keyed areas (§7.7, G17/G18): source ids are the union of this
-    /// shard's replicas' lists, each blob fetched verified and stored where
-    /// missing. Best-effort per destination node — an unreachable dest replica
-    /// (a split's child inherits the parent's replicas, which may include a
-    /// crashed one) is skipped rather than stalling the split; its copies heal
-    /// via recovery-on-access when it returns. The committed records and snapshot
-    /// already reached a majority (`transfer_to_majority`), and blobs reach every
-    /// reachable dest. Idempotent (content-addressed); requires this leader's own
-    /// local copy to land, so the child leader can always serve.
+    /// `dest`-keyed areas (§7.7, G17/G18): the shared copy behind
+    /// [`copy_blob_area`], best-effort per destination node — an unreachable
+    /// dest replica (a split's child inherits the parent's replicas, which may
+    /// include a crashed one) is skipped rather than stalling the split; its
+    /// copies heal via recovery-on-access when it returns. The committed
+    /// records and snapshot already reached a majority
+    /// (`transfer_to_majority`), and blobs reach every reachable dest,
+    /// including this leader's own `dest`-keyed copy, so the child leader can
+    /// always serve.
     async fn transfer_blobs(
         &self,
         grain: &GrainName,
@@ -1341,10 +1331,35 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         dest_replicas: &[NodeId],
     ) -> Result<(), GrainJournalError> {
         let sets = self.sets();
-        // Source ids under THIS shard's keys: local plus every reachable peer.
+        self.copy_blob_area(
+            grain,
+            dest,
+            dest_replicas.iter().copied(),
+            self.peers_of(&sets),
+            OnUnreachable::Skip,
+        )
+        .await
+    }
+
+    /// The one blob-area copy (§7.7): gather the source id set — this
+    /// replica's list under this shard's keys plus every reachable
+    /// `source_peers` list — then, per destination node, list what it holds
+    /// under `dest` and ship each missing blob through a verified
+    /// [`get_blob`] fetch (`None` means no replica holds it any more, an
+    /// orphan swept mid-copy, safely skipped). A destination that is this
+    /// node writes through the local store's blocking pool. Idempotent
+    /// (content-addressed). `on_unreachable` is the migration-vs-transfer
+    /// policy split, kept explicit because it is load-bearing (G17 vs G18).
+    async fn copy_blob_area(
+        &self,
+        grain: &GrainName,
+        dest: u32,
+        dest_nodes: impl IntoIterator<Item = NodeId>,
+        source_peers: Vec<NodeId>,
+        on_unreachable: OnUnreachable,
+    ) -> Result<(), GrainJournalError> {
         let mut ids: std::collections::BTreeSet<BlobId> =
             self.local.blob_ids(self.shard, grain).into_iter().collect();
-        let source_peers = self.peers_of(&sets);
         let lists = source_peers.iter().map(|&node| {
             self.transport
                 .list_blobs(node, self.shard, grain.clone(), self.deadlines.quorum)
@@ -1352,7 +1367,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         for list in join_all(lists).await.into_iter().flatten() {
             ids.extend(list);
         }
-        for &node in dest_replicas {
+        for node in dest_nodes {
             let held: std::collections::BTreeSet<BlobId> = if node == self.self_node {
                 self.local.blob_ids(dest, grain).into_iter().collect()
             } else {
@@ -1362,14 +1377,17 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                     .await
                 {
                     Ok(list) => list.into_iter().collect(),
-                    // Unreachable dest replica: skip it (heals on access later).
-                    Err(_) => continue,
+                    Err(_) => match on_unreachable {
+                        OnUnreachable::Fail => {
+                            return Err(GrainJournalError::Unavailable(
+                                "target replica unreachable".into(),
+                            ));
+                        }
+                        OnUnreachable::Skip => continue,
+                    },
                 }
             };
             for &id in ids.difference(&held) {
-                // A verified fetch from this shard's keys: local copy, else the
-                // first peer holding it. `None` means no replica holds it any
-                // more (swept mid-copy) — an orphan, safely skipped.
                 let Some(bytes) = self.get_blob(grain, id).await? else {
                     continue;
                 };
@@ -1385,10 +1403,17 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                     .await
                     .is_err()
                 {
-                    // Lost the dest replica mid-copy — skip; the rest of its
-                    // blobs heal on access. Records/snapshot durability is
-                    // unaffected (they committed on a majority).
-                    break;
+                    match on_unreachable {
+                        OnUnreachable::Fail => {
+                            return Err(GrainJournalError::Unavailable(
+                                "blob copy to target failed".into(),
+                            ));
+                        }
+                        // Lost the dest replica mid-copy — skip; the rest of
+                        // its blobs heal on access. Records/snapshot durability
+                        // is unaffected (they committed on a majority).
+                        OnUnreachable::Skip => break,
+                    }
                 }
             }
         }
@@ -1569,6 +1594,79 @@ fn merge(replies: Vec<crate::store::ReadReply>, our_term: Term) -> Merged {
     }
     let head = Seq::new(base + records.len() as u64);
     (records, head, snapshot, any_below)
+}
+
+/// The clustered `Quorum` journal (spec §7, §7.4): the shard's replicator
+/// handle *is* the [`GrainJournal`] — no layer relays between them, because
+/// the composition (election + replicator) already happened in
+/// [`QuorumReplicator::for_shard`]. A grain write is an independent per-grain
+/// quorum append (§7.2), not an entry in a shared shard log, so a write-heavy
+/// grain never queues behind its shard-mates. On `Arc` because a journal
+/// clones per activation, sharing one replicator.
+impl<R: RaftConsensus> GrainJournal for Arc<QuorumReplicator<R>> {
+    async fn append(&self, grain: &GrainName, after: Seq, events: Vec<Vec<u8>>) -> AppendOutcome {
+        (**self).append(grain, after, events).await
+    }
+
+    async fn load(
+        &self,
+        grain: &GrainName,
+        from: Seq,
+        limit: usize,
+    ) -> Result<RecordPage, GrainJournalError> {
+        (**self).load(grain, from, limit).await
+    }
+
+    async fn head(&self, grain: &GrainName) -> Result<Seq, GrainJournalError> {
+        // On the `Quorum` tier `head` *is* the rehydration barrier (§8, §9): it
+        // recovers the grain's head from a write quorum by read-repair, so a fresh
+        // leader never folds onto a stale head.
+        (**self).recover(grain).await
+    }
+
+    fn term(&self) -> Option<Term> {
+        (**self).leadership_term()
+    }
+
+    async fn save_snapshot(&self, grain: &GrainName, at: Seq, state: Vec<u8>) -> AppendOutcome {
+        (**self).save_snapshot(grain, at, state).await
+    }
+
+    async fn load_snapshot(
+        &self,
+        grain: &GrainName,
+    ) -> Result<Option<(Seq, Vec<u8>)>, GrainJournalError> {
+        (**self).load_snapshot(grain).await
+    }
+
+    async fn put_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+        bytes: Vec<u8>,
+    ) -> Result<(), GrainJournalError> {
+        (**self).put_blob(grain, id, bytes).await
+    }
+
+    async fn get_blob(
+        &self,
+        grain: &GrainName,
+        id: BlobId,
+    ) -> Result<Option<Vec<u8>>, GrainJournalError> {
+        (**self).get_blob(grain, id).await
+    }
+
+    async fn has_blob(&self, grain: &GrainName, id: BlobId) -> Result<bool, GrainJournalError> {
+        (**self).has_blob(grain, id).await
+    }
+
+    async fn retain_blobs(&self, grain: &GrainName, retain: Vec<BlobId>) {
+        (**self).retain_blobs(grain, retain).await
+    }
+
+    async fn delete_blobs(&self, grain: &GrainName) {
+        (**self).delete_blobs(grain).await
+    }
 }
 
 #[cfg(test)]

@@ -109,13 +109,6 @@ impl Pending {
         self.slots.get(name).map(|slot| slot.head)
     }
 
-    pub fn len(&self) -> usize {
-        self.slots.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
 }
 
 /// A per-shard alarm index for one target grain type — a durable `GrainName → due`

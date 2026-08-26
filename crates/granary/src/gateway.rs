@@ -469,17 +469,9 @@ impl<G: Grain> Handler<ReadEvents<G>> for Gateway<G> {
             .load(&msg.name, msg.from, limit)
             .await
             .map_err(|e| GrainError::Unavailable(e.to_string()))?;
-        let base = page.base;
-        let loaded = page.records.len();
-        // Serve only the committed prefix: slots above the floor are an
-        // in-flight append's tentative writes (or undecided leftovers) and are
-        // not served until a commit or recovery raises the floor.
-        let records: Vec<(Seq, Vec<u8>)> = page
-            .records
-            .into_iter()
-            .take_while(|(seq, _)| *seq <= floor)
-            .collect();
-        let at_head = records.len() < loaded || loaded < limit;
+        // Serve only the committed prefix (`committed_prefix` states the §7.5
+        // contract this encodes).
+        let (base, records, at_head) = crate::grain::committed_prefix(page, floor, limit);
         let cursor = records.last().map(|(seq, _)| *seq).unwrap_or(msg.from);
         // The projection consumes the page in place — the serial gateway pays
         // one bounded local copy from the store, never a second allocation.

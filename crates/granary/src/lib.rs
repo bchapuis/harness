@@ -46,7 +46,7 @@
 //!
 //! - **`Local`, single-node** ([`LocalGrainJournal`]): one linearizable local store,
 //!   CP trivially. Hosted on a [`LocalSystem`](actor_core::LocalSystem).
-//! - **`Quorum`, clustered** ([`QuorumGrainJournal`]): the namespace is partitioned
+//! - **`Quorum`, clustered** (the shard replicator, replicator.rs): the namespace is partitioned
 //!   into shards (`GranaryConfig::shards`), each a leader-election Raft group holding
 //!   no grain data (§7.1) over which a per-grain **quorum append** (§7.2) makes a
 //!   grain's records durable on the shard's replicas, fenced by the shard term. A
@@ -115,7 +115,6 @@ mod metrics;
 mod node;
 mod replica_store;
 mod replicator;
-mod shard;
 mod shardmap;
 #[cfg(feature = "sql")]
 mod sql;
@@ -191,7 +190,6 @@ pub use metrics::GrainMetrics;
 pub use node::GranaryNode;
 pub use replica_store::ReplicaTransport;
 pub use replicator::Deadlines;
-pub use shard::QuorumGrainJournal;
 pub use shardmap::ShardMapSource;
 #[cfg(feature = "sql")]
 pub use sql::MAX_QUERY_ROWS;

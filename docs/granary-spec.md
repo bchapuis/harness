@@ -1042,13 +1042,12 @@ granary/                 # the grain runtime, built on actor-core + actor-cluste
   grainref.rs            # GrainRef + Granary handle + the system extension (`granary`/`grain`) (§4.3, §5.4)
   journal.rs             # the GrainJournal seam + AppendOutcome + Seq + DynGrainJournal (§7.3)
   election.rs            # the per-shard leader-election group: a small Raft group owning leadership/term/replica-set (§8)
-  replicator.rs          # the Replicator: per-grain quorum append fenced by the shard term;
-                         #   Local (single-node) and Quorum (clustered) tiers (§7.2, §7.4)
+  replicator.rs          # the Replicator: per-grain quorum append fenced by the shard term; its
+                         #   shard handle is the clustered GrainJournal (Quorum tier, §7, §7.2, §7.4)
   store.rs               # the per-node GrainStore seam: term-fenced records keyed by (shard, grain),
                          #   plus the in-memory MemoryGrainStore reference impl (§7.2, §7.4)
   replica_store.rs       # the per-node replica-store actor + ReplicaTransport: the Quorum replicator
                          #   quorum-appends to and recovers from peers over actor messaging (§7.2, §8)
-  shard.rs               # the clustered GrainJournal: composes the leader-election group + Replicator over a key range (§7)
   shardmap.rs            # the consensus-agreed shard map (per-type map group); allocator + reconcile (§7.6, §7.7)
   memory.rs              # the single-node journal: Local replicator + in-memory event log (tier 1, §7.4)
   file_store.rs          # the file-backed GrainStore: a node's records durable across a restart,

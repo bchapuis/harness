@@ -6,8 +6,8 @@
 //! simulator (§14) runs a grain's whole lifecycle under one seed.
 //!
 //! It never returns `NotLeader` or `Unavailable`: with a single store there is always
-//! a leader and always a quorum (those outcomes arise on the clustered
-//! [`QuorumGrainJournal`](crate::shard::QuorumGrainJournal)). Every method here is the
+//! a leader and always a quorum (those outcomes arise on the clustered `Quorum`
+//! tier, `GrainJournal for Arc<QuorumReplicator>` in replicator.rs). Every method here is the
 //! whole of what this tier does — it writes and reads the [`GrainStore`] seam it
 //! shares with the clustered tier, and there is no durability machinery under it to
 //! hold apart.

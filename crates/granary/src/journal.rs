@@ -7,7 +7,7 @@
 //!
 //! Two reference tiers implement it (§7.4): the single-node `Local`
 //! [`LocalGrainJournal`](crate::memory::LocalGrainJournal) and the clustered `Quorum`
-//! [`QuorumGrainJournal`](crate::shard::QuorumGrainJournal). Because the methods
+//! (`GrainJournal for Arc<QuorumReplicator>`, replicator.rs). Because the methods
 //! return `impl Future`, the trait is not object-safe; it is threaded as a concrete
 //! type (actor §4.6).
 

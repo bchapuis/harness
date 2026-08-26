@@ -242,16 +242,18 @@ where
         });
     }
 
-    /// The committed entries with `prefix` overlaid with this command's staged
-    /// puts and deletes, in key order — the prefix walk behind
-    /// [`list`](Self::list) (read-your-staged-writes, §7.12).
-    fn merged_range(&self, prefix: &str) -> BTreeMap<String, KvValue> {
+    /// The committed keys with `prefix` overlaid with this command's staged
+    /// puts and deletes, in key order, each projected through `project` — the
+    /// one implementation of the prefix walk (read-your-staged-writes, §7.12):
+    /// a staged `Some` wins over the committed value, a staged `None` deletes.
+    /// `project` decides what a hit costs — the value itself, or nothing.
+    fn merged<V>(&self, prefix: &str, project: impl Fn(&KvValue) -> V) -> BTreeMap<String, V> {
         self.cell.with_overlay::<Kv, I, _>(|form, stage| {
-            let mut entries: BTreeMap<String, KvValue> = form
+            let mut entries: BTreeMap<String, V> = form
                 .map
                 .range(prefix.to_string()..)
                 .take_while(|(k, _)| k.starts_with(prefix))
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| (k.clone(), project(v)))
                 .collect();
             if let Some(stage) = stage {
                 for (key, staged) in &stage.overlay {
@@ -260,7 +262,7 @@ where
                     }
                     match staged {
                         Some(value) => {
-                            entries.insert(key.clone(), value.clone());
+                            entries.insert(key.clone(), project(value));
                         }
                         None => {
                             entries.remove(key);
@@ -272,34 +274,17 @@ where
         })
     }
 
-    /// The keys with `prefix`, in order, through the overlay (§7.13). Walks keys
-    /// only — it never touches the values, so a large inline payload under the
-    /// prefix costs nothing here (unlike [`list`](Self::list)).
+    /// The committed entries with `prefix` through the overlay, in key order —
+    /// the walk behind [`list`](Self::list).
+    fn merged_range(&self, prefix: &str) -> BTreeMap<String, KvValue> {
+        self.merged(prefix, KvValue::clone)
+    }
+
+    /// The keys with `prefix`, in order, through the overlay (§7.13). Projects
+    /// to `()` — it never touches the values, so a large inline payload under
+    /// the prefix costs nothing here (unlike [`list`](Self::list)).
     pub fn keys(&self, prefix: &str) -> Vec<String> {
-        self.cell.with_overlay::<Kv, I, _>(|form, stage| {
-            let mut keys: BTreeSet<String> = form
-                .map
-                .range(prefix.to_string()..)
-                .take_while(|(k, _)| k.starts_with(prefix))
-                .map(|(k, _)| k.clone())
-                .collect();
-            if let Some(stage) = stage {
-                for (key, staged) in &stage.overlay {
-                    if !key.starts_with(prefix) {
-                        continue;
-                    }
-                    match staged {
-                        Some(_) => {
-                            keys.insert(key.clone());
-                        }
-                        None => {
-                            keys.remove(key);
-                        }
-                    }
-                }
-            }
-            keys.into_iter().collect()
-        })
+        self.merged(prefix, |_| ()).into_keys().collect()
     }
 
     /// The `(key, value)` pairs with `prefix`, in key order, through the overlay.

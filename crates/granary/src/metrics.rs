@@ -42,6 +42,24 @@ pub enum CommitOutcome {
 }
 
 impl CommitOutcome {
+    /// Every outcome, in slot order — the one place the outcome→slot mapping
+    /// lives, so a recorder and both render loops cannot disagree on which
+    /// counter an outcome owns.
+    const ALL: [CommitOutcome; 3] = [
+        CommitOutcome::Committed,
+        CommitOutcome::NotLeader,
+        CommitOutcome::Unavailable,
+    ];
+
+    /// This outcome's slot in [`ALL`](CommitOutcome::ALL)-ordered arrays.
+    fn index(self) -> usize {
+        match self {
+            CommitOutcome::Committed => 0,
+            CommitOutcome::NotLeader => 1,
+            CommitOutcome::Unavailable => 2,
+        }
+    }
+
     /// The label text used when rendering.
     fn as_str(self) -> &'static str {
         match self {
@@ -244,19 +262,12 @@ impl AtomicGrainMetrics {
              # TYPE granary_commit_seconds histogram\n",
         );
         for (name, m) in &types {
-            for (idx, outcome) in [
-                CommitOutcome::Committed,
-                CommitOutcome::NotLeader,
-                CommitOutcome::Unavailable,
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            for outcome in CommitOutcome::ALL {
                 render_histogram(
                     &mut out,
                     "granary_commit_seconds",
                     &format!("grain_type=\"{name}\",outcome=\"{}\"", outcome.as_str()),
-                    &m.commit_latency[idx],
+                    &m.commit_latency[outcome.index()],
                 );
             }
         }
@@ -265,18 +276,11 @@ impl AtomicGrainMetrics {
              # TYPE granary_commits_total counter\n",
         );
         for (name, m) in &types {
-            for (idx, outcome) in [
-                CommitOutcome::Committed,
-                CommitOutcome::NotLeader,
-                CommitOutcome::Unavailable,
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            for outcome in CommitOutcome::ALL {
                 out.push_str(&format!(
                     "granary_commits_total{{grain_type=\"{name}\",outcome=\"{}\"}} {}\n",
                     outcome.as_str(),
-                    m.commits[idx].load(Ordering::Relaxed)
+                    m.commits[outcome.index()].load(Ordering::Relaxed)
                 ));
             }
         }
@@ -319,11 +323,7 @@ impl AtomicGrainMetrics {
 impl GrainMetrics for AtomicGrainMetrics {
     fn commit(&self, grain_type: &'static str, outcome: CommitOutcome, took: Duration) {
         let m = self.entry(grain_type);
-        let idx = match outcome {
-            CommitOutcome::Committed => 0,
-            CommitOutcome::NotLeader => 1,
-            CommitOutcome::Unavailable => 2,
-        };
+        let idx = outcome.index();
         m.commit_latency[idx].observe(took);
         m.commits[idx].fetch_add(1, Ordering::Relaxed);
     }

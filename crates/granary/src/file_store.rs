@@ -998,12 +998,12 @@ fn read_sidecar(path: &Path, stamp: &compat::Stamp) -> io::Result<Option<u64>> {
 }
 
 impl WriteGuard for FileGrainStore {
-    fn sealed(&self, shard: u32, grain: &GrainName) -> bool {
+    fn seal_bound(&self, shard: u32) -> Option<u64> {
         self.seals
             .lock()
             .expect("grain store seals poisoned")
             .get(&shard)
-            .is_some_and(|&from| crate::system::name_at_or_above(grain, from))
+            .copied()
     }
 
     /// Persists the bump before returning. The fence file is rewritten only when the
