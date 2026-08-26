@@ -229,31 +229,19 @@ impl FileRaftWAL {
                 // the JSON decoder; only bytes without it are the unstamped
                 // predecessor, which JSON reads exactly as it always did.
                 let body = if TERM.is_stamped(&bytes) {
-                    let (_, body) = TERM.unstamp(&bytes).map_err(|err| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "raft term file {} was written by a different build \
-                                 ({err}); this is a version skew, not corruption — run \
-                                 this node on a build that accepts it, and keep the \
-                                 node's state",
-                                term_path.display()
-                            ),
-                        )
-                    })?;
+                    let (_, body) = TERM
+                        .unstamp(&bytes)
+                        .map_err(|err| skew_error("raft term file", &term_path, err))?;
                     body
                 } else {
                     &bytes[..]
                 };
                 let record: TermRecord = serde_json::from_slice(body).map_err(|err| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "corrupt raft term file {} ({err}); refusing to guess a term \
-                             (a wrong one risks a double vote) — restore or remove the \
-                             node's state and rejoin it as a new member",
-                            term_path.display()
-                        ),
+                    corrupt_error(
+                        "raft term file",
+                        &term_path,
+                        "a term (a wrong one risks a double vote)",
+                        err,
                     )
                 })?;
                 record
@@ -277,26 +265,15 @@ impl FileRaftWAL {
             // revision this build refuses is a named skew (**V2**) rather than
             // bytes fed to the predecessor's decoder.
             Ok(bytes) if SNAPSHOT.is_stamped(&bytes) => {
-                let (_, body) = SNAPSHOT.unstamp(&bytes).map_err(|err| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "raft snapshot file {} was written by a different build \
-                             ({err}); this is a version skew, not corruption — run this \
-                             node on a build that accepts it, and keep the node's state",
-                            snapshot_path.display()
-                        ),
-                    )
-                })?;
+                let (_, body) = SNAPSHOT
+                    .unstamp(&bytes)
+                    .map_err(|err| skew_error("raft snapshot file", &snapshot_path, err))?;
                 let record: SnapshotBody = postcard::from_bytes(body).map_err(|err| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "corrupt raft snapshot file {} ({err}); refusing to guess a \
-                             compacted prefix — restore or remove the node's state and \
-                             rejoin it as a new member",
-                            snapshot_path.display()
-                        ),
+                    corrupt_error(
+                        "raft snapshot file",
+                        &snapshot_path,
+                        "a compacted prefix",
+                        err,
                     )
                 })?;
                 record
@@ -312,14 +289,11 @@ impl FileRaftWAL {
             }
             Ok(bytes) => {
                 let record: SnapshotRecord = postcard::from_bytes(&bytes).map_err(|err| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "corrupt raft snapshot file {} ({err}); refusing to guess a \
-                             compacted prefix — restore or remove the node's state and \
-                             rejoin it as a new member",
-                            snapshot_path.display()
-                        ),
+                    corrupt_error(
+                        "raft snapshot file",
+                        &snapshot_path,
+                        "a compacted prefix",
+                        err,
                     )
                 })?;
                 (record.index, record.term, Some(record.data))
@@ -429,10 +403,9 @@ impl FileRaftWAL {
             "append at index {from_index} beyond a log of {} entries (base {base})",
             inner.log.len()
         );
-        // Truncation: drop any conflicting suffix (durable before the new entries land),
-        // and mirror it in memory. A no-op when appending at the end.
+        // Truncation: drop any conflicting suffix (durable before the new entries
+        // land). A no-op when appending at the end.
         inner.log.truncate(from)?;
-        inner.state.log.truncate(from);
 
         // Entry at local position `from + i` has absolute index
         // `base + (from + i) + 1` (the log is 1-based above the snapshot).
@@ -442,9 +415,10 @@ impl FileRaftWAL {
             .map(|(i, entry)| (base + from as u64 + 1 + i as u64, entry.clone()))
             .collect();
         inner.log.append_batch(&records)?;
-        for (_, entry) in records {
-            inner.state.log.push(entry);
-        }
+        // In memory only after the disk writes landed, through the one shared fold
+        // (`PersistedRaft::apply_append`), so the offset arithmetic cannot drift
+        // from the in-memory WAL's.
+        inner.state.apply_append(from_index, entries);
         Ok(())
     }
 
@@ -453,7 +427,6 @@ impl FileRaftWAL {
     /// retained suffix.
     fn persist_snapshot(&self, index: u64, term: u64, data: &[u8]) -> io::Result<()> {
         let mut inner = self.lock();
-        let base = inner.state.snapshot_index;
         // Persist the snapshot first: a crash here leaves a snapshot newer than the
         // log, which `open` self-heals; the reverse would lose the prefix.
         let record = SnapshotBody {
@@ -465,13 +438,10 @@ impl FileRaftWAL {
         let body = postcard::to_allocvec(&record).expect("a SnapshotBody always serializes");
         wal::atomic_replace(&self.dir, "snapshot", &SNAPSHOT.stamp(&body))?;
 
-        // Drop the prefix the snapshot subsumes, then rewrite the log to what remains.
-        // Mirrors `InMemoryRaftWAL`: a stale/duplicate index discards nothing.
-        let drop = index.saturating_sub(base).min(inner.state.log.len() as u64) as usize;
-        inner.state.log.drain(..drop);
-        inner.state.snapshot_index = index;
-        inner.state.snapshot_term = term;
-        inner.state.snapshot = Some(data.to_vec());
+        // Drop the prefix the snapshot subsumes, then rewrite the log to what
+        // remains — the shared fold, so a stale/duplicate index discards nothing
+        // here exactly as it discards nothing in the in-memory WAL.
+        inner.state.apply_snapshot(index, term, data);
 
         let retained: Vec<(u64, RaftEntry)> = inner
             .state
@@ -483,6 +453,35 @@ impl FileRaftWAL {
         inner.log.rewrite(&retained)?;
         Ok(())
     }
+}
+
+/// A version-skew refusal (**V2**): the file is this format, from a revision
+/// this build does not accept. Deliberately worded as a skew and never as
+/// corruption — the remedy is a compatible build, and the state must be kept.
+fn skew_error(what: &str, path: &Path, err: impl std::fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "{what} {} was written by a different build ({err}); this is a version \
+             skew, not corruption — run this node on a build that accepts it, and \
+             keep the node's state",
+            path.display()
+        ),
+    )
+}
+
+/// A corruption refusal: bytes this build should read and cannot. `guess`
+/// names what the WAL refuses to guess (and, where it matters, why guessing
+/// would be unsafe); the remedy is restore-or-remove.
+fn corrupt_error(what: &str, path: &Path, guess: &str, err: impl std::fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "corrupt {what} {} ({err}); refusing to guess {guess} — restore or \
+             remove the node's state and rejoin it as a new member",
+            path.display()
+        ),
+    )
 }
 
 /// A retained log suffix must be contiguous from `snapshot_index + 1`; anything else
@@ -521,9 +520,7 @@ impl RaftWAL for FileRaftWAL {
         }
         // In memory only after the disk write landed, so `load` after a failure still
         // reports the last state this node can actually reconstruct.
-        let mut inner = self.lock();
-        inner.state.term = term;
-        inner.state.voted_for = voted_for;
+        self.lock().state.apply_term_and_vote(term, voted_for);
         WalAck::Persisted
     }
 

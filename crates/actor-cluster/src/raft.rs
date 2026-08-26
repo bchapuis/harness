@@ -114,6 +114,40 @@ pub struct PersistedRaft {
     pub snapshot: Option<Vec<u8>>,
 }
 
+/// The one implementation of each [`RaftWAL`] write's fold over the in-memory
+/// state — the compacted-log offset arithmetic in particular. Every WAL applies
+/// these; a durable WAL persists first, then folds, so what `load` reports is
+/// always what the disk can reconstruct.
+impl PersistedRaft {
+    /// Fold a new term and the vote cast in it.
+    pub fn apply_term_and_vote(&mut self, term: u64, voted_for: Option<NodeId>) {
+        self.term = term;
+        self.voted_for = voted_for;
+    }
+
+    /// Fold a conflict-resolution write: truncate at `from_index` (absolute)
+    /// and append `entries` there. The retained log begins at
+    /// `snapshot_index + 1`, so the absolute index maps onto its suffix.
+    pub fn apply_append(&mut self, from_index: u64, entries: &[RaftEntry]) {
+        let local = from_index.saturating_sub(self.snapshot_index) as usize;
+        self.log.truncate(local);
+        self.log.extend_from_slice(entries);
+    }
+
+    /// Fold a snapshot at `index`/`term`: discard the prefix it subsumes
+    /// (absolute indices `≤ index`), then record the new base. A stale or
+    /// duplicate call (index already compacted) discards nothing.
+    pub fn apply_snapshot(&mut self, index: u64, term: u64, data: &[u8]) {
+        let drop = index
+            .saturating_sub(self.snapshot_index)
+            .min(self.log.len() as u64);
+        self.log.drain(..drop as usize);
+        self.snapshot_index = index;
+        self.snapshot_term = term;
+        self.snapshot = Some(data.to_vec());
+    }
+}
+
 /// Whether a [`RaftWAL`] write reached stable storage.
 ///
 /// The distinction is not advisory. Every write through this seam happens *before* the
@@ -205,33 +239,26 @@ impl RaftWAL for InMemoryRaftWAL {
     }
 
     fn save_term_and_vote(&self, term: u64, voted_for: Option<NodeId>) -> WalAck {
-        let mut state = self.state.lock().expect("raft storage mutex poisoned");
-        state.term = term;
-        state.voted_for = voted_for;
+        self.state
+            .lock()
+            .expect("raft storage mutex poisoned")
+            .apply_term_and_vote(term, voted_for);
         WalAck::Persisted
     }
 
     fn append(&self, from_index: u64, entries: &[RaftEntry]) -> WalAck {
-        let mut state = self.state.lock().expect("raft storage mutex poisoned");
-        // `from_index` is absolute; the retained log begins at `snapshot_index + 1`.
-        let local = from_index.saturating_sub(state.snapshot_index) as usize;
-        state.log.truncate(local);
-        state.log.extend_from_slice(entries);
+        self.state
+            .lock()
+            .expect("raft storage mutex poisoned")
+            .apply_append(from_index, entries);
         WalAck::Persisted
     }
 
     fn save_snapshot(&self, index: u64, term: u64, data: &[u8]) -> WalAck {
-        let mut state = self.state.lock().expect("raft storage mutex poisoned");
-        // Discard the prefix the snapshot subsumes (absolute indices `≤ index`),
-        // then record the new base. A stale or duplicate call (index already
-        // compacted) discards nothing.
-        let drop = index
-            .saturating_sub(state.snapshot_index)
-            .min(state.log.len() as u64);
-        state.log.drain(..drop as usize);
-        state.snapshot_index = index;
-        state.snapshot_term = term;
-        state.snapshot = Some(data.to_vec());
+        self.state
+            .lock()
+            .expect("raft storage mutex poisoned")
+            .apply_snapshot(index, term, data);
         WalAck::Persisted
     }
 }
@@ -560,12 +587,8 @@ fn first_election_delay(
     }
     // A splitmix64 round: enough to decorrelate adjacent ids and group numbers, and
     // cheap and stable across builds (no `Hasher`, whose output is not contracted).
-    let mix = |x: u64| {
-        let mut z = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    };
+    // The finalizer is placement's; only the stream increment is added here.
+    let mix = |x: u64| crate::placement::mix64(x.wrapping_add(0x9e37_79b9_7f4a_7c15));
     let key = |n: NodeId| mix(group.0 ^ mix(n.uid()));
     // This node's position in the group's own ordering of its voters.
     let ours = key(node);

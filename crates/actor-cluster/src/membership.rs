@@ -825,40 +825,18 @@ impl Membership {
         }
         let (event, downed) = {
             let mut members = self.members.lock().expect("members mutex poisoned");
-            let Some(member) = members.get_mut(&node) else {
-                // First sight: the decision itself introduces the member —
-                // admission is the entry (spec §9.4.2 item 2) or the committed
-                // command.
-                members.insert(
-                    node,
-                    Member {
-                        status,
-                        reachability: Reachability::Reachable,
-                        incarnation: 0,
-                        stamp,
-                        changed_at: now,
-                    },
-                );
-                let event = match status {
-                    MemberStatus::Up => Some(Event::MemberUp {
-                        observer: self.node,
-                        node,
-                    }),
-                    MemberStatus::Draining => Some(Event::MemberDraining {
-                        observer: self.node,
-                        node,
-                    }),
-                    MemberStatus::Down => Some(Event::NodeDown {
-                        observer: self.node,
-                        node,
-                    }),
-                    _ => None,
-                };
-                if let Some(event) = event {
-                    self.events.emit(event);
-                }
-                return status == MemberStatus::Down;
-            };
+            // First sight: the decision itself introduces the member — admission
+            // is the entry (spec §9.4.2 item 2) or the committed command. The
+            // default is a stamp-zero `Joining` ghost the observation folds over
+            // immediately, so first sight and re-observation share the one merge
+            // rule (`apply_status`) and the one event mapping behind it.
+            let member = members.entry(node).or_insert(Member {
+                status: MemberStatus::Joining,
+                reachability: Reachability::Reachable,
+                incarnation: 0,
+                stamp: 0,
+                changed_at: now,
+            });
             self.apply_status(node, member, status, stamp, now)
         };
         if let Some(event) = event {

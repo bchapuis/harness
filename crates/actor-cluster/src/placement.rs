@@ -38,8 +38,10 @@ fn fnv1a64(chunks: &[&[u8]]) -> u64 {
     hash
 }
 
-/// The splitmix64 finalizer: full-avalanche mixing of a 64-bit value.
-fn mix64(mut x: u64) -> u64 {
+/// The splitmix64 finalizer: full-avalanche mixing of a 64-bit value. Shared
+/// with the Raft campaign stagger (`raft.rs`), whose output must stay
+/// bit-identical across builds — the known-answer tests here pin the rounds.
+pub(crate) fn mix64(mut x: u64) -> u64 {
     x ^= x >> 30;
     x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     x ^= x >> 27;
