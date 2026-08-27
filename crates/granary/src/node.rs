@@ -85,18 +85,10 @@ impl std::fmt::Debug for NodeCapabilities {
 ///
 /// Hosting a type straight off the system (`system.granary(..)`) still works and takes
 /// the defaults — the shape every test and the `Local` tier want.
+#[derive(Clone)]
 pub struct GranaryNode<S: GranarySystem> {
     system: S,
     capabilities: NodeCapabilities,
-}
-
-impl<S: GranarySystem> Clone for GranaryNode<S> {
-    fn clone(&self) -> GranaryNode<S> {
-        GranaryNode {
-            system: self.system.clone(),
-            capabilities: self.capabilities.clone(),
-        }
-    }
 }
 
 impl<S: GranarySystem> GranaryNode<S> {

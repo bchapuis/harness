@@ -206,18 +206,26 @@ impl ReplicaSets {
         }
     }
 
-    /// Every node that must receive the fan-out: `current ∪ target`, deduplicated.
+    /// Every node that must receive the fan-out: [`joint_members`].
     pub(crate) fn union(&self) -> Vec<NodeId> {
-        let mut nodes = self.current.clone();
-        if let Some(target) = &self.target {
-            for node in target {
-                if !nodes.contains(node) {
-                    nodes.push(*node);
-                }
+        joint_members(&self.current, self.target.as_deref())
+    }
+}
+
+/// The nodes involved in a shard right now: `current ∪ target`, deduplicated,
+/// order-preserving — the one definition of the mid-migration joint membership
+/// (§7.7), shared by the replicator's fan-out and the shard map's reconcile loop
+/// so the two cannot drift.
+pub(crate) fn joint_members(current: &[NodeId], target: Option<&[NodeId]>) -> Vec<NodeId> {
+    let mut nodes = current.to_vec();
+    if let Some(target) = target {
+        for node in target {
+            if !nodes.contains(node) {
+                nodes.push(*node);
             }
         }
-        nodes
     }
+    nodes
 }
 
 /// A majority of `n` replicas (§7.2).
@@ -295,29 +303,6 @@ pub(crate) struct QuorumReplicator<R: RaftConsensus> {
 }
 
 impl<R: RaftConsensus> QuorumReplicator<R> {
-    #[allow(clippy::too_many_arguments)] // one call site, from the shard map
-    pub(crate) fn new(
-        election: LeaderElection<R>,
-        local: Arc<dyn GrainStore>,
-        transport: Arc<dyn ReplicaTransport>,
-        control: Arc<std::sync::Mutex<ShardControl>>,
-        shard: u32,
-        self_node: NodeId,
-        io: Arc<dyn BlockingIo>,
-        deadlines: Deadlines,
-    ) -> QuorumReplicator<R> {
-        QuorumReplicator {
-            election,
-            local,
-            transport,
-            control,
-            shard,
-            self_node,
-            io,
-            deadlines,
-        }
-    }
-
     /// Build one shard's replicator over its leader-election group (spec §7.3,
     /// §7.4): the group supplies placement — who may write, under which term —
     /// holding no grain data (§7.1, §8); this replicator supplies durability.
@@ -338,10 +323,16 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         deadlines: Deadlines,
     ) -> Arc<QuorumReplicator<R>> {
         let self_node = consensus.node();
-        let election = LeaderElection::new(consensus, group);
-        Arc::new(QuorumReplicator::new(
-            election, local, transport, control, shard, self_node, io, deadlines,
-        ))
+        Arc::new(QuorumReplicator {
+            election: LeaderElection::new(consensus, group),
+            local,
+            transport,
+            control,
+            shard,
+            self_node,
+            io,
+            deadlines,
+        })
     }
 
     /// A point-in-time snapshot of the replica sets: one fan-out uses one snapshot,
@@ -397,12 +388,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         after: Seq,
         events: Vec<Vec<u8>>,
     ) -> AppendOutcome {
-        let Some(term) = self.election.term() else {
+        let Some(term) = self.leadership_term() else {
             return self.not_leader();
         };
-        if !self.election.is_leader() {
-            return self.not_leader();
-        }
         // The split/merge gate (§7.7, G15): an append for a key this shard no longer
         // owns, or that is frozen mid-move, is refused BEFORE any store attempt, so it
         // provably never ran and the caller can re-resolve against the committed map.
@@ -522,7 +510,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         grain: &GrainName,
         require_quorum: bool,
     ) -> Result<Seq, GrainJournalError> {
-        let Some(term) = self.election.term().filter(|_| self.election.is_leader()) else {
+        let Some(term) = self.leadership_term() else {
             return Err(GrainJournalError::Unavailable("shard electing".into()));
         };
         let sets = self.sets();
@@ -974,12 +962,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         at: Seq,
         state: Vec<u8>,
     ) -> AppendOutcome {
-        let Some(term) = self.election.term() else {
+        let Some(term) = self.leadership_term() else {
             return self.not_leader();
         };
-        if !self.election.is_leader() {
-            return self.not_leader();
-        }
         let sets = self.sets();
         // Clone the state for each remote peer's wire message, then move it into this
         // node's own replica write (§5.2) — R-1 copies, not R.

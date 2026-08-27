@@ -266,17 +266,10 @@ impl Allocation {
         self.target.is_none() && self.split.is_none() && self.merge.is_none()
     }
 
-    /// The nodes involved in the shard right now: `current ∪ target`.
+    /// The nodes involved in the shard right now:
+    /// [`joint_members`](crate::replicator::joint_members).
     fn union(&self) -> Vec<NodeId> {
-        let mut nodes = self.current.clone();
-        if let Some(target) = &self.target {
-            for node in target {
-                if !nodes.contains(node) {
-                    nodes.push(*node);
-                }
-            }
-        }
-        nodes
+        crate::replicator::joint_members(&self.current, self.target.as_deref())
     }
 }
 
@@ -919,25 +912,19 @@ impl<R: RaftConsensus> ShardApply<R> {
             Change::Migration(current, committed_range) => {
                 let involved =
                     current.contains(&self.self_node) || replicas.contains(&self.self_node);
-                let has_handles = self
+                let control = self
                     .handles
                     .lock()
                     .expect("shard handles mutex poisoned")
-                    .contains_key(&shard);
-                if has_handles {
+                    .get(&shard)
+                    .map(|(control, _)| Arc::clone(control));
+                if let Some(control) = control {
                     // A continuing participant: flip its live sets so every
                     // in-flight journal switches to the joint quorum (§7.7).
-                    if let Some((control, _)) = self
-                        .handles
-                        .lock()
-                        .expect("shard handles mutex poisoned")
-                        .get(&shard)
-                    {
-                        control.lock().expect("shard control poisoned").sets = ReplicaSets {
-                            current: current.clone(),
-                            target: Some(replicas.clone()),
-                        };
-                    }
+                    control.lock().expect("shard control poisoned").sets = ReplicaSets {
+                        current,
+                        target: Some(replicas),
+                    };
                 } else if involved {
                     // Newly a target member: form the shard group as a
                     // non-member over the CURRENT voters (no election
@@ -1122,31 +1109,33 @@ impl<R: RaftConsensus> ShardApply<R> {
         // match — the right driver recovers from right's quorum and
         // transfers to left's replicas, exactly as migration crosses
         // sets. An invalid proposal is a silent no-op on every node.
+        // On success, the start of the moving (right) range rides out of the
+        // critical section, so the freeze below needs no second look at the map.
         let started = {
             let mut guard = self.inner.lock().expect("shard map mutex poisoned");
-            let ok = match (guard.allocation.get(&left), guard.allocation.get(&right)) {
-                (Some(l), Some(r)) => {
-                    l.idle() && r.idle() && l.range.end.checked_add(1) == Some(r.range.start)
+            let start = match (guard.allocation.get(&left), guard.allocation.get(&right)) {
+                (Some(l), Some(r))
+                    if l.idle()
+                        && r.idle()
+                        && l.range.end.checked_add(1) == Some(r.range.start) =>
+                {
+                    Some(r.range.start)
                 }
-                _ => false,
+                _ => None,
             };
-            if ok {
+            if start.is_some() {
                 guard.allocation.get_mut(&left).expect("checked").merge =
                     Some(MergeRole::Absorbing(right));
                 guard.allocation.get_mut(&right).expect("checked").merge =
                     Some(MergeRole::Absorbed(left));
             }
-            ok
+            start
         };
-        if started {
+        if let Some(start) = started {
             // Right replicas: freeze the whole right range and bound the
             // store (the driver's majority-acked seal is authoritative).
-            let right_start = {
-                let guard = self.inner.lock().expect("shard map mutex poisoned");
-                guard.allocation.get(&right).map(|a| a.range.start)
-            };
             let handles = self.handles.lock().expect("shard handles mutex poisoned");
-            if let (Some(start), Some((control, _))) = (right_start, handles.get(&right)) {
+            if let Some((control, _)) = handles.get(&right) {
                 control.lock().expect("shard control poisoned").frozen_from = Some(start);
                 self.local.seal_range(right, start);
             }
@@ -1170,9 +1159,8 @@ impl<R: RaftConsensus> ShardApply<R> {
                 let left_alloc = guard.allocation.get_mut(&left).expect("checked");
                 left_alloc.range.end = right_end;
                 left_alloc.merge = None;
-                let new_end = right_end;
                 guard.allocation.remove(&right);
-                Some(new_end)
+                Some(right_end)
             } else {
                 None
             }
@@ -2037,15 +2025,13 @@ async fn leader_watch_loop<R: RaftConsensus>(
                 if consensus.group_is_leader(group)
                     && let Some(term) = consensus.group_term(group)
                 {
-                    let unseen = last
+                    // One lock: re-inserting an unchanged term is a no-op, and the
+                    // returned prior value says whether this term is news.
+                    let seen = last
                         .lock()
                         .expect("leader-watch term map poisoned")
-                        .get(&shard)
-                        != Some(&term);
-                    if unseen {
-                        last.lock()
-                            .expect("leader-watch term map poisoned")
-                            .insert(shard, term);
+                        .insert(shard, term);
+                    if seen != Some(term) {
                         emit(GrainEvent::LeaderChanged {
                             node: self_node,
                             grain_type,

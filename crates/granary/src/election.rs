@@ -18,22 +18,11 @@ use actor_core::NodeId;
 
 use crate::journal::Term;
 
-/// The leadership and term of one shard's leader-election group (spec §8). Cheap to
-/// clone — it holds only the consensus handle and the group id.
+/// The leadership and term of one shard's leader-election group (spec §8).
 pub(crate) struct LeaderElection<R: RaftConsensus> {
     consensus: R,
     group: GroupId,
     self_node: NodeId,
-}
-
-impl<R: RaftConsensus> Clone for LeaderElection<R> {
-    fn clone(&self) -> Self {
-        LeaderElection {
-            consensus: self.consensus.clone(),
-            group: self.group,
-            self_node: self.self_node,
-        }
-    }
 }
 
 impl<R: RaftConsensus> LeaderElection<R> {

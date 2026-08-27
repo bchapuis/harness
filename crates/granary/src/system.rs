@@ -170,13 +170,6 @@ pub(crate) fn group_id_for(shard: ShardId) -> GroupId {
     GroupId(id.max(1))
 }
 
-/// Split `members` into a shard's `replicas` voters and its remaining learners
-/// (spec §7.1) by **rendezvous hashing**: each member is scored by a stable hash
-/// of `(node, group)`, the top `replicas` become voters, the rest learners. This
-/// is a deterministic function of the members and the group — so every node
-/// computes the identical split — and it spreads each shard's voters across the
-/// cluster while moving only `~1/N` of shards when membership changes. `members`
-/// is assumed sorted (the tie-break) and non-empty; `replicas` is clamped to it.
 /// How a deployment groups nodes into failure domains — racks, availability zones,
 /// whatever fails together (spec §7.1).
 ///
@@ -287,7 +280,14 @@ pub(crate) fn select_replicas_in(
     }
 }
 
-pub(crate) fn select_replicas(
+/// Split `members` into a shard's `replicas` voters and its remaining learners
+/// (spec §7.1) by **rendezvous hashing**: each member is scored by a stable hash
+/// of `(node, group)`, the top `replicas` become voters, the rest learners. This
+/// is a deterministic function of the members and the group — so every node
+/// computes the identical split — and it spreads each shard's voters across the
+/// cluster while moving only `~1/N` of shards when membership changes. `members`
+/// is assumed sorted (the tie-break) and non-empty; `replicas` is clamped to it.
+fn select_replicas(
     members: &[NodeId],
     group: GroupId,
     replicas: usize,
