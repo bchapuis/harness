@@ -18,6 +18,7 @@ use actor_serialization::Codec;
 use actor_serialization::JsonCodec;
 
 use crate::SimNetwork;
+use crate::transport::Process;
 use crate::transport::SimNode;
 
 /// A node's process was replaced by [`SimNetwork::restart`] — emitted on the
@@ -71,8 +72,12 @@ impl SimNetwork {
             config,
         );
         let mut inner = self.inner.lock().expect("network mutex poisoned");
-        inner.nodes.insert(node, tx);
-        inner.domains.insert(node, domain);
+        inner.processes.push(Process {
+            node,
+            sender: tx,
+            domain,
+            system: system.clone(),
+        });
         system
     }
 
@@ -81,12 +86,11 @@ impl SimNetwork {
     /// is known up front).
     pub fn join(&self, node: NodeId) -> SimNode {
         let system = self.bring_up(node, false);
-        let mut inner = self.inner.lock().expect("network mutex poisoned");
-        for existing in &inner.joined {
-            existing.add_member(node);
-            system.add_member(existing.node());
+        let inner = self.inner.lock().expect("network mutex poisoned");
+        for peer in inner.processes.iter().filter(|p| p.node != node) {
+            peer.system.add_member(node);
+            system.add_member(peer.node);
         }
-        inner.joined.push(system.clone());
         system
     }
 
@@ -99,11 +103,6 @@ impl SimNetwork {
         for &seed in seeds {
             system.add_member(seed);
         }
-        self.inner
-            .lock()
-            .expect("network mutex poisoned")
-            .joined
-            .push(system.clone());
         system
     }
 
@@ -131,37 +130,35 @@ impl SimNetwork {
         let old = {
             let mut inner = self.inner.lock().expect("network mutex poisoned");
             let index = inner
-                .joined
+                .processes
                 .iter()
-                .position(|system| system.node() == node)
+                .position(|p| p.node == node)
                 .expect("restart of a node that never joined");
-            inner.joined.remove(index)
+            inner.processes.remove(index)
         };
-        old.shutdown();
-        let retiring = {
-            let mut inner = self.inner.lock().expect("network mutex poisoned");
-            // Drop the old inbound sender: queued frames die with the old
-            // receive loop, and new frames route to the successor only.
-            inner.nodes.remove(&node);
-            inner.blocked.retain(|(a, b)| *a != node && *b != node);
-            inner.domains.remove(&node)
-        };
+        old.system.shutdown();
+        self.inner
+            .lock()
+            .expect("network mutex poisoned")
+            .blocked
+            .retain(|(a, b)| *a != node && *b != node);
+        let domain = old.domain;
+        // Drop the old inbound sender: queued frames die with the old receive
+        // loop, and new frames route to the successor only.
+        drop(old);
         // Ordered after the shutdown and before the announcement, so the
         // predecessor has emitted everything it will ever emit by the time a
         // checker is told the boundary is here.
-        if let Some(domain) = retiring {
-            self.spawner.retire_domain(domain);
-        }
+        self.spawner.retire_domain(domain);
         self.events
             .emit(actor_core::Event::app(NodeRestarted { node }));
         let system = self.bring_up(node, false);
-        let mut inner = self.inner.lock().expect("network mutex poisoned");
-        for existing in &inner.joined {
+        let inner = self.inner.lock().expect("network mutex poisoned");
+        for peer in inner.processes.iter().filter(|p| p.node != node) {
             // `add_member` is idempotent and never resurrects a terminal member.
-            existing.add_member(node);
-            system.add_member(existing.node());
+            peer.system.add_member(node);
+            system.add_member(peer.node);
         }
-        inner.joined.push(system.clone());
         system
     }
 
@@ -194,7 +191,12 @@ impl SimNetwork {
     /// rest of the cluster: its frames are dropped in both directions.
     pub fn crash(&self, node: NodeId) {
         let mut inner = self.inner.lock().expect("network mutex poisoned");
-        let others: Vec<NodeId> = inner.nodes.keys().copied().filter(|&n| n != node).collect();
+        let others: Vec<NodeId> = inner
+            .processes
+            .iter()
+            .map(|p| p.node)
+            .filter(|&n| n != node)
+            .collect();
         for other in others {
             inner.blocked.insert((node, other));
             inner.blocked.insert((other, node));
@@ -208,7 +210,7 @@ impl SimNetwork {
     pub fn inject(&self, from: NodeId, to: NodeId, frame: Frame) {
         let sender = {
             let inner = self.inner.lock().expect("network mutex poisoned");
-            inner.nodes.get(&to).cloned()
+            inner.process(to).map(|p| p.sender.clone())
         };
         if let Some(sender) = sender {
             let _ = sender.try_send((from, frame));
@@ -227,7 +229,7 @@ impl SimNetwork {
         }
     }
 
-    /// The scheduler domain of `node`'s live process. Read through the registry
+    /// The scheduler domain of `node`'s live process. Read from the live entry
     /// rather than derived from the id, because a restart gives the successor a
     /// different domain (see [`restart`]).
     ///
@@ -236,9 +238,8 @@ impl SimNetwork {
         self.inner
             .lock()
             .expect("network mutex poisoned")
-            .domains
-            .get(&node)
-            .copied()
+            .process(node)
+            .map(|p| p.domain)
     }
 
     /// Thaw a node frozen by [`pause`](SimNetwork::pause): its queued inbound frames

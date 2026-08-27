@@ -137,16 +137,6 @@ impl<M: Model> History<M> {
             .push(Mark::Complete { id: id.0, outcome });
     }
 
-    /// The number of operations invoked so far.
-    pub fn len(&self) -> usize {
-        self.inner.lock().expect("history mutex poisoned").next_id
-    }
-
-    /// Whether no operation has been invoked.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// Lower the recorded marks into the operation list the linearizer searches.
     /// `Fail` operations are dropped (they had no effect); `Info` and never-
     /// completed operations become *pending* (completion at `usize::MAX`), so the

@@ -636,10 +636,11 @@ pub(crate) fn drive_cluster<W: ClusterWorkload>(
     }
 }
 
-/// Drive one run and evaluate it: the invariant violations observed (plus a
-/// synthesized liveness violation if the workload hung) and the faults the run
-/// exercised. Shared by the seed runner and the coverage sweep.
-fn eval_cluster<W: ClusterWorkload>(workload: &W, seed: u64) -> (Vec<Violation>, FaultStats) {
+/// Drive one run and evaluate it: the faults the run exercised, or a
+/// [`RunFailure`] carrying the invariant violations observed (plus a synthesized
+/// liveness violation if the workload hung). Shared by the seed runner and the
+/// coverage sweep.
+fn eval_cluster<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<FaultStats, RunFailure> {
     let checker = Checker::new(workload.invariants());
     let run = drive_cluster(workload, seed, checker.sink());
 
@@ -650,14 +651,8 @@ fn eval_cluster<W: ClusterWorkload>(workload: &W, seed: u64) -> (Vec<Violation>,
             detail: "workload did not complete within the time budget (a call may hang)".into(),
         });
     }
-    (violations, run.faults)
-}
-
-/// Run a cluster workload once under `seed`, returning any invariant violations.
-pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(), RunFailure> {
-    let (violations, _) = eval_cluster(workload, seed);
     if violations.is_empty() {
-        Ok(())
+        Ok(run.faults)
     } else {
         Err(RunFailure {
             workload: workload.name(),
@@ -665,6 +660,11 @@ pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(
             violations,
         })
     }
+}
+
+/// Run a cluster workload once under `seed`, returning any invariant violations.
+pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(), RunFailure> {
+    eval_cluster(workload, seed).map(|_| ())
 }
 
 /// Sweep a cluster workload across many seeds, stopping at the first failure —
@@ -696,17 +696,9 @@ pub fn run_cluster_swarm_coverage<W: ClusterWorkload>(
         crate::corpus::regression_seeds(workload.name()).chain(seeds),
         crate::sweep::collect_all_failures(),
         |seed| {
-            let (violations, faults) = eval_cluster(workload, seed);
-            if !violations.is_empty() {
-                return Err(RunFailure {
-                    workload: workload.name(),
-                    seed,
-                    violations,
-                });
-            }
             // Only a clean seed contributes coverage: the totals are a claim
             // about runs that held their invariants.
-            total = total + faults;
+            total = total + eval_cluster(workload, seed)?;
             Ok(())
         },
     )?;

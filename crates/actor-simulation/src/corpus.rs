@@ -35,6 +35,17 @@ fn index() -> &'static BTreeMap<String, Vec<u64>> {
     INDEX.get_or_init(|| parse(CORPUS))
 }
 
+/// The block a failure report ends with: every failing `(workload, seed)` in the
+/// `<workload> <seed>` form [`parse`] reads, ready to paste into `corpus.txt`.
+/// Lives here so the one place that parses the format is the one that prints it.
+pub(crate) fn corpus_block<'a>(pairs: impl IntoIterator<Item = (&'a str, u64)>) -> String {
+    let mut block = String::from("corpus.txt lines for every seed above:\n\n");
+    for (workload, seed) in pairs {
+        block.push_str(&format!("{workload} {seed}\n"));
+    }
+    block
+}
+
 /// Parse the corpus. A malformed line is a hard error rather than a skip: a typo
 /// that silently dropped a regression case would defeat the file's purpose.
 fn parse(text: &str) -> BTreeMap<String, Vec<u64>> {

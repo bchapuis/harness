@@ -141,10 +141,10 @@ impl Invariant for NoSilentLoss {
 }
 
 /// **Serial, non-reentrant execution** (spec §18.5 #4): an actor never has two
-/// dispatches in flight at once.
+/// dispatches in flight at once. `busy` holds the actors mid-dispatch right now.
 #[derive(Default)]
 pub struct SerialExecution {
-    busy: BTreeMap<ActorId, bool>,
+    busy: BTreeSet<ActorId>,
 }
 
 impl Invariant for SerialExecution {
@@ -155,18 +155,15 @@ impl Invariant for SerialExecution {
     fn observe(&mut self, event: &Event) -> Result<(), String> {
         match event {
             Event::DispatchStart { actor, .. } => {
-                let slot = self.busy.entry(actor.clone()).or_insert(false);
-                if *slot {
+                if !self.busy.insert(actor.clone()) {
                     return Err(format!("reentrant dispatch on {actor}"));
                 }
-                *slot = true;
             }
             Event::DispatchEnd { actor, .. } => {
-                let slot = self.busy.entry(actor.clone()).or_insert(false);
-                if !*slot {
+                let was_dispatching = self.busy.remove(actor);
+                if !was_dispatching {
                     return Err(format!("dispatch end without start on {actor}"));
                 }
-                *slot = false;
             }
             _ => {}
         }
@@ -176,16 +173,14 @@ impl Invariant for SerialExecution {
     fn forget_node(&mut self, node: NodeId) {
         // A process killed mid-dispatch leaves `DispatchStart` unmatched; that is
         // death, not reentrancy, and the successor reuses the actor ids.
-        self.busy.retain(|actor, _| actor.node() != node);
+        self.busy.retain(|actor| actor.node() != node);
     }
 
     fn at_quiescence(&mut self) -> Result<(), String> {
-        for (actor, busy) in &self.busy {
-            if *busy {
-                return Err(format!("dispatch on {actor} never completed"));
-            }
+        match self.busy.first() {
+            Some(actor) => Err(format!("dispatch on {actor} never completed")),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -306,8 +301,9 @@ impl Invariant for DownIsTerminal {
 /// non-reentrant half of #13 is covered by [`SerialExecution`] (#4).
 #[derive(Default)]
 pub struct SignalInBand {
-    enqueued: BTreeMap<ActorId, u64>,
-    dispatched: BTreeMap<ActorId, u64>,
+    /// Per actor, `Terminated`s enqueued minus dispatched; going negative is the
+    /// out-of-band dispatch this flags (the [`NoSilentLoss`] bracket shape).
+    credit: BTreeMap<ActorId, i64>,
 }
 
 impl SignalInBand {
@@ -324,13 +320,12 @@ impl Invariant for SignalInBand {
     fn observe(&mut self, event: &Event) -> Result<(), String> {
         match event {
             Event::Enqueue { actor, manifest } if Self::is_terminated(*manifest) => {
-                *self.enqueued.entry(actor.clone()).or_default() += 1;
+                *self.credit.entry(actor.clone()).or_default() += 1;
             }
             Event::DispatchStart { actor, manifest } if Self::is_terminated(*manifest) => {
-                let dispatched = self.dispatched.entry(actor.clone()).or_default();
-                *dispatched += 1;
-                let enqueued = self.enqueued.get(actor).copied().unwrap_or(0);
-                if *dispatched > enqueued {
+                let credit = self.credit.entry(actor.clone()).or_default();
+                *credit -= 1;
+                if *credit < 0 {
                     return Err(format!(
                         "{actor} dispatched a Terminated signal never enqueued on its \
                          mailbox — delivered out of band (spec §12)"
@@ -343,8 +338,7 @@ impl Invariant for SignalInBand {
     }
 
     fn forget_node(&mut self, node: NodeId) {
-        self.enqueued.retain(|actor, _| actor.node() != node);
-        self.dispatched.retain(|actor, _| actor.node() != node);
+        self.credit.retain(|actor, _| actor.node() != node);
     }
 }
 

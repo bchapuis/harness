@@ -16,7 +16,8 @@ pub struct FaultStats {
     pub dropped: u64,
     /// Frames delivered twice by a seeded duplication roll.
     pub duplicated: u64,
-    /// Frames delayed by a non-zero seeded latency (i.e. reordered in time).
+    /// Frames a seeded jitter delayed beyond the fixed base latency (i.e.
+    /// actually reordered in time, not just paying the floor every frame pays).
     pub delayed: u64,
     /// Frames dropped because their directed pair was partitioned or crashed.
     pub blocked: u64,
@@ -28,20 +29,6 @@ pub struct FaultStats {
     /// Nodes moved to another release's wire window by the nemesis — a rolling
     /// upgrade or a rollback (spec §18.3, compatibility §4).
     pub upgrades: u64,
-}
-
-impl FaultStats {
-    /// Total number of fault events of any kind. Zero means the run exercised
-    /// only the happy path.
-    pub fn total(&self) -> u64 {
-        self.dropped
-            + self.duplicated
-            + self.delayed
-            + self.blocked
-            + self.registry_outages
-            + self.registry_stale
-            + self.upgrades
-    }
 }
 
 impl std::ops::Add for FaultStats {

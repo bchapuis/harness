@@ -141,12 +141,9 @@ impl std::fmt::Display for SweepFailure {
         for failure in &self.failures {
             writeln!(f, "{failure}")?;
         }
-        // In the `<workload> <seed>` format corpus.txt parses.
-        writeln!(f, "corpus.txt lines for every seed above:\n")?;
-        for failure in &self.failures {
-            writeln!(f, "{} {}", failure.workload, failure.seed)?;
-        }
-        Ok(())
+        f.write_str(&crate::corpus::corpus_block(
+            self.failures.iter().map(|fail| (fail.workload, fail.seed)),
+        ))
     }
 }
 

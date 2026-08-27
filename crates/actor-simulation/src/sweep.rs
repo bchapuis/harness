@@ -253,9 +253,9 @@ pub fn scenario_sweep(name: &str, seeds: impl IntoIterator<Item = u64>, mut run:
     for (seed, detail) in &failed {
         report.push_str(&format!("  seed {seed}: {detail}\n"));
     }
-    report.push_str("\ncorpus.txt lines for every seed above:\n\n");
-    for (seed, _) in &failed {
-        report.push_str(&format!("{name} {seed}\n"));
-    }
+    report.push('\n');
+    report.push_str(&crate::corpus::corpus_block(
+        failed.iter().map(|(seed, _)| (name, *seed)),
+    ));
     panic!("{report}");
 }

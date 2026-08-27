@@ -51,20 +51,26 @@ use crate::faults::FaultPolicy;
 /// [`SimNetwork`] and the nodes joined to it.
 pub type SimNode = ClusterSystem<SimClock, SimEntropy, SimSpawner, SimTransport>;
 
+/// One node's **live** process on the network: the inbound frame sender its
+/// receive loop reads from, the process incarnation (scheduler domain) that
+/// `pause`/`resume` freeze and `restart` retires, and the running system a new
+/// joiner is wired into. One entry travels as one unit — a restart replaces the
+/// whole entry, so the three can never disagree about which incarnation is live.
+pub(crate) struct Process {
+    pub(crate) node: NodeId,
+    pub(crate) sender: async_channel::Sender<(NodeId, Frame)>,
+    pub(crate) domain: u64,
+    pub(crate) system: SimNode,
+}
+
 pub(crate) struct NetInner {
-    /// Each node's inbound frame sender (its receive loop holds the receiver).
-    pub(crate) nodes: BTreeMap<NodeId, async_channel::Sender<(NodeId, Frame)>>,
+    /// The live processes, one per node, in join order.
+    pub(crate) processes: Vec<Process>,
     /// Directed pairs whose frames are dropped (partitions and crashes).
     pub(crate) blocked: BTreeSet<(NodeId, NodeId)>,
     /// Last scheduled delivery time per directed pair, kept strictly increasing
     /// so per-pair FIFO survives latency jitter (spec §7.2, invariant #3).
     pair_clock: BTreeMap<(NodeId, NodeId), Instant>,
-    /// Joined systems, so a new node can be wired into every roster.
-    pub(crate) joined: Vec<SimNode>,
-    /// Each node's **live** process incarnation (its scheduler domain), so
-    /// `pause`/`resume` freeze the running process and `restart` retires exactly
-    /// the outgoing one. Keyed by node because a restart replaces the value.
-    pub(crate) domains: BTreeMap<NodeId, u64>,
     /// Nodes running a wire window other than [`WIRE`] — what a simulated node's
     /// *build* accepts and writes (spec §7.1, compatibility spec §3).
     ///
@@ -73,6 +79,14 @@ pub(crate) struct NetInner {
     /// Keyed by node and **not** cleared by `restart`, because a restart is how a
     /// rolling upgrade is modelled: set the window, then replace the process.
     windows: BTreeMap<NodeId, compat::Window>,
+}
+
+impl NetInner {
+    /// The live process running `node`, if any. A handful of nodes at most, so
+    /// the scan costs what a map lookup would.
+    pub(crate) fn process(&self, node: NodeId) -> Option<&Process> {
+        self.processes.iter().find(|p| p.node == node)
+    }
 }
 
 /// An in-memory network shared by the nodes of one simulation (spec §18.2).
@@ -112,11 +126,9 @@ impl SimNetwork {
     pub fn new(sim: &Simulation) -> SimNetwork {
         SimNetwork {
             inner: Arc::new(Mutex::new(NetInner {
-                nodes: BTreeMap::new(),
+                processes: Vec::new(),
                 blocked: BTreeSet::new(),
                 pair_clock: BTreeMap::new(),
-                joined: Vec::new(),
-                domains: BTreeMap::new(),
                 windows: BTreeMap::new(),
             })),
             clock: sim.clock(),
@@ -286,8 +298,8 @@ impl SimNetwork {
                 self.stats.record_blocked();
                 return Ok(());
             }
-            match inner.nodes.get(&to) {
-                Some(sender) => sender.clone(),
+            match inner.process(to) {
+                Some(process) => process.sender.clone(),
                 None => return Err(TransportError::Unreachable),
             }
         };
@@ -319,9 +331,6 @@ impl SimNetwork {
         };
         for _ in 0..copies {
             let deliver_at = self.reserve_pair_slot(from, to, faults.max_latency);
-            if deliver_at > self.clock.now() {
-                self.stats.record_delayed();
-            }
             let now = self.clock.now();
             let clock = self.clock.clone();
             let sender = sender.clone();
@@ -353,6 +362,12 @@ impl SimNetwork {
             let span = max_latency.as_nanos() as u64 + 1;
             Duration::from_nanos(self.entropy.next_u64() % span)
         };
+        // Only a jitter above the fixed floor moves this delivery relative to
+        // un-jittered traffic; that, not the base every frame pays, is the
+        // "delayed" fault the coverage tally counts (spec §18.3).
+        if jitter > BASE_LATENCY {
+            self.stats.record_delayed();
+        }
         let earliest = self.clock.now() + jitter.max(BASE_LATENCY);
         let mut inner = self.inner.lock().expect("network mutex poisoned");
         let deliver_at = match inner.pair_clock.get(&(from, to)) {
@@ -389,7 +404,7 @@ impl Transport for SimTransport {
     /// that agreed to it.
     fn peer_version(&self, peer: NodeId) -> Option<compat::Version> {
         let inner = self.net.inner.lock().expect("network mutex poisoned");
-        if !inner.nodes.contains_key(&peer) || inner.blocked.contains(&(self.from, peer)) {
+        if inner.process(peer).is_none() || inner.blocked.contains(&(self.from, peer)) {
             return None;
         }
         let ours = inner.windows.get(&self.from).copied().unwrap_or(WIRE);

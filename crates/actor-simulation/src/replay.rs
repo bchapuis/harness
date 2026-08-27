@@ -69,39 +69,26 @@ impl std::fmt::Debug for Divergence {
     }
 }
 
-/// Diff two event streams, returning the first index at which they differ.
+/// Diff two event streams, returning the first index at which they differ —
+/// past the shorter stream's end when one is a prefix of the other, so a `get`
+/// there is the `None` the report shows for the run that ended early.
 fn first_divergence(
     workload: &'static str,
     seed: u64,
     left: &[Event],
     right: &[Event],
 ) -> Option<Divergence> {
-    let common = left.len().min(right.len());
-    for i in 0..common {
-        if left[i] != right[i] {
-            return Some(Divergence {
-                workload,
-                seed,
-                index: i,
-                left: Some(left[i].clone()),
-                right: Some(right[i].clone()),
-                left_len: left.len(),
-                right_len: right.len(),
-            });
-        }
-    }
-    if left.len() != right.len() {
-        return Some(Divergence {
+    (0..left.len().max(right.len()))
+        .find(|&i| left.get(i) != right.get(i))
+        .map(|index| Divergence {
             workload,
             seed,
-            index: common,
-            left: left.get(common).cloned(),
-            right: right.get(common).cloned(),
+            index,
+            left: left.get(index).cloned(),
+            right: right.get(index).cloned(),
             left_len: left.len(),
             right_len: right.len(),
-        });
-    }
-    None
+        })
 }
 
 /// Run a workload twice under one seed and diff the two event streams, reporting
@@ -177,11 +164,9 @@ impl std::fmt::Display for SweepDivergence {
         for divergence in &self.divergences {
             writeln!(f, "{divergence}\n")?;
         }
-        writeln!(f, "corpus.txt lines for every seed above:\n")?;
-        for divergence in &self.divergences {
-            writeln!(f, "{} {}", divergence.workload, divergence.seed)?;
-        }
-        Ok(())
+        f.write_str(&crate::corpus::corpus_block(
+            self.divergences.iter().map(|d| (d.workload, d.seed)),
+        ))
     }
 }
 

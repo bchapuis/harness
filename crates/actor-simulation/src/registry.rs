@@ -115,11 +115,6 @@ impl SimRegistry {
         Arc::new(self.clone())
     }
 
-    /// The current global revision.
-    pub fn revision(&self) -> u64 {
-        self.state.lock().expect("registry mutex poisoned").revision
-    }
-
     /// Toggle availability (spec §9.4.2 item 6): while unavailable, every
     /// client call fails `Unavailable`. Mutations through this operator handle
     /// still apply — the registry exists; only the cluster's path to it is out.
