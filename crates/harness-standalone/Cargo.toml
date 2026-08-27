@@ -12,7 +12,6 @@ rust-version.workspace = true
 actor-core.workspace = true
 actor-cluster.workspace = true
 actor-runtime.workspace = true
-actor-serialization.workspace = true
 granary.workspace = true
 tenancy.workspace = true
 harness.workspace = true

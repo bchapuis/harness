@@ -17,11 +17,11 @@ use std::sync::Arc;
 use actor_cluster::MembershipMode;
 use actor_core::Event;
 use actor_core::EventSink;
+use actor_core::JsonCodec;
 use actor_core::NodeId;
 use actor_runtime::Encryption;
 use actor_runtime::JoinOptions;
 use actor_runtime::TcpCluster;
-use actor_serialization::JsonCodec;
 
 /// How the gateway joins the transport: its own (non-voting) id, the roster it
 /// dials, and the secret it presents.

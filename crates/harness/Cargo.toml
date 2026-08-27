@@ -13,7 +13,6 @@ actor-simulation = { workspace = true, optional = true }
 granary.workspace = true
 actor-core.workspace = true
 actor-cluster.workspace = true
-actor-serialization.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true

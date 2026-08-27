@@ -1008,7 +1008,7 @@ if let Some(greeter) = listing.first() {
 ```
 actor-core/             # Actor, Message, Handler, ActorRef, Ctx, ActorSystem,
                          #   HandlerRegistry, Manifest, CallError (§3, §4, §14)
-actor-serialization/    # SerializationRequirement, dispatch registry, codecs (§5, §4.4)
+actor-serialization/    # SerializationRequirement and the pluggable wire Codec (§5)
 actor-cluster/          # ClusterSystem: transport, membership control planes, SWIM, supervision,
                          #   death watch, receptionist (§7 to §13). The reference ActorSystem.
 actor-runtime/          # Production seam: wall-clock Clock, OS-seeded Entropy,

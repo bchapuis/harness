@@ -25,7 +25,6 @@ net = ["machine-grain/net"]
 actor-core.workspace = true
 actor-cluster.workspace = true
 actor-runtime.workspace = true
-actor-serialization.workspace = true
 granary.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
