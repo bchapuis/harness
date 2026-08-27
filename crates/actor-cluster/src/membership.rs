@@ -228,17 +228,6 @@ pub enum MembershipCommand {
 }
 
 impl MembershipCommand {
-    /// The node this transition targets.
-    pub fn node(self) -> NodeId {
-        match self {
-            MembershipCommand::Admit(n)
-            | MembershipCommand::Drain(n)
-            | MembershipCommand::Resume(n)
-            | MembershipCommand::Leave(n)
-            | MembershipCommand::Down(n) => n,
-        }
-    }
-
     /// What committing this transition *means*: the target node and the
     /// [`MemberStatus`] it moves that node to (spec §9.3).
     pub fn effect(self) -> (NodeId, MemberStatus) {
@@ -758,15 +747,6 @@ impl Membership {
         self.coordinator() == Some(self.node)
     }
 
-    /// Apply one **stamped authority decision** to the view — a registry entry at
-    /// its revision (spec §9.4.2) or a committed Raft entry at its commit index
-    /// (spec §9.4.3). The single write path for both stamped control planes: the
-    /// decision applies iff it supersedes the current view ([`status_supersedes`])
-    /// and never revives a terminal member, whatever its stamp (invariant #15). A
-    /// decision about *this* node is adopted into `self_status`.
-    ///
-    /// Returns whether `node` was **newly declared `down`**, in which case the
-    /// caller runs the node-down cascade (spec §8.1).
     /// Fold one status observation `(stamp, status)` into an existing member —
     /// the **one** implementation of the status axis's merge rule (invariant
     /// #15, spec §9.1, §9.2), shared by the authority path
@@ -809,6 +789,15 @@ impl Membership {
         )
     }
 
+    /// Apply one **stamped authority decision** to the view — a registry entry at
+    /// its revision (spec §9.4.2) or a committed Raft entry at its commit index
+    /// (spec §9.4.3). The single write path for both stamped control planes: the
+    /// decision applies iff it supersedes the current view ([`status_supersedes`])
+    /// and never revives a terminal member, whatever its stamp (invariant #15). A
+    /// decision about *this* node is adopted into `self_status`.
+    ///
+    /// Returns whether `node` was **newly declared `down`**, in which case the
+    /// caller runs the node-down cascade (spec §8.1).
     pub(crate) fn apply_stamped(
         &self,
         node: NodeId,

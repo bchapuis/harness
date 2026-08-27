@@ -356,12 +356,8 @@ where
     /// transition; the *cluster* converges asynchronously through the mode's
     /// dissemination.
     pub async fn admit(&self, node: NodeId) -> bool {
-        self.apply_membership_op(
-            MembershipCommand::Admit(node),
-            move |m| m.status(node) == Some(MemberStatus::Up),
-            move |client| async move { client.register(node).await.is_ok() },
-        )
-        .await
+        self.apply_membership_op(MembershipCommand::Admit(node))
+            .await
     }
 
     /// **Drain** `node` for maintenance — the reversible cordon (spec §9.1,
@@ -371,29 +367,16 @@ where
     /// [`resume`](Self::resume) returns it to `Up`. `false` in modes without an
     /// authoritative control plane.
     pub async fn drain(&self, node: NodeId) -> bool {
-        self.apply_membership_op(
-            MembershipCommand::Drain(node),
-            move |m| m.status(node) == Some(MemberStatus::Draining),
-            move |client| async move {
-                client
-                    .set_state(node, RegistryState::Draining)
-                    .await
-                    .is_ok()
-            },
-        )
-        .await
+        self.apply_membership_op(MembershipCommand::Drain(node))
+            .await
     }
 
     /// **Resume** a drained `node` after maintenance (spec §9.1, §9.4) — the
     /// reverse of [`drain`](Self::drain). `false` in modes without an
     /// authoritative control plane.
     pub async fn resume(&self, node: NodeId) -> bool {
-        self.apply_membership_op(
-            MembershipCommand::Resume(node),
-            move |m| m.status(node) == Some(MemberStatus::Up),
-            move |client| async move { client.set_state(node, RegistryState::Up).await.is_ok() },
-        )
-        .await
+        self.apply_membership_op(MembershipCommand::Resume(node))
+            .await
     }
 
     /// **Decommission** `node`: terminally remove it from the cluster through
@@ -405,28 +388,47 @@ where
     /// actors receive `Terminated { NodeDown }`. `false` in modes without an
     /// authoritative control plane.
     pub async fn decommission(&self, node: NodeId) -> bool {
-        self.apply_membership_op(
-            MembershipCommand::Down(node),
-            move |m| m.is_down(node),
-            move |client| async move { client.deregister(node).await.is_ok() },
-        )
-        .await
+        self.apply_membership_op(MembershipCommand::Down(node))
+            .await
     }
 
     /// Execute a membership operator command through the mode's authority (spec
-    /// §9.4): a registry mutation (registry-based) via `registry_op`, or a
-    /// committed control-group entry (leader-based) — `command`, awaited until
-    /// `done` observes its effect in the local view. Modes without an
-    /// authoritative control plane return `false`.
-    async fn apply_membership_op<Fut: Future<Output = bool>>(
-        &self,
-        command: MembershipCommand,
-        done: impl Fn(&Membership) -> bool,
-        registry_op: impl FnOnce(Arc<dyn RegistryClient>) -> Fut,
-    ) -> bool {
+    /// §9.4): a registry mutation (registry-based), or a committed control-group
+    /// entry (leader-based) awaited until the local view reflects
+    /// [`effect()`](MembershipCommand::effect). Both readings of the command are
+    /// derived here rather than passed in, so the operator methods cannot state
+    /// them differently. Modes without an authoritative control plane return
+    /// `false`.
+    async fn apply_membership_op(&self, command: MembershipCommand) -> bool {
         match &self.inner.mode {
-            MembershipMode::Registry(registry) => registry_op(registry.client.clone()).await,
-            MembershipMode::Leader(leader) => self.propose_and_wait(leader, command, done).await,
+            MembershipMode::Registry(registry) => {
+                let client = &registry.client;
+                match command {
+                    MembershipCommand::Admit(node) => client.register(node).await.is_ok(),
+                    MembershipCommand::Drain(node) => client
+                        .set_state(node, RegistryState::Draining)
+                        .await
+                        .is_ok(),
+                    MembershipCommand::Resume(node) => {
+                        client.set_state(node, RegistryState::Up).await.is_ok()
+                    }
+                    // Removal is what finalizes `down` in a registry (spec §9.4.2
+                    // items 3–4), for a decommission and a leave alike.
+                    MembershipCommand::Leave(node) | MembershipCommand::Down(node) => {
+                        client.deregister(node).await.is_ok()
+                    }
+                }
+            }
+            MembershipMode::Leader(leader) => {
+                let (node, status) = command.effect();
+                let done = move |m: &Membership| match status {
+                    // `is_down` also covers the `removed` tombstone the effect
+                    // may have advanced to by the time we look.
+                    MemberStatus::Down => m.is_down(node),
+                    status => m.status(node) == Some(status),
+                };
+                self.propose_and_wait(leader, command, done).await
+            }
             _ => false,
         }
     }
@@ -598,6 +600,28 @@ where
     /// reuse so they add no second tunable (utilities spec §4).
     pub(crate) fn probe_interval(&self) -> Duration {
         self.inner.swim.probe_interval
+    }
+
+    /// Send one SWIM probe and await its ack (spec §10): register a waiter under
+    /// a fresh seq, send the frames `build` derives from it, and wait out the
+    /// configured RTT. The shared plumbing of the direct probe, the indirect
+    /// fan-out, and a helper's relayed probe — each call site states only who
+    /// gets which frame. Returns the acked incarnation (delivered by the receive
+    /// loop's `Ack`/`IndirectAck` handler), or `None` when nothing answered in
+    /// time; the waiter is cleaned up either way.
+    async fn probe(&self, build: impl FnOnce(u64) -> Vec<(NodeId, Frame)>) -> Option<u64> {
+        let seq = self.inner.pings.next_id();
+        let (tx, rx) = oneshot::channel::<u64>();
+        self.inner.pings.register(seq, tx);
+        for (to, frame) in build(seq) {
+            let _ = self.inner.transport.send(to, frame).await;
+        }
+        let acked = match self.inner.clock.timeout(self.inner.swim.rtt, rx).await {
+            Ok(Ok(incarnation)) => Some(incarnation),
+            _ => None,
+        };
+        self.inner.pings.take(seq);
+        acked
     }
 
     /// Complete every in-flight `ask` to `node` with `err` — the node-down
@@ -1860,19 +1884,20 @@ where
             continue;
         };
 
-        let seq = system.inner.pings.next_id();
-        let (tx, rx) = oneshot::channel::<u64>();
-        system.inner.pings.register(seq, tx);
-        let frame = Frame::Ping {
-            seq,
-            incarnation: system.inner.membership.self_incarnation(),
-            digest: system.inner.membership.digest(),
-        };
-        let _ = system.inner.transport.send(target, frame).await;
-
         // A received `Ack` is handled by the receive loop (mark alive + merge).
-        let direct_ok = matches!(system.inner.clock.timeout(config.rtt, rx).await, Ok(Ok(_)));
-        system.inner.pings.take(seq);
+        let direct_ok = system
+            .probe(|seq| {
+                vec![(
+                    target,
+                    Frame::Ping {
+                        seq,
+                        incarnation: system.inner.membership.self_incarnation(),
+                        digest: system.inner.membership.digest(),
+                    },
+                )]
+            })
+            .await
+            .is_some();
 
         // On a missed direct probe, enlist `k` helpers to probe indirectly before
         // suspecting — a single bad link should not cause a false suspicion
@@ -1909,26 +1934,27 @@ where
     if helpers.is_empty() {
         return false;
     }
-
-    let seq = system.inner.pings.next_id();
-    let (tx, rx) = oneshot::channel::<u64>();
-    system.inner.pings.register(seq, tx);
-
     let incarnation = system.inner.membership.self_incarnation();
     let digest = system.inner.membership.digest();
-    for helper in helpers {
-        let frame = Frame::PingReq {
-            seq,
-            target,
-            incarnation,
-            digest: digest.clone(),
-        };
-        let _ = system.inner.transport.send(helper, frame).await;
-    }
-
-    let alive = matches!(system.inner.clock.timeout(config.rtt, rx).await, Ok(Ok(_)));
-    system.inner.pings.take(seq);
-    alive
+    system
+        .probe(|seq| {
+            helpers
+                .into_iter()
+                .map(|helper| {
+                    (
+                        helper,
+                        Frame::PingReq {
+                            seq,
+                            target,
+                            incarnation,
+                            digest: digest.clone(),
+                        },
+                    )
+                })
+                .collect()
+        })
+        .await
+        .is_some()
 }
 
 /// Helper side of indirect probing (spec §10 #2): probe `target` ourselves and,
@@ -1945,31 +1971,26 @@ async fn relay_probe<C, E, S, T>(
     S: Spawner,
     T: Transport,
 {
-    let seq = system.inner.pings.next_id();
-    let (tx, rx) = oneshot::channel::<u64>();
-    system.inner.pings.register(seq, tx);
-    let ping = Frame::Ping {
-        seq,
-        incarnation: system.inner.membership.self_incarnation(),
-        digest: system.inner.membership.digest(),
-    };
-    let _ = system.inner.transport.send(target, ping).await;
-
-    // Bound the relayed probe by the same RTT as a direct one.
-    let rtt = system.inner.swim.rtt;
-    match system.inner.clock.timeout(rtt, rx).await {
-        Ok(Ok(target_incarnation)) => {
-            let ack = Frame::IndirectAck {
-                seq: requester_seq,
+    let probed = system
+        .probe(|seq| {
+            vec![(
                 target,
-                incarnation: target_incarnation,
-                digest: system.inner.membership.digest(),
-            };
-            let _ = system.inner.transport.send(requester, ack).await;
-        }
-        _ => {
-            system.inner.pings.take(seq);
-        }
+                Frame::Ping {
+                    seq,
+                    incarnation: system.inner.membership.self_incarnation(),
+                    digest: system.inner.membership.digest(),
+                },
+            )]
+        })
+        .await;
+    if let Some(target_incarnation) = probed {
+        let ack = Frame::IndirectAck {
+            seq: requester_seq,
+            target,
+            incarnation: target_incarnation,
+            digest: system.inner.membership.digest(),
+        };
+        let _ = system.inner.transport.send(requester, ack).await;
     }
 }
 

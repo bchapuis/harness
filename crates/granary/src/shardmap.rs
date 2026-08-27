@@ -347,7 +347,7 @@ fn admit(
     // The map group is tiny and never compacts, so it only ever applies commands; a
     // snapshot install (were one to occur) carries no allocation this loop can act
     // on. Not a refusal: nothing about it is unreadable.
-    let Committed::Apply { index, command, .. } = observation else {
+    let Committed::Apply { index, command } = observation else {
         return Ok(None);
     };
     let refusal = |what: String| {
@@ -2066,11 +2066,7 @@ mod tests {
 
     /// A committed observation carrying `command` at `index`.
     fn applied(index: u64, command: Vec<u8>) -> Committed {
-        Committed::Apply {
-            index,
-            command,
-            commit: index,
-        }
+        Committed::Apply { index, command }
     }
 
     /// A map whose state is `inner` and whose handoff does nothing — enough to
@@ -2209,7 +2205,6 @@ mod tests {
         let observation = Committed::Snapshot {
             index: 2,
             snapshot: vec![0xff, 0xff],
-            commit: 2,
         };
         assert!(
             admit(&observation, "acct")

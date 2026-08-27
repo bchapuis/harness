@@ -436,45 +436,11 @@ enum Role {
 /// never reorder.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Committed {
-    /// A committed application command at this 1-based log index. `commit` is the
-    /// group's commit index at the moment this batch was drained — a high-water
-    /// mark a consumer MAY fold monotonically (`seen = max(seen, commit)`) to track
-    /// how far its projection trails the leader's commit. It rides the same ordered
-    /// stream as the command, so it never races the data it covers; and it carries
-    /// the *commit*, not this entry's `index`, so the last delivered observation
-    /// reflects any `Noop`/voter-change tail that the stream filters.
-    Apply {
-        index: u64,
-        command: Vec<u8>,
-        commit: u64,
-    },
+    /// A committed application command at this 1-based log index.
+    Apply { index: u64, command: Vec<u8> },
     /// Install this state-machine snapshot, which subsumes every command through
-    /// `index`; the receiver replaces its state with it. `commit` is the
-    /// high-water mark as for [`Apply`](Committed::Apply).
-    Snapshot {
-        index: u64,
-        snapshot: Vec<u8>,
-        commit: u64,
-    },
-}
-
-impl Committed {
-    /// The log index this observation carries (an applied command's index, or the
-    /// index a snapshot is taken at).
-    pub fn index(&self) -> u64 {
-        match self {
-            Committed::Apply { index, .. } | Committed::Snapshot { index, .. } => *index,
-        }
-    }
-
-    /// The commit high-water mark this observation was drained at — a consumer
-    /// MAY fold it monotonically to track how far its projection trails the
-    /// leader's commit (see the variant docs).
-    pub fn commit(&self) -> u64 {
-        match self {
-            Committed::Apply { commit, .. } | Committed::Snapshot { commit, .. } => *commit,
-        }
-    }
+    /// `index`; the receiver replaces its state with it.
+    Snapshot { index: u64, snapshot: Vec<u8> },
 }
 
 /// What one Raft step produced, for the caller to act on: frames to send over
@@ -787,8 +753,7 @@ impl RaftGroup {
     /// otherwise see only the post-snapshot tail and miss the compacted prefix
     /// entirely. Handing it this observation first rebuilds the projection from the
     /// snapshot, the leaderless counterpart of a leader-driven InstallSnapshot
-    /// (§9). Its `commit` watermark is the snapshot base: the snapshot proves the
-    /// projection current only through `snapshot_index`, never beyond.
+    /// (§9).
     ///
     /// [`new`]: RaftGroup::new
     pub(crate) fn snapshot_observation(&self) -> Option<Committed> {
@@ -799,7 +764,6 @@ impl RaftGroup {
         state.snapshot.clone().map(|snapshot| Committed::Snapshot {
             index: state.snapshot_index,
             snapshot,
-            commit: state.snapshot_index,
         })
     }
 
@@ -1261,7 +1225,6 @@ impl RaftGroup {
                     out.committed.push(Committed::Apply {
                         index: state.applied,
                         command: bytes,
-                        commit: state.commit,
                     });
                 }
                 EntryPayload::Noop | EntryPayload::AddVoter(_) => {}
@@ -1562,7 +1525,6 @@ impl RaftGroup {
             out.committed.push(Committed::Snapshot {
                 index: snapshot_index,
                 snapshot: data,
-                commit: snapshot_index,
             });
         }
         out.frames.push((
@@ -2574,9 +2536,7 @@ mod tests {
         learner: NodeId,
     ) {
         for observation in out.committed {
-            if let Committed::Snapshot {
-                index, snapshot, ..
-            } = observation
+            if let Committed::Snapshot { index, snapshot } = observation
                 && src == learner
             {
                 *learner_snapshot = Some((index, snapshot));
