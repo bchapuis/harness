@@ -502,22 +502,6 @@ impl<G: Grain> Host<G> {
         Ok(reply)
     }
 
-    /// The command path of the §6 protocol: the grain's handler is the decision.
-    pub(crate) async fn run_protocol<M>(
-        &mut self,
-        msg: M,
-        ctx: &Ctx<Host<G>>,
-    ) -> Result<M::Reply, GrainError>
-    where
-        G: GrainHandler<M>,
-        M: Message,
-    {
-        self.run_decision(ctx, (), move |grain, state, gctx, ()| {
-            grain.handle(state, msg, gctx).boxed()
-        })
-        .await
-    }
-
     /// The callerless alarm protocol (spec §7.16): fire the grain's
     /// [`on_alarm`](Grain::on_alarm) through the same §6 durability barrier. Before
     /// the handler runs, stage a cancel of the fired alarm, so the deadline clears
@@ -927,12 +911,16 @@ where
     G: GrainHandler<M>,
     M: Message,
 {
+    /// The command path of the §6 protocol: the grain's handler is the decision.
     async fn handle(
         &mut self,
         msg: RunTyped<M>,
         ctx: &Ctx<Host<G>>,
     ) -> Result<M::Reply, GrainError> {
-        self.run_protocol(msg.0, ctx).await
+        self.run_decision(ctx, (), move |grain, state, gctx, ()| {
+            grain.handle(state, msg.0, gctx).boxed()
+        })
+        .await
     }
 }
 

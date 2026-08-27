@@ -496,11 +496,6 @@ impl<G: Grain> GrainRegistry<G> {
         self.host_entries.push(register_run_typed::<G, M>);
     }
 
-    /// The manifests this grain accepts, in deterministic order.
-    pub fn accepted(&self) -> &BTreeSet<&'static str> {
-        &self.accepted
-    }
-
     /// The host-registration thunks, replayed by [`Host::register`] to build the
     /// host's network dispatch table.
     pub(crate) fn host_entries(&self) -> &[fn(&mut HandlerRegistry<Host<G>>)] {

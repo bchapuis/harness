@@ -657,7 +657,7 @@ where
     /// Run a query, returning all rows, capped at [`MAX_QUERY_ROWS`] (over the
     /// cap is an error, not a truncation). Sees the transaction's own writes.
     pub fn query(&self, sql: &str, params: &[SqlValue]) -> Result<Vec<SqlRow>, SqlError> {
-        Ok(self.collect(sql, params)?.rows)
+        Ok(self.select(sql, params)?.rows)
     }
 
     /// Run a query expected to return exactly one row.
@@ -672,15 +672,9 @@ where
     /// Run a query, returning the rows **with their column names** (spec §7.14),
     /// capped at [`MAX_QUERY_ROWS`]: a row-object shape a caller can serialize
     /// directly. Over the cap is an error, not a truncation — a silently clipped
-    /// result would read as complete.
+    /// result would read as complete. The row-collecting body behind
+    /// [`query`](Self::query) too, which keeps only the rows.
     pub fn select(&self, sql: &str, params: &[SqlValue]) -> Result<QueryResult, SqlError> {
-        self.collect(sql, params)
-    }
-
-    /// Prepare `sql`, bind `params`, and collect every row with its column names
-    /// — the shared body of [`query`](Self::query) and [`select`](Self::select),
-    /// bounded by [`MAX_QUERY_ROWS`].
-    fn collect(&self, sql: &str, params: &[SqlValue]) -> Result<QueryResult, SqlError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(sql).map_err(|e| SqlError(e.to_string()))?;
             let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();

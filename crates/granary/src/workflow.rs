@@ -166,9 +166,7 @@ where
     /// Called from the handler that receives a step effect's outcome (typically the
     /// [`StepDone`] handler via [`complete_step`]).
     pub fn record<T: Serialize>(&self, id: StepId, value: &T) {
-        let bytes = encode_payload(value);
-        self.cell
-            .with_stage::<Workflow, I, _>(|stage| stage.staged.insert(id, bytes));
+        self.record_bytes(id, encode_payload(value));
     }
 
     /// Record a step's already-encoded result bytes (the generic path, when the

@@ -597,19 +597,6 @@ impl FileGrainStore {
         self.blob_dir(seg_id).join(id.to_string())
     }
 
-    /// Drop the live segment handle, its on-disk log, and the blob subtree of one
-    /// grain. The manifest keeps the id assignment (append-only); a later access
-    /// reopens an empty segment under the same id, which reads as absent.
-    fn remove_grain_inner(&self, shard: u32, grain: &GrainName) {
-        let Some(seg_id) = self.segment_id(shard, grain, false) else {
-            return;
-        };
-        let mut segments = self.segments.lock().expect("grain store segments poisoned");
-        segments.remove(&(shard, grain.clone()));
-        let _ = fs::remove_file(self.segment_path(seg_id));
-        let _ = fs::remove_dir_all(self.blob_dir(seg_id));
-    }
-
     /// Rewrite a grain's segment to a single `Checkpoint` of its current state, folding
     /// away the record ops a snapshot made redundant (§9), and swap in the fresh append
     /// handle. Called under the held segment lock so no append races the rewrite.
@@ -1190,10 +1177,7 @@ impl GrainStore for FileGrainStore {
 
     fn read(&self, shard: u32, grain: &GrainName) -> ReadReply {
         self.with_records(shard, grain, GrainRecords::read)
-            .unwrap_or_else(|| ReadReply {
-                slots: Vec::new(),
-                snapshot: None,
-            })
+            .unwrap_or_default()
     }
 
     // Answered from the segment directly, not through `read` — see the note on
@@ -1217,18 +1201,8 @@ impl GrainStore for FileGrainStore {
         from: Seq,
         limit: usize,
     ) -> RecordPage {
-        match self.segment_existing(shard, grain) {
-            Some(segment) => segment
-                .inner
-                .lock()
-                .expect("grain segment poisoned")
-                .records
-                .read_from(from, limit),
-            None => RecordPage {
-                base: Seq::ZERO,
-                records: Vec::new(),
-            },
-        }
+        self.with_records(shard, grain, |records| records.read_from(from, limit))
+            .unwrap_or_default()
     }
 
     fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> ReadOutcome {
@@ -1267,14 +1241,14 @@ impl GrainStore for FileGrainStore {
         if let Err(ack) = self.guard_snapshot(shard, term, kind) {
             return ack;
         }
-        let (ack, advanced) = inner.records.store_snapshot(at, term, state);
+        let advanced = inner.records.store_snapshot(at, term, state);
         // A snapshot that advanced the base just compacted the records it subsumes
         // (§9): rewrite this grain's segment to a single checkpoint that embeds the
         // snapshot. One that did *not* advance writes nothing durable (module docs).
         if advanced && !self.checkpoint(&segment, &mut inner) {
             return StoreAck::Failed;
         }
-        ack
+        StoreAck::Stored(at)
     }
 
     fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: Term) {
@@ -1359,8 +1333,17 @@ impl GrainStore for FileGrainStore {
         }
     }
 
+    /// Drop the live segment handle, its on-disk log, and the blob subtree of one
+    /// grain. The manifest keeps the id assignment (append-only); a later access
+    /// reopens an empty segment under the same id, which reads as absent.
     fn remove_grain(&self, shard: u32, grain: &GrainName) {
-        self.remove_grain_inner(shard, grain);
+        let Some(seg_id) = self.segment_id(shard, grain, false) else {
+            return;
+        };
+        let mut segments = self.segments.lock().expect("grain store segments poisoned");
+        segments.remove(&(shard, grain.clone()));
+        let _ = fs::remove_file(self.segment_path(seg_id));
+        let _ = fs::remove_dir_all(self.blob_dir(seg_id));
     }
 
     /// Enumerate-and-remove, because a grain owns a file: the range is expressible
@@ -1368,14 +1351,14 @@ impl GrainStore for FileGrainStore {
     fn remove_range(&self, shard: u32, from: u64) {
         for grain in self.grains(shard) {
             if crate::system::name_at_or_above(&grain, from) {
-                self.remove_grain_inner(shard, &grain);
+                self.remove_grain(shard, &grain);
             }
         }
     }
 
     fn drop_shard(&self, shard: u32) {
         for grain in self.grains(shard) {
-            self.remove_grain_inner(shard, &grain);
+            self.remove_grain(shard, &grain);
         }
         // The fence and the bound go with the data (see `MemoryGrainStore`), so a
         // shard index reused later starts from a clean promise rather than one this

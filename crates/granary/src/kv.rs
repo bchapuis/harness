@@ -58,20 +58,11 @@ pub struct Kv;
 impl Sealed for Kv {}
 
 /// One stored value: inline bytes, or a content id of spilled bytes plus their
-/// length (so `len` needs no blob fetch).
+/// length (recorded at spill time; part of the stable record shape).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum KvValue {
     Inline(Vec<u8>),
     Spilled { id: BlobId, len: u64 },
-}
-
-impl KvValue {
-    fn len(&self) -> u64 {
-        match self {
-            KvValue::Inline(bytes) => bytes.len() as u64,
-            KvValue::Spilled { len, .. } => *len,
-        }
-    }
 }
 
 /// One kv record (spec §7.13): the unit of durable change under the kv tag.
@@ -204,16 +195,6 @@ where
         }
     }
 
-    /// Whether `key` is present.
-    pub fn contains(&self, key: &str) -> bool {
-        self.resolve(key, |value| value.is_some())
-    }
-
-    /// The stored length of `key`'s value, without fetching a spilled one.
-    pub fn len_of(&self, key: &str) -> Option<u64> {
-        self.resolve(key, |value| value.map(KvValue::len))
-    }
-
     /// Stage `key = value` into the current command's batch (§7.12). A value
     /// above [`INLINE_MAX`] spills to the grain's blob area first — durable on a
     /// write quorum before the map references it (§7.10); if the command later
@@ -274,12 +255,6 @@ where
         })
     }
 
-    /// The committed entries with `prefix` through the overlay, in key order —
-    /// the walk behind [`list`](Self::list).
-    fn merged_range(&self, prefix: &str) -> BTreeMap<String, KvValue> {
-        self.merged(prefix, KvValue::clone)
-    }
-
     /// The keys with `prefix`, in order, through the overlay (§7.13). Projects
     /// to `()` — it never touches the values, so a large inline payload under
     /// the prefix costs nothing here (unlike [`list`](Self::list)).
@@ -290,7 +265,7 @@ where
     /// The `(key, value)` pairs with `prefix`, in key order, through the overlay.
     /// Spilled values are fetched concurrently and verified (G17).
     pub async fn list(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, GrainError> {
-        let entries = self.merged_range(prefix);
+        let entries = self.merged(prefix, KvValue::clone);
         // `join_all_results`, not `try_join_all`: a short-circuiting join drops
         // the fetches still in flight and abandons their asks (core spec §18.5 #1).
         join_all_results(entries.into_iter().map(|(key, value)| async move {

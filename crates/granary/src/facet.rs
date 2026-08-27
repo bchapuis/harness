@@ -1027,15 +1027,12 @@ impl<FS: FacetSet> FacetCell<FS> {
         F: Facet,
         FS: HasFacet<F, I>,
     {
-        let forms = self.forms.lock().expect("facet forms lock");
-        let mut stages = self.stages.lock().expect("facet stages lock");
-        let stage = stages
-            .as_mut()
-            .expect("facet writes are only valid inside a command handler (spec §7.12)");
-        write(
-            <FS as HasFacet<F, I>>::form(&forms),
-            <FS as HasFacet<F, I>>::stage_mut(stage),
-        )
+        self.with_overlay::<F, I, _>(|form, stage| {
+            write(
+                form,
+                stage.expect("facet writes are only valid inside a command handler (spec §7.12)"),
+            )
+        })
     }
 
     /// Run `read` against `F`'s committed form AND its armed stage, if any — the

@@ -185,7 +185,6 @@ fn render_histogram(out: &mut String, metric: &str, labels: &str, hist: &Histogr
 #[derive(Default)]
 struct TypeMetrics {
     commit_latency: [Histogram; 3],
-    commits: [AtomicU64; 3],
     rehydrate_latency: Histogram,
     replayed: AtomicU64,
     /// Signed, but held unsigned: activations only ever exceed passivations, since a
@@ -277,10 +276,15 @@ impl AtomicGrainMetrics {
         );
         for (name, m) in &types {
             for outcome in CommitOutcome::ALL {
+                // The histogram's own count: a commit and its latency observation are
+                // one event, so the counter is read off the histogram rather than
+                // kept in a second atomic that could only agree or drift.
                 out.push_str(&format!(
                     "granary_commits_total{{grain_type=\"{name}\",outcome=\"{}\"}} {}\n",
                     outcome.as_str(),
-                    m.commits[outcome.index()].load(Ordering::Relaxed)
+                    m.commit_latency[outcome.index()]
+                        .count
+                        .load(Ordering::Relaxed)
                 ));
             }
         }
@@ -322,10 +326,7 @@ impl AtomicGrainMetrics {
 
 impl GrainMetrics for AtomicGrainMetrics {
     fn commit(&self, grain_type: &'static str, outcome: CommitOutcome, took: Duration) {
-        let m = self.entry(grain_type);
-        let idx = outcome.index();
-        m.commit_latency[idx].observe(took);
-        m.commits[idx].fetch_add(1, Ordering::Relaxed);
+        self.entry(grain_type).commit_latency[outcome.index()].observe(took);
     }
 
     fn rehydrated(&self, grain_type: &'static str, took: Duration, replayed: u64) {

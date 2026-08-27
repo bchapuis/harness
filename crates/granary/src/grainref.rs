@@ -627,12 +627,17 @@ impl<G: Grain> GrainRef<G> {
         Err(GrainError::NotLeader(self.system.node()))
     }
 
-    /// The gateway registered on `node`, if discovered in the receptionist (§5.3).
-    fn gateway_on(&self, node: NodeId) -> Option<ActorRef<Gateway<G>>> {
+    /// Every gateway discovered for this grain type (§5.3), one per node.
+    fn gateways(&self) -> Vec<ActorRef<Gateway<G>>> {
         self.system
             .receptionist()
             .lookup(gateway_key::<G>(self.grain_type))
             .into_vec()
+    }
+
+    /// The gateway registered on `node`, if discovered in the receptionist (§5.3).
+    fn gateway_on(&self, node: NodeId) -> Option<ActorRef<Gateway<G>>> {
+        self.gateways()
             .into_iter()
             .find(|gateway| gateway.id().node() == node)
     }
@@ -641,11 +646,7 @@ impl<G: Grain> GrainRef<G> {
     /// target (§5.4) without re-selecting the very gateway that just timed out,
     /// whose registration may outlive the crash until the membership prunes it.
     fn gateway_excluding(&self, failed: NodeId) -> Option<ActorRef<Gateway<G>>> {
-        let gateways = self
-            .system
-            .receptionist()
-            .lookup(gateway_key::<G>(self.grain_type))
-            .into_vec();
+        let gateways = self.gateways();
         gateways
             .iter()
             .find(|gateway| gateway.id().node() != failed)
@@ -761,26 +762,19 @@ fn is_retriable(call: &CallError) -> bool {
 /// A handle to a hosted grain type (spec Appendix A): address a grain by key and
 /// `ask`/`tell` it. Obtained from [`GranaryExt::granary`].
 pub struct Granary<G: Grain> {
-    system: G::System,
-    /// The runtime type name (spec §5.1) this handle addresses, `G::GRAIN_TYPE` by
-    /// default; a caller-supplied name under [`granary_named`](GranaryExt::granary_named).
-    grain_type: &'static str,
     gateway: ActorRef<Gateway<G>>,
-    /// The founding shard count (§7.1), the [`resolve_shard`] fallback.
-    shards: usize,
-    /// The consensus-agreed shard map (§7.6), read by [`Granary::replicas`].
-    shard_map: Arc<dyn ShardMapSource>,
+    /// The shared routing state (§5.4): the system handle, the runtime type name
+    /// (spec §5.1, `G::GRAIN_TYPE` unless
+    /// [`granary_named`](GranaryExt::granary_named) overrode it), the founding
+    /// shard count, and the shard map — read through the cache rather than kept
+    /// as copies here, so name resolution has one set of inputs.
     cache: Arc<HostCache<G>>,
 }
 
 impl<G: Grain> Clone for Granary<G> {
     fn clone(&self) -> Self {
         Granary {
-            system: self.system.clone(),
-            grain_type: self.grain_type,
             gateway: self.gateway.clone(),
-            shards: self.shards,
-            shard_map: Arc::clone(&self.shard_map),
             cache: Arc::clone(&self.cache),
         }
     }
@@ -792,10 +786,10 @@ impl<G: Grain> Granary<G> {
     /// handle's host cache (§5.4).
     pub fn grain(&self, key: impl Into<String>) -> GrainRef<G> {
         GrainRef::new(
-            self.grain_type,
-            GrainName::new(self.grain_type, key),
+            self.cache.grain_type,
+            GrainName::new(self.cache.grain_type, key),
             self.gateway.clone(),
-            self.system.clone(),
+            self.cache.system.clone(),
             Some(Arc::clone(&self.cache)),
         )
     }
@@ -804,15 +798,15 @@ impl<G: Grain> Granary<G> {
     /// grain activates (§5.2) — or `None` during a shard election. A routing
     /// observation, not a guarantee: leadership can move immediately after.
     pub fn leader(&self, key: impl Into<String>) -> Option<NodeId> {
-        let name = GrainName::new(self.grain_type, key);
-        self.system.shard_leader(self.cache.shard_of(&name))
+        let name = GrainName::new(self.cache.grain_type, key);
+        self.cache.system.shard_leader(self.cache.shard_of(&name))
     }
 
     /// Whether a live host handle is currently cached for `key` (spec §5.4). An
     /// observability detail, not a statement about the grain's activation on its
     /// leader.
     pub fn is_cached(&self, key: impl Into<String>) -> bool {
-        self.cache.contains(&GrainName::new(self.grain_type, key))
+        self.cache.contains(&GrainName::new(self.cache.grain_type, key))
     }
 
     /// Request a split of shard `index` at its range midpoint (spec §7.7) — the
@@ -822,7 +816,7 @@ impl<G: Grain> Granary<G> {
     /// observable as a [`ShardSplit`](crate::GrainEvent::ShardSplit) event and
     /// changed routing. A no-op on the `Local` tier and on a routing-only client.
     pub fn split_shard(&self, index: u32) {
-        self.shard_map.request_split(index);
+        self.cache.shard_map.request_split(index);
     }
 
     /// Request a merge of shard `left` with its right neighbour (spec §7.7) —
@@ -832,7 +826,7 @@ impl<G: Grain> Granary<G> {
     /// are skipped, and the committed flip is observable as a
     /// [`ShardMerged`](crate::GrainEvent::ShardMerged) event.
     pub fn merge_shards(&self, left: u32) {
-        self.shard_map.request_merge(left);
+        self.cache.shard_map.request_merge(left);
     }
 
     /// Hand every shard this node leads to another of its replicas before the node
@@ -854,7 +848,7 @@ impl<G: Grain> Granary<G> {
     /// A no-op on the `Local` tier (there are no other replicas) and on a
     /// routing-only client (it leads nothing).
     pub async fn hand_off_leadership(&self) -> usize {
-        self.shard_map.hand_off_leadership().await
+        self.cache.shard_map.hand_off_leadership().await
     }
 
     /// The nodes that replicate the shard a grain key maps to (spec §7.6) — the
@@ -862,9 +856,9 @@ impl<G: Grain> Granary<G> {
     /// consensus-agreed shard map, so it reflects the latest committed allocation,
     /// not a `granary()`-time snapshot.
     pub fn replicas(&self, key: impl Into<String>) -> Vec<NodeId> {
-        let name = GrainName::new(self.grain_type, key);
+        let name = GrainName::new(self.cache.grain_type, key);
         let index = self.cache.shard_of(&name).index;
-        self.shard_map.replicas(index).unwrap_or_default()
+        self.cache.shard_map.replicas(index).unwrap_or_default()
     }
 }
 
@@ -921,13 +915,8 @@ pub trait GranaryExt: GranarySystem {
             .into_vec()
             .into_iter()
             .next()?;
-        let shard_map: Arc<dyn ShardMapSource> = Arc::new(EmptyShardMap);
         Some(Granary {
-            system: self.clone(),
-            grain_type,
             gateway,
-            shards,
-            shard_map: Arc::clone(&shard_map),
             // A routing-only client has no `GranaryConfig` to read, so it takes the
             // default bound. This is the path that most needs one: the gateway is a
             // client, long-lived, and addresses every tenant's names.
@@ -935,7 +924,7 @@ pub trait GranaryExt: GranarySystem {
                 self.clone(),
                 grain_type,
                 shards,
-                shard_map,
+                Arc::new(EmptyShardMap),
                 GranaryConfig::default().host_cache_capacity,
             ),
         })
@@ -1132,11 +1121,7 @@ where
         .receptionist()
         .register(gateway_key::<G>(grain_type), &gateway);
     Granary {
-        system: system.clone(),
-        grain_type,
         gateway,
-        shards,
-        shard_map: Arc::clone(&shard_map),
         cache: HostCache::new(
             system.clone(),
             grain_type,
@@ -1171,16 +1156,16 @@ where
 {
     // The type name and founding shard count ride on the handle; this loop
     // takes no copy of facts the `Granary` already carries.
-    let grain_type = granary.grain_type;
+    let grain_type = granary.cache.grain_type;
     loop {
         system.sleep(ALARM_DRIVE_INTERVAL).await;
         let now = system.now().as_nanos();
         // Sweep the committed partition's shards — a split/merge (§7.7) changes
         // the shard set, and each shard has its own index grain. While the map is
         // still bootstrapping, fall back to the founding indices.
-        let mut indices = granary.shard_map.shard_indices();
+        let mut indices = granary.cache.shard_map.shard_indices();
         if indices.is_empty() {
-            indices = (0..granary.shards as u32).collect();
+            indices = (0..granary.cache.shards as u32).collect();
         }
         for shard in indices {
             let id = ShardId {

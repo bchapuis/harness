@@ -41,7 +41,7 @@ use crate::journal::Term;
 /// One stored record: the opaque event bytes and the **shard term** under which it
 /// was committed. The term is what a recovering leader picks by, per `Seq` slot (§8).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecordSlot {
+pub(crate) struct RecordSlot {
     /// The shard term under which this record was written (the fencing token, §8).
     pub term: Term,
     /// The opaque, codec-encoded event bytes.
@@ -105,7 +105,7 @@ pub enum BlobAck {
 /// The reply to a read: every occupied slot with its committing term, and the
 /// latest snapshot, so a recovering leader can merge a write quorum by
 /// highest-term-per-slot (**G14**).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadReply {
     /// `(seq, term, bytes)` for each occupied slot, ascending by `seq`.
     pub slots: Vec<(Seq, Term, Vec<u8>)>,
@@ -140,11 +140,6 @@ impl ReadReply {
         )
     }
 
-    /// The latest snapshot as `(seq, state)` — what the `load_snapshot` seam needs,
-    /// without the committing term (§9).
-    pub fn into_snapshot(self) -> Option<(Seq, Vec<u8>)> {
-        self.snapshot.map(|(seq, _term, state)| (seq, state))
-    }
 }
 
 /// The outcome of a recovery [`prepare`](GrainStore::prepare) (spec §8): the
@@ -314,7 +309,9 @@ pub trait GrainStore: GrainBlobStore {
     /// a second time to reach one field.
     #[must_use = "the answer is the whole point of the call"]
     fn snapshot(&self, shard: u32, grain: &GrainName) -> Option<(Seq, Vec<u8>)> {
-        self.read(shard, grain).into_snapshot()
+        self.read(shard, grain)
+            .snapshot
+            .map(|(seq, _term, state)| (seq, state))
     }
 
     /// Up to `limit` records for a grain after `from` (exclusive), ascending by
@@ -640,15 +637,10 @@ impl GrainRecords {
         StoreAck::Stored(self.head())
     }
 
-    /// Apply a fenced snapshot store (§9). Returns the ack and whether the snapshot
-    /// **advanced the base** — i.e. just compacted records — so a file store knows to
-    /// rewrite the grain's segment.
-    pub(crate) fn store_snapshot(
-        &mut self,
-        at: Seq,
-        term: Term,
-        state: Vec<u8>,
-    ) -> (StoreAck, bool) {
+    /// Apply a fenced snapshot store (§9); the guard has already run, so it cannot
+    /// refuse. Returns whether the snapshot **advanced the base** — i.e. just
+    /// compacted records — so a file store knows to rewrite the grain's segment.
+    pub(crate) fn store_snapshot(&mut self, at: Seq, term: Term, state: Vec<u8>) -> bool {
         // A snapshot only ever advances (§9, G4). When it does it subsumes every
         // record up to `at`, so compact them: advance the base and drop the covered
         // slots (records past `at`, if any, shift down behind the new base).
@@ -661,9 +653,9 @@ impl GrainRecords {
             self.slots.drain(..drop);
             self.base = at;
             self.snapshot = Some((at, term, state));
-            return (StoreAck::Stored(at), true);
+            return true;
         }
-        (StoreAck::Stored(at), false)
+        false
     }
 
     /// An estimate of this segment's stored bytes — record payloads plus the
@@ -990,10 +982,7 @@ impl GrainStore for MemoryGrainStore {
 
     fn read(&self, shard: u32, grain: &GrainName) -> ReadReply {
         self.with_records(shard, grain, GrainRecords::read)
-            .unwrap_or_else(|| ReadReply {
-                slots: Vec::new(),
-                snapshot: None,
-            })
+            .unwrap_or_default()
     }
 
     // `head` and `snapshot` read the segment directly rather than through `read`, whose
@@ -1019,16 +1008,8 @@ impl GrainStore for MemoryGrainStore {
         from: Seq,
         limit: usize,
     ) -> RecordPage {
-        match self.existing(shard, grain) {
-            Some(segment) => segment
-                .lock()
-                .expect("grain segment poisoned")
-                .read_from(from, limit),
-            None => RecordPage {
-                base: Seq::ZERO,
-                records: Vec::new(),
-            },
-        }
+        self.with_records(shard, grain, |records| records.read_from(from, limit))
+            .unwrap_or_default()
     }
 
     fn prepare(&self, shard: u32, grain: &GrainName, term: Term) -> ReadOutcome {
@@ -1058,7 +1039,8 @@ impl GrainStore for MemoryGrainStore {
         if let Err(ack) = self.guard_snapshot(shard, term, kind) {
             return ack;
         }
-        records_guard.store_snapshot(at, term, state).0
+        records_guard.store_snapshot(at, term, state);
+        StoreAck::Stored(at)
     }
 
     fn truncate(&self, shard: u32, grain: &GrainName, after: Seq, term: Term) {

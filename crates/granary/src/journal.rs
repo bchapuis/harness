@@ -101,7 +101,7 @@ pub enum AppendOutcome {
 /// by the grain's snapshot and gone from every read path. Without the base a
 /// reader below it cannot tell truncated history from the interleaved slots a
 /// projection legally skips (§7.12), so every read reply carries it (§7.5).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RecordPage {
     /// The compaction base: records at `Seq <= base` are no longer readable.
     /// `Seq::ZERO` when nothing has been compacted.

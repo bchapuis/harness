@@ -6,7 +6,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use actor_core::ActorSystem;
 use actor_core::CallError;
 use actor_core::EventSink;
 use actor_core::LocalSystemBuilder;

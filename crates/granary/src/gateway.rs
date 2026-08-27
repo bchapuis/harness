@@ -54,6 +54,7 @@ use crate::grainref::Granary;
 use crate::host::CommittedCell;
 use crate::host::HEAD_UNPUBLISHED;
 use crate::host::Host;
+use crate::journal::DynGrainJournal;
 use crate::journal::Seq;
 use crate::journal::Term;
 use crate::shardmap::ShardMapSource;
@@ -287,12 +288,14 @@ impl<G: Grain> Gateway<G> {
 
     /// Get-or-activate the host for `name` on **this** node (its shard's leader),
     /// returning a live handle. Exactly-once per node by the serial actor
-    /// (**G6**, see module docs). Called only when this node replicates and leads
-    /// the shard, so the shard's `journal` is present.
+    /// (**G6**, see module docs). `journal` is the shard's, from
+    /// [`leading_journal`](Gateway::leading_journal) — passing it in carries the
+    /// caller's leads-this-shard proof along instead of re-deriving it here.
     fn get_or_activate(
         &mut self,
         name: GrainName,
         shard: ShardId,
+        journal: Arc<dyn DynGrainJournal>,
         ctx: &Ctx<Gateway<G>>,
     ) -> ActorRef<Host<G>> {
         // Reuse the cached host only if it is still alive AND still activated
@@ -322,10 +325,6 @@ impl<G: Grain> Gateway<G> {
 
         // Otherwise spawn a restartable host that rehydrates from its shard's
         // journal (§9).
-        let journal = self
-            .shard_map
-            .journal(shard.index)
-            .expect("a leader replicates the shard, so its journal is present");
         let config = self.config.clone();
         let capabilities = self.capabilities.clone();
         let factory = Arc::clone(&self.factory);
@@ -365,6 +364,20 @@ impl<G: Grain> Gateway<G> {
     fn shard_of(&self, key: &str) -> ShardId {
         resolve_shard(self.shard_map.as_ref(), self.grain_type, key, self.shards)
     }
+
+    /// The shard's journal if this node replicates **and** currently leads it,
+    /// else `NotLeader(hint)` for the caller's redirect loop (§5.4) — the one
+    /// leads-this-shard gate both network handlers pass through.
+    fn leading_journal(
+        &self,
+        shard: ShardId,
+        ctx: &Ctx<Gateway<G>>,
+    ) -> Result<Arc<dyn DynGrainJournal>, GrainError> {
+        match self.shard_map.journal(shard.index) {
+            Some(journal) if ctx.system().leads_shard(shard) => Ok(journal),
+            _ => Err(GrainError::NotLeader(self.redirect_hint(shard, ctx))),
+        }
+    }
 }
 
 impl<G: Grain> Actor for Gateway<G> {
@@ -390,11 +403,8 @@ impl<G: Grain> Handler<Activate<G>> for Gateway<G> {
         ctx: &Ctx<Gateway<G>>,
     ) -> Result<ActorRef<Host<G>>, GrainError> {
         let shard = self.shard_of(msg.name.key());
-        if self.shard_map.journal(shard.index).is_some() && ctx.system().leads_shard(shard) {
-            Ok(self.get_or_activate(msg.name, shard, ctx))
-        } else {
-            Err(GrainError::NotLeader(self.redirect_hint(shard, ctx)))
-        }
+        let journal = self.leading_journal(shard, ctx)?;
+        Ok(self.get_or_activate(msg.name, shard, journal, ctx))
     }
 }
 
@@ -425,10 +435,7 @@ impl<G: Grain> Handler<ReadEvents<G>> for Gateway<G> {
         ctx: &Ctx<Gateway<G>>,
     ) -> Result<ReadReply, GrainError> {
         let shard = self.shard_of(msg.name.key());
-        let journal = match self.shard_map.journal(shard.index) {
-            Some(journal) if ctx.system().leads_shard(shard) => journal,
-            _ => return Err(GrainError::NotLeader(self.redirect_hint(shard, ctx))),
-        };
+        let journal = self.leading_journal(shard, ctx)?;
         let floor = match self.table.get(&msg.name) {
             // Resident (even if just stopped — the cell only ever holds
             // committed heads): the activation's published head is the floor.
@@ -498,7 +505,7 @@ impl<G: Grain> Gateway<G> {
         name: GrainName,
         shard: u32,
         term: Term,
-        journal: Arc<dyn crate::journal::DynGrainJournal>,
+        journal: Arc<dyn DynGrainJournal>,
         ctx: &Ctx<Gateway<G>>,
     ) {
         if self.warming.contains_key(&name) {

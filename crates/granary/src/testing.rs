@@ -167,12 +167,6 @@ impl StaticGrainStore {
         })
     }
 
-    fn empty_reply() -> crate::ReadReply {
-        crate::ReadReply {
-            slots: Vec::new(),
-            snapshot: None,
-        }
-    }
 }
 
 impl crate::GrainBlobStore for StaticGrainStore {
@@ -219,7 +213,7 @@ impl crate::GrainStore for StaticGrainStore {
     }
 
     fn read(&self, _shard: u32, _grain: &GrainName) -> crate::ReadReply {
-        StaticGrainStore::empty_reply()
+        crate::ReadReply::default()
     }
 
     fn read_from(
@@ -229,16 +223,13 @@ impl crate::GrainStore for StaticGrainStore {
         _from: crate::Seq,
         _limit: usize,
     ) -> crate::RecordPage {
-        crate::RecordPage {
-            base: crate::Seq::ZERO,
-            records: Vec::new(),
-        }
+        crate::RecordPage::default()
     }
 
     fn prepare(&self, _shard: u32, _grain: &GrainName, _term: crate::Term) -> crate::ReadOutcome {
         // Prepared, not fenced: a read must succeed so activation gets far enough
         // for the refusal to land at the commit.
-        crate::ReadOutcome::Prepared(StaticGrainStore::empty_reply())
+        crate::ReadOutcome::Prepared(crate::ReadReply::default())
     }
 
     fn store_snapshot(
