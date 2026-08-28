@@ -76,8 +76,6 @@ mod workspace;
 
 #[cfg(feature = "compute")]
 pub use compute::run_js_tool;
-#[cfg(feature = "compute")]
-pub use compute::run_module_tool;
 #[cfg(feature = "firecracker")]
 pub use firecracker::FirecrackerConfig;
 #[cfg(feature = "firecracker")]

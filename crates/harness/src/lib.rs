@@ -51,7 +51,6 @@ pub use http::HttpPost;
 pub use http::HttpResponse;
 pub use http::Protocol;
 pub use http::ProtocolModel;
-pub use http::RetryPolicy;
 pub use kind::Kind;
 pub use kind::Kinds;
 pub use model::Model;

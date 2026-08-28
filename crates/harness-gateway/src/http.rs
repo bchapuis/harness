@@ -80,18 +80,6 @@ pub fn router<S: HarnessSystem>(gateway: Arc<Gateway<S>>) -> Router {
         .with_state(gateway)
 }
 
-/// Reject a client-supplied session id the edge will not scope (see
-/// [`is_valid_session`]). A `400`, not a `404`: the id is malformed, and answering
-/// `404` would imply the name was merely unused.
-fn reject_bad_session(session: &str) -> Result<(), GatewayError> {
-    if is_valid_session(session) {
-        return Ok(());
-    }
-    Err(GatewayError::bad_request(
-        "session id must be non-empty and must not contain '/'",
-    ))
-}
-
 /// The edge's tenant-isolation preamble, in its fixed order: verify the bearer
 /// token, reject a malformed session id, resolve the principal-scoped ref (an
 /// unknown kind is the client's `404`, a pure local check before any side
@@ -104,7 +92,14 @@ fn authed_session<S: HarnessSystem>(
     session: &str,
 ) -> Result<(PrincipalId, SessionRef<S>), GatewayError> {
     let principal = principal(gw, headers)?;
-    reject_bad_session(session)?;
+    // A `400`, not a `404`: a session id the edge will not scope (see
+    // [`is_valid_session`]) is malformed, and `404` would imply the name was
+    // merely unused.
+    if !is_valid_session(session) {
+        return Err(GatewayError::bad_request(
+            "session id must be non-empty and must not contain '/'",
+        ));
+    }
     let session_ref = gw.session(&principal, kind, session)?;
     Ok((principal, session_ref))
 }
@@ -292,17 +287,7 @@ async fn stream<S: HarnessSystem>(
 ) -> Result<Response, GatewayError> {
     let (_, session_ref) = authed_session(&gw, &headers, &kind, &session)?;
     let follower = session_ref.follow(Seq::new(resume_from(&headers, q.from)));
-    let body = futures::stream::unfold(
-        SessionStream::Streaming {
-            follower,
-            turn: q.turn,
-            tail: Tail::End,
-        },
-        next_event,
-    );
-    Ok(Sse::new(body)
-        .keep_alive(KeepAlive::default())
-        .into_response())
+    Ok(sse_response(follower, q.turn, Tail::End))
 }
 
 /// The streaming `prompt`: submit the turn as a background task, stream the run's
@@ -322,11 +307,17 @@ fn prompt_stream<S: HarnessSystem>(
             .prompt_within(turn, Duration::from_secs(body.within_secs))
             .await
     });
+    sse_response(follower, turn, Tail::Outcome(prompt))
+}
+
+/// The SSE response both streaming endpoints serve: forward record batches off
+/// `follower` until `turn`'s run ends, then run the [`Tail`].
+fn sse_response<S: HarnessSystem>(follower: Follower<S>, turn: String, tail: Tail) -> Response {
     let body = futures::stream::unfold(
         SessionStream::Streaming {
             follower,
             turn,
-            tail: Tail::Outcome(prompt),
+            tail,
         },
         next_event,
     );
@@ -364,41 +355,35 @@ async fn next_event<S: HarnessSystem>(
             mut follower,
             turn,
             tail,
-        } => match follower.next().await {
-            Ok(Followed::Batch(records)) => {
-                let event = records_event(&records);
-                let next = if ends_turn(&records, &turn) {
-                    SessionStream::Terminal(tail)
-                } else {
-                    SessionStream::Streaming {
-                        follower,
-                        turn,
-                        tail,
+        } => {
+            let event = match follower.next().await {
+                Ok(Followed::Batch(records)) => {
+                    let event = records_event(&records);
+                    if ends_turn(&records, &turn) {
+                        return Some((Ok(event), SessionStream::Terminal(tail)));
                     }
-                };
-                Some((Ok(event), next))
-            }
-            // Compaction outran the stream's cursor (§10.2): the records up to
-            // `base` are subsumed by the session's snapshot and cannot be
-            // replayed. Tell the client rather than silently resuming past the
-            // gap; the event id is the base, so a `Last-Event-ID` reconnect
-            // also resumes after it.
-            Ok(Followed::Truncated { base }) => {
-                let event = Event::default()
+                    event
+                }
+                // Compaction outran the stream's cursor (§10.2): the records up
+                // to `base` are subsumed by the session's snapshot and cannot be
+                // replayed. Tell the client rather than silently resuming past
+                // the gap; the event id is the base, so a `Last-Event-ID`
+                // reconnect also resumes after it.
+                Ok(Followed::Truncated { base }) => Event::default()
                     .event("truncated")
                     .data(json!({ "base": base }).to_string())
-                    .id(base.value().to_string());
-                Some((
-                    Ok(event),
-                    SessionStream::Streaming {
-                        follower,
-                        turn,
-                        tail,
-                    },
-                ))
-            }
-            Err(e) => Some((Ok(error_event(e)), SessionStream::Done)),
-        },
+                    .id(base.value().to_string()),
+                Err(e) => return Some((Ok(error_event(e)), SessionStream::Done)),
+            };
+            Some((
+                Ok(event),
+                SessionStream::Streaming {
+                    follower,
+                    turn,
+                    tail,
+                },
+            ))
+        }
         SessionStream::Terminal(Tail::End) => Some((
             Ok(Event::default().event("end").data("")),
             SessionStream::Done,
@@ -410,17 +395,12 @@ async fn next_event<S: HarnessSystem>(
                     .data(serde_json::to_string(&outcome).unwrap_or_default()),
                 // Transport failure reaching/committing the run — the structured
                 // error envelope, same code taxonomy as the HTTP body.
-                Ok(Err(e)) => Event::default()
-                    .event("error")
-                    .data(GatewayError::from(e).to_event_data()),
-                Err(e) => Event::default().event("error").data(
-                    GatewayError::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal",
-                        format!("prompt task failed: {e}"),
-                    )
-                    .to_event_data(),
-                ),
+                Ok(Err(e)) => error_event(e),
+                Err(e) => error_event(GatewayError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    format!("prompt task failed: {e}"),
+                )),
             };
             Some((Ok(event), SessionStream::Done))
         }
@@ -449,12 +429,12 @@ fn records_event(records: &[(Seq, Record)]) -> Event {
     }
 }
 
-/// A transport/durability error as an SSE `error` event, in the structured
-/// `{ code, message }` envelope (the same taxonomy as the HTTP error body).
-fn error_event(e: GrainError) -> Event {
+/// A failure as an SSE `error` event, in the structured `{ code, message }`
+/// envelope (the same taxonomy as the HTTP error body).
+fn error_event(e: impl Into<GatewayError>) -> Event {
     Event::default()
         .event("error")
-        .data(GatewayError::from(e).to_event_data())
+        .data(e.into().to_event_data())
 }
 
 /// Verify the request's bearer token to the principal it names, or a `401`

@@ -135,6 +135,10 @@ fn read_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
     Ok(cap_and_decode(&bytes, offset, limit))
 }
 
+/// Apply an `edit_file` string replacement (`old_string` → `new_string`,
+/// optional `replace_all`). An absent or — without `replace_all` — non-unique
+/// `old_string` is an `InvalidArguments` error, so an ambiguous edit fails
+/// loudly rather than touching the wrong site.
 fn edit_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
     let path = required_str(input, "path")?;
     let bytes = dir
@@ -142,24 +146,6 @@ fn edit_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
         .map_err(|e| ToolError::Sandbox(format!("edit_file: {path}: {e}")))?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| ToolError::Sandbox(format!("edit_file: {path}: not a UTF-8 text file")))?;
-    let updated = edit_text(text, input, path)?;
-    dir.write(path, updated.text.as_bytes())
-        .map_err(|e| ToolError::Sandbox(format!("edit_file: {path}: {e}")))?;
-    Ok(json!({ "replaced": updated.replaced }))
-}
-
-/// The result of one `edit_file` string replacement: the new content and how many
-/// occurrences were replaced.
-pub(crate) struct Edit {
-    pub text: String,
-    pub replaced: usize,
-}
-
-/// Apply an `edit_file` call (`old_string` → `new_string`, optional `replace_all`)
-/// to `text`. An absent or — without `replace_all` — non-unique `old_string` is an
-/// `InvalidArguments` error, so an ambiguous edit fails loudly rather than
-/// touching the wrong site.
-pub(crate) fn edit_text(text: &str, input: &Value, path: &str) -> Result<Edit, ToolError> {
     let old = required_str(input, "old_string")?;
     let new = required_str(input, "new_string")?;
     if old.is_empty() {
@@ -188,18 +174,20 @@ pub(crate) fn edit_text(text: &str, input: &Value, path: &str) -> Result<Edit, T
              surrounding context to make it unique"
         )));
     }
-    let (text, replaced) = if replace_all {
+    let (updated, replaced) = if replace_all {
         (text.replace(old, new), count)
     } else {
         (text.replacen(old, new, 1), 1)
     };
-    Ok(Edit { text, replaced })
+    dir.write(path, updated.as_bytes())
+        .map_err(|e| ToolError::Sandbox(format!("edit_file: {path}: {e}")))?;
+    Ok(json!({ "replaced": replaced }))
 }
 
 /// Decode `bytes` as UTF-8, optionally to a 1-based line window (`offset`/`limit`,
 /// for paging past the cap), then apply the 256 KiB cap with clean truncation —
 /// the tier's `{content, truncated}` shape.
-pub(crate) fn cap_and_decode(bytes: &[u8], offset: Option<u64>, limit: Option<u64>) -> Value {
+fn cap_and_decode(bytes: &[u8], offset: Option<u64>, limit: Option<u64>) -> Value {
     let text = String::from_utf8_lossy(bytes);
     // The requested line window, if any. `split_inclusive` keeps each line's
     // trailing newline, so the slice rejoins to the exact original bytes.
@@ -307,7 +295,7 @@ fn remove(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
     }
 }
 
-pub(crate) fn required_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, ToolError> {
+fn required_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, ToolError> {
     input
         .get(key)
         .and_then(Value::as_str)
@@ -316,7 +304,7 @@ pub(crate) fn required_str<'a>(input: &'a Value, key: &str) -> Result<&'a str, T
 
 /// An optional non-negative integer argument (e.g. `read_file`'s `offset`/`limit`).
 /// Absent or null is `None`; a present non-integer is an error.
-pub(crate) fn optional_u64(input: &Value, key: &str) -> Result<Option<u64>, ToolError> {
+fn optional_u64(input: &Value, key: &str) -> Result<Option<u64>, ToolError> {
     match input.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(value) => value.as_u64().map(Some).ok_or_else(|| {

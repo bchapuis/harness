@@ -144,9 +144,6 @@ pub struct FirecrackerConfig {
     pub vcpus: u32,
     /// Guest memory in MiB.
     pub mem_mib: u32,
-    /// Kernel boot arguments. The default boots the agent as init with the
-    /// rootfs on `/dev/vda`.
-    pub boot_args: String,
 }
 
 impl FirecrackerConfig {
@@ -156,25 +153,24 @@ impl FirecrackerConfig {
             kernel: kernel.into(),
             vcpus: 1,
             mem_mib: 256,
-            // `quiet`: the serial console is an emulated device, so kernel
-            // chatter measurably slows the boot; panics still print.
-            boot_args: "console=ttyS0 reboot=k panic=1 pci=off quiet root=/dev/vda rw \
-                        init=/sbin/fc-agent"
-                .to_string(),
         }
     }
 }
+
+/// Kernel boot arguments: the agent as init with the rootfs on `/dev/vda`.
+/// Not a knob — the tier only works with the agent as pid 1, so exposing this
+/// would let a deployment boot a VM that never answers a ping. `quiet`: the
+/// serial console is an emulated device, so kernel chatter measurably slows
+/// the boot; panics still print.
+const BOOT_ARGS: &str =
+    "console=ttyS0 reboot=k panic=1 pci=off quiet root=/dev/vda rw init=/sbin/fc-agent";
 
 /// The shared boot document's inputs ([`machine_host::microvm::config_json`]) for this
 /// tier: the agent as init over one root drive, vsock on, no network (a
 /// sandboxed guest has no NIC by construction, sandbox spec §1.1).
 fn vm_config(config: &FirecrackerConfig, rootfs: &Path) -> machine_host::microvm::VmConfig {
-    let mut vm = machine_host::microvm::VmConfig::rooted(
-        &config.binary,
-        &config.kernel,
-        &config.boot_args,
-        rootfs,
-    );
+    let mut vm =
+        machine_host::microvm::VmConfig::rooted(&config.binary, &config.kernel, BOOT_ARGS, rootfs);
     vm.vcpus = config.vcpus;
     vm.mem_mib = config.mem_mib;
     vm
@@ -269,16 +265,18 @@ impl FirecrackerTier {
     async fn provision(&self) -> Result<MicroVm, ToolError> {
         self.attempted.store(true, Ordering::SeqCst);
         let fail = |e: String| ToolError::Sandbox(format!("firecracker: provision: {e}"));
-        let control = machine_host::microvm::control_dir(CONTROL_PREFIX, &self.control_key)
-            .await
-            .map_err(|e| fail(e.to_string()))?;
-        // Each VM boots a private copy of the base rootfs: the guest writes
-        // to its root, and the base must serve every later activation.
+        // Checked before anything touches the disk: an unconfigured profile
+        // fails cleanly, leaving no stray control directory behind.
         if self.image.is_empty() {
             return Err(fail(
                 "no base rootfs: the profile's `image` names it".to_string(),
             ));
         }
+        let control = machine_host::microvm::control_dir(CONTROL_PREFIX, &self.control_key)
+            .await
+            .map_err(|e| fail(e.to_string()))?;
+        // Each VM boots a private copy of the base rootfs: the guest writes
+        // to its root, and the base must serve every later activation.
         let base = PathBuf::from(&self.image);
         let rootfs = control.join("rootfs.ext4");
         tokio::fs::copy(&base, &rootfs)

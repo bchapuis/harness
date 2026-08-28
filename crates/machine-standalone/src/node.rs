@@ -456,20 +456,8 @@ struct StderrEvents {
 
 impl EventSink for StderrEvents {
     fn emit(&self, event: Event) {
-        match &event {
-            Event::Suspected { .. }
-            | Event::Unreachable { .. }
-            | Event::Reachable { .. }
-            | Event::NodeDown { .. }
-            | Event::MemberJoining { .. }
-            | Event::MemberUp { .. }
-            | Event::MemberDraining { .. }
-            | Event::MemberResumed { .. } => eprintln!("[{}] {event:?}", self.node),
-            other => {
-                if std::env::var_os("MACHINE_TRACE").is_some() {
-                    eprintln!("[{}] {other:?}", self.node);
-                }
-            }
+        if event.is_membership() || std::env::var_os("MACHINE_TRACE").is_some() {
+            eprintln!("[{}] {event:?}", self.node);
         }
     }
 }

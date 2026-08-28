@@ -29,6 +29,8 @@ use actor_core::Ctx;
 use actor_core::Handler;
 use actor_core::HandlerRegistry;
 use futures::channel::oneshot;
+use futures::future::Either;
+use futures::future::select;
 use granary::EventHistory;
 use granary::GrainError;
 use granary::GrainRef;
@@ -36,6 +38,8 @@ use granary::Granary;
 use granary::GranaryExt;
 use granary::GranaryNode;
 use granary::GranarySystem;
+use granary::Seq;
+use granary::Subscription;
 
 use crate::agent::Agent;
 use crate::agent::AttachOutcome;
@@ -47,14 +51,11 @@ use crate::kind::Kinds;
 use crate::model::Model;
 use crate::sandbox::SandboxProvider;
 use crate::session::KindId;
-use crate::session::Lineage;
 use crate::session::Record;
 use crate::session::RunOutcome;
 use crate::session::SessionId;
 use crate::session::Turn;
 use crate::session::TurnId;
-use granary::Seq;
-use granary::Subscription;
 
 /// Interned grain-type names, keyed by kind name (granary keys purely by string,
 /// §5.1). A build re-tried in a discovery poll loop ([`Harness::client`]) reuses
@@ -270,11 +271,6 @@ impl<S: HarnessSystem> Harness<S> {
             system: self.system.clone(),
             config: self.shared.config.clone(),
         })
-    }
-
-    /// The actor system this harness runs on.
-    pub fn system(&self) -> &S {
-        &self.system
     }
 }
 
@@ -524,38 +520,25 @@ impl<S: HarnessSystem> Clone for SessionRef<S> {
 }
 
 impl<S: HarnessSystem> SessionRef<S> {
-    /// The session's durable identity.
-    pub fn id(&self) -> &SessionId {
-        &self.session
-    }
-
     /// Submit a turn and await its run's terminal outcome (harness spec §7.3,
     /// §7.4): `Submit` (ack) plus awaiting the one `RunCompleted` notification.
     /// The deadline bounds this caller's **wait**, never the run: on a lapse it
     /// re-submits the same `TurnId`, which re-attaches or returns the recorded
     /// outcome (H7).
     pub async fn prompt(&self, turn: Turn) -> Result<RunOutcome, GrainError> {
-        self.submit(turn, None, self.config.submit_deadline).await
+        self.prompt_within(turn, self.config.submit_deadline).await
     }
 
-    /// [`prompt`](Self::prompt) with an explicit wait deadline.
-    pub async fn prompt_within(
-        &self,
-        turn: Turn,
-        within: Duration,
-    ) -> Result<RunOutcome, GrainError> {
-        self.submit(turn, None, within).await
-    }
-
-    /// The submission protocol behind `prompt` and delegation (§8.1): `Submit`
-    /// the turn carrying an ephemeral reply-to mailbox, await the one
+    /// [`prompt`](Self::prompt) with an explicit wait deadline: `Submit` the
+    /// turn carrying an ephemeral reply-to mailbox, await the one
     /// `RunCompleted`, and on a wait lapse re-submit the same `TurnId` to
     /// re-attach. A failed `Submit` is **not** transparently retried (granary
     /// §2.2): an ambiguous transport failure surfaces as `GrainError`.
-    pub(crate) async fn submit(
+    /// (Delegation submits through [`submit_and_attach`] directly, carrying its
+    /// lineage.)
+    pub async fn prompt_within(
         &self,
         turn: Turn,
-        parent: Option<Lineage>,
         within: Duration,
     ) -> Result<RunOutcome, GrainError> {
         let started = self.system.now();
@@ -564,15 +547,8 @@ impl<S: HarnessSystem> SessionRef<S> {
             let Some(remaining) = within.checked_sub(elapsed).filter(|d| !d.is_zero()) else {
                 return Err(GrainError::Call(CallError::Timeout));
             };
-            match submit_and_attach(
-                &self.system,
-                &self.grain,
-                &self.kind,
-                &turn,
-                parent.as_ref(),
-                remaining,
-            )
-            .await
+            match submit_and_attach(&self.system, &self.grain, &self.kind, &turn, None, remaining)
+                .await
             {
                 AttachOutcome::Completed(outcome) => return Ok(outcome),
                 // Mailbox dropped or wait lapsed: re-submit the same TurnId.
@@ -703,9 +679,9 @@ impl<S: HarnessSystem> Follower<S> {
             let recv = rx.recv();
             let resync = self.system.sleep(FOLLOW_RESYNC);
             futures::pin_mut!(recv);
-            match futures::future::select(recv, resync).await {
+            match select(recv, resync).await {
                 // A live batch: reconcile by seq.
-                futures::future::Either::Left((Ok(stream), _)) => {
+                Either::Left((Ok(stream), _)) => {
                     if stream.from <= self.last {
                         let fresh: Vec<(Seq, Record)> = stream
                             .records
@@ -721,12 +697,12 @@ impl<S: HarnessSystem> Follower<S> {
                     // re-subscribe replay): fall through; the loop re-backfills.
                 }
                 // The stream closed (a clean step-down dropped the sink): re-attach.
-                futures::future::Either::Left((Err(_), _)) => self.sub = None,
+                Either::Left((Err(_), _)) => self.sub = None,
                 // The timer won: a silent move/crash leaves the stream open but
                 // dead. If the head advanced anyway, re-subscribe to the current
                 // leader (the old sink is orphaned) and return the backfill; else
                 // we are simply idle — keep the subscription, no churn.
-                futures::future::Either::Right(_) => {
+                Either::Right(_) => {
                     if let Some(step) = self.backfill().await? {
                         self.sub = None;
                         return Ok(step);

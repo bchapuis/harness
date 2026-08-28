@@ -40,7 +40,7 @@ impl TierStats {
         self.opened.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn count_opened(&self) {
+    fn count_opened(&self) {
         self.opened.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -48,12 +48,12 @@ impl TierStats {
         self.released.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn count_released(&self) {
+    fn count_released(&self) {
         self.released.fetch_add(1, Ordering::SeqCst);
     }
 
     #[cfg(feature = "compute")]
-    pub(crate) fn count_compute_built(&self) {
+    fn count_compute_built(&self) {
         self.compute_built.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -282,8 +282,8 @@ impl SandboxProvider for TieredSandboxes {
     }
 }
 
-/// One session's environments: the workspace handle always, the compute
-/// engine once a call needs it.
+/// One session's environments: the workspace handle always; the compute
+/// engine and the native tier's container or microVM once a call needs them.
 struct TieredSandbox {
     /// The workspace's host path, retained solely to detect a vanished
     /// directory (see [`escalate_loss`]). The directory itself is owned by
@@ -385,7 +385,7 @@ pub(crate) fn unknown_tool(name: &str) -> ToolError {
 
 /// Cap on a captured output stream in a tool reply (the journal carries it).
 #[cfg(feature = "native")]
-pub(crate) const OUTPUT_CAP: usize = 16 * 1024;
+const OUTPUT_CAP: usize = 16 * 1024;
 
 /// UTF-8-safe truncation of a captured stream to [`OUTPUT_CAP`], shared by
 /// the native realizations (docker and microVM).
@@ -425,6 +425,34 @@ fn escalate_loss(
     result
 }
 
+#[cfg(feature = "compute")]
+impl TieredSandbox {
+    /// Provision-or-get the compute engine under the lock, lazily on the first
+    /// call that carries the tier (sandbox spec §2.3 item 2). Poison recovery,
+    /// not propagation: a panic in a prior call must degrade to per-call
+    /// `ToolError` outcomes (harness spec §5.4), never poison every later call.
+    fn compute_tier(&self) -> Result<Arc<crate::compute::ComputeTier>, ToolError> {
+        let mut slot = self
+            .compute
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match slot.as_ref() {
+            Some(engine) => Ok(Arc::clone(engine)),
+            None => crate::compute::ComputeTier::new(
+                self.limits,
+                Arc::clone(&self.modules),
+                self.stats.clone(),
+            )
+            .map(|engine| {
+                self.stats.count_compute_built();
+                let engine = Arc::new(engine);
+                *slot = Some(Arc::clone(&engine));
+                engine
+            }),
+        }
+    }
+}
+
 impl Sandbox for TieredSandbox {
     fn call(
         &self,
@@ -443,33 +471,7 @@ impl Sandbox for TieredSandbox {
             }
             #[cfg(feature = "compute")]
             Tier::Compute => {
-                let engine = {
-                    // Poison recovery, not propagation: a panic in a prior
-                    // call must degrade to per-call ToolError outcomes
-                    // (harness spec §5.4), never poison every later call.
-                    let mut slot = self
-                        .compute
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match slot.as_ref() {
-                        Some(engine) => Ok(Arc::clone(engine)),
-                        None => {
-                            // Provisioned lazily, on the first call that
-                            // carries the tier (sandbox spec §2.3 item 2).
-                            crate::compute::ComputeTier::new(
-                                self.limits,
-                                Arc::clone(&self.modules),
-                                self.stats.clone(),
-                            )
-                            .map(|engine| {
-                                self.stats.count_compute_built();
-                                let engine = Arc::new(engine);
-                                *slot = Some(Arc::clone(&engine));
-                                engine
-                            })
-                        }
-                    }
-                };
+                let engine = self.compute_tier();
                 let dir = Arc::clone(&self.dir);
                 let seed = self.seed;
                 let name = name.to_string();

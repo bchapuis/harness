@@ -57,12 +57,13 @@ pub trait HttpPost: Send + Sync + 'static {
 }
 
 /// Retry tuning: attempts and the backoff curve, timed by the injected
-/// [`Clock`] with jitter from the injected [`Entropy`] (§4.2 rule 1).
+/// [`Clock`] with jitter from the injected [`Entropy`] (§4.2 rule 1). The
+/// shell's judgment, not the caller's: no adapter or deployment tunes it.
 #[derive(Clone, Debug)]
-pub struct RetryPolicy {
-    pub attempts: u32,
-    pub base_backoff: Duration,
-    pub max_backoff: Duration,
+struct RetryPolicy {
+    attempts: u32,
+    base_backoff: Duration,
+    max_backoff: Duration,
 }
 
 impl Default for RetryPolicy {
@@ -140,10 +141,6 @@ impl<P: Protocol, C: Clock, E: Entropy> ProtocolModel<P, C, E> {
         }
     }
 
-    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
-        self.retry = retry;
-        self
-    }
 }
 
 impl<P: Protocol, C: Clock, E: Entropy> Model for ProtocolModel<P, C, E> {

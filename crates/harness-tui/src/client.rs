@@ -35,11 +35,14 @@ pub struct SessionEntry {
     pub label: Option<String>,
 }
 
-/// A parsed SSE frame from a streamed run: a `records` batch, the terminal
-/// `outcome`, an `error`, or the stream's `end` marker.
+/// A parsed SSE frame from a streamed run: a `records` batch, a `truncated`
+/// notice (compaction outran the stream's cursor — records up to the base are
+/// gone, §10.2), the terminal `outcome`, an `error`, or the stream's `end`
+/// marker.
 #[derive(Debug)]
 pub enum Event {
     Records(Vec<(Seq, Record)>),
+    Truncated(Seq),
     Outcome(RunOutcome),
     Error(String),
     End,
@@ -134,19 +137,20 @@ impl GatewayClient {
             encode(session)
         );
         let body = serde_json::json!({ "turn": turn, "content": content }).to_string();
-        let request = self.build_request(
-            "POST",
-            &path,
-            &[
-                ("content-type", "application/json"),
-                ("accept", "text/event-stream"),
-            ],
-            Some(body.into_bytes()),
-        );
-        let stream = self.origin.connect().await?;
-        let mut reader = Reader::new(stream);
-        reader.write_all(&request).await?;
-        let status = reader.read_headers().await?;
+        let auth = format!("Bearer {}", self.token);
+        let (status, mut reader) = self
+            .origin
+            .exchange(
+                "POST",
+                &path,
+                &[
+                    ("authorization", &auth),
+                    ("content-type", "application/json"),
+                    ("accept", "text/event-stream"),
+                ],
+                body.as_bytes(),
+            )
+            .await?;
         if status != 200 {
             let body = reader.drain_to_end().await.unwrap_or_default();
             return Err(format!(
@@ -169,13 +173,20 @@ impl GatewayClient {
         path: &str,
         body: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, String> {
-        let request =
-            self.build_request(method, path, &[("content-type", "application/json")], body);
+        let auth = format!("Bearer {}", self.token);
         let exchange = async {
-            let stream = self.origin.connect().await?;
-            let mut reader = Reader::new(stream);
-            reader.write_all(&request).await?;
-            let status = reader.read_headers().await?;
+            let (status, mut reader) = self
+                .origin
+                .exchange(
+                    method,
+                    path,
+                    &[
+                        ("authorization", &auth),
+                        ("content-type", "application/json"),
+                    ],
+                    &body.unwrap_or_default(),
+                )
+                .await?;
             let body = reader.read_body().await?;
             Ok::<_, String>((status, body))
         };
@@ -190,23 +201,6 @@ impl GatewayClient {
                 String::from_utf8_lossy(&body)
             ))
         }
-    }
-
-    /// Frame a request against the gateway origin, carrying the tenant's
-    /// bearer token; the framing itself (`connection: close`, content-length)
-    /// is the shared substrate's.
-    fn build_request(
-        &self,
-        method: &str,
-        path: &str,
-        headers: &[(&str, &str)],
-        body: Option<Vec<u8>>,
-    ) -> Vec<u8> {
-        let auth = format!("Bearer {}", self.token);
-        let mut all = vec![("authorization", auth.as_str())];
-        all.extend_from_slice(headers);
-        self.origin
-            .request(method, path, &all, &body.unwrap_or_default())
     }
 }
 
@@ -268,6 +262,15 @@ fn parse_frame(frame: &[u8]) -> Option<Event> {
     }
     match name {
         "records" => serde_json::from_str(&data).ok().map(Event::Records),
+        "truncated" => {
+            #[derive(Deserialize)]
+            struct Truncated {
+                base: Seq,
+            }
+            serde_json::from_str(&data)
+                .ok()
+                .map(|t: Truncated| Event::Truncated(t.base))
+        }
         "outcome" => serde_json::from_str(&data).ok().map(Event::Outcome),
         "error" => Some(Event::Error(data)),
         "end" => Some(Event::End),

@@ -68,11 +68,6 @@ impl GatewayError {
         self.status
     }
 
-    /// The stable machine code.
-    pub fn code(&self) -> &'static str {
-        self.code
-    }
-
     /// The `{ "code", "message" }` object, for embedding as an SSE `error` event's
     /// data (the stream analogue of the JSON body below).
     pub fn to_event_data(&self) -> String {

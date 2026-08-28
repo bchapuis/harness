@@ -40,6 +40,7 @@ use actor_core::Manifest;
 use actor_core::Message;
 use futures::channel::oneshot;
 use futures::future::Either;
+use futures::future::select;
 use granary::Grain;
 use granary::GrainCtx;
 use granary::GrainError;
@@ -383,8 +384,6 @@ struct EventOutbox {
 /// rebuilt on every activation, lost on deactivation. Held behind a [`Mutex`] so
 /// the `&self` handlers (granary's decide functions) can mutate it.
 struct Activation<S: HarnessSystem> {
-    /// A self-reference for the launched tasks to deliver outcomes back (§3.2).
-    this: Option<granary::GrainRef<Agent<S>>>,
     /// The sandbox binding and held tiers (§5.4, §5.6).
     env: SandboxState,
     /// The live run's progress flags (§3.1, §5.5).
@@ -422,7 +421,6 @@ impl<S: HarnessSystem> Activation<S> {
 impl<S: HarnessSystem> Default for Activation<S> {
     fn default() -> Self {
         Activation {
-            this: None,
             env: SandboxState::default(),
             run: RunScope::default(),
             events: EventOutbox::default(),
@@ -466,11 +464,6 @@ impl<S: HarnessSystem> Agent<S> {
         self.act.lock().expect("agent activation mutex poisoned")
     }
 
-    /// This grain's kind definition (§7.1).
-    fn kind(&self) -> &Kind {
-        &self.kind
-    }
-
     fn session(ctx: &GrainCtx<Agent<S>>) -> SessionId {
         SessionId::new(ctx.name().key())
     }
@@ -505,6 +498,23 @@ impl<S: HarnessSystem> Agent<S> {
                 outcome: Err(error),
             },
         )
+    }
+
+    /// End the live run as one step: owe the §10.4 `RunEnded` event and return
+    /// the terminal record to journal. Paired like `fail_call` — the event
+    /// without the record would announce a run the journal never ended; the
+    /// record without the event breaks H3's start/end pairing. A turn cancelled
+    /// while still queued does not come through here: no run started, so no
+    /// event is owed.
+    fn end_run(
+        &self,
+        act: &mut Activation<S>,
+        ctx: &GrainCtx<Agent<S>>,
+        turn: TurnId,
+        outcome: RunOutcome,
+    ) -> Record {
+        act.events.ended.push(turn.clone());
+        self.rec(ctx, RecordBody::RunEnded { turn, outcome })
     }
 
     /// Launch a self-`tell` of [`Advance`] (§3.2): runs after the current
@@ -554,7 +564,7 @@ impl<S: HarnessSystem> Agent<S> {
                 Some(outcome) => {
                     // Ended: deliver the recorded outcome to the fresh reply-to.
                     if let Some(reply_to) = msg.reply_to {
-                        self.notify_one(ctx, reply_to, &turn_id, outcome.clone());
+                        self.notify(ctx, reply_to, &turn_id, outcome.clone());
                     }
                     (
                         Vec::new(),
@@ -590,7 +600,7 @@ impl<S: HarnessSystem> Agent<S> {
         drop(act);
         self.schedule_advance(ctx);
         (
-            self.accept_records(state, ctx, self.kind(), msg.turn, msg.parent),
+            self.accept_records(state, ctx, &self.kind, msg.turn, msg.parent),
             Ok(Accepted {
                 turn: turn_id,
                 status: SubmitStatus::Started,
@@ -651,16 +661,10 @@ impl<S: HarnessSystem> Agent<S> {
         // debt survives a crash in between.
         if state.live.as_ref().is_some_and(|l| l.turn == turn) {
             let mut act = self.lock();
-            act.events.ended.push(turn.clone());
+            let ended = self.end_run(&mut act, ctx, turn, Err(RunError::Cancelled));
             drop(act);
             self.schedule_advance(ctx);
-            vec![self.rec(
-                ctx,
-                RecordBody::RunEnded {
-                    turn,
-                    outcome: Err(RunError::Cancelled),
-                },
-            )]
+            vec![ended]
         } else if state.queue.iter().any(|q| q.turn == turn) {
             // Queued, never started (§9.2): the terminal record alone moves
             // the fold — the queue entry drops, and the post-commit `Advance`
@@ -724,36 +728,27 @@ impl<S: HarnessSystem> Agent<S> {
                     .push((turn.clone(), response.usage.total()));
                 // No requested tool calls ⇒ this assistant message ends the run
                 // (§3.1 step 3).
-                let is_final = response.calls.is_empty();
-                if is_final {
-                    act.events.ended.push(turn.clone());
-                }
-                drop(act);
-                self.schedule_advance(ctx);
-                if is_final {
+                if response.calls.is_empty() {
                     // Final message and terminal outcome in one atomic batch
                     // (§6.4): no journal prefix ends between them.
                     let tokens = live.spend.tokens() + response.usage.total();
                     let completion = Completion::new(response.content.clone(), tokens);
-                    vec![
-                        self.rec(
-                            ctx,
-                            RecordBody::ModelResponse {
-                                turn: turn.clone(),
-                                content: response.content,
-                                calls: Vec::new(),
-                                usage: response.usage,
-                            },
-                        ),
-                        self.rec(
-                            ctx,
-                            RecordBody::RunEnded {
-                                turn,
-                                outcome: Ok(completion),
-                            },
-                        ),
-                    ]
+                    let message = self.rec(
+                        ctx,
+                        RecordBody::ModelResponse {
+                            turn: turn.clone(),
+                            content: response.content,
+                            calls: Vec::new(),
+                            usage: response.usage,
+                        },
+                    );
+                    let ended = self.end_run(&mut act, ctx, turn, Ok(completion));
+                    drop(act);
+                    self.schedule_advance(ctx);
+                    vec![message, ended]
                 } else {
+                    drop(act);
+                    self.schedule_advance(ctx);
                     vec![self.rec(
                         ctx,
                         RecordBody::ModelResponse {
@@ -767,16 +762,10 @@ impl<S: HarnessSystem> Agent<S> {
             }
             Err(error) => {
                 // A failure no retry policy absorbed ends the run (§4.3).
-                act.events.ended.push(turn.clone());
+                let ended = self.end_run(&mut act, ctx, turn, Err(RunError::Model(error)));
                 drop(act);
                 self.schedule_advance(ctx);
-                vec![self.rec(
-                    ctx,
-                    RecordBody::RunEnded {
-                        turn,
-                        outcome: Err(RunError::Model(error)),
-                    },
-                )]
+                vec![ended]
             }
         }
     }
@@ -790,15 +779,16 @@ impl<S: HarnessSystem> Agent<S> {
         ctx: &GrainCtx<Agent<S>>,
     ) -> Vec<Record> {
         let mut act = self.lock();
-        let live_matches = state
+        let pending = state
             .live
             .as_ref()
-            .is_some_and(|l| l.turn == turn && l.pending.contains_key(&call));
-        if !live_matches || act.run.resolved.contains(&call) {
+            .filter(|l| l.turn == turn)
+            .and_then(|l| l.pending.get(&call));
+        let Some(pending) = pending.filter(|_| !act.run.resolved.contains(&call)) else {
             // A straggler of an ended or cancelled run, or a duplicate
             // (a timeout racing the real outcome): discard (§3.2, §9.2 item 4).
             return Vec::new();
-        }
+        };
         act.run.resolved.insert(call.clone());
         // Capture the workspace delta this tool left on disk (granary §7.11):
         // the staged records join this command's batch, so the tool outcome
@@ -810,11 +800,7 @@ impl<S: HarnessSystem> Agent<S> {
         // never touched the directory, and a reported environment loss must
         // not capture — the root may be gone, and a vanished root is never a
         // mass deletion.
-        let sandboxed = state
-            .live
-            .as_ref()
-            .and_then(|l| l.pending.get(&call))
-            .is_some_and(|p| p.name != DELEGATE);
+        let sandboxed = pending.name != DELEGATE;
         let lost_already = matches!(&outcome, Err(ToolError::EnvironmentLost(_)));
         let outcome = if sandboxed && !lost_already {
             match ctx.ws().capture() {
@@ -865,7 +851,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// (§6.4). Returns the records to journal this round (empty when it only
     /// launches effects); the handler schedules a re-advance iff it returns records.
     fn advance(&self, state: &SessionState, ctx: &GrainCtx<Agent<S>>) -> Vec<Record> {
-        let kind = self.kind();
+        let kind = &self.kind;
         let session = Self::session(ctx);
         let mut act = self.lock();
 
@@ -873,7 +859,7 @@ impl<S: HarnessSystem> Agent<S> {
         //     callers of any finished run, and propagate the cancels the fold
         //     still owes (§9.2).
         self.emit_run_events(&mut act, state, ctx, &session);
-        self.notify_finished(&mut act, state, ctx, &session);
+        self.notify_finished(&mut act, state, ctx);
         self.propagate_cancels(&mut act, state, ctx);
 
         // (b) No live run: reset per-run flags and start the next queued turn.
@@ -972,14 +958,7 @@ impl<S: HarnessSystem> Agent<S> {
         }
         let floor = self.shared.config.budget_floor;
         if !live.spend.allows_call(&live.budget, floor) {
-            act.events.ended.push(turn.clone());
-            return vec![self.rec(
-                ctx,
-                RecordBody::RunEnded {
-                    turn,
-                    outcome: Err(RunError::BudgetExhausted),
-                },
-            )];
+            return vec![self.end_run(act, ctx, turn, Err(RunError::BudgetExhausted))];
         }
         // Surface a lost workspace before the model acts on state that is gone
         // (§5.5). The workspace itself is durable — the agent's facet
@@ -995,7 +974,7 @@ impl<S: HarnessSystem> Agent<S> {
         act.env.reconciled = true;
         act.run.launched.claim(StepKey::Model(step));
         let request = self.build_request(state, kind, live);
-        let this = act.this.clone().expect("self-ref set in on_activate");
+        let this = ctx.this();
         let model = self.seams.model.clone();
         ctx.system().launch(Box::pin(async move {
             let result = model.complete(request).await;
@@ -1150,7 +1129,6 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Plan a fresh delegation (§8.1 step 1): validate the child kind against the
     /// allowlist and the registry, then build the `ChildRun` intent.
-    #[allow(clippy::too_many_arguments)]
     fn plan_delegation(
         &self,
         ctx: &GrainCtx<Agent<S>>,
@@ -1158,7 +1136,7 @@ impl<S: HarnessSystem> Agent<S> {
         turn: &TurnId,
         call: &CallId,
         pending: &PendingCall,
-        live: &crate::session::LiveRun,
+        live: &LiveRun,
     ) -> Result<Record, ToolError> {
         let request: DelegateInput = serde_json::from_value(pending.input.clone())
             .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
@@ -1242,7 +1220,7 @@ impl<S: HarnessSystem> Agent<S> {
                 turn: turn.clone(),
                 root: root.clone(),
             };
-            self.launch_delegation(act, ctx, turn.clone(), call, request, child, lineage);
+            self.launch_delegation(ctx, turn.clone(), call, request, child, lineage);
             return Vec::new();
         }
 
@@ -1257,7 +1235,7 @@ impl<S: HarnessSystem> Agent<S> {
                     return Vec::new(); // already in flight this activation
                 }
                 let sandbox = Arc::clone(sandbox);
-                let this = act.this.clone().expect("self-ref set in on_activate");
+                let this = ctx.this();
                 let system = ctx.system().clone();
                 let name = pending.name.clone();
                 let input = pending.input.clone();
@@ -1265,7 +1243,7 @@ impl<S: HarnessSystem> Agent<S> {
                 system.clone().launch(Box::pin(async move {
                     let call_fut = Box::pin(sandbox.call(tier, &name, input));
                     let sleep = system.sleep(timeout);
-                    let outcome = match futures::future::select(call_fut, sleep).await {
+                    let outcome = match select(call_fut, sleep).await {
                         Either::Left((outcome, _)) => outcome,
                         Either::Right(((), _)) => Err(ToolError::Timeout),
                     };
@@ -1343,10 +1321,8 @@ impl<S: HarnessSystem> Agent<S> {
     /// ordinary grain submit with a reply-to mailbox, awaiting the child's
     /// `RunCompleted`, retried on transport failure (safe — the derived `TurnId`
     /// dedups, H7). The outcome becomes this call's tool outcome (§5.4).
-    #[allow(clippy::too_many_arguments)]
     fn launch_delegation(
         &self,
-        act: &mut Activation<S>,
         ctx: &GrainCtx<Agent<S>>,
         turn: TurnId,
         call: CallId,
@@ -1354,7 +1330,7 @@ impl<S: HarnessSystem> Agent<S> {
         child: ChildRef,
         lineage: Lineage,
     ) {
-        let this = act.this.clone().expect("self-ref set in on_activate");
+        let this = ctx.this();
         let system = ctx.system().clone();
         let cadence = self.shared.config.submit_deadline;
         // Scaled to the carve (§8.1): the child's steps bound its whole
@@ -1462,13 +1438,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Notify every caller registered for a run that has finished (§7.3), then
     /// drop their registrations.
-    fn notify_finished(
-        &self,
-        act: &mut Activation<S>,
-        state: &SessionState,
-        ctx: &GrainCtx<Agent<S>>,
-        session: &SessionId,
-    ) {
+    fn notify_finished(&self, act: &mut Activation<S>, state: &SessionState, ctx: &GrainCtx<Agent<S>>) {
         let mut finished = Vec::new();
         act.subscribers
             .retain(|turn, subs| match state.turns.get(turn) {
@@ -1481,48 +1451,29 @@ impl<S: HarnessSystem> Agent<S> {
             });
         for (turn, subs, outcome) in finished {
             for sub in subs {
-                self.deliver(
-                    ctx,
-                    sub,
-                    RunCompleted {
-                        session: session.clone(),
-                        turn: turn.clone(),
-                        outcome: outcome.clone(),
-                    },
-                );
+                self.notify(ctx, sub, &turn, outcome.clone());
             }
         }
     }
 
-    /// Deliver one `RunCompleted` to one reply-to (§7.3): a fire-and-forget
-    /// `tell`, launched off the command path.
-    fn deliver(
-        &self,
-        ctx: &GrainCtx<Agent<S>>,
-        reply_to: ActorRef<ReplyMailbox<S>>,
-        msg: RunCompleted,
-    ) {
-        ctx.system().launch(Box::pin(async move {
-            let _ = reply_to.tell(msg).await;
-        }));
-    }
-
-    fn notify_one(
+    /// Deliver a run's outcome to one registered reply-to (§7.3): a
+    /// fire-and-forget `tell` of the `RunCompleted`, launched off the command
+    /// path.
+    fn notify(
         &self,
         ctx: &GrainCtx<Agent<S>>,
         reply_to: ActorRef<ReplyMailbox<S>>,
         turn: &TurnId,
         outcome: RunOutcome,
     ) {
-        self.deliver(
-            ctx,
-            reply_to,
-            RunCompleted {
-                session: Self::session(ctx),
-                turn: turn.clone(),
-                outcome,
-            },
-        );
+        let msg = RunCompleted {
+            session: Self::session(ctx),
+            turn: turn.clone(),
+            outcome,
+        };
+        ctx.system().launch(Box::pin(async move {
+            let _ = reply_to.tell(msg).await;
+        }));
     }
 
     /// Propagate every cancel the fold still owes (§9.2 item 2): the owed set
@@ -1552,7 +1503,7 @@ impl<S: HarnessSystem> Agent<S> {
                     // backstop meanwhile (§9.2 item 3).
                     continue;
                 };
-                let this = act.this.clone().expect("self-ref set in on_activate");
+                let this = ctx.this();
                 let system = ctx.system().clone();
                 let turn = turn.clone();
                 let call = call.clone();
@@ -1665,12 +1616,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Build the model request from the folded transcript (§4.1), clamping
     /// `max_tokens` to the remaining budget (§9.1 item 2).
-    fn build_request(
-        &self,
-        state: &SessionState,
-        kind: &Kind,
-        live: &crate::session::LiveRun,
-    ) -> ModelRequest {
+    fn build_request(&self, state: &SessionState, kind: &Kind, live: &LiveRun) -> ModelRequest {
         let max_tokens = kind
             .params
             .max_tokens
@@ -1717,7 +1663,6 @@ impl<S: HarnessSystem> Grain for Agent<S> {
 
     async fn on_activate(&mut self, ctx: &GrainCtx<Self>) -> Result<(), BoxError> {
         let mut act = self.lock();
-        act.this = Some(ctx.this());
         // Opening grants `Workspace` and nothing else (§5.6 item 1); every other
         // tier is re-acquired under a journaled record this activation.
         act.env.tiers_held = BTreeSet::from([Tier::Workspace]);
@@ -1889,7 +1834,7 @@ pub(crate) async fn submit_and_attach<S: HarnessSystem>(
     match grain.ask_timeout(submit, within).await {
         Ok(Ok(_accepted)) => {
             let sleep = system.sleep(within);
-            match futures::future::select(rx, sleep).await {
+            match select(rx, sleep).await {
                 Either::Left((Ok(outcome), _)) => {
                     // Delivered: the mailbox already stopped itself.
                     guard.disarm();

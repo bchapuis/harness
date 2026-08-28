@@ -61,6 +61,9 @@ pub enum Update {
     },
     /// A batch of new records from the live run.
     Records(Vec<(Seq, Record)>),
+    /// Compaction outran the live stream's cursor (§10.2): records up to the
+    /// base are subsumed by a snapshot and were skipped, not delivered.
+    Truncated(Seq),
     /// The run's terminal outcome.
     Outcome(RunOutcome),
     /// The streamed run ended (the SSE stream closed).
@@ -211,6 +214,7 @@ impl App {
                     while let Some(event) = events.next().await {
                         let update = match event {
                             Event::Records(records) => Update::Records(records),
+                            Event::Truncated(base) => Update::Truncated(base),
                             Event::Outcome(outcome) => Update::Outcome(outcome),
                             Event::Error(e) => Update::Error(e),
                             Event::End => continue,
@@ -447,6 +451,11 @@ impl App {
                 for (seq, record) in records {
                     self.push_record(seq, record);
                 }
+            }
+            // The same wording as the truncated history load: the viewer's one
+            // signal that the transcript now has a gap it cannot backfill.
+            Update::Truncated(base) => {
+                self.status = format!("history truncated: records ≤ {} compacted", base.value());
             }
             Update::Outcome(outcome) => {
                 self.status = match &outcome {

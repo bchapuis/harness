@@ -17,7 +17,6 @@ use harness::HttpError;
 use harness::HttpPost;
 use harness::HttpResponse;
 use harness_http::Origin;
-use harness_http::Reader;
 
 /// Bound on one whole request, connect to last byte. Generous: a large
 /// completion can take minutes; the model-side retry policy sits above.
@@ -45,18 +44,16 @@ impl HttpPost for HttpsPost {
         headers: &[(String, String)],
         body: Vec<u8>,
     ) -> BoxFuture<'static, Result<HttpResponse, HttpError>> {
-        let headers: Vec<(&str, &str)> = headers
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect();
-        let request = self.origin.request("POST", path, &headers, &body);
         let origin = self.origin.clone();
+        let path = path.to_string();
+        let headers = headers.to_vec();
         Box::pin(async move {
             let exchange = async {
-                let stream = origin.connect().await?;
-                let mut reader = Reader::new(stream);
-                reader.write_all(&request).await?;
-                let status = reader.read_headers().await?;
+                let headers: Vec<(&str, &str)> = headers
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str()))
+                    .collect();
+                let (status, mut reader) = origin.exchange("POST", &path, &headers, &body).await?;
                 let body = reader.read_body().await?;
                 Ok::<_, String>(HttpResponse { status, body })
             };

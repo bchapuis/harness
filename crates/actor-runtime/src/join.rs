@@ -83,6 +83,16 @@ pub struct JoinOptions {
 /// transport and system are paired here, so a mismatched pairing cannot be
 /// expressed.
 pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
+    // A client id inside the voter roster would collide with a voter's identity
+    // and port. Refused here, where the roster is computed, so no deployment
+    // binary needs to restate the rule.
+    if let Some(id) = opts.clients.keys().find(|id| (1..=opts.voters).contains(id)) {
+        return Err(format!(
+            "client id {id} collides with the voter roster 1..={}: a client must be a \
+             non-voting id outside it",
+            opts.voters
+        ));
+    }
     let node = NodeId::new(opts.node);
     let roster: Vec<NodeId> = (1..=opts.voters).map(NodeId::new).collect();
     let is_voter = roster.contains(&node);

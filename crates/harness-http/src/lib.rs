@@ -2,8 +2,10 @@
 //! binaries — the TUI's gateway client and the standalone node's model-seam
 //! socket. Deliberately minimal (no `reqwest`/`hyper`): one connection per
 //! request with `connection: close`, TLS from rustls with webpki trust
-//! anchors, and an incremental [`Reader`] that serves both shapes of call —
-//! read the whole reply (unary), or pull a live chunked stream (SSE).
+//! anchors, and one opening — [`Origin::exchange`] connects, sends, and
+//! parses the response head, handing back an incremental [`Reader`] that
+//! serves both shapes of call — read the whole reply (unary), or pull a
+//! live chunked stream (SSE).
 //!
 //! This is plumbing, not a seam: the model adapters' seam is
 //! `harness::http::HttpPost`, and one implementation of it (the standalone's)
@@ -22,7 +24,7 @@ use tokio_rustls::TlsConnector;
 
 /// Any byte stream the client talks HTTP over — a bare `TcpStream` or a
 /// rustls `TlsStream` on top of one.
-pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
 /// One `http://` / `https://` base URL, parsed once: the host and port to
@@ -72,13 +74,27 @@ impl Origin {
         Ok(Origin { host, port, tls })
     }
 
-    /// The host, as the `host:` request header must carry it.
-    pub fn host(&self) -> &str {
-        &self.host
+    /// Connect, send one framed request, and parse the response head — the
+    /// shared opening of both call shapes. Returns the status and the
+    /// [`Reader`] positioned at the body: pull it whole ([`Reader::read_body`])
+    /// or chunk by chunk ([`Reader::next_chunk`]). Auth and content headers
+    /// are the caller's, passed in `headers`.
+    pub async fn exchange(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<(u16, Reader), String> {
+        let request = self.request(method, path, headers, body);
+        let mut reader = Reader::new(self.connect().await?);
+        reader.write_all(&request).await?;
+        let status = reader.read_headers().await?;
+        Ok((status, reader))
     }
 
     /// Open a transport connection (TLS when the scheme asked for it).
-    pub async fn connect(&self) -> Result<Box<dyn Io>, String> {
+    async fn connect(&self) -> Result<Box<dyn Io>, String> {
         let tcp = TcpStream::connect((self.host.as_str(), self.port))
             .await
             .map_err(|e| format!("connect {}:{}: {e}", self.host, self.port))?;
@@ -96,9 +112,8 @@ impl Origin {
 
     /// Frame an HTTP/1.1 request against this origin. `connection: close`
     /// keeps a unary reply a single read-to-EOF; a streaming server sends the
-    /// body chunked and closes when done. Auth and content headers are the
-    /// caller's, passed in `headers`.
-    pub fn request(
+    /// body chunked and closes when done.
+    fn request(
         &self,
         method: &str,
         path: &str,
@@ -131,7 +146,7 @@ pub struct Reader {
 }
 
 impl Reader {
-    pub fn new(stream: Box<dyn Io>) -> Reader {
+    fn new(stream: Box<dyn Io>) -> Reader {
         Reader {
             stream,
             buf: Vec::new(),
@@ -141,7 +156,7 @@ impl Reader {
     }
 
     /// Send the framed request.
-    pub async fn write_all(&mut self, bytes: &[u8]) -> Result<(), String> {
+    async fn write_all(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.stream
             .write_all(bytes)
             .await
@@ -151,7 +166,7 @@ impl Reader {
     /// Read and parse the status line and headers, leaving the body bytes (any
     /// already buffered) in `buf`. Returns the status code and records whether
     /// the body is chunked / its content-length.
-    pub async fn read_headers(&mut self) -> Result<u16, String> {
+    async fn read_headers(&mut self) -> Result<u16, String> {
         let head = loop {
             if let Some(end) = find(&self.buf, b"\r\n\r\n") {
                 let head: Vec<u8> = self.buf.drain(..end + 4).collect();
@@ -315,7 +330,6 @@ mod tests {
         assert!(Origin::parse("ftp://x").is_err());
         assert!(Origin::parse("https://host/path").is_err());
         let origin = Origin::parse("http://gw:8080/").expect("parses");
-        assert_eq!(origin.host(), "gw");
         let framed = origin.request("GET", "/v1/sessions", &[("accept", "json")], b"");
         let text = String::from_utf8(framed).expect("utf8");
         assert!(text.starts_with("GET /v1/sessions HTTP/1.1\r\nhost: gw\r\n"));

@@ -110,11 +110,6 @@ pub struct StaticTokens {
 }
 
 impl StaticTokens {
-    /// An empty map (no token authenticates).
-    pub fn new() -> StaticTokens {
-        StaticTokens::default()
-    }
-
     /// Bind `token` to `principal`. A later bind of the same token wins.
     pub fn insert(&mut self, principal: PrincipalId, token: impl Into<String>) {
         self.by_token.insert(token.into(), principal);
@@ -126,7 +121,7 @@ impl StaticTokens {
     /// whitespace-free secret. A token reused across two principals is an error
     /// (it would make the principal ambiguous).
     pub fn parse(text: &str) -> Result<StaticTokens, String> {
-        let mut tokens = StaticTokens::new();
+        let mut tokens = StaticTokens::default();
         for (n, raw) in text.lines().enumerate() {
             let line = raw.split('#').next().unwrap_or("").trim();
             if line.is_empty() {

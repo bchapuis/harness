@@ -154,6 +154,24 @@ pub enum Event {
 }
 
 impl Event {
+    /// Whether this is a membership or reachability transition (spec §9, §10)
+    /// — the block an operator-facing stderr sink prints while swallowing
+    /// dispatch-level noise. Named here, beside the enum, so a new membership
+    /// variant extends every such sink in one place.
+    pub fn is_membership(&self) -> bool {
+        matches!(
+            self,
+            Event::Suspected { .. }
+                | Event::Unreachable { .. }
+                | Event::Reachable { .. }
+                | Event::NodeDown { .. }
+                | Event::MemberJoining { .. }
+                | Event::MemberUp { .. }
+                | Event::MemberDraining { .. }
+                | Event::MemberResumed { .. }
+        )
+    }
+
     /// Wrap an application event for emission onto the stream.
     pub fn app<E: AppEvent>(event: E) -> Event {
         Event::App(Box::new(event))

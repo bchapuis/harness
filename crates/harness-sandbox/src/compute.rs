@@ -76,40 +76,6 @@ use crate::provider::TierStats;
 /// contract.
 pub(crate) const QJS_MODULE: &str = "qjs.wasm";
 
-/// The compute tool declaration, ready for [`harness::Kind::tool`]: guest
-/// code is arbitrary, so a dangling call is never blindly re-executed — the
-/// model decides (`OnDangling::Interrupt`, harness spec §5.5).
-pub fn run_module_tool() -> ToolDecl {
-    ToolDecl {
-        name: "run_module".to_string(),
-        description: "Execute a WebAssembly module from the session workspace, hermetically: \
-                      no clock, no network, no filesystem beyond the workspace. The module \
-                      must export `memory`, `alloc(len: i32) -> i32`, and `run(ptr: i32, \
-                      len: i32) -> i64`: the input JSON is written at `alloc(len)`, and `run` \
-                      returns `(ptr << 32) | len` locating the UTF-8 JSON output. Host \
-                      imports, module `harness`: `seed() -> i64`, `ws_size(path_ptr, \
-                      path_len) -> i64`, `ws_read(path_ptr, path_len, dst_ptr, dst_cap) -> \
-                      i64`, `ws_write(path_ptr, path_len, src_ptr, src_len) -> i64`."
-            .to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "module": {
-                    "type": "string",
-                    "description": "Workspace-relative path to the .wasm module."
-                },
-                "input": {
-                    "description": "JSON input handed to the guest's `run`."
-                }
-            },
-            "required": ["module"]
-        }),
-        tier: Tier::Compute,
-        on_dangling: OnDangling::Interrupt,
-        timeout: None,
-    }
-}
-
 /// The JavaScript tool declaration (the QuickJS runner's model-facing face):
 /// scripts are arbitrary code, so a dangling call interrupts rather than
 /// blindly re-executing (harness spec §5.5).
@@ -656,16 +622,29 @@ fn guest_memory(caller: &mut Caller<'_, HostState>) -> wasmtime::Result<Memory> 
     }
 }
 
-/// `data[ptr .. ptr + len]`, or an out-of-bounds trap. The guest controls
-/// `ptr` and `len`, so a range outside its own memory is an ABI violation
-/// (the `what` names the host function in the trap). `len` is clamped at zero
-/// first: a negative length is the guest's, not a panic on the host side.
-fn guest_slice<'a>(data: &'a [u8], ptr: i32, len: i32, what: &str) -> wasmtime::Result<&'a [u8]> {
+/// The in-bounds range `ptr .. ptr + len` of a guest memory `data_len` bytes
+/// long, or an out-of-bounds trap — the one bounds check both slice accessors
+/// share. The guest controls `ptr` and `len`, so a range outside its own
+/// memory is an ABI violation (the `what` names the host function in the
+/// trap). `len` is clamped at zero first: a negative length is the guest's,
+/// not a panic on the host side.
+fn guest_range(
+    data_len: usize,
+    ptr: i32,
+    len: i32,
+    what: &str,
+) -> wasmtime::Result<std::ops::Range<usize>> {
     let start = ptr as u32 as usize;
     start
         .checked_add(len.max(0) as usize)
-        .and_then(|end| data.get(start..end))
+        .filter(|end| *end <= data_len)
+        .map(|end| start..end)
         .ok_or_else(|| wasmtime::Error::msg(format!("{what}: out of guest memory bounds")))
+}
+
+/// `data[ptr .. ptr + len]`, bounds-checked by [`guest_range`].
+fn guest_slice<'a>(data: &'a [u8], ptr: i32, len: i32, what: &str) -> wasmtime::Result<&'a [u8]> {
+    Ok(&data[guest_range(data.len(), ptr, len, what)?])
 }
 
 /// The mutable counterpart of [`guest_slice`].
@@ -675,11 +654,8 @@ fn guest_slice_mut<'a>(
     len: i32,
     what: &str,
 ) -> wasmtime::Result<&'a mut [u8]> {
-    let start = ptr as u32 as usize;
-    start
-        .checked_add(len.max(0) as usize)
-        .and_then(|end| data.get_mut(start..end))
-        .ok_or_else(|| wasmtime::Error::msg(format!("{what}: out of guest memory bounds")))
+    let range = guest_range(data.len(), ptr, len, what)?;
+    Ok(&mut data[range])
 }
 
 /// A UTF-8 path read out of guest memory, or an ABI-violation trap. The

@@ -165,16 +165,6 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
             opts.nodes, opts.id
         ));
     }
-    // A client id must fall outside the voter roster (see `NodeOptions::clients`).
-    for id in opts.clients.keys() {
-        if *id >= 1 && *id <= opts.nodes {
-            return Err(format!(
-                "--client id {id} collides with the node roster 1..={}: a client must be a \
-                 non-voting id outside it",
-                opts.nodes
-            ));
-        }
-    }
     // Resolved before any port is bound: a missing confinement choice is a
     // configuration error the operator fixes, not a half-booted node.
     let sandbox_mode = opts.sandbox.clone().ok_or(
@@ -422,18 +412,8 @@ impl EventSink for StderrEvents {
     fn emit(&self, event: Event) {
         if let Some(harness_event) = event.as_app::<HarnessEvent>() {
             eprintln!("[{}] {harness_event:?}", self.node);
-            return;
-        }
-        match &event {
-            Event::Suspected { .. }
-            | Event::Unreachable { .. }
-            | Event::Reachable { .. }
-            | Event::NodeDown { .. }
-            | Event::MemberJoining { .. }
-            | Event::MemberUp { .. }
-            | Event::MemberDraining { .. }
-            | Event::MemberResumed { .. } => eprintln!("[{}] {event:?}", self.node),
-            _ => {}
+        } else if event.is_membership() {
+            eprintln!("[{}] {event:?}", self.node);
         }
     }
 }

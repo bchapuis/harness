@@ -95,16 +95,8 @@ struct GatewayEvents {
 
 impl EventSink for GatewayEvents {
     fn emit(&self, event: Event) {
-        match &event {
-            Event::Suspected { .. }
-            | Event::Unreachable { .. }
-            | Event::Reachable { .. }
-            | Event::NodeDown { .. }
-            | Event::MemberJoining { .. }
-            | Event::MemberUp { .. }
-            | Event::MemberDraining { .. }
-            | Event::MemberResumed { .. } => eprintln!("[gateway {}] {event:?}", self.node),
-            _ => {}
+        if event.is_membership() {
+            eprintln!("[gateway {}] {event:?}", self.node);
         }
     }
 }
