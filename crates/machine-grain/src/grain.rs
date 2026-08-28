@@ -345,17 +345,21 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> Machine<S, P> {
     }
 
     /// Record a committed capture (advance the capture clock) and map its
-    /// stats to the journal event — nothing for a clean image (§7.5).
-    fn capture_event(&self, stats: granary::DiskCaptureStats, now: Instant) -> Vec<MachineEvent> {
+    /// stats to the journal event — `None` for a clean image (§7.5).
+    fn capture_event(
+        &self,
+        stats: granary::DiskCaptureStats,
+        now: Instant,
+    ) -> Option<MachineEvent> {
         self.lock().last_capture = Some(now);
         if stats.blocks == 0 {
-            vec![]
+            None
         } else {
-            vec![MachineEvent::Captured {
+            Some(MachineEvent::Captured {
                 at_nanos: now.as_nanos(),
                 blocks: stats.blocks,
                 bytes: stats.bytes,
-            }]
+            })
         }
     }
 
@@ -708,12 +712,12 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<Provision> for Ma
     }
 }
 
-/// What a successful [`Attach`] returns to the front door (machine §5.1).
+/// What a successful [`Attach`] returns to the front door (machine §5.1). The
+/// host key is not here: the door already read it — SSH presents it at KEX,
+/// before any principal exists to attach ([`DoorPolicy`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachReply {
     pub attachment: u64,
-    /// The machine's host-key material (see `MachineState::host_key`, M4).
-    pub host_key: Vec<u8>,
 }
 
 /// Attach a connection (machine §5.1): journaled with its principal (M4),
@@ -756,10 +760,7 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<Attach> for Machi
                 front_door: msg.front_door,
                 at_nanos: ctx.system().now().as_nanos(),
             }],
-            Ok(AttachReply {
-                attachment: id,
-                host_key: state.host_key.clone(),
-            }),
+            Ok(AttachReply { attachment: id }),
         )
     }
 }
@@ -889,11 +890,10 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<SetEgress> for Ma
 /// host key is presented at KEX, and the authorized-key set decides the
 /// publickey method that immediately follows — both before any `Attach`.
 ///
-/// The reply carries the machine's private host-key material, the same bytes
-/// [`AttachReply`] already returns: a front door is a cluster member inside
-/// the trust boundary (machine §5.1), and no key material ever crosses into
-/// the guest. Reading the set per connection is what makes revocation take
-/// effect on the *next* attach (M4).
+/// The reply carries the machine's private host-key material: a front door is
+/// a cluster member inside the trust boundary (machine §5.1), and no key
+/// material ever crosses into the guest. Reading the set per connection is
+/// what makes revocation take effect on the *next* attach (M4).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DoorPolicy;
 

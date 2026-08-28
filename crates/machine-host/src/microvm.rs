@@ -154,10 +154,9 @@ pub fn control_path(prefix: &str, key: &str) -> PathBuf {
 }
 
 /// The host-side vsock socket inside a VM's control directory. Derived from
-/// the directory alone, so a caller that knows *where* a VM runs can dial its
-/// guest without holding the [`MicroVm`] — what a front door bridging to a
-/// co-located guest needs (machine spec §5.1).
-pub fn vsock_socket(control: &Path) -> PathBuf {
+/// the directory alone, so [`MachineHost::connect_by_key`] can dial a guest
+/// without holding its [`MicroVm`].
+fn vsock_socket(control: &Path) -> PathBuf {
     control.join(VSOCK_SOCK)
 }
 
@@ -200,7 +199,7 @@ pub fn config_json(config: &VmConfig, control: &Path) -> Value {
     if config.vsock {
         document["vsock"] = json!({
             "guest_cid": 3,
-            "uds_path": control.join(VSOCK_SOCK).display().to_string(),
+            "uds_path": vsock_socket(control).display().to_string(),
         });
     }
     if let Some(net) = &config.net {
@@ -263,7 +262,7 @@ impl MicroVm {
 
     /// The host-side vsock unix socket ([`VmConfig::vsock`]).
     pub fn vsock_path(&self) -> PathBuf {
-        self.control.join(VSOCK_SOCK)
+        vsock_socket(&self.control)
     }
 
     /// Poll `probe` until it reports the guest ready, the VMM exits (failing
@@ -355,11 +354,6 @@ impl MicroVm {
         } else {
             Err(fail(format!("unexpected response: {}", status.trim())))
         }
-    }
-
-    /// Begin killing the VMM without waiting (the watchdog path).
-    pub fn start_kill(&mut self) {
-        let _ = self.child.start_kill();
     }
 
     /// Kill the VMM and reap it.

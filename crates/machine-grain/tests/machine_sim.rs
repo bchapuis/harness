@@ -25,6 +25,7 @@ use granary::GranaryConfig;
 use granary::GranaryExt;
 use machine_grain::Attach;
 use machine_grain::Detach;
+use machine_grain::DoorPolicy;
 use machine_grain::Machine;
 use machine_grain::MachineError;
 use machine_grain::Provision;
@@ -419,7 +420,8 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
 /// own 32-byte ed25519 seed from the system's entropy stream — so no two
 /// machines share an SSH identity — and the seed is folded state, so
 /// rehydration returns the same identity and the client's `known_hosts` pin
-/// survives hibernation (machine §5.1).
+/// survives hibernation (machine §5.1). Read through [`DoorPolicy`], the
+/// command the front door itself presents the key from.
 #[test]
 fn each_machine_draws_its_own_host_key_and_keeps_it_across_hibernation() {
     let Fixture {
@@ -428,17 +430,13 @@ fn each_machine_draws_its_own_host_key_and_keeps_it_across_hibernation() {
         image_len: _image_len,
         sim,
         recorder,
-        system,
+        system: _system,
         machines,
     } = fixture(59);
 
-    let door = system.spawn(DoorStub);
-    let door_id = door.id().clone();
     let box_a = machines.grain("box-a");
     let box_b = machines.grain("box-b");
-    let sys = system.clone();
     let base_for_task = base.clone();
-    let door_for_task = door_id.clone();
     let key_a = sim.block_on(async move {
         let mut keys = Vec::new();
         for grain in [&box_a, &box_b] {
@@ -447,33 +445,22 @@ fn each_machine_draws_its_own_host_key_and_keeps_it_across_hibernation() {
                 .await
                 .expect("ask")
                 .expect("provision");
-            let reply = grain
-                .ask(Attach {
-                    principal: "alice".into(),
-                    front_door: door_for_task.clone(),
-                })
+            let policy = grain
+                .ask(DoorPolicy)
                 .await
                 .expect("ask")
-                .expect("attach");
+                .expect("door policy");
             assert_eq!(
-                reply.host_key.len(),
+                policy.host_key.len(),
                 32,
                 "the host key is a raw 32-byte ed25519 seed (machine §3)"
             );
-            grain
-                .ask(Detach {
-                    attachment: reply.attachment,
-                })
-                .await
-                .expect("detach");
-            keys.push(reply.host_key);
+            keys.push(policy.host_key);
         }
         assert_ne!(
             keys[0], keys[1],
             "two machines must draw distinct host keys (machine §3)"
         );
-        // Let the final captures run so both machines quiesce clean.
-        sys.sleep(Duration::from_millis(50)).await;
         keys.swap_remove(0)
     });
 
@@ -491,24 +478,15 @@ fn each_machine_draws_its_own_host_key_and_keeps_it_across_hibernation() {
     // rehydrated machine presents the identity it was provisioned with.
     let reread = machines.grain("box-a");
     sim.block_on(async move {
-        let reply = reread
-            .ask(Attach {
-                principal: "alice".into(),
-                front_door: door_id,
-            })
+        let policy = reread
+            .ask(DoorPolicy)
             .await
             .expect("ask")
-            .expect("reattach");
+            .expect("door policy after rehydration");
         assert_eq!(
-            reply.host_key, key_a,
+            policy.host_key, key_a,
             "rehydration must reproduce the provisioned host key (machine §3)"
         );
-        reread
-            .ask(Detach {
-                attachment: reply.attachment,
-            })
-            .await
-            .expect("detach");
     });
 }
 

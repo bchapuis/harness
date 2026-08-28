@@ -183,9 +183,7 @@ impl MachineRuntime for FakeRuntime {
             if self.killed.load(Ordering::Relaxed) {
                 return Err(RuntimeError("fake runtime killed".to_string()));
             }
-            let map = FakeRuntime::read_dir_map(&ws)
-                .map_err(|e| RuntimeError(e.to_string()))?;
-            *self.lock_ws() = map;
+            *self.lock_ws() = FakeRuntime::read_dir_map(&ws)?;
             Ok(())
         })
     }
@@ -203,27 +201,20 @@ impl MachineRuntime for FakeRuntime {
             let map = self.lock_ws();
             // Replace, never merge — the guest's view is authoritative
             // across a pull, as for the real agent.
-            for entry in
-                std::fs::read_dir(&ws).map_err(|e| RuntimeError(e.to_string()))?
-            {
-                let entry = entry.map_err(|e| RuntimeError(e.to_string()))?;
-                let kind = entry
-                    .file_type()
-                    .map_err(|e| RuntimeError(e.to_string()))?;
-                let result = if kind.is_dir() {
-                    std::fs::remove_dir_all(entry.path())
+            for entry in std::fs::read_dir(&ws)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    std::fs::remove_dir_all(entry.path())?;
                 } else {
-                    std::fs::remove_file(entry.path())
-                };
-                result.map_err(|e| RuntimeError(e.to_string()))?;
+                    std::fs::remove_file(entry.path())?;
+                }
             }
             for (rel, bytes) in map.iter() {
                 let path = ws.join(rel);
                 if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| RuntimeError(e.to_string()))?;
+                    std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(&path, bytes).map_err(|e| RuntimeError(e.to_string()))?;
+                std::fs::write(&path, bytes)?;
             }
             Ok(())
         })

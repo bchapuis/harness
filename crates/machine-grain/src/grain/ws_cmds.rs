@@ -26,6 +26,11 @@ use crate::runtime::MachineRuntimeProvider;
 /// bytes inline, grain §7.11).
 pub const MAX_WS_FILE: usize = 1024 * 1024;
 
+/// The one mapping every workspace file operation fails through.
+fn ws_err(e: impl std::fmt::Display) -> MachineError {
+    MachineError::Ws(e.to_string())
+}
+
 /// Validate a workspace-relative path: non-empty, normal components only.
 /// The subsequent operations go through a capability handle over the facet's
 /// directory, so an escape is unrepresentable even past this check (S1).
@@ -47,10 +52,7 @@ fn ws_rel_path(path: &str) -> Result<&std::path::Path, MachineError> {
 fn ws_open<S: GranarySystem, P: MachineRuntimeProvider>(
     ctx: &GrainCtx<Machine<S, P>>,
 ) -> Result<cap_std::fs::Dir, MachineError> {
-    let root = ctx
-        .ws()
-        .dir_path()
-        .map_err(|e| MachineError::Ws(e.to_string()))?;
+    let root = ctx.ws().dir_path().map_err(ws_err)?;
     cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())
         .map_err(|e| MachineError::Ws(format!("open workspace: {e}")))
 }
@@ -79,7 +81,7 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> Machine<S, P> {
             Err(WsError::TooLarge { bytes, cap }) => Err(MachineError::Ws(format!(
                 "durable workspace is {bytes} bytes, over the {cap}-byte cap"
             ))),
-            Err(e) => Err(MachineError::Ws(e.to_string())),
+            Err(e) => Err(ws_err(e)),
         }
     }
 }
@@ -119,11 +121,9 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<WsWrite> for Mach
             if let Some(parent) = rel.parent()
                 && !parent.as_os_str().is_empty()
             {
-                dir.create_dir_all(parent)
-                    .map_err(|e| MachineError::Ws(e.to_string()))?;
+                dir.create_dir_all(parent).map_err(ws_err)?;
             }
-            dir.write(rel, &msg.bytes)
-                .map_err(|e| MachineError::Ws(e.to_string()))?;
+            dir.write(rel, &msg.bytes).map_err(ws_err)?;
             self.ws_stage(ctx)
         })();
         (vec![], outcome)
@@ -153,16 +153,13 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<WsRead> for Machi
             self.ws_command_guard(state)?;
             let rel = ws_rel_path(&msg.path)?;
             let dir = ws_open(ctx)?;
-            let len = dir
-                .metadata(rel)
-                .map_err(|e| MachineError::Ws(e.to_string()))?
-                .len();
+            let len = dir.metadata(rel).map_err(ws_err)?.len();
             if len as usize > MAX_WS_FILE {
                 return Err(MachineError::Ws(format!(
                     "file is {len} bytes, over the {MAX_WS_FILE}-byte command cap"
                 )));
             }
-            dir.read(rel).map_err(|e| MachineError::Ws(e.to_string()))
+            dir.read(rel).map_err(ws_err)
         })();
         (vec![], outcome)
     }
@@ -201,18 +198,12 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<WsList> for Machi
             let listed = if msg.path.is_empty() {
                 dir
             } else {
-                dir.open_dir(ws_rel_path(&msg.path)?)
-                    .map_err(|e| MachineError::Ws(e.to_string()))?
+                dir.open_dir(ws_rel_path(&msg.path)?).map_err(ws_err)?
             };
             let mut entries = Vec::new();
-            for entry in listed
-                .entries()
-                .map_err(|e| MachineError::Ws(e.to_string()))?
-            {
-                let entry = entry.map_err(|e| MachineError::Ws(e.to_string()))?;
-                let meta = entry
-                    .metadata()
-                    .map_err(|e| MachineError::Ws(e.to_string()))?;
+            for entry in listed.entries().map_err(ws_err)? {
+                let entry = entry.map_err(ws_err)?;
+                let meta = entry.metadata().map_err(ws_err)?;
                 entries.push(WsFileInfo {
                     name: entry.file_name().to_string_lossy().into_owned(),
                     len: meta.len(),
@@ -249,15 +240,13 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> GrainHandler<WsRemove> for Mac
             self.ws_command_guard(state)?;
             let rel = ws_rel_path(&msg.path)?;
             let dir = ws_open(ctx)?;
-            let meta = dir
-                .metadata(rel)
-                .map_err(|e| MachineError::Ws(e.to_string()))?;
+            let meta = dir.metadata(rel).map_err(ws_err)?;
             let removed = if meta.is_dir() {
                 dir.remove_dir_all(rel)
             } else {
                 dir.remove_file(rel)
             };
-            removed.map_err(|e| MachineError::Ws(e.to_string()))?;
+            removed.map_err(ws_err)?;
             self.ws_stage(ctx)
         })();
         (vec![], outcome)

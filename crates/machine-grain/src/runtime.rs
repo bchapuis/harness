@@ -45,6 +45,13 @@ impl std::fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
+/// An IO failure maps mechanically; a site with more to say formats its own.
+impl From<std::io::Error> for RuntimeError {
+    fn from(e: std::io::Error) -> RuntimeError {
+        RuntimeError(e.to_string())
+    }
+}
+
 /// What a boot needs (machine §3): the disk-facet image to mount as the
 /// rootfs, the journaled sizing, and the machine's name for attribution.
 #[derive(Clone, Debug)]
