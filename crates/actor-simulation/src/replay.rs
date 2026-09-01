@@ -125,15 +125,17 @@ fn sweep(
     let (seeds_run, divergences) = crate::sweep::sweep_generic(
         crate::corpus::regression_seeds(workload).chain(seeds),
         crate::sweep::collect_all_failures(),
-        |divergence: &Divergence| divergence.seed,
-        |seed| check(seed).map_err(|divergence| *divergence),
+        |divergence| divergence.seed,
+        // Swept boxed — the per-seed result stays thin — and unboxed only on
+        // the cold path below, where divergence is already the whole story.
+        &mut check,
     );
     if divergences.is_empty() {
         Ok(())
     } else {
         Err(Box::new(SweepDivergence {
             seeds_run,
-            divergences,
+            divergences: divergences.into_iter().map(|d| *d).collect(),
         }))
     }
 }
