@@ -367,7 +367,7 @@ impl Options {
 /// Generate a CA and one shared cluster leaf cert/key, writing them as DER files
 /// into `dir`. Every node loads the same three files.
 fn gen_certs(dir: &FsPath) {
-    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     std::fs::create_dir_all(dir).expect("cannot create certs dir");
 
     let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
@@ -390,7 +390,7 @@ fn gen_certs(dir: &FsPath) {
 
 /// Build the mutual-TLS config from the DER files written by `gen-certs`.
 fn load_tls(dir: &FsPath) -> TlsConfig {
-    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     let read = |name: &str| {
         std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("cannot read {name}: {e}"))
     };

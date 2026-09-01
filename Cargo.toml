@@ -124,8 +124,16 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util"
 getrandom = "0.2"
 # Mutual-TLS TCP transport (`actor-runtime`), plus the TLS client side of
 # `harness-standalone`'s HttpPost seam and `harness-tui`'s gateway connection.
-rustls = "0.23"
-tokio-rustls = "0.26"
+#
+# `ring` rather than the default aws-lc-rs backend, here and on russh below:
+# aws-lc-sys was the single largest compile unit in the workspace (a 76 s
+# build script compiling aws-lc's C), and ring serves the same suites for the
+# in-tree mTLS and client connections. What the swap gives up is aws-lc's
+# `prefer-post-quantum` default — ring has no ML-KEM, so key exchange stays
+# classical X25519 — and FIPS availability, neither of which this tree uses.
+# rcgen already defaults to ring, so the backends agree.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rcgen = "0.13"
 # The HTTP/SSE gateway (`harness-gateway`) only: the public multi-tenant edge.
 axum = "0.8"
@@ -133,8 +141,9 @@ axum = "0.8"
 bytes = "1"
 # The machine front door (`machine-frontdoor`) only: a pure-Rust SSH server, so
 # the front door terminates SSH in-process against journaled keys and presents
-# each machine's own host key (machine spec §5.1).
-russh = "0.62"
+# each machine's own host key (machine spec §5.1). `ring` for the same reason
+# as rustls above; `flate2` and `rsa` are the rest of russh's default set.
+russh = { version = "0.62", default-features = false, features = ["ring", "flate2", "rsa"] }
 # The terminal client (`harness-tui`) only: a full-screen ratatui frontend over
 # crossterm, with crossterm's async `EventStream` so input multiplexes with the
 # gateway's SSE record stream in one `tokio::select!`.
