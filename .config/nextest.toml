@@ -1,0 +1,25 @@
+# Which tests a run executes by default (filtering happens at run time; every
+# target still compiles). The split mirrors sweep.rs's sizing: the edit loop
+# proves the invariants hold somewhere, CI holds the full corpus.
+#
+# The exclusions are measured, not guessed (2026-09, M-series laptop; the full
+# suite is ~1250s of serial test time, wall ~150s under nextest):
+#   binary(/swarm/)      — the seed-sweep regression suites,        ~350s serial
+#   native, quickjs      — harness-sandbox against real containers, ~375s
+#   disk_rounds          — granary's quorum-round cost suite,       ~155s
+#   store_oracle         — granary's seeded file-vs-memory oracle,   ~55s
+#
+# - `cargo nextest run` — the fast local suite: everything else.
+# - `cargo nextest run -p harness-sandbox --ignore-default-filter` — when the
+#   excluded suite is the one you are editing.
+# - `cargo nextest run -E 'binary(/swarm/)'` — just the sweeps, locally
+#   narrowed by sweep.rs unless SWARM_SEEDS says otherwise.
+# - `cargo nextest run --profile ci` — everything; what CI runs.
+
+[profile.default]
+default-filter = "not (binary(/swarm/) | binary(native) | binary(quickjs) | binary(disk_rounds) | binary(store_oracle))"
+
+[profile.ci]
+default-filter = "all()"
+# A sweep failure should not hide what the rest of the corpus would have said.
+fail-fast = false

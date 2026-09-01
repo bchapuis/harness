@@ -46,8 +46,20 @@ jobs:
       - name: Clippy (warnings are errors)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Nextest rather than `cargo test`: one process per test with live
+      # per-test status and timings, so a hung sweep names itself instead of
+      # stalling a silent binary. The `ci` profile (.config/nextest.toml) runs
+      # everything — the default profile's swarm exclusion is a local-edit-loop
+      # concern, and this job's value comes from the full corpus.
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Test (conformance suite + swarm regression corpus)
-        run: cargo test --workspace
+        run: cargo nextest run --workspace --profile ci
+
+      # Nextest does not run doc-tests; keep them under cargo test.
+      - name: Doc-tests
+        run: cargo test --workspace --doc
 
   # The guest-backed suites (sandbox spec §3.5, machine spec §2.1): boot real
   # guests. The microVM mechanism needs /dev/kvm — available on GitHub's
