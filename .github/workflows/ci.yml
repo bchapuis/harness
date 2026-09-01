@@ -40,11 +40,14 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
+      # --locked: the committed Cargo.lock is the build, here and below. A
+      # manifest change that forgot to refresh the lock fails by name instead
+      # of resolving to whatever the registry holds that day.
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --locked --workspace --all-targets
 
       - name: Clippy (warnings are errors)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       # Nextest rather than `cargo test`: one process per test with live
       # per-test status and timings, so a hung sweep names itself instead of
@@ -55,11 +58,11 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Test (conformance suite + swarm regression corpus)
-        run: cargo nextest run --workspace --profile ci
+        run: cargo nextest run --locked --workspace --profile ci
 
       # Nextest does not run doc-tests; keep them under cargo test.
       - name: Doc-tests
-        run: cargo test --workspace --doc
+        run: cargo test --locked --workspace --doc
 
   # The guest-backed suites (sandbox spec §3.5, machine spec §2.1): boot real
   # guests. The microVM mechanism needs /dev/kvm — available on GitHub's
