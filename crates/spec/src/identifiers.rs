@@ -142,7 +142,6 @@ pub const EXEMPT: &[Exempt] = &[
         Why::NotAnIdentifier,
         "SQL, in the SQL facet's discussion",
     ),
-    e("PATH", Why::NotAnIdentifier, "the environment variable"),
     e(
         "TODO",
         Why::NotAnIdentifier,
