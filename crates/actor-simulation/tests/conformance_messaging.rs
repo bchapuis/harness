@@ -15,6 +15,7 @@ use actor_core::ActorSystem;
 use actor_core::CallError;
 use actor_core::Clock;
 use actor_core::Ctx;
+use actor_core::Event;
 use actor_core::Handler;
 use actor_core::HandlerRegistry;
 use actor_core::LocalSystemBuilder;
@@ -22,6 +23,7 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Path;
+use actor_simulation::Recorder;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::SimSystem;
@@ -215,6 +217,83 @@ fn ask_default_deadline_elapses_to_timeout() {
         remote.ask(Work { ms: 60_000 }).await
     });
     assert_eq!(outcome, Err(CallError::Timeout));
+}
+
+// --- §14.2: the deadline binds a local target too --------------------------------
+
+#[test]
+fn local_ask_to_a_handler_that_never_replies_is_timeout() {
+    // Every request carries an effective deadline (spec §14.2), local or remote
+    // alike (§3.3): a local ask must not hang on a handler that never comes
+    // back, and the timed-out ask still reaches its `AskOutcome` (invariant #1).
+    let (sim, system, recorder) = support::local_recorded(6);
+    let outcome = sim.block_on(async move {
+        let slow = system.spawn(Slow::new(system.clock().clone()));
+        slow.ask_timeout(Work { ms: 10_000 }, Duration::from_secs(1))
+            .await
+    });
+    assert_eq!(outcome, Err(CallError::Timeout));
+    assert!(
+        recorder.events().iter().any(|e| matches!(
+            e,
+            Event::AskOutcome {
+                manifest,
+                failed: true,
+                ..
+            } if *manifest == Work::MANIFEST
+        )),
+        "a timed-out local ask must still record a failed AskOutcome",
+    );
+}
+
+// --- §6 #4: a remote tell refused by a full mailbox leaves a trace ------------
+
+#[test]
+fn a_remote_tell_into_a_full_mailbox_is_recorded_not_dropped() {
+    // A one-way `tell` has no reply to carry `MailboxFull` back over the wire,
+    // so the refusal must surface on the event stream instead (spec §6 rule 4):
+    // the sender saw the transport accept the frame, and the event is the only
+    // trace that the message never reached the mailbox.
+    let sim = Simulation::new(7);
+    let recorder = Recorder::new();
+    let net = SimNetwork::new(&sim)
+        .with_mailbox_capacity(1)
+        .with_events(Arc::new(recorder.clone()));
+    let node_a = net.join(NodeId::new(1));
+    let node_b = net.join(NodeId::new(2));
+
+    let (target, sent) = sim.block_on(async move {
+        let slow = node_a.spawn(Slow::<SimNode>::new(node_a.clock().clone()));
+        let remote = node_b.resolve::<Slow<SimNode>>(slow.id().clone());
+        let mut sent = Vec::new();
+        for _ in 0..8 {
+            sent.push(remote.tell(Work { ms: 100 }).await);
+        }
+        // Let the receive loop meet the capacity-1 mailbox while the handler
+        // is still asleep on the first message.
+        node_b
+            .clock()
+            .clone()
+            .sleep(Duration::from_millis(10))
+            .await;
+        (slow.id().clone(), sent)
+    });
+
+    assert!(
+        sent.iter().all(Result::is_ok),
+        "the transport accepts a tell; the refusal happens on the receiving node: {sent:?}",
+    );
+    assert!(
+        recorder.events().iter().any(|e| matches!(
+            e,
+            Event::Undelivered {
+                actor,
+                manifest,
+                error: CallError::MailboxFull,
+            } if *actor == target && manifest == Work::MANIFEST.as_str()
+        )),
+        "a tell refused by a full mailbox must be recorded as Undelivered",
+    );
 }
 
 // --- §14.3: ask_flat collapses the two-level result ---------------------------

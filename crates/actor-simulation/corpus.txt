@@ -1,9 +1,11 @@
 # The fixed-seed regression corpus (spec §18.6, docs/simulation-testing.md).
 #
-# Every seed that ever failed belongs here. Once listed, it replays on every
-# swarm run — local, CI, and soak alike — regardless of how wide that run's
-# sweep is. That is what makes the suite a ratchet: a bug found once can never
-# come back quietly, even in the edit loop where sweeps are only a few seeds.
+# Representative failing seeds, pruned per workload: a collecting soak reports
+# one finding a hundred times over, and a few seeds per workload guard it as
+# well as all of them. Once listed, a seed replays on every swarm run — local,
+# CI, and soak alike — regardless of how wide that run's sweep is. That is what
+# makes the suite a ratchet: a bug found once can never come back quietly, even
+# in the edit loop where sweeps are only a few seeds.
 #
 # Format: one `<workload-name> <seed>` per line; `#` comments and blank lines
 # ignored. The name is the workload's `name()` — the same string the failure

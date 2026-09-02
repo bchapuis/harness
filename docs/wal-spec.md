@@ -124,7 +124,7 @@ Some durable state is not a log but a single small file rewritten in place: a ge
 
 ## 6. Failure policy
 
-1. Every fallible method MUST return `std::io::Result`. The crate **MUST NOT decide what an I/O failure means** — it neither retries, nor masks, nor panics on an I/O error (the §4 over-bound panic is a caller bug, not an I/O failure). The decision belongs to the caller: one that cannot persist a record it must not lose may have no safe way to continue and so panics with a domain-specific message; another might degrade or report. `path()` is exposed (§3.5) for the caller's own failure message.
+1. Every fallible method MUST return `std::io::Result`, except `open`, which returns `OpenError` so that a policy refusal (`Incompatible`) stays distinct from an I/O failure (`Io`) — §2.1 rule 6. The crate **MUST NOT decide what an I/O failure means** — it neither retries, nor masks, nor panics on an I/O error (the §4 over-bound panic is a caller bug, not an I/O failure). The decision belongs to the caller: one that cannot persist a record it must not lose may have no safe way to continue and so panics with a domain-specific message; another might degrade or report. `path()` is exposed (§3.5) for the caller's own failure message.
 
 2. The crate masks no corruption: a checksum failure, a torn tail, and a parse failure all surface as a shortened valid prefix (§3.1), never as an error and never as a silently patched record.
 

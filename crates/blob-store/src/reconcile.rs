@@ -15,8 +15,10 @@
 //! whether a misplaced copy is still wanted. A blob whose namespace is tombstoned
 //! is **never copied**: the loop skips it, and the receiving owner would reject it
 //! anyway, so rebalancing cannot resurrect a deleted namespace (**B7** safety).
-//! The same pass reclaims tombstones whose retention is no longer needed (spec
-//! §5.3).
+//! The same pass pulls the tombstones this node missed from every serving peer,
+//! and releases the sweep bookkeeping a coordinating anchor kept once every member
+//! at fan-out time has swept or reached a terminal state (spec §5.3). The
+//! tombstone itself is never reclaimed (spec §10).
 
 use std::sync::Weak;
 use std::time::Duration;
@@ -59,8 +61,9 @@ pub(crate) async fn reconcile_loop<S: BlobSystem>(inner: Weak<Inner<S>>) {
     }
 }
 
-/// One reconcile pass: restore under-replicated blobs (B6), then reclaim
-/// tombstones whose retention is no longer required (B7 liveness).
+/// One reconcile pass: restore under-replicated blobs (B6), pull missed tombstones
+/// from every serving peer (B7 liveness), then release sweep bookkeeping whose
+/// retention is no longer required.
 async fn reconcile_pass<S: BlobSystem>(inner: &Inner<S>) {
     let members = inner.system.serving_members();
     let r = inner.config.replication_factor;

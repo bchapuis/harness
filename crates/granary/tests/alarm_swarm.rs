@@ -68,6 +68,7 @@ use actor_simulation::ClusterWorkload;
 use actor_simulation::Invariant;
 use actor_simulation::SimNode;
 use actor_simulation::default_invariants;
+use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::sweep_seeds;
 use granary::AlarmIndex;
@@ -374,6 +375,23 @@ fn alarms_fire_at_most_once_under_the_cluster_swarm() {
         "no grain's fire count could be read on any seed, so the sweep asserted \
          G21 against an empty set",
     );
+}
+
+/// The reproducibility half of the pair (docs/simulation-testing.md): the same
+/// seed replays to a byte-identical event stream. The alarm path is the one
+/// with the most self-driven timing — the host's idle and alarm timers, the
+/// driver's 500 ms sweep, the index registration round trips — and every one of
+/// those rides the Clock/Entropy/Spawner seams, which is what this checks. A
+/// divergence names the seed to replay.
+#[test]
+fn the_alarm_swarm_is_reproducible() {
+    let workload = AlarmSwarm {
+        nodes: 3,
+        fired: Fired::default(),
+    };
+    if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..12)) {
+        panic!("{divergence}");
+    }
 }
 
 /// The other half of the swarm's claim, on a clean cluster: an armed alarm

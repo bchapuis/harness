@@ -39,11 +39,14 @@
 //! - **`Network`**: not offered. A call carrying it fails as a `ToolError`
 //!   outcome the model reacts to (harness spec §5.4), and the
 //!   registration-time cap check makes such a call unreachable in a
-//!   correctly configured deployment (harness spec §5.3 item 4). With
-//!   `native` enabled, a profile that *names* egress (or caps in `Network`)
-//!   fails at `open` instead: holding `Native` implies `Network`'s grants
-//!   (sandbox spec §2.2), and `--network none` delivers exactly an empty
-//!   allowlist.
+//!   correctly configured deployment (harness spec §5.3 item 4). Under every
+//!   feature set alike, a profile that *names* egress (or explicitly caps in
+//!   `Network`) fails at `open` instead, as a `SandboxError` the harness
+//!   turns into a `ToolError` outcome per call that needed the sandbox:
+//!   holding `Native` implies `Network`'s grants (sandbox spec §2.2), and
+//!   neither native realization has a dataplane (`--network none` for the
+//!   container, no network device in the microVM), so both deliver exactly
+//!   an empty allowlist.
 //!
 //! The S-catalogue (sandbox spec §6) is machine-readable beside this crate's
 //! conformance suite, in `tests/support/mod.rs`.

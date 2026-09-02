@@ -108,8 +108,9 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
             transport,
             self_node,
         });
-        // Drive rebalancing and tombstone reclamation in the background, holding a
-        // `Weak` so the loop exits once the last store handle is dropped (spec §7).
+        // Drive rebalancing, the tombstone anti-entropy pull, and the release of
+        // sweep bookkeeping in the background, holding a `Weak` so the loop exits
+        // once the last store handle is dropped (spec §7).
         inner
             .system
             .launch(Box::pin(crate::reconcile::reconcile_loop(Arc::downgrade(
@@ -282,7 +283,11 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
         }
         let members = self.inner.system.serving_members();
         let owners = placement::owners(&members, ns, id, self.r());
-        let need = self.w().min(owners.len().max(1));
+        // §3 / B3: "durably present" means the durability target is met — at
+        // least W confirmed copies, the same floor `put` refuses to ack below.
+        // With fewer than W candidate owners the answer is `false`, not a quorum
+        // of whatever is left, which would report a one-copy blob as durable.
+        let need = self.w();
 
         let mut present = 0usize;
         for owner in owners {
@@ -347,9 +352,11 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
             }
         }
 
-        // If this node anchors the namespace, begin tracking sweep completion so the
-        // tombstone is retained until every member-at-anchor has swept or reached a
-        // terminal state (spec §5.3, B7). Reclamation runs in the reconcile loop.
+        // If this node anchors the namespace, record which members acked their
+        // sweep (spec §5.3, B7). Only the coordinator records, and only when it is
+        // itself an anchor owner; the bookkeeping is released in the reconcile loop
+        // once every member-at-anchor has swept or reached a terminal state. The
+        // tombstone itself is never reclaimed (spec §10).
         if anchor_owners.contains(&self.inner.self_node) {
             self.inner.anchors.anchor(ns, members.iter().copied());
             for node in swept {

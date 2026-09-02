@@ -18,7 +18,7 @@
 //! Beyond the event fold, a grain composes **facets** (spec §7.12) by declaring
 //! `type Facets`: the [`Kv`] map (§7.13), the [`Ws`] workspace directory
 //! (§7.11), the SQL database (§7.14, behind the `sql` cargo feature), the
-//! [`Alarm`] durable timer (§16), and the [`Workflow`] step memo (§16). A
+//! [`Alarm`] durable timer (§7.16), and the [`Workflow`] step memo (§7.17). A
 //! handler writes through the compile-time-gated `ctx` accessors —
 //! [`kv()`](GrainCtx::kv), [`ws()`](GrainCtx::ws), `sql()`,
 //! [`alarm()`](GrainCtx::alarm), [`workflow()`](GrainCtx::workflow) — and all of a

@@ -62,6 +62,7 @@ use crate::journal::AppendOutcome;
 use crate::journal::DynGrainJournal;
 use crate::journal::GrainJournalError;
 use crate::journal::Seq;
+use crate::subscription::CloseSink;
 use crate::subscription::RecordBatch;
 use crate::subscription::SUB_BUFFER;
 use crate::subscription::Subscribe;
@@ -809,7 +810,7 @@ impl<G: Grain> Host<G> {
     /// Called after every commit and at the end of rehydration, so the timer always
     /// reflects the durable form (**G3**).
     fn arm_alarm(&mut self, ctx: &Ctx<Host<G>>) {
-        // Keep the per-shard index current before (re)arming the local timer (§16).
+        // Keep the per-shard index current before (re)arming the local timer (§7.16).
         self.sync_alarm_index(ctx);
         self.alarm_epoch = self.alarm_epoch.wrapping_add(1);
         let Some(due_nanos) = self.facets.alarm_due() else {
@@ -932,13 +933,19 @@ impl<G: Grain> Handler<Subscribe<G>> for Host<G> {
         let (tx, rx) = async_channel::bounded::<Arc<RecordBatch>>(SUB_BUFFER);
         let sink = msg.sink;
         ctx.system().launch(Box::pin(async move {
-            // Ends when the host drops `tx` (deactivation, §10) or the sink is
-            // gone; either way the subscriber re-subscribes and backfills (§7.9).
+            // Ends when the host drops `tx` (a lag-drop, deactivation, or a
+            // forced step-down, §7.9/§10) or the sink is gone. Dropping `tx`
+            // alone would end only this task: the sink, spawned on the
+            // subscriber's node, would keep the subscriber's stream open and
+            // silent. So the close is told to the sink explicitly, and the
+            // subscriber observes its stream end, re-subscribes, and backfills
+            // (§7.9). A sink already gone dead-letters the close, which is fine.
             while let Ok(batch) = rx.recv().await {
                 if sink.tell((*batch).clone()).await.is_err() {
-                    break;
+                    return;
                 }
             }
+            let _ = sink.tell(CloseSink).await;
         }));
         self.sinks.push(tx);
         Subscribed { head: self.head }

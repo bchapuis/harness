@@ -91,10 +91,13 @@ impl<G: Grain> Message for Subscribe<G> {
     const MANIFEST: Manifest = Manifest::new("granary.Subscribe");
 }
 
-/// Stop a [`RecordSink`] that was spawned but never registered (spec §7.9): the
-/// `subscribe` error path tells it this so the actor does not linger until system
-/// shutdown (a registered sink instead stops itself when its channel closes).
-/// Local-only — sent by the spawning node, never over the wire.
+/// Stop a [`RecordSink`] (spec §7.9), closing the subscriber's stream. Two
+/// senders: the `subscribe` error path, for a sink spawned but never registered
+/// (so the actor does not linger until system shutdown), and the host's
+/// forwarder, once the host has dropped the sink — a lag-drop, hibernation, a
+/// move, or a forced step-down — so the subscriber observes its stream close
+/// and re-subscribes rather than waiting on a push that will never come. The
+/// host may lead the grain's shard from another node, so this crosses the wire.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CloseSink;
 
@@ -138,11 +141,13 @@ impl<G: Grain> RecordSink<G> {
 impl<G: Grain> Actor for RecordSink<G> {
     type System = G::System;
 
-    /// Accept pushed batches over the network: the host that leads the grain's
-    /// shard may be another node (§5.2), so this is the deserialization
-    /// allowlist entry for `RecordBatch` (actor §5, §15).
+    /// Accept pushed batches, and the close, over the network: the host that
+    /// leads the grain's shard may be another node (§5.2), so these are the
+    /// deserialization allowlist entries for `RecordBatch` and [`CloseSink`]
+    /// (actor §5, §15).
     fn register(registry: &mut HandlerRegistry<Self>) {
         registry.accept::<RecordBatch>();
+        registry.accept::<CloseSink>();
     }
 }
 

@@ -41,7 +41,8 @@ and one node's harness — host actor, session actors, and the three seams:
   nor a filesystem. It is durable: a new owner recovers a grain's head from a
   quorum on activation (§8, G14).
 - **Sandbox** — one private workspace directory per session under
-  `--data/workspaces`, where the `shell` tool runs.
+  `--data/workspaces/<node-id>/`, keyed by the grain, where the `shell` tool
+  runs.
 
 Sessions are placed by rendezvous hashing over the members every node
 currently considers serving. The gateway holds a `GrainRef` per session and the
@@ -144,8 +145,8 @@ container runtime required.
 Each node logs its bootstrap and then the cluster's life on stderr:
 
 ```
-[node-2] transport 127.0.0.1:7402, data ./harness-data, model claude-sonnet-4-6
-[node-2] cluster ready (leader elected)
+[node-2] joined (voter 2/3), data ./harness-data, model claude-sonnet-4-6
+[node-2] cluster ready (leader elected) after 1.2s
 [node-2] hosting grains; the public edge is harness-gateway (a cluster client). No client-facing listener on this node.
 ```
 
@@ -217,7 +218,8 @@ A session survives the machine that was running it.
 1. Submit a long-ish turn, e.g.
    `Write a fibonacci script, run it for n=1..20, and summarize the timing.`
 2. Find the owner: the node whose stderr shows
-   `RunStarted { session: SessionId("demo"), … }`.
+   `RunStarted { session: SessionId("alice/demo"), … }` (the gateway scopes
+   the session under its tenant, so the grain is `alice/demo`).
 3. Kill that process (`Ctrl-C` or `kill <pid>`).
 4. Watch the survivors: within a few seconds (SWIM defaults: 1s probes, 3s
    suspicion) they log `Suspected { … }` then `Unreachable { … }`, and
@@ -391,17 +393,19 @@ over HTTP — and needs no API key.
 | this deployment | agentic harness spec |
 |---|---|
 | `--data/grains`, a quorum append per grain fenced by the shard term | the fenced, per-session journal (§6.1–§6.2, §7.2); the journal **is** the session (§2.1) |
-| killing a node, `:retry` | caller-driven resumption (§7.5), idempotent turns (H7) |
+| killing a node, then re-issuing the same `turn` id over HTTP | caller-driven resumption (§7.5), idempotent turns (H7) |
 | the gateway's `GrainRef` reaches any session | placement is routing, not a lease (utilities spec §2.3); exclusivity lives in the fence |
-| `--data/workspaces/<session>` | the sandbox seam (§5.3); working state, not session state (§5.5) |
+| `--data/workspaces/<node-id>/…`, one directory per session grain | the sandbox seam (§5.3); working state, not session state (§5.5) |
 | `assistant` → `delegate` → `worker` | delegation with budget carve-outs (§8, §9.1) |
 | stderr `RunStarted`/`ModelCompleted`/`RunEnded`/… plus membership transitions | the observability stream (§10.4) |
 
 ## Limitations
 
 - **The transport is plaintext.** Fine on loopback; the transport supports
-  mutual TLS (`TcpConfig.tls`) but this deployment does not provision
-  certificates. Do not point the roster across untrusted networks.
+  mutual TLS (`Encryption::MutualTls`, the `encryption` field of `TcpConfig`),
+  but this deployment names `Encryption::PlaintextTrusted`, exposes no flag for
+  the other, and provisions no certificates. Do not point the roster across
+  untrusted networks.
 - **`--sandbox` must be chosen explicitly; there is no unconfined mode.** Pass
   `--sandbox docker --sandbox-image <ref>` (e.g. `alpine:3.20`) to run `shell`
   inside a per-session OCI container, via `harness-sandbox`'s `Native` tier:

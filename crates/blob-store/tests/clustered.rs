@@ -241,6 +241,43 @@ fn a_put_below_write_quorum_is_refused() {
 }
 
 #[test]
+fn has_reports_false_below_write_quorum() {
+    // §3 / B3: `has` answers "durably present" — at least W confirmed copies, the
+    // same floor `put` refuses below. Store a blob on all R=3 owners, then
+    // partition A alone: its serving set shrinks to itself, so only one owner can
+    // confirm a copy. A's own copy is real, but one copy is not W=2 of them, so
+    // `has` must say false rather than lower the bar to the owners left.
+    let sim = Simulation::new(10);
+    let (net, stores, _dirs) = cluster(&sim);
+    let ns = Namespace::new(b"under-quorum-has".to_vec());
+    let bytes = b"present on one, durable on none".to_vec();
+
+    let id = drive(&sim, Duration::from_secs(5), {
+        let (store, ns, bytes) = (stores[0].clone(), ns.clone(), bytes.clone());
+        async move { store.put(&ns, bytes).await }
+    })
+    .expect("put acked at W");
+    sim.run_for(Duration::from_secs(3)); // straggler drain + reconcile: all three hold it
+    assert!(
+        stores[0].local().present(&ns, &id),
+        "precondition: A holds its own copy",
+    );
+
+    net.partition(&[A], &[B, C]);
+    sim.run_for(Duration::from_secs(2)); // SWIM marks B and C unreachable on A
+
+    let present = drive(&sim, Duration::from_secs(5), {
+        let (store, ns) = (stores[0].clone(), ns.clone());
+        async move { store.has(&ns, &id).await }
+    });
+    assert_eq!(
+        present,
+        Ok(false),
+        "one reachable copy is below W=2, so the blob is not durably present",
+    );
+}
+
+#[test]
 fn a_deleted_namespace_resolves_nowhere_and_refuses_puts() {
     // B7: delete_namespace fans a tombstone cluster-wide; afterwards every node
     // returns Deleted for a get and refuses a put back into the namespace.

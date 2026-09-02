@@ -35,7 +35,9 @@ pub type DispatchFn<A> = fn(
 ) -> Result<(), CallError>;
 
 /// The dispatch entry for `(A, M)`. Decodes `M` from `payload` with `codec`
-/// (rejecting bad input as `CallError::Serialization`), then enqueues it.
+/// (rejecting bad input as `CallError::Serialization`), then enqueues it. Every
+/// failure path resolves `reply` before returning, so the caller sees the
+/// rejection as its own error (spec §8) rather than a cancelled channel.
 fn dispatch_entry<A, M>(
     codec: &dyn Codec,
     payload: &[u8],
@@ -46,7 +48,14 @@ where
     A: Handler<M>,
     M: Message,
 {
-    let msg: M = actor_serialization::decode(codec, payload)?;
+    let msg: M = match actor_serialization::decode(codec, payload) {
+        Ok(msg) => msg,
+        Err(err) => {
+            let err = CallError::from(err);
+            reply.fail(err.clone());
+            return Err(err);
+        }
+    };
     mailbox.enqueue_remote::<M>(msg, reply)
 }
 

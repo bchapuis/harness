@@ -20,6 +20,7 @@ use std::time::Duration;
 use actor_cluster::DowningPolicy;
 use actor_cluster::RaftConfig;
 use actor_cluster::SwimConfig;
+use actor_core::Clock;
 use actor_core::Event;
 use actor_core::NodeId;
 use actor_core::Spawner;
@@ -333,6 +334,7 @@ fn await_journal(
     ready: impl Fn(&[RecordBody]) -> bool + Send + Sync + 'static,
 ) -> Vec<RecordBody> {
     let session = harness.session(kind, session.clone()).unwrap();
+    let clock = sim.clock();
     drive(sim, settle, async move {
         loop {
             if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
@@ -342,6 +344,11 @@ fn await_journal(
                     return bodies;
                 }
             }
+            // Yield virtual time between polls. A `tail` served by a local
+            // leader completes without a timer, so a poll loop that never
+            // sleeps keeps the executor's ready queue non-empty and the clock
+            // never advances to the events the predicate is waiting for.
+            clock.sleep(Duration::from_millis(100)).await;
         }
     })
 }

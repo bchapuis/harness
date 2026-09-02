@@ -34,10 +34,10 @@
 //!
 //! The header carries a magic, the **frame layout's** revision and the **checksum
 //! kind** — this crate's own secrets — and a **record-schema** revision that belongs
-//! to the caller and that this crate stores and returns without interpreting. That
-//! last field is the load-bearing one: a `Wal<T>`'s records are postcard, which is
-//! positional and has no field names, so `T` cannot gain a field and its revision has
-//! nowhere to live except outside the payload.
+//! to the caller and that this crate admits against the caller's window and never
+//! interprets. That last field is the load-bearing one: a `Wal<T>`'s records are
+//! postcard, which is positional and has no field names, so `T` cannot gain a field
+//! and its revision has nowhere to live except outside the payload.
 //!
 //! [`open`](Wal::open) therefore takes the caller's [`compat::Window`] and does the
 //! refusing itself, rather than exposing the header for a caller to check.

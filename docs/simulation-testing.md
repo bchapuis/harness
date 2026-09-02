@@ -317,8 +317,11 @@ checked by `tests/corpus_keys.rs`:
 
 The two kinds fail differently: a scenario failure names a sequence you can read,
 a sweep failure names a seed you have to replay. Separate binaries keep that
-distinction legible, and keep a slow sweep from sitting between you and a fast
-scenario suite.
+distinction legible, keep a slow sweep from sitting between you and a fast
+scenario suite, and give nextest a name to filter on: `binary(/swarm/)` is how
+`.config/nextest.toml` keeps every sweep out of a plain `cargo nextest run`
+(see [The three runs](#the-three-runs)), so the `*swarm.rs` name is
+load-bearing rather than a convention.
 
 Two organizing axes are both allowed, which is what clause 2 is for. Most crates
 name a sweep file after its **area** — `grain_swarm.rs`, `sql_swarm.rs`,
@@ -326,7 +329,11 @@ name a sweep file after its **area** — `grain_swarm.rs`, `sql_swarm.rs`,
 the same workload. `actor-simulation` instead hoists every reproducibility sweep
 in the crate into `conformance_determinism.rs`, by **shape**, so there is one
 file to point at and call the §18.1 determinism gate. Either is fine; mixing
-them within one crate is not.
+them within one crate is not. The nextest filter follows the file name, so the
+two axes differ in one observable way: a `*swarm.rs` reproducibility sweep
+stays out of the default profile with its invariant twin, while
+`conformance_determinism.rs` is not `binary(/swarm/)` and runs in the edit loop
+at `sweep_seeds` width.
 
 Clause 3 exists because a `scenario_sweep` has no workload to pair with and
 reads as narrative, so it stays with the scenarios it belongs to.
@@ -343,6 +350,11 @@ site declares a cost class and the *run* decides the width:
 | `sweep_seeds`    | 8           | ordinary sweeps                                |
 | `slow_seeds`     | 1           | seconds per seed (disk, SQL, machine bindings) |
 | `coverage_seeds` | declared    | coverage assertions — never narrowed           |
+
+The cost class sizes a sweep that runs. Whether a sweep runs at all is the run
+tier's decision, made by the nextest profile rather than by the sweep (see
+[The three runs](#the-three-runs)): a plain `cargo nextest run` executes no
+`*swarm.rs` binary, at any width.
 
 Sizing is **deterministic on purpose**. Deciding width from a wall clock would
 make the seeds that ran depend on the machine that ran them, which spec §18.1
@@ -361,13 +373,30 @@ Warm the binary first — a cold start is ~0.6s and will swamp a cheap sweep.
 
 ## The three runs
 
-| run   | seeds                          | job                                 |
-|-------|--------------------------------|-------------------------------------|
-| local | a few, by cost class           | fast feedback                       |
-| CI    | from 0, the declared width     | regression: the pinned corpus       |
-| soak  | from a fresh base, many        | discovery: seeds nobody has run     |
+| run   | sweeps run   | seeds                      | job                             |
+|-------|--------------|----------------------------|---------------------------------|
+| local | on request   | a few, by cost class       | fast feedback                   |
+| CI    | all          | from 0, the declared width | regression: the pinned corpus   |
+| soak  | all          | from a fresh base, many    | discovery: seeds nobody has run |
 
-Controlled by two environment variables:
+Which sweeps a run executes is nextest's decision, in `.config/nextest.toml`.
+`[profile.default]` filters out `binary(/swarm/)` together with the other
+suites measured too slow for the edit loop (`native.rs`, `quickjs.rs`,
+`disk_rounds.rs`, `store_oracle.rs`), so a plain `cargo nextest run` compiles
+every `*swarm.rs` binary and runs none of them — about 350 s of serial sweep
+time, measured out. The sweeps run four ways: `cargo nextest run -E
+'binary(/swarm/)'` runs just the sweeps at cost-class width;
+`cargo nextest run -p <crate> --ignore-default-filter` runs an excluded suite
+when it is the one being edited; `cargo nextest run --profile ci` runs `all()`
+with `fail-fast = false`, so one sweep failure does not hide what the rest of
+the corpus would have said, and is what CI runs; plain `cargo test` knows
+nothing of the filter, and is what `soak.yml` drives. The filter matches the
+binary name, not the helper, so `actor-simulation`'s reproducibility sweeps in
+`conformance_determinism.rs` run in the default profile at `sweep_seeds`
+width.
+
+How many seeds a sweep that runs takes is controlled by two environment
+variables:
 
 - `SWARM_SEEDS=<n>` — exactly `n` seeds, whatever the class. May exceed the
   declared width; that is how a soak asks for more than the corpus holds.
@@ -436,15 +465,19 @@ runs out of budget makes no claim rather than a false one.
 A background loop that polls for as long as its node lives has something in
 flight at *any* stopping point, so a quiescence assertion over it fails on a
 fraction of seeds no matter how long the runner waits. Granary's alarm driver
-sweeps its shard's index every 500 ms (`ALARM_DRIVE_INTERVAL`), and
-`blob-store`'s reconcile loop probes owners continuously, and both break the same
-two default checkers — but they do not deserve the same remedy.
+sweeps its shard's index every 500 ms (`ALARM_DRIVE_INTERVAL`) and breaks two
+default checkers; `blob-store`'s reconcile loop probes owners continuously and
+breaks one of them — and the two checkers do not deserve the same remedy.
 `no-silent-loss` is *entirely* a quiescence claim, so a workload over such a
-subsystem drops it whole, which both swarms do. `serial-execution` is two claims
-in one: `observe` asserts no reentrant dispatch, which is real safety and holds
-fine, and only `at_quiescence` asserts nothing is left open. Dropping it whole
-would throw away the safety half, so `alarm_swarm.rs` wraps the real checker and
-overrides the final call alone. Read a failing checker before deleting it: the
+subsystem drops it whole, which both `alarm_swarm.rs` and `blob-store`'s
+`swarm.rs` do. `serial-execution` is two claims in one: `observe` asserts no
+reentrant dispatch, which is real safety and holds fine, and only
+`at_quiescence` asserts nothing is left open. `blob-store`'s swarm keeps it
+whole; only the alarm driver, which re-activates grains forever, leaves a
+dispatch open at an arbitrary stopping point, and dropping the checker whole
+would throw away the safety half, so `alarm_swarm.rs` wraps the real one in
+`NotReentrant` and overrides the final call alone. Read a failing checker
+before deleting it: the
 question is not "does this subsystem satisfy it" but "which of its claims does
 it satisfy". Dropping a quiescence claim stays honest only while the workload
 awaits every op it issues to an outcome, which is what keeps the data path's
@@ -452,8 +485,10 @@ no-loss covered with the checker gone.
 
 ## The regression corpus
 
-`crates/actor-simulation/corpus.txt` records every seed that ever failed, keyed
-by workload name:
+`crates/actor-simulation/corpus.txt` holds representative failing seeds, pruned
+per workload and keyed by workload name — a collecting soak reports one finding
+a hundred times over, and a few seeds per workload guard it as well as all of
+them:
 
 ```
 singleton-chaos/leader 900006  # split-brain singleton after heal
@@ -519,11 +554,13 @@ every seed *except the first*. Seed 0 has nothing to inherit.
 A durability claim is only as good as the reply it trusts, and three mistakes
 recur in workloads that assert one:
 
-- **A no-op commits nothing.** Granary's `Unchanged` reports what the serving
-  activation believed; it journals no record, so the output gate never held a
-  reply for it and a quorum-less recovery may have seeded that belief with an
-  uncommitted record (grain §7.5). Only outcomes that journal — `Created`, `Updated` —
-  are acknowledgements.
+- **A no-op commits nothing.** `tenancy`'s directory grain, built on granary,
+  answers a `Record` whose name is already owned with identical metadata with
+  `Recorded::Unchanged`. That reports what the serving activation believed; it
+  journals no record, so granary's output gate never held a reply for it and a
+  quorum-less recovery may have seeded that belief with an uncommitted record
+  (grain §7.5). Only outcomes that journal — `Recorded::Created`,
+  `Recorded::Updated` — are acknowledgements.
 - **A read is not a probe.** Granary's read contract is read-your-leader
   (relaxed), *not* linearizable under partition (grain §7.5). To observe committed
   state, issue a trivial *writing* command rather than a query.

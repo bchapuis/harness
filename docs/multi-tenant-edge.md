@@ -111,9 +111,13 @@ authorization gate.
 - **Gateway-as-cluster-client edge** — `harness-gateway` joins the transport as a
   non-voting member (`Harness::client` + `granary_client`), terminates tenant
   auth, and addresses session grains directly. SSE carries the live record stream.
+- **Clients of the edge** — two, both HTTP/SSE clients of the gateway and
+  nothing else: `harness-tui` (`crates/harness-tui`), a terminal chat UI that
+  authenticates as a tenant, lists its sessions, and streams a run's records; and
+  the VS Code extension in `clients/harness-vscode`, on the same endpoints.
 - **Not implemented** — per-tenant budgets and quotas, `session/delete` (forget
-  plus grain retire), token introspection, signed (HMAC/JWT) tokens, a WebSocket
-  transport, and a thin CLI as an HTTP client of the gateway.
+  plus grain retire), token introspection, signed (HMAC/JWT) tokens, and a
+  WebSocket transport.
 
 ## Tests
 

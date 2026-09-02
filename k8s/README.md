@@ -4,9 +4,9 @@ A three-node `harness-standalone` cluster (silos) as a **StatefulSet**, fronted
 by a **`harness-gateway` StatefulSet** that joins the same cluster as a
 non-voting, non-hosting **client** (the Orleans cluster-client pattern). Each pod
 has its own data volume and stable DNS name. Unlike the single-host `demo-agent.sh`,
-the nodes run on separate pods, and so potentially separate machines, and share
-nothing on disk. The journal replicates over the transport, a quorum append per
-grain (spec §7.2).
+the nodes run on separate pods, and so potentially separate machines. As there,
+they share nothing on disk: the journal replicates over the transport, a quorum
+append per grain (spec §7.2).
 
 ```
    HTTP  ─►  Service: harness-gateway  ─►  StatefulSet harness-gw (N clients)

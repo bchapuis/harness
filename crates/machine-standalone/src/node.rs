@@ -168,7 +168,21 @@ const RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(250);
 /// warning that describes the constant rather than the cluster.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Boot the node, open its doors, and host machines forever.
+/// The most a stop waits on the shard handoff. The handoff is bounded on its
+/// own (granary's `hand_off_leadership`: a fixed number of rounds, each one
+/// transfer round trip per led shard), so this is the backstop against a
+/// transport that stops answering, sized well inside the unit's 120 s stop
+/// budget (`deploy/systemd`).
+const HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a stop waits after announcing `Leaving` before releasing the
+/// transport: two SWIM rounds at this node's `probe_interval`, so the gossip
+/// carries the departure to peers and the control leader commits it.
+const LEAVE_GRACE: Duration = Duration::from_secs(4);
+
+/// Boot the node, open its doors, and host machines until SIGTERM or SIGINT,
+/// then stop gracefully: hand off every shard this node leads (granary spec
+/// §8.3), announce the departure, and release the transport.
 pub async fn run(opts: NodeOptions) -> Result<(), String> {
     if opts.id < 1 || opts.id > opts.nodes {
         return Err(format!(
@@ -287,7 +301,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         MACHINE_TYPE,
         config,
         Arc::new(move || Machine::new(Arc::clone(&provider))),
-        alarms,
+        alarms.clone(),
     );
 
     // The grade, not just the flag: what confinement a machine actually gets is
@@ -317,7 +331,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // so a machine death-watches it and reaps the attachment if this process
     // dies without detaching (machine §5.1).
     let door = system.spawn(FrontDoor).id().clone();
-    let authority = Arc::new(GrainAuthority::new(machines, door, DOOR_TIMEOUT));
+    let authority = Arc::new(GrainAuthority::new(machines.clone(), door, DOOR_TIMEOUT));
     for (port, name) in &opts.doors {
         let addr: SocketAddr = format!("{}:{port}", opts.bind_host)
             .parse()
@@ -338,8 +352,57 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     if opts.doors.is_empty() {
         eprintln!("[{node}] no --door given: hosting machines with no ingress");
     }
-    std::future::pending::<()>().await;
+    shutdown_signal().await;
+    // The graceful stop the systemd unit relies on (`deploy/systemd`): hand off
+    // every led shard while this node is still a full member, so the transfers
+    // are accepted, then announce the departure and release the transport in the
+    // order `leave`/`shutdown` document. Skipping the handoff is safe but turns a
+    // rolling restart into one failover per led shard — and here a failover
+    // deposes the activation owning a guest.
+    eprintln!("[{node}] stop signal received; handing off shard leadership");
+    let outstanding = tokio::time::timeout(HANDOFF_TIMEOUT, async {
+        machines.hand_off_leadership().await + alarms.hand_off_leadership().await
+    })
+    .await;
+    match outstanding {
+        Ok(0) => eprintln!("[{node}] handed off every led shard; leaving the cluster"),
+        Ok(n) => eprintln!(
+            "[{node}] {n} shard(s) kept their leader (no caught-up replica); leaving the cluster"
+        ),
+        Err(_) => eprintln!(
+            "[{node}] handoff still running after {HANDOFF_TIMEOUT:?}; leaving the cluster"
+        ),
+    }
+    system.leave();
+    tokio::time::sleep(LEAVE_GRACE).await;
+    system.shutdown();
     Ok(())
+}
+
+/// Resolve on SIGTERM or SIGINT (the unit's stop signal, and ctrl-c at a
+/// terminal). Without a SIGTERM handler the default disposition kills the
+/// process outright, and nothing above gets to run.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::SignalKind;
+        use tokio::signal::unix::signal;
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                term.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
 
 /// Accept SSH connections for one machine until the process ends. Each

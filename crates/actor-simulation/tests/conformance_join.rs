@@ -186,3 +186,45 @@ fn a_long_dead_member_is_tombstoned_then_pruned() {
     // A live cluster member is unaffected.
     assert_eq!(a.membership().self_status(), MemberStatus::Up);
 }
+
+#[test]
+fn the_lowest_id_joiner_takes_the_coordinator_role_and_admits_itself() {
+    // The coordinator's candidate set includes `Joining` members (spec §9.4.4
+    // item 3): a joiner whose id is lower than every founder's derives the role
+    // for itself and admits itself, which is what lets a fresh cluster bootstrap
+    // when no member is `Up` yet.
+    let (sim, net) = support::cluster(24, Some(brisk_swim()));
+    let a = net.join(NodeId::new(5));
+    let b = net.join(NodeId::new(6));
+    sim.run_for(Duration::from_millis(500)); // let the founders settle
+    let c = net.join_seeded(NodeId::new(1), &[NodeId::new(5)]);
+    assert_eq!(c.membership().self_status(), MemberStatus::Joining);
+
+    sim.run_for(Duration::from_secs(3));
+
+    assert_eq!(
+        c.leader(),
+        Some(NodeId::new(1)),
+        "the lowest-id joiner derives the coordinator role for itself"
+    );
+    assert_eq!(
+        a.leader(),
+        Some(NodeId::new(1)),
+        "the founders defer to the lowest-id joiner"
+    );
+    assert_eq!(
+        c.membership().self_status(),
+        MemberStatus::Up,
+        "the coordinator admits itself"
+    );
+    assert_eq!(
+        a.membership().status(NodeId::new(1)),
+        Some(MemberStatus::Up),
+        "the self-admission propagated to a founder"
+    );
+    assert_eq!(
+        b.membership().status(NodeId::new(1)),
+        Some(MemberStatus::Up),
+        "the self-admission propagated to the other founder"
+    );
+}

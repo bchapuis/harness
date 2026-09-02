@@ -21,13 +21,14 @@ use actor_cluster::SwimConfig;
 use actor_core::ActorSystem;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
 use granary::GrainRef;
 use granary::Granary;
 use granary::GranaryConfig;
 use granary::GranaryExt;
+use granary::Seq;
 
 use support::log::Append;
 use support::log::LogGrain;
@@ -88,12 +89,19 @@ fn drive<T: Send + 'static>(
 }
 
 fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, Vec<Granary<LogGrain>>) {
+    cluster_with(sim, config())
+}
+
+fn cluster_with(
+    sim: &Simulation,
+    config: GranaryConfig,
+) -> (SimNetwork, Vec<SimNode>, Vec<Granary<LogGrain>>) {
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2));
     let granaries: Vec<Granary<LogGrain>> = systems
         .iter()
-        .map(|system| system.granary::<LogGrain>(config()))
+        .map(|system| system.granary::<LogGrain>(config.clone()))
         .collect();
     sim.run_for(Duration::from_secs(3));
     (net, systems, granaries)
@@ -197,6 +205,65 @@ fn subscription_survives_a_leader_crash_mid_stream() {
         out,
         (0..N as i64).collect::<Vec<_>>(),
         "every record is reconstructed across the leader crash (G16)"
+    );
+}
+
+#[test]
+fn hibernation_closes_the_subscribers_stream() {
+    // §7.9: when the host drops its sink set — here by hibernating (§10) — a
+    // dropped sink *observes its stream close* and re-subscribes. The close has to
+    // be told to the sink, which lives on the subscriber's node: the host merely
+    // dropping its end would leave the stream open and silent, and a subscriber
+    // waiting on it would wait forever. The caller is a non-leader node, so the
+    // close crosses the wire as it does in production.
+    let sim = Simulation::new(5);
+    let idle_after = Duration::from_secs(2);
+    let (_net, systems, granaries) = cluster_with(
+        &sim,
+        GranaryConfig {
+            idle_after,
+            ..config()
+        },
+    );
+    let key = "log/hibernate";
+    let caller = surviving_caller(&sim, &systems, &granaries, key);
+    let system = systems[caller].clone();
+    let granary = granaries[caller].clone();
+
+    #[derive(Debug, PartialEq)]
+    enum Stream {
+        Closed,
+        Silent,
+    }
+
+    let outcome = drive(&sim, Duration::from_secs(30), async move {
+        let grain = granary.grain(key);
+        append_retry(&system, &grain, 1).await;
+        let sub = grain
+            .subscribe(Seq::new(1))
+            .await
+            .expect("subscribed to a resident grain");
+        // Nothing more is written, so the grain idles past `idle_after` and
+        // hibernates. Race the stream against a wait several times that long: a
+        // close is the expected outcome, and the timer winning is the hang.
+        let timeout = system.sleep(idle_after * 5);
+        futures::pin_mut!(timeout);
+        loop {
+            let recv = sub.records.recv();
+            futures::pin_mut!(recv);
+            match futures::future::select(recv, timeout.as_mut()).await {
+                futures::future::Either::Left((Ok(_), _)) => continue, // a stray batch
+                futures::future::Either::Left((Err(_), _)) => return Stream::Closed,
+                futures::future::Either::Right(_) => return Stream::Silent,
+            }
+        }
+    });
+
+    assert_eq!(
+        outcome,
+        Stream::Closed,
+        "the subscriber's stream must end when the host hibernates (§7.9), \
+         not go silent"
     );
 }
 

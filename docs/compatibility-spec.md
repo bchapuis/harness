@@ -51,7 +51,7 @@ The `compat` crate is the vocabulary and nothing else: it owns no format, reads 
 - **`Accepted`** — an inclusive range of revisions, one side of a check. Kept apart from `Window` because a peer announces what it can *read* and never what it will *write*: that choice is neither knowable nor trustworthy across a boundary.
 - **`Window`** — one build's policy at one boundary: the accepted range, the written revision, and the boundary's name. The name lives here rather than at each call so that no refusal can be raised without it.
 - **`Stamp`** — a magic and a revision written ahead of a body, for a boundary with bytes at rest. The stamp sits **outside** the body's own encoding: a positional format such as `postcard` cannot version itself, having no field name to make optional and no discriminant to grow, so reading the revision before any decoder runs is what makes refusal-instead-of-misparse possible. The magic travels with the window in one value, so a writer and a reader cannot disagree about it.
-- **`Incompatible`** — the refusal, in three shapes: `Unstamped` (not this format at all), `Version` (stamped, outside the range), and `Disjoint` (two ranges with nothing in common). No caller branches on the shape — they propagate and report it — so the wording lives in one place instead of at each boundary.
+- **`Incompatible`** — the refusal, in four shapes: `Unstamped` (not this format at all), `Version` (stamped, outside the range), `Disjoint` (two ranges with nothing in common), and `UnknownCritical` (stamped and inside the range, but carrying an extension its writer marked critical and this build does not know, §2.1). No caller branches on the shape — they propagate and report it — so the wording lives in one place instead of at each boundary.
 
 Two verdicts, and they are the same comparison:
 
@@ -163,7 +163,7 @@ This versions the **envelope**, not a facet's payload schema. Those evolve separ
 
 The write-ahead log's header (wal §2.1) is the one place a single stamp is split between the crate that owns the *layout* and the caller that owns the *records*. `wal.frame` and `wal.checksum` are the crate's: they say how a frame is shaped and which digest closes it. `actor.raft.log`, `granary.store.manifest`, and `granary.store.segment` are the callers': one per log, because the logs evolve independently — adding a field to a segment op says nothing about a manifest entry.
 
-`Wal<T>`'s records are `postcard`, so a caller's revision has nowhere to live but outside the payload (wal §2.1 rule 5). `wal` stores the field and returns it without interpreting it, so one crate need not know every caller's schema.
+`Wal<T>`'s records are `postcard`, so a caller's revision has nowhere to live but outside the payload (wal §2.1 rule 5). `wal` admits the field against the caller's window and never interprets it, so one crate need not know every caller's schema.
 
 `actor.raft.log` is the strictest boundary in the tree: its records are the consensus history, and a node that cannot read its own log cannot rejoin without losing committed state. **V4** admits no exception there.
 

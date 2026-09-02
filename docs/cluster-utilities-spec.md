@@ -25,7 +25,7 @@ A utility's behavior MUST be a deterministic function of the virtualized runtime
 
 ## 2. Placement (rendezvous hashing)
 
-Placement answers one question deterministically on every node: *given a key, which member owns it?* It is the primitive the singleton (§4) anchors on and the planned sharding layer (§7) maps shards with.
+Placement answers one question deterministically on every node: *given a key, which member owns it?* It is the primitive the singleton (§4) anchors on, through `owner`, and that the blob store places its `R` replicas and its namespace tombstone anchors with, through `top` over the serving set (blob §5.2, §5.3). Granary's sharding uses a placement of its own (§7).
 
 ### 2.1 The serving set
 
@@ -38,7 +38,7 @@ This is deliberately stricter than the receptionist's listing filter (core §13 
 2. `owner(set, key)` and `top(set, key, n)` MUST be **pure functions** of the candidate set and the key — no internal state, no clock, no entropy — so that two nodes holding identical serving sets compute identical owners for every key (core §18.1).
 3. The weight of a member for a key is normatively `mix64(fnv1a64(tag ‖ key))`, where `tag` is the member's node uid as 8 little-endian bytes, `fnv1a64` is FNV-1a (64-bit, offset basis `0xcbf29ce484222325`, prime `0x100000001b3`), and `mix64` is the splitmix64 finalizer. The hash is fixed: it MUST NOT vary across platforms, framework versions, or process runs. (`std::hash` and other unstable hashers are therefore ruled out; the finalizer compensates for FNV-1a's weak avalanche on short inputs.)
 4. `owner` is the member with the highest weight; a weight tie MUST resolve to the lowest `NodeId`. `top(n)` is the `n` distinct members in descending weight order, under the same tie rule; `top(1)` equals `owner`. An empty candidate set yields no owner.
-5. **Minimal movement.** Removing one member from the set MUST reassign only the keys that member owned; adding one MUST move only the keys it now owns. (This follows from per-member independent weights and is what makes the function suitable for shard placement, §7.)
+5. **Minimal movement.** Removing one member from the set MUST reassign only the keys that member owned; adding one MUST move only the keys it now owns. (This follows from per-member independent weights and is what makes the function suitable for replica placement, blob §5.2.)
 
 ### 2.3 Honesty
 
@@ -63,7 +63,7 @@ A group router spreads calls over the actors registered under one receptionist `
 
 ## 4. Cluster singleton
 
-One logical instance of an actor cluster-wide — for coordinators, schedulers, and (later) the sharding allocation owner. The instance's identity is decided by placement (§2); its discovery rides the receptionist (core §13).
+One logical instance of an actor cluster-wide — for coordinators and schedulers (granary allocates its shards from the leader of its own map group, not from a singleton, granary §7.6). The instance's identity is decided by placement (§2); its discovery rides the receptionist (core §13).
 
 1. Every node that may host the singleton runs a **manager** per singleton name. The manager observes **only its local membership view**, on a periodic virtual-clock tick (core §18.1), and MUST activate (spawn) the instance iff its view's **anchor** — `owner(serving set, name)` per §2 — is the local node. On activation it MUST register the instance under the singleton's receptionist key. (The anchor is hash-based uniformly in all four control-plane modes, core §9.4: it is a pure function of the view and needs no join-order or coordinator the view does not carry.)
 2. When a node's view stops naming it anchor, its manager MUST initiate **handoff** by delivering the configured **stop message** to the instance; the instance's handler SHOULD stop the actor promptly. The manager MUST NOT activate a new local instance while a previous local activation is still live — activations on one node are strictly sequential (the per-node half of U2). There is no external kill: the instance always winds down through its own handler.
@@ -109,6 +109,6 @@ The utilities are additionally held to the core testing contract (core §18.1, �
 
 ## 7. Future work
 
-- **Cluster sharding.** Entity actors addressed by `(entity type, entity id)`, grouped into a fixed number of shards by a static hash; shards map to nodes via §2's `owner`/`top` — hash-based placement, no coordinator, uniform across all four control-plane modes (core §9.4). A leader-committed shard-allocation table (control-plane metadata in the Raft log, core §9.4.3) is a possible leader-mode upgrade enabling load-aware allocation and graceful rebalancing.
+- **Cluster sharding.** Not provided here: this document defines no entity actors addressed by `(entity type, entity id)`, and no mapping of shards onto nodes through §2's `owner`/`top`. The tree's sharding layer is granary, which partitions each grain type's namespace into shards (granary §7.1), ranks a shard's replicas by a rendezvous order of its own — a different hash and sort from §2 rule 3 — and agrees the allocation through a per-type Raft group whose committed log is the shard map (granary §7.6). A sharding utility over §2 placement would therefore be a second placement beside granary's, not the one it uses.
 - **Distributed pub/sub.** Topic-based fan-out over per-node topic mediators discovered through the receptionist; at-most-once, matching core §7.2.
 - **Leader-anchored singleton.** A singleton whose activation is a committed log entry in the leader-based mode, trading the §4 convergence caveat for a quorum-gated activation.

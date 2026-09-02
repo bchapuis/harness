@@ -6,9 +6,10 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-/// A cluster node identity (spec §3.6). In production this carries a uid plus a
-/// network endpoint; under simulation the uid alone suffices, as the in-memory
-/// network routes by it.
+/// A cluster node identity (spec §3.6): a bare uid. It carries no network
+/// endpoint — the transport's address book maps a node to where it is reached,
+/// so the same id routes over TCP in production and over the in-memory network
+/// under simulation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct NodeId(u64);
 
@@ -113,8 +114,11 @@ impl std::fmt::Display for Path {
 ///
 /// Two actors are equal iff their `ActorId`s are equal; `Hash`/`Eq` on an
 /// `ActorRef` derive from this. The `node` makes locality classifiable without
-/// contacting another node (spec §4.3); the `incarnation` ensures a reused path
-/// on a fresh actor never collides with a resigned predecessor.
+/// contacting another node (spec §4.3); the `path` comes from a counter the
+/// host never reuses, so a fresh actor never collides with a resigned one; the
+/// `incarnation` is the owning **process** incarnation, so an id issued before a
+/// process restart never resolves against the actor that now holds the same
+/// path (see `LocalHost::with_incarnation`).
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct ActorId {
     node: NodeId,

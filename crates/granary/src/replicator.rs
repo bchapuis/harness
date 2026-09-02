@@ -500,7 +500,8 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// [`recover`](Self::recover) that REQUIRES the read quorum: `Err` instead of
     /// the local fallback. The migration and split drivers (§7.7) use this — a
     /// transfer or `Migrated`/`SplitCommitted` proposal must never be based on a
-    /// possibly-stale local view (G14/G15).
+    /// possibly-stale local view (G14/G15), and during a migration the confirmed
+    /// joint quorum is also what makes the write-back run at all.
     pub(crate) async fn recover_quorum(&self, grain: &GrainName) -> Result<Seq, GrainJournalError> {
         self.recover_with(grain, true).await
     }
@@ -1049,15 +1050,16 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// best snapshot on the joint quorum (a compacted grain's prefix exists only in
     /// the snapshot, so the records alone are not enough), then copy its blob area.
     ///
-    /// Uses the read-your-leader `recover`, not the quorum-required variant: a
-    /// migration only ever advances a `target` toward becoming `current`, gated by the
-    /// joint-quorum write-back and the final `Migrated` flip, so a pass on a
-    /// possibly-stale local view still cannot flip the set without a quorum, and it
-    /// does not retry-storm against a partitioned peer (§14). `recover_quorum` is
-    /// reserved for split/merge, where a transfer decision is irreversible before any
-    /// consensus gate (G15).
+    /// Uses the quorum-required `recover_quorum`, never the read-your-leader
+    /// `recover`: the write-back that lands the records on the target replicas runs
+    /// only when the joint read quorum is confirmed, and `recover`'s local fallback
+    /// returns `Ok` without it. A pass built on that fallback could complete — the
+    /// targets still answer the blob listing — and the driver would propose
+    /// `Migrated` for a set that never received the records, so a later loss of the
+    /// departed replicas would lose committed writes (G14). Short of the quorum the
+    /// pass fails instead, `target` stays, and the driver re-drives it next tick.
     pub(crate) async fn migrate_grain(&self, grain: &GrainName) -> Result<(), GrainJournalError> {
-        self.recover(grain).await?;
+        self.recover_quorum(grain).await?;
         if let Some((at, state)) = self.local.snapshot(self.shard, grain)
             && let AppendOutcome::NotLeader(_) | AppendOutcome::Unavailable(_) =
                 self.save_snapshot(grain, at, state).await
@@ -1790,6 +1792,235 @@ mod tests {
             write.now_or_never(),
             Some(StoreAck::Stored(Seq::new(1))),
             "the caller's handle did not observe the completed write",
+        );
+    }
+
+    // --- The migration barrier (§7.7, G14) ----------------------------------------
+
+    /// A consensus that always leads: placement is not what these tests exercise.
+    #[derive(Clone)]
+    struct AlwaysLeading(NodeId);
+
+    impl RaftConsensus for AlwaysLeading {
+        fn node(&self) -> NodeId {
+            self.0
+        }
+        fn cluster_voters(&self) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn configured_voters(&self) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn reconfigure_group(&self, _: GroupId, _: Vec<NodeId>) {}
+        fn create_group(&self, _: GroupId, _: Vec<NodeId>, _: Vec<NodeId>) {}
+        fn remove_group(&self, _: GroupId) {}
+        fn subscribe_commits(
+            &self,
+            _: GroupId,
+        ) -> async_channel::Receiver<actor_cluster::Committed> {
+            async_channel::bounded(1).1
+        }
+        async fn propose_to(&self, _: GroupId, _: Vec<u8>) {}
+        async fn transfer_group_leadership(&self, _: GroupId, _: NodeId) -> bool {
+            false
+        }
+        fn group_is_leader(&self, _: GroupId) -> bool {
+            true
+        }
+        fn group_term(&self, _: GroupId) -> Option<u64> {
+            Some(3)
+        }
+        fn group_leader(&self, _: GroupId) -> Option<NodeId> {
+            Some(self.0)
+        }
+        fn sleep(&self, _: Duration) -> actor_core::BoxFuture<'static, ()> {
+            Box::pin(async {})
+        }
+        fn launch(&self, _: actor_core::BoxFuture<'static, ()>) {}
+    }
+
+    /// Peers whose stores are empty and answer everything at once — except the
+    /// recovery read on the nodes in `unreadable`, which times out. The blob
+    /// listing on those same nodes still answers: the shape of a target replica
+    /// that was slow under `recover_timeout` yet reachable a moment later, the
+    /// case a pass that tolerated an unconfirmed read quorum would sail through.
+    struct PeersWithSlowReads {
+        unreadable: Vec<NodeId>,
+    }
+
+    impl ReplicaTransport for PeersWithSlowReads {
+        fn store_record(
+            &self,
+            _: NodeId,
+            _: u32,
+            _: GrainName,
+            after: Seq,
+            _: Term,
+            records: Vec<Vec<u8>>,
+            _: WriteKind,
+            _: Duration,
+        ) -> actor_core::BoxFuture<'static, Result<StoreAck, actor_core::CallError>> {
+            let head = Seq::new(after.value() + records.len() as u64);
+            Box::pin(async move { Ok(StoreAck::Stored(head)) })
+        }
+        fn read_grain(
+            &self,
+            node: NodeId,
+            _: u32,
+            _: GrainName,
+            _: Term,
+            _: Duration,
+        ) -> actor_core::BoxFuture<'static, Result<ReadOutcome, actor_core::CallError>> {
+            let answers = !self.unreadable.contains(&node);
+            Box::pin(async move {
+                if answers {
+                    Ok(ReadOutcome::Prepared(crate::store::ReadReply::default()))
+                } else {
+                    Err(actor_core::CallError::Timeout)
+                }
+            })
+        }
+        fn store_snapshot(
+            &self,
+            _: NodeId,
+            _: u32,
+            _: GrainName,
+            at: Seq,
+            _: Term,
+            _: Vec<u8>,
+            _: WriteKind,
+            _: Duration,
+        ) -> actor_core::BoxFuture<'static, Result<StoreAck, actor_core::CallError>> {
+            Box::pin(async move { Ok(StoreAck::Stored(at)) })
+        }
+        fn seal_range(
+            &self,
+            _: NodeId,
+            _: u32,
+            _: u64,
+            _: Duration,
+        ) -> actor_core::BoxFuture<'static, Result<(), actor_core::CallError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn store_blob(
+            &self,
+            _: NodeId,
+            _: u32,
+            _: GrainName,
+            _: BlobId,
+            _: Vec<u8>,
+            _: Duration,
+        ) -> actor_core::BoxFuture<'static, Result<BlobAck, actor_core::CallError>> {
+            Box::pin(async { Ok(BlobAck::Stored) })
+        }
+        fn fetch_blob(
+            &self,
+            _: NodeId,
+            _: u32,
+            _: GrainName,
+            _: BlobId,
+            _: Duration,
+        ) -> actor_core::BoxFuture<'static, Result<Option<Vec<u8>>, actor_core::CallError>>
+        {
+            Box::pin(async { Ok(None) })
+        }
+        fn has_blob(
+            &self,
+            _: NodeId,
+            _: u32,
+            _: GrainName,
+            _: BlobId,
+            _: Duration,
+        ) -> actor_core::BoxFuture<'static, Result<bool, actor_core::CallError>> {
+            Box::pin(async { Ok(false) })
+        }
+        fn sweep_blobs(
+            &self,
+            _: NodeId,
+            _: u32,
+            _: GrainName,
+            _: Option<Vec<BlobId>>,
+            _: Duration,
+        ) -> actor_core::BoxFuture<'static, Result<(), actor_core::CallError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn list_grains(
+            &self,
+            _: NodeId,
+            _: u32,
+            _: Duration,
+        ) -> actor_core::BoxFuture<'static, Result<Vec<GrainName>, actor_core::CallError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn list_blobs(
+            &self,
+            _: NodeId,
+            _: u32,
+            _: GrainName,
+            _: Duration,
+        ) -> actor_core::BoxFuture<'static, Result<Vec<BlobId>, actor_core::CallError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn launch(&self, _: actor_core::BoxFuture<'static, ()>) {}
+    }
+
+    /// A migrating shard led by `a`: `current` {a, b, c}, `target` {a, d, e}.
+    fn migrating_replicator(unreadable: Vec<NodeId>) -> Arc<QuorumReplicator<AlwaysLeading>> {
+        let [a, b, c, d, e] = [1, 2, 3, 4, 5].map(NodeId::new);
+        let mut sets = ReplicaSets::new(vec![a, b, c]);
+        sets.target = Some(vec![a, d, e]);
+        let control = Arc::new(Mutex::new(ShardControl::new(
+            sets,
+            crate::system::KeyRange {
+                start: 0,
+                end: u64::MAX,
+            },
+        )));
+        QuorumReplicator::for_shard(
+            AlwaysLeading(a),
+            GroupId(7),
+            0,
+            control,
+            stored_store(),
+            Arc::new(PeersWithSlowReads { unreadable }),
+            Arc::new(crate::blocking::InlineIo),
+            Deadlines {
+                quorum: Duration::from_secs(1),
+                recover: Duration::from_secs(1),
+            },
+        )
+    }
+
+    #[test]
+    fn a_migration_pass_short_of_the_joint_read_quorum_fails_instead_of_completing() {
+        // §7.6 step 3 / G14: `Migrated` may be proposed only after a complete pass,
+        // and a pass is complete only if the joint write-back ran — which it does
+        // only under a confirmed joint read quorum. With the target majority (d, e)
+        // not answering the recovery read, the read-your-leader fallback would
+        // have returned `Ok`, the targets still answer the blob listing, and the
+        // pass would have completed with the records on no target replica. The
+        // pass must fail instead, so `migrate_loop` keeps `target` and re-drives.
+        let [d, e] = [4, 5].map(NodeId::new);
+        let replicator = migrating_replicator(vec![d, e]);
+        let outcome = replicator
+            .migrate_grain(&GrainName::new("t", "k"))
+            .now_or_never()
+            .expect("every peer answers immediately");
+        assert!(
+            matches!(outcome, Err(GrainJournalError::Unavailable(_))),
+            "a pass whose joint read quorum was not confirmed completed: {outcome:?}",
+        );
+
+        // The same pass completes once the targets answer the read, so the failure
+        // above is the quorum's and not the fixture's.
+        let replicator = migrating_replicator(Vec::new());
+        let outcome = replicator
+            .migrate_grain(&GrainName::new("t", "k"))
+            .now_or_never()
+            .expect("every peer answers immediately");
+        assert!(
+            outcome.is_ok(),
+            "a pass with the joint read quorum confirmed failed: {outcome:?}",
         );
     }
 }

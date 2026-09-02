@@ -12,6 +12,7 @@
 //! `&mut self` in a handler is never aliased (spec §3.5, §6).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -30,6 +31,7 @@ use crate::message::Manifest;
 use crate::message::Message;
 use crate::reply::ReplyHandle;
 use crate::runtime::BoxFuture;
+use crate::runtime::Clock;
 
 /// A lending closure that runs one message: given the actor and its context, it
 /// returns the future that drives the handler.
@@ -97,11 +99,18 @@ impl<A: Actor> Mailbox<A> {
     }
 
     /// Request/response: enqueue `msg` by value and await its typed reply (spec
-    /// §4.4). No serialization occurs on this path.
-    pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, CallError>
+    /// §4.4), failing with [`CallError::Timeout`] once `within` of `clock`'s
+    /// time has elapsed (spec §14.2). No serialization occurs on this path.
+    pub async fn ask<M, C>(
+        &self,
+        msg: M,
+        clock: &C,
+        within: Duration,
+    ) -> Result<M::Reply, CallError>
     where
         A: Handler<M>,
         M: Message,
+        C: Clock,
     {
         let manifest = M::MANIFEST;
         // `AskIssued`/`AskOutcome` always pair, so a checker can prove every ask
@@ -119,10 +128,20 @@ impl<A: Actor> Mailbox<A> {
                 let _ = reply_tx.send(reply);
             })
         });
-        let result = match self.enqueue(manifest, run).await {
-            // Sender dropped without replying ⇒ the actor died mid-handling.
-            Ok(()) => reply_rx.await.map_err(|_| CallError::DeadLetter),
-            Err(err) => Err(err),
+        let call = async {
+            match self.enqueue(manifest, run).await {
+                // Sender dropped without replying ⇒ the actor died mid-handling.
+                Ok(()) => reply_rx.await.map_err(|_| CallError::DeadLetter),
+                Err(err) => Err(err),
+            }
+        };
+        // The deadline is applied here, inside the event bracket, so a timed-out
+        // ask still reaches its `AskOutcome` (invariant #1). It covers the whole
+        // call — waiting for mailbox space as much as the reply. A handler still
+        // running when it elapses finishes on its own; its reply has no taker.
+        let result = match clock.timeout(within, call).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(CallError::Timeout),
         };
         self.events.emit(Event::AskOutcome {
             actor: self.id.clone(),

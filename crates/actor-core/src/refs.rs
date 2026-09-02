@@ -132,8 +132,10 @@ impl<A: Actor> ActorRef<A> {
         A: Handler<M>,
         M: Message,
     {
+        // Both paths carry the deadline (spec §14.2): the local one on the
+        // system clock, the remote one inside `remote_ask`.
         match self.locate() {
-            Target::Local(mailbox) => mailbox.ask(msg).await,
+            Target::Local(mailbox) => mailbox.ask(msg, self.system.clock(), within).await,
             Target::DeadLetter => Err(CallError::DeadLetter),
             Target::Remote => {
                 let codec = self.system.codec();

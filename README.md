@@ -12,10 +12,10 @@ export ANTHROPIC_API_KEY=sk-ant-…
 ```
 
 That builds the workspace and boots a three-node cluster: three OS processes on
-your machine, one shared journal directory, each `shell` call inside a
-per-session container. In front of it sits the HTTP gateway on
-`127.0.0.1:8080`. Drive a session with `curl`, streaming the run as
-Server-Sent Events:
+your machine, each with its own data directory (the journal replicates between
+them; nothing is shared on disk), each `shell` call inside a per-session
+container. In front of it sits the HTTP gateway on `127.0.0.1:8080`. Drive a
+session with `curl`, streaming the run as Server-Sent Events:
 
 ```sh
 curl -N -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
@@ -26,15 +26,15 @@ curl -N -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
 
 ```
 event: records   …the transcript, one committed record at a time…
-event: outcome    {"outcome":{"Ok":{"content":"…Their sum is 55.","tokens":1843}}}
+event: outcome    {"Ok":{"content":"…Their sum is 55.","tokens":1843}}
 ```
 
 Now the part that matters. The script printed each node's pid. Kill the one
 hosting the session, then re-issue the **same** prompt (same `turn` id):
 within seconds the survivors detect the death, placement routes around it, the
-new owner folds the session back out of the shared journal, and the run
-finishes as if nothing happened. No coordinator, no session server, no state
-lost. That is the prototype.
+new owner recovers the journal's head from a quorum of its replicas, folds the
+session back out of it, and the run finishes as if nothing happened. No
+coordinator, no session server, no state lost. That is the prototype.
 
 `GET /v1/assistant/demo/records` shows what exists: the journal, one record per
 line. Sessions are durable and named. Quit, reboot everything, and prompt
@@ -56,9 +56,10 @@ authenticated form with opaque per-tenant tokens.
   whose only state is a fenced, append-only journal. Model, journal, and sandbox
   are injected seams (`crates/harness-anthropic` is the Anthropic one).
 - A **standalone deployment** (`crates/harness-standalone`): the binary the demo
-  runs. A file-backed journal fenced by an atomic `hard_link`, tokio/rustls HTTP
-  to the Messages API, and per-session workspaces behind an explicit
-  `--sandbox` choice, required and never defaulted: a `docker` container, a
+  runs. A file-backed, replicated journal fenced by a per-shard term written
+  beside it (`fences/<shard>`), tokio/rustls HTTP to the Messages API, and
+  per-session workspaces behind an explicit `--sandbox` choice, required and
+  never defaulted: a `docker` container, a
   `firecracker` microVM (Linux/KVM), or `durable` — the typed file tools over
   the same durable workspace, with no shell at all. There is no unconfined mode.
 - A **gateway-as-cluster-client edge** (`crates/harness-gateway`): an `axum`

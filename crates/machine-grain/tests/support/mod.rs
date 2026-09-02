@@ -5,12 +5,13 @@
 //! guarded by the drift test in `conformance_catalogue.rs`. `invariant: n` reads
 //! as "Mn".
 //!
-//! The machine's verification is spread across three crates — the grain's own
-//! suites here, the SSH front door's in `machine-frontdoor`, and the egress rule
-//! generator's unit tests in this crate's `src/net.rs` — so a pointer containing a
-//! `/` is resolved relative to `crates/` and a bare filename relative to this
-//! crate's `tests/`. Without that, M4 and M6 would have to be recorded as prose,
-//! which is the form that rots.
+//! The machine's verification is spread across three sites in two crates — the
+//! grain's own suites here, the SSH front door's in `machine-frontdoor`, and the
+//! egress rule generator's unit tests in this crate's `src/net.rs` — so each entry
+//! names test functions, and the drift test resolves a name to its file by
+//! searching for the function's definition across `machine-grain`,
+//! `machine-frontdoor`, and `machine-host`. Without that, M4 and M6 would have to
+//! be recorded as prose, which is the form that rots.
 
 #![allow(dead_code)]
 

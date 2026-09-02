@@ -233,12 +233,13 @@ pub trait BlobStore: Clone + Send + Sync + 'static {
 
     /// Reclaim an entire namespace: every blob stored under `ns` becomes
     /// permanently unresolvable (spec §5.3). Idempotent and monotonic: a
-    /// namespace, once deleted, stays deleted, and re-deleting is a no-op. Returns
-    /// once the tombstone is durably anchored (`W` of the namespace's `R`
-    /// tombstone owners, spec §5.3), after which it cannot be lost and is
-    /// disseminated to the rest of the cluster; from that point no surviving or
-    /// rejoining copy can resurrect a blob of `ns`. The bytes are swept in the
-    /// background.
+    /// namespace, once deleted, stays deleted, and re-deleting is a no-op. On the
+    /// `Clustered` tier the tombstone is fanned out to every serving member, each
+    /// of which records it durably and sweeps its bytes before acking; the call
+    /// returns once every member has acked, failed, or timed out, and succeeds
+    /// iff `W` of the namespace's `R` tombstone owners acked (spec §5.3), after
+    /// which the tombstone cannot be lost and no surviving or rejoining copy can
+    /// resurrect a blob of `ns`.
     fn delete_namespace(
         &self,
         ns: &Namespace,

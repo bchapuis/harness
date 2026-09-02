@@ -382,7 +382,8 @@ pub struct LeaderMode {
 /// The gossip-based control plane (spec §9.4.4): membership propagates
 /// peer-to-peer through SWIM and anti-entropy gossip, and the transitions that
 /// need a single actor are performed by the **coordinator** — a deterministic
-/// role, the lowest-address `up`, reachable member.
+/// role, the lowest-address reachable member that is neither terminal nor
+/// departing, joiners included (see [`Membership::coordinator`]).
 #[derive(Clone, Copy)]
 pub struct GossipMode {
     /// Detector parameters (full SWIM, spec §10).
@@ -712,14 +713,18 @@ impl Membership {
     }
 
     /// The gossip-based **coordinator** (spec §9.4.4 item 3): a deterministic
-    /// *role*, not an election — it falls to the lowest-address `up`, reachable
-    /// member of this node's view, this node included. Returns `None` only if
-    /// this node has excluded itself by leaving or being down and sees no other
+    /// *role*, not an election — it falls to the lowest-address member of this
+    /// node's view that is neither terminal nor departing (`Leaving`,
+    /// `Draining`) and is reachable, this node included. `Joining` members are
+    /// candidates too: that is what lets a fresh cluster bootstrap, since with
+    /// no `Up` member anywhere the lowest-address joiner takes the role and
+    /// admits itself (`advance_lifecycle`). Returns `None` only if this node
+    /// has excluded itself by leaving or being down and sees no other
     /// candidate.
     fn compute_coordinator(&self, members: &BTreeMap<NodeId, Member>) -> Option<NodeId> {
         let mut best = None;
         let ss = self.self_status();
-        if !ss.is_terminal() && ss != MemberStatus::Leaving {
+        if !ss.is_terminal() && ss != MemberStatus::Leaving && ss != MemberStatus::Draining {
             best = Some(self.node);
         }
         for (node, m) in members.iter() {

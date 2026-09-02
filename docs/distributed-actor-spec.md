@@ -162,6 +162,7 @@ impl<A: Actor> ActorRef<A> {
 
     /// Like `tell`, but a full local mailbox fails with `CallError::MailboxFull`
     /// at once instead of awaiting space (§6). Synchronous: it never awaits.
+    /// Local-only: a remote target yields `CallError::Unreachable`.
     pub fn try_tell<M>(&self, msg: M) -> Result<(), CallError>
     where A: Handler<M>, M: Message;
 
@@ -223,18 +224,18 @@ An `ActorId` is a single cluster-wide identity type, shared by every system:
 
 ```
 ActorId = {
-    node:        NodeId,        // cluster node identity (uid + endpoint)
+    node:        NodeId,        // cluster node identity: a bare uid; endpoints live in the transport's address book
     path:        Path,          // hierarchical name, e.g. /user/greeter
-    incarnation: u64,           // monotonic per path on the owning node
+    incarnation: u64,           // the owning process incarnation, stamped on every id it issues
 }
 ```
 
 It is `Clone + Eq + Hash + Send + Sync + Serialize + DeserializeOwned`, and it MUST:
 - Be unique within a cluster for the cluster's lifetime.
 - Let any node identify the target's **owning node** (the `node` field) and classify it as local or remote, from the id alone, without a network round-trip (the capability `resolve` depends on, §4.3).
-- Carry an **incarnation** that distinguishes a fresh actor from a resigned one that reused the same `path`.
+- Carry the owning **process incarnation**, so that an id issued before a process restart under the same `NodeId` never resolves against whatever actor the restarted process later places at the same `path`; it fails as `DeadLetter` instead (§8). Within one incarnation a `path` is never reused — paths come from a counter the node never rewinds — so the path alone distinguishes a fresh actor from a resigned one.
 
-The struct is closed and self-describing, so any id that deserializes is well-formed and locality-classifiable with no routing-table lookup. A few paths are **well-known** (for example, `/system/receptionist`) and resolvable on every node without prior introduction (§13).
+The struct is closed and self-describing, so any id that deserializes is well-formed and locality-classifiable with no routing-table lookup. The receptionist (§13) is not an actor and has no resolvable path: it is a handle obtained from `ActorSystem::receptionist`, available on every node without prior introduction.
 
 ---
 
@@ -278,8 +279,8 @@ For each actor, the system MUST observe exactly this order:
 
 ```
 1. id ← assign_id::<A>()          // reserve identity; MUST be unique; MUST NOT be observable yet
-2. mailbox created, executor started, actor bound; A::started() runs before first user message
-3. actor_ready(actor) → ActorRef  // id becomes resolvable; messages may now be delivered
+2. mailbox created and buffering, id resolvable, executor started; A::started() runs before first user message
+3. actor_ready(actor)             // A::started() returned Ok; buffered messages may now be processed
 4. … actor processes messages …
 5. resign_id(id)                  // on stop/failure; A::stopped() runs; releases all resources
 ```
@@ -290,7 +291,7 @@ Invariants (MUST):
 - `resign_id` runs exactly once, even when spawn fails between steps 1 and 3, in which case it follows `assign_id` directly.
 - Between `assign_id` and `actor_ready` the id is reserved but **not** deliverable; the system MUST dead-letter or buffer messages to it, never silently accept them.
 
-Steps 2 and 3 overlap in time: `spawn` is synchronous (§4.1), so `actor_ready` does not await the async `A::started`. Messages delivered after `actor_ready` queue in the mailbox while `started` runs; the normative ordering is *`started` completes before the first user message is processed*, not *`started` completes before `actor_ready`*.
+Steps 2 and 3 straddle the synchronous and asynchronous halves of a spawn: `spawn` is synchronous (§4.1) and returns the `ActorRef` at once, with the id resolvable and the mailbox buffering from that moment, while `actor_ready` is reported only after the async `A::started` has returned `Ok`. Messages sent before that point queue in the mailbox while `started` runs; the normative ordering is *`started` completes before the first user message is processed*, and `actor_ready` marks exactly that point.
 
 ### 4.3 Resolution: local vs remote
 
@@ -416,7 +417,7 @@ Rules:
 1. **One mailbox per actor.** Each local actor has a bounded mailbox (a multi-producer, single-consumer queue) feeding exactly one executor task.
 2. **Serial execution.** The executor processes one message to completion before the next. This is what makes `&mut self` sound (§3.5) and gives each actor a total order over the messages it observes.
 3. **Cooperative async.** A handler MAY `.await`. While it is suspended, the executor MUST NOT begin another message for that actor (no reentrancy). Handlers SHOULD avoid blocking the thread, and SHOULD offload blocking work.
-4. **Backpressure.** Mailboxes are bounded. When one is full, the system MUST apply a defined policy: `await` until space frees, or fail the send with `CallError::MailboxFull`. It MUST NOT drop messages silently. The two policies are separate calls: `tell` awaits, `try_tell` (§3.3) returns `CallError::MailboxFull` at once (local target).
+4. **Backpressure.** Mailboxes are bounded. When one is full, the system MUST apply a defined policy: `await` until space frees, or fail the send with `CallError::MailboxFull`. It MUST NOT drop messages silently. The two policies are separate calls: `tell` awaits, `try_tell` (§3.3) returns `CallError::MailboxFull` at once. `try_tell` is a local-only operation: a remote target yields `CallError::Unreachable`, never a send. A remote `tell` refused on the receiving node (a full mailbox, no live actor, no registration, or an undecodable payload) has no reply to carry the error back, so the receiving node MUST record the refusal on its event stream (§16).
 5. **Ordering guarantee.** Messages from a single sender to a single recipient arrive in send order (FIFO per directed pair). For a remote recipient this order is scoped to a single association (§7.2). The system guarantees no ordering across different senders. `tell` and `ask` from the same sender share this order.
 6. **Fairness.** The runtime SHOULD schedule executors fairly so that no ready actor starves.
 
@@ -554,10 +555,10 @@ reachability: reachable ⇄ unreachable             (orthogonal to every state a
 Every node holds a local **membership view**: one entry per member, `(NodeId, state, incarnation, stamp)`. Views update through the mode's dissemination channel (§9.4) and merge entry-wise by one rule, identical in every mode:
 
 1. **Authority stamp wins.** An entry carrying a higher **authority stamp** — the registry revision (registry-based, §9.4.2) or the log commit index (leader-based, §9.4.3) — replaces an entry with a lower or absent stamp. A mode's stamps come from a single logical writer, so they totally order its decisions; that order, not state rank, is what lets a *reversible* transition (`up ⇄ draining`) converge.
-2. **Otherwise, the lattice.** The higher incarnation wins; within one incarnation, the higher-ranked state on the monotonic ladder `joining < up < leaving < down < removed` wins. `up` is monotonic and `down` is terminal, so independently-reached views merge without conflict.
+2. **Otherwise, the lattice.** At equal stamp, the higher-ranked state on the monotonic ladder `joining < up < leaving < down < removed` wins; incarnation plays no part on this axis. `up` is monotonic and `down` is terminal, so independently-reached views merge without conflict.
 3. **`down` is absorbing.** No merge result — stamped or not — returns a `down` member to a live state under the same incarnation. An authority that wants the machine back admits it as a *new* member with a fresh `NodeId`.
 
-The reachability axis (§9.1) is not part of this merge: suspicion and refutation order by incarnation inside the detector (§10). In **static** and **gossip-based** mode no stamp is ever issued, so the merge reduces exactly to the lattice.
+The reachability axis (§9.1) is not part of this merge: suspicion and refutation order by incarnation inside the detector (§10), the higher incarnation winning and, within one incarnation, the more severe view. In **static** and **gossip-based** mode no stamp is ever issued, so the merge reduces exactly to the lattice.
 
 ### 9.3 Joining and leaving
 
@@ -628,7 +629,7 @@ The cluster self-hosts its source of truth as a **replicated log** coordinated t
 5. **Quorum loss** pauses the control plane only — no join, drain, or down commits until a quorum reforms — while existing members keep exchanging actor traffic on the last committed view.
 6. **Beyond membership.** The log MAY carry other control-plane decisions as opaque entries — singleton placement, shard allocation, cluster-wide configuration — giving them the same total order and failover. This specification normatively defines only the membership entries.
 7. **Runtime seams.** Consensus traffic rides the ordinary `Transport` (§7) as system messages, election and heartbeat timers come from `Clock`, and election-timeout jitter from `Entropy` (§4.6), so a leader-based cluster simulates deterministically (§18).
-8. **Leadership transfer (RECOMMENDED).** A group leader SHOULD be able to hand leadership to a named voter without waiting out an election timeout (Raft §3.10): it verifies that the target has replicated the leader's last entry, then invites it to stand for election immediately. The invitation MUST be refused by a target whose log is behind — such a target would lose the election it was invited to hold, so sending it costs a disrupted term and achieves nothing — and MUST be accepted only from the leader of the recipient's current term. Transfer is safe by construction and needs no new agreement: it starts an ordinary election, which still requires a quorum of votes, so it can move leadership but never split it, and initiating one does not itself end the leader's term. Its purpose is planned departure. Without it a node that leads many groups costs one full election timeout *per group* when it stops, which makes a rolling restart — the most frequent operation a production cluster performs — indistinguishable from that many simultaneous failures.
+8. **Leadership transfer (RECOMMENDED).** A group leader SHOULD be able to hand leadership to a named voter without waiting out an election timeout (Raft §3.10): it verifies that the target has replicated the leader's last entry, then invites it to stand for election immediately. The leader MUST NOT invite a target whose match index is behind the leader's last index — such a target would lose the election it was invited to hold, so inviting it costs a disrupted term and achieves nothing — and the invitation MUST be accepted only from the leader of the recipient's current term. Transfer is safe by construction and needs no new agreement: it starts an ordinary election, which still requires a quorum of votes, so it can move leadership but never split it, and initiating one does not itself end the leader's term. Its purpose is planned departure. Without it a node that leads many groups costs one full election timeout *per group* when it stops, which makes a rolling restart — the most frequent operation a production cluster performs — indistinguishable from that many simultaneous failures.
 9. **Heartbeat coalescing (RECOMMENDED).** A heartbeat is an empty append, and a node leading `G` groups sends one to each of `R-1` followers every heartbeat interval: `G × (R-1)` frames per interval carrying no data. Where `G` grows with the deployment — granary runs one group per shard (grain §8.2), and shard count is its elasticity knob (grain §7.7) — an implementation SHOULD batch the empty appends bound for one peer into a single frame, and their replies likewise. The batching MUST be framing only: each heartbeat is dispatched to its own group exactly as a lone append would be, so no group's state machine can observe the difference. An implementation SHOULD also send the batches **before** applying the tick's per-group outputs, so heartbeat latency does not grow with `G` — a heartbeat delayed behind `G` units of work is what turns a well-packed node into a source of spurious elections, which is the failure this item exists to prevent.
 10. **The first election is not the detector's business (RECOMMENDED).** The election timeout exists to notice a leader that *stopped*. A group that has never had one — no persisted term, no log, no snapshot — is detecting nothing, and an implementation SHOULD NOT make it wait out that timeout before its first campaign. This is not a micro-optimization: groups are created in sequence (a shard's group only exists once the allocation naming it commits), so a cold cluster pays the timeout once per stage, serially, before it can serve anything. A group that *does* hold persisted state keeps the full timeout — a voter rejoining a healthy group has no business campaigning early.
 
@@ -640,8 +641,8 @@ Membership and state propagate peer-to-peer through the **SWIM** protocol and an
 
 1. **Dissemination.** Each node periodically exchanges a membership digest with a peer chosen at random (via `Entropy`, §4.6) and merges by §9.2; updates also piggyback on detector traffic (§10) for infection-style spread.
 2. **Refutation.** Entries carry the member's incarnation; a node that sees a stale suspicion or state about itself increments its incarnation and gossips the override (§10).
-3. **Coordinator.** Transitions that need a single actor — admitting `joining → up`, finalizing `leaving → down` — are performed by the **coordinator**: a deterministic *role*, not an election — it falls to the lowest-address `up`, reachable member of each node's converged view. The coordinator acts only on a **locally stable, fully-reachable view** (every live member it can see is `reachable`), so it never transitions members while its own view is in flux — with one exception: applying the downing policy to an `unreachable` member (#4), which cannot be gated on full reachability because the node being downed is unreachable by definition. Two nodes that transiently both consider themselves coordinator cannot conflict: their decisions merge through the lattice, since `up` is monotonic and `down` terminal (§9.2).
-4. **Downing.** The detector drives `suspect → unreachable`; the configured **downing policy** (manual, timeout-based, or quorum-heuristic) decides `unreachable → down`, applied by the coordinator. A partition leaves each side seeing the other `unreachable`; the default policy MUST be conservative and MUST NOT auto-`down` across a partition (§18.5 #16).
+3. **Coordinator.** Transitions that need a single actor — admitting `joining → up`, finalizing `leaving → down` — are performed by the **coordinator**: a deterministic *role*, not an election — it falls to the lowest-address member of each node's converged view that is neither terminal (`down`, `removed`) nor departing (`leaving`, `draining`) and is `reachable`, `joining` members included, the deriving node itself among them while it is still `joining`. Admitting `joining` candidates is what lets a fresh cluster bootstrap: with no `up` member anywhere, the lowest-address joiner takes the role and admits itself along with its peers (#5). The coordinator acts only on a **locally stable, fully-reachable view** (every live member it can see is `reachable`), so it never transitions members while its own view is in flux — with one exception: applying the downing policy to an `unreachable` member (#4), which cannot be gated on full reachability because the node being downed is unreachable by definition. Two nodes that transiently both consider themselves coordinator cannot conflict: their decisions merge through the lattice, since `up` is monotonic and `down` terminal (§9.2).
+4. **Downing.** The detector drives `suspect → unreachable`; the configured **downing policy** (`DowningPolicy`: conservative, which never auto-downs and leaves `unreachable` to an operator, or timeout-based) decides `unreachable → down`, applied by the coordinator. A partition leaves each side seeing the other `unreachable`; the default policy MUST be conservative and MUST NOT auto-`down` across a partition (§18.5 #16).
 5. **Join:** a new node handshakes a configured seed → `joining`; the coordinator admits it to `up` on convergence.
 
 This mode chooses availability and partition tolerance over an instantaneously consistent view (§1.2): nodes may briefly disagree, and everything above membership — death watch (§12), the receptionist (§13) — is designed to tolerate that.
@@ -743,7 +744,7 @@ Remote watch works by sending a `Watch(id)` system message to the target's node;
 
 ## 13. Receptionist (service discovery)
 
-Actors are addressed by `ActorRef`, but a node needs a way to obtain the initial `ActorRef` for a remote service without hardcoding its `ActorId`. The **receptionist** is a well-known, cluster-replicated registry.
+Actors are addressed by `ActorRef`, but a node needs a way to obtain the initial `ActorRef` for a remote service without hardcoding its `ActorId`. The **receptionist** is a cluster-replicated registry, reached through a handle rather than addressed as an actor.
 
 ```rust
 pub struct Key<A> { id: &'static str, _marker: PhantomData<fn() -> A> }
@@ -758,10 +759,10 @@ impl Receptionist {
 `lookup` is synchronous: the listing is replicated local state (requirement 2), so it is a snapshot read with nothing to await.
 
 Requirements:
-1. The receptionist is a well-known actor (§3.6), resolvable on every node without prior introduction.
+1. The receptionist is not an actor and has no resolvable path (§3.6): it is a handle obtained from `ActorSystem::receptionist`, available on every node without prior introduction, and its registrations replicate over the `Receptionist` frame (§7.1).
 2. Registrations are **replicated** across the cluster and **eventually consistent**. A CRDT (an OR-Set keyed by registering node) is RECOMMENDED so that concurrent registrations merge without coordination.
 3. When a node goes `down` (§9.4), the receptionist MUST prune all registrations originating from it, and subscribers MUST receive an updated `Listing`. (The receptionist watches registered actors to drive this.)
-4. A `lookup` or `subscribe` listing MUST omit actors on a node that is not currently serving — one an operator has `draining` for maintenance (§9.4), or one that is `down`. Wherever a detector runs (§9.4), the listing SHOULD likewise omit actors on a node confirmed `unreachable`. Unlike a `down` node's registrations (pruned, requirement 3), a `draining` or `unreachable` node's registrations are **retained** and merely routed around — `resume` or recovered reachability restores them without re-registration. A drained node still answers a direct `ask`.
+4. A `lookup` or `subscribe` listing MUST omit actors on a node that is not currently serving — one an operator has `draining` for maintenance (§9.4), or one that is `down`. A node confirmed `unreachable` (§10) but not yet `down` stays listed: reachability is refutable, and only the down authority (§9.4) takes a node out of rotation. Unlike a `down` node's registrations (pruned, requirement 3), a `draining` node's registrations are **retained** and merely routed around — `resume` restores them without re-registration. A drained node still answers a direct `ask`.
 5. `subscribe` MUST deliver the current listing on subscription and a fresh listing on every change.
 6. `Key` is typed by actor type, so `lookup` and `subscribe` return correctly typed `ActorRef`s.
 
@@ -829,7 +830,7 @@ A conforming system SHOULD expose:
 - **Tracing:** propagate a trace/correlation context through envelopes, so a logical request can be followed across nodes.
 - **Lifecycle logging:** spawn and resign, membership transitions, downing decisions, and supervision actions, each at a defined, filterable level.
 
-The same events drive deterministic simulation: a simulator subscribes to this stream to check invariants (§18.5). A conforming system SHOULD emit, as structured events on a single (extensible) `Event` enum: `assign_id`/`actor_ready`/`resign_id` (§4.2), mailbox enqueue and dispatch (§6), every `ask` outcome (§14), membership and reachability transitions (§9 and §10), supervision decisions (§11), and `Terminated` deliveries (§12). Metrics and cross-node trace propagation are RECOMMENDED, not REQUIRED.
+The same events drive deterministic simulation: a simulator subscribes to this stream to check invariants (§18.5). A conforming system SHOULD emit, as structured events on a single (extensible) `Event` enum: `assign_id`/`actor_ready`/`resign_id` (§4.2), mailbox enqueue and dispatch (§6), every `ask` outcome (§14), membership and reachability transitions (§9 and §10), supervision decisions (§11), `Terminated` deliveries (§12), and inbound remote messages refused at delivery, with the refusing `CallError` (§6, §8) — the only trace a refused one-way `tell` leaves. Metrics and cross-node trace propagation are RECOMMENDED, not REQUIRED.
 
 ---
 
@@ -1007,10 +1008,14 @@ if let Some(greeter) = listing.first() {
 
 ```
 actor-core/             # Actor, Message, Handler, ActorRef, Ctx, ActorSystem,
-                         #   HandlerRegistry, Manifest, CallError (§3, §4, §14)
+                         #   HandlerRegistry, Manifest, CallError, the Clock/Entropy/Spawner
+                         #   seam, supervision, death watch, the receptionist, and the
+                         #   Event enum (§3, §4, §11 to §14, §16)
 actor-serialization/    # SerializationRequirement and the pluggable wire Codec (§5)
-actor-cluster/          # ClusterSystem: transport, membership control planes, SWIM, supervision,
-                         #   death watch, receptionist (§7 to §13). The reference ActorSystem.
+actor-cluster/          # ClusterSystem: transport, membership control planes, SWIM; forwards
+                         #   the Watch/Terminated/Receptionist frames that carry death watch and
+                         #   receptionist replication across nodes (§7 to §10, §12, §13).
+                         #   The reference ActorSystem.
 actor-runtime/          # Production seam: wall-clock Clock, OS-seeded Entropy,
                          #   multi-thread Spawner, mutual-TLS TCP Transport (§4.6, §7, §15)
 actor-simulation/       # TEST-ONLY. Virtual Clock/Entropy/Spawner + in-memory Transport

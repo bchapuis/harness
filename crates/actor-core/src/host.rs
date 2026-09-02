@@ -82,8 +82,15 @@ trait ErasedActor: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
 
     /// Dispatch an inbound remote message; an unregistered manifest fails the
-    /// reply with [`CallError::Unhandled`] (spec §4.4, the allowlist).
-    fn deliver(&self, codec: &dyn Codec, manifest: &str, payload: &[u8], reply: ReplyHandle);
+    /// reply with [`CallError::Unhandled`] (spec §4.4, the allowlist). The
+    /// returned error mirrors what `reply` was failed with, for the event stream.
+    fn deliver(
+        &self,
+        codec: &dyn Codec,
+        manifest: &str,
+        payload: &[u8],
+        reply: ReplyHandle,
+    ) -> Result<(), CallError>;
 }
 
 impl<A: Actor> ErasedActor for ActorEntry<A> {
@@ -91,12 +98,19 @@ impl<A: Actor> ErasedActor for ActorEntry<A> {
         self
     }
 
-    fn deliver(&self, codec: &dyn Codec, manifest: &str, payload: &[u8], reply: ReplyHandle) {
+    fn deliver(
+        &self,
+        codec: &dyn Codec,
+        manifest: &str,
+        payload: &[u8],
+        reply: ReplyHandle,
+    ) -> Result<(), CallError> {
         match self.registry.dispatch(manifest) {
-            Some(entry) => {
-                let _ = entry(codec, payload, reply, &self.mailbox);
+            Some(entry) => entry(codec, payload, reply, &self.mailbox),
+            None => {
+                reply.fail(CallError::Unhandled);
+                Err(CallError::Unhandled)
             }
-            None => reply.fail(CallError::Unhandled),
         }
     }
 }
@@ -336,7 +350,11 @@ impl LocalHost {
             .map(|entry| entry.mailbox.clone())
     }
 
-    /// Dispatch an inbound remote message to a local actor (spec §4.4).
+    /// Dispatch an inbound remote message to a local actor (spec §4.4). A
+    /// refusal always resolves `reply` with its error and is recorded as
+    /// [`Event::Undelivered`]: an `ask` learns of it through the reply, but a
+    /// one-way `tell` has no reply, and a message MUST NOT vanish without a
+    /// trace (spec §6 rule 4).
     pub fn deliver(
         &self,
         codec: &dyn Codec,
@@ -349,9 +367,19 @@ impl LocalHost {
             let actors = self.state.actors.lock().expect("actors mutex poisoned");
             actors.get(recipient).cloned()
         };
-        match entry {
+        let outcome = match entry {
             Some(entry) => entry.deliver(codec, manifest, payload, reply),
-            None => reply.fail(CallError::DeadLetter),
+            None => {
+                reply.fail(CallError::DeadLetter);
+                Err(CallError::DeadLetter)
+            }
+        };
+        if let Err(error) = outcome {
+            self.state.events.emit(Event::Undelivered {
+                actor: recipient.clone(),
+                manifest: manifest.to_string(),
+                error,
+            });
         }
     }
 
@@ -588,7 +616,13 @@ impl<A: Actor, C: Clock> Executor<A, C> {
         let mut step = Step::Start(actor);
         let end = loop {
             step = match step {
-                Step::Start(mut actor) => match actor.started(&self.ctx).await {
+                // A panic in `started` is a start failure, contained by the same
+                // executor boundary as a handler panic (spec §11.1).
+                Step::Start(mut actor) => match AssertUnwindSafe(actor.started(&self.ctx))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_panic| Err("started panicked".into()))
+                {
                     Ok(()) => {
                         // `ActorReady` fires once (spec §4.2); a restart re-runs
                         // `started` but the id stays resolvable, so it emits
@@ -628,7 +662,7 @@ impl<A: Actor, C: Clock> Executor<A, C> {
         match end {
             // Stop the instance, then release its identity (spec §4.2 step 5).
             End::Stop(actor, reason) => {
-                actor.stopped(reason).await;
+                stop_contained(actor, reason).await;
                 self.host.release(self.ctx.id(), reason.into()).await;
             }
             // No instance to stop: it was already stopped during a failed restart.
@@ -667,7 +701,7 @@ impl<A: Actor, C: Clock> Executor<A, C> {
             }
             SupervisionDecision::Restart => {
                 // The faulted instance stops with `Failed` first (spec §11.2).
-                actor.stopped(StopReason::Failed).await;
+                stop_contained(actor, StopReason::Failed).await;
                 match self.resolve_restart(fault) {
                     Some(fresh) => Step::Start(fresh),
                     None => Step::End(End::Released(TerminationReason::Failed)),
@@ -763,6 +797,14 @@ impl<A: Actor, C: Clock> Executor<A, C> {
             }
         }
     }
+}
+
+/// Run an actor's `stopped` hook with a panic contained (spec §11.1): the actor
+/// is already on its way out, so a panic there changes nothing about the stop —
+/// the id is still released and watchers still notified — and MUST NOT take the
+/// executor, and with it the node, down.
+async fn stop_contained<A: Actor>(actor: A, reason: StopReason) {
+    let _ = AssertUnwindSafe(actor.stopped(reason)).catch_unwind().await;
 }
 
 /// Apply the supervision directive for `fault`, including the restart window

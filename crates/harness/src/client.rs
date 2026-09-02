@@ -272,6 +272,20 @@ impl<S: HarnessSystem> Harness<S> {
             config: self.shared.config.clone(),
         })
     }
+
+    /// Hand every shard this node leads, across every kind it hosts, to another
+    /// replica before the node departs (granary spec §8.3): the sum of each kind's
+    /// [`Granary::hand_off_leadership`], so `0` means every led shard moved. Same
+    /// terms as the per-kind call — best-effort and bounded, a non-zero return is
+    /// information for the operator rather than an error — and a no-op for a
+    /// routing-only client, which leads nothing.
+    pub async fn hand_off_leadership(&self) -> usize {
+        let mut outstanding = 0;
+        for granary in self.shared.granaries().values() {
+            outstanding += granary.hand_off_leadership().await;
+        }
+        outstanding
+    }
 }
 
 /// The error of [`Harness::session`]: the named kind is in neither this node's

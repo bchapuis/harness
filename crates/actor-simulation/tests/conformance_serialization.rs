@@ -6,6 +6,7 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use actor_cluster::Authorizer;
 use actor_core::Actor;
@@ -25,9 +26,9 @@ use actor_serialization::JsonCodec;
 use actor_serialization::decode;
 use actor_serialization::encode;
 use actor_simulation::SimClock;
-use actor_simulation::SimNode;
 use actor_simulation::SimEntropy;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::SimSpawner;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
@@ -35,6 +36,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use support::Counter;
 use support::Get;
+use support::Greet;
 use support::Greeter;
 use support::Inc;
 
@@ -208,4 +210,31 @@ fn malformed_payload_is_a_serialization_error() {
         outcome,
         Err(actor_core::CallError::Serialization(_))
     ));
+}
+
+#[test]
+fn a_remote_ask_with_an_undecodable_payload_is_a_serialization_error() {
+    // The receiving node fails to decode the payload; the caller must learn
+    // that as `Serialization` (spec §8), not as a `DeadLetter` from a reply
+    // channel the receiver let drop.
+    let (sim, net) = support::cluster(3, None);
+    let node_a = net.join(NodeId::new(1));
+    let node_b = net.join(NodeId::new(2));
+
+    let outcome = sim.block_on(async move {
+        let greeter = node_a.spawn(Greeter::<SimNode>::new("Hello"));
+        node_b
+            .remote_ask(
+                greeter.id(),
+                Greet::MANIFEST,
+                b"not valid json".to_vec(),
+                Duration::from_secs(5),
+            )
+            .await
+    });
+
+    assert!(
+        matches!(outcome, Err(CallError::Serialization(_))),
+        "an undecodable payload must surface as Serialization, got {outcome:?}",
+    );
 }

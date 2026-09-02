@@ -187,6 +187,54 @@ fn repeated_startup_failure_escalates_to_stop() {
     assert_eq!(outcome, Err(CallError::DeadLetter));
 }
 
+// --- A panic in `started` is a start failure, not a crash (spec §11.1) --------
+
+struct PanicsOnStart;
+impl Actor for PanicsOnStart {
+    type System = SimSystem;
+    async fn started(&mut self, _ctx: &Ctx<Self>) -> Result<(), BoxError> {
+        panic!("started blew up");
+    }
+    fn register(r: &mut HandlerRegistry<Self>) {
+        r.accept::<Ping>();
+    }
+}
+impl Handler<Ping> for PanicsOnStart {
+    async fn handle(&mut self, _msg: Ping, _ctx: &Ctx<Self>) -> u64 {
+        0
+    }
+}
+
+#[test]
+fn a_panic_in_started_unwinds_into_a_supervision_decision() {
+    // The executor boundary catches a panic in `started` just as it catches one
+    // in a handler (spec §11.1): the actor takes the `started`-failed path — the
+    // default directive stops it — and a queued ask dead-letters rather than
+    // hanging or taking the node down.
+    let (sim, system, recorder) = support::local_recorded(8);
+    let outcome = sim.block_on(async move {
+        let actor = system.spawn(PanicsOnStart);
+        actor.ask(Ping).await
+    });
+    assert_eq!(outcome, Err(CallError::DeadLetter));
+    let events = recorder.events();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Supervised {
+                fault: Fault::Started,
+                decision: SupervisionDecision::Stop,
+                ..
+            }
+        )),
+        "the panic must surface as a Started fault decided by supervision, got {events:?}",
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, Event::ResignId { .. })),
+        "the actor resigns its id after the failed start (spec §4.2 step 5)"
+    );
+}
+
 // --- A by-value Restart degrades to Stop, reported as Stop (spec §11.2, §16) --
 //
 // `Restart` rebuilds an actor from its factory; an actor spawned **by value**

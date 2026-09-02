@@ -31,6 +31,8 @@ One filesystem per node, on **local NVMe**, mounted at `/var/lib/harness`. Not s
     │   ├── LOCK                       advisory single-writer guard
     │   ├── segments/<id>              one append log per grain: records + snapshots
     │   ├── fences/<shard>             the per-shard durable term fence
+    │   ├── seals/<shard>              the per-shard append bound a split or merge
+    │   │                              sets: appends at or above it are refused
     │   └── blobs/<segment id>/<hash>  content-addressed blobs (disk blocks, chunks)
     ├── raft/<group>/<node>/           the Raft voter state, one directory per group
     │   ├── term                       current term + vote (JSON; parse failure is the
@@ -46,7 +48,7 @@ A store is per hosted **grain type** (`grains/<type>/…`), never shared across
 types: the fence under it is keyed by shard index, and the same index is a
 different leader-election group under each type (granary spec §8.2).
 
-**`grains/` and `raft/` are the source of truth. `workspaces/` is a rebuildable cache** (granary spec §1) — keyed by node and grain, and safe to wipe between runs. A node that lost only that rematerializes it from the committed state on next activation. A node that lost `grains/` or `raft/` has lost its replica: do not restart it on the empty directory, because it will be re-replicated to as if it were healthy. Give it a **fresh node id** instead (see below).
+**`grains/` and `raft/` are the source of truth. `workspaces/` is a rebuildable cache** (granary spec §1) — keyed by node and grain, and safe to wipe between runs. A node that lost only that rematerializes it from the committed state on next activation. A node that lost `grains/` or `raft/` has lost its replica: do not restart it on the empty directory, because it will be re-replicated to as if it were healthy. Restore the directory from the machine's own backup, or rebuild it as "Replacing a node" describes.
 
 Sizing per node: eight or more cores, 32 GB and up, local NVMe. Memory is consumed by grain *count* rather than concurrency — the manifest is held whole and segments and host handles are cached by the thousand — so undershooting shows up as an OOM under grain growth, not under load. `docs/standalone-deployment.md` carries the full sizing note and the `link ÷ (replication_factor − 1)` ingest ceiling.
 
@@ -64,8 +66,9 @@ install -d -m 0750 -o root    -g harness /etc/harness
 install -m 0755 target/release/harness-standalone /usr/local/bin/
 install -m 0644 deploy/systemd/harness-node.service /etc/systemd/system/
 install -m 0640 -o root -g harness deploy/systemd/node.env.example /etc/harness/node.env
-# edit /etc/harness/node.env: HARNESS_NODE_ID and HARNESS_ADVERTISE_HOST differ per
-# machine; everything else is identical across the cluster.
+# edit /etc/harness/node.env: HARNESS_NODE_ID differs per machine; everything
+# else is identical across the cluster.
+# (A node has no advertise host: peers dial its own entry in HARNESS_PEERS.)
 
 systemctl daemon-reload
 systemctl enable --now harness-node
@@ -101,13 +104,15 @@ Shortening `TimeoutStopSec` below the worst handoff means systemd SIGKILLs the n
 
 ## Replacing a node
 
-A node declared `down` is terminal and **must not rejoin under the same id** (actor spec §3.6, §9.1). To replace it:
+The voter roster is fixed at boot: the binary accepts `--id` only in `1..=HARNESS_NODES`, the voter set is exactly that range, and nothing in it adds or removes a voter at runtime. So a replacement machine **keeps the dead node's id**:
 
-1. Remove it from the voter set by a committed membership change.
-2. Wipe `/var/lib/harness/node` on the replacement machine.
-3. Give it a **fresh** `HARNESS_NODE_ID` and add it to every node's `HARNESS_PEERS`.
+1. Stop the old machine for good. The cluster runs on the remaining quorum meanwhile: the node never auto-downs a peer (`DowningPolicy::Conservative`), so an absent voter stays `unreachable` until something answers under its id again.
+2. Restore `/var/lib/harness/node` on the replacement from the old machine's own backup. That directory holds the id's Raft term and vote, which is what makes reusing the id safe (actor spec §9.4.3 item 2). Starting the same id on an **empty** directory instead forfeits that state: the node can vote again in a term it already voted in, and it rejoins as a replica with everything to re-replicate — accept that only with the cluster quiescent and the alternative being no third voter at all.
+3. If the replacement is not reachable at the old machine's address, point the id's entry in every `HARNESS_PEERS` at it and restart the peers one at a time ("Rolling restart"): a node resolves the roster's hosts to addresses at boot.
 
-The same applies to a node whose Raft WAL has poisoned — it stopped voting because it could not persist (actor spec §9.4.3 item 2), and it will not recover on its own. `journalctl -u harness-node | grep '\[raft\]'` shows the reason.
+The same procedure applies to a node whose Raft WAL has poisoned — it stopped voting because it could not persist (actor spec §9.4.3 item 2), and it will not recover on its own. `journalctl -u harness-node | grep '\[raft\]'` shows the reason.
+
+The actor spec's rule for a voter declared `down` — remove it by a committed membership change and admit the replacement under a fresh `NodeId` (§9.1, §9.4.3) — has no path in this binary: a fresh id would lie outside the roster, and the roster admits no new voter. That is a limitation of `harness-standalone`, not of the substrate.
 
 ## Failure domains
 
@@ -115,4 +120,6 @@ The same applies to a node whose Raft WAL has poisoned — it stopped voting bec
 
 ## TLS
 
-The transport handshake is guarded by the cluster secret and is expected to run on a private network. Public TLS terminates in front of the gateway — that is the only tenant-facing port in the deployment, and the bearer tokens in `/etc/harness/tenants` are credentials that must not cross a plaintext link. A reverse proxy on the gateway machine is the ordinary arrangement; `harness-gateway` also accepts a `TlsConfig` directly.
+`harness-gateway` serves plain HTTP: it has no TLS flag and binds a bare listener on `HARNESS_HTTP_BIND`. That is the only tenant-facing port in the deployment, and the bearer tokens in `/etc/harness/tenants` are credentials that must not cross a plaintext link, so terminate public TLS in front of it — a reverse proxy on the gateway machine, with the gateway bound to loopback or a private address behind it.
+
+The actor transport between nodes and gateways is plaintext as well, guarded by the cluster secret, and expected to run on a private network. The transport itself supports mutual TLS (`Encryption::MutualTls`), but neither binary exposes a flag for it: both name `Encryption::PlaintextTrusted` in code, and a deployment crossing untrusted links has to provision certificates there and rebuild.

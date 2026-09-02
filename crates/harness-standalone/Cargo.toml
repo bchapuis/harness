@@ -19,7 +19,7 @@ harness-anthropic.workspace = true
 harness-sandbox = { workspace = true, features = ["native", "firecracker", "quickjs"] }
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["process", "fs"] }
+tokio = { workspace = true, features = ["process", "fs", "signal"] }
 harness-http.workspace = true
 
 [dev-dependencies]

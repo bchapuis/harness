@@ -50,8 +50,10 @@ impl std::error::Error for FrontDoorError {}
 
 /// Expand the machine's journaled host-key material into the SSH host key
 /// presented at KEX (machine §3, §5.1). The material — `MachineState::
-/// host_key`, carried on the attach reply — is the raw 32-byte ed25519 seed
-/// the machine drew from system entropy at provisioning; expanding it here
+/// host_key`, read through the machine's `DoorPolicy` command before any
+/// principal exists to attach ([`MachineAuthority::host_key`]) — is the raw
+/// 32-byte ed25519 seed the machine drew from system entropy at provisioning;
+/// expanding it here
 /// keeps russh out of the machine crate. Pure: the same seed always yields the
 /// same key, so the client's `known_hosts` pin survives hibernation,
 /// migration, and failover.

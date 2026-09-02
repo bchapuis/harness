@@ -188,10 +188,10 @@ pub trait GrainJournal: Clone + Send + Sync + 'static {
         state: Vec<u8>,
     ) -> impl Future<Output = AppendOutcome> + Send;
 
-    /// The latest snapshot for one grain, if any (§9). On the `Quorum` tier this
-    /// recovers the latest durable snapshot from a write quorum (the snapshot
-    /// analogue of `head`'s record recovery, §8); on the `Local` tier it reads
-    /// locally.
+    /// The latest snapshot for one grain, if any (§9), read from the **local**
+    /// store on every tier. On the `Quorum` tier the quorum-best snapshot is
+    /// chosen during `head`'s recovery (§8) and cached locally there, so this
+    /// read — like `load` — costs no round trip and follows that recovery.
     fn load_snapshot(
         &self,
         grain: &GrainName,
