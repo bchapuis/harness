@@ -51,7 +51,7 @@ pub enum GrainEvent {
     },
     /// An activation hibernated on idle and dropped its in-memory state (§10);
     /// the journal survives, so the next message rehydrates it (invariant **G12**).
-    Passivated { node: NodeId, name: GrainName },
+    Deactivated { node: NodeId, name: GrainName },
     /// This node won a shard's leader election at `term` (§8, §13). Emitted by
     /// the new leader itself, once per term it observes, so the stream carries
     /// at most one per (shard, term) from the node that actually serves.

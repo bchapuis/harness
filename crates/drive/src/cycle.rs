@@ -79,7 +79,7 @@ struct Scope<K: Ord> {
     /// arrived ahead of the rehydration nudge from having its own, fresh work
     /// re-derived as dangling.
     phase: Phase<K>,
-    /// What the last cycle concluded about quiescence, so `can_passivate` — which
+    /// What the last cycle concluded about quiescence, so `can_hibernate` — which
     /// takes no seams and so cannot read the clock — answers from a decision
     /// rather than recomputing one (§6). `false` until the first drive has run:
     /// an activation that has not resolved its dangling set may not hibernate.
@@ -108,7 +108,7 @@ impl<K: Ord> Scope<K> {
 /// (spec §2.1).
 ///
 /// Internally synchronized, so a consumer holds it as a plain field and reaches
-/// it through `&self` from its handlers, `can_passivate`, and `on_passivate` —
+/// it through `&self` from its handlers, `can_hibernate`, and `on_deactivate` —
 /// the shape granary's own per-activation state already takes.
 pub struct Drive<D: Driven> {
     scope: Mutex<Scope<D::Key>>,
@@ -158,14 +158,14 @@ impl<D: Driven> Drive<D> {
     /// nothing in flight and every member of the desired set at rest — the set
     /// empty, or its remaining members backed off to the cap.
     ///
-    /// A consumer calls this from `Grain::can_passivate` and MAY narrow it
+    /// A consumer calls this from `Grain::can_hibernate` and MAY narrow it
     /// further by conjoining its own condition; it never has to widen it. The
     /// harness narrows exactly once, for a turn accepted into its queue but not
     /// yet started: work owed *now* that no effect represents, so it is invisible
     /// to the desired set.
     ///
     /// It answers from the last cycle's conclusion rather than recomputing,
-    /// because `can_passivate` takes no seams and so cannot read the clock. That
+    /// because `can_hibernate` takes no seams and so cannot read the clock. That
     /// is the same answer and a cheaper one: a cycle runs on every commit and on
     /// every backoff expiry, so the conclusion is never staler than the last
     /// thing that happened to this grain. Before the first drive has run it is

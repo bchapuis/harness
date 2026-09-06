@@ -168,11 +168,11 @@ fn rig(seed: u64, idle_after: Duration) -> (Simulation, Recorder, granary::Grana
     (sim, recorder, grains)
 }
 
-fn passivated(recorder: &Recorder) -> bool {
+fn hibernated(recorder: &Recorder) -> bool {
     recorder.events().iter().any(|e| {
         matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )
     })
 }
@@ -267,7 +267,7 @@ fn pending_alarm_vetoes_hibernation() {
 
     assert!(activated(&recorder), "the grain activated");
     assert!(
-        !passivated(&recorder),
+        !hibernated(&recorder),
         "a pending alarm must veto idle hibernation until it fires",
     );
 }

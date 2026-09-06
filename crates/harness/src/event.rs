@@ -3,7 +3,7 @@
 //! spend, the sandbox bind/release pair — so the H-invariants are checkable over
 //! a run's stream. They carry nothing about a session's content: records are the
 //! durable, user-facing account (§10.1). Activation, deactivation, and the
-//! single-writer fence are the grain's events (`Activated`/`Passivated`/
+//! single-writer fence are the grain's events (`Activated`/`Deactivated`/
 //! `LeaderChanged`, granary §13), not duplicated here.
 //!
 //! Each event rides the core stream as [`Event::App`] (core spec §16), so

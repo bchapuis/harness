@@ -23,7 +23,7 @@
 //! checkpoint interval has elapsed. Because a fired alarm always stages its
 //! consume/re-arm record, every fire is a **fenced append**, which makes the
 //! alarm the session lease too (M5): on a deposed or partitioned activation
-//! the append cannot commit, the host steps down, and `on_passivate` kills the
+//! the append cannot commit, the host steps down, and `on_deactivate` kills the
 //! guest, bounding the doomed-session window to one alarm interval plus the
 //! append timeout.
 //!
@@ -31,7 +31,7 @@
 //! captures, resumes (M3's window is the checkpoint interval). When the last
 //! attachment detaches the alarm re-arms to fire immediately: the final fire
 //! stops the guest, runs the last capture, and leaves the grain clean, so
-//! `can_passivate` (which refuses while attached or dirty) lets the §10 idle
+//! `can_hibernate` (which refuses while attached or dirty) lets the §10 idle
 //! path hibernate a machine whose disk is fully durable (M2).
 
 use std::collections::BTreeMap;
@@ -557,7 +557,7 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> Grain for Machine<S, P> {
         Ok(())
     }
 
-    fn can_passivate(&self, state: &MachineState) -> bool {
+    fn can_hibernate(&self, state: &MachineState) -> bool {
         // A live attachment pins the activation (machine §5.1), and an image
         // holding uncaptured writes must not be stranded by the idle path
         // (grain §7.15): the final capture command clears the flag first
@@ -566,7 +566,7 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> Grain for Machine<S, P> {
         state.attachments.is_empty() && !act.dirty
     }
 
-    async fn on_passivate(&mut self, _ctx: &GrainCtx<Self>) {
+    async fn on_deactivate(&mut self, _ctx: &GrainCtx<Self>) {
         // Every deactivation kills the guest: idle hibernation after the final
         // capture, or the forced step-down of M5, whose guest must not outlive
         // the activation.
@@ -582,7 +582,7 @@ impl<S: GranarySystem, P: MachineRuntimeProvider> Grain for Machine<S, P> {
             // Quiescent point 1 (machine §4): the final capture. Stop the
             // guest, capture the settled image, and leave the grain clean so
             // idle hibernation can proceed (M2). No re-arm on success: the
-            // alarm is consumed and `can_passivate` now permits eviction.
+            // alarm is consumed and `can_hibernate` now permits eviction.
             let (events, committed) = self.run_capture(ctx, now, Quiesce::Stop).await;
             if committed {
                 self.lock().dirty = false;

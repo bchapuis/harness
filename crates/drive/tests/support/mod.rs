@@ -4,7 +4,7 @@
 //! that fans a job out to N workers, collects their results, and finishes. It
 //! journals its own records, holds no memo, and — this is the point — writes no
 //! dispatch loop, no in-flight table, no "did I already launch this", no
-//! recovery pass, no straggler check, and no `can_passivate` body of its own.
+//! recovery pass, no straggler check, and no `can_hibernate` body of its own.
 //!
 //! `Script` is the drive spec §10 simulation seam: the one row the drive adds to
 //! the table the grain already virtualizes. A scripted effect is a deterministic
@@ -254,7 +254,7 @@ impl<S: GranarySystem> Grain for Fanout<S> {
         Ok(())
     }
 
-    fn can_passivate(&self, _state: &FanoutState) -> bool {
+    fn can_hibernate(&self, _state: &FanoutState) -> bool {
         // Derived, not hand-written (§6). A consumer with work that no effect
         // represents would conjoin its own clause here; this one has none.
         self.drive.quiescent()
@@ -596,11 +596,11 @@ pub fn announced_quiescence(events: &[Event]) -> bool {
 }
 
 /// Whether any grain hibernated (granary §13).
-pub fn passivated(events: &[Event]) -> bool {
+pub fn hibernated(events: &[Event]) -> bool {
     events.iter().any(|e| {
         matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )
     })
 }

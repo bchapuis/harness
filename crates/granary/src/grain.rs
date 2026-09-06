@@ -135,7 +135,7 @@ pub trait Grain: Sized + Send + 'static {
     /// a forced step-down (§10). Safe even when the journal is unwritable, because
     /// it cannot persist ([`GrainCtx`] exposes no `persist`); use it to release
     /// non-durable per-activation resources.
-    fn on_passivate(&mut self, _ctx: &GrainCtx<Self>) -> impl Future<Output = ()> + Send {
+    fn on_deactivate(&mut self, _ctx: &GrainCtx<Self>) -> impl Future<Output = ()> + Send {
         async {}
     }
 
@@ -145,7 +145,7 @@ pub trait Grain: Sized + Send + 'static {
     /// **autonomous** work that is not yet journaled (harness §7.2) overrides this
     /// to veto eviction until the work settles; the host then reschedules the idle
     /// check rather than evicting.
-    fn can_passivate(&self, _state: &Self::State) -> bool {
+    fn can_hibernate(&self, _state: &Self::State) -> bool {
         true
     }
 

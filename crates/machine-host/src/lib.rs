@@ -243,7 +243,7 @@ pub trait MachineGuest: Send + Sync + 'static {
     fn resume(&self) -> BoxFuture<'_, Result<(), GuestError>>;
 
     /// Stop the guest. Idempotent — a forced step-down and an ordinary
-    /// passivation both call it, possibly for a guest already gone — and an
+    /// deactivation both call it, possibly for a guest already gone — and an
     /// implementation whose handle outlives the call must also stop on drop, so
     /// a dropped activation can never leak a running guest.
     fn stop(&self) -> BoxFuture<'_, ()>;

@@ -106,7 +106,7 @@ impl<T> Binding<T> {
     }
 
     /// Take the resource for release, leaving the binding closed. Called from
-    /// `on_passivate` on **every** deactivation path — idle hibernation,
+    /// `on_deactivate` on **every** deactivation path — idle hibernation,
     /// migration, or a forced step-down — so nothing is owed at deactivation.
     pub fn take(&mut self) -> Option<T> {
         match std::mem::replace(&mut self.state, BindingState::Closed) {

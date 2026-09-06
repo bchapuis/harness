@@ -172,7 +172,7 @@ struct SqlAccountSwarm {
     clients: usize,
     ops: u64,
     dir: PathBuf,
-    /// Idle past `idle_after` between operations, so activations passivate and
+    /// Idle past `idle_after` between operations, so activations hibernate and
     /// the database is rematerialized mid-run.
     hibernating: bool,
     /// Let the nemesis kill and re-launch node processes, not just isolate them.
@@ -224,7 +224,7 @@ impl SqlAccountSwarm {
             // Checkpoint often: the manifest + blob-chunk path runs under faults,
             // and failover rematerializes from it plus the later frame records.
             // Oftener when hibernating, so a grain has a checkpoint to come back
-            // from before it first passivates.
+            // from before it first hibernates.
             snapshot_every: if self.hibernating { 2 } else { 4 },
             data_dir: Some(self.dir.clone()),
             ..GranaryConfig::default()
@@ -237,7 +237,7 @@ const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
 /// How long a hibernating client idles when it idles — comfortably past
-/// [`IDLE_AFTER`], so the host really does passivate rather than nearly.
+/// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
 impl ClusterWorkload for SqlAccountSwarm {
@@ -377,7 +377,7 @@ fn sql_grain_invariants_hold_under_the_cluster_swarm() {
 
 #[test]
 fn sql_grain_invariants_hold_across_hibernation_and_restarts() {
-    // The clustered restore path: the grain passivates, its database file goes,
+    // The clustered restore path: the grain hibernates, its database file goes,
     // and the next call rebuilds it from the composite snapshot's pages plus the
     // frame records above it — in a process that may not have existed when the
     // write committed.

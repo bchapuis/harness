@@ -123,7 +123,7 @@ In short: Raft is a bottleneck only when it is one big shared log doing ordering
 | Input gate (no reentrancy across awaits) | serial executor (§6) | Mostly present; extend gating to cover outstanding storage ops. |
 | Quorum-replicated log | replicated Journal / Raft journal groups | Strongest existing piece. Keep it **per grain**, and use only the log-replication half (Section 4.3). |
 | Alarms | none | Durable timers that re-activate the grain. |
-| Hibernation | actor lives until stopped | Deactivate-on-idle, rehydrate-from-journal. Requires the journal seam first. |
+| Hibernation | actor lives until stopped | Hibernate-on-idle, rehydrate-from-journal. Requires the journal seam first. |
 
 Framing: **a grain is your actor plus a name-based virtual identity, a per-actor journal seam, and a durability barrier on the reply path.** Everything else you already have.
 

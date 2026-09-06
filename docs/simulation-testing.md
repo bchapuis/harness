@@ -587,7 +587,7 @@ recur in workloads that assert one:
      ride the invariant sweep. Make it actually deterministic: idle past
      `idle_after` on a fixed cadence rather than a seeded coin, and snapshot
      often enough that a grain has a checkpoint to return from before it first
-     passivates. `granary`'s `support::Exercised` is the shared tally.
+     hibernates. `granary`'s `support::Exercised` is the shared tally.
    - Something the *nemesis* draws is a property of the seed range, so it needs
      `coverage_seeds`, which never narrows. At `slow_seeds`' single local seed a
      six-round nemesis misses any one action about two runs in five, so the same

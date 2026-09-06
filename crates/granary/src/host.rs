@@ -428,7 +428,7 @@ impl<G: Grain> Host<G> {
 
         // Run `on_activate` BEFORE announcing the activation: if it fails, the
         // activation aborts (§10) and must leave no `Activated` on the stream — a
-        // phantom `Activated` with no matching `Passivated` would both misreport
+        // phantom `Activated` with no matching `Deactivated` would both misreport
         // the lifecycle (§13) and corrupt a G6 activation checker.
         let gctx = self.grain_ctx(ctx);
         self.grain.on_activate(&gctx).await?;
@@ -451,7 +451,7 @@ impl<G: Grain> Host<G> {
             name: self.name.clone(),
         });
         // What a cold access cost, and one more grain resident (§13). The pair with
-        // the `Passivated` decrement below is what makes the gauge track the working
+        // the `Deactivated` decrement below is what makes the gauge track the working
         // set hibernation is meant to bound (§10).
         self.metrics.rehydrated(
             self.grain_type,
@@ -675,12 +675,12 @@ impl<G: Grain> Host<G> {
         }
     }
 
-    /// Emit `Passivated` and stop — the one deactivation seam (§13). Every
-    /// `Activated` gets a matching `Passivated`/`NodeDown`, the basis of the
+    /// Emit `Deactivated` and stop — the one deactivation seam (§13). Every
+    /// `Activated` gets a matching `Deactivated`/`NodeDown`, the basis of the
     /// **G6** singleton checker.
     fn step_down(&self, ctx: &Ctx<Host<G>>) {
         self.metrics.activation_delta(self.grain_type, -1);
-        ctx.system().emit_grain_event(GrainEvent::Passivated {
+        ctx.system().emit_grain_event(GrainEvent::Deactivated {
             node: ctx.system().node(),
             name: self.name.clone(),
         });
@@ -691,20 +691,20 @@ impl<G: Grain> Host<G> {
     /// unavailable (§11), or the head desynced. The in-memory forms can no longer
     /// be trusted, so every physical facet materialization is discarded (**G20**,
     /// §7.14); the next activation rebuilds from the composite snapshot plus
-    /// committed records. Runs `on_passivate`, which is safe even when the journal
+    /// committed records. Runs `on_deactivate`, which is safe even when the journal
     /// is unwritable (the [`GrainCtx`] exposes no `persist`). Unlike idle
     /// hibernation (§10) it takes **no snapshot**.
     async fn forced_step_down(&mut self, ctx: &Ctx<Host<G>>) {
         self.facets.discard();
         let gctx = self.grain_ctx(ctx);
-        self.grain.on_passivate(&gctx).await;
+        self.grain.on_deactivate(&gctx).await;
         self.step_down(ctx);
     }
 
     /// Persist a snapshot once enough events have accumulated past the last one
     /// (spec §9). The trigger is configuration, not part of the model, and it is the
     /// *only* trigger — the idle path comes through here too
-    /// ([`passivate`](Host::passivate)).
+    /// ([`hibernate`](Host::hibernate)).
     async fn maybe_snapshot(&mut self, ctx: &Ctx<Host<G>>) {
         if self.config.snapshot_every == 0 {
             return;
@@ -764,7 +764,7 @@ impl<G: Grain> Host<G> {
         }
     }
 
-    /// Hibernate on idle (spec §10): run `on_passivate`, snapshot if enough has
+    /// Hibernate on idle (spec §10): run `on_deactivate`, snapshot if enough has
     /// accumulated to be worth one, and stop. The gateway prunes the name via death
     /// watch, and the next message reactivates and rehydrates (invariant **G12**).
     ///
@@ -781,11 +781,11 @@ impl<G: Grain> Host<G> {
     /// record. Skipping it costs a longer replay on the next activation, and replay
     /// reads come from the *local* store (§9), so that cost stays on the side of the
     /// machine with capacity to spare (hw §3.1).
-    async fn passivate(&mut self, ctx: &Ctx<Host<G>>) {
+    async fn hibernate(&mut self, ctx: &Ctx<Host<G>>) {
         let gctx = self.grain_ctx(ctx);
-        self.grain.on_passivate(&gctx).await;
+        self.grain.on_deactivate(&gctx).await;
         self.maybe_snapshot(ctx).await;
-        self.step_down(ctx); // emit Passivated + stop, the one deactivation seam
+        self.step_down(ctx); // emit Deactivated + stop, the one deactivation seam
     }
 
     /// Arm the next idle check (spec §10): after `idle_after` of virtual time,
@@ -1009,7 +1009,7 @@ impl<G: Grain> Handler<CheckIdle> for Host<G> {
         let now = ctx.system().now();
         // Idle long enough AND the grain permits eviction (§10): a grain with
         // autonomous, not-yet-journaled work vetoes hibernation until it settles
-        // (`can_passivate`), so the host reschedules rather than evicting it
+        // (`can_hibernate`), so the host reschedules rather than evicting it
         // mid-flight.
         //
         // A pending durable alarm pins the grain resident (spec §7.16) unless its
@@ -1023,10 +1023,10 @@ impl<G: Grain> Handler<CheckIdle> for Host<G> {
             due => matches!(self.index_sync, IndexSync::Acked { due: acked } if acked == due),
         };
         if now.duration_since(self.last_active) >= self.config.idle_after
-            && self.grain.can_passivate(&self.state)
+            && self.grain.can_hibernate(&self.state)
             && alarm_covered
         {
-            self.passivate(ctx).await;
+            self.hibernate(ctx).await;
         } else {
             // The idle tick doubles as the registration retry (never the command
             // path): a no-op when the deadline is acked, in flight, or unindexed.

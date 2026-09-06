@@ -3,7 +3,7 @@
 //! `run_cluster_swarm_coverage` proves a sweep injected loss, duplication,
 //! delay, and blocking, because those are the wire's and `FaultStats` counts
 //! them. The two faults that matter most to a hibernating sweep are not the
-//! wire's: whether an activation actually passivated and came back, and whether
+//! wire's: whether an activation actually hibernated and came back, and whether
 //! the nemesis actually killed a process. A sweep that configures a short
 //! `idle_after` but whose grains all stay resident, or one whose vocabulary
 //! includes a restart it never draws, is a green run that proves nothing.
@@ -19,17 +19,17 @@
 //! run rather than the workload. Most hibernating workloads earn that by
 //! *driving* these paths rather than sampling them: they idle past `idle_after`
 //! on a fixed cadence rather than a seeded coin, and snapshot often enough that a
-//! grain has a checkpoint to return from before it first passivates. What stays
+//! grain has a checkpoint to return from before it first hibernates. What stays
 //! seeded is everything the nemesis and the wire do around that.
 //!
 //! A workload that cannot drive them has to say so, and one cannot: the disk
 //! swarm's grains must import a multi-megabyte image before they can commit
 //! anything, and under a nemesis that kills processes there are seeds where the
-//! cluster never gives them a window — seeds on which nothing passivates at all.
+//! cluster never gives them a window — seeds on which nothing hibernates at all.
 //! Its totals are therefore an aggregate over the seed range rather than a
 //! per-seed property, so they are asserted on a sweep sized by `coverage_seeds`,
 //! which never narrows. See
-//! `disk_swarm.rs::disk_hibernation_actually_passivates_and_restores_from_a_snapshot`,
+//! `disk_swarm.rs::disk_hibernation_actually_deactivates_and_restores_from_a_snapshot`,
 //! which records how that was found out. Before assuming a new workload drives
 //! these paths, check it at width 1 across the declared range rather than at the
 //! one seed a local run happens to draw.
@@ -46,15 +46,15 @@ use granary::GrainEvent;
 /// What a sweep actually exercised, accumulated across its seeds.
 #[derive(Clone, Default)]
 pub struct Exercised {
-    passivated: Arc<AtomicUsize>,
+    hibernated: Arc<AtomicUsize>,
     from_snapshot: Arc<AtomicUsize>,
     restarted: Arc<AtomicUsize>,
 }
 
 impl Exercised {
-    /// Activations that hibernated (`GrainEvent::Passivated`).
-    pub fn passivated(&self) -> usize {
-        self.passivated.load(Ordering::Relaxed)
+    /// Activations that hibernated (`GrainEvent::Deactivated`).
+    pub fn hibernated(&self) -> usize {
+        self.hibernated.load(Ordering::Relaxed)
     }
 
     /// Activations that came back from a snapshot rather than replaying from an
@@ -72,7 +72,7 @@ impl Exercised {
     /// wants, so the four of them state it once.
     ///
     /// Deliberately *not* including [`restarted`](Self::restarted). Whether a
-    /// grain passivates and returns is something the workload drives, so it holds
+    /// grain hibernates and returns is something the workload drives, so it holds
     /// however narrow the run; whether the nemesis ever *draws* a restart is a
     /// property of the seed range, which at `slow_seeds`' single local seed is a
     /// coin it loses about two runs in five. That claim belongs on a sweep sized
@@ -81,7 +81,7 @@ impl Exercised {
     /// once for the nemesis rather than four times for four facets.
     pub fn assert_hibernated(&self) {
         assert!(
-            self.passivated() > 0,
+            self.hibernated() > 0,
             "no activation ever hibernated: this is the resident sweep with a \
              shorter idle_after, not a hibernating one",
         );
@@ -101,8 +101,8 @@ impl Invariant for Exercised {
     fn observe(&mut self, event: &Event) -> Result<(), String> {
         if let Some(grain) = event.as_app::<GrainEvent>() {
             match grain {
-                GrainEvent::Passivated { .. } => {
-                    self.passivated.fetch_add(1, Ordering::Relaxed);
+                GrainEvent::Deactivated { .. } => {
+                    self.hibernated.fetch_add(1, Ordering::Relaxed);
                 }
                 GrainEvent::Rehydrated { from_snapshot, .. } if *from_snapshot => {
                     self.from_snapshot.fetch_add(1, Ordering::Relaxed);

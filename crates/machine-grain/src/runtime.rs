@@ -83,7 +83,7 @@ pub trait MachineRuntime: Send + Sync + 'static {
     fn resume(&self) -> BoxFuture<'_, Result<(), RuntimeError>>;
 
     /// Stop the guest. Idempotent: the forced step-down path (machine §4, M5)
-    /// and `on_passivate` both call it, possibly for a guest already gone; an
+    /// and `on_deactivate` both call it, possibly for a guest already gone; an
     /// implementation whose process handle outlives the call must also kill
     /// on drop, so a dropped activation can never leak a running guest.
     fn kill(&self) -> BoxFuture<'_, ()>;

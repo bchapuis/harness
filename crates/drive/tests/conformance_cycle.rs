@@ -27,7 +27,7 @@ use support::ask;
 use support::drive_events;
 use support::fanouts;
 use support::launched;
-use support::passivated;
+use support::hibernated;
 use support::read_script;
 use support::request;
 use support::seam;
@@ -163,7 +163,7 @@ fn a_hibernated_grain_re_derives_and_re_drives_its_outstanding_work() {
     sim.run_for(SETTLE);
 
     assert!(
-        passivated(&recorder.events()),
+        hibernated(&recorder.events()),
         "an idle grain whose desired set emptied must hibernate (D7)"
     );
     assert!(
@@ -188,7 +188,7 @@ fn a_hibernated_grain_re_derives_and_re_drives_its_outstanding_work() {
 
 #[test]
 fn an_activation_with_an_effect_in_flight_does_not_hibernate() {
-    // D7's veto half. A hung effect holds its claim, so `can_passivate` — which
+    // D7's veto half. A hung effect holds its claim, so `can_hibernate` — which
     // is the drive's derived quiescence and nothing hand-written — must refuse
     // eviction for as long as the outcome could still arrive.
     let sim = Simulation::new(19);
@@ -202,7 +202,7 @@ fn an_activation_with_an_effect_in_flight_does_not_hibernate() {
     sim.run_for(SETTLE);
 
     assert!(
-        !passivated(&recorder.events()),
+        !hibernated(&recorder.events()),
         "an activation holding an in-flight effect must not hibernate (D7)"
     );
     assert_eq!(
@@ -328,7 +328,7 @@ fn a_key_backed_off_to_the_cap_stops_holding_the_activation_resident() {
     sim.run_for(SETTLE);
 
     assert!(
-        passivated(&recorder.events()),
+        hibernated(&recorder.events()),
         "a grain whose only outstanding key has backed off to the cap must \
          reach rest and hibernate (§6); pinning it forever is the bug this \
          clause exists to prevent"

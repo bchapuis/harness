@@ -118,7 +118,7 @@ impl Invariant for ActivationSingletonPerNode {
                     ));
                 }
             }
-            Some(GrainEvent::Passivated { node, name }) => {
+            Some(GrainEvent::Deactivated { node, name }) => {
                 self.live.remove(&(*node, name.clone()));
             }
             _ => {}
@@ -128,7 +128,7 @@ impl Invariant for ActivationSingletonPerNode {
 
     fn forget_node(&mut self, node: NodeId) {
         // The other way a node's activations vanish: its process ended. Nothing
-        // emits `Passivated` for an activation that died with its host, and the
+        // emits `Deactivated` for an activation that died with its host, and the
         // successor may legitimately re-activate it (G6 is per *live* node).
         self.live.retain(|(n, _)| *n != node);
     }

@@ -10,7 +10,7 @@
 //! Plus the continuous H-invariant checkers (§11) and the machine-readable
 //! [`harness_catalogue`], guarded by the same drift-test pattern as the core and
 //! granary catalogues. Activation, deactivation, and the single-writer fence are
-//! observed through the **grain's** events (`Activated`/`Passivated`, granary
+//! observed through the **grain's** events (`Activated`/`Deactivated`, granary
 //! §13), not duplicated by the harness.
 
 #![allow(dead_code)]

@@ -206,12 +206,12 @@ fn attach_capture_detach_hibernate_reattach_round_trips() {
     });
 
     // Idle: with the disk captured and no attachment, the machine hibernates
-    // (M2's graceful boundary; `can_passivate` no longer refuses).
+    // (M2's graceful boundary; `can_hibernate` no longer refuses).
     sim.run();
     assert!(
         recorder.events().iter().any(|e| matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )),
         "the idle machine must hibernate",
     );
@@ -368,7 +368,7 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
     assert!(
         recorder.events().iter().any(|e| matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )),
         "the idle machine must hibernate",
     );
@@ -469,7 +469,7 @@ fn each_machine_draws_its_own_host_key_and_keeps_it_across_hibernation() {
     assert!(
         recorder.events().iter().any(|e| matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )),
         "the idle machines must hibernate",
     );
@@ -544,7 +544,7 @@ fn front_door_death_folds_detached_and_releases_the_pin() {
     assert!(
         recorder.events().iter().any(|e| matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )),
         "the machine must hibernate after the front door died",
     );

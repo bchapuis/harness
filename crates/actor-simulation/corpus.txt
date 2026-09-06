@@ -213,6 +213,6 @@ granary-ws-swarm 6
 # proves the command never ran (§2.2) — so `GrainRef` re-resolves and re-issues.
 #
 # Kept as a corpus seed because the sweep that found it only reaches this with a
-# restart, a passivation, and a cached ref lining up.
+# restart, a deactivation, and a cached ref lining up.
 
 tenancy-directory-swarm 9300730

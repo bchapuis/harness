@@ -78,7 +78,7 @@ fn tail_leaves_a_hibernated_session_asleep() {
             .iter()
             .filter_map(|e| e.as_app::<GrainEvent>().cloned())
             .filter(|e| match e {
-                GrainEvent::Activated { name, .. } | GrainEvent::Passivated { name, .. } => {
+                GrainEvent::Activated { name, .. } | GrainEvent::Deactivated { name, .. } => {
                     name.key() == "s1"
                 }
                 _ => false,
@@ -88,7 +88,7 @@ fn tail_leaves_a_hibernated_session_asleep() {
     assert!(
         session_events(&recorder)
             .iter()
-            .any(|e| matches!(e, GrainEvent::Passivated { .. })),
+            .any(|e| matches!(e, GrainEvent::Deactivated { .. })),
         "the idle session must hibernate",
     );
 

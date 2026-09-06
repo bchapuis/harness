@@ -85,7 +85,7 @@ pub trait GrainMetrics: Send + Sync + 'static {
     /// is what hibernation tuning (§10) trades against memory.
     fn rehydrated(&self, grain_type: &'static str, took: Duration, replayed: u64);
 
-    /// A grain activated (`+1`) or passivated (`-1`) on this node — the resident
+    /// A grain activated (`+1`) or deactivated (`-1`) on this node — the resident
     /// working set (§7.8), the thing hibernation is meant to bound.
     fn activation_delta(&self, grain_type: &'static str, delta: i64);
 }
@@ -187,8 +187,8 @@ struct TypeMetrics {
     commit_latency: [Histogram; 3],
     rehydrate_latency: Histogram,
     replayed: AtomicU64,
-    /// Signed, but held unsigned: activations only ever exceed passivations, since a
-    /// passivation follows an activation of the same grain (§10).
+    /// Signed, but held unsigned: activations only ever exceed deactivations, since a
+    /// deactivation follows an activation of the same grain (§10).
     active: AtomicU64,
 }
 
@@ -340,7 +340,7 @@ impl GrainMetrics for AtomicGrainMetrics {
         if delta >= 0 {
             m.active.fetch_add(delta.unsigned_abs(), Ordering::Relaxed);
         } else {
-            // Saturating, not wrapping: a passivation without a matching activation
+            // Saturating, not wrapping: a deactivation without a matching activation
             // is a bug in the caller, and a gauge that wraps to u64::MAX turns that
             // bug into a page.
             let _ = m
@@ -401,7 +401,7 @@ mod tests {
             m.render()
                 .contains("granary_active_grains{grain_type=\"test.Grain\"} 1")
         );
-        // An unmatched passivation must not underflow into a gauge reading 1.8e19.
+        // An unmatched deactivation must not underflow into a gauge reading 1.8e19.
         m.activation_delta("test.Grain", -5);
         assert!(
             m.render()

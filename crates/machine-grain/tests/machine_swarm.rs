@@ -10,7 +10,7 @@
 //!   never a fork, never a torn image (the disk facet's swarm obligations,
 //!   re-run here with a live "guest" dirtying the image between captures).
 //! - **M5's self-fence.** A deposed activation's next checkpoint-alarm append
-//!   cannot commit; the host steps down and `on_passivate` kills the fake VM.
+//!   cannot commit; the host steps down and `on_deactivate` kills the fake VM.
 //!   The safety checkers below would catch the forbidden alternative (a
 //!   deposed activation still committing).
 //! - **Front-door loss.** Node crashes kill door stubs; death watch folds

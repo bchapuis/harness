@@ -243,7 +243,7 @@ fn queries_grains_by_type() {
 fn index_survives_hibernation() {
     let sim = Simulation::new(7);
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
-    // Aggressive idle window so the directory passivates between the two batches.
+    // Aggressive idle window so the directory hibernates between the two batches.
     let directories = system.granary::<Directory<_>>(GranaryConfig {
         idle_after: Duration::from_millis(10),
         snapshot_every: 2,
@@ -266,7 +266,7 @@ fn index_survives_hibernation() {
         .unwrap();
     });
 
-    // Drive past the idle window: the grain snapshots, passivates, and stops.
+    // Drive past the idle window: the grain snapshots, hibernates, and stops.
     sim.run();
 
     // A fresh ref re-activates the name; the journaled index and its metadata

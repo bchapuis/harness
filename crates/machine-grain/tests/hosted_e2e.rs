@@ -169,7 +169,7 @@ async fn round_trip(mechanism: Arc<dyn MachineHost>, image: PathBuf, name: &str)
     // The capture command's quiescent point (machine §4).
     runtime.pause().await.expect("pause");
     runtime.resume().await.expect("resume");
-    // Idempotent kill (the M5 path and on_passivate both call it).
+    // Idempotent kill (the M5 path and on_deactivate both call it).
     runtime.kill().await;
     runtime.kill().await;
 }

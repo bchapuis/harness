@@ -10,7 +10,7 @@
 //!
 //! The vocabulary is kept to what a stream checker cannot reconstruct from the
 //! grain's own events: activation, deactivation, leadership, and commit are read
-//! from `Activated`, `Passivated`, `LeaderChanged`, and `Committed`, and the
+//! from `Activated`, `Deactivated`, `LeaderChanged`, and `Committed`, and the
 //! drive mints no duplicates of them. [`Discarded`](DriveEvent::Discarded) is
 //! present because a discarded outcome leaves no record anywhere — the one thing
 //! the drive does that the journal cannot show, and D5 would be uncheckable

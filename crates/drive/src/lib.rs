@@ -37,7 +37,7 @@
 //!         self.drive.on_activate(ctx);
 //!         Ok(())
 //!     }
-//!     fn can_passivate(&self, _state: &Self::State) -> bool { self.drive.quiescent() }
+//!     fn can_hibernate(&self, _state: &Self::State) -> bool { self.drive.quiescent() }
 //!     fn register(r: &mut GrainRegistry<Self>) { /* the drive's commands are local-only */ }
 //! }
 //!

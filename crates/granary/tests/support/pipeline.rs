@@ -352,7 +352,7 @@ impl<S: GranarySystem> Grain for Pipeline<S> {
         Vec::new()
     }
 
-    fn can_passivate(&self, state: &PipelineState) -> bool {
+    fn can_hibernate(&self, state: &PipelineState) -> bool {
         // Either the workflow is over, or this hosting has opted into hibernating
         // under an in-flight step (see `PipelineConfig::hibernate_mid_workflow`).
         self.cfg.hibernate_mid_workflow || state.finished.is_some()

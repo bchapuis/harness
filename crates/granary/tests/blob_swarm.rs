@@ -213,7 +213,7 @@ const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
 /// How long a hibernating client idles when it idles — comfortably past
-/// [`IDLE_AFTER`], so the host really does passivate rather than nearly.
+/// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
 /// Content that varies in length and bytes with `n`, so distinct draws address
@@ -241,7 +241,7 @@ struct BlobSwarm {
     nodes: usize,
     clients: usize,
     ops: u64,
-    /// Idle past `idle_after` between operations, so activations passivate and
+    /// Idle past `idle_after` between operations, so activations hibernate and
     /// rehydrate mid-run.
     hibernating: bool,
     /// Let the nemesis kill and re-launch node processes, not just isolate them.
@@ -470,7 +470,7 @@ fn blob_integrity_holds_under_the_cluster_swarm() {
 //
 // The sweep above holds every activation resident, so a `get` is always served by
 // the activation that took the `put`. This one tears that down: the grain
-// passivates, its blob area goes with it, and the next `get` must rebuild from a
+// deactivates, its blob area goes with it, and the next `get` must rebuild from a
 // composite snapshot and re-fan the root set from a write quorum — on a node that
 // may have been a different process entirely a moment ago. G17 (returned bytes
 // hash to the requested id) and B2/G18 (the id is the content hash) are the same

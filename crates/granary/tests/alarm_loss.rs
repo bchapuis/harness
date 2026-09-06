@@ -3,12 +3,12 @@
 //! **What this settled.** A commit on this branch, `932ebca`, recorded that an
 //! alarm-wired granary does not commit *at all* under plain frame loss — no
 //! partition, no crash — the grain activating, never committing, being
-//! passivated, while the caller hangs to its own deadline. `557ad1a` reverted
+//! hibernated, while the caller hangs to its own deadline. `557ad1a` reverted
 //! that prose with no reason written down, and the workload behind it was never
 //! committed, so the claim survived as an assertion nobody could check. This file
 //! is the check. **It does not reproduce**, under the conditions the commit named
 //! or under harsher ones: at one-in-six, one-in-three, and one-in-two frame loss,
-//! with passivation on and off, and with the settle window removed entirely, the
+//! with hibernation on and off, and with the settle window removed entirely, the
 //! alarm-wired arm committed on every configuration — more often than the plain
 //! arm on four of the six, never categorically less.
 //!

@@ -38,7 +38,7 @@ type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 ///   dropped without a record; it must correspond to a launch on the stream, or
 ///   the drive discarded something it never sent.
 /// - **D7, quiescence.** A `Quiescent` must not be announced while a claim is
-///   open, and on the single-node tier the grain's `Passivated` (granary §13) must
+///   open, and on the single-node tier the grain's `Deactivated` (granary §13) must
 ///   not arrive while one is: an activation with an effect in flight has not
 ///   settled its work, and hibernating under it would strand the outcome.
 /// - **D2, launch coverage**, in the shape a stream can carry: the `Quiescent`
@@ -48,23 +48,23 @@ type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 /// — is a scenario assertion rather than a grammar rule, because the liveness is
 /// conditional on the activation surviving (§9 D2). The checker does hold the
 /// half that is checkable: a `Settled { committed: false }` closes its claim, so
-/// a stranded key shows up as a `Passivated` with nothing open and the work still
+/// a stranded key shows up as a `Deactivated` with nothing open and the work still
 /// in the fold, which the scenario suites assert against the journal.
 ///
 /// **Two tiers, one rule that differs.** A forced step-down — a leadership move,
-/// quorum loss — is involuntary, ignores `can_passivate`, and legitimately
-/// abandons its launches (§6); on the stream it is a `Passivated` with claims open,
+/// quorum loss — is involuntary, ignores `can_hibernate`, and legitimately
+/// abandons its launches (§6); on the stream it is a `Deactivated` with claims open,
 /// exactly the shape of a D7 violation, and granary's event carries no reason that
 /// would tell the two apart. So the checker is built for the tier it watches:
 /// [`strict`](DriveCycle::strict) for the single-node suites, where nothing is
-/// ever deposed and every `Passivated` is an idle hibernation, and
+/// ever deposed and every `Deactivated` is an idle hibernation, and
 /// [`under_failover`](DriveCycle::under_failover) for the clustered sweeps, where
-/// the `Passivated` half of D7 is left to the scenario suites and the `Quiescent`
+/// the `Deactivated` half of D7 is left to the scenario suites and the `Quiescent`
 /// half still holds.
 pub struct DriveCycle {
-    /// Whether a `Passivated` with claims open is a violation (single-node tier)
+    /// Whether a `Deactivated` with claims open is a violation (single-node tier)
     /// or a forced step-down abandoning its launches (clustered tier, §6).
-    passivation_is_idle: bool,
+    hibernation_is_idle: bool,
     /// Keys currently claimed, per grain and per activation of it: launched and
     /// not yet terminated.
     open: BTreeMap<GrainName, Claims>,
@@ -80,22 +80,22 @@ impl Default for DriveCycle {
 }
 
 impl DriveCycle {
-    /// The single-node tier's checker: every `Passivated` is an idle hibernation,
+    /// The single-node tier's checker: every `Deactivated` is an idle hibernation,
     /// so one with a claim open is a D7 violation.
     pub fn strict() -> DriveCycle {
         DriveCycle {
-            passivation_is_idle: true,
+            hibernation_is_idle: true,
             open: BTreeMap::new(),
             seen: BTreeMap::new(),
         }
     }
 
-    /// The clustered tier's checker: a `Passivated` with claims open is read as a
+    /// The clustered tier's checker: a `Deactivated` with claims open is read as a
     /// forced step-down abandoning its launches (§6), and only the `Quiescent`
     /// half of D7 is held.
     pub fn under_failover() -> DriveCycle {
         DriveCycle {
-            passivation_is_idle: false,
+            hibernation_is_idle: false,
             ..DriveCycle::strict()
         }
     }
@@ -173,13 +173,13 @@ impl Invariant for DriveCycle {
         // mints no duplicate of it (§8).
         if let Some(grain) = event.as_app::<GrainEvent>() {
             match grain {
-                GrainEvent::Passivated { node, name } => {
-                    if self.passivation_is_idle
+                GrainEvent::Deactivated { node, name } => {
+                    if self.hibernation_is_idle
                         && let Some(open) = self.open(*node, name)
                         && !open.is_empty()
                     {
                         return Err(format!(
-                            "{name} on {node} passivated with {} claim(s) still open ({}) — \
+                            "{name} on {node} deactivated with {} claim(s) still open ({}) — \
                              an activation with an effect in flight has not settled its \
                              work (D7)",
                             open.len(),
@@ -338,8 +338,8 @@ mod tests {
         .into()
     }
 
-    fn passivated_on(node: NodeId) -> Event {
-        Event::app(GrainEvent::Passivated { node, name: name() })
+    fn deactivated_on(node: NodeId) -> Event {
+        Event::app(GrainEvent::Deactivated { node, name: name() })
     }
 
     fn activated_on(node: NodeId) -> Event {
@@ -351,7 +351,7 @@ mod tests {
         let mut c = DriveCycle::strict();
         assert!(c.observe(&launched("k")).is_ok());
         assert!(c.observe(&settled("k", true)).is_ok());
-        assert!(c.observe(&passivated_on(N1)).is_ok(), "nothing left open");
+        assert!(c.observe(&deactivated_on(N1)).is_ok(), "nothing left open");
     }
 
     #[test]
@@ -362,7 +362,7 @@ mod tests {
         let mut c = DriveCycle::strict();
         c.observe(&launched("k")).unwrap();
         assert!(c.observe(&settled("k", false)).is_ok());
-        assert!(c.observe(&passivated_on(N1)).is_ok());
+        assert!(c.observe(&deactivated_on(N1)).is_ok());
     }
 
     #[test]
@@ -385,21 +385,21 @@ mod tests {
     }
 
     #[test]
-    fn passivating_with_a_claim_open_is_rejected_on_the_single_node_tier() {
+    fn deactivating_with_a_claim_open_is_rejected_on_the_single_node_tier() {
         let mut c = DriveCycle::strict();
         c.observe(&launched("k")).unwrap();
-        let err = c.observe(&passivated_on(N1)).expect_err("D7");
+        let err = c.observe(&deactivated_on(N1)).expect_err("D7");
         assert!(err.contains("still open"), "{err}");
     }
 
     #[test]
-    fn passivating_with_a_claim_open_is_a_step_down_under_failover() {
-        // §6: a forced step-down abandons its launches, and granary's `Passivated`
+    fn deactivating_with_a_claim_open_is_a_step_down_under_failover() {
+        // §6: a forced step-down abandons its launches, and granary's `Deactivated`
         // does not say which kind it was. The clustered checker reads it as the
         // legal kind and starts the next activation from an empty table.
         let mut c = DriveCycle::under_failover();
         c.observe(&launched("k")).unwrap();
-        assert!(c.observe(&passivated_on(N1)).is_ok());
+        assert!(c.observe(&deactivated_on(N1)).is_ok());
         assert!(
             c.observe(&activated_on(N1)).is_ok() && c.observe(&launched("k")).is_ok(),
             "the successor relaunches the abandoned key as a fresh claim (§3.3)"
@@ -424,7 +424,7 @@ mod tests {
         let err = c.observe(&interrupted("k")).expect_err("resolved twice");
         assert!(err.contains("twice"), "{err}");
         assert!(c.observe(&settled("k", true)).is_ok());
-        assert!(c.observe(&passivated_on(N1)).is_ok());
+        assert!(c.observe(&deactivated_on(N1)).is_ok());
     }
 
     #[test]
@@ -454,7 +454,7 @@ mod tests {
         // holds the grain. It closes no claim there, but it is not an invention.
         let mut c = DriveCycle::under_failover();
         c.observe(&launched_on_node(N1, "k")).unwrap();
-        c.observe(&passivated_on(N1)).unwrap();
+        c.observe(&deactivated_on(N1)).unwrap();
         c.observe(&activated_on(N2)).unwrap();
         assert!(c.observe(&settled_on_node(N2, "k", true)).is_ok());
     }

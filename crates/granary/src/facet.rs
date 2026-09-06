@@ -1002,7 +1002,7 @@ impl<FS: FacetSet> FacetCell<FS> {
 
     /// Run `write` against `F`'s armed stage (a facet accessor's write path).
     /// Panics outside a command handler: staging is command-scoped (§4.2), and a
-    /// write from `on_activate`/`on_passivate` would otherwise vanish silently.
+    /// write from `on_activate`/`on_deactivate` would otherwise vanish silently.
     pub(crate) fn with_stage<F, I, R>(&self, write: impl FnOnce(&mut F::Stage) -> R) -> R
     where
         F: Facet,

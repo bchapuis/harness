@@ -277,7 +277,7 @@ fn import_capture_and_hibernation_round_trip_byte_identically() {
     assert!(
         recorder.events().iter().any(|e| matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )),
         "the idle grain must hibernate",
     );
@@ -320,7 +320,7 @@ fn import_capture_and_hibernation_round_trip_byte_identically() {
         // lost — prove the inverse: a fresh scribble reads back live but is
         // absent from durable state until captured. (The crash-rewind variant
         // is the swarm's job; here hibernation refuses no capture because the
-        // consumer — this test grain — declares no `can_passivate` guard.)
+        // consumer — this test grain — declares no `can_hibernate` guard.)
         let second = reread.ask(CaptureNow).await.expect("ask").expect("capture");
         assert_eq!(
             second,

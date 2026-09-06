@@ -23,7 +23,7 @@
 //! stored, so a checkpoint uploads only new content. The manifests' chunk ids are
 //! the facet's blob roots (F3); §9 compaction then drops the delta records the
 //! checkpoint subsumes. A snapshot taken while an in-flight tool has dirtied the
-//! directory fails (never snapshot uncaptured bytes); the idle/passivation
+//! directory fails (never snapshot uncaptured bytes); the idle/deactivation
 //! snapshot runs quiesced and lands.
 //!
 //! **Files-only model.** Directories are implied by the files within them; empty
@@ -355,7 +355,7 @@ impl Facet for Ws {
                     // The snapshot must be the COMMITTED image (G4). Bytes that
                     // do not hash to the committed entry are an in-flight tool's
                     // uncaptured dirt: fail — a snapshot is only an optimization
-                    // and the idle/passivation snapshot runs quiesced.
+                    // and the idle/deactivation snapshot runs quiesced.
                     if BlobId::of(&bytes) != hash {
                         return Err(FacetError(format!(
                             "ws: {path} dirty (uncaptured writes); snapshot deferred"

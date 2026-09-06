@@ -153,14 +153,14 @@ impl GrainHandler<ReadBalance> for Account {
 
 /// `hibernating` picks the activation lifetime: `false` keeps every activation
 /// resident for the whole run, `true` gives it a lifetime short enough that
-/// clients can idle past it, so grains passivate and rehydrate from a quorum
+/// clients can idle past it, so grains hibernate and rehydrate from a quorum
 /// while the nemesis is still running. The snapshot cadence follows, because a
 /// hibernating grain that never snapshotted comes back by replaying from an
 /// empty base and never exercises the snapshot-plus-tail restore.
 ///
 /// The hibernating cadence is `1` — a snapshot at every commit — because idle
 /// eviction takes one only when §9's threshold has been crossed, exactly as the
-/// write path does (`host.rs::passivate`). A faulted client here often lands
+/// write path does (`host.rs::hibernate`). A faulted client here often lands
 /// fewer than two commits on a grain before idling past `idle_after`, so any
 /// higher cadence leaves the restore path unexercised, which
 /// `Exercised::assert_hibernated` then reports.
@@ -175,12 +175,12 @@ fn config(hibernating: bool) -> GranaryConfig {
 }
 
 /// Activation lifetime for the resident sweeps: longer than any run, so nothing
-/// passivates.
+/// hibernates.
 const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
 /// How long a hibernating client idles when it idles — comfortably past
-/// [`IDLE_AFTER`], so the host really does passivate rather than nearly.
+/// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
 /// Deposit-and-read traffic against a handful of grains, hosted on a leader-based
@@ -192,7 +192,7 @@ struct AccountSwarm {
     nodes: usize,
     clients: usize,
     ops: u64,
-    /// Idle past `idle_after` between operations, so activations passivate and
+    /// Idle past `idle_after` between operations, so activations hibernate and
     /// rehydrate mid-run.
     hibernating: bool,
     /// Let the nemesis kill and re-launch node processes, not just isolate them.
@@ -410,7 +410,7 @@ fn grain_swarm_is_reproducible() {
 /// `corpus.txt` after the identical mistake.
 ///
 /// The key lives in the *event*, so the applied set is folded from the journal
-/// and survives passivation and failover: a duplicate that arrives after a
+/// and survives deactivation and failover: a duplicate that arrives after a
 /// rehydration is still recognized. A read needs no key — it changes nothing, and
 /// a duplicate's reply is the value at its own instant, which falls inside the
 /// caller's window and linearizes there.
@@ -679,7 +679,7 @@ fn the_linearizable_account_sweep_is_reproducible() {
 // workload hibernates with no faults at all, and every clustered workload faults
 // without ever hibernating.
 //
-// This one crosses them: grains passivate and snapshot mid-run, and the next
+// This one crosses them: grains hibernate and snapshot mid-run, and the next
 // call rehydrates through the quorum barrier while the nemesis partitions,
 // freezes, and kills the processes around it. `CommitMonotonic` is the checker
 // that would name a write the recovery dropped or replayed onto an occupied
@@ -720,7 +720,7 @@ fn the_nemesis_actually_restarts_a_node() {
 
 #[test]
 fn hibernating_grain_swarm_is_reproducible() {
-    // Passivation, snapshot, rehydration, and process restart all ride the
+    // Hibernation, snapshot, rehydration, and process restart all ride the
     // Clock/Entropy/Spawner seams, so the stream stays byte-identical per seed.
     if let Err(divergence) = replay_cluster_swarm(&hibernating(2, 5), sweep_seeds(0..12)) {
         panic!("{divergence}");

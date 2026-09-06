@@ -259,7 +259,7 @@ impl<K: Ord> LaunchGuard<K> {
     }
 
     /// Whether no claim is outstanding: nothing launched since the last
-    /// [`reset`](LaunchGuard::reset). The passivation veto reads this — an
+    /// [`reset`](LaunchGuard::reset). The deactivation veto reads this — an
     /// activation holding an unswept claim may still receive its effect's
     /// outcome and must not hibernate under it.
     pub fn is_idle(&self) -> bool {

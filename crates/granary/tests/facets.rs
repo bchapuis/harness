@@ -346,7 +346,7 @@ fn kv_ws_and_events_compose_in_one_grain() {
     assert!(
         recorder.events().iter().any(|e| matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )),
         "the idle grain must hibernate",
     );
@@ -418,7 +418,7 @@ fn kv_and_events_commit_together_and_survive_hibernation() {
     assert!(
         recorder.events().iter().any(|e| matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )),
         "the idle grain must hibernate",
     );

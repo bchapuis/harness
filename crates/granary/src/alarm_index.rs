@@ -6,7 +6,7 @@
 //! # Why it exists
 //!
 //! An alarm fires from an in-activation timer, so a resident grain always fires on
-//! time. The gap is every **deactivation**: a failover passivates a shard's grains
+//! time. The gap is every **deactivation**: a failover deactivates a shard's grains
 //! (a forced step-down, §13), and idle hibernation would otherwise pin an alarmed
 //! grain resident forever — in either case an alarm with no caller would sleep
 //! until the grain is next touched. This index closes that gap. Each

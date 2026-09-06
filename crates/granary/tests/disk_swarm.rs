@@ -179,7 +179,7 @@ struct DiskBoxSwarm {
     clients: usize,
     ops: u64,
     dir: PathBuf,
-    /// Idle past `idle_after` between operations, so activations passivate and
+    /// Idle past `idle_after` between operations, so activations hibernate and
     /// the image is rematerialized mid-run.
     hibernating: bool,
     /// Let the nemesis kill and re-launch node processes, not just isolate them.
@@ -227,7 +227,7 @@ impl DiskBoxSwarm {
             // faults, and failover rematerializes from it plus the later
             // capture records (fold + rehydrate). Oftener still when
             // hibernating, so a grain has a checkpoint to come back from before
-            // it first passivates — otherwise every rehydration replays from an
+            // it first hibernates — otherwise every rehydration replays from an
             // empty base and the manifest restore path goes untested, which is
             // what `Exercised::from_snapshot` refuses to let pass silently.
             snapshot_every: if self.hibernating { 2 } else { 4 },
@@ -246,7 +246,7 @@ const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
 /// How long a hibernating client idles when it idles — comfortably past
-/// [`IDLE_AFTER`], so the host really does passivate rather than nearly.
+/// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
 impl ClusterWorkload for DiskBoxSwarm {
@@ -403,7 +403,7 @@ fn disk_grain_invariants_hold_under_the_cluster_swarm() {
 //
 // The sweep above holds every activation resident, so a read is served from the
 // image the write landed in — the block image is never rebuilt. This one tears it
-// down: the grain passivates, its image goes, and the next read is served from
+// down: the grain hibernates, its image goes, and the next read is served from
 // one the new activation rehydrated block by block out of content-addressed
 // blobs, possibly in a process that did not exist when the write committed. That
 // is the disk facet's whole durability story, and until now only a scripted
@@ -421,18 +421,18 @@ fn disk_grain_invariants_hold_across_hibernation_and_restarts() {
 }
 
 #[test]
-fn disk_hibernation_actually_passivates_and_restores_from_a_snapshot() {
+fn disk_hibernation_actually_deactivates_and_restores_from_a_snapshot() {
     // The sweep above is where the invariants are checked, and it narrows: at
     // `slow_seeds` a local run gets one seed of the declared sixteen. That is
     // right for an invariant, which every seed must satisfy, and wrong for the
     // coverage claim that used to ride along with it.
     //
-    // Whether this workload passivates and returns from a checkpoint is a
+    // Whether this workload hibernates and returns from a checkpoint is a
     // property of the *seed range*, not of any one seed. Nothing forces it: the
     // grain has to commit past `snapshot_every`, then idle out, then be called
     // again, and the nemesis spends stretches of most seeds unable to reach a
     // write quorum, so on the declared range it happens on some seeds and not
-    // others — seeds 2 and 3 never passivate at all. Asserted on a narrowed
+    // others — seeds 2 and 3 never hibernate at all. Asserted on a narrowed
     // sweep it was a claim about which seed a local run happened to draw, and it
     // held only because seed 0 was one of the ones that covered. Any change that
     // shifted the schedule could turn it red without breaking anything, and one

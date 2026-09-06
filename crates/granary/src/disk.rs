@@ -411,7 +411,7 @@ impl Facet for Disk {
 /// only at a capture's scan, so "the image holds uncaptured writes" is a
 /// conservative activation-local flag the consumer owns (machine §4: set it
 /// whenever the guest has run since the last committed capture) and consults
-/// in `can_passivate`, so the idle path cannot strand a dirty image.
+/// in `can_hibernate`, so the idle path cannot strand a dirty image.
 pub struct DiskHandle<'a, G: Grain, I>
 where
     G::Facets: HasFacet<Disk, I>,

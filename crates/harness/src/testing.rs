@@ -25,7 +25,7 @@ fn session_of(name: &GrainName) -> SessionId {
 }
 
 /// **Effect containment and single per-node activation** (H6 per-node half, H8):
-/// activation is the grain's (`Activated`/`Passivated` strictly alternate per
+/// activation is the grain's (`Activated`/`Deactivated` strictly alternate per
 /// session and node, granary §13); the harness's `SandboxBound`/`SandboxReleased`
 /// alternate **within** that window and the sandbox is released before
 /// deactivation; and a `ModelCompleted` only fires inside a live activation.
@@ -56,16 +56,16 @@ impl Invariant for HarnessEventGrammar {
                     let w = self.window(session_of(name), *node);
                     if w.0 {
                         return Err(format!(
-                            "second activation of {name} on {node} without passivation (G6)"
+                            "second activation of {name} on {node} without deactivation (G6)"
                         ));
                     }
                     *w = (true, false);
                 }
-                GrainEvent::Passivated { node, name } => {
+                GrainEvent::Deactivated { node, name } => {
                     let w = self.window(session_of(name), *node);
                     if w.1 {
                         return Err(format!(
-                            "passivation of {name} on {node} with the sandbox still bound (H8)"
+                            "deactivation of {name} on {node} with the sandbox still bound (H8)"
                         ));
                     }
                     *w = (false, false);

@@ -242,7 +242,7 @@ A session survives the machine that was running it.
 
 The journal's fenced append means even a *not actually dead* node (a partition,
 a pause) cannot fork the transcript: the old owner's next append loses the fence
-and deactivates. Re-submitting a turn id is always safe (invariant H7).
+and hibernates. Re-submitting a turn id is always safe (invariant H7).
 
 ## Sizing the host
 

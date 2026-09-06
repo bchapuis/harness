@@ -241,7 +241,7 @@ struct WsSwarm {
     /// materializations by node and grain beneath it, and every activation
     /// restores through a wipe, so seeded runs cannot contaminate each other.
     scratch: tempfile::TempDir,
-    /// Idle past `idle_after` between operations, so activations passivate and
+    /// Idle past `idle_after` between operations, so activations hibernate and
     /// rehydrate mid-run.
     hibernating: bool,
     /// Let the nemesis kill and re-launch node processes, not just isolate them.
@@ -304,7 +304,7 @@ const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
 /// How long a hibernating client idles when it idles — comfortably past
-/// [`IDLE_AFTER`], so the host really does passivate rather than nearly.
+/// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
 impl ClusterWorkload for WsSwarm {
@@ -500,7 +500,7 @@ fn workspace_reads_never_go_stale_under_the_cluster_swarm() {
 //
 // The sweep above holds every activation resident, so a read is served from the
 // live directory the write landed in — the materialization is never rebuilt. This
-// one tears it down: the grain passivates, its directory goes, and the next read
+// one tears it down: the grain hibernates, its directory goes, and the next read
 // is served from a tree the new activation reconstructed by applying the captured
 // bytes over a composite snapshot (F1 holds on the bytes, never on re-execution),
 // possibly in a process that did not exist when the write committed.

@@ -122,12 +122,12 @@ fn activations_of(recorder: &Recorder, key: &str) -> usize {
         .count()
 }
 
-fn passivations_of(recorder: &Recorder, key: &str) -> usize {
+fn deactivations_of(recorder: &Recorder, key: &str) -> usize {
     recorder
         .events()
         .iter()
         .filter(|e| {
-            matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Passivated { name, .. }) if name.key() == key)
+            matches!(e.as_app::<GrainEvent>(), Some(GrainEvent::Deactivated { name, .. }) if name.key() == key)
         })
         .count()
 }
@@ -234,7 +234,7 @@ fn driver_reactivates_an_indexed_grain() {
         ..GranaryConfig::default()
     });
     // A short idle window so the grain hibernates once touched — standing in for the
-    // passivation a failover forces. The driver must bring it back from the index.
+    // deactivation a failover forces. The driver must bring it back from the index.
     let pokes = system.granary_with_alarms::<Poke>(
         GranaryConfig {
             shards: SHARDS,
@@ -308,7 +308,7 @@ fn acked_registration_lets_an_alarmed_grain_hibernate_and_the_driver_fires_it() 
     sim.run_for(Duration::from_secs(1));
     assert_eq!(activations_of(&recorder, "t/1"), 1, "activated once so far");
     assert_eq!(
-        passivations_of(&recorder, "t/1"),
+        deactivations_of(&recorder, "t/1"),
         1,
         "the alarmed grain hibernated once the index acked its deadline",
     );
@@ -370,7 +370,7 @@ fn unacked_registration_keeps_an_alarmed_grain_resident() {
         "still the first activation"
     );
     assert_eq!(
-        passivations_of(&recorder, "t/2"),
+        deactivations_of(&recorder, "t/2"),
         0,
         "an alarmed grain whose registration never acked must stay resident",
     );

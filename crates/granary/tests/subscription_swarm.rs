@@ -19,7 +19,7 @@
 //!   and the host drops the subscription. Recovery is a re-subscribe plus
 //!   backfill, not a retry of the lost batch.
 //! - **Hibernation and reactivation under a live subscription.** `idle_after` is
-//!   short and writers pause past it, so the grain passivates with a subscriber
+//!   short and writers pause past it, so the grain hibernates with a subscriber
 //!   attached and the next append re-activates it.
 //! - **A timed-out append that commits late.** Every append carries a deadline
 //!   shorter than a faulted quorum round, so some return `Unavailable` and land
@@ -65,7 +65,7 @@ use support::log::LogGrain;
 use support::log::ReadFrom;
 use support::log::collect_until;
 
-/// Short enough that the pauses below cross it, so the grain passivates with a
+/// Short enough that the pauses below cross it, so the grain deactivates with a
 /// subscriber attached (§14's hibernation case).
 const IDLE_AFTER: Duration = Duration::from_millis(200);
 /// A writer's pause between bursts — past [`IDLE_AFTER`] on purpose.
@@ -195,7 +195,7 @@ impl ClusterWorkload for SubscriptionSwarm {
                                 let value = (w as i64 + 1) * 1000 + op as i64;
                                 let _ = grain.ask_timeout(Append(value), APPEND_DEADLINE).await;
                                 // Then idle past `idle_after`, so the grain
-                                // passivates under the live subscription.
+                                // hibernates under the live subscription.
                                 if op % 2 == 1 {
                                     clock.sleep(IDLE_FOR).await;
                                 }
@@ -309,7 +309,7 @@ fn a_subscription_reconstructs_the_committed_prefix_under_the_swarm() {
 
 #[test]
 fn the_subscription_swarm_is_reproducible() {
-    // Delivery, backfill, re-subscription, and the passivation underneath them
+    // Delivery, backfill, re-subscription, and the hibernation underneath them
     // all ride the Clock/Entropy/Spawner seams, so a seed replays byte-identically.
     let workload = SubscriptionSwarm::new(3, 2, 4);
     if let Err(divergence) = replay_cluster_swarm(&workload, sweep_seeds(0..12)) {

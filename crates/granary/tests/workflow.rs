@@ -64,11 +64,11 @@ fn rig(
     (sim, recorder, grains)
 }
 
-fn passivated(recorder: &Recorder) -> bool {
+fn hibernated(recorder: &Recorder) -> bool {
     recorder.events().iter().any(|e| {
         matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )
     })
 }
@@ -104,7 +104,7 @@ fn workflow_runs_steps_sleeps_and_finishes() {
 }
 
 #[test]
-fn steps_memoize_across_passivation() {
+fn steps_memoize_across_hibernation() {
     // Aggressive idle window: the grain hibernates in every gap the workflow allows
     // (after Finished, and — because the alarm veto holds during the sleep — the
     // memo must still carry completed steps across the reactivations the drive
@@ -128,7 +128,7 @@ fn steps_memoize_across_passivation() {
     let result = sim.block_on(async move { g.ask(Read).await.expect("read") });
     assert_eq!(result, Some(2));
     assert!(
-        passivated(&recorder),
+        hibernated(&recorder),
         "the aggressive idle window must have hibernated the grain at least once",
     );
     let g = grains.grain("p/0");

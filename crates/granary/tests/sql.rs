@@ -642,7 +642,7 @@ fn sql_writes_survive_hibernation_and_reads_commit_nothing() {
     assert!(
         recorder.events().iter().any(|e| matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )),
         "the idle grain must hibernate",
     );

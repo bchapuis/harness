@@ -16,7 +16,7 @@
 //!   ordinary command ([`ModelDone`]/[`ToolDone`]), and nudges itself forward
 //!   with [`Advance`] once an intent has committed. The activation therefore
 //!   never awaits I/O inside a handler (§3.2).
-//! - **`on_activate`/`on_passivate`/`can_passivate`** (granary §10): resume
+//! - **`on_activate`/`on_deactivate`/`can_hibernate`** (granary §10): resume
 //!   set-up, sandbox release on every deactivation (H8), and the veto that keeps
 //!   a live run from hibernating (§7.2).
 //!
@@ -1572,7 +1572,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Emit `SandboxReleased` for this session (H8): the one place the event is
     /// built, shared by [`release_sandbox`](Self::release_sandbox) and the
-    /// passivation teardown.
+    /// deactivation teardown.
     fn emit_sandbox_released(&self, ctx: &GrainCtx<Agent<S>>) {
         ctx.system().emit(
             HarnessEvent::SandboxReleased {
@@ -1587,7 +1587,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// the `bound` flag, and report the sandbox to release (if the slot was open)
     /// plus whether a `SandboxReleased` is owed. The caller drives the release
     /// future — deferred off the command path in
-    /// [`release_sandbox`](Self::release_sandbox), awaited inline on passivation.
+    /// [`release_sandbox`](Self::release_sandbox), awaited inline on deactivation.
     /// The announce is paired with `bound` here, independent of the slot: an
     /// unpaired bind is always announced (H8), so a `SandboxReleased` matches
     /// every `SandboxBound` exactly once.
@@ -1682,7 +1682,7 @@ impl<S: HarnessSystem> Grain for Agent<S> {
         Ok(())
     }
 
-    async fn on_passivate(&mut self, ctx: &GrainCtx<Self>) {
+    async fn on_deactivate(&mut self, ctx: &GrainCtx<Self>) {
         // Release the sandbox on every deactivation — idle hibernation, migration,
         // or forced step-down (H8). The workspace goes with it (§5.5). Scope the
         // lock so the guard is dropped before the async release.
@@ -1698,7 +1698,7 @@ impl<S: HarnessSystem> Grain for Agent<S> {
         }
     }
 
-    fn can_passivate(&self, state: &SessionState) -> bool {
+    fn can_hibernate(&self, state: &SessionState) -> bool {
         // Never hibernate a session whose run is live or whose fold queue
         // holds an accepted turn (§7.2) — both mean work is owed now — nor one
         // with a launched effect whose outcome could still arrive (the guard's

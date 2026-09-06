@@ -85,7 +85,7 @@ use tenancy::Meta;
 use tenancy::Record;
 use tenancy::Recorded;
 
-/// Short enough that clients idle past it, so a principal's index is passivated
+/// Short enough that clients idle past it, so a principal's index is hibernated
 /// and rebuilt from its journal mid-run (G12 crossed with G14).
 const IDLE_AFTER: Duration = Duration::from_millis(200);
 /// A client's idle, comfortably past [`IDLE_AFTER`].
@@ -299,7 +299,7 @@ impl ClusterWorkload for DirectorySwarm {
                         }
 
                         // Idle past the activation lifetime, so the index
-                        // passivates and the next call rebuilds it from a quorum.
+                        // hibernates and the next call rebuilds it from a quorum.
                         if op % 2 == 1 {
                             clock.sleep(IDLE_FOR).await;
                         }

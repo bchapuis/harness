@@ -142,13 +142,13 @@ fn hibernated_grain_reactivates_with_state() {
     });
     assert_eq!(added, 10);
 
-    // Drive past the idle window: the grain snapshots, passivates, and stops.
+    // Drive past the idle window: the grain snapshots, hibernates, and stops.
     sim.run();
     let events = recorder.events();
     assert!(
         events.iter().any(|e| matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )),
         "the idle grain must hibernate",
     );
@@ -210,7 +210,7 @@ fn a_gateway_read_leaves_a_hibernated_grain_asleep() {
     assert!(
         recorder.events().iter().any(|e| matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )),
         "the idle grain must hibernate",
     );
@@ -327,10 +327,10 @@ fn a_compacted_grain_reports_its_base_instead_of_a_silent_gap() {
     );
 }
 
-// --- can_passivate: a grain that vetoes idle hibernation (§10) ----------------
+// --- can_hibernate: a grain that vetoes idle hibernation (§10) ----------------
 
 /// A grain that never permits idle hibernation. The agentic harness overrides
-/// `can_passivate` this way while a run is live (harness §7.2).
+/// `can_hibernate` this way while a run is live (harness §7.2).
 #[derive(Default)]
 struct PinnedGrain;
 
@@ -351,7 +351,7 @@ impl Grain for PinnedGrain {
         r.accept::<Add>();
     }
 
-    fn can_passivate(&self, _state: &CounterState) -> bool {
+    fn can_hibernate(&self, _state: &CounterState) -> bool {
         false
     }
 }
@@ -368,7 +368,7 @@ impl GrainHandler<Add> for PinnedGrain {
 }
 
 #[test]
-fn can_passivate_vetoes_idle_hibernation() {
+fn can_hibernate_vetoes_idle_hibernation() {
     use actor_core::Spawner;
 
     let sim = Simulation::new(9);
@@ -400,9 +400,9 @@ fn can_passivate_vetoes_idle_hibernation() {
     assert!(
         !events.iter().any(|e| matches!(
             e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Passivated { .. })
+            Some(GrainEvent::Deactivated { .. })
         )),
-        "can_passivate = false must veto idle hibernation (§10)",
+        "can_hibernate = false must veto idle hibernation (§10)",
     );
 }
 
