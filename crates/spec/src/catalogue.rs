@@ -67,7 +67,7 @@ pub enum Shape {
 /// leaving the comparison quietly empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pointers {
-    /// Test files, `` `entities.rs` `` or `` `harness-sandbox/tests/workspace.rs` ``.
+    /// Test files, `` `entities.rs` `` or `` `agent-sandbox/tests/workspace.rs` ``.
     /// Compared by stem, so the path a spec writes matches the bare file name a
     /// catalogue writes, and the `compile_fail.rs` runner matches the
     /// `compile_fail` case directory beside it.
@@ -155,10 +155,10 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         pointers: Pointers::Files,
     },
     CatalogueSite {
-        id: "harness",
-        doc: "harness",
+        id: "agent",
+        doc: "agent",
         section: "11",
-        label: "H",
+        label: "A",
         shape: Shape::Table,
         pointers: Pointers::Files,
     },
@@ -199,7 +199,7 @@ impl Row {
     ///
     /// `verify` is the text of the entry's `Verify` entries, passed whole. A
     /// caller need not sort them: several are prose with the file names embedded
-    /// (`"harness-sandbox/tests/workspace.rs (adversarial traversal); tests/
+    /// (`"agent-sandbox/tests/workspace.rs (adversarial traversal); tests/
     /// native.rs (container confinement smoke)"`), and a `Verify::Checker` or
     /// `Verify::CompileTime` names no suite at all. `kind` decides which tokens
     /// are pointers and the rest are ignored, exactly as they are in the spec's
@@ -532,7 +532,7 @@ fn suite_pointers(cell: &str, kind: Pointers) -> BTreeSet<String> {
 /// The suite pointers inside a run of text, under one vocabulary.
 ///
 /// Used for both sides: a spec's backticked cell contents and a Rust entry's
-/// `Verify` text go through the same filter, so `harness-sandbox/tests/workspace.rs`
+/// `Verify` text go through the same filter, so `agent-sandbox/tests/workspace.rs`
 /// and `workspace.rs` reduce alike and the prose around them is ignored.
 fn pointer_tokens(text: &str, kind: Pointers) -> BTreeSet<String> {
     if kind == Pointers::Prose {
@@ -654,9 +654,9 @@ mod tests {
     fn columns_are_found_by_name_not_position() {
         let body = "\n| # | Invariant | Defined in | Verified by | Entity basis |\n\
                     |---|---|---|---|---|\n\
-                    | H1 | **Fold.** | §6.2 | `sessions.rs` | E2 |\n";
+                    | A1 | **Fold.** | §6.2 | `sessions.rs` | E2 |\n";
         let site = CatalogueSite {
-            label: "H",
+            label: "A",
             ..GRANARY
         };
         let rows = table_rows(body, &site);

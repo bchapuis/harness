@@ -3,7 +3,7 @@
 //! fold, the [`Alarm`](crate::Alarm) facet, and an entity's self-driving loop.
 //!
 //! **The durable core is memoization.** A workflow is a re-entrant decision the
-//! entity re-drives after every commit (harness §3). Each **step** runs an external
+//! entity re-drives after every commit (agent §3). Each **step** runs an external
 //! effect *once*; its result is journaled under the steps tag and folded into a
 //! `step id → bytes` map. On replay — a later drive, a re-activation, a failover —
 //! a completed step resolves from the map instead of re-running, so effects are

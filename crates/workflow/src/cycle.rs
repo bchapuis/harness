@@ -194,7 +194,7 @@ impl<D: Workflow> Engine<D> {
     /// A caller-driven tick also **wakes every at-rest key** (§3.4, §6). This is
     /// the line between the engine's own timer re-entering the cycle and someone
     /// asking: a key the engine gave up driving unattended is waiting for exactly
-    /// this message, and the harness draws the same line today (harness §9.2 item
+    /// this message, and the harness draws the same line today (agent §9.2 item
     /// 3, where the next message to drive the session re-launches an abandoned
     /// propagation).
     pub fn tick(&self, workflow: &D, state: &D::State, ctx: &EntityCtx<D>) {

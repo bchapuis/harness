@@ -1,0 +1,30 @@
+[package]
+name = "agent-gateway"
+description = "The public HTTP/SSE edge for the agentic harness: an Orleans-style cluster client that terminates tenant auth and addresses session entities directly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-runtime.workspace = true
+entity.workspace = true
+tenancy.workspace = true
+agent.workspace = true
+axum.workspace = true
+# `signal` (added on top of the workspace feature set) for graceful shutdown on
+# SIGTERM/SIGINT and the SIGHUP token-file reload.
+tokio = { workspace = true, features = ["signal"] }
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

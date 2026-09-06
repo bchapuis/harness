@@ -1,6 +1,6 @@
 # fc-rootfs: microVM assets for the `firecracker` Native tier
 
-`build.sh` produces everything `harness-sandbox --features firecracker`
+`build.sh` produces everything `agent-sandbox --features firecracker`
 needs at runtime, into `out/` (gitignored):
 
 | Asset | What | Source |
@@ -15,18 +15,18 @@ the assets requires Linux with `/dev/kvm` — Firecracker has no emulation
 fallback, and Docker Desktop's VM does not expose KVM (Apple Silicon nested
 virtualization needs M3+). The split is deliberate:
 
-- everywhere (incl. macOS): `cargo test -p harness-sandbox --features
+- everywhere (incl. macOS): `cargo test -p agent-sandbox --features
   firecracker` exercises the wire protocol, the tar sync, and the conduct
   paths against a fake guest; `guest/fc-agent && cargo test` exercises the
   real agent over `--uds`;
 - Linux + KVM (CI's `firecracker` job, or any Linux box): the same command
   additionally boots real microVMs through `tests/firecracker.rs`, reading
-  the assets from `out/` (override with `HARNESS_FC_ASSETS=<dir>`).
+  the assets from `out/` (override with `AGENT_FC_ASSETS=<dir>`).
 
 Knobs, all env: `ARCH` (`x86_64`/`aarch64`, defaults to the docker engine's),
 `ALPINE`, `FC_VERSION`, `CI_VERSION`, `KERNEL` — see the script header.
 Cross-arch builds work through docker's `--platform` emulation.
 
-The agent and `crates/harness-sandbox/src/firecracker.rs` are the two ends
+The agent and `crates/agent-sandbox/src/firecracker.rs` are the two ends
 of one wire protocol (framed JSON + tar over vsock, documented in both);
 change them together.

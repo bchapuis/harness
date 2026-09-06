@@ -142,7 +142,7 @@ pub trait Entity: Sized + Send + 'static {
     /// Whether the activation MAY idle-hibernate now (§10). Consulted only on idle
     /// eviction; a forced step-down (leadership move, quorum loss) is involuntary
     /// and ignores it. The default always permits hibernation. An entity with
-    /// **autonomous** work that is not yet journaled (harness §7.2) overrides this
+    /// **autonomous** work that is not yet journaled (agent §7.2) overrides this
     /// to veto eviction until the work settles; the host then reschedules the idle
     /// check rather than evicting.
     fn can_hibernate(&self, _state: &Self::State) -> bool {

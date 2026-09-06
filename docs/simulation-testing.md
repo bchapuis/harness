@@ -668,7 +668,7 @@ inline in the spec. The [cluster utilities](cluster-utilities-spec.md) carry
 their own, separately numbered catalogue (U1, U2, …; machine-readable as
 `utilities_catalogue()`), held to the same drift discipline, as do the layers
 above: the wal (L1–L5), entity (E1–E21, plus the facet contract F1–F4), the
-harness (H1–H8), the sandbox (S1–S5), the machine (M1–M6), and the blob store
+harness (A1–A8), the sandbox (S1–S5), the machine (M1–M6), and the blob store
 (B1–B7). Format compatibility (V1–V6) is the one catalogue with no Rust copy to
 drift from: V3 is a compile-time assertion inside `compat::Window`, and V4 and V5
 are policy, held by the golden corpus and the mixed-version sweep (compatibility
@@ -739,7 +739,7 @@ For each component, write:
 Known gaps between what the sweeps exercise and what the specs mandate. Each is
 a place a bug could live undetected today.
 
-- **`harness-sandbox`, `harness-gateway`, and `machine-frontdoor` have no
+- **`agent-sandbox`, `agent-gateway`, and `machine-frontdoor` have no
   sweep.** These are I/O-boundary crates rather than distributed ones, so the
   simulator reaches them only indirectly. What a sweep would look like there is
   settled for one of the three and open for the other two: the sandbox states

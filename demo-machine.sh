@@ -31,7 +31,7 @@ MACHINE=${MACHINE_NAME:-dev-box}
 PORT_BASE=${MACHINE_PORT_BASE:-7601}
 DOOR_BASE=${MACHINE_DOOR_BASE:-2222}
 ADMIN_BASE=${MACHINE_ADMIN_BASE:-7701}
-ASSETS=${HARNESS_MACHINE_ASSETS:-guest/machine-rootfs/out}
+ASSETS=${AGENT_MACHINE_ASSETS:-guest/machine-rootfs/out}
 # Every node offers an admin socket, and the CLI is given all three: a command
 # keeps working after the node it usually talks to is killed.
 ADMIN=(--admin "127.0.0.1:$ADMIN_BASE" --admin "127.0.0.1:$((ADMIN_BASE + 1))" \

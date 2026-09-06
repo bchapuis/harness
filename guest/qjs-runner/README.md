@@ -2,7 +2,7 @@
 
 A hermetic QuickJS interpreter for the Compute tier, compiled to
 `wasm32-wasip1` and shipped as the committed artifact
-`crates/harness-sandbox/modules/qjs.wasm`. It turns `run_js` tool calls into
+`crates/agent-sandbox/modules/qjs.wasm`. It turns `run_js` tool calls into
 deterministic JavaScript execution: the model writes JS (inline or as a
 workspace file), and this module runs it under the same fuel bound, workspace
 handle, and injected seed as any other Compute guest.
@@ -38,7 +38,7 @@ sysroot, for rquickjs's quickjs-ng C compilation), and libclang (for
 rquickjs's bindgen, since no pregenerated bindings ship for wasm32-wasip1).
 The script copies the result over the committed `qjs.wasm`.
 
-After building, `cargo test -p harness-sandbox --features quickjs` runs the
+After building, `cargo test -p agent-sandbox --features quickjs` runs the
 real-artifact suite: the imports allowlist (hermeticity guard), the S2
 determinism differential (same seed reproduces the `Math.random` stream and
 workspace effects, a different seed diverges), the frozen clock, and the
@@ -55,7 +55,7 @@ The committed `qjs.wasm` was built from:
 - `qjs.wasm` size: `696176` bytes
 
 Rebuild with `build.sh` and update these on any change; the imports-allowlist
-test in `harness-sandbox/tests/quickjs.rs` fails if a rebuild widens the host
+test in `agent-sandbox/tests/quickjs.rs` fails if a rebuild widens the host
 surface.
 
 ## Imports (the hermeticity contract)
@@ -67,6 +67,6 @@ The artifact may import only:
   (`random_get`, `clock_time_get`, `fd_write`, `environ_sizes_get`,
   `environ_get`, `proc_exit`, `fd_close`, `fd_fdstat_get`, `fd_seek`).
 
-`harness-sandbox/tests/quickjs.rs` pins this set. A wasi-libc upgrade that
+`agent-sandbox/tests/quickjs.rs` pins this set. A wasi-libc upgrade that
 imports more fails that test rather than silently widening the surface; the
 fix is a deliberate addition to `wasi_stubs` in `compute.rs`.

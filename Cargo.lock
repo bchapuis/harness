@@ -134,6 +134,129 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent"
+version = "0.1.0"
+dependencies = [
+ "actor-cluster",
+ "actor-core",
+ "actor-simulation",
+ "agent",
+ "entity",
+ "futures",
+ "serde",
+ "serde_json",
+ "spec",
+ "tempfile",
+]
+
+[[package]]
+name = "agent-anthropic"
+version = "0.1.0"
+dependencies = [
+ "actor-core",
+ "actor-simulation",
+ "agent",
+ "futures",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "agent-gateway"
+version = "0.1.0"
+dependencies = [
+ "actor-cluster",
+ "actor-core",
+ "actor-runtime",
+ "agent",
+ "axum",
+ "entity",
+ "futures",
+ "serde",
+ "serde_json",
+ "tenancy",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "agent-http"
+version = "0.1.0"
+dependencies = [
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots",
+]
+
+[[package]]
+name = "agent-openai"
+version = "0.1.0"
+dependencies = [
+ "actor-core",
+ "actor-simulation",
+ "agent",
+ "futures",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "agent-sandbox"
+version = "0.1.0"
+dependencies = [
+ "actor-core",
+ "actor-simulation",
+ "agent",
+ "cap-std",
+ "entity",
+ "futures",
+ "machine-host",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "spec",
+ "tar",
+ "tempfile",
+ "tokio",
+ "wasmtime",
+ "wat",
+]
+
+[[package]]
+name = "agent-standalone"
+version = "0.1.0"
+dependencies = [
+ "actor-cluster",
+ "actor-core",
+ "actor-runtime",
+ "agent",
+ "agent-anthropic",
+ "agent-http",
+ "agent-sandbox",
+ "entity",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tenancy",
+ "tokio",
+]
+
+[[package]]
+name = "agent-tui"
+version = "0.1.0"
+dependencies = [
+ "agent",
+ "agent-http",
+ "crossterm",
+ "futures",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1448,129 +1571,6 @@ dependencies = [
  "ff",
  "rand_core 0.10.1",
  "subtle",
-]
-
-[[package]]
-name = "harness"
-version = "0.1.0"
-dependencies = [
- "actor-cluster",
- "actor-core",
- "actor-simulation",
- "entity",
- "futures",
- "harness",
- "serde",
- "serde_json",
- "spec",
- "tempfile",
-]
-
-[[package]]
-name = "harness-anthropic"
-version = "0.1.0"
-dependencies = [
- "actor-core",
- "actor-simulation",
- "futures",
- "harness",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "harness-gateway"
-version = "0.1.0"
-dependencies = [
- "actor-cluster",
- "actor-core",
- "actor-runtime",
- "axum",
- "entity",
- "futures",
- "harness",
- "serde",
- "serde_json",
- "tenancy",
- "tokio",
- "tower",
-]
-
-[[package]]
-name = "harness-http"
-version = "0.1.0"
-dependencies = [
- "rustls",
- "tokio",
- "tokio-rustls",
- "webpki-roots",
-]
-
-[[package]]
-name = "harness-openai"
-version = "0.1.0"
-dependencies = [
- "actor-core",
- "actor-simulation",
- "futures",
- "harness",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "harness-sandbox"
-version = "0.1.0"
-dependencies = [
- "actor-core",
- "actor-simulation",
- "cap-std",
- "entity",
- "futures",
- "harness",
- "machine-host",
- "rustix 1.1.4",
- "serde",
- "serde_json",
- "spec",
- "tar",
- "tempfile",
- "tokio",
- "wasmtime",
- "wat",
-]
-
-[[package]]
-name = "harness-standalone"
-version = "0.1.0"
-dependencies = [
- "actor-cluster",
- "actor-core",
- "actor-runtime",
- "entity",
- "harness",
- "harness-anthropic",
- "harness-http",
- "harness-sandbox",
- "serde",
- "serde_json",
- "tempfile",
- "tenancy",
- "tokio",
-]
-
-[[package]]
-name = "harness-tui"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "futures",
- "harness",
- "harness-http",
- "ratatui",
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 TARGET=wasm32-wasip1
-OUT=../../crates/harness-sandbox/modules/qjs.wasm
+OUT=../../crates/agent-sandbox/modules/qjs.wasm
 
 if [[ -z "${WASI_SDK_PATH:-}" ]]; then
   echo "set WASI_SDK_PATH to a WASI SDK install (https://github.com/WebAssembly/wasi-sdk/releases)" >&2
@@ -35,4 +35,4 @@ cp "target/$TARGET/release/qjs_runner.wasm" "$OUT"
 
 SIZE=$(wc -c < "$OUT" | tr -d ' ')
 echo "wrote $OUT ($SIZE bytes)"
-echo "now run: cargo test -p harness-sandbox --features quickjs"
+echo "now run: cargo test -p agent-sandbox --features quickjs"

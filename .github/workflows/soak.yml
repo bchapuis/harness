@@ -109,7 +109,7 @@ jobs:
         env:
           SWARM_SEED_BASE: ${{ steps.seeds.outputs.base }}
           SWARM_SEEDS: ${{ steps.seeds.outputs.heavy }}
-        run: cargo test -p harness -p machine-entity --no-fail-fast
+        run: cargo test -p agent -p machine-entity --no-fail-fast
 
       - name: Report the replay command on failure
         if: failure()

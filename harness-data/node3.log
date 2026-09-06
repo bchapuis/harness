@@ -1,0 +1,13 @@
+[node-3] transport 127.0.0.1:7403, data ./harness-data/node3, model claude-sonnet-4-6
+[node-3] cluster ready (leader elected)
+[node-3] hosting grains; the public edge is harness-gateway (a cluster client). No client-facing listener on this node.
+[node-3] Suspected { observer: NodeId(3), node: NodeId(100) }
+[node-3] Reachable { observer: NodeId(3), node: NodeId(100) }
+[node-3] RunStarted { session: SessionId("alice/http-demo"), turn: TurnId("t-1"), parent: None }
+[node-3] ModelCompleted { session: SessionId("alice/http-demo"), turn: TurnId("t-1"), node: NodeId(3), usage: 1974 }
+[node-3] SandboxBound { session: SessionId("alice/http-demo"), node: NodeId(3) }
+[node-3] ToolCompleted { session: SessionId("alice/http-demo"), turn: TurnId("t-1"), node: NodeId(3) }
+[node-3] ToolCompleted { session: SessionId("alice/http-demo"), turn: TurnId("t-1"), node: NodeId(3) }
+[node-3] ModelCompleted { session: SessionId("alice/http-demo"), turn: TurnId("t-1"), node: NodeId(3), usage: 2156 }
+[node-3] RunEnded { session: SessionId("alice/http-demo"), turn: TurnId("t-1"), outcome: "ok" }
+[node-3] SandboxReleased { session: SessionId("alice/http-demo"), node: NodeId(3) }

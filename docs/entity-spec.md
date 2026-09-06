@@ -131,7 +131,7 @@ pub trait Entity: Sized + Send + 'static {
     /// a forced step-down (leadership move, quorum loss). Runs even when the
     /// journal is unwritable, since it cannot persist (the ctx exposes no
     /// `persist`); a layered runtime uses it to release non-durable per-activation
-    /// resources (e.g. the agentic harness's sandbox, harness §5.3).
+    /// resources (e.g. the agentic harness's sandbox, agent §5.3).
     fn on_deactivate(&mut self, _ctx: &EntityCtx<Self>)
         -> impl Future<Output = ()> + Send { async {} }
 
@@ -770,7 +770,7 @@ The alarm facet gives an entity a **durable timer**: at most one pending deadlin
 
 **Status: implemented** (`steps.rs`).
 
-The steps facet gives an entity **durable step memoization**: the Cloudflare-Workflows-style `step`/`sleep`/`retry` pattern, layered on the event fold, the alarm facet (§7.16), and an entity's self-driving loop (the agentic harness's `advance` loop is the reference consumer, harness §3).
+The steps facet gives an entity **durable step memoization**: the Cloudflare-Workflows-style `step`/`sleep`/`retry` pattern, layered on the event fold, the alarm facet (§7.16), and an entity's self-driving loop (the agentic harness's `advance` loop is the reference consumer, agent §3).
 
 - **The durable core is a memo.** A workflow is a re-entrant decision the entity re-drives after every commit. Each **step** runs an external effect once; the facet journals its result under the steps tag and folds it into a `step id → bytes` map. On any later drive (a re-activation, a failover) a completed step resolves from the map instead of re-running, so effects are at-most-once across crashes. Step ids are the workflow's stable call-site ordinals, deterministic across re-drives and replay.
 

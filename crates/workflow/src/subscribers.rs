@@ -4,7 +4,7 @@
 //! it therefore cannot receive it as a reply: a reply handle is resolved exactly
 //! once within the delivery of one message (core §4.5) and the work spans many.
 //! Every consumer of the workflow meets this the same way — an ack, a registered
-//! reply-to, and a later notification (harness §7.3) — so the pattern is
+//! reply-to, and a later notification (agent §7.3) — so the pattern is
 //! supplied here as a **component**, with a normative discipline and no trait
 //! method.
 //!

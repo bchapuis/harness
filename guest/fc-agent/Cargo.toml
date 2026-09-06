@@ -1,4 +1,4 @@
-# The Firecracker guest agent: pid 1 inside the microVM of harness-sandbox's
+# The Firecracker guest agent: pid 1 inside the microVM of agent-sandbox's
 # `firecracker` feature. Its own workspace (like guest/qjs-runner): it targets
 # static musl Linux and is built by guest/fc-rootfs/build.sh, never by the
 # repository workspace.

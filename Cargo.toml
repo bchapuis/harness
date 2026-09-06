@@ -53,7 +53,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # (the TUI's gateway client, the standalone node's model-seam socket): origins,
 # TCP/TLS connect, request framing, and an incremental response reader serving
 # both unary read-to-EOF calls and live chunked streams.
-harness-http = { path = "crates/harness-http", version = "0.1.0" }
+agent-http = { path = "crates/agent-http", version = "0.1.0" }
 
 # Entity: durable objects ("entities") built on the actor framework (entity spec).
 entity = { path = "crates/entity", version = "0.1.0" }
@@ -69,7 +69,7 @@ tenancy = { path = "crates/tenancy", version = "0.1.0" }
 
 # The host side of a machine (machine spec §2.1, sandbox spec §3.4, §3.5): the
 # Firecracker microVM and OCI container mechanisms behind one seam, plus the
-# vsock transport and workspace tar codec they share. Held by harness-sandbox's
+# vsock transport and workspace tar codec they share. Held by agent-sandbox's
 # native and firecracker tiers and by machine-entity's runtime binding.
 machine-host = { path = "crates/machine-host", version = "0.1.0" }
 
@@ -86,10 +86,10 @@ machine-proto = { path = "crates/machine-proto", version = "0.1.0" }
 machine-frontdoor = { path = "crates/machine-frontdoor", version = "0.1.0" }
 
 # The agentic harness (Appendix B layout of the agentic harness spec).
-harness = { path = "crates/harness", version = "0.1.0" }
-harness-anthropic = { path = "crates/harness-anthropic", version = "0.1.0" }
-harness-openai = { path = "crates/harness-openai", version = "0.1.0" }
-harness-sandbox = { path = "crates/harness-sandbox", version = "0.1.0" }
+agent = { path = "crates/agent", version = "0.1.0" }
+agent-anthropic = { path = "crates/agent-anthropic", version = "0.1.0" }
+agent-openai = { path = "crates/agent-openai", version = "0.1.0" }
+agent-sandbox = { path = "crates/agent-sandbox", version = "0.1.0" }
 
 # Third-party. The runtime seam (Clock/Entropy/Spawner) and mailbox are built
 # on these; our own crates remain `unsafe`-free.
@@ -123,7 +123,7 @@ rand_chacha = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync"] }
 getrandom = "0.2"
 # Mutual-TLS TCP transport (`actor-runtime`), plus the TLS client side of
-# `harness-standalone`'s HttpPost seam and `harness-tui`'s gateway connection.
+# `agent-standalone`'s HttpPost seam and `agent-tui`'s gateway connection.
 #
 # `ring` rather than the default aws-lc-rs backend, here and on russh below:
 # aws-lc-sys was the single largest compile unit in the workspace (a 76 s
@@ -135,7 +135,7 @@ getrandom = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rcgen = "0.13"
-# The HTTP/SSE gateway (`harness-gateway`) only: the public multi-tenant edge.
+# The HTTP/SSE gateway (`agent-gateway`) only: the public multi-tenant edge.
 axum = "0.8"
 # Byte buffers for russh's channel data (`machine-frontdoor`).
 bytes = "1"
@@ -144,25 +144,25 @@ bytes = "1"
 # each machine's own host key (machine spec §5.1). `ring` for the same reason
 # as rustls above; `flate2` and `rsa` are the rest of russh's default set.
 russh = { version = "0.62", default-features = false, features = ["ring", "flate2", "rsa"] }
-# The terminal client (`harness-tui`) only: a full-screen ratatui frontend over
+# The terminal client (`agent-tui`) only: a full-screen ratatui frontend over
 # crossterm, with crossterm's async `EventStream` so input multiplexes with the
 # gateway's SSE record stream in one `tokio::select!`.
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
-# Trust anchors for the outbound rustls connections (`harness-standalone`'s
-# HttpPost seam to the Anthropic API, `harness-tui`'s gateway connection).
+# Trust anchors for the outbound rustls connections (`agent-standalone`'s
+# HttpPost seam to the Anthropic API, `agent-tui`'s gateway connection).
 webpki-roots = "1"
 
 # The capability-handle filesystem of sandbox spec §3.1, held by
-# `harness-sandbox`, `machine-entity`, and `machine-host`'s workspace codec.
+# `agent-sandbox`, `machine-entity`, and `machine-host`'s workspace codec.
 cap-std = "3"
-# Compute engine of sandbox spec §3.2 (`harness-sandbox` only) — the
+# Compute engine of sandbox spec §3.2 (`agent-sandbox` only) — the
 # reference realization's product choice (sandbox spec §3.5).
 wasmtime = { version = "33", default-features = false, features = ["runtime", "cranelift"] }
 # The tar stream that carries a workspace over vsock (`machine-host`'s ws codec,
 # feature `ws`; mirrored by the guest agents, which pin the same major).
 tar = "0.4"
-# Native tier (`harness-sandbox`, feature `native`) only: uid/gid without
+# Native tier (`agent-sandbox`, feature `native`) only: uid/gid without
 # `unsafe` in our own crates (rustix is already in the graph via cap-std).
 rustix = { version = "1", features = ["process"] }
 

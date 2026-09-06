@@ -1,8 +1,8 @@
 # Multi-tenant edge: the gateway as a cluster client
 
-This is the design for making `harness-standalone` multi-tenant, built on the
+This is the design for making `agent-standalone` multi-tenant, built on the
 `tenancy` directory entity (`crates/tenancy`) and a single public edge: the
-**`harness-gateway`**, an Orleans-style cluster *client*.
+**`agent-gateway`**, an Orleans-style cluster *client*.
 
 The trust boundary is the **gateway**; a request proves its principal with a
 **bearer token**; and the gateway reaches the cluster by joining the actor
@@ -42,7 +42,7 @@ The gateway is the one place that decides identity. A request carries
 scopes the session key under it before addressing the entity:
 
 ```
-client --(HTTP: Authorization: Bearer <token>)--> harness-gateway
+client --(HTTP: Authorization: Bearer <token>)--> agent-gateway
                                                      |
                                   gateway verifies token -> principal P
                                   scopes key  P/<session>  -> EntityRef.ask(...)
@@ -57,11 +57,11 @@ over HTTP with a bearer token; the nodes have no client-facing listener.
 
 | File | Role |
 |------|------|
-| `harness-gateway/src/auth.rs` | The `TokenVerifier` seam: `verify(token) -> Option<PrincipalId>`, with `StaticTokens` (opaque secrets from `--auth-tokens`) and `InsecureTokens` (the token is the principal, loopback-only). Plus `scoped_session`/`unscope_session`. Runs at the edge, never in an entity (the determinism guard-rail). |
-| `harness-gateway/src/http.rs` | Each handler verifies the bearer token to a principal, scopes the `SessionId`, and calls the entity directly (`SessionRef::prompt_within`/`tail`/`follow`/`cancel`). `Record`/`List` go through the client `Entity<Directory>`. SSE carries the live record stream. |
-| `harness-gateway/src/cluster.rs` | Joins the transport in `MembershipMode::Static` with the cluster secret, dials the nodes, and `add_member`s them — so the receptionist gossip (the host gateway refs) reaches this non-voting client. |
-| `harness-gateway/src/lib.rs` | `Harness::client` (routing-only, no model/sandbox seams) + a client `Entity<Directory>`; `connect` polls until discovery, then assembles the `Gateway`. |
-| `harness-standalone/src/node.rs` | The node hosts the Agent kinds and the `Directory` entity and admits the gateway with `--client <id>=<host>` (a non-voting id outside the Raft roster). No client-facing listener. |
+| `agent-gateway/src/auth.rs` | The `TokenVerifier` seam: `verify(token) -> Option<PrincipalId>`, with `StaticTokens` (opaque secrets from `--auth-tokens`) and `InsecureTokens` (the token is the principal, loopback-only). Plus `scoped_session`/`unscope_session`. Runs at the edge, never in an entity (the determinism guard-rail). |
+| `agent-gateway/src/http.rs` | Each handler verifies the bearer token to a principal, scopes the `SessionId`, and calls the entity directly (`SessionRef::prompt_within`/`tail`/`follow`/`cancel`). `Record`/`List` go through the client `Entity<Directory>`. SSE carries the live record stream. |
+| `agent-gateway/src/cluster.rs` | Joins the transport in `MembershipMode::Static` with the cluster secret, dials the nodes, and `add_member`s them — so the receptionist gossip (the host gateway refs) reaches this non-voting client. |
+| `agent-gateway/src/lib.rs` | `Harness::client` (routing-only, no model/sandbox seams) + a client `Entity<Directory>`; `connect` polls until discovery, then assembles the `Gateway`. |
+| `agent-standalone/src/node.rs` | The node hosts the Agent kinds and the `Directory` entity and admits the gateway with `--client <id>=<host>` (a non-voting id outside the Raft roster). No client-facing listener. |
 
 ## Delegation falls out for free
 
@@ -108,21 +108,21 @@ authorization gate.
 - **Directory wiring** — the node hosts the `tenancy::Directory` entity (one per
   principal, sharing the kinds' durable store); the gateway records ownership on
   each prompt and answers `GET /v1/sessions` from it.
-- **Gateway-as-cluster-client edge** — `harness-gateway` joins the transport as a
+- **Gateway-as-cluster-client edge** — `agent-gateway` joins the transport as a
   non-voting member (`Harness::client` + `entities_client`), terminates tenant
   auth, and addresses session entities directly. SSE carries the live record stream.
 - **Clients of the edge** — two, both HTTP/SSE clients of the gateway and
-  nothing else: `harness-tui` (`crates/harness-tui`), a terminal chat UI that
+  nothing else: `agent-tui` (`crates/agent-tui`), a terminal chat UI that
   authenticates as a tenant, lists its sessions, and streams a run's records; and
-  the VS Code extension in `clients/harness-vscode`, on the same endpoints.
+  the VS Code extension in `clients/agent-vscode`, on the same endpoints.
 - **Not implemented** — per-tenant budgets and quotas, `session/delete` (forget
   plus entity retire), token introspection, signed (HMAC/JWT) tokens, and a
   WebSocket transport.
 
 ## Tests
 
-- Unit: `TokenVerifier`; scoped-key construction (`harness-gateway/src/auth.rs`).
-- Integration: `harness-gateway/tests/gateway.rs` drives the axum router against
+- Unit: `TokenVerifier`; scoped-key construction (`agent-gateway/src/auth.rs`).
+- Integration: `agent-gateway/tests/gateway.rs` drives the axum router against
   an in-process cluster, runs a prompt to a hosted entity, and asserts principal A
   cannot see principal B's sessions — the core isolation invariant.
 

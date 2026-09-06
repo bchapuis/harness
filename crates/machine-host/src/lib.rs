@@ -9,7 +9,7 @@
 //!   the box.
 //!
 //! Two consumers run untrusted code inside a guest: the agent sandbox's
-//! `Native` tier (`harness-sandbox`) and the persistent machine
+//! `Native` tier (`agent-sandbox`) and the persistent machine
 //! (`crates/machine-entity`). Two mechanisms can hold one: a Firecracker microVM
 //! ([`microvm`]) or an OCI container driven through the `docker` CLI
 //! ([`container`]). This crate owns both mechanisms and the seam between them,

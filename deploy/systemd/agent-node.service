@@ -1,0 +1,112 @@
+# A agent-standalone node (silo) on bare metal.
+#
+# One unit per machine. Every node's identity, peer roster, and data directory come
+# from /etc/agent/node.env (see node.env.example); nothing here is host-specific, so
+# the same file ships to every machine in the cluster.
+#
+# Install:
+#   install -m 0755 target/release/agent-standalone /usr/local/bin/
+#   install -m 0644 deploy/systemd/agent-node.service /etc/systemd/system/
+#   install -d -m 0750 -o agent -g agent /etc/agent
+#   install -m 0640 -o root -g agent deploy/systemd/node.env.example /etc/agent/node.env
+#   # edit /etc/agent/node.env, then:
+#   systemctl daemon-reload && systemctl enable --now agent-node
+#
+# See deploy/systemd/README.md for the disk layout and the rolling-restart procedure —
+# in particular, this unit stops with SIGTERM and a generous timeout on purpose, and
+# shortening that is how a rolling restart becomes an outage.
+
+[Unit]
+Description=agent-standalone node (entity silo)
+Documentation=file:///usr/share/doc/agent/standalone-deployment.md
+# The data directory must be mounted before the node opens its store: a node that
+# starts on an empty directory because its NVMe was not yet mounted looks to the
+# cluster like a node that lost its state, and it will be re-replicated to.
+RequiresMountsFor=/var/lib/agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=agent
+Group=agent
+EnvironmentFile=/etc/agent/node.env
+ExecStart=/usr/local/bin/agent-standalone node \
+    --id ${AGENT_NODE_ID} \
+    --nodes ${AGENT_NODES} \
+    --data /var/lib/agent/node \
+    --bind-host ${AGENT_BIND_HOST} \
+    --port-base ${AGENT_PORT_BASE} \
+    --model ${AGENT_MODEL} \
+    --sandbox ${AGENT_SANDBOX} \
+    --secret ${AGENT_SECRET} \
+    $AGENT_PEERS \
+    $AGENT_CLIENTS
+
+# The node takes no --advertise-host: the address peers dial for it is its OWN entry
+# in the --peer roster, which is why that roster is identical on every machine and
+# must include this node.
+#
+# The secret reaches the process as an argument, so it is visible in `ps` to any local
+# user. That is the binary's only interface for it today. On a machine with untrusted
+# local users, keep the node off it — this deployment already assumes the machine is
+# trusted (it holds the API key and every tenant's entity data on disk).
+
+# --- Shutdown -----------------------------------------------------------------
+#
+# SIGTERM, and then wait. The node hands off leadership of every shard it leads
+# before exiting (spec §8.3); skipping that is safe but expensive — each shard it
+# still led waits a full election timeout before its replicas elect, and every entity
+# on those shards rehydrates on the new leader. A node leading many shards therefore
+# turns an ordinary rolling restart into that many simultaneous failovers, which is
+# the single most common way a healthy cluster is made to look unhealthy.
+#
+# So the timeout is set above the worst handoff, not below it. If systemd SIGKILLs
+# the node mid-handoff the work is wasted and the failover happens the slow way.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+# Restart, but not in a tight loop: a node that cannot open its store (or whose Raft
+# WAL has poisoned, spec §9.4.3 item 2) fails the same way every time, and restarting
+# it every second buries the reason in the journal.
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# --- Limits -------------------------------------------------------------------
+#
+# The entity store keeps up to 65536 segment files open (DEFAULT_SEGMENT_CAPACITY),
+# plus transport connections and transient blob opens. Below ~70000 the process hits
+# the kernel's limit before the store's cache ever evicts anything — see
+# docs/standalone-deployment.md, "Descriptors".
+LimitNOFILE=131072
+
+# Not memory-limited on purpose. Several defaults assume memory is abundant: the
+# manifest is held whole, and segments and resolved host handles are cached by the
+# thousand, so consumption tracks entity *count* rather than concurrency. A cap sized
+# from steady-state RSS will be hit by a node that has simply seen more entities.
+# Size the machine instead (docs/hardware-envelope.md §1).
+
+# --- Hardening ----------------------------------------------------------------
+#
+# The node holds an API key and the cluster secret and speaks to peers; it needs its
+# data directory and nothing else on the filesystem.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/agent
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOTE: `--sandbox docker` or `--sandbox firecracker` needs more than this — a docker
+# socket or /dev/kvm, and the namespace restrictions above will block them. Those
+# modes want their own unit; `durable` (the typed file tools, no guest shell) runs
+# entirely within these bounds.
+
+[Install]
+WantedBy=multi-user.target

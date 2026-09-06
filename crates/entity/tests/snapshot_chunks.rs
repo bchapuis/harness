@@ -35,7 +35,7 @@ use serde::Serialize;
 // --- An entity whose state grows, the shape facet-0 chunking exists for ---------
 
 /// A folded transcript: state grows by an entry per command and is never
-/// rewritten. The agent entity's shape (harness §7), reduced to what matters here.
+/// rewritten. The agent entity's shape (agent §7), reduced to what matters here.
 #[derive(Default)]
 struct Transcript;
 

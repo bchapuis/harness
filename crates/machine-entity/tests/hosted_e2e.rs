@@ -16,7 +16,7 @@
 //!
 //! With `E2E_REQUIRE` set, a missing prerequisite panics instead: the CI job that
 //! exists to run this suite must not read a broken environment as a pass. Point
-//! `HARNESS_MACHINE_ASSETS` at an assets directory to override the default
+//! `AGENT_MACHINE_ASSETS` at an assets directory to override the default
 //! `guest/machine-rootfs/out`.
 //!
 //! Under the container mechanism the disk image is bind-mounted from the test's
@@ -52,7 +52,7 @@ fn missing<T>(reason: String) -> Option<T> {
 }
 
 fn assets_dir() -> PathBuf {
-    std::env::var("HARNESS_MACHINE_ASSETS")
+    std::env::var("AGENT_MACHINE_ASSETS")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/machine-rootfs/out")

@@ -3,7 +3,7 @@
 # Built OUT of the main workspace (its own [workspace] table below) so a plain
 # `cargo build` of the harness never needs the wasm toolchain. It targets
 # wasm32-wasip1 and links wasi-libc; the host's deterministic WASI stubs
-# (crates/harness-sandbox/src/compute.rs) satisfy the few imports that leaves.
+# (crates/agent-sandbox/src/compute.rs) satisfy the few imports that leaves.
 #
 # Build with ./build.sh; see README.md for the toolchain and provenance.
 [package]

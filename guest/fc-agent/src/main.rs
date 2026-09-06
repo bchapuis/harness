@@ -1,6 +1,6 @@
-//! The guest half of harness-sandbox's Firecracker `Native` tier: pid 1 in
+//! The guest half of agent-sandbox's Firecracker `Native` tier: pid 1 in
 //! the microVM, serving the wire protocol documented in
-//! `crates/harness-sandbox/src/firecracker.rs` (the host side; the two files
+//! `crates/agent-sandbox/src/firecracker.rs` (the host side; the two files
 //! must agree byte for byte on the protocol).
 //!
 //! As init it mounts `/proc`, `/dev`, and `/tmp`, then listens on vsock port

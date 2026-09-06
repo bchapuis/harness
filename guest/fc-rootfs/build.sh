@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the microVM assets for harness-sandbox's `firecracker` feature into
+# Build the microVM assets for agent-sandbox's `firecracker` feature into
 # guest/fc-rootfs/out/:
 #
 #   fc-agent      the guest agent (static musl), built and *tested* on Linux

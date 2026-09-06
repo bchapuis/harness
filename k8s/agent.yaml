@@ -1,0 +1,306 @@
+# A three-node agent-standalone cluster (silos) as a StatefulSet, fronted by a
+# agent-gateway StatefulSet that joins the same cluster as a non-voting,
+# non-hosting CLIENT (the Orleans cluster-client pattern). Each pod has its OWN
+# data volume (no shared filesystem) and a stable DNS name; the journal replicates
+# over the transport (a quorum append per entity), so the nodes share nothing on
+# disk.
+#
+# Why the gateway is a StatefulSet (not a Deployment): as a cluster client it
+# needs a stable transport identity — a fixed non-voting node id and a DNS name
+# the nodes admit with `--client <id>=<host>`. Ordinals give both: gateway pod N
+# is node id 100+N at agent-gw-N.agent-gw.
+#
+# Prerequisites:
+#   1. Build and load the image so the cluster can pull it (it ships both the
+#      `agent-standalone` and `agent-gateway` binaries):
+#        docker build -t agent-standalone:latest .
+#        # kind:    kind load docker-image agent-standalone:latest
+#        # minikube: minikube image load agent-standalone:latest
+#        # remote:  push to a registry and set `image:` below accordingly
+#   2. Create the API-key secret (NOT committed):
+#        kubectl create secret generic agent-anthropic \
+#          --from-literal=api-key="$ANTHROPIC_API_KEY"
+#   3. Create the cluster-secret and tenants secrets (deploy.sh does this for you;
+#      see k8s/README.md to do it by hand):
+#        agent-cluster  — the cluster secret guarding the transport handshake
+#        agent-auth     — a tenants file (`<principal> <token>` per line)
+#   4. kubectl apply -f k8s/agent.yaml
+#
+# Drive sessions over HTTP through the gateway Service (the only tenant-facing
+# path; the nodes have no client-facing listener):
+#   kubectl port-forward service/agent-gateway 8080:8080
+#   curl -N -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
+#     -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+#     -H "Accept: text/event-stream" -d '{"turn":"t-1","content":"hello"}'
+#
+# See k8s/README.md for the walkthrough, the failure drill, and the sandbox
+# trade-off (`durable` here vs. a shell behind a per-session container).
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent
+  labels:
+    app: agent
+spec:
+  # Headless: no proxy, no cluster IP — just an A record per pod
+  # (agent-0.agent, agent-1.agent, …), which is what `--peer` dials.
+  clusterIP: None
+  # Publish pod DNS before the pods report Ready, so a node can resolve its
+  # peers during the startup window (it blocks until it has discovered them).
+  publishNotReadyAddresses: true
+  selector:
+    app: agent
+  # Node i binds transport 7401+i-1. The port on a headless service is
+  # informational (it never proxies); pod-to-pod traffic reaches any port the
+  # process binds.
+  ports:
+    - { name: transport, port: 7401 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: agent
+  labels:
+    app: agent
+spec:
+  serviceName: agent
+  replicas: 3
+  # Start all pods at once. Each node waits to discover every peer before it
+  # reports ready, so the default one-at-a-time (OrderedReady) startup would
+  # deadlock: pod 0 would wait forever for pods 1 and 2 to exist.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: agent
+  template:
+    metadata:
+      labels:
+        app: agent
+    spec:
+      # Tidy shutdown for the failure drill (kill a pod, watch a survivor
+      # resume its sessions); SWIM notices within a few seconds regardless.
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: node
+          image: agent-standalone:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Pod "agent-2" → ordinal 2 → node id 3 (ids are 1-based).
+              ID="$(( ${HOSTNAME##*-} + 1 ))"
+              echo "[$HOSTNAME] node id $ID; waiting for peer DNS…"
+              for p in agent-0 agent-1 agent-2; do
+                until getent hosts "$p.agent" >/dev/null 2>&1; do sleep 1; done
+              done
+              echo "[$HOSTNAME] peers resolved; starting node"
+              # The node has no client-facing listener: the transport binds
+              # 0.0.0.0 and is guarded by the cluster secret. --client admits the
+              # two gateway pods (ids 100/101) as non-voting members so the
+              # receptionist gossip reaches them; an admitted client that is not
+              # up yet simply dials in later (the host need not resolve at boot).
+              exec agent-standalone node \
+                --id "$ID" \
+                --nodes 3 \
+                --data /data \
+                --bind-host 0.0.0.0 \
+                --peer 1=agent-0.agent \
+                --peer 2=agent-1.agent \
+                --peer 3=agent-2.agent \
+                --client 100=agent-gw-0.agent-gw \
+                --client 101=agent-gw-1.agent-gw \
+                --model "${MODEL:-claude-sonnet-4-6}" \
+                --sandbox durable \
+                --secret "$CLUSTER_SECRET"
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-anthropic
+                  key: api-key
+            # The cluster secret guarding the transport handshake; the nodes and
+            # the gateway must agree. Same Secret the gateway mounts.
+            - name: CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agent-cluster
+                  key: secret
+            # Override to pick a different model; every node must agree, which
+            # a single StatefulSet template guarantees.
+            - name: MODEL
+              value: claude-sonnet-4-6
+          # DEMO SIZING. These limits fit a laptop kind/minikube cluster and are
+          # roughly three orders of magnitude below the machine the design assumes
+          # (docs/hardware-envelope.md §1: local NVMe, tens of cores, 128-256 GB).
+          # Several defaults are set on the assumption that memory is abundant —
+          # the manifest is held whole, segments and host handles are cached by the
+          # thousand — so a node run at 512Mi will OOM under any real entity count.
+          #
+          # For production, size a node to the envelope and give it a real
+          # descriptor budget; the store's segment cache alone wants ~65k
+          # (crates/entity/src/file_store.rs, DEFAULT_SEGMENT_CAPACITY):
+          #
+          #   resources:
+          #     requests: { cpu: "8",  memory: "32Gi" }
+          #     limits:   { cpu: "16", memory: "64Gi" }
+          #
+          # and raise LimitNOFILE on the node, or set it here per-container via a
+          # securityContext/initContainer, to at least 70000. Note that the target
+          # deployment is bare metal rather than Kubernetes — see
+          # docs/standalone-deployment.md for the sizing this manifest does not do.
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  # One PVC per pod: each node's journal + workspaces live on its own volume.
+  # Nothing is shared between them.
+  #
+  # DEMO SIZING again, and the storage class matters more than the number. The
+  # design assumes directly-attached NVMe, where a durable flush costs tens of
+  # microseconds; network-attached block storage puts it back near a millisecond
+  # and reverses one of the assumptions the storage layer is built on
+  # (docs/hardware-envelope.md §6). Prefer a local-NVMe storage class.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# Stable per-replica DNS for the gateway pods, so the nodes' --client flags name
+# them (agent-gw-0.agent-gw, …) and the gateway advertises a routable host.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-gw
+  labels:
+    app: agent-gateway
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: agent-gateway
+  ports:
+    - { name: transport, port: 7500 }
+---
+# The gateway tier: the public HTTP/SSE edge, joined to the cluster as a
+# non-voting CLIENT. It verifies a caller's bearer token to a tenant (it
+# terminates auth, with the agent-auth tenants file) and addresses the
+# session's entity directly over the transport — no control protocol. Holds no
+# durable state, so scale `replicas` freely (each gets its own non-voting id;
+# admit more by extending the nodes' --client flags). Public TLS is expected to
+# terminate at an Ingress/LoadBalancer; the transport link is plaintext, guarded
+# by the cluster secret.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: agent-gw
+  labels:
+    app: agent-gateway
+spec:
+  serviceName: agent-gw
+  replicas: 2
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: agent-gateway
+  template:
+    metadata:
+      labels:
+        app: agent-gateway
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: gateway
+          image: agent-standalone:latest
+          imagePullPolicy: IfNotPresent
+          # Override the image's `agent-standalone` entrypoint to run the
+          # gateway binary the image also ships.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Pod "agent-gw-1" → ordinal 1 → node id 101 (gateways are
+              # 100-based, outside the nodes' 1..=3 voter roster).
+              ORD="${HOSTNAME##*-}"
+              NODE_ID="$(( 100 + ORD ))"
+              echo "[$HOSTNAME] gateway node id $NODE_ID; waiting for node DNS…"
+              for p in agent-0 agent-1 agent-2; do
+                until getent hosts "$p.agent" >/dev/null 2>&1; do sleep 1; done
+              done
+              echo "[$HOSTNAME] nodes resolved; joining as a cluster client"
+              exec agent-gateway \
+                --bind 0.0.0.0:8080 \
+                --secret "$CLUSTER_SECRET" \
+                --node-id "$NODE_ID" \
+                --nodes 3 \
+                --bind-host 0.0.0.0 \
+                --advertise-host "$HOSTNAME.agent-gw" \
+                --peer 1=agent-0.agent \
+                --peer 2=agent-1.agent \
+                --peer 3=agent-2.agent \
+                --auth-tokens /auth/tenants
+          env:
+            - name: CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agent-cluster
+                  key: secret
+          ports:
+            - name: http
+              containerPort: 8080
+          # Liveness: the process is up. Readiness: serving and not draining — on
+          # SIGTERM the gateway flips /readyz to 503 so this pod leaves the Service
+          # endpoints before axum drains the in-flight requests.
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            # Poll often with a threshold of 1 so a draining pod (readyz -> 503 on
+            # SIGTERM) leaves the Service endpoints well within the gateway's
+            # pre-drain grace, before axum stops accepting.
+            periodSeconds: 2
+            failureThreshold: 1
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: auth
+              mountPath: /auth
+              readOnly: true
+      volumes:
+        - name: auth
+          secret:
+            secretName: agent-auth
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-gateway
+  labels:
+    app: agent-gateway
+spec:
+  selector:
+    app: agent-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  # ClusterIP by default. Switch to LoadBalancer (or front with an Ingress) to
+  # expose it outside the cluster, terminating public TLS there.

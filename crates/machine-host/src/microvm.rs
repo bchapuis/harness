@@ -2,7 +2,7 @@
 //! half of this crate's two [`MachineHost`] implementations.
 //!
 //! Two consumers boot Firecracker VMs and share the process-hygiene code
-//! between them: the agent sandbox's `Native` tier (`harness-sandbox`,
+//! between them: the agent sandbox's `Native` tier (`agent-sandbox`,
 //! per-call tar sync over vsock) and the persistent machine
 //! (`crates/machine-entity`, whose drive is the disk facet's image, entity §7.15).
 //! This module owns the mechanics identical for both and nothing

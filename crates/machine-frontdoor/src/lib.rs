@@ -1,7 +1,7 @@
 //! The persistent machine's SSH front door (machine spec §5.1).
 //!
 //! A front door is a cluster member — the ingress analogue of the harness
-//! gateway (harness §7.3) — that **terminates SSH in-process** (`russh`) and
+//! gateway (agent §7.3) — that **terminates SSH in-process** (`russh`) and
 //! bridges each authenticated channel to the machine's guest agent.
 //! It authenticates the client by public key against the machine's journaled
 //! authorized-key set, presents the machine's own journaled host key so one SSH

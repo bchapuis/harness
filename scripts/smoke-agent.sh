@@ -1,6 +1,6 @@
 #!/bin/bash
-# End-to-end smoke test for harness-standalone: three node processes against a
-# fake Messages API, fronted by the harness-gateway (the public HTTP edge, joined
+# End-to-end smoke test for agent-standalone: three node processes against a
+# fake Messages API, fronted by the agent-gateway (the public HTTP edge, joined
 # as a cluster client). One prompt over HTTP, a records read, then a node kill and
 # a same-turn resume — driven entirely through the gateway, which routes around
 # the dead node. Run from the workspace root.
@@ -8,8 +8,8 @@ set -u
 cd "$(dirname "$0")/.."
 
 DATA=$(mktemp -d)
-BIN=target/debug/harness-standalone
-GATEWAY_BIN=target/debug/harness-gateway
+BIN=target/debug/agent-standalone
+GATEWAY_BIN=target/debug/agent-gateway
 GATEWAY_ID=100
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null; wait 2>/dev/null; }

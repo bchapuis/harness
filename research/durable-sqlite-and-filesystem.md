@@ -3,7 +3,7 @@
 **Status:** Research note (no implementation)
 **Purpose:** Decide whether entity's per-entity replication substrate can host a **durable SQLite database** and a **durable filesystem / workspace** that survive hibernation, migration, and node loss — the deferred "alternative record interpretations (SQLite, File)" of [`entity-spec.md`](../docs/entity-spec.md) §16. This note researches the mechanism and the model changes it forces; it builds nothing.
 
-References: `entity §N` → [`entity-spec.md`](../docs/entity-spec.md); `harness §N` → [`agentic-harness-spec.md`](../docs/agentic-harness-spec.md); `DO §N` → [`durable-objects.md`](durable-objects.md). Claims inferred rather than sourced are marked **(inferred)**.
+References: `entity §N` → [`entity-spec.md`](../docs/entity-spec.md); `agent §N` → [`agent-spec.md`](../docs/agent-spec.md); `DO §N` → [`durable-objects.md`](durable-objects.md). Claims inferred rather than sourced are marked **(inferred)**.
 
 ---
 
@@ -13,7 +13,7 @@ entity already gives an entity **durable, quorum-replicated, term-fenced, single
 
 - They are **large on-disk artifacts** (megabytes to gigabytes), not a small foldable value.
 - Their natural "record" is not a user `Event` but a **physical byte mutation** (a SQLite WAL frame, a file byte-range write).
-- For the harness workspace specifically, durability is today **deliberately given up**: the sandbox is one-per-activation, released on every hibernation and migration, and the loss is put on the record as a `WorkspaceReset` so the model re-derives rather than trusting vanished state (harness §5.1, §5.5, §7.2, invariant H8). Making the workspace survive hibernation is a reversal of that stance, and the note must say what that costs.
+- For the harness workspace specifically, durability is today **deliberately given up**: the sandbox is one-per-activation, released on every hibernation and migration, and the loss is put on the record as a `WorkspaceReset` so the model re-derives rather than trusting vanished state (agent §5.1, §5.5, §7.2, invariant H8). Making the workspace survive hibernation is a reversal of that stance, and the note must say what that costs.
 
 The good news, established in §2: **the hard part — durability, ordering, fencing, quorum recovery — is already built and carries over unchanged.** What is missing is a different *materialization* layer above the same Replicator, plus a snapshot seam that can move bytes at scale. The rest of this note is about that delta.
 
@@ -111,7 +111,7 @@ Cloudflare's snapshot cadence is the rule to copy (DO §4.2, source: Cloudflare 
 
 ## 4. The filesystem / workspace entity
 
-A workspace is a working directory: files the agent creates and edits, which today vanish on hibernation (harness §5.5). Making it durable is a *general* filesystem-over-a-log problem, and the cleanest published template is **JuiceFS's split** (source: JuiceFS architecture/internals docs).
+A workspace is a working directory: files the agent creates and edits, which today vanish on hibernation (agent §5.5). Making it durable is a *general* filesystem-over-a-log problem, and the cleanest published template is **JuiceFS's split** (source: JuiceFS architecture/internals docs).
 
 ### 4.1 The record: metadata op + immutable content block
 
@@ -132,7 +132,7 @@ The decisive property for entity: **the metadata is small and is the only thing 
 
 ### 4.3 Selective durability
 
-A workspace is not uniformly worth replicating. `node_modules`, `target/`, `.venv`, and build caches are large, regenerable, and churn-heavy; replicating their byte streams through a quorum is waste. A durable-workspace design should support **include/exclude rules** (a `.entityignore`, or an explicit "durable paths" set), replicating source and agent-authored artifacts while leaving regenerable trees to a non-durable local overlay that is rebuilt by re-running the build on rehydration. This keeps the record stream proportional to *meaningful* change, not disk churn — the filesystem analogue of not journaling scratch state. (This directly tempers the cost of reversing harness §5.5: durable does not have to mean *all* of the workspace.)
+A workspace is not uniformly worth replicating. `node_modules`, `target/`, `.venv`, and build caches are large, regenerable, and churn-heavy; replicating their byte streams through a quorum is waste. A durable-workspace design should support **include/exclude rules** (a `.entityignore`, or an explicit "durable paths" set), replicating source and agent-authored artifacts while leaving regenerable trees to a non-durable local overlay that is rebuilt by re-running the build on rehydration. This keeps the record stream proportional to *meaningful* change, not disk churn — the filesystem analogue of not journaling scratch state. (This directly tempers the cost of reversing agent §5.5: durable does not have to mean *all* of the workspace.)
 
 ---
 
@@ -196,14 +196,14 @@ No new transport, no new consensus, no change to the shard/leader-election/shard
 - **Snapshot of a live SQLite file under the single-writer gate.** A `VACUUM`/full checkpoint can be large and slow; does it block the input gate, or run against a frozen WAL generation while writes continue? Cloudflare snapshots asynchronously off the write path — entity needs the same, which interacts with §6.1's streaming seam.
 - **Block store ownership for the FS entity.** Are immutable data blocks per-entity (replicated through its quorum) or in a cluster-shared content-addressed store referenced by hash? Shared is far cheaper for large workspaces but adds a second durability domain off the entity's quorum — its GC and its own replication need a design.
 - **Rolling whole-state checksum.** Worth adding to entity's recovery (E14) generally, or only for byte-stream entities? It is cheap insurance against a silently divergent replica that quorum-intersection alone would not catch if a record were misapplied.
-- **Reversing harness §5.5 selectively.** With a durable workspace available, does the harness keep `WorkspaceReset` for the non-durable (excluded) subtree and drop it for the durable subtree? The two coexist; the record stream should say which paths survived.
+- **Reversing agent §5.5 selectively.** With a durable workspace available, does the harness keep `WorkspaceReset` for the non-durable (excluded) subtree and drop it for the durable subtree? The two coexist; the record stream should say which paths survived.
 - **Is dqlite's in-memory-VFS model or an on-disk-VFS model right?** dqlite keeps DB+WAL in memory (fast, size-capped); a true durable object wants on-disk (large, zero-latency local reads). The VFS work differs; §3.3 leans on-disk but this needs prototyping.
 
 ---
 
 ## Sources
 
-- entity substrate: [`entity-spec.md`](../docs/entity-spec.md) §6–§9, §16; harness workspace stance: [`agentic-harness-spec.md`](../docs/agentic-harness-spec.md) §5.1, §5.5, §7.2; Durable Objects lessons: [`durable-objects.md`](durable-objects.md).
+- entity substrate: [`entity-spec.md`](../docs/entity-spec.md) §6–§9, §16; harness workspace stance: [`agent-spec.md`](../docs/agent-spec.md) §5.1, §5.5, §7.2; Durable Objects lessons: [`durable-objects.md`](durable-objects.md).
 - Cloudflare, *Zero-latency SQLite storage in every Durable Object* — https://blog.cloudflare.com/sqlite-in-durable-objects/ (SRS, WAL-frame shipping, 3-of-5 quorum, snapshot-when-log≥db-size, 16 MB/10 s batching, 30-day PITR, 10 GB cap).
 - SQLite, *WAL-mode File Format* — https://sqlite.org/walformat.html ; *Database File Format* — https://sqlite.org/fileformat.html ; *WAL hook* — https://sqlite.org/c3ref/wal_hook.html
 - libSQL virtual WAL — https://github.com/tursodatabase/libsql/blob/main/libsql-sqlite3/doc/libsql_extensions.md and `wal.h`; Turso sync (physical pages, byte-identical) — https://docs.turso.tech/libsql

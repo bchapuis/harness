@@ -1,0 +1,32 @@
+[package]
+name = "agent-standalone"
+description = "A standalone multi-process deployment of the agentic harness: TCP nodes (silos) hosting entities over a shared file journal and the Anthropic model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-runtime.workspace = true
+entity.workspace = true
+tenancy.workspace = true
+agent.workspace = true
+agent-anthropic.workspace = true
+agent-sandbox = { workspace = true, features = ["native", "firecracker", "quickjs"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["process", "fs", "signal"] }
+agent-http.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# `tokio.workspace` carries the macros/rt/io-util/net/sync features the unit
+# tests need (the library target asks for a narrower set).
+tokio = { workspace = true }
+
+[lints]
+workspace = true

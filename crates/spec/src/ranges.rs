@@ -2,7 +2,7 @@
 //! catalogues they name.
 //!
 //! A spec names a sibling's catalogue by its extent: `entity §N` (its invariants as
-//! **E1–E20**), "the harness (H1–H8)", "core §18.5 #1–#22". The range is a
+//! **E1–E20**), "the harness (A1–A8)", "core §18.5 #1–#22". The range is a
 //! citation like any other — it points at a catalogue and says how far it runs —
 //! but where [`crate::citations`] resolves a `§` against a heading and
 //! [`crate::identifiers`] resolves a backticked name against the tree, nothing
@@ -21,7 +21,7 @@
 //! Two directions, and neither is the obvious one.
 //!
 //! The obvious check — every number in the span exists — is *wrong here*: the
-//! harness catalogue has no H2 (harness §11 retires it deliberately), so `H1–H8`
+//! harness catalogue has no A2 (agent §11 retires it deliberately), so `A1–A8`
 //! spans a number nothing defines and is still the correct way to write the
 //! harness's extent. And the natural stronger check — a range is the whole
 //! catalogue, so its high end is the last invariant — is wrong too, because
@@ -76,7 +76,7 @@ pub const LABELS: &[(&str, Owner)] = &[
     ("L", Owner::Catalogue("wal")),
     ("E", Owner::Catalogue("entity")),
     ("B", Owner::Catalogue("blob")),
-    ("H", Owner::Catalogue("harness")),
+    ("A", Owner::Catalogue("agent")),
     ("S", Owner::Catalogue("sandbox")),
     ("M", Owner::Catalogue("machine")),
     (
@@ -139,7 +139,7 @@ pub fn resolve(label: &str) -> Option<Owner> {
 /// Every invariant range in `text`, in source order.
 ///
 /// A range is two same-labelled numbers around a dash: `E1–E20`, `#1–#22`,
-/// `H3–H8`. Both the en dash the specs use and a plain hyphen are accepted, since
+/// `A3–A8`. Both the en dash the specs use and a plain hyphen are accepted, since
 /// which one a sentence carries is a typographic accident and neither should
 /// change what a gate sees.
 ///
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn reads_a_range_with_either_dash() {
-        let found = ranges("its invariants as **E1–E20**, and the harness (H1-H8)");
+        let found = ranges("its invariants as **E1–E20**, and the harness (A1-A8)");
         assert_eq!(found.len(), 2);
         assert_eq!(
             (found[0].label.as_str(), found[0].low, found[0].high),
@@ -289,7 +289,7 @@ mod tests {
         );
         assert_eq!(
             (found[1].label.as_str(), found[1].low, found[1].high),
-            ("H", 1, 8)
+            ("A", 1, 8)
         );
         assert_eq!(found[0].text, "E1–E20");
     }
@@ -308,13 +308,13 @@ mod tests {
     /// gate's job, not the scanner's.
     #[test]
     fn reads_a_range_that_does_not_start_at_one() {
-        let found = ranges("so M1–M3 cover it unchanged, and H3–H8 keep stable numbers");
+        let found = ranges("so M1–M3 cover it unchanged, and A3–A8 keep stable numbers");
         assert_eq!(
             found
                 .iter()
                 .map(|r| (r.label.as_str(), r.low, r.high))
                 .collect::<Vec<_>>(),
-            [("M", 1, 3), ("H", 3, 8)],
+            [("M", 1, 3), ("A", 3, 8)],
         );
     }
 

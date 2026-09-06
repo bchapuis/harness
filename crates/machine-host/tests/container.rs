@@ -5,7 +5,7 @@
 //!
 //! Probes for docker first and skips (eprintln + return) when it is absent, so a
 //! machine without it stays green — the convention of
-//! `harness-sandbox/tests/native.rs`. The pinned image is pulled on the first run
+//! `agent-sandbox/tests/native.rs`. The pinned image is pulled on the first run
 //! (`docker pull alpine:3.20` to pre-warm). A test that panics mid-flight can
 //! strand a container: `docker ps -a --filter name=isolation-test-` lists them.
 

@@ -26,7 +26,7 @@ will run the other way once it does.
 | | [entity-spec](entity-spec.md) | durable objects ("entities"): the journal, the single-writer fence, shards, snapshots, the facet model | E1–E21, F1–F4 |
 | | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside entity (standalone; no in-tree consumer yet) | B1–B7 |
 | consumers | [workflow-spec](workflow-spec.md) | the autonomous entity: the desired set of effects, intent before effect, orphaned resolution, quiescence | W1–W7 |
-| | [agentic-harness-spec](agentic-harness-spec.md) | the agent: an entity plus a run loop, a model seam, and a sandbox | H1–H8 |
+| | [agent-spec](agent-spec.md) | the agent: an entity plus a run loop, a model seam, and a sandbox | A1–A8 |
 | | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the harness's sandbox seam | S1–S5 |
 | | [machine-spec](machine-spec.md) | the agent's sibling: a durable lightweight VM as an entity, reached over SSH | M1–M6 |
 | cross-cutting | [compatibility-spec](compatibility-spec.md) | format revisions, the boundary registry, the read-new-first policy | V1–V6 |
@@ -51,7 +51,7 @@ One layer has a design note rather than a spec:
 ## Guides
 
 - [standalone-deployment](standalone-deployment.md) — install
-  `harness-standalone`, run a three-node cluster with the gateway in front,
+  `agent-standalone`, run a three-node cluster with the gateway in front,
   walk the failure drill, and read the full flag reference.
 - [k8s/README](../k8s/README.md) — the same cluster as a Kubernetes
   StatefulSet.
@@ -87,8 +87,8 @@ One layer has a design note rather than a spec:
   any other, pointing at a catalogue and saying how far it runs. Two checks pin
   it from both sides: no range reaches past the catalogue it names, and across
   the whole set some range reaches its last invariant. Neither is the obvious
-  rule, and the module says why both obvious ones are wrong — `H1–H8` spans an H2
-  that harness §11 deliberately retires, and `M1–M3` is a true claim about three
+  rule, and the module says why both obvious ones are wrong — `A1–A8` spans an A2
+  that agent §11 deliberately retires, and `M1–M3` is a true claim about three
   of six. The pair is what catches a catalogue that *grows*: `E21` was added at
   entity §7.16 and six citations across four documents went on describing
   entity as ending at E20, each of them resolving, parsing, and passing every
@@ -137,7 +137,7 @@ grepping the code, and is answered by reading these sections instead:
   would reopen it.
 - Each layer's own deferrals, declined with their reasons: [entity
   §16](entity-spec.md), [machine §8](machine-spec.md), [harness
-  §13](agentic-harness-spec.md), [sandbox §7](sandbox-spec.md),
+  §13](agent-spec.md), [sandbox §7](sandbox-spec.md),
   [cluster-utilities §7](cluster-utilities-spec.md), [wal §8](wal-spec.md).
 - [simulation-testing](simulation-testing.md), *Where the sweeps do not yet
   reach* — what the specs mandate that no sweep asserts.
@@ -146,8 +146,8 @@ grepping the code, and is answered by reading these sections instead:
 
 - **The clients** — the two front ends on the gateway's HTTP/SSE edge, neither
   of them part of the cluster:
-  [`../crates/harness-tui/`](../crates/harness-tui/), a terminal chat UI, and
-  [`../clients/harness-vscode/`](../clients/harness-vscode/), a VS Code
+  [`../crates/agent-tui/`](../crates/agent-tui/), a terminal chat UI, and
+  [`../clients/agent-vscode/`](../clients/agent-vscode/), a VS Code
   extension that surfaces a session as an agent in the Agents window. Each
   carries its own README. Neither has a spec: they hold no durable state and
   define no invariant, so what binds them is the gateway's surface, described in

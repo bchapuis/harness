@@ -1,7 +1,7 @@
-# harness-standalone on Kubernetes
+# agent-standalone on Kubernetes
 
-A three-node `harness-standalone` cluster (silos) as a **StatefulSet**, fronted
-by a **`harness-gateway` StatefulSet** that joins the same cluster as a
+A three-node `agent-standalone` cluster (silos) as a **StatefulSet**, fronted
+by a **`agent-gateway` StatefulSet** that joins the same cluster as a
 non-voting, non-hosting **client** (the Orleans cluster-client pattern). Each pod
 has its own data volume and stable DNS name. Unlike the single-host `demo-agent.sh`,
 the nodes run on separate pods, and so potentially separate machines. As there,
@@ -9,12 +9,12 @@ they share nothing on disk: the journal replicates over the transport, a quorum
 append per entity (spec §7.2).
 
 ```
-   HTTP  ─►  Service: harness-gateway  ─►  StatefulSet harness-gw (N clients)
+   HTTP  ─►  Service: agent-gateway  ─►  StatefulSet agent-gw (N clients)
                                               │  actor transport (cluster secret)
-        ┌── Service: harness (headless) ──────┴──┐   DNS: harness-N.harness
+        ┌── Service: agent (headless) ──────┴──┐   DNS: agent-N.agent
         │                                        │
    ┌────┴─────┐      ┌──────────┐      ┌─────────┴┐
-   │ harness-0│◄────►│ harness-1│◄────►│ harness-2│   transport 7401/02/03
+   │ agent-0│◄────►│ agent-1│◄────►│ agent-2│   transport 7401/02/03
    │  node 1  │      │  node 2  │      │  node 3  │   no client-facing listener
    │ PVC data │      │ PVC data │      │ PVC data │   own volume per pod
    └──────────┘      └──────────┘      └──────────┘
@@ -29,7 +29,7 @@ a bearer token. The session-key scope is what keeps tenants isolated.
 
 The gateway is a StatefulSet, not a Deployment, because a cluster client needs a
 stable transport identity: gateway pod *N* takes the non-voting node id `100+N`
-at the stable DNS name `harness-gw-N.harness-gw`, which the nodes admit with
+at the stable DNS name `agent-gw-N.agent-gw`, which the nodes admit with
 `--client <id>=<host>`.
 
 ## Prerequisites
@@ -52,8 +52,8 @@ k8s/deploy.sh
 ```
 
 It is idempotent: re-run it after editing the manifest, and it leaves existing
-Secrets untouched. Override the image name with `HARNESS_IMAGE`, or force the
-load step with `HARNESS_IMAGE_LOADER=kind|minikube|none`.
+Secrets untouched. Override the image name with `AGENT_IMAGE`, or force the
+load step with `AGENT_IMAGE_LOADER=kind|minikube|none`.
 
 The rest of this page is the manual path the script automates, plus the parts it
 leaves to you: talking to the cluster, the failure drill, the sandbox choice,
@@ -64,19 +64,19 @@ and tear-down.
 From the repository root (the build context is the whole workspace):
 
 ```sh
-docker build -t harness-standalone:latest .
+docker build -t agent-standalone:latest .
 ```
 
 Make the image reachable by the cluster:
 
 ```sh
 # kind:
-kind load docker-image harness-standalone:latest
+kind load docker-image agent-standalone:latest
 # minikube:
-minikube image load harness-standalone:latest
-# remote cluster: push to a registry and set `image:` in harness.yaml
-docker tag harness-standalone:latest <registry>/harness-standalone:latest
-docker push <registry>/harness-standalone:latest
+minikube image load agent-standalone:latest
+# remote cluster: push to a registry and set `image:` in agent.yaml
+docker tag agent-standalone:latest <registry>/agent-standalone:latest
+docker push <registry>/agent-standalone:latest
 ```
 
 ## 2. Create the Secrets
@@ -86,7 +86,7 @@ All three stay out of the manifest on purpose; never commit them.
 The API key:
 
 ```sh
-kubectl create secret generic harness-anthropic \
+kubectl create secret generic agent-anthropic \
   --from-literal=api-key="$ANTHROPIC_API_KEY"
 ```
 
@@ -95,7 +95,7 @@ pods all present it, so they admit one another and reject anyone else:
 
 ```sh
 secret=$(head -c 30 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
-kubectl create secret generic harness-cluster --from-literal=secret="$secret"
+kubectl create secret generic agent-cluster --from-literal=secret="$secret"
 ```
 
 A tenant token the gateway verifies (one principal, `demo`, with a random opaque
@@ -104,18 +104,18 @@ token):
 ```sh
 token=$(head -c 30 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
 printf 'demo %s\n' "$token" > tenants
-kubectl create secret generic harness-auth --from-file=tenants
+kubectl create secret generic agent-auth --from-file=tenants
 rm tenants            # the Secret is the source of truth now
 ```
 
 ## 3. Deploy
 
 ```sh
-kubectl apply -f k8s/harness.yaml
-kubectl rollout status statefulset/harness      # waits for all three nodes
-kubectl rollout status statefulset/harness-gw   # and both gateways
-kubectl logs harness-0 | tail                   # "cluster ready (leader elected)"
-kubectl logs harness-gw-0 | tail                # "joined the cluster (client of nodes 1..=3)"
+kubectl apply -f k8s/agent.yaml
+kubectl rollout status statefulset/agent      # waits for all three nodes
+kubectl rollout status statefulset/agent-gw   # and both gateways
+kubectl logs agent-0 | tail                   # "cluster ready (leader elected)"
+kubectl logs agent-gw-0 | tail                # "joined the cluster (client of nodes 1..=3)"
 ```
 
 All node and gateway pods start at once (`podManagementPolicy: Parallel`): each
@@ -129,8 +129,8 @@ client-facing listener. Forward the gateway Service, pull a tenant token from
 the Secret, and stream a turn as Server-Sent Events:
 
 ```sh
-token=$(kubectl get secret harness-auth -o jsonpath='{.data.tenants}' | base64 -d | awk 'NR==1{print $2}')
-kubectl port-forward service/harness-gateway 8080:8080            # another terminal
+token=$(kubectl get secret agent-auth -o jsonpath='{.data.tenants}' | base64 -d | awk 'NR==1{print $2}')
+kubectl port-forward service/agent-gateway 8080:8080            # another terminal
 curl -N -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
   -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
@@ -148,10 +148,10 @@ The reason the deployment exists: a session survives the pod that ran it.
 
 ```sh
 # Submit a longish turn, find its owner in the logs, then delete that pod:
-kubectl delete pod harness-1 --grace-period=5
+kubectl delete pod agent-1 --grace-period=5
 
 # Survivors notice within a few seconds (SWIM: 1s probes, 3s suspicion):
-kubectl logs harness-0 | grep -E 'Suspected|Unreachable'
+kubectl logs agent-0 | grep -E 'Suspected|Unreachable'
 
 # Re-issue the SAME prompt (same turn id) through the gateway. The new owner
 # recovers the entity's head from a quorum, folds the journal, and resumes from
@@ -161,7 +161,7 @@ curl -N -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
   -d '{"turn":"t-1","content":"…the same turn…"}'
 ```
 
-The StatefulSet recreates `harness-1` with the **same** name, DNS, and PVC, so
+The StatefulSet recreates `agent-1` with the **same** name, DNS, and PVC, so
 it rejoins as the same node and new sessions place onto it again.
 
 ## Sandbox boundary
@@ -196,15 +196,15 @@ the right boundary.
   larger cluster.
 - **Scale the gateways by id, not just by replicas.** Each gateway pod needs a
   distinct non-voting node id the nodes admit, so adding capacity means raising
-  `harness-gw`'s `replicas` **and** extending the nodes' `--client` flags (ids
+  `agent-gw`'s `replicas` **and** extending the nodes' `--client` flags (ids
   `102`, `103`, …) to admit the new pods. The gateway holds no durable state, so
   beyond admission it scales freely. Each line of the tenants file
-  (`harness-auth`) is one tenant; rotate tokens by editing the Secret and
+  (`agent-auth`) is one tenant; rotate tokens by editing the Secret and
   restarting.
 - **Public TLS terminates at the edge, not the gateway.** The gateway Service is
   `ClusterIP`; expose it with an Ingress or `LoadBalancer` and terminate TLS
   there.
-- **The transport is plaintext, guarded by the cluster secret** (`harness-cluster`).
+- **The transport is plaintext, guarded by the cluster secret** (`agent-cluster`).
   The gateway joins it inside the trust boundary, so it must be a trusted
   component — which it is, being where tenant auth terminates. Fine within a
   trusted cluster network; provision transport TLS (`TlsConfig`, on both the
@@ -214,7 +214,7 @@ the right boundary.
 ## Tear down
 
 ```sh
-kubectl delete -f k8s/harness.yaml
-kubectl delete pvc -l app=harness        # PVCs outlive the StatefulSet; delete to reclaim
-kubectl delete secret harness-anthropic harness-auth harness-cluster
+kubectl delete -f k8s/agent.yaml
+kubectl delete pvc -l app=agent        # PVCs outlive the StatefulSet; delete to reclaim
+kubectl delete secret agent-anthropic agent-auth agent-cluster
 ```

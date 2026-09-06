@@ -1,5 +1,5 @@
 //! The QuickJS runner: a hermetic JavaScript interpreter exposed to the
-//! Compute tier through the guest ABI of `harness-sandbox`'s compute.rs.
+//! Compute tier through the guest ABI of `agent-sandbox`'s compute.rs.
 //!
 //! The host hands this module `{script, input}` JSON and reads back
 //! `{result, console}` (a completed script) or `{error, console}` (a thrown
@@ -15,7 +15,7 @@
 //! Note: this crate is built only by `build.sh` against the wasm toolchain;
 //! the main `cargo` workspace never compiles it. The rquickjs API calls below
 //! are pinned to the version in Cargo.toml and may need a touch-up on a major
-//! upgrade — the imports-allowlist and S2 tests in `harness-sandbox` are the
+//! upgrade — the imports-allowlist and S2 tests in `agent-sandbox` are the
 //! backstop.
 
 use std::cell::RefCell;

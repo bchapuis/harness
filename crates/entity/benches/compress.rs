@@ -46,7 +46,7 @@
 //! this file takes neither.
 //!
 //! Run with `cargo bench -p entity --bench compress`. If a `machine-data/` or
-//! `harness-data/` directory from a real run is present at the workspace root, the
+//! `agent-data/` directory from a real run is present at the workspace root, the
 //! blob and transcript benches read it; otherwise they fall back to generated payloads
 //! shaped like it and say so. Real data is worth more here than anywhere else in the
 //! tree, because the whole question is what the bytes look like.
@@ -151,21 +151,21 @@ fn blocks() -> (Vec<Vec<u8>>, &'static str) {
 /// one that answers *against* compressing: these are hundreds of bytes each, and LZ4's
 /// frame overhead exceeds what it saves on most of them.
 fn control() -> (Vec<Vec<u8>>, &'static str) {
-    let real = sample("harness-data", "raft", |m| m.len() > 0, 96);
+    let real = sample("agent-data", "raft", |m| m.len() > 0, 96);
     if real.is_empty() {
         let generated = (0..64u32)
             .map(|i| i.to_le_bytes().repeat(4).to_vec())
             .collect();
         (generated, "generated")
     } else {
-        (real, "harness-data")
+        (real, "agent-data")
     }
 }
 
 /// The record payloads: real entity segments from a harness run — an agent session's
 /// journal, the thing a snapshot and a record batch are cut from.
 fn records() -> (Vec<Vec<u8>>, &'static str) {
-    let real = sample("harness-data", "segments", |m| m.len() > 0, 64);
+    let real = sample("agent-data", "segments", |m| m.len() > 0, 64);
     if real.is_empty() {
         let generated = (0..64)
             .map(|i| {
@@ -178,7 +178,7 @@ fn records() -> (Vec<Vec<u8>>, &'static str) {
             .collect();
         (generated, "generated")
     } else {
-        (real, "harness-data")
+        (real, "agent-data")
     }
 }
 

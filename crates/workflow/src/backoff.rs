@@ -152,7 +152,7 @@ impl<K: Ord> Backoff<K> {
     /// and *someone asking*. The harness draws the same line today: it abandons a
     /// propagation launch after bounded retries, and "the next message that drives
     /// the session — on this same activation or a later one — re-launches the
-    /// send" (harness §9.2 item 3). A key at rest is waiting for exactly that
+    /// send" (agent §9.2 item 3). A key at rest is waiting for exactly that
     /// message, so the count starts over when it arrives.
     pub fn wake(&mut self) {
         self.entries.retain(|_, e| e.until.is_some());

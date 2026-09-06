@@ -2,7 +2,7 @@
 //! inside the microVM, serving the wire protocol in [`machine_proto`] — the
 //! same crate the front door compiles, so the two ends cannot drift.
 //!
-//! Unlike harness-sandbox's `fc-agent`, this is **not** pid 1: it is an
+//! Unlike agent-sandbox's `fc-agent`, this is **not** pid 1: it is an
 //! ordinary service the *user's own rootfs* ships (machine §2.1), started by
 //! the rootfs's init. So it mounts nothing and assumes a booted system. It
 //! listens on vsock port 62 and serves each connection — one SSH channel — on

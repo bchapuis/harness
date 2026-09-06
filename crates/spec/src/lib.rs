@@ -140,9 +140,9 @@ pub const DOCUMENTS: &[DocSpec] = &[
         unprefixed: Unprefixed::Own,
     },
     DocSpec {
-        id: "harness",
-        path: "docs/agentic-harness-spec.md",
-        aliases: &["harness"],
+        id: "agent",
+        path: "docs/agent-spec.md",
+        aliases: &["agent"],
         unprefixed: Unprefixed::Own,
     },
     // §5 relates the tier model to the harness's own §5, and cites into it bare.
@@ -150,7 +150,7 @@ pub const DOCUMENTS: &[DocSpec] = &[
         id: "sandbox",
         path: "docs/sandbox-spec.md",
         aliases: &["sandbox"],
-        unprefixed: Unprefixed::OwnThen(&["harness"]),
+        unprefixed: Unprefixed::OwnThen(&["agent"]),
     },
     DocSpec {
         id: "machine",
@@ -186,13 +186,13 @@ pub const DOCUMENTS: &[DocSpec] = &[
         id: "standalone",
         path: "docs/standalone-deployment.md",
         aliases: &["standalone-deployment"],
-        unprefixed: Unprefixed::Other(&["harness"]),
+        unprefixed: Unprefixed::Other(&["agent"]),
     },
     DocSpec {
         id: "edge",
         path: "docs/multi-tenant-edge.md",
         aliases: &["multi-tenant-edge"],
-        unprefixed: Unprefixed::Other(&["harness"]),
+        unprefixed: Unprefixed::Other(&["agent"]),
     },
     DocSpec {
         id: "docs-index",

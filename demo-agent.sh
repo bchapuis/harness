@@ -1,5 +1,5 @@
 #!/bin/bash
-# Your agentic distributed harness in two minutes: build, boot a three-node
+# Your agentic distributed agent in two minutes: build, boot a three-node
 # cluster (three OS processes, each its own journal, replicated over the
 # transport), and start the HTTP gateway in front of it.
 #
@@ -22,22 +22,22 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
 fi
 
 echo "▸ building"
-cargo build -q -p harness-standalone -p harness-gateway
-BIN=target/debug/harness-standalone
-GATEWAY_BIN=target/debug/harness-gateway
+cargo build -q -p agent-standalone -p agent-gateway
+BIN=target/debug/agent-standalone
+GATEWAY_BIN=target/debug/agent-gateway
 # The cluster secret guards the transport handshake; the nodes and the gateway
-# must agree on it. Both default to "harness-standalone"; override here to share.
-SECRET=${HARNESS_SECRET:-harness-standalone}
+# must agree on it. Both default to "agent-standalone"; override here to share.
+SECRET=${AGENT_SECRET:-agent-standalone}
 # The gateway joins as a non-voting cluster client with this id, OUTSIDE the
 # nodes' 1..=3 voter roster; each node admits it with --client.
-GATEWAY_ID=${HARNESS_GATEWAY_ID:-100}
-DATA=${HARNESS_DATA:-./harness-data}
-API_URL=${HARNESS_API_URL:-https://api.anthropic.com}
+GATEWAY_ID=${AGENT_GATEWAY_ID:-100}
+DATA=${AGENT_DATA:-./agent-data}
+API_URL=${AGENT_API_URL:-https://api.anthropic.com}
 # python:3.12-slim rather than bare alpine: it carries python3, bash, and
 # the GNU coreutils, so the model can actually run what a newcomer asks for.
-# Override with HARNESS_SANDBOX_IMAGE for a leaner (alpine:3.20) or richer
+# Override with AGENT_SANDBOX_IMAGE for a leaner (alpine:3.20) or richer
 # (a polyglot image) container.
-IMAGE=${HARNESS_SANDBOX_IMAGE:-python:3.12-slim}
+IMAGE=${AGENT_SANDBOX_IMAGE:-python:3.12-slim}
 mkdir -p "$DATA"
 
 # A real model composes the shell commands this demo runs, so they execute
@@ -59,7 +59,7 @@ fi
 # the gateway's public HTTP.
 for p in 7401 7402 7403 7500 8080; do
   if (echo > "/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
-    echo "Port $p is busy — an old demo still running?  pkill -f 'harness-'" >&2
+    echo "Port $p is busy — an old demo still running?  pkill -f 'agent-'" >&2
     exit 1
   fi
 done

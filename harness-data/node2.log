@@ -1,0 +1,7 @@
+[node-2] transport 127.0.0.1:7402, data ./harness-data/node2, model claude-sonnet-4-6
+[node-2] cluster ready (leader elected)
+[node-2] hosting grains; the public edge is harness-gateway (a cluster client). No client-facing listener on this node.
+[node-2] Suspected { observer: NodeId(2), node: NodeId(100) }
+[node-2] Suspected { observer: NodeId(2), node: NodeId(3) }
+[node-2] Reachable { observer: NodeId(2), node: NodeId(3) }
+[node-2] Reachable { observer: NodeId(2), node: NodeId(100) }

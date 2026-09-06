@@ -1,7 +1,7 @@
 //! An activation-scoped external resource (workflow spec §6).
 //!
 //! A consumer frequently holds something for the life of an activation — the
-//! harness's sandbox (harness §5.3), the machine's runtime binding (machine
+//! harness's sandbox (agent §5.3), the machine's runtime binding (machine
 //! §2.1) — with an open-once lifecycle, a release on every deactivation, and a
 //! hibernation veto while the open is in flight.
 //!

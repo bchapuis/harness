@@ -7,7 +7,7 @@
 //! one — contiguous, in order, no gap or duplicate — regardless of buffer
 //! overflow (a burst writer) or a shard-leader crash mid-stream (push stops; the
 //! re-sync backfill recovers every post-move record). The collector below is the
-//! reference reconciler; `harness::Follower` implements the same contract.
+//! reference reconciler; `agent::Follower` implements the same contract.
 
 mod support;
 

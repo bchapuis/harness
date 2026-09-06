@@ -3,7 +3,7 @@
 //!
 //! A node hosts machine entities, votes in Raft, and runs an **in-process SSH
 //! front door** (machine §5.1). The front door is in-process rather than a
-//! separate tier — the shape `harness-gateway` takes for sessions — for one
+//! separate tier — the shape `agent-gateway` takes for sessions — for one
 //! reason: a bridged channel ends at a node-local vsock socket, and the
 //! cross-node relay that would let a detached door reach another node's guest
 //! is machine §8's deferred work. So each node's door serves the machines that
@@ -224,7 +224,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         // trusted cluster network. Note what this is *not* protecting — the SSH
         // connection is terminated at the door and bridged over a node-local
         // socket, so no session bytes cross this transport. See the note in
-        // `harness-standalone`: plaintext is a stated choice, valid only on a
+        // `agent-standalone`: plaintext is a stated choice, valid only on a
         // network the operator controls.
         encryption: Encryption::PlaintextTrusted,
         membership: Box::new(move |roster| {

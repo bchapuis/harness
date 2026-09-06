@@ -67,7 +67,7 @@ pub const SCANNED: &[&str] = &[
     "entity",
     "blob",
     "workflow",
-    "harness",
+    "agent",
     "sandbox",
     "machine",
     "compatibility",
@@ -155,7 +155,7 @@ pub const EXEMPT: &[Exempt] = &[
     e(
         "RunResumed",
         Why::DeclaredAbsent,
-        "harness §10: a resume is recognized from Activated plus ModelCompleted, so \
+        "agent §10: a resume is recognized from Activated plus ModelCompleted, so \
          \"the harness mints no RunResumed event of its own\"",
     ),
     e(

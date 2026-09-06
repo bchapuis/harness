@@ -1,6 +1,6 @@
 # Standalone deployment: a three-node agentic harness
 
-This guide installs `harness-standalone` — the runnable deployment of the
+This guide installs `agent-standalone` — the runnable deployment of the
 agentic harness — and walks through a three-node cluster: one OS process per
 node, each with its own data directory, agentic sessions backed by the
 Anthropic API, and the failure drill (kill a node, watch its sessions resume on
@@ -21,7 +21,7 @@ machines").
          │   Nodes host entities and vote in Raft; no client listener.
  terminal 4 (joins the transport as a non-voting client)
  ┌────────────────────┐                    api.anthropic.com
- │ harness-gateway     │                   ▲ (one HTTPS call
+ │ agent-gateway     │                   ▲ (one HTTPS call
  │ HTTP :8080 ─► entities│                   │  per model step,
  │ transport :7500     │                   │  from the owning node)
  └────────────────────┘
@@ -31,7 +31,7 @@ Each `node` process is a full cluster member: a TCP transport on loopback, a
 static three-node roster with the SWIM failure detector running observe-only,
 and one node's harness — host actor, session actors, and the three seams:
 
-- **Model** — the Anthropic Messages API (`harness-anthropic`), over a small
+- **Model** — the Anthropic Messages API (`agent-anthropic`), over a small
   tokio/rustls HTTP client.
 - **EntityJournal** — a file-backed store in each node's own `--data` directory.
   The journal is one logical store for the whole cluster (spec §6.1), but it is
@@ -80,11 +80,11 @@ entries.
 From the repository root:
 
 ```sh
-cargo install --path crates/harness-standalone
+cargo install --path crates/agent-standalone
 ```
 
-Or run uninstalled with `cargo run -p harness-standalone --` in place of
-`harness-standalone` below.
+Or run uninstalled with `cargo run -p agent-standalone --` in place of
+`agent-standalone` below.
 
 ## Start the cluster
 
@@ -97,11 +97,11 @@ export ANTHROPIC_API_KEY=sk-ant-…
 docker pull python:3.12-slim   # once; the first shell call would otherwise eat its timeout
 
 # terminal 1
-harness-standalone node --id 1 --data ./harness-data/node1 --client 100=127.0.0.1 --sandbox docker --sandbox-image python:3.12-slim
+agent-standalone node --id 1 --data ./agent-data/node1 --client 100=127.0.0.1 --sandbox docker --sandbox-image python:3.12-slim
 # terminal 2
-harness-standalone node --id 2 --data ./harness-data/node2 --client 100=127.0.0.1 --sandbox docker --sandbox-image python:3.12-slim
+agent-standalone node --id 2 --data ./agent-data/node2 --client 100=127.0.0.1 --sandbox docker --sandbox-image python:3.12-slim
 # terminal 3
-harness-standalone node --id 3 --data ./harness-data/node3 --client 100=127.0.0.1 --sandbox docker --sandbox-image python:3.12-slim
+agent-standalone node --id 3 --data ./agent-data/node3 --client 100=127.0.0.1 --sandbox docker --sandbox-image python:3.12-slim
 ```
 
 On one host the nodes find each other on loopback (the default).
@@ -122,7 +122,7 @@ node except `--id`:
 
 ```sh
 # on host-a (the others are identical but for --id):
-harness-standalone node --id 1 --data ./harness-data \
+agent-standalone node --id 1 --data ./agent-data \
   --bind-host 0.0.0.0 \
   --peer 1=host-a --peer 2=host-b --peer 3=host-c \
   --sandbox docker --sandbox-image python:3.12-slim
@@ -145,9 +145,9 @@ container runtime required.
 Each node logs its bootstrap and then the cluster's life on stderr:
 
 ```
-[node-2] joined (voter 2/3), data ./harness-data, model claude-sonnet-4-6
+[node-2] joined (voter 2/3), data ./agent-data, model claude-sonnet-4-6
 [node-2] cluster ready (leader elected) after 1.2s
-[node-2] hosting entities; the public edge is harness-gateway (a cluster client). No client-facing listener on this node.
+[node-2] hosting entities; the public edge is agent-gateway (a cluster client). No client-facing listener on this node.
 ```
 
 ## Start the gateway
@@ -157,8 +157,8 @@ client (node id 100, the one the nodes admitted with `--client`) and serves
 HTTP/SSE on `127.0.0.1:8080`:
 
 ```sh
-# terminal 4  (build with `cargo build -p harness-gateway`, or `cargo run -p harness-gateway --`)
-harness-gateway --bind 127.0.0.1:8080 --node-id 100 --nodes 3
+# terminal 4  (build with `cargo build -p agent-gateway`, or `cargo run -p agent-gateway --`)
+agent-gateway --bind 127.0.0.1:8080 --node-id 100 --nodes 3
 ```
 
 It logs `joined the cluster (client of nodes 1..=3)` once it discovers a host
@@ -194,10 +194,10 @@ as JSON (`{"outcome":{"Ok":{…}}}`). The endpoints:
 | `GET  /v1/sessions?kind=`                       | this tenant's sessions |
 
 Re-issuing the **same** `turn` id is the resume primitive: a completed run
-returns its recorded outcome, a live run re-attaches, never run twice (H7).
+returns its recorded outcome, a live run re-attaches, never run twice (A7).
 
 The records *are* the session: each is a line in that session's own segment under
-`./harness-data/entities/<entity_type>/<node>/segments/`, and folding them back is how
+`./agent-data/entities/<entity_type>/<node>/segments/`, and folding them back is how
 any node reconstructs the session — there is no other session state. The entity type
 comes first because a store is per hosted type: its fence is keyed by shard index,
 and the same index is a different leader-election group under each type (entity
@@ -242,7 +242,7 @@ A session survives the machine that was running it.
 
 The journal's fenced append means even a *not actually dead* node (a partition,
 a pause) cannot fork the transcript: the old owner's next append loses the fence
-and hibernates. Re-submitting a turn id is always safe (invariant H7).
+and hibernates. Re-submitting a turn id is always safe (invariant A7).
 
 ## Sizing the host
 
@@ -337,21 +337,21 @@ under-replicated one.
 ## Configuration
 
 ```
-harness-standalone node --id <n> [options]
-harness-gateway [options]                  # the public HTTP edge
+agent-standalone node --id <n> [options]
+agent-gateway [options]                  # the public HTTP edge
 ```
 
 | flag             | default                     | notes |
 |------------------|-----------------------------|-------|
 | `--id <n>`       | required                    | 1..=`--nodes` |
 | `--nodes <n>`    | `3`                         | roster size; agree everywhere |
-| `--data <dir>`   | `./harness-data`            | this node's own journal + workspaces |
+| `--data <dir>`   | `./agent-data`            | this node's own journal + workspaces |
 | `--bind-host <addr>` | `127.0.0.1`             | interface the transport binds; `0.0.0.0` in a container |
 | `--peer <id>=<host>` | all `127.0.0.1`         | each node's reachable host; repeat for the roster |
 | `--client <id>=<host>` | —                     | admit a non-voting cluster client (the gateway); id outside `1..=--nodes`. Repeatable |
 | `--port-base <p>`| `7401`                      | node/client *i*'s transport = p+i−1 |
 | `--model <id>`   | `claude-sonnet-4-6`         | agree everywhere (kind digests are pinned per session) |
-| `--secret <s>`   | `harness-standalone`        | cluster association secret |
+| `--secret <s>`   | `agent-standalone`        | cluster association secret |
 | `--api-url <url>`| `https://api.anthropic.com` | `http://…` points at a fake for offline testing |
 | `--sandbox <mode>` | — (required)              | `docker` or `firecracker` (confined shell, durable workspace), or `durable` (typed file tools, no shell); agree everywhere (the choice shapes the kind digest) |
 | `--sandbox-image <r>` | —                       | container image for `--sandbox docker` (required there); agree everywhere |
@@ -365,19 +365,19 @@ Environment: `ANTHROPIC_API_KEY` (required by `node`).
 Every flag marked "agree everywhere" is deployment configuration in the
 spec's sense (§7.1): all nodes must be started with the same values.
 
-The **gateway** (`harness-gateway`) takes its own set:
+The **gateway** (`agent-gateway`) takes its own set:
 
 | flag                    | default            | notes |
 |-------------------------|--------------------|-------|
 | `--bind <host:port>`    | `127.0.0.1:8080`   | the public HTTP listener |
-| `--secret <s>`          | `harness-standalone` | must match the nodes' `--secret` |
+| `--secret <s>`          | `agent-standalone` | must match the nodes' `--secret` |
 | `--node-id <n>`         | `100`              | outside `1..=--nodes`, and admitted by the nodes' `--client` |
 | `--nodes <n>`           | `3`                | the voter roster size, mirroring the nodes |
 | `--peer <id>=<host>`    | all `127.0.0.1`    | each node's reachable host; repeat for the roster |
 | `--bind-host <addr>`    | `127.0.0.1`        | interface the *transport* binds; `0.0.0.0` in a container |
 | `--advertise-host <a>`  | `--bind-host`      | the host the nodes dial it back at; must match their `--client <host>` |
 | `--port-base <p>`       | `7401`             | node/client *i*'s transport = p+i−1 |
-| `--kind <name[:shards]>` | `assistant:4 worker:4` | a kind the nodes host, with its `EntityConfig.shards`; repeat per kind. Must match the nodes' deployment — an unknown name fails discovery, a wrong shard count misroutes sessions. The default mirrors `harness-standalone`'s default kinds |
+| `--kind <name[:shards]>` | `assistant:4 worker:4` | a kind the nodes host, with its `EntityConfig.shards`; repeat per kind. Must match the nodes' deployment — an unknown name fails discovery, a wrong shard count misroutes sessions. The default mirrors `agent-standalone`'s default kinds |
 | `--auth-tokens <path>`  | —                  | tenants file (`<principal> <token>` per line), reloaded on SIGHUP. **Required** unless `--bind` is loopback; without it the bearer token *is* the tenant |
 | `--max-within-secs <n>` | `3600`             | ceiling on a prompt's `within_secs` |
 | `--max-body-bytes <n>`  | `1048576`          | max request body size |
@@ -393,7 +393,7 @@ over HTTP — and needs no API key.
 | this deployment | agentic harness spec |
 |---|---|
 | `--data/entities`, a quorum append per entity fenced by the shard term | the fenced, per-session journal (§6.1–§6.2, §7.2); the journal **is** the session (§2.1) |
-| killing a node, then re-issuing the same `turn` id over HTTP | caller-driven resumption (§7.5), idempotent turns (H7) |
+| killing a node, then re-issuing the same `turn` id over HTTP | caller-driven resumption (§7.5), idempotent turns (A7) |
 | the gateway's `EntityRef` reaches any session | placement is routing, not a lease (utilities spec §2.3); exclusivity lives in the fence |
 | `--data/workspaces/<node-id>/…`, one directory per session entity | the sandbox seam (§5.3); working state, not session state (§5.5) |
 | `assistant` → `delegate` → `worker` | delegation with budget carve-outs (§8, §9.1) |
@@ -408,7 +408,7 @@ over HTTP — and needs no API key.
   untrusted networks.
 - **`--sandbox` must be chosen explicitly; there is no unconfined mode.** Pass
   `--sandbox docker --sandbox-image <ref>` (e.g. `alpine:3.20`) to run `shell`
-  inside a per-session OCI container, via `harness-sandbox`'s `Native` tier:
+  inside a per-session OCI container, via `agent-sandbox`'s `Native` tier:
   the workspace bind-mounted, no network — shared-kernel confinement (sandbox
   spec §3.4's SHOULD grade), still not the microVM grade. Pre-pull the image:
   the first call otherwise pulls it inside the 120s tool timeout. On Linux with

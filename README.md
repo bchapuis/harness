@@ -52,17 +52,17 @@ authenticated form with opaque per-tenant tokens.
   SWIM failure detection, rendezvous placement, a mutual-TLS-capable TCP
   transport. Seeded deterministic simulation tests all of it, FoundationDB-style:
   one seed reproduces an entire multi-node run, partitions and all.
-- An **agentic harness** on top (`crates/harness`): each session is an actor
+- An **agentic harness** on top (`crates/agent`): each session is an actor
   whose only state is a fenced, append-only journal. Model, journal, and sandbox
-  are injected seams (`crates/harness-anthropic` is the Anthropic one).
-- A **standalone deployment** (`crates/harness-standalone`): the binary the demo
+  are injected seams (`crates/agent-anthropic` is the Anthropic one).
+- A **standalone deployment** (`crates/agent-standalone`): the binary the demo
   runs. A file-backed, replicated journal fenced by a per-shard term written
   beside it (`fences/<shard>`), tokio/rustls HTTP to the Messages API, and
   per-session workspaces behind an explicit `--sandbox` choice, required and
   never defaulted: a `docker` container, a
   `firecracker` microVM (Linux/KVM), or `durable` — the typed file tools over
   the same durable workspace, with no shell at all. There is no unconfined mode.
-- A **gateway-as-cluster-client edge** (`crates/harness-gateway`): an `axum`
+- A **gateway-as-cluster-client edge** (`crates/agent-gateway`): an `axum`
   HTTP/SSE tier that is the single public boundary. It joins the actor transport
   as a non-voting, non-hosting member (the Orleans cluster-client pattern),
   terminates tenant auth (a bearer token → a principal), and addresses the
@@ -74,7 +74,7 @@ authenticated form with opaque per-tenant tokens.
   ownership-index entity (`tenancy`, itself another journaled actor). The gateway
   is where auth terminates, so it joins inside the cluster's trust boundary;
   untrusted callers reach it only over HTTP with a bearer token.
-- **Two clients** (`crates/harness-tui`, `clients/harness-vscode`): the only
+- **Two clients** (`crates/agent-tui`, `clients/agent-vscode`): the only
   parts of the tree that are not in the cluster. Both sit on the gateway's
   HTTP/SSE surface and speak nothing else — a terminal chat UI, and a VS Code
   extension that surfaces a session as an agent in the Agents window. Each lists
@@ -127,7 +127,7 @@ the guides, and the testing conventions. The paths worth taking first:
   tenancy directory, and the gateway-as-cluster-client trust model.
 - [k8s/README.md](k8s/README.md): the cluster as a Kubernetes StatefulSet of
   silos, with the gateway joining it as a cluster client.
-- [docs/agentic-harness-spec.md](docs/agentic-harness-spec.md): why the journal
+- [docs/agent-spec.md](docs/agent-spec.md): why the journal
   is the session.
 - [docs/entity-spec.md](docs/entity-spec.md): the substrate under all of it —
   what an entity is, the fenced journal, shards and snapshots, and the facet model

@@ -1,7 +1,7 @@
 //! The workflow's observability events (workflow spec §8): checker-facing, ephemeral,
 //! describing the *machinery around* effects and carrying nothing about their
 //! content — the payload is the consumer's and belongs in the consumer's records
-//! (harness §10.1).
+//! (agent §10.1).
 //!
 //! Each event rides the core stream as [`Event::App`] (core §16), alongside the
 //! entity's own (entity §13), so a checker observes one totally ordered sequence

@@ -137,11 +137,11 @@ jobs:
 
       - name: Clippy (feature firecracker)
         run: |
-          cargo clippy -p harness-sandbox --features firecracker --all-targets -- -D warnings
+          cargo clippy -p agent-sandbox --features firecracker --all-targets -- -D warnings
           cargo clippy -p machine-entity --features host --all-targets -- -D warnings
 
       - name: Test the sandbox tier (protocol suite + KVM-gated conformance)
-        run: cargo test -p harness-sandbox --features firecracker
+        run: cargo test -p agent-sandbox --features firecracker
 
       - name: Test the machine binding (ws sync suite + microVM and container e2e)
         if: ${{ !cancelled() }}

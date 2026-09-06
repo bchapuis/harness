@@ -335,7 +335,7 @@ fn a_compacted_entity_reports_its_base_instead_of_a_silent_gap() {
 // --- can_hibernate: an entity that vetoes idle hibernation (§10) ----------------
 
 /// An entity that never permits idle hibernation. The agentic harness overrides
-/// `can_hibernate` this way while a run is live (harness §7.2).
+/// `can_hibernate` this way while a run is live (agent §7.2).
 #[derive(Default)]
 struct PinnedEntity;
 
@@ -642,12 +642,12 @@ fn entity_named_hosts_one_entity_under_many_type_names() {
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
 
     let researchers = system.entities_named::<CounterEntity>(
-        "harness.researcher",
+        "agent.researcher",
         EntityConfig::default(),
         Arc::new(CounterEntity::default),
     );
     let summarizers = system.entities_named::<CounterEntity>(
-        "harness.summarizer",
+        "agent.summarizer",
         EntityConfig::default(),
         Arc::new(CounterEntity::default),
     );
@@ -655,11 +655,11 @@ fn entity_named_hosts_one_entity_under_many_type_names() {
     // The runtime type name lands in the `EntityName`, overriding `G::ENTITY_TYPE`.
     assert_eq!(
         researchers.entity("c/0").name().entity_type(),
-        "harness.researcher"
+        "agent.researcher"
     );
     assert_eq!(
         summarizers.entity("c/0").name().entity_type(),
-        "harness.summarizer"
+        "agent.summarizer"
     );
 
     sim.block_on(async move {
