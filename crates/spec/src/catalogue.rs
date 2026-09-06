@@ -147,6 +147,14 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         pointers: Pointers::Functions,
     },
     CatalogueSite {
+        id: "drive",
+        doc: "drive",
+        section: "9",
+        label: "D",
+        shape: Shape::Table,
+        pointers: Pointers::Files,
+    },
+    CatalogueSite {
         id: "harness",
         doc: "harness",
         section: "11",

@@ -131,6 +131,14 @@ pub const DOCUMENTS: &[DocSpec] = &[
         aliases: &["blob", "blob-store"],
         unprefixed: Unprefixed::Own,
     },
+    // The autonomous grain (the `drive` crate). Cites the harness above it: the
+    // harness is the layer it generalizes and does not yet sit on it.
+    DocSpec {
+        id: "drive",
+        path: "docs/drive-spec.md",
+        aliases: &["drive"],
+        unprefixed: Unprefixed::Own,
+    },
     DocSpec {
         id: "harness",
         path: "docs/agentic-harness-spec.md",

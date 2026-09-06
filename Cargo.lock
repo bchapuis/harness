@@ -1024,6 +1024,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "drive"
+version = "0.1.0"
+dependencies = [
+ "actor-cluster",
+ "actor-core",
+ "actor-serialization",
+ "actor-simulation",
+ "drive",
+ "futures",
+ "granary",
+ "serde",
+ "spec",
+]
+
+[[package]]
 name = "ecdsa"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

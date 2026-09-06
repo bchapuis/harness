@@ -1,0 +1,37 @@
+[package]
+name = "drive"
+description = "The autonomous grain: a durable object that re-derives and drives the work its committed state calls for"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+actor-simulation = { workspace = true, optional = true }
+granary.workspace = true
+actor-serialization.workspace = true
+actor-core.workspace = true
+serde.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+spec.workspace = true
+# Its own `testing` module, for this crate's conformance suites.
+drive = { path = ".", features = ["testing"] }
+actor-simulation.workspace = true
+# The clustered tier the dangling, resume, and swarm suites run on: a driven
+# grain's crash and migration scenarios are shard-leader moves (§4.4, §6).
+actor-cluster.workspace = true
+# Granary's own continuous checkers, mounted beside the drive's in the swarm.
+granary = { workspace = true, features = ["testing"] }
+
+[features]
+# The continuous D-checkers over the drive's event stream, for the conformance
+# suites in this crate and any consumer's swarm. Test support, so it stays out
+# of a production build.
+testing = ["dep:actor-simulation"]
+
+[lints]
+workspace = true

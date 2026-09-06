@@ -116,7 +116,7 @@ so — everything durable still runs, and only the shell is missing.
 
 ## Going deeper
 
-[docs/README.md](docs/README.md) indexes everything — the nine specifications,
+[docs/README.md](docs/README.md) indexes everything — the ten specifications,
 the guides, and the testing conventions. The paths worth taking first:
 
 - [docs/standalone-deployment.md](docs/standalone-deployment.md): the full

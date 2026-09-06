@@ -86,6 +86,7 @@ pub const LABELS: &[(&str, Owner)] = &[
              than a site of its own, and no crate holds a Rust copy of it",
         ),
     ),
+    ("D", Owner::Catalogue("drive")),
     (
         "V",
         Owner::Unregistered(

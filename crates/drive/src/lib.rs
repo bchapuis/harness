@@ -1,0 +1,311 @@
+//! The autonomous grain (drive spec): a grain that drives itself.
+//!
+//! A grain waits. It holds durable state, admits a command, decides records,
+//! commits them, and replies (granary §4.2, §6). An **autonomous** grain does
+//! not wait: its activation re-derives the work its committed state calls for,
+//! launches what is not yet in flight, folds each outcome back, and stops when
+//! there is nothing left. The agentic harness builds that mechanism by hand,
+//! welded to one agentic policy (harness §3); this crate is the mechanism on
+//! its own, with no model, tool, or prompt in it.
+//!
+//! The whole of it rests on one decision: **the work outstanding is a pure
+//! function of committed state**, [`Driven::pending`], never a journaled queue.
+//! A set re-derived from the journal needs no reconciliation after a crash,
+//! because recovery computes the same function over the same records — so
+//! resume stops being a special case, and the desired set is at once the
+//! dispatch list (§3.2), the recovery set (§4.4), and the straggler filter
+//! (§4.5).
+//!
+//! Everything beneath is granary's and is not re-implemented here: this crate
+//! defines **no journal, no fence, no placement function, and no resume
+//! protocol**, and names no durable type of its own. Every record a driven
+//! grain writes is the consumer's [`Grain::Event`]; the drive's own state —
+//! claims, backoff, subscribers — is ephemeral by specification (§3.3, §3.4,
+//! §7.1).
+//!
+//! # Wiring a driven grain
+//!
+//! A consumer implements [`Driven`] beside its [`Grain`], holds a [`Drive`] in
+//! its behavior, and forwards four hooks. There is deliberately no blanket
+//! `GrainHandler` impl (the orphan rule forbids one, and granary's stance is
+//! that the hand-written form is normative), so the two commands are two small
+//! handlers:
+//!
+//! ```ignore
+//! impl Grain for Fanout {
+//!     async fn on_activate(&mut self, ctx: &GrainCtx<Self>) -> Result<(), BoxError> {
+//!         self.drive.on_activate(ctx);
+//!         Ok(())
+//!     }
+//!     fn can_passivate(&self, _state: &Self::State) -> bool { self.drive.quiescent() }
+//!     fn register(r: &mut GrainRegistry<Self>) { /* the drive's commands are local-only */ }
+//! }
+//!
+//! impl GrainHandler<Nudge> for Fanout {
+//!     async fn handle(&self, state: &Self::State, _: Nudge, ctx: &GrainCtx<Self>)
+//!         -> (Vec<Self::Event>, ()) { (self.drive.advance(self, state, ctx), ()) }
+//! }
+//!
+//! impl GrainHandler<Settled<Self>> for Fanout {
+//!     async fn handle(&self, state: &Self::State, msg: Settled<Self>, ctx: &GrainCtx<Self>)
+//!         -> (Vec<Self::Event>, ()) { (self.drive.settled(self, state, msg, ctx).await, ()) }
+//! }
+//! ```
+//!
+//! and every handler of the consumer's own whose records call for work calls
+//! [`Drive::nudge`] with the state it was given — the cycle's entry point after a
+//! commit (§3.2 item 1), and, on the activation's first handler, what classifies
+//! the dangling set (§4.4). The drive re-enters after its own settles by itself,
+//! and arms the backoff timer after one that committed nothing (§3.2 item 3).
+
+pub mod backoff;
+pub mod binding;
+pub mod cycle;
+pub mod dangling;
+pub mod event;
+pub mod settle;
+pub mod subscribers;
+#[cfg(feature = "testing")]
+pub mod testing;
+
+use std::future::Future;
+
+use granary::Grain;
+use granary::GrainCtx;
+use granary::GrainName;
+use serde::Deserialize;
+use serde::Serialize;
+
+pub use backoff::Backoff;
+pub use backoff::BackoffPolicy;
+pub use binding::Binding;
+pub use binding::BindingState;
+pub use cycle::Drive;
+pub use cycle::Nudge;
+pub use event::DriveEvent;
+pub use settle::Settled;
+pub use subscribers::Subscribers;
+
+/// One unit of work the committed state calls for, and how to recover it
+/// (spec §3.1).
+///
+/// `key` is the effect's identity within its grain, `effect` the consumer's own
+/// opaque description of the work, and `on_dangling` the policy the drive
+/// applies if a crash leaves the effect's fate unknown (§4.4). None of the three
+/// is journaled by the drive: a `Pending` is re-derived, in full, on every
+/// activation that folds the same journal prefix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending<K, E> {
+    pub key: K,
+    pub effect: E,
+    /// The declared recovery policy. There is deliberately **no default**: an
+    /// effect whose policy went unstated would be a silent decision about
+    /// whether to repeat a side effect, and there is no safe guess (§4.4).
+    pub on_dangling: OnDangling,
+}
+
+impl<K, E> Pending<K, E> {
+    /// A pending effect that is safe to re-run after an interruption (§4.4).
+    pub fn reexecute(key: K, effect: E) -> Self {
+        Pending {
+            key,
+            effect,
+            on_dangling: OnDangling::Reexecute,
+        }
+    }
+
+    /// A pending effect whose repetition the consumer will not risk blindly: a
+    /// dangling one resolves as [`EffectError::Interrupted`] and the consumer
+    /// decides (§4.4).
+    pub fn interrupt(key: K, effect: E) -> Self {
+        Pending {
+            key,
+            effect,
+            on_dangling: OnDangling::Interrupt,
+        }
+    }
+}
+
+/// Resume's policy for a **dangling** effect — one whose intent committed and
+/// whose outcome did not, so nothing says whether it ran (spec §4.4).
+///
+/// This is the drive's type, and the home of the decision. The harness declares
+/// the same two variants per tool (harness §5.2) and re-exports this rather than
+/// keeping a second copy: a tool declaration's recovery policy is exactly what
+/// its [`Pending`] carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum OnDangling {
+    /// Launch it again, as an ordinary launch. The consumer has declared the
+    /// effect idempotent, self-deduplicating, or cheap enough that a second run
+    /// is preferable to an unknown one.
+    Reexecute,
+    /// Settle it as [`EffectError::Interrupted`] without launching anything, and
+    /// let the consumer decide what to do about a side effect of unknown fate.
+    Interrupt,
+}
+
+/// Why an effect produced no outcome (spec §4.3). A failing effect does not fail
+/// the grain: the drive settles it as a value the consumer's fold records and
+/// reacts to.
+///
+/// **Only [`Interrupted`](EffectError::Interrupted) is the drive's to mint**
+/// (§4.4). The other three are what a consumer's [`Driven::perform`] returns:
+/// the drive neither bounds an effect nor interprets its failure. A consumer
+/// wanting a per-effect timeout takes it from the [`Clock`](actor_core::Clock)
+/// on [`Perform`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectError {
+    /// A bound the consumer's `perform` set on itself elapsed. Its effects MAY
+    /// still land; only the *outcome* is bounded.
+    Timeout,
+    /// A dangling effect declaring [`OnDangling::Interrupt`] was resolved on
+    /// resume (§4.4). Nothing is known about whether it ran.
+    Interrupted,
+    /// The environment the effect needed is gone.
+    Lost(String),
+    /// The effect ran and failed.
+    Failed(String),
+}
+
+impl std::fmt::Display for EffectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EffectError::Timeout => write!(f, "the effect's bound elapsed"),
+            EffectError::Interrupted => write!(f, "interrupted: the effect's fate is unknown"),
+            EffectError::Lost(why) => write!(f, "environment lost: {why}"),
+            EffectError::Failed(why) => write!(f, "failed: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for EffectError {}
+
+/// What an effect legitimately needs from outside itself (spec §4.1): the
+/// grain's name and the system's seams (clock, entropy, task launching).
+///
+/// It carries **no** access to the grain's state, journal, or facets, which is
+/// how "`perform` touches none of them" is enforced rather than asked for.
+/// Everything else an effect needs — the consumer's own model, sandbox, or
+/// network seams — the consumer clones out of `&self` before returning the
+/// future.
+///
+/// Owned rather than borrowed, because the future `perform` returns is launched
+/// as a detached task and must therefore be `'static`.
+#[derive(Clone)]
+pub struct Perform<S> {
+    name: GrainName,
+    system: S,
+}
+
+impl<S> Perform<S> {
+    pub(crate) fn new(name: GrainName, system: S) -> Self {
+        Perform { name, system }
+    }
+
+    /// The grain this effect belongs to.
+    pub fn name(&self) -> &GrainName {
+        &self.name
+    }
+
+    /// The system's seams: `now`, `sleep`, `next_random`, `launch` (core §4.6).
+    /// Time and randomness inside an effect MUST come from here, or a simulated
+    /// run stops reproducing.
+    pub fn system(&self) -> &S {
+        &self.system
+    }
+}
+
+/// A grain that drives itself (spec §2.1, §3, §4).
+///
+/// A **supertrait of [`Grain`]**, which is what makes `Self::State`,
+/// `Self::Event`, and [`GrainCtx<Self>`] below mean what they mean: a driven
+/// grain is an ordinary grain that has additionally said what work its state
+/// calls for.
+///
+/// Three methods, but only two new *things*: [`pending`](Driven::pending) is the
+/// function and [`perform`](Driven::perform) the seam, while
+/// [`settle`](Driven::settle) is an ordinary grain decision under the ordinary
+/// rules (granary §4.2), differing from a handler only in that the drive holds
+/// the command it answers.
+///
+/// The two handler supertraits are the wiring, made a compile-time obligation
+/// rather than a documented one: a driven grain that has not routed [`Nudge`] to
+/// [`Drive::advance`] and [`Settled`] to [`Drive::settled`] does not compile,
+/// which is the posture granary takes for its own calls (G10). There is
+/// deliberately no blanket impl supplying them — the orphan rule forbids one, and
+/// granary's stance is that the hand-written form is normative.
+pub trait Driven:
+    Grain + granary::GrainHandler<Nudge> + granary::GrainHandler<Settled<Self>>
+{
+    /// An effect's identity within this grain (§3.1).
+    ///
+    /// Re-derived on every activation and **never journaled by the drive**, so
+    /// it needs no stability across deployments and no registry. The bounds are
+    /// the ordinary command bounds, because a key rides the [`Settled`] command
+    /// through the grain's mailbox (§4.2) and orders the claim and backoff
+    /// tables (§3.3, §3.4).
+    ///
+    /// A key MUST be **unique over the grain's whole journal**, not merely
+    /// within one desired set: the straggler filter's only test is presence in
+    /// the set (§4.5), so a key that leaves and later re-enters would let an
+    /// outcome launched under the first occurrence be settled as the second's.
+    type Key: actor_serialization::SerializationRequirement + Clone + Ord + std::fmt::Debug;
+
+    /// One unit of work performed outside the grain: the consumer's own type,
+    /// opaque to the drive. Carried from `pending` to `perform` and never across
+    /// a wire, so it needs no serialization.
+    type Effect: Send + 'static;
+
+    /// What an effect returns. Rides [`Settled`] back onto the command path, so
+    /// it carries the command bounds; `Clone` because `GrainRef::tell` takes it
+    /// (granary §4.3).
+    type Outcome: actor_serialization::SerializationRequirement + Clone;
+
+    /// The effects this grain's **committed** state calls for (§3.1).
+    ///
+    /// MUST be pure and deterministic — the same obligation [`Grain::apply`]
+    /// carries (granary §4.1, G2), for the same reason: a resumed activation
+    /// that disagreed with the one it replaced about what work is outstanding
+    /// would either abandon work or duplicate it. It MUST NOT perform I/O, read
+    /// the clock, or use entropy, and it MUST NOT read the activation's
+    /// ephemeral state — the claims, the backoff table, and any binding are
+    /// invisible to it by construction, because a function that saw them would
+    /// no longer be a function of the journal (D1).
+    fn pending(&self, state: &Self::State) -> Vec<Pending<Self::Key, Self::Effect>>;
+
+    /// Perform one effect (§4.1). The **only** place a driven grain performs
+    /// I/O.
+    ///
+    /// It runs outside the activation, in a task the drive launched, holding no
+    /// lock on the grain and no claim on its mailbox — which is why the returned
+    /// future is `'static` and cannot borrow `&self`. An implementation clones
+    /// the seams it needs out of `&self` first, then returns a future owning
+    /// them.
+    fn perform(
+        &self,
+        effect: Self::Effect,
+        cx: Perform<Self::System>,
+    ) -> impl Future<Output = Result<Self::Outcome, EffectError>> + Send + 'static;
+
+    /// Fold one effect's outcome into records (§4.2).
+    ///
+    /// A **decision**, under exactly the rules a [`GrainHandler`] decision
+    /// follows (granary §4.2): it MUST NOT mutate state, MUST NOT perform
+    /// durable I/O, and MUST NOT await anything. It returns the records that
+    /// make the outcome durable; the grain's output gate commits them; the
+    /// commit re-enters the drive.
+    ///
+    /// Returning no records is legal and commits nothing (granary §7.5) — the
+    /// way a consumer says "this outcome changed nothing" — which then leaves
+    /// the key in the desired set for the backoff timer to relaunch (§3.2 item
+    /// 3), since this settle committed nothing to bring the next drive.
+    ///
+    /// [`GrainHandler`]: granary::GrainHandler
+    fn settle(
+        &self,
+        state: &Self::State,
+        key: &Self::Key,
+        outcome: Result<Self::Outcome, EffectError>,
+        ctx: &GrainCtx<Self>,
+    ) -> impl Future<Output = Vec<Self::Event>> + Send;
+}

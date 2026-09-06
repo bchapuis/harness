@@ -13,7 +13,10 @@ suite, so there is no Rust copy to hold it against (its V3 is asserted at compil
 time and its V4/V5 by the golden corpus instead, compatibility §4). They layer
 bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`,
 `grain §N`, and so on) — citations the build resolves rather than trusts (the
-`spec` crate, under Testing).
+`spec` crate, under Testing). The one exception is the drive, which cites the
+harness above it: the harness is the layer the drive generalizes and does not yet
+sit on it, so it is at once the motivation and the measure, and the dependency
+will run the other way once it does.
 
 | | Spec | Owns | Invariants |
 |---|---|---|---|
@@ -22,7 +25,8 @@ bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`,
 | storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | W1–W5 |
 | | [granary-spec](granary-spec.md) | durable objects ("grains"): the journal, the single-writer fence, shards, snapshots, the facet model | G1–G21, F1–F4 |
 | | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside granary (standalone; no in-tree consumer yet) | B1–B7 |
-| consumers | [agentic-harness-spec](agentic-harness-spec.md) | the agent: a grain plus a run loop, a model seam, and a sandbox | H1–H8 |
+| consumers | [drive-spec](drive-spec.md) | the autonomous grain: the desired set of effects, intent before effect, dangling resolution, quiescence | D1–D7 |
+| | [agentic-harness-spec](agentic-harness-spec.md) | the agent: a grain plus a run loop, a model seam, and a sandbox | H1–H8 |
 | | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the harness's sandbox seam | S1–S5 |
 | | [machine-spec](machine-spec.md) | the agent's sibling: a durable lightweight VM as a grain, reached over SSH | M1–M6 |
 | cross-cutting | [compatibility-spec](compatibility-spec.md) | format revisions, the boundary registry, the read-new-first policy | V1–V6 |
