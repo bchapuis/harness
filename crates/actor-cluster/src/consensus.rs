@@ -66,7 +66,7 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     /// after this, before the engine next ticks.
     fn create_group(&self, group: GroupId, voters: Vec<NodeId>, learners: Vec<NodeId>);
 
-    /// Retire an application Raft group (spec §7.7, G7): stop running it so it no
+    /// Retire an application Raft group (spec §7.7, E7): stop running it so it no
     /// longer elects, heartbeats, or commits. A group that holds no data — one
     /// used for leader election / placement only — needs no in-group consensus
     /// to retire: each node drops it as it applies the committed merge.
@@ -111,7 +111,7 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
 
     /// `group`'s current Raft term, or `None` if this node has no engine / is not
     /// in the group. A layer above (e.g. a per-shard leader-election group, §8)
-    /// stamps it on every per-grain append as the single-writer fencing token: one
+    /// stamps it on every per-entity append as the single-writer fencing token: one
     /// leader per term, refused by any replica that has acknowledged a higher term.
     fn group_term(&self, group: GroupId) -> Option<u64>;
 

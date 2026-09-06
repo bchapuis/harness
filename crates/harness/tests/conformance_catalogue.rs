@@ -112,7 +112,7 @@ fn the_declared_checkers_are_exactly_the_live_ones() {
 
 #[test]
 fn the_catalogue_covers_the_live_h_invariants() {
-    // H2 is retired (§11): the single-writer fence is wholly the grain's (G1),
+    // H2 is retired (§11): the single-writer fence is wholly the entity's (E1),
     // so it has no harness invariant; H3–H8 keep their numbers.
     let numbers: Vec<u8> = harness_catalogue().iter().map(|e| e.invariant).collect();
     assert_eq!(numbers, vec![1, 3, 4, 5, 6, 7, 8]);

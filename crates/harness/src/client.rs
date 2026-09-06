@@ -1,16 +1,16 @@
 //! The client view (harness spec §7.4): [`Harness`], [`SessionRef`], and the
 //! ephemeral reply-to actor behind the blocking `prompt` convenience.
 //!
-//! A session is a grain, so addressing is granary's: [`SessionRef`] wraps a
-//! [`GrainRef<Agent>`](granary::GrainRef) and `ask`s it the §7.3 commands,
-//! location-transparently (granary §4.3). [`Harness::cluster`] hosts one `Agent`
-//! grain per kind via `granary_named` (each `KindId` is its own grain type,
+//! A session is an entity, so addressing is entity's: [`SessionRef`] wraps a
+//! [`EntityRef<Agent>`](entity::EntityRef) and `ask`s it the §7.3 commands,
+//! location-transparently (entity §4.3). [`Harness::cluster`] hosts one `Agent`
+//! entity per kind via `entities_named` (each `KindId` is its own entity type,
 //! §2.2), injecting the node's model and sandbox seams into every activation
 //! through the factory.
 //!
 //! [`HarnessSystem`] is the harness's name for the system it runs on — exactly
-//! a [`GranarySystem`]; its §10.4 events ride the core `emit` seam onto the
-//! same observability stream the grain's events use.
+//! a [`EntitySystem`]; its §10.4 events ride the core `emit` seam onto the
+//! same observability stream the entity's events use.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -31,15 +31,15 @@ use actor_core::HandlerRegistry;
 use futures::channel::oneshot;
 use futures::future::Either;
 use futures::future::select;
-use granary::EventHistory;
-use granary::GrainError;
-use granary::GrainRef;
-use granary::Granary;
-use granary::GranaryExt;
-use granary::GranaryNode;
-use granary::GranarySystem;
-use granary::Seq;
-use granary::Subscription;
+use entity::EventHistory;
+use entity::EntityError;
+use entity::EntityRef;
+use entity::Entities;
+use entity::EntityExt;
+use entity::EntityNode;
+use entity::EntitySystem;
+use entity::Seq;
+use entity::Subscription;
 
 use crate::agent::Agent;
 use crate::agent::AttachOutcome;
@@ -57,19 +57,19 @@ use crate::session::SessionId;
 use crate::session::Turn;
 use crate::session::TurnId;
 
-/// Interned grain-type names, keyed by kind name (granary keys purely by string,
+/// Interned entity-type names, keyed by kind name (entity keys purely by string,
 /// §5.1). A build re-tried in a discovery poll loop ([`Harness::client`]) reuses
 /// the leaked name instead of leaking a fresh copy each attempt.
 static GRAIN_TYPE_IDS: LazyLock<Mutex<HashMap<String, &'static str>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// A grain type name must be `&'static` (the `GrainName` tag, §5.1); kinds are a
+/// An entity type name must be `&'static` (the `EntityName` tag, §5.1); kinds are a
 /// bounded deployment-time set, so interning one leaked `&'static str` per
 /// distinct kind name is sound.
-fn leak_grain_type(kind_id: &KindId) -> &'static str {
+fn leak_entity_type(kind_id: &KindId) -> &'static str {
     let mut ids = GRAIN_TYPE_IDS
         .lock()
-        .expect("grain-type name cache poisoned");
+        .expect("entity-type name cache poisoned");
     if let Some(id) = ids.get(kind_id.as_str()) {
         return id;
     }
@@ -78,20 +78,20 @@ fn leak_grain_type(kind_id: &KindId) -> &'static str {
     id
 }
 
-/// The system a harness runs on — exactly a [`GranarySystem`] (the agent is a
-/// grain, §2.1; its events ride [`ActorSystem::emit`]). The name is the
+/// The system a harness runs on — exactly a [`EntitySystem`] (the agent is a
+/// entity, §2.1; its events ride [`ActorSystem::emit`]). The name is the
 /// harness's own vocabulary for the requirement, so a consumer writes
 /// `S: HarnessSystem` without naming the storage layer; the blanket impl makes
-/// every grain-hosting system one.
+/// every entity-hosting system one.
 ///
 /// [`ActorSystem::emit`]: actor_core::ActorSystem::emit
-pub trait HarnessSystem: GranarySystem {}
+pub trait HarnessSystem: EntitySystem {}
 
-impl<S: GranarySystem> HarnessSystem for S {}
+impl<S: EntitySystem> HarnessSystem for S {}
 
 /// Harness tuning (harness spec §7.2, §9.1): the few knobs the spec calls
-/// configurable. Idle/snapshot/shard policy is per-kind `GranaryConfig` (§7.1),
-/// not here; durability retries are the grain's.
+/// configurable. Idle/snapshot/shard policy is per-kind `EntityConfig` (§7.1),
+/// not here; durability retries are the entity's.
 #[derive(Clone, Debug)]
 pub struct HarnessConfig {
     /// Default deadline bounding a caller's wait on `prompt` (§7.3) — never the
@@ -144,25 +144,25 @@ impl Default for HarnessConfig {
 }
 
 /// The node-global addressing context shared by a [`Harness`] and every `Agent`
-/// activation it hosts (§7.4): the per-kind granary directory (for routing and
+/// activation it hosts (§7.4): the per-kind entity directory (for routing and
 /// delegation), the cluster-wide kind registry, and the harness tuning. It holds
 /// **no** activation seams — those live on the hosted kind's [`Seams`].
 pub(crate) struct Shared<S: HarnessSystem> {
     pub(crate) kinds: Kinds,
     pub(crate) config: HarnessConfig,
-    /// One `Granary` handle per kind, set once after every kind is built, so a
-    /// grain can address children of any kind for delegation (§8.1) and cancel
+    /// One `Entities` handle per kind, set once after every kind is built, so a
+    /// entity can address children of any kind for delegation (§8.1) and cancel
     /// propagation (§9.2). Filled after construction — the factories that produce
     /// activations are captured before the handles exist.
-    pub(crate) granaries: OnceLock<BTreeMap<KindId, Granary<Agent<S>>>>,
+    pub(crate) hosts: OnceLock<BTreeMap<KindId, Entities<Agent<S>>>>,
 }
 
 impl<S: HarnessSystem> Shared<S> {
-    /// The per-kind `Granary` handles (set in [`HarnessBuilder::build`]).
-    pub(crate) fn granaries(&self) -> &BTreeMap<KindId, Granary<Agent<S>>> {
-        self.granaries
+    /// The per-kind `Entities` handles (set in [`HarnessBuilder::build`]).
+    pub(crate) fn hosts(&self) -> &BTreeMap<KindId, Entities<Agent<S>>> {
+        self.hosts
             .get()
-            .expect("granaries set in HarnessBuilder::build")
+            .expect("hosts set in HarnessBuilder::build")
     }
 }
 
@@ -176,9 +176,9 @@ pub(crate) struct Seams {
     pub(crate) sandbox: Arc<dyn SandboxProvider>,
 }
 
-/// One node's view of the session-grain namespace (harness spec §7.4): it
+/// One node's view of the session-entity namespace (harness spec §7.4): it
 /// addresses every kind's sessions, and for the kinds this node **hosts** it runs
-/// their grain type with the node's model and sandbox seams (§4, §5.3). Built with
+/// their entity type with the node's model and sandbox seams (§4, §5.3). Built with
 /// [`Harness::builder`]; cheap to clone, every clone shares the node's directory.
 pub struct Harness<S: HarnessSystem> {
     shared: Arc<Shared<S>>,
@@ -210,7 +210,7 @@ impl<S: HarnessSystem> Harness<S> {
     /// `(name, shards)` roster instead — see [`Harness::client`].
     pub fn builder(system: S, kinds: &Kinds) -> HarnessBuilder<S, NoRoutes> {
         HarnessBuilder {
-            granary_node: system.granary_node(),
+            entity_node: system.entity_node(),
             system,
             kinds: kinds.clone(),
             config: HarnessConfig::default(),
@@ -237,8 +237,8 @@ impl<S: HarnessSystem> Harness<S> {
     }
 
     /// Build a routing-only **client** harness (the Orleans cluster-client): it
-    /// hosts no grains, it only *addresses* sessions hosted elsewhere on the
-    /// cluster. `roster` pairs each kind's name with its `GranaryConfig.shards`
+    /// hosts no entities, it only *addresses* sessions hosted elsewhere on the
+    /// cluster. `roster` pairs each kind's name with its `EntityConfig.shards`
     /// on the hosting nodes — the two facts a router needs (a session name must
     /// hash to the same shard here as there), and the only two it may know:
     /// prompts, tools, and model params stay the hosts' concern. Both MUST
@@ -261,11 +261,11 @@ impl<S: HarnessSystem> Harness<S> {
     /// first turn.
     pub fn session(&self, kind: &str, session: SessionId) -> Result<SessionRef<S>, UnknownKind> {
         let kind = KindId::new(kind);
-        let Some(granary) = self.shared.granaries().get(&kind) else {
+        let Some(entities) = self.shared.hosts().get(&kind) else {
             return Err(UnknownKind { kind });
         };
         Ok(SessionRef {
-            grain: granary.grain(session.as_str()),
+            entity: entities.entity(session.as_str()),
             kind,
             session,
             system: self.system.clone(),
@@ -274,22 +274,22 @@ impl<S: HarnessSystem> Harness<S> {
     }
 
     /// Hand every shard this node leads, across every kind it hosts, to another
-    /// replica before the node departs (granary spec §8.3): the sum of each kind's
-    /// [`Granary::hand_off_leadership`], so `0` means every led shard moved. Same
+    /// replica before the node departs (entity spec §8.3): the sum of each kind's
+    /// [`Entities::hand_off_leadership`], so `0` means every led shard moved. Same
     /// terms as the per-kind call — best-effort and bounded, a non-zero return is
     /// information for the operator rather than an error — and a no-op for a
     /// routing-only client, which leads nothing.
     pub async fn hand_off_leadership(&self) -> usize {
         let mut outstanding = 0;
-        for granary in self.shared.granaries().values() {
-            outstanding += granary.hand_off_leadership().await;
+        for entity in self.shared.hosts().values() {
+            outstanding += entity.hand_off_leadership().await;
         }
         outstanding
     }
 }
 
 /// The error of [`Harness::session`]: the named kind is in neither this node's
-/// hosted nor its routed set, so there is no granary to address the session
+/// hosted nor its routed set, so there is no entity to address the session
 /// through. Permanent for this node's directory — a retry cannot clear it; the
 /// fix is configuration (host or route the kind) or the caller's spelling.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,17 +319,17 @@ pub struct NoRoutes;
 /// node's receptionist.
 pub struct HasRoutes;
 
-/// Builds a [`Harness`], choosing **per kind** whether this node hosts the grain
+/// Builds a [`Harness`], choosing **per kind** whether this node hosts the entity
 /// type — starting its gateway, replica store, and shard-map group and injecting
 /// the model/sandbox [`Seams`] into each activation — or only routes to a host of
 /// it (the Orleans cluster-client path: no hosting, the gateway discovered through
 /// the receptionist). See [`Harness::builder`].
 pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
     system: S,
-    /// The node-scoped granary capabilities every hosted kind's grain type shares
-    /// (granary §7.4, §13). One per node, not per kind — a node hosting five kinds
+    /// The node-scoped entity capabilities every hosted kind's entity type shares
+    /// (entity §7.4, §13). One per node, not per kind — a node hosting five kinds
     /// wants one I/O pool and one metrics registry, not five.
-    granary_node: GranaryNode<S>,
+    entity_node: EntityNode<S>,
     kinds: Kinds,
     config: HarnessConfig,
     hosted: Vec<(KindId, Arc<Kind>, Seams)>,
@@ -338,14 +338,14 @@ pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
 }
 
 impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
-    /// The node-scoped granary capabilities every hosted kind shares (granary §7.4,
+    /// The node-scoped entity capabilities every hosted kind shares (entity §7.4,
     /// §13): the blocking-I/O pool and the metrics registry. Defaults to the system's
     /// own — inline I/O and discarded metrics — which is what the simulation wants.
     ///
     /// A deployment on real storage sets it once here rather than per kind, since a
     /// pool exists to bound *the node's* concurrent device work.
-    pub fn granary_node(mut self, node: GranaryNode<S>) -> Self {
-        self.granary_node = node;
+    pub fn entity_node(mut self, node: EntityNode<S>) -> Self {
+        self.entity_node = node;
         self
     }
 
@@ -391,9 +391,9 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
     }
 
     /// Route to a host of the kind named `kind` instead of hosting it (the
-    /// Orleans cluster-client path). `shards` is the kind's `GranaryConfig.shards`
+    /// Orleans cluster-client path). `shards` is the kind's `EntityConfig.shards`
     /// on the hosting nodes, so a session name hashes to the same shard here as
-    /// there. A routing tier addresses sessions — it never activates a grain — so
+    /// there. A routing tier addresses sessions — it never activates an entity — so
     /// a kind's name and shard count are the only two facts it takes, and the
     /// only two it may know: prompts, tools, and model params stay the hosts'
     /// concern. Moves the builder to the `HasRoutes` type-state, so `build`
@@ -408,7 +408,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
     fn into_has_routes(self) -> HarnessBuilder<S, HasRoutes> {
         HarnessBuilder {
             system: self.system,
-            granary_node: self.granary_node,
+            entity_node: self.entity_node,
             kinds: self.kinds,
             config: self.config,
             hosted: self.hosted,
@@ -424,7 +424,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
     /// Panics unless every hosted kind's delegation allowlist is contained in
     /// this node's directory (hosted ∪ routed, §7.1): the parent's node launches
     /// the child `Submit` (§8.1) and delivers owed cancels (§9.2) through its
-    /// own granary for the child's kind, so an uncovered allowlist would fail
+    /// own entity for the child's kind, so an uncovered allowlist would fail
     /// every delegation per-call and leave a cancel owed until a
     /// better-configured node leads the shard. A deployment configuration
     /// error, surfaced as loudly as a duplicate tool name (§5.2).
@@ -443,31 +443,31 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
                 );
             }
         }
-        let mut granaries: BTreeMap<KindId, Granary<Agent<S>>> = BTreeMap::new();
+        let mut hosts: BTreeMap<KindId, Entities<Agent<S>>> = BTreeMap::new();
         for (id, shards) in &self.routed {
-            let grain_type = leak_grain_type(id);
-            let granary = self
+            let entity_type = leak_entity_type(id);
+            let entities = self
                 .system
-                .granary_client::<Agent<S>>(grain_type, *shards)?;
-            granaries.insert(id.clone(), granary);
+                .entities_client::<Agent<S>>(entity_type, *shards)?;
+            hosts.insert(id.clone(), entities);
         }
         let shared = Arc::new(Shared {
             kinds: self.kinds,
             config: self.config,
-            granaries: OnceLock::new(),
+            hosts: OnceLock::new(),
         });
-        // Host one grain type per hosted kind. The factory captures the node's
+        // Host one entity type per hosted kind. The factory captures the node's
         // directory (via `shared`), this kind's definition, and its seams, and
-        // builds a fresh activation per (re)activation — so the grain needs no
+        // builds a fresh activation per (re)activation — so the entity needs no
         // `Default` and no process-global; multi-node-in-one-process simulations
         // each get their own (§12.1).
         for (id, def, seams) in &self.hosted {
-            let grain_type = leak_grain_type(id);
+            let entity_type = leak_entity_type(id);
             let factory_shared = Arc::clone(&shared);
             let factory_kind = Arc::clone(def);
             let factory_seams = seams.clone();
-            let granary = self.granary_node.granary_named::<Agent<S>>(
-                grain_type,
+            let entities = self.entity_node.entities_named::<Agent<S>>(
+                entity_type,
                 def.config.clone(),
                 Arc::new(move || {
                     Agent::new(
@@ -477,12 +477,12 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
                     )
                 }),
             );
-            granaries.insert(id.clone(), granary);
+            hosts.insert(id.clone(), entities);
         }
         shared
-            .granaries
-            .set(granaries)
-            .unwrap_or_else(|_| panic!("granaries set once"));
+            .hosts
+            .set(hosts)
+            .unwrap_or_else(|_| panic!("hosts set once"));
         Some(Harness {
             shared,
             system: self.system,
@@ -512,9 +512,9 @@ impl<S: HarnessSystem> HarnessBuilder<S, HasRoutes> {
 }
 
 /// A typed client handle to one session (harness spec §7.4): a thin agent-facing
-/// surface over [`GrainRef<Agent>`](granary::GrainRef).
+/// surface over [`EntityRef<Agent>`](entity::EntityRef).
 pub struct SessionRef<S: HarnessSystem> {
-    grain: GrainRef<Agent<S>>,
+    entity: EntityRef<Agent<S>>,
     kind: KindId,
     session: SessionId,
     system: S,
@@ -524,7 +524,7 @@ pub struct SessionRef<S: HarnessSystem> {
 impl<S: HarnessSystem> Clone for SessionRef<S> {
     fn clone(&self) -> Self {
         SessionRef {
-            grain: self.grain.clone(),
+            entity: self.entity.clone(),
             kind: self.kind.clone(),
             session: self.session.clone(),
             system: self.system.clone(),
@@ -539,78 +539,78 @@ impl<S: HarnessSystem> SessionRef<S> {
     /// The deadline bounds this caller's **wait**, never the run: on a lapse it
     /// re-submits the same `TurnId`, which re-attaches or returns the recorded
     /// outcome (H7).
-    pub async fn prompt(&self, turn: Turn) -> Result<RunOutcome, GrainError> {
+    pub async fn prompt(&self, turn: Turn) -> Result<RunOutcome, EntityError> {
         self.prompt_within(turn, self.config.submit_deadline).await
     }
 
     /// [`prompt`](Self::prompt) with an explicit wait deadline: `Submit` the
     /// turn carrying an ephemeral reply-to mailbox, await the one
     /// `RunCompleted`, and on a wait lapse re-submit the same `TurnId` to
-    /// re-attach. A failed `Submit` is **not** transparently retried (granary
-    /// §2.2): an ambiguous transport failure surfaces as `GrainError`.
+    /// re-attach. A failed `Submit` is **not** transparently retried (entity
+    /// §2.2): an ambiguous transport failure surfaces as `EntityError`.
     /// (Delegation submits through [`submit_and_attach`] directly, carrying its
     /// lineage.)
     pub async fn prompt_within(
         &self,
         turn: Turn,
         within: Duration,
-    ) -> Result<RunOutcome, GrainError> {
+    ) -> Result<RunOutcome, EntityError> {
         let started = self.system.now();
         loop {
             let elapsed = self.system.now().duration_since(started);
             let Some(remaining) = within.checked_sub(elapsed).filter(|d| !d.is_zero()) else {
-                return Err(GrainError::Call(CallError::Timeout));
+                return Err(EntityError::Call(CallError::Timeout));
             };
-            match submit_and_attach(&self.system, &self.grain, &self.kind, &turn, None, remaining)
+            match submit_and_attach(&self.system, &self.entity, &self.kind, &turn, None, remaining)
                 .await
             {
                 AttachOutcome::Completed(outcome) => return Ok(outcome),
                 // Mailbox dropped or wait lapsed: re-submit the same TurnId.
                 AttachOutcome::Lapsed => continue,
                 // A permanent caller-contract violation, surfaced as a system
-                // failure; not transparently retried (granary §2.2).
+                // failure; not transparently retried (entity §2.2).
                 AttachOutcome::Rejected(reject) => {
-                    return Err(GrainError::Call(CallError::System(reject.to_string())));
+                    return Err(EntityError::Call(CallError::System(reject.to_string())));
                 }
-                // An ambiguous transport failure surfaces as `GrainError`.
+                // An ambiguous transport failure surfaces as `EntityError`.
                 AttachOutcome::Unreachable(e) => return Err(e),
             }
         }
     }
 
     /// Cancel the run `turn` names (harness spec §7.3, §9.2): idempotent.
-    pub async fn cancel(&self, turn: &TurnId) -> Result<(), GrainError> {
-        self.grain.ask(Cancel { turn: turn.clone() }).await
+    pub async fn cancel(&self, turn: &TurnId) -> Result<(), EntityError> {
+        self.entity.ask(Cancel { turn: turn.clone() }).await
     }
 
     /// Read committed records (harness spec §10.2): at most `limit` records
     /// after `from` (`limit` clamped to [`TAIL_PAGE`](crate::TAIL_PAGE)) — an
     /// idempotent, replication-free read of the leader's journal, riding
-    /// granary's gateway-level event read (granary §7.5). It never
+    /// entity's gateway-level event read (entity §7.5). It never
     /// get-or-activates the session, so **polling a hibernated session leaves
     /// it asleep** — observation costs a journal read, not a rehydration. The
     /// returned `Seq`s are the journal's real slots (facet records occupy
     /// interleaved ones); fewer than `limit` records come back only at the
     /// head, so page by re-asking from the last `Seq` returned. A leader-side
-    /// read failure surfaces as the grain's `Unavailable`: transient, and — a
+    /// read failure surfaces as the entity's `Unavailable`: transient, and — a
     /// read commits nothing — always safe to retry.
     ///
     /// The returned [`EventHistory`]'s `base` reports how far snapshot
-    /// compaction has truncated the journal (granary §9): a `from` below it
+    /// compaction has truncated the journal (entity §9): a `from` below it
     /// asked for records the session's snapshot has subsumed, and the records
     /// in `(from, base]` are not — and can no longer be — served. `base <=
     /// from` means the page is complete history from `from`; without the base,
     /// truncation would be indistinguishable from the facet slots the
     /// projection legally skips.
-    pub async fn tail(&self, from: Seq, limit: u32) -> Result<EventHistory<Record>, GrainError> {
-        self.grain.events(from, limit.min(TAIL_PAGE) as usize).await
+    pub async fn tail(&self, from: Seq, limit: u32) -> Result<EventHistory<Record>, EntityError> {
+        self.entity.events(from, limit.min(TAIL_PAGE) as usize).await
     }
 
-    /// Follow the session's records live from `from` (granary §7.9). See
+    /// Follow the session's records live from `from` (entity §7.9). See
     /// [`Follower`]; caller-driven, pull batches with [`Follower::next`].
     pub fn follow(&self, from: Seq) -> Follower<S> {
         Follower {
-            grain: self.grain.clone(),
+            entity: self.entity.clone(),
             system: self.system.clone(),
             sub: None,
             last: from,
@@ -622,7 +622,7 @@ impl<S: HarnessSystem> SessionRef<S> {
 /// clamps `limit` to it, so no single call asks the journal for an unbounded
 /// reply. A caller wanting more pages by advancing `from` past the last `Seq`
 /// returned. (The gateway additionally bounds each wire page server-side,
-/// granary §7.5, so the clamp here is the API contract, not the safety.)
+/// entity §7.5, so the clamp here is the API contract, not the safety.)
 pub const TAIL_PAGE: u32 = 1024;
 
 /// Journal page size for a follower's backfill reads.
@@ -631,12 +631,12 @@ const FOLLOW_PAGE: usize = 256;
 /// How long a caught-up follower waits for a live record before re-checking the
 /// journal. A silent leader move or crash leaves the old sink alive but idle —
 /// the stream never closes and the new leader has no sink — so a periodic
-/// backfill is the liveness net that detects the move and re-subscribes (grain §7.9).
+/// backfill is the liveness net that detects the move and re-subscribes (entity §7.9).
 const FOLLOW_RESYNC: Duration = Duration::from_secs(2);
 
 /// What one [`Follower::next`] yields: the next records, or the one thing that
 /// breaks the exact-sequence contract — snapshot compaction truncating the
-/// journal past the follower's cursor (granary §9).
+/// journal past the follower's cursor (entity §9).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Followed {
     /// The next in-order records after the cursor, at least one.
@@ -649,16 +649,16 @@ pub enum Followed {
     Truncated { base: Seq },
 }
 
-/// A live follower over a session's journal (granary §7.9). It rides a grain
+/// A live follower over a session's journal (entity §7.9). It rides an entity
 /// record subscription and reconciles by `Seq`: it backfills from the journal on
 /// first attach, on any gap, and after the stream closes (a leader move, a
 /// lag-drop, or hibernation), so [`next`](Self::next) yields the exact committed
-/// sequence — in order, with no gap or duplicate (granary G16) — except where
+/// sequence — in order, with no gap or duplicate (entity E16) — except where
 /// compaction has truncated it, which it reports as [`Followed::Truncated`]
 /// rather than papering over. Push is the fast path; the journal is the
 /// authority.
 pub struct Follower<S: HarnessSystem> {
-    grain: GrainRef<Agent<S>>,
+    entity: EntityRef<Agent<S>>,
     /// For the re-sync liveness timer (a silent move leaves the stream open).
     system: S,
     /// The live subscription, or `None` before the first attach / after a close.
@@ -671,16 +671,16 @@ impl<S: HarnessSystem> Follower<S> {
     /// The next in-order records after the last ones returned (at least one),
     /// or a [`Followed::Truncated`] when compaction has outrun the cursor.
     /// Blocks until records are available, attaching, backfilling, and
-    /// re-subscribing transparently. A `GrainError` is a real durability
+    /// re-subscribing transparently. A `EntityError` is a real durability
     /// outcome (the shard cannot serve right now) the caller may surface and
     /// retry.
-    pub async fn next(&mut self) -> Result<Followed, GrainError> {
+    pub async fn next(&mut self) -> Result<Followed, EntityError> {
         loop {
             // (Re)attach if needed: subscribe registers a sink and returns the
             // head, so any commit from here on is pushed; the backfill below
             // closes whatever gap preceded the attach (a late start or a move).
             if self.sub.is_none() {
-                self.sub = Some(self.grain.subscribe(self.last).await?);
+                self.sub = Some(self.entity.subscribe(self.last).await?);
             }
             // Backfill straight from the journal (the source of truth) until the
             // cursor reaches the head; return as soon as a page has records.
@@ -727,14 +727,14 @@ impl<S: HarnessSystem> Follower<S> {
     }
 
     /// One page of records after the cursor, read from the journal (the
-    /// non-activating gateway read, granary §7.5), advancing the cursor. `None`
+    /// non-activating gateway read, entity §7.5), advancing the cursor. `None`
     /// when already at the head. A compaction base above the cursor is the
     /// truncation signal: the cursor jumps to the base and the fetched records
     /// are dropped — the next call re-reads from the base, so the one-page
     /// waste buys a caller that always hears about the gap *before* any record
     /// past it.
-    async fn backfill(&mut self) -> Result<Option<Followed>, GrainError> {
-        let history = self.grain.events(self.last, FOLLOW_PAGE).await?;
+    async fn backfill(&mut self) -> Result<Option<Followed>, EntityError> {
+        let history = self.entity.events(self.last, FOLLOW_PAGE).await?;
         if history.base > self.last {
             self.last = history.base;
             return Ok(Some(Followed::Truncated { base: history.base }));

@@ -1,17 +1,17 @@
-//! The directory grain under the cluster fault swarm (granary §14).
+//! The directory entity under the cluster fault swarm (entity §14).
 //!
 //! `tests/directory.rs` drives the ownership contract on the single-node `Local`
 //! tier, where nothing is lost, duplicated, or delayed. This file puts the same
-//! grain on a leader-based cluster and sweeps seeds while the nemesis partitions,
+//! entity on a leader-based cluster and sweeps seeds while the nemesis partitions,
 //! freezes, crashes, and restarts nodes under it, with the §13 event stream
 //! watched live.
 //!
 //! # What the sweep can and cannot claim
 //!
-//! The directory is an ordinary grain, so the guarantees it inherits are
-//! granary's: a `Record` that *acknowledges* is committed and survives failover
-//! (G14), the journal's seqs advance and never land twice on a slot (G3/G5), and
-//! a grain is activated at most once per live node (G6). Those are what this
+//! The directory is an ordinary entity, so the guarantees it inherits are
+//! entity's: a `Record` that *acknowledges* is committed and survives failover
+//! (E14), the journal's seqs advance and never land twice on a slot (E3/E5), and
+//! an entity is activated at most once per live node (E6). Those are what this
 //! sweep asserts, plus the actor safety core.
 //!
 //! What it deliberately does **not** assert is any end state a *re-delivered
@@ -42,7 +42,7 @@
 //!   effect-idempotent — applying it twice leaves the same entry — so no amount
 //!   of duplication, delay, or reordering changes where they end up. Every one
 //!   whose `Record` acknowledged **must** be in the index at the end, and that is
-//!   a real G14 claim: it is the acknowledged-write-survives-failover property.
+//!   a real E14 claim: it is the acknowledged-write-survives-failover property.
 //! - **Churn names** are recorded and forgotten in turn. They exercise the
 //!   removal path, the fold, and the invariants, but carry **no** end-state
 //!   assertion, because a delayed duplicate of either operation can legitimately
@@ -74,11 +74,11 @@ use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_cluster_swarm_coverage;
 use actor_simulation::sweep_seeds;
-use granary::GrainName;
-use granary::GranaryConfig;
-use granary::GranaryExt;
-use granary::testing::ActivationSingletonPerNode;
-use granary::testing::CommitMonotonic;
+use entity::EntityConfig;
+use entity::EntityExt;
+use entity::EntityName;
+use entity::testing::ActivationSingletonPerNode;
+use entity::testing::CommitMonotonic;
 use tenancy::Directory;
 use tenancy::Forget;
 use tenancy::Meta;
@@ -86,7 +86,7 @@ use tenancy::Record;
 use tenancy::Recorded;
 
 /// Short enough that clients idle past it, so a principal's index is hibernated
-/// and rebuilt from its journal mid-run (G12 crossed with G14).
+/// and rebuilt from its journal mid-run (E12 crossed with E14).
 const IDLE_AFTER: Duration = Duration::from_millis(200);
 /// A client's idle, comfortably past [`IDLE_AFTER`].
 const IDLE_FOR: Duration = Duration::from_millis(500);
@@ -101,13 +101,13 @@ const IDLE_FOR: Duration = Duration::from_millis(500);
 /// claim is better than a seed that makes a false one.
 const VERIFY_BUDGET: Duration = Duration::from_secs(30);
 
-fn config() -> GranaryConfig {
-    GranaryConfig {
+fn config() -> EntityConfig {
+    EntityConfig {
         shards: 2,
         replication_factor: 3,
         idle_after: IDLE_AFTER,
         snapshot_every: 3,
-        ..GranaryConfig::default()
+        ..EntityConfig::default()
     }
 }
 
@@ -120,14 +120,14 @@ fn meta(label: &str) -> Meta {
 }
 
 /// A name this client only ever records. Its presence at the end is decidable.
-fn keep(client: usize, n: u64) -> GrainName {
-    GrainName::new("app.Session", format!("keep-c{client}-{n}"))
+fn keep(client: usize, n: u64) -> EntityName {
+    EntityName::new("app.Session", format!("keep-c{client}-{n}"))
 }
 
 /// A name this client records and forgets in turn. Its fate is not decidable
 /// without an idempotency key, so nothing is claimed about it.
-fn churn(client: usize, n: u64) -> GrainName {
-    GrainName::new("app.Session", format!("churn-c{client}-{n}"))
+fn churn(client: usize, n: u64) -> EntityName {
+    EntityName::new("app.Session", format!("churn-c{client}-{n}"))
 }
 
 /// The keep names whose `Record` was acknowledged, per principal. A call that
@@ -135,11 +135,11 @@ fn churn(client: usize, n: u64) -> GrainName {
 /// be adopted by a later recovery (§7.2, §11) — so it is not tracked.
 #[derive(Default)]
 struct Acked {
-    recorded: BTreeSet<(String, GrainName)>,
+    recorded: BTreeSet<(String, EntityName)>,
 }
 
 /// Record-and-forget traffic against a handful of principals' directories,
-/// driven through the public `GrainRef` API only (spec §18.4).
+/// driven through the public `EntityRef` API only (spec §18.4).
 struct DirectorySwarm {
     nodes: usize,
     clients: usize,
@@ -199,7 +199,7 @@ impl ClusterWorkload for DirectorySwarm {
     }
 
     fn mode(&self) -> ClusterModeSpec {
-        // Granary requires the leader-based control plane to host the shard map
+        // The entity layer requires the leader-based control plane to host the shard map
         // (§7.6); every node is a control voter so the map group can form.
         ClusterModeSpec::Leader {
             swim: self.swim(),
@@ -212,7 +212,7 @@ impl ClusterWorkload for DirectorySwarm {
 
     fn rehost(&self) -> Option<Rehost> {
         Some(Arc::new(|node: &SimNode| {
-            node.granary::<Directory<SimNode>>(config());
+            node.entities::<Directory<SimNode>>(config());
         }))
     }
 
@@ -228,12 +228,12 @@ impl ClusterWorkload for DirectorySwarm {
         Box::pin(async move {
             // Per **run**, not per workload. A sweep drives every seed through the
             // same `&self`, so a field here would carry seed N's acknowledged names
-            // into seed N+1's freshly empty grains and report them as lost writes.
-            // (It did: that is what made this sweep look like a G14 defect.)
+            // into seed N+1's freshly empty entities and report them as lost writes.
+            // (It did: that is what made this sweep look like a E14 defect.)
             let acked: Arc<Mutex<Acked>> = Arc::new(Mutex::new(Acked::default()));
-            let granaries: Vec<_> = nodes
+            let hosts: Vec<_> = nodes
                 .iter()
-                .map(|s| s.granary::<Directory<SimNode>>(config()))
+                .map(|s| s.entities::<Directory<SimNode>>(config()))
                 .collect();
             let clock = nodes[0].clock().clone();
             let entropy = nodes[0].entropy().clone();
@@ -241,12 +241,12 @@ impl ClusterWorkload for DirectorySwarm {
 
             // Node 1's gateway only: the nemesis may restart any other node, and a
             // handle for a restarted one points at a shut-down system. Location
-            // transparency (G13) keeps the coverage.
-            let granary = granaries[0].clone();
+            // transparency (E13) keeps the coverage.
+            let entities = hosts[0].clone();
 
             let mut tasks = Vec::new();
             for c in 0..clients {
-                let granary = granary.clone();
+                let entities = entities.clone();
                 let clock = clock.clone();
                 let entropy = entropy.clone();
                 let acked = Arc::clone(&acked);
@@ -255,7 +255,7 @@ impl ClusterWorkload for DirectorySwarm {
                         // A small principal space, so several directories share
                         // each shard and some collide across clients.
                         let principal = format!("p{}", entropy.next_u64() % 3);
-                        let dir = granary.grain(&principal);
+                        let dir = entities.entity(&principal);
                         // Name spaces are private per client, so two clients never
                         // race one name and every claim below stays decidable.
                         let slot = entropy.next_u64() % 3;
@@ -351,7 +351,7 @@ impl ClusterWorkload for DirectorySwarm {
                 if clock.now() >= verify_by {
                     break;
                 }
-                let dir = granary.grain(principal);
+                let dir = entities.entity(principal);
                 let probe = Meta {
                     label: Some("probe".into()),
                     created_at: Some(1),
@@ -387,7 +387,7 @@ impl ClusterWorkload for DirectorySwarm {
                     Recorded::Created,
                     "{principal} acknowledged Record({name}) — a name nothing in \
                      this run ever forgets — and a committed probe found it absent: \
-                     an acknowledged write was lost (G14)",
+                     an acknowledged write was lost (E14)",
                 );
                 verified.fetch_add(1, Ordering::Relaxed);
             }

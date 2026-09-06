@@ -65,15 +65,15 @@ fn live_actors(events: &[Event]) -> BTreeSet<ActorId> {
 
 /// A kind config whose idle window outlives the test, so the live-actor set is
 /// not churned by hibernation between snapshots.
-fn calm_idle() -> granary::GranaryConfig {
-    granary::GranaryConfig {
+fn calm_idle() -> entity::EntityConfig {
+    entity::EntityConfig {
         idle_after: Duration::from_secs(100_000),
         data_dir: Some(
             tempfile::tempdir()
                 .expect("workspace scratch tempdir")
                 .keep(),
         ),
-        ..granary::GranaryConfig::default()
+        ..entity::EntityConfig::default()
     }
 }
 
@@ -86,13 +86,13 @@ fn tree_kinds() -> Kinds {
             Kind::new("parent agent")
                 .delegates_to(&["child"])
                 .budget(Budget::new(10_000, 10))
-                .grain(calm_idle()),
+                .entity(calm_idle()),
         )
         .register(
             "child",
             Kind::new("child agent")
                 .budget(Budget::new(2_000, 4))
-                .grain(calm_idle()),
+                .entity(calm_idle()),
         )
 }
 
@@ -137,7 +137,7 @@ fn a_rejected_resubmission_leaks_no_reply_mailbox() {
         "worker",
         Kind::new("worker")
             .budget(Budget::new(10_000, 5))
-            .grain(calm_idle()),
+            .entity(calm_idle()),
     );
     let harness = Harness::cluster(
         system.clone(),

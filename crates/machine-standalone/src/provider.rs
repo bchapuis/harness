@@ -1,7 +1,7 @@
 //! The node's runtime binding, chosen at runtime (machine §2.1).
 //!
 //! `Machine<S, P>` fixes its provider in the type, so a node that could host
-//! either binding would host two *different* grain types. This enum keeps one
+//! either binding would host two *different* entity types. This enum keeps one
 //! `P` and dispatches inside it, so `--machine` is a flag rather than a build.
 //!
 //! Two arms, not three: the two real mechanisms — a Firecracker microVM and a
@@ -13,11 +13,11 @@ use std::sync::Arc;
 
 use actor_core::BoxFuture;
 use actor_runtime::TcpCluster;
-use machine_grain::BootSpec;
-use machine_grain::MachineRuntime;
-use machine_grain::MachineRuntimeProvider;
-use machine_grain::RuntimeError;
-use machine_grain::fake::FakeRuntimeProvider;
+use machine_entity::BootSpec;
+use machine_entity::MachineRuntime;
+use machine_entity::MachineRuntimeProvider;
+use machine_entity::RuntimeError;
+use machine_entity::fake::FakeRuntimeProvider;
 
 /// Which binding `--machine` selected.
 pub enum NodeRuntimeProvider {
@@ -30,7 +30,7 @@ pub enum NodeRuntimeProvider {
     /// A real guest, held by whichever mechanism this node was configured with
     /// (`--machine firecracker` or `--machine docker`).
     #[cfg(feature = "host")]
-    Hosted(machine_grain::hosted::HostedRuntimeProvider),
+    Hosted(machine_entity::hosted::HostedRuntimeProvider),
 }
 
 impl MachineRuntimeProvider for NodeRuntimeProvider {

@@ -17,7 +17,7 @@
 # shortening that is how a rolling restart becomes an outage.
 
 [Unit]
-Description=harness-standalone node (grain silo)
+Description=harness-standalone node (entity silo)
 Documentation=file:///usr/share/doc/harness/standalone-deployment.md
 # The data directory must be mounted before the node opens its store: a node that
 # starts on an empty directory because its NVMe was not yet mounted looks to the
@@ -50,13 +50,13 @@ ExecStart=/usr/local/bin/harness-standalone node \
 # The secret reaches the process as an argument, so it is visible in `ps` to any local
 # user. That is the binary's only interface for it today. On a machine with untrusted
 # local users, keep the node off it — this deployment already assumes the machine is
-# trusted (it holds the API key and every tenant's grain data on disk).
+# trusted (it holds the API key and every tenant's entity data on disk).
 
 # --- Shutdown -----------------------------------------------------------------
 #
 # SIGTERM, and then wait. The node hands off leadership of every shard it leads
 # before exiting (spec §8.3); skipping that is safe but expensive — each shard it
-# still led waits a full election timeout before its replicas elect, and every grain
+# still led waits a full election timeout before its replicas elect, and every entity
 # on those shards rehydrates on the new leader. A node leading many shards therefore
 # turns an ordinary rolling restart into that many simultaneous failovers, which is
 # the single most common way a healthy cluster is made to look unhealthy.
@@ -76,7 +76,7 @@ StartLimitBurst=5
 
 # --- Limits -------------------------------------------------------------------
 #
-# The grain store keeps up to 65536 segment files open (DEFAULT_SEGMENT_CAPACITY),
+# The entity store keeps up to 65536 segment files open (DEFAULT_SEGMENT_CAPACITY),
 # plus transport connections and transient blob opens. Below ~70000 the process hits
 # the kernel's limit before the store's cache ever evicts anything — see
 # docs/standalone-deployment.md, "Descriptors".
@@ -84,8 +84,8 @@ LimitNOFILE=131072
 
 # Not memory-limited on purpose. Several defaults assume memory is abundant: the
 # manifest is held whole, and segments and resolved host handles are cached by the
-# thousand, so consumption tracks grain *count* rather than concurrency. A cap sized
-# from steady-state RSS will be hit by a node that has simply seen more grains.
+# thousand, so consumption tracks entity *count* rather than concurrency. A cap sized
+# from steady-state RSS will be hit by a node that has simply seen more entities.
 # Size the machine instead (docs/hardware-envelope.md §1).
 
 # --- Hardening ----------------------------------------------------------------

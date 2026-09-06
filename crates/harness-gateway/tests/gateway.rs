@@ -1,9 +1,9 @@
 //! Gateway integration: drive the axum router (via `oneshot`, no socket) against
-//! an in-process `LocalSystem` that both *hosts* the Agent + Directory grains and
+//! an in-process `LocalSystem` that both *hosts* the Agent + Directory entities and
 //! serves as the gateway's own cluster-client system. This is the single-node
 //! analogue of the production split (nodes host; the gateway is a client over the
 //! same transport): it proves the gateway terminates tenant auth, scopes each
-//! session under its principal, drives a prompt to the grain **directly** (no
+//! session under its principal, drives a prompt to the entity **directly** (no
 //! control protocol), and isolates tenants — alice never sees bob's sessions.
 
 use std::sync::Arc;
@@ -18,9 +18,9 @@ use axum::body::Body;
 use axum::body::to_bytes;
 use axum::http::Request;
 use axum::http::StatusCode;
-use granary::Granary;
-use granary::GranaryConfig;
-use granary::GranaryExt;
+use entity::Entities;
+use entity::EntityConfig;
+use entity::EntityExt;
 use harness::Budget;
 use harness::Harness;
 use harness::Kind;
@@ -88,24 +88,24 @@ fn host_kinds() -> Kinds {
     let build = |prompt: &str| {
         Kind::new(prompt)
             .model(params.clone())
-            .grain(GranaryConfig::default())
+            .entity(EntityConfig::default())
             .budget(Budget::new(1_000_000, 100))
     };
     Kinds::new()
         .register("assistant", build("assistant"))
         // `worker` snapshots aggressively, so the records test below crosses
-        // the compaction trigger (granary §9) in a handful of turns. The
+        // the compaction trigger (entity §9) in a handful of turns. The
         // config is host-side policy: the client-side registry needs no match.
         .register(
             "worker",
-            build("worker").grain(GranaryConfig {
+            build("worker").entity(EntityConfig {
                 snapshot_every: 6,
-                ..GranaryConfig::default()
+                ..EntityConfig::default()
             }),
         )
 }
 
-/// Stand up one LocalSystem hosting the grains, then build the gateway as a client
+/// Stand up one LocalSystem hosting the entities, then build the gateway as a client
 /// over the same system.
 async fn gateway() -> Arc<harness_gateway::Gateway<Sys>> {
     let system = LocalSystem::new(TokioClock::new(), OsEntropy::new(), TokioSpawner::current());
@@ -116,11 +116,11 @@ async fn gateway() -> Arc<harness_gateway::Gateway<Sys>> {
         Arc::new(DoneModel),
         Arc::new(NoSandbox),
     );
-    let _directory: Granary<Directory<Sys>> = system.granary(GranaryConfig::default());
+    let _directory: Entities<Directory<Sys>> = system.entities(EntityConfig::default());
     // The gateway joins as a client over the same system. On a single LocalSystem
     // the host gateways are in the receptionist immediately, so discovery returns
     // at once.
-    let shards = GranaryConfig::default().shards;
+    let shards = EntityConfig::default().shards;
     let roster = vec![
         ("assistant".to_string(), shards),
         ("worker".to_string(), shards),
@@ -128,7 +128,7 @@ async fn gateway() -> Arc<harness_gateway::Gateway<Sys>> {
     harness_gateway::connect(
         system,
         &roster,
-        GranaryConfig::default().shards,
+        EntityConfig::default().shards,
         Arc::new(InsecureTokens),
         harness_gateway::Limits::default(),
         Duration::from_secs(5),
@@ -195,10 +195,10 @@ async fn body_json(resp: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
-async fn prompt_runs_the_grain_and_isolates_tenants() {
+async fn prompt_runs_the_entity_and_isolates_tenants() {
     let gw = gateway().await;
 
-    // Alice prompts a session; the gateway scopes it, runs the grain to its
+    // Alice prompts a session; the gateway scopes it, runs the entity to its
     // terminal outcome, and records ownership.
     let resp = harness_gateway::http::router(gw.clone())
         .oneshot(prompt_req(Some("alice"), "demo"))
@@ -222,7 +222,7 @@ async fn prompt_runs_the_grain_and_isolates_tenants() {
     );
 
     // Bob, a different tenant, sees none of alice's sessions — the principal scope
-    // keeps her grains unreachable.
+    // keeps her entities unreachable.
     let resp = harness_gateway::http::router(gw.clone())
         .oneshot(list_req("bob"))
         .await

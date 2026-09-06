@@ -150,7 +150,7 @@ pub enum Frame {
     Reply {
         correlation: CallId,
         /// The request direction's bytes problem, in the direction that answers:
-        /// a `fetch_blob` or a grain read returns a mebibyte through here. See
+        /// a `fetch_blob` or an entity read returns a mebibyte through here. See
         /// [`reply_bytes`] for why it needs a module where the others needed an
         /// attribute.
         #[serde(with = "reply_bytes")]
@@ -278,8 +278,8 @@ pub enum Frame {
     /// leads `G` groups sends one to each of `R-1` followers every heartbeat
     /// interval. Sent individually that is `G × (R-1)` frames — each its own
     /// serialization, its own transport send — repeated several times a second, for
-    /// traffic that carries no data at all. Since granary runs one Raft group per
-    /// shard (grain §8.2) and shard count is the elasticity knob (grain §7.7), `G`
+    /// traffic that carries no data at all. Since entity runs one Raft group per
+    /// shard (entity §8.2) and shard count is the elasticity knob (entity §7.7), `G`
     /// grows with the cluster, and this becomes the ceiling on how far a node can be
     /// packed long before storage or CPU does.
     ///

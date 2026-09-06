@@ -3,10 +3,10 @@
 //!
 //! The trust boundary is the gateway. A request presents a token in its
 //! `Authorization: Bearer` header; the gateway verifies it here — at the edge,
-//! never in a grain, whose fold must stay pure (granary §4.1) — to a
+//! never in an entity, whose fold must stay pure (entity §4.1) — to a
 //! [`PrincipalId`]. Every session that request then addresses is scoped under
 //! that principal by [`scoped_session`], so one tenant can never name another's
-//! grains.
+//! entities.
 //!
 //! Two verifiers ship behind [`TokenVerifier`]: [`StaticTokens`] (the secure
 //! mode) and [`InsecureTokens`] (loopback-only dev). Not implemented: a stateless
@@ -20,7 +20,7 @@ use std::net::IpAddr;
 /// The charset is deliberately narrow — ASCII alphanumerics plus `_`, `-`, `.`
 /// — and excludes `/`, so a principal can prefix a session key as
 /// `"{principal}/{session}"` ([`scoped_session`]) and the prefix splits back
-/// unambiguously. That namespacing is what isolates one tenant's grains.
+/// unambiguously. That namespacing is what isolates one tenant's entities.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PrincipalId(String);
 
@@ -56,7 +56,7 @@ impl std::fmt::Display for PrincipalId {
 /// is named `"{session}/{turn}/{child}"` (multi-tenant-edge design), and those
 /// segments are minted by the agent, never supplied by a client. A client free to
 /// send `"demo/t-1/c-2"` could therefore address — or pre-create — one of its own
-/// sub-agents' grains, which is not a boundary break but is a name collision the
+/// sub-agents' entities, which is not a boundary break but is a name collision the
 /// caller was never meant to be able to cause.
 ///
 /// Only the client-supplied segment is checked; the internally-minted child ids that
@@ -65,16 +65,16 @@ pub fn is_valid_session(session: &str) -> bool {
     !session.is_empty() && !session.contains('/')
 }
 
-/// The grain session key for `session` under `principal`: the principal-prefixed
+/// The entity session key for `session` under `principal`: the principal-prefixed
 /// namespace that isolates tenants. The gateway always supplies the prefix — a
 /// client only ever names the unprefixed `session` — so a client cannot address
-/// a grain outside its own principal. A delegated child id (`session/t-1/c-2`)
-/// inherits the prefix transitively, keeping worker grains in-tenant for free.
+/// an entity outside its own principal. A delegated child id (`session/t-1/c-2`)
+/// inherits the prefix transitively, keeping worker entities in-tenant for free.
 pub fn scoped_session(principal: &PrincipalId, session: &str) -> String {
     format!("{}/{}", principal.as_str(), session)
 }
 
-/// The unprefixed session for a principal-scoped grain key, or `None` if the key
+/// The unprefixed session for a principal-scoped entity key, or `None` if the key
 /// is not under this principal. The inverse of [`scoped_session`]: it strips the
 /// `"{principal}/"` prefix the gateway added, so a listing hands a client back
 /// the session ids it actually supplied.
@@ -96,7 +96,7 @@ pub fn is_loopback(host: &str) -> bool {
 
 /// Verify a bearer token, returning the principal it authenticates — or `None`
 /// if the token is unknown or malformed. Runs at the gateway edge, so it may be
-/// stateful and impure (unlike a grain fold).
+/// stateful and impure (unlike an entity fold).
 pub trait TokenVerifier: Send + Sync {
     fn verify(&self, token: &str) -> Option<PrincipalId>;
 }

@@ -66,7 +66,7 @@ You should see `event: records` frames followed by a terminal `event: outcome`.
 | --- | --- | --- |
 | `harness.gatewayUrl` | `http://127.0.0.1:8080` | Gateway base URL |
 | `harness.token` | `anonymous` | Bearer token (prefer `Harness: Set Gateway Token`, which uses SecretStorage) |
-| `harness.kind` | `assistant` | Session kind (grain type) |
+| `harness.kind` | `assistant` | Session kind (entity type) |
 | `harness.withinSecs` | `600` | Per-prompt wait ceiling (gateway clamps it) |
 
 ## Caveats

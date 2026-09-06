@@ -1,6 +1,6 @@
 //! The `§` citations the specs make of each other, resolved.
 //!
-//! The specs address each other by section — `grain §7.12`, `actor §18.5`, a bare
+//! The specs address each other by section — `entity §7.12`, `actor §18.5`, a bare
 //! `§9` inside the document that owns it. There are two thousand-odd such
 //! citations across fourteen documents and nothing has ever checked one. A
 //! renumbered section is the ordinary way they break: the edit is local, the
@@ -46,12 +46,12 @@
 //!   because a wrapped paragraph splits `sandbox` from its `spec §3.4`, but not a
 //!   blank line.
 //! - **A markdown link is a prefix.** The compatibility spec's boundary table
-//!   writes `[granary](granary-spec.md) §7.12`, naming the document by link rather
+//!   writes `[entity](entity-spec.md) §7.12`, naming the document by link rather
 //!   than by short prefix.
 //! - **A prefix carries across separators.** `actor §18.5/§18.6` cites the actor
 //!   spec twice and only the first says so. The inheritance is this crate's
 //!   inference, but it binds like a written prefix, which means a citation that
-//!   changes document mid-list has to say so. One did — `grain §6, §6.2`, where
+//!   changes document mid-list has to say so. One did — `entity §6, §6.2`, where
 //!   the second is the harness's own — and saying so was the cheaper fix.
 //! - **An unprefixed citation follows the citing document's own convention**,
 //!   declared per document as [`Unprefixed`]. Most specs number their own sections
@@ -211,9 +211,9 @@ impl Registry {
 
     /// The documents a citation could name, most specific first.
     ///
-    /// A prefix is the only candidate, whether written or inherited: `grain §7.99`
+    /// A prefix is the only candidate, whether written or inherited: `entity §7.99`
     /// is wrong even if some other spec happens to have a §7.99, and a `§6.2`
-    /// following `grain §6` across a comma is granary's too. Only an unprefixed
+    /// following `entity §6` across a comma is entity's too. Only an unprefixed
     /// citation falls to the citing document's own convention.
     fn targets(&self, doc: &Document, cite: &Citation) -> Vec<&'static str> {
         let own: Vec<&'static str> = match doc.spec.unprefixed {
@@ -438,7 +438,7 @@ fn trim_gap(head: &str) -> Option<&str> {
     (!gap.is_empty() && !paragraph_break).then_some(trimmed)
 }
 
-/// `…[granary](granary-spec.md)` → `granary`, matching the link target against
+/// `…[entity](entity-spec.md)` → `entity`, matching the link target against
 /// [`DocSpec::path`]. The compatibility spec's tables address documents this way.
 fn link_before(head: &str) -> Option<&'static str> {
     let inner = head.strip_suffix(')')?;
@@ -584,8 +584,8 @@ mod tests {
     #[test]
     fn a_prefixed_citation_names_its_document() {
         assert_eq!(
-            cited("routing (grain §7.12) is"),
-            [(Some("granary"), false, "7.12".into())]
+            cited("routing (entity §7.12) is"),
+            [(Some("entity"), false, "7.12".into())]
         );
     }
 
@@ -597,8 +597,8 @@ mod tests {
     #[test]
     fn a_trailing_period_is_not_part_of_the_number() {
         assert_eq!(
-            cited("see granary §16."),
-            [(Some("granary"), false, "16".into())]
+            cited("see entity §16."),
+            [(Some("entity"), false, "16".into())]
         );
     }
 
@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn punctuation_ends_the_search_for_a_prefix() {
         assert_eq!(
-            targets("unlike granary, the §5 here"),
+            targets("unlike entity, the §5 here"),
             [None],
             "a comma separates two clauses, not a prefix from its section",
         );
@@ -639,14 +639,14 @@ mod tests {
 
     #[test]
     fn a_prefix_does_not_reach_across_a_paragraph() {
-        assert_eq!(targets("about granary\n\n§7.2 says"), [None]);
+        assert_eq!(targets("about entity\n\n§7.2 says"), [None]);
     }
 
     #[test]
     fn a_markdown_link_names_a_document() {
         assert_eq!(
-            targets("stamped by revision | [granary](granary-spec.md) §7.12 |"),
-            [Some("granary")],
+            targets("stamped by revision | [entity](entity-spec.md) §7.12 |"),
+            [Some("entity")],
         );
     }
 
@@ -680,8 +680,8 @@ mod tests {
     #[test]
     fn a_prefix_carries_across_a_comma_and_an_and() {
         assert_eq!(
-            targets("granary §7.1, §7.2 and §7.6"),
-            [Some("granary"), Some("granary"), Some("granary")],
+            targets("entity §7.1, §7.2 and §7.6"),
+            [Some("entity"), Some("entity"), Some("entity")],
         );
     }
 
@@ -703,14 +703,14 @@ mod tests {
     #[test]
     fn a_citation_inside_a_doc_comment_is_still_a_citation() {
         assert_eq!(
-            cited("/// rehydration (§9, G3/G4)."),
+            cited("/// rehydration (§9, E3/E4)."),
             [(None, false, "9".into())]
         );
     }
 
     #[test]
     fn an_invariant_number_is_not_a_citation() {
-        assert!(cited("invariants #1–#22 and G1–G21").is_empty());
+        assert!(cited("invariants #1–#22 and E1–E21").is_empty());
     }
 
     #[test]

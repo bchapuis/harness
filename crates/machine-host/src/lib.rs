@@ -10,7 +10,7 @@
 //!
 //! Two consumers run untrusted code inside a guest: the agent sandbox's
 //! `Native` tier (`harness-sandbox`) and the persistent machine
-//! (`crates/machine-grain`). Two mechanisms can hold one: a Firecracker microVM
+//! (`crates/machine-entity`). Two mechanisms can hold one: a Firecracker microVM
 //! ([`microvm`]) or an OCI container driven through the `docker` CLI
 //! ([`container`]). This crate owns both mechanisms and the seam between them,
 //! so a consumer states *what* it wants held and never *how*:
@@ -86,7 +86,7 @@ impl std::fmt::Display for MachineIsolation {
 
 /// A mechanism operation failed. Split by the caller's next move, not by the
 /// mechanism's internals: the same two arms serve a tier that must decide
-/// whether to re-provision (sandbox §4) and a grain that must decide whether
+/// whether to re-provision (sandbox §4) and an entity that must decide whether
 /// its guest is gone (machine §4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GuestError {
@@ -168,7 +168,7 @@ pub struct GuestSpec {
     pub key: GuestKey,
     /// The guest's root block image, used **in place**: both mechanisms read
     /// and write this very file, which is what makes it the durable thing a
-    /// capture scans (grain §7.15). A consumer wanting a disposable root
+    /// capture scans (entity §7.15). A consumer wanting a disposable root
     /// copies it first and names the copy here.
     pub disk: PathBuf,
     pub vcpus: u8,
@@ -231,7 +231,7 @@ pub trait MachineGuest: Send + Sync + 'static {
 
     /// Reach a quiescent point: once this resolves, the guest issues no further
     /// writes to its disk until [`resume`](MachineGuest::resume), so a capture scans a
-    /// stable image (machine §4, grain §7.15).
+    /// stable image (machine §4, entity §7.15).
     ///
     /// Each mechanism promises as much consistency as it can: freezing a
     /// container leaves its writes in the host kernel's cache, so that

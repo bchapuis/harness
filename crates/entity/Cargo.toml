@@ -1,0 +1,78 @@
+[package]
+name = "entity"
+description = "Durable objects (\"entities\"): virtual, durable, single-activation actors with colocated event-sourced storage (entity spec)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+actor-simulation = { workspace = true, optional = true }
+actor-core.workspace = true
+actor-cluster.workspace = true
+actor-serialization.workspace = true
+compat.workspace = true
+wal.workspace = true
+blake3.workspace = true
+# `fs`, for the store directory's single-writer `flock` (`file_store`). Already in
+# the graph via `cap-std`; cargo unions this with the workspace's `process` feature.
+rustix = { workspace = true, features = ["fs"] }
+serde = { workspace = true }
+serde_bytes.workspace = true
+serde_json.workspace = true
+postcard.workspace = true
+futures.workspace = true
+async-channel.workspace = true
+rusqlite = { workspace = true, optional = true }
+
+[dev-dependencies]
+spec.workspace = true
+# Its own `testing` module, for this crate's swarm suites.
+entity = { path = ".", features = ["testing"] }
+actor-simulation.workspace = true
+# A *threaded* runtime for the contention bench: the simulation seams are
+# single-threaded by construction (§14), so they cannot show lock contention at all.
+actor-runtime.workspace = true
+tokio = { workspace = true }
+trybuild.workspace = true
+tempfile.workspace = true
+divan.workspace = true
+# Bench-only, and deliberately not a dependency: `benches/compress.rs` measures what
+# compressing the replication path would buy, which is a question about this
+# deployment's payloads rather than about the algorithm. Nothing compresses yet; the
+# bench's header records what turning it on would take.
+lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "frame"] }
+
+[[bench]]
+name = "store"
+harness = false
+
+[[bench]]
+name = "disk_capture"
+harness = false
+
+[[bench]]
+name = "flush"
+harness = false
+
+[[bench]]
+name = "contention"
+harness = false
+
+[[bench]]
+name = "compress"
+harness = false
+
+[features]
+# The SQL facet (spec §7.14): a private on-disk SQLite database per entity.
+# Off by default to keep the base crate free of the bundled C dependency.
+sql = ["dep:rusqlite"]
+# Shared simulation invariants over entity events, for swarm suites in this
+# crate and in crates layered on it (machine). Test support, so it stays out
+# of a production build.
+testing = ["dep:actor-simulation"]

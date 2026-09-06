@@ -4,7 +4,7 @@
 //! message with the codec, and the result is carried as bytes inside a [`Frame`] that
 //! is *itself* codec-encoded onto the socket. The inner encode is
 //! `actor-serialization/benches/codec.rs`'s subject. This file is the outer one, which
-//! is the layer that was missed — granary's blob messages were told they held bytes
+//! is the layer that was missed — entity's blob messages were told they held bytes
 //! long before the frame wrapping them was, so a replicated mebibyte still went
 //! through serde's element-at-a-time sequence path once in each direction and it cost
 //! ~11 ms a block on real nodes.
@@ -13,10 +13,10 @@
 //! fixed differently and were fixed at different times:
 //!
 //! - [`Frame::Envelope`] is the **request** direction — a blob being replicated to a
-//!   peer, a grain record being appended. Its `payload` takes
+//!   peer, an entity record being appended. Its `payload` takes
 //!   `#[serde(with = "serde_bytes")]` directly.
 //! - [`Frame::Reply`] is the **answer** — a `fetch_blob` returning a block to a leader
-//!   that lacks it, a grain read returning its records. Its outcome is `ReplyResult`,
+//!   that lacks it, an entity read returning its records. Its outcome is `ReplyResult`,
 //!   a `Result<Vec<u8>, CallError>` *type alias* with no field to hang an attribute
 //!   on, so `protocol::reply_bytes` mirrors serde's `Result` representation instead.
 //!   That mirror is the thing this bench exists to keep honest about cost, and

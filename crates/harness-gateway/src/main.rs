@@ -4,7 +4,7 @@
 //! It joins the actor transport as a non-voting, non-hosting member (its
 //! `--node-id` is outside the nodes' `1..=--nodes` roster, and each node admits
 //! it with `--client`), terminates tenant auth (bearer token → principal), and
-//! drives each caller's session by addressing its grain directly. Run one or many
+//! drives each caller's session by addressing its entity directly. Run one or many
 //! replicas behind a load balancer, each with its own `--node-id`. Public TLS is
 //! expected to terminate at an ingress/LB; the transport link is plaintext,
 //! guarded by the cluster `--secret`.
@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use harness::GranaryConfig;
+use harness::EntityConfig;
 use harness::HarnessSystem;
 use harness_gateway::Gateway;
 use harness_gateway::Limits;
@@ -42,7 +42,7 @@ options (defaults in parentheses):
   --advertise-host <a>  host the nodes dial the gateway back at (default
                         --bind-host); must match the nodes' --client <host>
   --port-base <p>       node/client i's transport port = p+i-1     (7401)
-  --kind <name[:shards]> a kind the nodes host, with its GranaryConfig.shards;
+  --kind <name[:shards]> a kind the nodes host, with its EntityConfig.shards;
                         repeat per kind. MUST match the nodes' deployment — an
                         unknown name fails discovery, a wrong shard count
                         misroutes sessions.  (assistant:4 worker:4, matching
@@ -109,7 +109,7 @@ async fn run(args: &[String]) -> Result<(), String> {
             "--kind" => {
                 let (name, shards) = match value.split_once(':') {
                     Some((name, shards)) => (name, parse("--kind <name:shards>", shards)?),
-                    None => (value.as_str(), GranaryConfig::default().shards),
+                    None => (value.as_str(), EntityConfig::default().shards),
                 };
                 if name.is_empty() {
                     return Err(format!("--kind expects <name[:shards]>, got {value}"));
@@ -167,13 +167,13 @@ async fn run(args: &[String]) -> Result<(), String> {
     if roster.is_empty() {
         // The dev default, matching `harness-standalone`'s default kinds; a
         // real deployment states its roster explicitly, next to the nodes'.
-        let shards = GranaryConfig::default().shards;
+        let shards = EntityConfig::default().shards;
         roster = vec![("assistant".into(), shards), ("worker".into(), shards)];
     }
     let gateway = harness_gateway::connect(
         system,
         &roster,
-        GranaryConfig::default().shards,
+        EntityConfig::default().shards,
         tokens,
         limits,
         Duration::from_secs(30),

@@ -1032,8 +1032,8 @@ dependencies = [
  "actor-serialization",
  "actor-simulation",
  "drive",
+ "entity",
  "futures",
- "granary",
  "serde",
  "spec",
 ]
@@ -1118,6 +1118,35 @@ name = "embedded-io"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
+
+[[package]]
+name = "entity"
+version = "0.1.0"
+dependencies = [
+ "actor-cluster",
+ "actor-core",
+ "actor-runtime",
+ "actor-serialization",
+ "actor-simulation",
+ "async-channel",
+ "blake3",
+ "compat",
+ "divan",
+ "entity",
+ "futures",
+ "lz4_flex",
+ "postcard",
+ "rusqlite",
+ "rustix 1.1.4",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "spec",
+ "tempfile",
+ "tokio",
+ "trybuild",
+ "wal",
+]
 
 [[package]]
 name = "enum_dispatch"
@@ -1426,35 +1455,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
-name = "granary"
-version = "0.1.0"
-dependencies = [
- "actor-cluster",
- "actor-core",
- "actor-runtime",
- "actor-serialization",
- "actor-simulation",
- "async-channel",
- "blake3",
- "compat",
- "divan",
- "futures",
- "granary",
- "lz4_flex",
- "postcard",
- "rusqlite",
- "rustix 1.1.4",
- "serde",
- "serde_bytes",
- "serde_json",
- "spec",
- "tempfile",
- "tokio",
- "trybuild",
- "wal",
-]
-
-[[package]]
 name = "group"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1472,8 +1472,8 @@ dependencies = [
  "actor-cluster",
  "actor-core",
  "actor-simulation",
+ "entity",
  "futures",
- "granary",
  "harness",
  "serde",
  "serde_json",
@@ -1501,8 +1501,8 @@ dependencies = [
  "actor-core",
  "actor-runtime",
  "axum",
+ "entity",
  "futures",
- "granary",
  "harness",
  "serde",
  "serde_json",
@@ -1540,8 +1540,8 @@ dependencies = [
  "actor-core",
  "actor-simulation",
  "cap-std",
+ "entity",
  "futures",
- "granary",
  "harness",
  "machine-host",
  "rustix 1.1.4",
@@ -1562,7 +1562,7 @@ dependencies = [
  "actor-cluster",
  "actor-core",
  "actor-runtime",
- "granary",
+ "entity",
  "harness",
  "harness-anthropic",
  "harness-http",
@@ -2004,35 +2004,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "machine-frontdoor"
-version = "0.1.0"
-dependencies = [
- "actor-core",
- "bytes",
- "granary",
- "machine-grain",
- "machine-host",
- "machine-proto",
- "russh",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "machine-grain"
+name = "machine-entity"
 version = "0.1.0"
 dependencies = [
  "actor-cluster",
  "actor-core",
  "actor-simulation",
  "cap-std",
+ "entity",
  "futures",
- "granary",
  "machine-host",
  "machine-proto",
  "serde",
  "spec",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "machine-frontdoor"
+version = "0.1.0"
+dependencies = [
+ "actor-core",
+ "bytes",
+ "entity",
+ "machine-entity",
+ "machine-host",
+ "machine-proto",
+ "russh",
+ "serde_json",
  "tokio",
 ]
 
@@ -2062,9 +2062,9 @@ dependencies = [
  "actor-cluster",
  "actor-core",
  "actor-runtime",
- "granary",
+ "entity",
+ "machine-entity",
  "machine-frontdoor",
- "machine-grain",
  "machine-host",
  "russh",
  "serde",
@@ -3378,8 +3378,8 @@ dependencies = [
  "actor-cluster",
  "actor-core",
  "actor-simulation",
+ "entity",
  "futures",
- "granary",
  "serde",
 ]
 

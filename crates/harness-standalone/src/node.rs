@@ -1,12 +1,12 @@
 //! One node (silo) of the standalone deployment: the production runtime wired to
-//! the harness. A node hosts grains and votes in Raft; it has no client-facing
+//! the harness. A node hosts entities and votes in Raft; it has no client-facing
 //! listener. The public edge is `harness-gateway`, a trusted cluster *client*
-//! that joins this transport as a non-voting member and addresses the grains
+//! that joins this transport as a non-voting member and addresses the entities
 //! directly (design: `docs/multi-tenant-edge.md`).
 //!
 //! Every node is identical (harness spec §7.1): same kinds, same seams. A
-//! session is a grain, so durability, placement, and the single-writer fence are
-//! granary's: each node hosts every kind's grain type, joining its shards' Raft
+//! session is an entity, so durability, placement, and the single-writer fence are
+//! entity's: each node hosts every kind's entity type, joining its shards' Raft
 //! groups and registering its gateway (§5.3). Membership is a static roster with
 //! the SWIM detector observe-only (core spec §9.4.1) — reachability drives the
 //! shard map's reallocation and the gateway gossip nodes route activations
@@ -34,12 +34,12 @@ use actor_runtime::JoinOptions;
 use actor_runtime::OsEntropy;
 use actor_runtime::TcpCluster;
 use actor_runtime::TokioClock;
-use granary::Granary;
-use granary::GranaryExt;
+use entity::Entities;
+use entity::EntityExt;
 use harness::Budget;
-use harness::FileGrainStore;
-use harness::GrainStoreFactory;
-use harness::GranaryConfig;
+use harness::FileEntityStore;
+use harness::EntityStoreFactory;
+use harness::EntityConfig;
 use harness::Harness;
 use harness::HarnessConfig;
 use harness::HarnessEvent;
@@ -55,7 +55,7 @@ use tenancy::Directory;
 use crate::http::HttpsPost;
 
 /// Which sandbox provider the node runs. Every mode's workspace is the agent
-/// grain's own facet directory (granary §7.11): tool-call deltas are captured
+/// entity's own facet directory (entity §7.11): tool-call deltas are captured
 /// into the session journal, so the workspace survives hibernation, migration,
 /// and node loss in every mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,7 +102,7 @@ pub struct NodeOptions {
     pub nodes: u64,
     /// This node's own data directory (journal + workspaces). Each node keeps
     /// its own: the journal replicates over the transport (a quorum append per
-    /// grain, §7.2), so nodes never share a directory or a filesystem.
+    /// entity, §7.2), so nodes never share a directory or a filesystem.
     pub data: PathBuf,
     /// The local interface the transport port binds. `0.0.0.0` binds every
     /// interface, which is what a container or pod needs; the `127.0.0.1`
@@ -117,7 +117,7 @@ pub struct NodeOptions {
     /// is outside `1..=nodes`: the client joins the transport and membership as a
     /// non-voting, non-hosting participant — so it receives the receptionist
     /// gossip that carries the gateway refs it routes through — but is never added
-    /// to the Raft roster, so it never votes or hosts a grain.
+    /// to the Raft roster, so it never votes or hosts an entity.
     pub clients: BTreeMap<u64, String>,
     /// Node `i`'s transport port is `port_base + i - 1`. A `--client <id>`'s
     /// transport port is derived the same way, so the gateway must agree on
@@ -158,7 +158,7 @@ impl Default for NodeOptions {
 }
 
 /// The most a stop waits on the shard handoff. The handoff is bounded on its
-/// own (granary's `hand_off_leadership`: a fixed number of rounds, each one
+/// own (entity's `hand_off_leadership`: a fixed number of rounds, each one
 /// transfer round trip per led shard), so this is the backstop against a
 /// transport that stops answering, sized well inside the unit's 120 s stop
 /// budget (`deploy/systemd`).
@@ -169,8 +169,8 @@ const HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 /// carries the departure to peers and the control leader commits it.
 const LEAVE_GRACE: Duration = Duration::from_secs(2);
 
-/// Boot the node and host its grains until SIGTERM or SIGINT, then stop
-/// gracefully: hand off every shard this node leads (granary spec §8.3),
+/// Boot the node and host its entities until SIGTERM or SIGINT, then stop
+/// gracefully: hand off every shard this node leads (entity spec §8.3),
 /// announce the departure, and release the transport.
 pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     if opts.id < 1 || opts.id > opts.nodes {
@@ -187,8 +187,8 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     )?;
     let node = NodeId::new(opts.id);
     // One codec value for this node, used in all three places that need to agree:
-    // the transport's framing, the message layer granary encodes a grain's records
-    // and snapshots with, and the grain store's stamp naming that codec (granary
+    // the transport's framing, the message layer entity encodes an entity's records
+    // and snapshots with, and the entity store's stamp naming that codec (entity
     // §7.4). The store refuses to open under a codec other than the one that wrote
     // it, so a stamp taken from a *different* value than the message layer's would
     // be worse than none — it would enforce agreement with the wrong thing.
@@ -211,7 +211,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         // Stated rather than defaulted: the cluster secret crosses the wire in
         // the handshake, so anyone who can watch this traffic can join.
         encryption: Encryption::PlaintextTrusted,
-        // Granary's sharded journal rides Raft, so the node must run the
+        // Entities's sharded journal rides Raft, so the node must run the
         // consensus engine: leader-based membership is the only mode that
         // builds one (system.rs). Voters are the roster `join` hands in; the
         // shard-map and per-shard groups seed from these. Disk-backed storage
@@ -238,25 +238,25 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
         TokioClock::new(),
         Arc::new(OsEntropy::new()),
     ));
-    // One durable grain store under --data (§7.4), shared by the session kinds and
-    // the tenancy directory. Its factory caches per node, so every grain type shares
-    // one on-disk store keyed by (shard, grain), the grain analogue of the Raft WAL.
-    let grain_store = FileGrainStore::factory(opts.data.join("grains"), codec.as_ref());
-    // This node's shared granary capabilities, set once here and used for every grain
-    // type it hosts (granary §7.4, §13).
+    // One durable entity store under --data (§7.4), shared by the session kinds and
+    // the tenancy directory. Its factory caches per node, so every entity type shares
+    // one on-disk store keyed by (shard, entity), the entity analogue of the Raft WAL.
+    let entity_store = FileEntityStore::factory(opts.data.join("entities"), codec.as_ref());
+    // This node's shared entity capabilities, set once here and used for every entity
+    // type it hosts (entity §7.4, §13).
     //
     // The I/O pool: without it every fsync runs on the tokio worker that is also
     // driving this node's Raft heartbeats and its shards' quorum waits, so a slow disk
     // becomes spurious elections and a rehydration storm rather than just slow writes.
     // The metrics registry: commit latency by outcome, rehydration cost, and the
-    // resident grain count — the signals that say whether this node's shards are
+    // resident entity count — the signals that say whether this node's shards are
     // healthy. Distinct from the event stream, which is shaped for the simulator's
     // checkers, not for an operator.
-    let granary_node = system
-        .granary_node()
-        .blocking_io(Arc::new(granary::ThreadPoolIo::sized_for_host()))
-        .metrics(Arc::new(granary::AtomicGrainMetrics::new()));
-    // Every mode runs over the agent grain's own workspace facet (see `SandboxMode`);
+    let entity_node = system
+        .entity_node()
+        .blocking_io(Arc::new(entity::ThreadPoolIo::sized_for_host()))
+        .metrics(Arc::new(entity::AtomicEntityMetrics::new()));
+    // Every mode runs over the agent entity's own workspace facet (see `SandboxMode`);
     // the provider just opens the supplied directory.
     let sandboxes: Arc<dyn SandboxProvider> = match &sandbox_mode {
         SandboxMode::Docker { cli, .. } => Arc::new(
@@ -278,18 +278,18 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     };
     // The handle is bound for the node's life to keep the gateway actors alive,
     // like `directory` below; both hand off their shards at the stop.
-    let node_kinds = kinds(&opts, &sandbox_mode, grain_store.clone());
+    let node_kinds = kinds(&opts, &sandbox_mode, entity_store.clone());
     let harness = Harness::builder(system.clone(), &node_kinds)
-        .granary_node(granary_node.clone())
+        .entity_node(entity_node.clone())
         .config(harness_config())
         .host_all(model, sandboxes)
         .build();
-    // Host the tenancy ownership-index grain type (one grain per principal) so the
-    // gateway's client `Granary<Directory>` can route `Record`/`List` to it. The
+    // Host the tenancy ownership-index entity type (one entity per principal) so the
+    // gateway's client `Entities<Directory>` can route `Record`/`List` to it. The
     // node only hosts it; the recording on each prompt happens at the gateway edge.
-    let directory: Granary<Directory<TcpCluster>> = granary_node.granary(GranaryConfig {
-        grain_store: Some(grain_store),
-        ..GranaryConfig::default()
+    let directory: Entities<Directory<TcpCluster>> = entity_node.entities(EntityConfig {
+        entity_store: Some(entity_store),
+        ..EntityConfig::default()
     });
 
     eprintln!(
@@ -301,7 +301,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     );
     actor_runtime::wait_for_cluster(&system, opts.nodes as usize, Duration::from_secs(15)).await;
     eprintln!(
-        "[{node}] hosting grains; the public edge is harness-gateway (a cluster client). \
+        "[{node}] hosting entities; the public edge is harness-gateway (a cluster client). \
          No client-facing listener on this node."
     );
     shutdown_signal().await;
@@ -361,7 +361,7 @@ async fn shutdown_signal() {
 /// every node must register byte-identical kinds — the digest is pinned by
 /// `SessionCreated` — so all nodes must run with the same values for those
 /// flags.
-fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, grain_store: GrainStoreFactory) -> Kinds {
+fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, entity_store: EntityStoreFactory) -> Kinds {
     let params = ModelParams {
         model: opts.model.to_string(),
         max_tokens: 4096,
@@ -370,7 +370,7 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, grain_store: GrainStore
     // declarations (and a profile image in docker/firecracker mode), so the digests
     // differ — a mixed-mode cluster fails to agree instead of silently splitting
     // confinement. Every mode offers the typed `Workspace` file tools over the
-    // durable grain-backed workspace (§7.10); the shell-capable modes add `shell`
+    // durable entity-backed workspace (§7.10); the shell-capable modes add `shell`
     // (the confined Native tier) and `run_js` (the hermetic QuickJS Compute tier,
     // sandbox spec §3.2) on top, over the same workspace.
     let with_file_tools = |kind: Kind| -> Kind {
@@ -394,23 +394,23 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, grain_store: GrainStore
                     .sandbox(harness::SandboxProfile::image(rootfs)),
             ),
             // No guest shell or compute: the typed file tools alone, over the durable
-            // filesystem grain (granary §7.10).
+            // filesystem entity (entity §7.10).
             SandboxMode::Durable => with_file_tools(kind),
         }
     };
-    // Durable grain storage under --data (§7.4): a session is a grain, so its
+    // Durable entity storage under --data (§7.4): a session is an entity, so its
     // journal must outlive a process restart for a cold-restarted cluster to recover
-    // the conversation. Without this, each node's grain store is in-memory and a full
+    // the conversation. Without this, each node's entity store is in-memory and a full
     // restart loses every session (the records do NOT ride the Raft log — that log
     // only carries leader election and the shard map, §7.1). `data_dir` places the
-    // workspace facet's per-session directory materializations (granary §7.11) under
+    // workspace facet's per-session directory materializations (entity §7.11) under
     // --data as well.
     let data_dir = opts.data.join("workspaces");
-    let grain = move |kind: Kind| -> Kind {
-        kind.grain(GranaryConfig {
-            grain_store: Some(grain_store.clone()),
+    let entity = move |kind: Kind| -> Kind {
+        kind.entity(EntityConfig {
+            entity_store: Some(entity_store.clone()),
             data_dir: Some(data_dir.clone()),
-            ..GranaryConfig::default()
+            ..EntityConfig::default()
         })
     };
     // Mode-aware tool guidance: `durable` has no shell and no Compute tier, so its
@@ -437,7 +437,7 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, grain_store: GrainStore
     )
     .delegates_to(&["worker"])
     .budget(Budget::new(200_000, 50));
-    let assistant = grain(assistant);
+    let assistant = entity(assistant);
     let worker = tools(
         Kind::new(format!(
             "You are a worker agent. Complete the task you were delegated, then reply with a \
@@ -446,7 +446,7 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, grain_store: GrainStore
         .model(params),
     )
     .budget(Budget::new(100_000, 25));
-    let worker = grain(worker);
+    let worker = entity(worker);
     Kinds::new()
         .register("assistant", assistant)
         .register("worker", worker)

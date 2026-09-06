@@ -7,7 +7,7 @@
 //! claim still open.
 //!
 //! Test support behind the `testing` feature, not part of the drive's API, and
-//! mountable by any consumer's swarm as granary and the harness both ship theirs.
+//! mountable by any consumer's swarm as entity and the harness both ship theirs.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -16,14 +16,14 @@ use actor_core::Event;
 use actor_core::NodeId;
 use actor_simulation::Invariant;
 use actor_simulation::default_invariants;
-use granary::GrainEvent;
-use granary::GrainName;
+use entity::EntityEvent;
+use entity::EntityName;
 
 use crate::DriveEvent;
 
-/// A grain's open claims, per node hosting an activation of it (granary §13).
+/// An entity's open claims, per node hosting an activation of it (entity §13).
 /// Under failover a deposed leader and its successor are two activations of one
-/// grain, and their claims must not be confused.
+/// entity, and their claims must not be confused.
 type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 
 /// **The drive cycle's grammar** (D2, D3, D5, D7).
@@ -32,13 +32,13 @@ type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 ///   activation is a second launch of an effect in flight, which no re-drive may
 ///   produce. A `Settled` closes an open claim; one with no claim open here must
 ///   at least name a key some activation launched — an outcome of a previous
-///   activation's launch reaching the one that now holds the grain (§3.3) — or
+///   activation's launch reaching the one that now holds the entity (§3.3) — or
 ///   the drive settled something nothing ever sent.
 /// - **D5, straggler rejection.** A `Discarded` names a key whose outcome was
 ///   dropped without a record; it must correspond to a launch on the stream, or
 ///   the drive discarded something it never sent.
 /// - **D7, quiescence.** A `Quiescent` must not be announced while a claim is
-///   open, and on the single-node tier the grain's `Deactivated` (granary §13) must
+///   open, and on the single-node tier the entity's `Deactivated` (entity §13) must
 ///   not arrive while one is: an activation with an effect in flight has not
 ///   settled its work, and hibernating under it would strand the outcome.
 /// - **D2, launch coverage**, in the shape a stream can carry: the `Quiescent`
@@ -54,7 +54,7 @@ type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 /// **Two tiers, one rule that differs.** A forced step-down — a leadership move,
 /// quorum loss — is involuntary, ignores `can_hibernate`, and legitimately
 /// abandons its launches (§6); on the stream it is a `Deactivated` with claims open,
-/// exactly the shape of a D7 violation, and granary's event carries no reason that
+/// exactly the shape of a D7 violation, and entity's event carries no reason that
 /// would tell the two apart. So the checker is built for the tier it watches:
 /// [`strict`](DriveCycle::strict) for the single-node suites, where nothing is
 /// ever deposed and every `Deactivated` is an idle hibernation, and
@@ -65,12 +65,12 @@ pub struct DriveCycle {
     /// Whether a `Deactivated` with claims open is a violation (single-node tier)
     /// or a forced step-down abandoning its launches (clustered tier, §6).
     hibernation_is_idle: bool,
-    /// Keys currently claimed, per grain and per activation of it: launched and
+    /// Keys currently claimed, per entity and per activation of it: launched and
     /// not yet terminated.
-    open: BTreeMap<GrainName, Claims>,
-    /// Every key ever launched per grain, across activations, so a `Discarded`
+    open: BTreeMap<EntityName, Claims>,
+    /// Every key ever launched per entity, across activations, so a `Discarded`
     /// or an unclaimed `Settled` can be held to having had a launch behind it.
-    seen: BTreeMap<GrainName, BTreeSet<String>>,
+    seen: BTreeMap<EntityName, BTreeSet<String>>,
 }
 
 impl Default for DriveCycle {
@@ -100,52 +100,52 @@ impl DriveCycle {
         }
     }
 
-    /// The claims open on `grain`'s activation at `node`, for reading.
-    fn open(&self, node: NodeId, grain: &GrainName) -> Option<&BTreeSet<String>> {
-        self.open.get(grain).and_then(|claims| claims.get(&node))
+    /// The claims open on `entity`'s activation at `node`, for reading.
+    fn open(&self, node: NodeId, entity: &EntityName) -> Option<&BTreeSet<String>> {
+        self.open.get(entity).and_then(|claims| claims.get(&node))
     }
 
-    /// Close `key`'s claim on `grain`'s activation at `node`, if one is open.
-    fn close(&mut self, node: NodeId, grain: &GrainName, key: &str) -> bool {
+    /// Close `key`'s claim on `entity`'s activation at `node`, if one is open.
+    fn close(&mut self, node: NodeId, entity: &EntityName, key: &str) -> bool {
         self.open
-            .get_mut(grain)
+            .get_mut(entity)
             .and_then(|claims| claims.get_mut(&node))
             .is_some_and(|open| open.remove(key))
     }
 
-    /// Forget every claim of `grain`'s activation at `node`: it deactivated, or a
+    /// Forget every claim of `entity`'s activation at `node`: it deactivated, or a
     /// successor activated there.
-    fn clear(&mut self, node: NodeId, grain: &GrainName) {
-        if let Some(claims) = self.open.get_mut(grain) {
+    fn clear(&mut self, node: NodeId, entity: &EntityName) {
+        if let Some(claims) = self.open.get_mut(entity) {
             claims.remove(&node);
         }
     }
 
-    fn launched_somewhere(&self, grain: &GrainName, key: &str) -> bool {
-        self.seen.get(grain).is_some_and(|seen| seen.contains(key))
+    fn launched_somewhere(&self, entity: &EntityName, key: &str) -> bool {
+        self.seen.get(entity).is_some_and(|seen| seen.contains(key))
     }
 
     /// Open a claim: a launch, or a dangling resolution standing in for one.
     fn claim(
         &mut self,
         node: NodeId,
-        grain: &GrainName,
+        entity: &EntityName,
         key: &str,
         how: &str,
     ) -> Result<(), String> {
-        let seen = self.seen.entry(grain.clone()).or_default();
+        let seen = self.seen.entry(entity.clone()).or_default();
         if !seen.contains(key) {
             seen.insert(key.to_string());
         }
         let open = self
             .open
-            .entry(grain.clone())
+            .entry(entity.clone())
             .or_default()
             .entry(node)
             .or_default();
         if !open.insert(key.to_string()) {
             return Err(format!(
-                "{grain} on {node} {how} {key} twice with the first still in flight — a \
+                "{entity} on {node} {how} {key} twice with the first still in flight — a \
                  re-drive relaunched a claimed effect (D3)"
             ));
         }
@@ -161,7 +161,7 @@ impl Invariant for DriveCycle {
     fn forget_node(&mut self, node: NodeId) {
         // Process death: its activations' launches are abandoned, and their
         // outcomes become stragglers at whichever activation next holds each
-        // grain (§6). `seen` is kept, because those stragglers must still be
+        // entity (§6). `seen` is kept, because those stragglers must still be
         // recognized as having had a launch behind them (D5).
         for claims in self.open.values_mut() {
             claims.remove(&node);
@@ -169,11 +169,11 @@ impl Invariant for DriveCycle {
     }
 
     fn observe(&mut self, event: &Event) -> Result<(), String> {
-        // The activation lifecycle is the grain's own (granary §13); the drive
+        // The activation lifecycle is the entity's own (entity §13); the drive
         // mints no duplicate of it (§8).
-        if let Some(grain) = event.as_app::<GrainEvent>() {
-            match grain {
-                GrainEvent::Deactivated { node, name } => {
+        if let Some(entity) = event.as_app::<EntityEvent>() {
+            match entity {
+                EntityEvent::Deactivated { node, name } => {
                     if self.hibernation_is_idle
                         && let Some(open) = self.open(*node, name)
                         && !open.is_empty()
@@ -190,7 +190,7 @@ impl Invariant for DriveCycle {
                     // activation starts from an empty table (§6).
                     self.clear(*node, name);
                 }
-                GrainEvent::Activated { node, name } => {
+                EntityEvent::Activated { node, name } => {
                     self.clear(*node, name);
                 }
                 _ => {}
@@ -202,40 +202,40 @@ impl Invariant for DriveCycle {
             return Ok(());
         };
         match event {
-            DriveEvent::Launched { grain, key, node } => {
-                self.claim(*node, grain, key, "launched")?;
+            DriveEvent::Launched { entity, key, node } => {
+                self.claim(*node, entity, key, "launched")?;
             }
-            DriveEvent::Interrupted { grain, key, node } => {
-                self.claim(*node, grain, key, "resolved dangling")?;
+            DriveEvent::Interrupted { entity, key, node } => {
+                self.claim(*node, entity, key, "resolved dangling")?;
             }
             DriveEvent::Settled {
-                grain, key, node, ..
+                entity, key, node, ..
             } => {
-                if !self.close(*node, grain, key) && !self.launched_somewhere(grain, key) {
+                if !self.close(*node, entity, key) && !self.launched_somewhere(entity, key) {
                     return Err(format!(
-                        "{grain} on {node} settled {key}, which no activation launched — an \
+                        "{entity} on {node} settled {key}, which no activation launched — an \
                          outcome with no claim behind it (D3)"
                     ));
                 }
             }
-            DriveEvent::Discarded { grain, key, node } => {
+            DriveEvent::Discarded { entity, key, node } => {
                 // A straggler may be an *earlier* activation's launch reaching a
                 // later one, so its claim need not be open here — but the drive
                 // must never discard a key nothing ever launched.
-                self.close(*node, grain, key);
-                if !self.launched_somewhere(grain, key) {
+                self.close(*node, entity, key);
+                if !self.launched_somewhere(entity, key) {
                     return Err(format!(
-                        "{grain} on {node} discarded {key}, which no launch on this stream \
+                        "{entity} on {node} discarded {key}, which no launch on this stream \
                          produced (D5)"
                     ));
                 }
             }
-            DriveEvent::Quiescent { grain, node } => {
-                if let Some(open) = self.open(*node, grain)
+            DriveEvent::Quiescent { entity, node } => {
+                if let Some(open) = self.open(*node, entity)
                     && !open.is_empty()
                 {
                     return Err(format!(
-                        "{grain} on {node} announced quiescence with {} claim(s) open — the \
+                        "{entity} on {node} announced quiescence with {} claim(s) open — the \
                          desired set is not at rest (D7)",
                         open.len()
                     ));
@@ -280,13 +280,13 @@ mod tests {
     const N1: NodeId = NodeId::new(1);
     const N2: NodeId = NodeId::new(2);
 
-    fn name() -> GrainName {
-        GrainName::new("test.Driven", "g")
+    fn name() -> EntityName {
+        EntityName::new("test.Driven", "g")
     }
 
     fn launched_on_node(node: NodeId, key: &str) -> Event {
         DriveEvent::Launched {
-            grain: name(),
+            entity: name(),
             key: key.into(),
             node,
         }
@@ -299,7 +299,7 @@ mod tests {
 
     fn interrupted(key: &str) -> Event {
         DriveEvent::Interrupted {
-            grain: name(),
+            entity: name(),
             key: key.into(),
             node: N1,
         }
@@ -308,7 +308,7 @@ mod tests {
 
     fn settled_on_node(node: NodeId, key: &str, committed: bool) -> Event {
         DriveEvent::Settled {
-            grain: name(),
+            entity: name(),
             key: key.into(),
             node,
             ok: true,
@@ -323,7 +323,7 @@ mod tests {
 
     fn discarded(key: &str) -> Event {
         DriveEvent::Discarded {
-            grain: name(),
+            entity: name(),
             key: key.into(),
             node: N1,
         }
@@ -332,18 +332,18 @@ mod tests {
 
     fn quiescent() -> Event {
         DriveEvent::Quiescent {
-            grain: name(),
+            entity: name(),
             node: N1,
         }
         .into()
     }
 
     fn deactivated_on(node: NodeId) -> Event {
-        Event::app(GrainEvent::Deactivated { node, name: name() })
+        Event::app(EntityEvent::Deactivated { node, name: name() })
     }
 
     fn activated_on(node: NodeId) -> Event {
-        Event::app(GrainEvent::Activated { node, name: name() })
+        Event::app(EntityEvent::Activated { node, name: name() })
     }
 
     #[test]
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn deactivating_with_a_claim_open_is_a_step_down_under_failover() {
-        // §6: a forced step-down abandons its launches, and granary's `Deactivated`
+        // §6: a forced step-down abandons its launches, and entity's `Deactivated`
         // does not say which kind it was. The clustered checker reads it as the
         // legal kind and starts the next activation from an empty table.
         let mut c = DriveCycle::under_failover();
@@ -451,7 +451,7 @@ mod tests {
     fn an_outcome_of_a_previous_activations_launch_may_settle_at_the_successor() {
         // §3.3: across activations an effect may run more than once, and the
         // outcome of the deposed leader's launch may reach the node that now
-        // holds the grain. It closes no claim there, but it is not an invention.
+        // holds the entity. It closes no claim there, but it is not an invention.
         let mut c = DriveCycle::under_failover();
         c.observe(&launched_on_node(N1, "k")).unwrap();
         c.observe(&deactivated_on(N1)).unwrap();
@@ -460,8 +460,8 @@ mod tests {
     }
 
     #[test]
-    fn claims_are_per_activation_not_per_grain() {
-        // Two activations of one grain on two nodes: a launch on each is not a
+    fn claims_are_per_activation_not_per_entity() {
+        // Two activations of one entity on two nodes: a launch on each is not a
         // double launch, and one's settle does not close the other's claim.
         let mut c = DriveCycle::under_failover();
         c.observe(&launched_on_node(N1, "k")).unwrap();

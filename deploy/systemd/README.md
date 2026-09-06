@@ -13,7 +13,7 @@ Three nodes as `harness-node.service`, fronted by one or more `harness-gateway.s
    └──────────┘      └──────────┘      └───────────┘
 ```
 
-The nodes share nothing on disk. Each holds its own replica and the journal replicates over the transport, a quorum append per grain (granary spec §7.2). There is no shared filesystem to provision and none to lose.
+The nodes share nothing on disk. Each holds its own replica and the journal replicates over the transport, a quorum append per entity (entity spec §7.2). There is no shared filesystem to provision and none to lose.
 
 ## Disk layout
 
@@ -26,10 +26,10 @@ One filesystem per node, on **local NVMe**, mounted at `/var/lib/harness`. Not s
 /etc/harness/tenants                   0640 root:harness — "<principal> <token>" per line
 /var/lib/harness/                      the mount point; one filesystem, this node's only state
 └── node/                              --data
-    ├── grains/<type>/<node-id>/       the durable grain store, one per hosted grain type
-    │   ├── manifest                   (shard, grain) -> segment id; held whole in memory
+    ├── entities/<type>/<node-id>/       the durable entity store, one per hosted entity type
+    │   ├── manifest                   (shard, entity) -> segment id; held whole in memory
     │   ├── LOCK                       advisory single-writer guard
-    │   ├── segments/<id>              one append log per grain: records + snapshots
+    │   ├── segments/<id>              one append log per entity: records + snapshots
     │   ├── fences/<shard>             the per-shard durable term fence
     │   ├── seals/<shard>              the per-shard append bound a split or merge
     │   │                              sets: appends at or above it are refused
@@ -39,18 +39,18 @@ One filesystem per node, on **local NVMe**, mounted at `/var/lib/harness`. Not s
     │   │                              corruption check protecting election safety)
     │   ├── log                        framed, checksummed entries
     │   └── snapshot                   the compacted prefix
-    └── workspaces/<node-id>/          physical-facet materializations, keyed by grain:
+    └── workspaces/<node-id>/          physical-facet materializations, keyed by entity:
                                        the per-session workspace directories, and any
                                        SQL database files or disk images beside them
 ```
 
-A store is per hosted **grain type** (`grains/<type>/…`), never shared across
+A store is per hosted **entity type** (`entities/<type>/…`), never shared across
 types: the fence under it is keyed by shard index, and the same index is a
-different leader-election group under each type (granary spec §8.2).
+different leader-election group under each type (entity spec §8.2).
 
-**`grains/` and `raft/` are the source of truth. `workspaces/` is a rebuildable cache** (granary spec §1) — keyed by node and grain, and safe to wipe between runs. A node that lost only that rematerializes it from the committed state on next activation. A node that lost `grains/` or `raft/` has lost its replica: do not restart it on the empty directory, because it will be re-replicated to as if it were healthy. Restore the directory from the machine's own backup, or rebuild it as "Replacing a node" describes.
+**`entities/` and `raft/` are the source of truth. `workspaces/` is a rebuildable cache** (entity spec §1) — keyed by node and entity, and safe to wipe between runs. A node that lost only that rematerializes it from the committed state on next activation. A node that lost `entities/` or `raft/` has lost its replica: do not restart it on the empty directory, because it will be re-replicated to as if it were healthy. Restore the directory from the machine's own backup, or rebuild it as "Replacing a node" describes.
 
-Sizing per node: eight or more cores, 32 GB and up, local NVMe. Memory is consumed by grain *count* rather than concurrency — the manifest is held whole and segments and host handles are cached by the thousand — so undershooting shows up as an OOM under grain growth, not under load. `docs/standalone-deployment.md` carries the full sizing note and the `link ÷ (replication_factor − 1)` ingest ceiling.
+Sizing per node: eight or more cores, 32 GB and up, local NVMe. Memory is consumed by entity *count* rather than concurrency — the manifest is held whole and segments and host handles are cached by the thousand — so undershooting shows up as an OOM under entity growth, not under load. `docs/standalone-deployment.md` carries the full sizing note and the `link ÷ (replication_factor − 1)` ingest ceiling.
 
 **Do not put `/var/lib/harness` on network-attached block storage** (EBS, Persistent Disk, Ceph). It puts a durable flush back near a millisecond and reverses an assumption the storage layer is built on (hardware-envelope §6). It will work, and it will be slower than the design expects.
 
@@ -93,7 +93,7 @@ Node ids are the opposite: unique per machine, and stable across restarts.
 
 ## Rolling restart
 
-One node at a time, waiting for the cluster to be healthy between each. The unit sends SIGTERM and waits up to 120 s on purpose: the node hands off leadership of every shard it leads before exiting (granary spec §8.3). Skipping the handoff is *safe* but expensive — each shard it still led waits a full election timeout before its replicas elect, and every grain on those shards rehydrates on the new leader. A node leading many shards therefore turns a rolling restart into that many simultaneous failovers.
+One node at a time, waiting for the cluster to be healthy between each. The unit sends SIGTERM and waits up to 120 s on purpose: the node hands off leadership of every shard it leads before exiting (entity spec §8.3). Skipping the handoff is *safe* but expensive — each shard it still led waits a full election timeout before its replicas elect, and every entity on those shards rehydrates on the new leader. A node leading many shards therefore turns a rolling restart into that many simultaneous failovers.
 
 ```sh
 systemctl restart harness-node   # then wait for the node to rejoin before the next
@@ -116,7 +116,7 @@ The actor spec's rule for a voter declared `down` — remove it by a committed m
 
 ## Failure domains
 
-`GranaryConfig::failure_domains` defaults to `None`, which treats every node as its own domain: replicas spread across the cluster, but nothing stops all *R* of a shard landing in one rack. On bare metal the mapping is usually obvious and worth setting — rack, chassis, or PDU. See `docs/standalone-deployment.md`, "Failure domains", for how the allocator uses it (`ceil(R / domains)` replicas per domain) and why the mapping must agree on every node.
+`EntityConfig::failure_domains` defaults to `None`, which treats every node as its own domain: replicas spread across the cluster, but nothing stops all *R* of a shard landing in one rack. On bare metal the mapping is usually obvious and worth setting — rack, chassis, or PDU. See `docs/standalone-deployment.md`, "Failure domains", for how the allocator uses it (`ceil(R / domains)` replicas per domain) and why the mapping must agree on every node.
 
 ## TLS
 

@@ -1687,7 +1687,7 @@ async fn apply_raft_output<C, E, S, T>(
     }
 }
 
-/// Publish an application group's committed entries (granary's sharded journal) to
+/// Publish an application group's committed entries (entity's sharded journal) to
 /// its subscribers, in commit order. The send is a synchronous `try_send` on an
 /// unbounded channel — no `.await` between draining `committed` and delivering — so
 /// commit order is preserved and a slow consumer cannot interleave another group's

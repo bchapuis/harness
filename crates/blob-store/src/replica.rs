@@ -7,7 +7,7 @@
 //! receptionist under one well-known key ([`blob_replica_key`]) so peers discover
 //! it, and [`ActorBlobTransport`] reaches a peer's replica by an ordinary `ask`.
 //!
-//! Unlike granary's `StoreRecord`, [`StoreBlob`] carries **no shard, no `after`,
+//! Unlike entity's `StoreRecord`, [`StoreBlob`] carries **no shard, no `after`,
 //! no term, and no `repair` flag** (spec §6): nothing needs fencing and nothing
 //! needs ordering, so the only field beyond the bytes is the namespace the blob
 //! lives under.
@@ -128,7 +128,7 @@ impl Message for SyncTombstones {
 }
 
 /// A replica's response to [`StoreBlob`] (spec §6). It has **no** `Fenced` or
-/// `Stale` variant (contrast granary's `StoreAck`): there is no term and no
+/// `Stale` variant (contrast entity's `StoreAck`): there is no term and no
 /// mutable head to be stale against.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StoreAck {
@@ -251,7 +251,7 @@ impl<S: BlobSystem> Handler<SyncTombstones> for BlobReplica<S> {
 pub type StoreAckFuture = BoxFuture<'static, Result<StoreAck, CallError>>;
 
 /// How the `Clustered` tier reaches a node's [`BlobReplica`] (spec §6). Object-safe
-/// (the analogue of granary's `ReplicaTransport`), so the tier and the reconcile
+/// (the analogue of entity's `ReplicaTransport`), so the tier and the reconcile
 /// loop stay free of the system's `Clock`/`Entropy`/`Spawner`/`Transport` type
 /// parameters, and a simulation can substitute its own (spec §8).
 pub trait BlobTransport: Send + Sync + 'static {

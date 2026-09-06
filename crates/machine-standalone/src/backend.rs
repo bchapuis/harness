@@ -3,7 +3,7 @@
 //!
 //! The door does not know the mechanism. It asks the node's
 //! `machine_host::MachineHost` for a channel to a machine by name
-//! (`machine_grain::hosted::open_channel`), which is a vsock connection under the
+//! (`machine_entity::hosted::open_channel`), which is a vsock connection under the
 //! microVM grade and a relayed `docker exec` under the container grade. What is
 //! left here is the diagnostic, because the *absence* of a guest is the one
 //! failure a demo operator actually hits, and its two causes need different
@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use granary::GrainName;
+use entity::EntityName;
 use machine_frontdoor::ChannelBackend;
 use machine_frontdoor::ChannelKind;
 use machine_frontdoor::Duplex;
@@ -29,7 +29,7 @@ pub struct LocalBackend {
     /// guest to reach.
     host: Option<Arc<dyn machine_host::MachineHost>>,
     /// This node's id, scoping the guest names it may dial
-    /// (`machine_grain::hosted::guest_key`).
+    /// (`machine_entity::hosted::guest_key`).
     node: String,
 }
 
@@ -49,7 +49,7 @@ impl LocalBackend {
 impl ChannelBackend for LocalBackend {
     async fn open(
         &self,
-        machine: &GrainName,
+        machine: &EntityName,
         kind: ChannelKind,
     ) -> std::io::Result<Box<dyn Duplex>> {
         #[cfg(feature = "host")]
@@ -57,7 +57,7 @@ impl ChannelBackend for LocalBackend {
             let Some(host) = self.host.as_deref() else {
                 return Err(no_guest_here(machine));
             };
-            return machine_grain::hosted::open_channel(host, &self.node, machine, &kind)
+            return machine_entity::hosted::open_channel(host, &self.node, machine, &kind)
                 .await
                 .map_err(|e| match e {
                     // The ordinary case, and not this node's fault: the machine
@@ -84,7 +84,7 @@ impl ChannelBackend for LocalBackend {
 /// A node with no guest to bridge to at all — `--machine fake`, or a build without
 /// the binding. Distinct from a machine led by another node: durability works
 /// here, sessions never will.
-fn no_guest_here(machine: &GrainName) -> std::io::Error {
+fn no_guest_here(machine: &EntityName) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::NotFound,
         format!(

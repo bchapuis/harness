@@ -17,12 +17,12 @@ machines").
  │ --data node1/  │    │ --data node2/  │    │ --data node3/  │
  └───────┬────────┘    └────────────────┘    └────────────────┘
          │   each node its own --data; the journal replicates
-         │   over the transport links above (a quorum per grain).
-         │   Nodes host grains and vote in Raft; no client listener.
+         │   over the transport links above (a quorum per entity).
+         │   Nodes host entities and vote in Raft; no client listener.
  terminal 4 (joins the transport as a non-voting client)
  ┌────────────────────┐                    api.anthropic.com
  │ harness-gateway     │                   ▲ (one HTTPS call
- │ HTTP :8080 ─► grains│                   │  per model step,
+ │ HTTP :8080 ─► entities│                   │  per model step,
  │ transport :7500     │                   │  from the owning node)
  └────────────────────┘
 ```
@@ -33,19 +33,19 @@ and one node's harness — host actor, session actors, and the three seams:
 
 - **Model** — the Anthropic Messages API (`harness-anthropic`), over a small
   tokio/rustls HTTP client.
-- **GrainJournal** — a file-backed store in each node's own `--data` directory.
+- **EntityJournal** — a file-backed store in each node's own `--data` directory.
   The journal is one logical store for the whole cluster (spec §6.1), but it is
   *replicated*, not shared: a session's record is appended to a quorum of the
   shard's replicas over the transport, fenced by the shard's term (spec §7.2,
   §8). A node writes only its own directory, so nodes share neither a directory
-  nor a filesystem. It is durable: a new owner recovers a grain's head from a
-  quorum on activation (§8, G14).
+  nor a filesystem. It is durable: a new owner recovers an entity's head from a
+  quorum on activation (§8, E14).
 - **Sandbox** — one private workspace directory per session under
-  `--data/workspaces/<node-id>/`, keyed by the grain, where the `shell` tool
+  `--data/workspaces/<node-id>/`, keyed by the entity, where the `shell` tool
   runs.
 
 Sessions are placed by rendezvous hashing over the members every node
-currently considers serving. The gateway holds a `GrainRef` per session and the
+currently considers serving. The gateway holds a `EntityRef` per session and the
 transport routes each `ask` to the session's current owner, so the gateway
 addresses any session regardless of which node hosts it.
 
@@ -58,7 +58,7 @@ Two agent kinds are registered on every node:
 
 Every `--sandbox` mode carries the typed file tools —
 `read_file`, `write_file`, `edit_file`, `list_dir`, `remove` — over a workspace
-backed by a durable filesystem grain (granary §7.10), so a session's files
+backed by a durable filesystem entity (entity §7.10), so a session's files
 survive hibernation, migration, and node loss. The shell-capable modes add two
 tools on top of the same workspace: `shell`, the Native tier (the container or
 microVM `--sandbox` selected), and `run_js`, the hermetic QuickJS Compute tier
@@ -139,7 +139,7 @@ model to actually run things. `alpine:3.20` is leaner (sh + awk only) if you
 only need file and text tasks.
 
 Without docker (or `/dev/kvm` for firecracker), run `--sandbox durable`: a
-grain-backed durable workspace with the typed file tools and no shell — no
+entity-backed durable workspace with the typed file tools and no shell — no
 container runtime required.
 
 Each node logs its bootstrap and then the cluster's life on stderr:
@@ -147,7 +147,7 @@ Each node logs its bootstrap and then the cluster's life on stderr:
 ```
 [node-2] joined (voter 2/3), data ./harness-data, model claude-sonnet-4-6
 [node-2] cluster ready (leader elected) after 1.2s
-[node-2] hosting grains; the public edge is harness-gateway (a cluster client). No client-facing listener on this node.
+[node-2] hosting entities; the public edge is harness-gateway (a cluster client). No client-facing listener on this node.
 ```
 
 ## Start the gateway
@@ -197,10 +197,10 @@ Re-issuing the **same** `turn` id is the resume primitive: a completed run
 returns its recorded outcome, a live run re-attaches, never run twice (H7).
 
 The records *are* the session: each is a line in that session's own segment under
-`./harness-data/grains/<grain_type>/<node>/segments/`, and folding them back is how
-any node reconstructs the session — there is no other session state. The grain type
+`./harness-data/entities/<entity_type>/<node>/segments/`, and folding them back is how
+any node reconstructs the session — there is no other session state. The entity type
 comes first because a store is per hosted type: its fence is keyed by shard index,
-and the same index is a different leader-election group under each type (granary
+and the same index is a different leader-election group under each type (entity
 §8.2).
 
 Sessions are durable and named: prompt `demo` again days later (any gateway
@@ -219,19 +219,19 @@ A session survives the machine that was running it.
    `Write a fibonacci script, run it for n=1..20, and summarize the timing.`
 2. Find the owner: the node whose stderr shows
    `RunStarted { session: SessionId("alice/demo"), … }` (the gateway scopes
-   the session under its tenant, so the grain is `alice/demo`).
+   the session under its tenant, so the entity is `alice/demo`).
 3. Kill that process (`Ctrl-C` or `kill <pid>`).
 4. Watch the survivors: within a few seconds (SWIM defaults: 1s probes, 3s
    suspicion) they log `Suspected { … }` then `Unreachable { … }`, and
    placement stops routing to the dead node.
 5. Re-issue the **same** prompt through the gateway (same `turn` id) — its
-   `GrainRef` re-resolves to a live owner automatically:
+   `EntityRef` re-resolves to a live owner automatically:
    ```sh
    curl -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
      -H 'Authorization: Bearer alice' -H 'Content-Type: application/json' \
      -d '{"turn":"t-1","content":"…the same turn…"}'
    ```
-6. The new owner recovers the grain's head from a quorum, folds the journal,
+6. The new owner recovers the entity's head from a quorum, folds the journal,
    resumes the run from its last committed record, and the outcome comes back as
    if nothing happened. A tool call that was in flight when the node died is
    resolved per its declared policy (the `shell` tool interrupts: the model is
@@ -256,13 +256,13 @@ of it.
 **Per node.** Eight or more cores, 32 GB and up, and local NVMe. Two things
 break first if you undershoot: the store holds its manifest whole in memory and
 caches segment handles and resolved host handles by the thousand, so memory is
-consumed by grain *count* rather than by concurrency; and the replication path
+consumed by entity *count* rather than by concurrency; and the replication path
 is the uplink, so a node's sustainable ingest of new data is roughly
 `link ÷ (replication_factor − 1)` — about 60 MB/s at 1 Gbps and R=3, against a
 device that would take gigabytes per second. If replication throughput is the
 constraint you hit, the 10 Gbps uplink upgrade buys more than any tuning here.
 
-**Descriptors.** The grain store keeps up to 65536 segment files open
+**Descriptors.** The entity store keeps up to 65536 segment files open
 (`DEFAULT_SEGMENT_CAPACITY`), plus transport connections and transient blob
 opens. Raise the limit to at least **70000** or the process hits the kernel's
 before the store's cache ever evicts anything:
@@ -286,7 +286,7 @@ expects.
 
 ### Timeouts by topology
 
-`quorum_timeout` and `recover_timeout` (`GranaryConfig`) default to 2 s, which
+`quorum_timeout` and `recover_timeout` (`EntityConfig`) default to 2 s, which
 is safe everywhere and derived for nowhere. Set them from the p99.9 commit
 latency you measure, never from a median — the tail is what they exist for. As
 starting points, against the round trips in hardware-envelope §2:
@@ -304,7 +304,7 @@ turning transient slowness into activation churn.
 
 ### Failure domains
 
-`GranaryConfig::failure_domains` defaults to `None`, which treats every node as
+`EntityConfig::failure_domains` defaults to `None`, which treats every node as
 its own domain — replicas spread across the cluster, but nothing stops all *R*
 of a shard landing in one rack. Since every durability claim rests on quorum
 intersection over those *R*, a concentrated shard turns one rack loss into an
@@ -318,14 +318,14 @@ already have per host — the site, or the rack if your provider exposes it:
 // `FailureDomains` is `Arc<dyn Fn(NodeId) -> u64>`, and the mapping MUST be a
 // pure function every node evaluates identically — static deployment metadata,
 // never anything read from the local host.
-let racks: granary::FailureDomains = std::sync::Arc::new(|node: NodeId| match node.uid() {
+let racks: entity::FailureDomains = std::sync::Arc::new(|node: NodeId| match node.uid() {
     1 | 2 => 0, // site A, rack 1
     3 | 4 => 1, // site A, rack 2
     _ => 2,     // site B
 });
-let config = GranaryConfig {
+let config = EntityConfig {
     failure_domains: Some(racks),
-    ..GranaryConfig::default()
+    ..EntityConfig::default()
 };
 ```
 
@@ -377,7 +377,7 @@ The **gateway** (`harness-gateway`) takes its own set:
 | `--bind-host <addr>`    | `127.0.0.1`        | interface the *transport* binds; `0.0.0.0` in a container |
 | `--advertise-host <a>`  | `--bind-host`      | the host the nodes dial it back at; must match their `--client <host>` |
 | `--port-base <p>`       | `7401`             | node/client *i*'s transport = p+i−1 |
-| `--kind <name[:shards]>` | `assistant:4 worker:4` | a kind the nodes host, with its `GranaryConfig.shards`; repeat per kind. Must match the nodes' deployment — an unknown name fails discovery, a wrong shard count misroutes sessions. The default mirrors `harness-standalone`'s default kinds |
+| `--kind <name[:shards]>` | `assistant:4 worker:4` | a kind the nodes host, with its `EntityConfig.shards`; repeat per kind. Must match the nodes' deployment — an unknown name fails discovery, a wrong shard count misroutes sessions. The default mirrors `harness-standalone`'s default kinds |
 | `--auth-tokens <path>`  | —                  | tenants file (`<principal> <token>` per line), reloaded on SIGHUP. **Required** unless `--bind` is loopback; without it the bearer token *is* the tenant |
 | `--max-within-secs <n>` | `3600`             | ceiling on a prompt's `within_secs` |
 | `--max-body-bytes <n>`  | `1048576`          | max request body size |
@@ -392,10 +392,10 @@ over HTTP — and needs no API key.
 
 | this deployment | agentic harness spec |
 |---|---|
-| `--data/grains`, a quorum append per grain fenced by the shard term | the fenced, per-session journal (§6.1–§6.2, §7.2); the journal **is** the session (§2.1) |
+| `--data/entities`, a quorum append per entity fenced by the shard term | the fenced, per-session journal (§6.1–§6.2, §7.2); the journal **is** the session (§2.1) |
 | killing a node, then re-issuing the same `turn` id over HTTP | caller-driven resumption (§7.5), idempotent turns (H7) |
-| the gateway's `GrainRef` reaches any session | placement is routing, not a lease (utilities spec §2.3); exclusivity lives in the fence |
-| `--data/workspaces/<node-id>/…`, one directory per session grain | the sandbox seam (§5.3); working state, not session state (§5.5) |
+| the gateway's `EntityRef` reaches any session | placement is routing, not a lease (utilities spec §2.3); exclusivity lives in the fence |
+| `--data/workspaces/<node-id>/…`, one directory per session entity | the sandbox seam (§5.3); working state, not session state (§5.5) |
 | `assistant` → `delegate` → `worker` | delegation with budget carve-outs (§8, §9.1) |
 | stderr `RunStarted`/`ModelCompleted`/`RunEnded`/… plus membership transitions | the observability stream (§10.4) |
 
@@ -417,7 +417,7 @@ over HTTP — and needs no API key.
   instead: one Firecracker VM per activation, the workspace synced over vsock,
   no network device (sandbox spec §3.5's reference choice).
 - **Each node keeps its own `--data` directory**; the journal replicates over
-  the transport (a quorum append per grain, §7.2), so the roster spans machines
+  the transport (a quorum append per entity, §7.2), so the roster spans machines
   — set `--bind-host` and `--peer` (see "Across machines").
 - **The fake-friendly `--api-url`** speaks HTTP/1.1 without retry-relevant
   streaming; long completions are bounded by a 300s per-request timeout

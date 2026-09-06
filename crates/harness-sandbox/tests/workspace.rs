@@ -1,7 +1,7 @@
 //! Workspace-tier conformance: S1 (confinement by capability handle —
 //! adversarial traversal) and S5 (per-tier release) of sandbox spec §6. The
 //! workspace directory is supplied by the caller (the agent's workspace facet,
-//! granary §7.11); the provider opens over it and never deletes it.
+//! entity §7.11); the provider opens over it and never deletes it.
 
 mod support;
 
@@ -194,7 +194,7 @@ fn tiers_not_offered_fail_as_outcomes() {
 
 // ---------------------------------------------------------------------------
 // S5: per-tier release, idempotent — and the workspace is not the provider's
-// to delete (its durable content is the caller's, granary §7.11)
+// to delete (its durable content is the caller's, entity §7.11)
 // ---------------------------------------------------------------------------
 
 #[test]

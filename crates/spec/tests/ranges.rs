@@ -1,7 +1,7 @@
 //! The invariant ranges the specs cite of each other resolve against the
 //! catalogues they name.
 //!
-//! `grain §N` (its invariants as **G1–G20**) is a citation: it points at granary's
+//! `entity §N` (its invariants as **E1–E20**) is a citation: it points at entity's
 //! catalogue and says how far it runs. Nothing resolved it until now, and a
 //! catalogue that grows leaves every sibling stating its old extent describing a
 //! shorter document than the one on disk — each sentence still reading exactly

@@ -14,7 +14,7 @@ use actor_core::CallError;
 use actor_core::Clock;
 use actor_simulation::SimSystem;
 use actor_simulation::run_seed;
-use granary::GrainError;
+use entity::EntityError;
 use harness::Budget;
 use harness::Kind;
 use harness::Kinds;
@@ -46,7 +46,7 @@ fn echo_kind() -> Kinds {
                 Tier::Workspace,
             )
             .budget(Budget::new(10_000, 10))
-            .grain(brisk_idle()),
+            .entity(brisk_idle()),
     )
 }
 
@@ -173,7 +173,7 @@ fn resubmitting_a_turn_never_starts_a_second_run() {
                     .await;
                 assert!(matches!(
                     mismatch,
-                    Err(GrainError::Call(CallError::System(_)))
+                    Err(EntityError::Call(CallError::System(_)))
                 ));
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;
@@ -224,7 +224,7 @@ fn a_resubmission_that_changes_the_budget_is_a_conflict() {
                     )
                     .await;
                 assert!(
-                    matches!(some_default, Err(GrainError::Call(CallError::System(_)))),
+                    matches!(some_default, Err(EntityError::Call(CallError::System(_)))),
                     "Some(default) is not None (§7.4)"
                 );
                 // An identical literal budget re-attaches and returns the
@@ -244,7 +244,7 @@ fn a_resubmission_that_changes_the_budget_is_a_conflict() {
                     .await;
                 assert!(matches!(
                     changed,
-                    Err(GrainError::Call(CallError::System(_)))
+                    Err(EntityError::Call(CallError::System(_)))
                 ));
                 *sink.lock().unwrap() = tail_records(&session).await;
                 flush(&system).await;

@@ -5,7 +5,7 @@
 //! `put` is durable once **W ≤ R** of them have stored it (spec §5.2). It has no
 //! leader and no quorum-intersection requirement: with immutable content, `W` and
 //! `R` are independent durability and availability knobs, not a correctness
-//! constraint (spec §4, contrast granary §8). A fan-out of immutable bytes, a
+//! constraint (spec §4, contrast entity §8). A fan-out of immutable bytes, a
 //! verified rank-order read, and a monotonic delete flag: no election, no term,
 //! and no write-time read-repair (**B4**).
 //!
@@ -47,7 +47,7 @@ use crate::tombstone::TombstoneSet;
 
 /// How long a `put`/`delete` waits for its durability target before returning
 /// [`BlobError::Unavailable`], and how long a `get`/`has` waits on each owner.
-/// Modeled on granary's quorum/recover timeouts.
+/// Modeled on entity's quorum/recover timeouts.
 const PUT_TIMEOUT: Duration = Duration::from_secs(2);
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -177,7 +177,7 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
 
         // Fan a StoreBlob out to every owner; the local owner resolves to the
         // in-process replica (no serialization, spec §5.2). Acknowledge at `need`
-        // and drain the rest in the background, off the latency path (granary §7.2).
+        // and drain the rest in the background, off the latency path (entity §7.2).
         let mut acks = FuturesUnordered::new();
         for owner in owners {
             acks.push(self.inner.transport.store_blob(

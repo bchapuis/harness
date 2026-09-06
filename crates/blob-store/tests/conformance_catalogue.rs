@@ -125,10 +125,10 @@ fn crate_sources() -> String {
 /// **B4**, checked rather than asserted: the data path runs no consensus because
 /// there is no consensus engine in the dependency graph to run.
 ///
-/// `granary` is the tree's consensus-bearing crate (per-shard Raft leadership, the
+/// `entity` is the tree's consensus-bearing crate (per-shard Raft leadership, the
 /// term fence). The blob store deliberately sits beside it on `actor-cluster`
 /// alone: content addressing makes concurrent writers of equal content converge
-/// without ordering, so nothing needs a term. If a `granary` dependency ever
+/// without ordering, so nothing needs a term. If a `entity` dependency ever
 /// appears here, B4 stops being free and has to be re-argued — this test is where
 /// that conversation starts.
 #[test]
@@ -149,8 +149,8 @@ fn the_data_path_has_no_consensus_engine_to_run() {
         "expected a [dependencies] section to inspect",
     );
     assert!(
-        !runtime.contains("granary"),
-        "blob-store gained a `granary` dependency, so B4's \"no consensus on the data path\" \
+        !runtime.contains("entity"),
+        "blob-store gained a `entity` dependency, so B4's \"no consensus on the data path\" \
          is no longer structural — re-verify it or restate the invariant:\n{runtime}",
     );
 }

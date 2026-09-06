@@ -2,7 +2,7 @@
 //! cluster.
 //!
 //! **Why the CLI is not a cluster client.** The harness gateway joins the
-//! transport as a non-voting member and addresses grains directly, and that is
+//! transport as a non-voting member and addresses entities directly, and that is
 //! the right shape for it: it is *long-lived*. A CLI process lives for one
 //! command. A member that short never survives long enough for the failure
 //! detector to probe it alive, so after the first invocation its id sits
@@ -12,8 +12,8 @@
 //! shape, so the CLI stops being a member.
 //!
 //! Instead each node offers a loopback admin socket, and the node — already a
-//! member, already routing — issues the grain command. One JSON request per
-//! line, one JSON reply. Every operation is an ordinary journaled grain
+//! member, already routing — issues the entity command. One JSON request per
+//! line, one JSON reply. Every operation is an ordinary journaled entity
 //! command (machine §3); this socket adds no state, no authority, and no
 //! durability of its own, so it stays a transport detail rather than a second
 //! control plane. It binds loopback because it carries no authentication: the
@@ -21,13 +21,13 @@
 
 use std::time::Duration;
 
-use granary::Granary;
-use machine_grain::AddKey;
-use machine_grain::MachineError;
-use machine_grain::Provision;
-use machine_grain::RevokeKey;
-use machine_grain::Status;
-use machine_grain::StatusReply;
+use entity::Entities;
+use machine_entity::AddKey;
+use machine_entity::MachineError;
+use machine_entity::Provision;
+use machine_entity::RevokeKey;
+use machine_entity::Status;
+use machine_entity::StatusReply;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncBufReadExt;
@@ -36,8 +36,8 @@ use tokio::io::BufReader;
 
 use crate::authority::NodeMachine;
 
-/// How long an admin-issued grain command waits. Provisioning imports the base
-/// image whole (grain §7.15), so it gets the long end.
+/// How long an admin-issued entity command waits. Provisioning imports the base
+/// image whole (entity §7.15), so it gets the long end.
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -78,7 +78,7 @@ pub enum AdminReply {
 }
 
 /// Serve admin requests until the process ends. One connection, one request.
-pub async fn serve(listener: tokio::net::TcpListener, machines: Granary<NodeMachine>) {
+pub async fn serve(listener: tokio::net::TcpListener, machines: Entities<NodeMachine>) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             continue;
@@ -92,7 +92,7 @@ pub async fn serve(listener: tokio::net::TcpListener, machines: Granary<NodeMach
 
 async fn handle(
     stream: tokio::net::TcpStream,
-    machines: Granary<NodeMachine>,
+    machines: Entities<NodeMachine>,
 ) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut line = String::new();
@@ -108,7 +108,7 @@ async fn handle(
     write.flush().await
 }
 
-async fn dispatch(request: AdminRequest, machines: &Granary<NodeMachine>) -> AdminReply {
+async fn dispatch(request: AdminRequest, machines: &Entities<NodeMachine>) -> AdminReply {
     match request {
         AdminRequest::Provision {
             machine,
@@ -121,7 +121,7 @@ async fn dispatch(request: AdminRequest, machines: &Granary<NodeMachine>) -> Adm
             authorized_keys,
         } => {
             let outcome = machines
-                .grain(machine)
+                .entity(machine)
                 .ask_timeout(
                     Provision {
                         owner,
@@ -144,7 +144,7 @@ async fn dispatch(request: AdminRequest, machines: &Granary<NodeMachine>) -> Adm
         }
         AdminRequest::Status { machine } => {
             match machines
-                .grain(machine)
+                .entity(machine)
                 .ask_timeout(Status, ADMIN_TIMEOUT)
                 .await
             {
@@ -158,7 +158,7 @@ async fn dispatch(request: AdminRequest, machines: &Granary<NodeMachine>) -> Adm
             key,
         } => reply_of(
             machines
-                .grain(machine)
+                .entity(machine)
                 .ask_timeout(AddKey { fingerprint, key }, ADMIN_TIMEOUT)
                 .await,
         ),
@@ -167,7 +167,7 @@ async fn dispatch(request: AdminRequest, machines: &Granary<NodeMachine>) -> Adm
             fingerprint,
         } => reply_of(
             machines
-                .grain(machine)
+                .entity(machine)
                 .ask_timeout(RevokeKey { fingerprint }, ADMIN_TIMEOUT)
                 .await,
         ),

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use granary::GrainName;
+use entity::EntityName;
 use russh::Channel;
 use russh::ChannelId;
 use russh::Sig;
@@ -38,7 +38,7 @@ use crate::MachineAuthority;
 /// runs to connection close.
 pub async fn serve_connection<A, B, S>(
     stream: S,
-    machine: GrainName,
+    machine: EntityName,
     authority: Arc<A>,
     backend: Arc<B>,
 ) -> Result<(), FrontDoorError>
@@ -92,7 +92,7 @@ struct PtyParams {
 }
 
 struct FrontDoorHandler<A, B> {
-    machine: GrainName,
+    machine: EntityName,
     authority: Arc<A>,
     backend: Arc<B>,
     attachment: Arc<std::sync::Mutex<Option<u64>>>,

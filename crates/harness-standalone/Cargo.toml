@@ -1,6 +1,6 @@
 [package]
 name = "harness-standalone"
-description = "A standalone multi-process deployment of the agentic harness: TCP nodes (silos) hosting grains over a shared file journal and the Anthropic model"
+description = "A standalone multi-process deployment of the agentic harness: TCP nodes (silos) hosting entities over a shared file journal and the Anthropic model"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ rust-version.workspace = true
 actor-core.workspace = true
 actor-cluster.workspace = true
 actor-runtime.workspace = true
-granary.workspace = true
+entity.workspace = true
 tenancy.workspace = true
 harness.workspace = true
 harness-anthropic.workspace = true

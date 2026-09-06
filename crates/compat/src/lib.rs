@@ -101,7 +101,7 @@ impl fmt::Display for Accepted {
 ///
 /// ```
 /// use compat::Window;
-/// const SNAPSHOT: Window = Window::new("granary.snapshot", 1, 1, 1);
+/// const SNAPSHOT: Window = Window::new("entity.snapshot", 1, 1, 1);
 /// ```
 ///
 /// `writes` is a single revision, not a range, because a build that could write
@@ -122,7 +122,7 @@ impl Window {
     /// what it writes must not link.
     ///
     /// `boundary` is a stable, dotted name for the format (`"actor.wire"`,
-    /// `"granary.record"`).
+    /// `"entity.record"`).
     pub const fn new(boundary: &'static str, lo: u16, hi: u16, writes: u16) -> Window {
         assert!(lo <= writes, "a window must accept the revision it writes");
         assert!(writes <= hi, "a window must accept the revision it writes");

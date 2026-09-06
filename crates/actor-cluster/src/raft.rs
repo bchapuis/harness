@@ -16,7 +16,7 @@
 //! ([`EntryPayload::App`]), and [`MultiRaft`] runs O(groups) independent groups
 //! keyed by [`GroupId`], each with its own log, leadership, and term sequence.
 //! The membership control plane is one well-known group ([`GroupId::CONTROL`]);
-//! granary's per-shard journals are additional groups.
+//! entity's per-shard journals are additional groups.
 //!
 //! Determinism: timers come from `Clock`, election jitter from `Entropy`, and
 //! consensus traffic rides the ordinary `Transport` as frames (spec §9.4.3
@@ -65,7 +65,7 @@ impl std::fmt::Display for GroupId {
 /// applies them itself (a term-opening no-op, and single-server configuration
 /// changes, spec §9.4.3 item 2) and never hands them to the caller. `App`
 /// carries the opaque application command — the membership control plane encodes
-/// a `MembershipCommand`, a granary shard encodes its grain-journal record — and
+/// a `MembershipCommand`, an entity shard encodes its entity-journal record — and
 /// only `App` entries drain to the caller on commit.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum EntryPayload {
@@ -317,7 +317,7 @@ impl RaftConfig {
 
 /// The node's consensus engine (spec §9.4.3): a registry of [`RaftGroup`]s keyed
 /// by [`GroupId`]. Every leader-mode node runs one, hosting the control group
-/// and (for granary, later) a group per shard it replicates. All groups share
+/// and (for entity, later) a group per shard it replicates. All groups share
 /// the engine-wide timing and draw election jitter from the one seeded
 /// `Entropy`, so the whole engine simulates deterministically.
 pub(crate) struct MultiRaft {
@@ -333,7 +333,7 @@ pub(crate) struct MultiRaft {
 impl MultiRaft {
     /// Build an empty engine — a group registry with the engine-wide timing and
     /// storage factory, and no groups yet. The caller creates the groups it wants
-    /// (the cluster layer's control group at startup, a granary shard's group on
+    /// (the cluster layer's control group at startup, an entity shard's group on
     /// demand). Election timers arm from the `now` passed to each `create_group`.
     pub(crate) fn new(node: NodeId, config: &RaftConfig) -> MultiRaft {
         MultiRaft {
@@ -385,7 +385,7 @@ impl MultiRaft {
     }
 
     /// Stop running `group`: drop it from the tick map so it no longer elects,
-    /// heartbeats, or commits (spec §7.7, G7 reclamation on a shard merge).
+    /// heartbeats, or commits (spec §7.7, E7 reclamation on a shard merge).
     /// Retiring needs no in-group consensus (see
     /// [`RaftConsensus::remove_group`](crate::RaftConsensus::remove_group)).
     /// Idempotent; a group this node never ran is already gone. Not implemented:
@@ -480,7 +480,7 @@ struct RaftState {
     /// Only voters elect, lead, and count toward a quorum.
     voters: Vec<NodeId>,
     /// Non-voting **learners**: group members the leader replicates to, but which
-    /// never elect, lead, or count toward a quorum (spec §7.1, the granary shards'
+    /// never elect, lead, or count toward a quorum (spec §7.1, the entity shards'
     /// extra replicas beyond the voter quorum). Kept sorted and disjoint from
     /// `voters`. A learner adopts the leader on append, so it can route and serve
     /// reads.
@@ -737,9 +737,9 @@ impl RaftGroup {
         self.lock().role == Role::Leader
     }
 
-    /// This group's current Raft term. A layer above (granary's per-shard
+    /// This group's current Raft term. A layer above (entity's per-shard
     /// leader-election group, §8) uses it as the single-writer fencing token every
-    /// per-grain append carries: one leader per term, monotonic across the quorum.
+    /// per-entity append carries: one leader per term, monotonic across the quorum.
     pub(crate) fn term(&self) -> u64 {
         self.lock().term
     }
@@ -2189,7 +2189,7 @@ mod tests {
     }
 
     /// A non-voting learner replicates the committed log just like a voter, but
-    /// never elects or leads and never counts toward the quorum (granary's storage
+    /// never elects or leads and never counts toward the quorum (entity's storage
     /// replicas beyond the voter quorum, spec §7.1).
     #[test]
     fn a_learner_replicates_committed_state_but_never_leads() {

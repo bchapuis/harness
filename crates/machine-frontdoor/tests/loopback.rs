@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use granary::GrainName;
+use entity::EntityName;
 use machine_frontdoor::ChannelBackend;
 use machine_frontdoor::ChannelKind;
 use machine_frontdoor::Duplex;
@@ -60,11 +60,11 @@ struct FakeAuthority {
 }
 
 impl MachineAuthority for FakeAuthority {
-    async fn host_key(&self, _machine: &GrainName) -> Result<PrivateKey, FrontDoorError> {
+    async fn host_key(&self, _machine: &EntityName) -> Result<PrivateKey, FrontDoorError> {
         Ok(self.host_key.clone())
     }
 
-    async fn authorizes(&self, _machine: &GrainName, key: &PublicKey) -> bool {
+    async fn authorizes(&self, _machine: &EntityName, key: &PublicKey) -> bool {
         // Compare key material, not the whole `PublicKey` — the wire key
         // carries no comment, so a `==` including the comment would never
         // match. A real authority compares fingerprints against the journaled
@@ -72,13 +72,13 @@ impl MachineAuthority for FakeAuthority {
         key.key_data() == self.authorized.key_data()
     }
 
-    async fn attach(&self, _machine: &GrainName, principal: &str) -> Result<u64, FrontDoorError> {
+    async fn attach(&self, _machine: &EntityName, principal: &str) -> Result<u64, FrontDoorError> {
         let mut attaches = self.attaches.lock().unwrap();
         attaches.push(principal.to_string());
         Ok(attaches.len() as u64)
     }
 
-    async fn detach(&self, _machine: &GrainName, attachment: u64) {
+    async fn detach(&self, _machine: &EntityName, attachment: u64) {
         self.detaches.lock().unwrap().push(attachment);
     }
 }
@@ -91,7 +91,7 @@ struct FakeBackend;
 impl ChannelBackend for FakeBackend {
     async fn open(
         &self,
-        _machine: &GrainName,
+        _machine: &EntityName,
         kind: ChannelKind,
     ) -> std::io::Result<Box<dyn Duplex>> {
         let (front, agent) = tokio::io::duplex(64 * 1024);
@@ -108,7 +108,7 @@ struct DeadBackend;
 impl ChannelBackend for DeadBackend {
     async fn open(
         &self,
-        _machine: &GrainName,
+        _machine: &EntityName,
         _kind: ChannelKind,
     ) -> std::io::Result<Box<dyn Duplex>> {
         let (front, agent) = tokio::io::duplex(64 * 1024);
@@ -125,7 +125,7 @@ async fn fake_agent(mut agent: tokio::io::DuplexStream, kind: ChannelKind) {
         }
         ChannelKind::Sftp => "sftp\n".to_string(),
         // The front door never opens workspace-sync channels (they are the
-        // machine grain's own, machine §4); an empty reply keeps the fake
+        // machine entity's own, machine §4); an empty reply keeps the fake
         // total.
         ChannelKind::Sync | ChannelKind::WsPush | ChannelKind::WsPull => String::new(),
     };
@@ -213,7 +213,7 @@ async fn run_client(
 #[tokio::test]
 async fn an_authorized_key_attaches_and_bridges_an_exec_channel() {
     let authority = authority();
-    let machine = GrainName::new("machine", "dev-box");
+    let machine = EntityName::new("machine", "dev-box");
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
 
     let server = tokio::spawn(serve_connection(
@@ -263,7 +263,7 @@ async fn an_authorized_key_attaches_and_bridges_an_exec_channel() {
 #[tokio::test]
 async fn a_guest_that_dies_without_a_status_closes_the_channel() {
     let authority = authority();
-    let machine = GrainName::new("machine", "dev-box");
+    let machine = EntityName::new("machine", "dev-box");
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
 
     let server = tokio::spawn(serve_connection(
@@ -296,7 +296,7 @@ async fn a_guest_that_dies_without_a_status_closes_the_channel() {
 #[tokio::test]
 async fn an_unauthorized_key_is_rejected() {
     let authority = authority();
-    let machine = GrainName::new("machine", "dev-box");
+    let machine = EntityName::new("machine", "dev-box");
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
 
     let server = tokio::spawn(serve_connection(

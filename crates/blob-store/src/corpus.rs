@@ -7,7 +7,7 @@
 //! The corpus matters more here than the size of the format suggests, because this
 //! crate has no in-tree consumer: nothing else in the workspace depends on it, so a
 //! format break has nothing downstream to fail. Every other boundary in the tree
-//! would eventually surface a mistake as a grain that would not activate or a node
+//! would eventually surface a mistake as an entity that would not activate or a node
 //! that could not rejoin. Here the fixture is the only thing that would notice.
 //!
 //! **The files are evidence, not output.** A fixture for a revision that has

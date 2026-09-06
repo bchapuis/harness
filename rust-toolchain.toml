@@ -3,8 +3,8 @@
 # Pinned rather than floating because two of this tree's conformance tests
 # compare against rustc's own output, and rustc rewords its diagnostics between
 # releases. `trybuild` snapshots (`actor-core/tests/compile_fail/`,
-# `granary/tests/compile_fail/`) are the whole stderr, byte for byte: they are how
-# invariant #20 and G10 — "an invalid send does not compile" — are verified at
+# `entity/tests/compile_fail/`) are the whole stderr, byte for byte: they are how
+# invariant #20 and E10 — "an invalid send does not compile" — are verified at
 # all, since no runtime test can express a property about type-checking.
 #
 # Floating on `stable` made those snapshots fail for whoever's rustc differed
@@ -14,7 +14,7 @@
 # Pinning removes the divergence instead of documenting it.
 #
 # To move the toolchain: bump `channel` here, run
-# `TRYBUILD=overwrite cargo test -p actor-core -p granary --test conformance_compile_fail --test compile_fail`,
+# `TRYBUILD=overwrite cargo test -p actor-core -p entity --test conformance_compile_fail --test compile_fail`,
 # and commit the re-blessed snapshots in the same change. Doing it in one commit
 # is what keeps the snapshots meaningful — they only prove anything while they
 # match the compiler that produced them.

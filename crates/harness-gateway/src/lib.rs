@@ -4,13 +4,13 @@
 //! It is the public multi-tenant edge (design: `docs/multi-tenant-edge.md`).
 //! A caller presents a bearer token; the gateway verifies it to a [`PrincipalId`]
 //! (it **terminates** tenant auth), scopes the caller's session key under that
-//! principal, and drives the session by addressing its grain **directly** — no
+//! principal, and drives the session by addressing its entity **directly** — no
 //! control protocol, no per-node listener, no forwarding hop.
 //!
 //! The gateway joins the actor transport as a non-voting, routing-only **member**
 //! (`Harness::client(system, roster)` /
-//! [`granary_client`](granary::GranaryExt::granary_client)): a full local actor
-//! system that hosts no grains but is still a member — it holds `GrainRef`s
+//! [`entities_client`](entity::EntityExt::entities_client)): a full local actor
+//! system that hosts no entities but is still a member — it holds `EntityRef`s
 //! discovered through the receptionist gossip, routes `ask`/`subscribe` to the
 //! shard leader, and spawns the ephemeral reply mailbox the host calls back. It is
 //! therefore **inside** the cluster's trust boundary (it holds the cluster secret
@@ -31,10 +31,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use granary::Grain;
-use granary::GrainName;
-use granary::Granary;
-use granary::GranaryExt;
+use entity::Entity;
+use entity::EntityName;
+use entity::Entities;
+use entity::EntityExt;
 use harness::Harness;
 use harness::HarnessSystem;
 use harness::SessionId;
@@ -75,7 +75,7 @@ impl Default for Limits {
 /// signal so `/readyz` deregisters the pod from a load balancer before the drain.
 pub struct Gateway<S: HarnessSystem> {
     harness: Harness<S>,
-    directory: Granary<Directory<S>>,
+    directory: Entities<Directory<S>>,
     tokens: RwLock<Arc<dyn TokenVerifier>>,
     limits: Limits,
     ready: AtomicBool,
@@ -83,11 +83,11 @@ pub struct Gateway<S: HarnessSystem> {
 
 impl<S: HarnessSystem> Gateway<S> {
     /// Build the shared state from an already-connected client harness and
-    /// directory granary. Split out of [`connect`] so a test can drive the router
+    /// directory entity. Split out of [`connect`] so a test can drive the router
     /// over a single in-process system without the discovery poll.
     pub fn new(
         harness: Harness<S>,
-        directory: Granary<Directory<S>>,
+        directory: Entities<Directory<S>>,
         tokens: Arc<dyn TokenVerifier>,
         limits: Limits,
     ) -> Arc<Gateway<S>> {
@@ -132,12 +132,12 @@ impl<S: HarnessSystem> Gateway<S> {
         self.ready.store(ready, Ordering::Relaxed);
     }
 
-    /// The client handle to the tenancy ownership index (one grain per principal).
-    pub fn directory(&self) -> &Granary<Directory<S>> {
+    /// The client handle to the tenancy ownership index (one entity per principal).
+    pub fn directory(&self) -> &Entities<Directory<S>> {
         &self.directory
     }
 
-    /// The session grain for `(principal, kind, session)`: the caller's session key
+    /// The session entity for `(principal, kind, session)`: the caller's session key
     /// scoped under its principal for tenant isolation, resolved to a routing
     /// `SessionRef`. The principal-scoping of a session name is the gateway's
     /// secret — a handler addresses a session by the tenant-facing triple and never
@@ -157,15 +157,15 @@ impl<S: HarnessSystem> Gateway<S> {
     /// Record the tenant's ownership of a session in the directory index, keyed by
     /// the principal. Best-effort and idempotent: re-recorded on every prompt, so a
     /// transient index failure self-heals next turn; the run proceeds regardless, so
-    /// the failure is logged, not returned. Owns the directory entry's `GrainName`
+    /// the failure is logged, not returned. Owns the directory entry's `EntityName`
     /// shape — `(kind, scoped session)` — so no handler re-derives it.
     pub async fn record_ownership(&self, principal: &PrincipalId, kind: &str, session: &str) {
         let scoped = scoped_session(principal, session);
         let recorded = self
             .directory
-            .grain(principal.as_str())
+            .entity(principal.as_str())
             .ask(tenancy::Record {
-                name: GrainName::new(kind.to_string(), scoped.clone()),
+                name: EntityName::new(kind.to_string(), scoped.clone()),
                 meta: tenancy::Meta {
                     label: Some(session.to_string()),
                     ..tenancy::Meta::default()
@@ -181,7 +181,7 @@ impl<S: HarnessSystem> Gateway<S> {
 /// Join the cluster as a client and build the [`Gateway`]: poll until both the
 /// kinds' and the directory's host gateways have gossiped into this client's
 /// receptionist, then assemble the shared state. `directory_shards` MUST match the
-/// nodes' `Directory` shards (the granary default). Errors if discovery does not
+/// nodes' `Directory` shards (the entity default). Errors if discovery does not
 /// complete within `timeout`.
 pub async fn connect<S: HarnessSystem>(
     system: S,
@@ -191,11 +191,11 @@ pub async fn connect<S: HarnessSystem>(
     limits: Limits,
     timeout: Duration,
 ) -> Result<Arc<Gateway<S>>, String> {
-    let directory_type = <Directory<S> as Grain>::GRAIN_TYPE;
+    let directory_type = <Directory<S> as Entity>::ENTITY_TYPE;
     let deadline = system.now() + timeout;
     loop {
         let harness = Harness::client(system.clone(), roster);
-        let directory = system.granary_client::<Directory<S>>(directory_type, directory_shards);
+        let directory = system.entities_client::<Directory<S>>(directory_type, directory_shards);
         if let (Some(harness), Some(directory)) = (harness, directory) {
             return Ok(Gateway::new(harness, directory, tokens, limits));
         }

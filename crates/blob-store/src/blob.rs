@@ -103,7 +103,7 @@ impl fmt::Debug for Namespace {
 
 /// A failure to store, fetch, or reclaim a blob (spec §3, Appendix A).
 ///
-/// Like the grain error model (granary §12), this carries only the failures of
+/// Like the entity error model (entity §12), this carries only the failures of
 /// *reaching and committing*, kept distinct from a blob's bytes: a `get` either
 /// returns verified bytes or one of these, never wrong bytes (B1).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,7 +137,7 @@ impl std::error::Error for BlobError {}
 ///
 /// `W` and `R` are independent durability and availability knobs, not a
 /// correctness constraint: with immutable content there is no write-quorum ∩
-/// read-quorum requirement (spec §5.2, contrast granary §8). The `Local` tier
+/// read-quorum requirement (spec §5.2, contrast entity §8). The `Local` tier
 /// ignores the replication knobs (one node, one durable copy).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlobConfig {
@@ -185,13 +185,13 @@ pub(crate) fn slice(bytes: Vec<u8>, range: Option<Range<u64>>) -> Vec<u8> {
 
 /// A content-addressed store for immutable blobs, scoped by namespace (spec §3).
 ///
-/// The simulation and deployment seam, like `GrainJournal`, `Transport`, and
-/// `Clock` (granary §7.3, actor §4.6): the [`Local`](crate) and `Clustered` tiers
+/// The simulation and deployment seam, like `EntityJournal`, `Transport`, and
+/// `Clock` (entity §7.3, actor §4.6): the [`Local`](crate) and `Clustered` tiers
 /// satisfy the contract identically. The trait is codec-agnostic — it moves raw
 /// bytes, and the [`BlobId`] is computed from those bytes, so no serialization
 /// format leaks across the seam.
 ///
-/// `Clone` (like `GrainJournal`) so the object-safe [`DynBlobStore`] mirror can
+/// `Clone` (like `EntityJournal`) so the object-safe [`DynBlobStore`] mirror can
 /// adapt any implementation into `'static` boxed futures; tiers wrap an
 /// `Arc<Inner>`, so cloning is cheap.
 pub trait BlobStore: Clone + Send + Sync + 'static {
@@ -260,7 +260,7 @@ type BoxFuture<T> = actor_core::BoxFuture<'static, T>;
 /// The object-safe form of [`BlobStore`], so a consumer can hold a store as
 /// `Arc<dyn DynBlobStore>` and **select the durability tier at construction**
 /// without threading a tier type parameter through its own code (as
-/// `DynGrainJournal` does, granary §7.3).
+/// `DynEntityJournal` does, entity §7.3).
 ///
 /// [`BlobStore`]'s `impl Future` returns are not object-safe; this mirror boxes
 /// them ([`BoxFuture`](actor_core::BoxFuture)). The blanket impl below clones the

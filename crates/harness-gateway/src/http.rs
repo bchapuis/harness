@@ -1,4 +1,4 @@
-//! The HTTP surface: a thin REST mapping onto the session grain, with SSE for the
+//! The HTTP surface: a thin REST mapping onto the session entity, with SSE for the
 //! live record stream.
 //!
 //! Every request authenticates by `Authorization: Bearer <token>` (the gateway
@@ -10,10 +10,10 @@
 //! `records` returns the journal's `base` beside the page, and a stream whose
 //! cursor the compactor overtakes emits `truncated` before resuming.
 //!
-//! There is no control protocol underneath: the handler holds a `GrainRef` and
-//! calls the grain directly ([`SessionRef::prompt_within`], [`SessionRef::tail`],
+//! There is no control protocol underneath: the handler holds a `EntityRef` and
+//! calls the entity directly ([`SessionRef::prompt_within`], [`SessionRef::tail`],
 //! [`SessionRef::follow`]), and records tenancy ownership through the client
-//! `Granary<Directory>`.
+//! `Entities<Directory>`.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -45,7 +45,7 @@ use tokio::task::JoinHandle;
 
 use harness::Followed;
 use harness::Follower;
-use harness::GrainError;
+use harness::EntityError;
 use harness::HarnessSystem;
 use harness::Record;
 use harness::RecordBody;
@@ -264,8 +264,8 @@ async fn list_sessions<S: HarnessSystem>(
     let principal = principal(&gw, &headers)?;
     let entries = gw
         .directory()
-        .grain(principal.as_str())
-        .ask(tenancy::ListByType { grain_type: q.kind })
+        .entity(principal.as_str())
+        .ask(tenancy::ListByType { entity_type: q.kind })
         .await?;
     let sessions: Vec<_> = entries
         .into_iter()
@@ -301,7 +301,7 @@ fn prompt_stream<S: HarnessSystem>(
     let follower = session_ref.follow(Seq::new(from));
     let turn = body.turn.clone();
     let prompt_ref = session_ref.clone();
-    let prompt: JoinHandle<Result<RunOutcome, GrainError>> = tokio::spawn(async move {
+    let prompt: JoinHandle<Result<RunOutcome, EntityError>> = tokio::spawn(async move {
         let turn = Turn::new(TurnId::new(body.turn), body.content);
         prompt_ref
             .prompt_within(turn, Duration::from_secs(body.within_secs))
@@ -332,7 +332,7 @@ fn sse_response<S: HarnessSystem>(follower: Follower<S>, turn: String, tail: Tai
 /// shared by both endpoints.
 enum Tail {
     End,
-    Outcome(JoinHandle<Result<RunOutcome, GrainError>>),
+    Outcome(JoinHandle<Result<RunOutcome, EntityError>>),
 }
 
 /// A server-sent-event stream over a session's records: forward record batches off a

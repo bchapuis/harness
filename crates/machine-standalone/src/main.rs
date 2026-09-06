@@ -10,10 +10,10 @@
 //! machine-standalone key    dev-box --admin 127.0.0.1:7701 --add ~/.ssh/other.pub
 //! ```
 //!
-//! `node` hosts machine grains and opens SSH front doors. The rest are
+//! `node` hosts machine entities and opens SSH front doors. The rest are
 //! one-shot commands issued through a node's admin socket (see [`admin`] for
 //! why they are not cluster members themselves); each becomes an ordinary
-//! journaled grain command, because provisioning and access policy *are*
+//! journaled entity command, because provisioning and access policy *are*
 //! journal events (machine §3), not an administrative side channel.
 
 mod admin;
@@ -30,7 +30,7 @@ use crate::node::MachineKind;
 use crate::node::NodeOptions;
 
 const USAGE: &str = "\
-machine-standalone — persistent lightweight VMs as grains (machine spec)
+machine-standalone — persistent lightweight VMs as entities (machine spec)
 
   node    --id <n> --machine <firecracker|docker|fake> [--nodes 3] [--data DIR]
           [--fc-binary PATH] [--fc-kernel PATH]
@@ -249,7 +249,7 @@ async fn run_status(args: &[String]) -> Result<(), String> {
             .map(|d| d.to_string())
             .unwrap_or_else(|| "-".to_string())
     );
-    // The capture cadence is the durability grain (machine §4, M3): the last
+    // The capture cadence is the durability entity (machine §4, M3): the last
     // capture is the point a crash rewinds to.
     println!("captures       {}", status.captures);
     println!(

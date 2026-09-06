@@ -1,6 +1,6 @@
 [package]
 name = "machine-standalone"
-description = "A standalone multi-process deployment of persistent machines (machine spec): TCP nodes hosting machine grains over a shared file journal, each with an in-process SSH front door."
+description = "A standalone multi-process deployment of persistent machines (machine spec): TCP nodes hosting machine entities over a shared file journal, each with an in-process SSH front door."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,20 +16,20 @@ default = ["host"]
 # selected by flag rather than by target, so one build serves a Linux host with
 # KVM, a Linux host without, and macOS. Without this feature only
 # `--machine fake` remains.
-host = ["machine-grain/host"]
+host = ["machine-entity/host"]
 # Policy-bound egress (machine §5.2, M6): the per-machine tap and node NAT.
 # Linux with CAP_NET_ADMIN; without it a machine boots with no NIC.
-net = ["machine-grain/net"]
+net = ["machine-entity/net"]
 
 [dependencies]
 actor-core.workspace = true
 actor-cluster.workspace = true
 actor-runtime.workspace = true
-granary.workspace = true
+entity.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 machine-host.workspace = true
-machine-grain.workspace = true
+machine-entity.workspace = true
 machine-frontdoor.workspace = true
 russh.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "signal"] }

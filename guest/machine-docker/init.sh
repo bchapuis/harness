@@ -1,7 +1,7 @@
 #!/bin/sh
 # The container mechanism's init (`machine_host::container`, machine spec §2.1):
 # give a container the machine's *own* rootfs, so the guest's writes land in the
-# disk facet's image (grain §7.15) exactly as they do under Firecracker.
+# disk facet's image (entity §7.15) exactly as they do under Firecracker.
 #
 # The container's own image is scaffolding the user never sees. What they get a
 # shell in is /machine/disk.img — the disk facet's materialization, bind-mounted

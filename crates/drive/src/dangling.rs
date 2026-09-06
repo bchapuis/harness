@@ -39,7 +39,7 @@ use crate::Pending;
 ///
 /// The drive settles each as `Err(EffectError::Interrupted)` without launching
 /// anything. It does not settle them inline: the first drive cannot commit
-/// (granary journals only through the per-command protocol, granary §6), so each
+/// (entity journals only through the per-command protocol, entity §6), so each
 /// resolution rides the mailbox as a synthesized `Settled` and commits as an
 /// ordinary command (§3.2).
 pub(crate) fn interrupted<K: Clone + Ord, E>(desired: &[Pending<K, E>]) -> BTreeSet<K> {
@@ -59,7 +59,7 @@ pub(crate) fn interrupted<K: Clone + Ord, E>(desired: &[Pending<K, E>]) -> BTree
 /// relaunch and never let rest.
 ///
 /// `AssertUnwindSafe` is the honest annotation here: the future owns everything
-/// it touches (it is `'static` and holds no borrow of the grain, §4.1), and what
+/// it touches (it is `'static` and holds no borrow of the entity, §4.1), and what
 /// it might leave inconsistent on a panic is discarded with it.
 pub(crate) async fn catch<T, F>(fut: F) -> Result<T, String>
 where

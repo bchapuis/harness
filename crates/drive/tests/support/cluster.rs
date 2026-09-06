@@ -2,7 +2,7 @@
 //! are shard-leader moves: a crash between a launch and its settled record
 //! (§4.4), a migration under an effect in flight (§6), and the fault swarm.
 //!
-//! Mirrors granary's `clustered_grains.rs` harness: SWIM plus a self-hosted Raft
+//! Mirrors entity's `clustered_entities.rs` harness: SWIM plus a self-hosted Raft
 //! control plane, two shards so names distribute across leader-election groups,
 //! and a long idle window so nothing hibernates mid-scenario unless a test asks.
 
@@ -23,10 +23,10 @@ use actor_simulation::Recorder;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
-use granary::GrainHandler;
-use granary::Granary;
-use granary::GranaryConfig;
-use granary::GranaryExt;
+use entity::EntityHandler;
+use entity::Entities;
+use entity::EntityConfig;
+use entity::EntityExt;
 
 use super::FANOUT_TYPE;
 use super::Fanout;
@@ -60,20 +60,20 @@ pub fn raft() -> RaftConfig {
 /// Two shards, no idle hibernation within a scenario, and no snapshots: every
 /// rehydration replays the journal, and `conformance_resume.rs`'s offline fold
 /// reads every record through the public read path, which a snapshot would
-/// truncate beneath it (granary §9).
-pub fn config() -> GranaryConfig {
-    GranaryConfig {
+/// truncate beneath it (entity §9).
+pub fn config() -> EntityConfig {
+    EntityConfig {
         shards: 2,
         idle_after: Duration::from_secs(600),
         snapshot_every: 0,
-        ..GranaryConfig::default()
+        ..EntityConfig::default()
     }
 }
 
 /// Host `Fanout` on `node` under `config`, every activation sharing `seam`.
-pub fn host_with(node: &SimNode, seam: &Seam, config: GranaryConfig) -> Granary<Fanout<SimNode>> {
+pub fn host_with(node: &SimNode, seam: &Seam, config: EntityConfig) -> Entities<Fanout<SimNode>> {
     let seam = seam.clone();
-    node.granary_named::<Fanout<SimNode>>(
+    node.entities_named::<Fanout<SimNode>>(
         FANOUT_TYPE,
         config,
         Arc::new(move || Fanout::new(seam.clone())),
@@ -81,12 +81,12 @@ pub fn host_with(node: &SimNode, seam: &Seam, config: GranaryConfig) -> Granary<
 }
 
 /// Host `Fanout` on `node` under the scenario config.
-pub fn host(node: &SimNode, seam: &Seam) -> Granary<Fanout<SimNode>> {
+pub fn host(node: &SimNode, seam: &Seam) -> Entities<Fanout<SimNode>> {
     host_with(node, seam, config())
 }
 
 /// A cluster the suites drive: the network (for faults), its nodes, and one
-/// `Granary` handle per node, with every node's events on the recorder.
+/// `Entities` handle per node, with every node's events on the recorder.
 ///
 /// The first node is the anchor: every call is issued through its handle and it
 /// is never restarted — the rule the swarm runner applies to its own nemesis
@@ -95,7 +95,7 @@ pub fn host(node: &SimNode, seam: &Seam) -> Granary<Fanout<SimNode>> {
 pub struct Cluster {
     pub net: SimNetwork,
     pub nodes: Vec<SimNode>,
-    pub granaries: Vec<Granary<Fanout<SimNode>>>,
+    pub hosts: Vec<Entities<Fanout<SimNode>>>,
 }
 
 /// Bring up the three nodes, elect the control-plane leader and each shard's
@@ -107,19 +107,19 @@ pub fn cluster(sim: &Simulation, recorder: &Recorder, seam: &Seam) -> Cluster {
         .with_events(sink);
     let nodes = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
-    let granaries: Vec<_> = nodes.iter().map(|n| host(n, seam)).collect();
+    let hosts: Vec<_> = nodes.iter().map(|n| host(n, seam)).collect();
     sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
     Cluster {
         net,
         nodes,
-        granaries,
+        hosts,
     }
 }
 
 impl Cluster {
     /// The anchor's handle: the first node, which no scenario restarts.
-    pub fn anchor(&self) -> &Granary<Fanout<SimNode>> {
-        &self.granaries[0]
+    pub fn anchor(&self) -> &Entities<Fanout<SimNode>> {
+        &self.hosts[0]
     }
 
     /// The node currently leading `key`'s shard.
@@ -129,7 +129,7 @@ impl Cluster {
             .expect("the shard elected a leader")
     }
 
-    /// A grain key under `prefix` whose shard is led by a node other than the
+    /// An entity key under `prefix` whose shard is led by a node other than the
     /// anchor, so its leader can be crashed while the anchor keeps routing.
     pub fn key_led_elsewhere(&self, prefix: &str) -> String {
         (0..32)
@@ -150,14 +150,14 @@ impl Cluster {
             .position(|n| n.node() == leader)
             .expect("the leader is one of ours");
         let fresh = self.net.restart(leader);
-        self.granaries[index] = host(&fresh, seam);
+        self.hosts[index] = host(&fresh, seam);
         self.nodes[index] = fresh;
         leader
     }
 
-    /// Ask `key`'s grain through the anchor, retrying across the window in which
+    /// Ask `key`'s entity through the anchor, retrying across the window in which
     /// a restarted node's gateway is still coming up and a stale redirect names a
-    /// leader that is gone (granary §5.4).
+    /// leader that is gone (entity §5.4).
     ///
     /// Every attempt costs the same four seconds of virtual time whether it
     /// replies at once or is refused: the scenarios' crash points are tuned
@@ -168,20 +168,20 @@ impl Cluster {
     /// it they were written for.
     ///
     /// Retrying a write after an ambiguous failure may commit it twice, which is
-    /// why `Fanout::apply` folds a repeated `Requested` idempotently (granary
+    /// why `Fanout::apply` folds a repeated `Requested` idempotently (entity
     /// §2.2): the fixture is safe to re-ask by construction, not by luck.
     pub fn ask<M>(&self, sim: &Simulation, key: &str, msg: M) -> M::Reply
     where
         M: Message + Clone + Send + 'static,
         M::Reply: Send + 'static,
-        Fanout<SimNode>: GrainHandler<M>,
+        Fanout<SimNode>: EntityHandler<M>,
     {
         let mut last = None;
         for _ in 0..10 {
-            let grain = self.anchor().grain(key);
+            let entity = self.anchor().entity(key);
             let msg = msg.clone();
             let reply = drive(sim, Duration::from_secs(4), async move {
-                grain.ask_timeout(msg, Duration::from_secs(3)).await
+                entity.ask_timeout(msg, Duration::from_secs(3)).await
             });
             match reply {
                 Ok(reply) => return reply,
@@ -189,7 +189,7 @@ impl Cluster {
             }
             sim.run_for(Duration::from_secs(1));
         }
-        panic!("the grain {key} refused every attempt: {last:?}");
+        panic!("the entity {key} refused every attempt: {last:?}");
     }
 }
 

@@ -1,9 +1,9 @@
 //! The `Settled` command (drive spec §4.2): an effect's outcome, back on the
-//! grain's serial command path.
+//! entity's serial command path.
 //!
 //! An effect's outcome returns to the activation as an ordinary command,
-//! delivered through the grain's mailbox like any other and therefore ordered
-//! against every other command by the input gate (granary §6). The drive holds
+//! delivered through the entity's mailbox like any other and therefore ordered
+//! against every other command by the input gate (entity §6). The drive holds
 //! the manifest and the handler body ([`Drive::settled`](crate::Drive::settled));
 //! the consumer sees only [`Driven::settle`].
 //!
@@ -13,9 +13,9 @@
 //! not on the message (§7.1).
 //!
 //! Like the drive's [`Nudge`](crate::Nudge), this is a **local-only** self-tell.
-//! A consumer MUST NOT `accept` it in its `GrainRegistry`: the registry is the
-//! deserialization allowlist for *network* commands (granary §5.5), and nothing
-//! outside the grain has any business injecting an effect outcome.
+//! A consumer MUST NOT `accept` it in its `EntityRegistry`: the registry is the
+//! deserialization allowlist for *network* commands (entity §5.5), and nothing
+//! outside the entity has any business injecting an effect outcome.
 
 use actor_core::Manifest;
 use actor_core::Message;
@@ -27,7 +27,7 @@ use crate::EffectError;
 
 /// One effect's outcome, self-`tell`ed back onto the command path (spec §4.2).
 ///
-/// Generic over the driven grain so `key` and `outcome` are the consumer's own
+/// Generic over the driven entity so `key` and `outcome` are the consumer's own
 /// types; the `serde` bound is empty because both associated types already carry
 /// [`SerializationRequirement`](actor_serialization::SerializationRequirement)
 /// and `D` itself is never serialized.
@@ -39,8 +39,8 @@ pub struct Settled<D: Driven> {
 }
 
 // Hand-written rather than `#[derive(Clone)]`: deriving would impose a spurious
-// `D: Clone` bound on the grain behavior, which a message never needs. `Clone` is
-// required because `GrainRef::tell` takes it (granary §4.3), not by `Message`.
+// `D: Clone` bound on the entity behavior, which a message never needs. `Clone` is
+// required because `EntityRef::tell` takes it (entity §4.3), not by `Message`.
 impl<D: Driven> Clone for Settled<D> {
     fn clone(&self) -> Self {
         Settled {

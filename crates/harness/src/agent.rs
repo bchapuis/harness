@@ -1,30 +1,30 @@
-//! The agent: an autonomous grain (harness spec §3).
+//! The agent: an autonomous entity (harness spec §3).
 //!
-//! A session *is* a grain ([`granary`]). What the harness adds is **autonomy**:
+//! A session *is* an entity ([`entity`]). What the harness adds is **autonomy**:
 //! an agent's activation drives itself forward — model→tools→model — until a run
-//! reaches a terminal outcome. The grain model is decide/apply: [`Grain::apply`]
-//! folds records into [`SessionState`], and each [`GrainHandler`] is a *pure
-//! decision* returning the records to journal plus a reply (granary §4.2). The
-//! loop rides three granary seams, none of which the harness re-implements:
+//! reaches a terminal outcome. The entity model is decide/apply: [`Entity::apply`]
+//! folds records into [`SessionState`], and each [`EntityHandler`] is a *pure
+//! decision* returning the records to journal plus a reply (entity §4.2). The
+//! loop rides three entity seams, none of which the harness re-implements:
 //!
-//! - **The output gate** (granary §6): a handler's records commit before its
+//! - **The output gate** (entity §6): a handler's records commit before its
 //!   reply releases, so "intent before effect" (§6.4) is free — a handler that
 //!   journals an intent never launches the effect itself.
-//! - **Self-messaging** ([`GrainCtx::this`]) + **`ctx.system().launch`**: the
+//! - **Self-messaging** ([`EntityCtx::this`]) + **`ctx.system().launch`**: the
 //!   loop launches each external operation (a model call, a sandboxed tool, a
 //!   child submit) as a background task that delivers its outcome back as an
 //!   ordinary command ([`ModelDone`]/[`ToolDone`]), and nudges itself forward
 //!   with [`Advance`] once an intent has committed. The activation therefore
 //!   never awaits I/O inside a handler (§3.2).
-//! - **`on_activate`/`on_deactivate`/`can_hibernate`** (granary §10): resume
+//! - **`on_activate`/`on_deactivate`/`can_hibernate`** (entity §10): resume
 //!   set-up, sandbox release on every deactivation (H8), and the veto that keeps
 //!   a live run from hibernating (§7.2).
 //!
 //! Everything else — the journal, the single-writer fence, placement,
-//! activation, hibernation, lossless failover — is the grain's (§2.1). Ephemeral
+//! activation, hibernation, lossless failover — is the entity's (§2.1). Ephemeral
 //! activation state (the sandbox handle, held tiers, the subscriber set, the
-//! launch-once guard — granary's steps facet's [`LaunchGuard`], granary §7.17) lives
-//! behind a [`Mutex`] on the grain behavior, rebuilt per activation and never
+//! launch-once guard — entity's steps facet's [`LaunchGuard`], entity §7.17) lives
+//! behind a [`Mutex`] on the entity behavior, rebuilt per activation and never
 //! journaled (§5.5, §5.6, §7.4).
 
 use std::collections::BTreeMap;
@@ -41,14 +41,14 @@ use actor_core::Message;
 use futures::channel::oneshot;
 use futures::future::Either;
 use futures::future::select;
-use granary::Grain;
-use granary::GrainCtx;
-use granary::GrainError;
-use granary::GrainHandler;
-use granary::GrainRegistry;
-use granary::LaunchGuard;
-use granary::Ws;
-use granary::WsError;
+use entity::Entity;
+use entity::EntityCtx;
+use entity::EntityError;
+use entity::EntityHandler;
+use entity::EntityRegistry;
+use entity::LaunchGuard;
+use entity::Ws;
+use entity::WsError;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -101,15 +101,15 @@ const TRANSPORT_RETRIES: u32 = 32;
 const PROPAGATION_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
 // ===========================================================================
-// Wire contract (§7.3): commands addressed to the grain, and the outbound
-// `RunCompleted` notification. A session is addressed as a grain — its `kind`
-// is the grain type and its `SessionId` the key — so the `GrainName` carries
-// both and the commands omit them (granary §4.3).
+// Wire contract (§7.3): commands addressed to the entity, and the outbound
+// `RunCompleted` notification. A session is addressed as an entity — its `kind`
+// is the entity type and its `SessionId` the key — so the `EntityName` carries
+// both and the commands omit them (entity §4.3).
 // ===========================================================================
 
 /// Submit a turn (§7.3). `kind` rides every call though it binds only on the
 /// first (creation is implicit in the first turn); after that it is a checked
-/// redundancy against the grain's own type, rejected on mismatch (§7.4).
+/// redundancy against the entity's own type, rejected on mismatch (§7.4).
 /// `reply_to` is **transient routing, not part of the turn**: it is not
 /// journaled and is excluded from the content-equality check (§7.4).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -150,13 +150,13 @@ pub enum SubmitStatus {
 }
 
 /// Why a `Submit` was rejected (§7.4): a deterministic caller-contract
-/// violation, kept distinct from a transport `GrainError`. Both cases are
+/// violation, kept distinct from a transport `EntityError`. Both cases are
 /// **permanent** — the same submit always rejects the same way — so a caller
 /// must never retry one, unlike a transport failure, which a peer move could
 /// clear.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubmitReject {
-    /// The submitted `kind` is not this grain's type: the address and the
+    /// The submitted `kind` is not this entity's type: the address and the
     /// payload disagree (§7.4).
     KindMismatch {
         addressed: KindId,
@@ -177,7 +177,7 @@ impl std::fmt::Display for SubmitReject {
                 submitted,
             } => write!(
                 f,
-                "kind mismatch: addressed grain type '{addressed}', submitted as '{submitted}'"
+                "kind mismatch: addressed entity type '{addressed}', submitted as '{submitted}'"
             ),
             SubmitReject::ContentConflict { turn } => {
                 write!(
@@ -218,7 +218,7 @@ impl Message for RunCompleted {
 // ===========================================================================
 // Internal self-driving commands (§3.2): local-only self-tells, never in the
 // network allowlist (`register`), so no peer can inject them. They carry the
-// outcomes of launched work back onto the grain's serial command path.
+// outcomes of launched work back onto the entity's serial command path.
 // ===========================================================================
 
 /// "What does the fold call for next?" — the post-commit continuation and
@@ -279,7 +279,7 @@ impl Message for CancelDone {
 }
 
 // ===========================================================================
-// The grain
+// The entity
 // ===========================================================================
 
 /// The activation's sandbox binding (§5.3): at most one live sandbox per
@@ -341,8 +341,8 @@ enum StepKey {
 /// [`reset`](RunScope::reset), since runs are serialized one at a time.
 #[derive(Default)]
 struct RunScope {
-    /// Effects this activation has launched: granary's steps-facet launch-once
-    /// guard (granary §7.17), fold-external, so `Advance` does not relaunch an
+    /// Effects this activation has launched: entity's steps-facet launch-once
+    /// guard (entity §7.17), fold-external, so `Advance` does not relaunch an
     /// effect whose outcome has not yet committed. A resume starts a fresh guard
     /// and re-launches whatever the journal still shows unresolved (§5.5): the
     /// *outcome record*, not the launch, is the durable fact.
@@ -382,7 +382,7 @@ struct EventOutbox {
 
 /// Ephemeral, per-activation working state (§5.5, §5.6, §7.4): never journaled,
 /// rebuilt on every activation, lost on deactivation. Held behind a [`Mutex`] so
-/// the `&self` handlers (granary's decide functions) can mutate it.
+/// the `&self` handlers (entity's decide functions) can mutate it.
 struct Activation<S: HarnessSystem> {
     /// The sandbox binding and held tiers (§5.4, §5.6).
     env: SandboxState,
@@ -430,15 +430,15 @@ impl<S: HarnessSystem> Default for Activation<S> {
     }
 }
 
-/// The agent grain (harness spec §3): one `Agent` Rust type hosted under each
-/// kind's name (`granary_named`, §2.2). The behavior is built fresh per
+/// The agent entity (harness spec §3): one `Agent` Rust type hosted under each
+/// kind's name (`entities_named`, §2.2). The behavior is built fresh per
 /// activation by the harness's factory, which injects the node's seams via
-/// [`Shared`]; the folded [`SessionState`] is the grain's `State`, rebuilt from
-/// the journal by granary.
+/// [`Shared`]; the folded [`SessionState`] is the entity's `State`, rebuilt from
+/// the journal by entity.
 pub struct Agent<S: HarnessSystem> {
     shared: Arc<Shared<S>>,
-    /// This grain's kind definition (§7.1). Captured by the factory, which hosts
-    /// one grain type per kind (§2.2), so an activation of grain-type `K` always
+    /// This entity's kind definition (§7.1). Captured by the factory, which hosts
+    /// one entity type per kind (§2.2), so an activation of entity-type `K` always
     /// has `K`'s definition — kind resolution is infallible, no lookup needed.
     kind: Arc<Kind>,
     /// The model and sandbox seams for this hosted kind (§4, §5.3), captured by
@@ -449,8 +449,8 @@ pub struct Agent<S: HarnessSystem> {
 
 impl<S: HarnessSystem> Agent<S> {
     /// Build a fresh activation's behavior, injecting this node's seams and this
-    /// grain type's kind (§7.4). Called by the harness factory passed to
-    /// `granary_named`.
+    /// entity type's kind (§7.4). Called by the harness factory passed to
+    /// `entities_named`.
     pub(crate) fn new(shared: Arc<Shared<S>>, kind: Arc<Kind>, seams: Seams) -> Agent<S> {
         Agent {
             shared,
@@ -464,12 +464,12 @@ impl<S: HarnessSystem> Agent<S> {
         self.act.lock().expect("agent activation mutex poisoned")
     }
 
-    fn session(ctx: &GrainCtx<Agent<S>>) -> SessionId {
+    fn session(ctx: &EntityCtx<Agent<S>>) -> SessionId {
         SessionId::new(ctx.name().key())
     }
 
     /// Stamp a record body with this node's clock reading (§10.1).
-    fn rec(&self, ctx: &GrainCtx<Agent<S>>, body: RecordBody) -> Record {
+    fn rec(&self, ctx: &EntityCtx<Agent<S>>, body: RecordBody) -> Record {
         Record {
             at_nanos: ctx.system().now().as_nanos(),
             body,
@@ -484,7 +484,7 @@ impl<S: HarnessSystem> Agent<S> {
     fn fail_call(
         &self,
         act: &mut Activation<S>,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         turn: &TurnId,
         call: &CallId,
         error: ToolError,
@@ -509,7 +509,7 @@ impl<S: HarnessSystem> Agent<S> {
     fn end_run(
         &self,
         act: &mut Activation<S>,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         turn: TurnId,
         outcome: RunOutcome,
     ) -> Record {
@@ -520,7 +520,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// Launch a self-`tell` of [`Advance`] (§3.2): runs after the current
     /// handler's records commit, so launching effects from it honors the
     /// write-ahead discipline (§6.4).
-    fn schedule_advance(&self, ctx: &GrainCtx<Agent<S>>) {
+    fn schedule_advance(&self, ctx: &EntityCtx<Agent<S>>) {
         let this = ctx.this();
         ctx.system().launch(Box::pin(async move {
             let _ = this.tell(Advance).await;
@@ -533,9 +533,9 @@ impl<S: HarnessSystem> Agent<S> {
         &self,
         state: &SessionState,
         msg: Submit<S>,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
     ) -> (Vec<Record>, Result<Accepted, SubmitReject>) {
-        let my_kind = KindId::new(ctx.name().grain_type());
+        let my_kind = KindId::new(ctx.name().entity_type());
         if msg.kind != my_kind {
             return (
                 Vec::new(),
@@ -613,7 +613,7 @@ impl<S: HarnessSystem> Agent<S> {
     fn accept_records(
         &self,
         state: &SessionState,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         kind: &Kind,
         turn: Turn,
         parent: Option<Lineage>,
@@ -625,7 +625,7 @@ impl<S: HarnessSystem> Agent<S> {
             batch.push(self.rec(
                 ctx,
                 RecordBody::SessionCreated {
-                    kind: KindId::new(ctx.name().grain_type()),
+                    kind: KindId::new(ctx.name().entity_type()),
                     digest: kind.digest(),
                     parent,
                     root,
@@ -650,7 +650,7 @@ impl<S: HarnessSystem> Agent<S> {
         &self,
         state: &SessionState,
         turn: TurnId,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
     ) -> Vec<Record> {
         // A cancel naming the live run ends it; one naming a queued turn ends
         // that turn before it ever starts; one naming an ended or unknown run
@@ -695,7 +695,7 @@ impl<S: HarnessSystem> Agent<S> {
         turn: TurnId,
         step: u32,
         result: Result<ModelResponse, ModelError>,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
     ) -> Vec<Record> {
         let mut act = self.lock();
         let Some(live) = state.live.as_ref().filter(|l| l.turn == turn) else {
@@ -776,7 +776,7 @@ impl<S: HarnessSystem> Agent<S> {
         turn: TurnId,
         call: CallId,
         outcome: Result<Value, ToolError>,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
     ) -> Vec<Record> {
         let mut act = self.lock();
         let pending = state
@@ -790,9 +790,9 @@ impl<S: HarnessSystem> Agent<S> {
             return Vec::new();
         };
         act.run.resolved.insert(call.clone());
-        // Capture the workspace delta this tool left on disk (granary §7.11):
+        // Capture the workspace delta this tool left on disk (entity §7.11):
         // the staged records join this command's batch, so the tool outcome
-        // and the files it wrote commit atomically (G19). Every sandboxed call
+        // and the files it wrote commit atomically (E19). Every sandboxed call
         // captures, success or failure (a failed shell can still have
         // written; a timed-out one may still be writing, so its capture can be
         // torn — the next capture diffs against the last committed index and
@@ -850,7 +850,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// folded state and launches the next effect, journaling intents first
     /// (§6.4). Returns the records to journal this round (empty when it only
     /// launches effects); the handler schedules a re-advance iff it returns records.
-    fn advance(&self, state: &SessionState, ctx: &GrainCtx<Agent<S>>) -> Vec<Record> {
+    fn advance(&self, state: &SessionState, ctx: &EntityCtx<Agent<S>>) -> Vec<Record> {
         let kind = &self.kind;
         let session = Self::session(ctx);
         let mut act = self.lock();
@@ -895,7 +895,7 @@ impl<S: HarnessSystem> Agent<S> {
     fn start_next_turn(
         &self,
         state: &SessionState,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         act: &mut Activation<S>,
     ) -> Vec<Record> {
         act.run.reset();
@@ -916,7 +916,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// `Some(events)` ⇒ commit them and stop; `None` ⇒ fall through.
     fn resolve_dangling(
         &self,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         kind: &Kind,
         act: &mut Activation<S>,
         live: &LiveRun,
@@ -942,7 +942,7 @@ impl<S: HarnessSystem> Agent<S> {
     fn step_model(
         &self,
         state: &SessionState,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         kind: &Kind,
         act: &mut Activation<S>,
         live: &LiveRun,
@@ -962,7 +962,7 @@ impl<S: HarnessSystem> Agent<S> {
         }
         // Surface a lost workspace before the model acts on state that is gone
         // (§5.5). The workspace itself is durable — the agent's facet
-        // rematerializes it on every activation (granary §7.11) — so only a loss
+        // rematerializes it on every activation (entity §7.11) — so only a loss
         // observed *this* activation (the provider returned `EnvironmentLost`)
         // resets. A fresh environment resets every held tier to `Workspace`;
         // later acquisitions re-journal, never silently inherited.
@@ -990,7 +990,7 @@ impl<S: HarnessSystem> Agent<S> {
     fn dispatch_pending(
         &self,
         state: &SessionState,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         kind: &Kind,
         act: &mut Activation<S>,
         live: &LiveRun,
@@ -1131,7 +1131,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// allowlist and the registry, then build the `ChildRun` intent.
     fn plan_delegation(
         &self,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         kind: &Kind,
         turn: &TurnId,
         call: &CallId,
@@ -1177,7 +1177,7 @@ impl<S: HarnessSystem> Agent<S> {
     fn launch_call(
         &self,
         act: &mut Activation<S>,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         kind: &Kind,
         turn: &TurnId,
         root: &SessionId,
@@ -1263,7 +1263,7 @@ impl<S: HarnessSystem> Agent<S> {
                 // Lazy open on the first sandboxed call (§5.3 item 1); the call
                 // stays pending and is re-driven when the environment is ready.
                 // The provider runs over the facet's materialized workspace
-                // directory (granary §7.11), which rehydration built before any
+                // directory (entity §7.11), which rehydration built before any
                 // command could reach here.
                 match ctx.ws().dir_path() {
                     Ok(workspace) => {
@@ -1284,7 +1284,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// `SandboxBound` (H8).
     fn launch_open(
         &self,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         profile: crate::sandbox::SandboxProfile,
         workspace: std::path::PathBuf,
     ) {
@@ -1318,12 +1318,12 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// Launch the child submission of a journaled delegation (§8.1 steps 2-3): an
-    /// ordinary grain submit with a reply-to mailbox, awaiting the child's
+    /// ordinary entity submit with a reply-to mailbox, awaiting the child's
     /// `RunCompleted`, retried on transport failure (safe — the derived `TurnId`
     /// dedups, H7). The outcome becomes this call's tool outcome (§5.4).
     fn launch_delegation(
         &self,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         turn: TurnId,
         call: CallId,
         request: DelegateInput,
@@ -1337,9 +1337,9 @@ impl<S: HarnessSystem> Agent<S> {
         // subtree's model calls (§9.1 item 3), so they are the right scale for
         // how long the parent waits before surfacing a tool failure.
         let wait = self.shared.config.child_wait(&child.budget);
-        let granary = self.shared.granaries().get(&child.kind).cloned();
+        let entities = self.shared.hosts().get(&child.kind).cloned();
         system.clone().launch(Box::pin(async move {
-            let outcome = match granary {
+            let outcome = match entities {
                 // Unreachable on a node built through `HarnessBuilder`, which
                 // requires every hosted kind's delegates in the directory;
                 // kept as defense so a missing route degrades to a tool
@@ -1348,8 +1348,8 @@ impl<S: HarnessSystem> Agent<S> {
                     "child kind '{}' is not hosted on this node",
                     child.kind
                 ))),
-                Some(granary) => {
-                    let child_ref = granary.grain(child.session.as_str());
+                Some(entities) => {
+                    let child_ref = entities.entity(child.session.as_str());
                     run_child(
                         system,
                         child_ref,
@@ -1382,7 +1382,7 @@ impl<S: HarnessSystem> Agent<S> {
         &self,
         act: &mut Activation<S>,
         state: &SessionState,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         session: &SessionId,
     ) {
         let node = ctx.system().node();
@@ -1438,7 +1438,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Notify every caller registered for a run that has finished (§7.3), then
     /// drop their registrations.
-    fn notify_finished(&self, act: &mut Activation<S>, state: &SessionState, ctx: &GrainCtx<Agent<S>>) {
+    fn notify_finished(&self, act: &mut Activation<S>, state: &SessionState, ctx: &EntityCtx<Agent<S>>) {
         let mut finished = Vec::new();
         act.subscribers
             .retain(|turn, subs| match state.turns.get(turn) {
@@ -1461,7 +1461,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// path.
     fn notify(
         &self,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
         reply_to: ActorRef<ReplyMailbox<S>>,
         turn: &TurnId,
         outcome: RunOutcome,
@@ -1487,14 +1487,14 @@ impl<S: HarnessSystem> Agent<S> {
         &self,
         act: &mut Activation<S>,
         state: &SessionState,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
     ) {
         for (turn, owed) in &state.cancels_owed {
             for (call, child) in owed {
                 if !act.cancels_launched.insert((turn.clone(), call.clone())) {
                     continue; // launched this activation already
                 }
-                let Some(granary) = self.shared.granaries().get(&child.kind).cloned() else {
+                let Some(entities) = self.shared.hosts().get(&child.kind).cloned() else {
                     // No route to the child's kind — unreachable on a node
                     // built through `HarnessBuilder`, which requires every
                     // hosted kind's delegates in the directory. Kept as
@@ -1511,7 +1511,7 @@ impl<S: HarnessSystem> Agent<S> {
                 let session = child.session.clone();
                 let launched = Arc::clone(&self.act);
                 system.clone().launch(Box::pin(async move {
-                    let child_ref = granary.grain(session.as_str());
+                    let child_ref = entities.entity(session.as_str());
                     let mut attempt = 0;
                     loop {
                         match child_ref
@@ -1556,7 +1556,7 @@ impl<S: HarnessSystem> Agent<S> {
         state: &SessionState,
         turn: TurnId,
         call: CallId,
-        ctx: &GrainCtx<Agent<S>>,
+        ctx: &EntityCtx<Agent<S>>,
     ) -> Vec<Record> {
         if !state
             .cancels_owed
@@ -1573,7 +1573,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// Emit `SandboxReleased` for this session (H8): the one place the event is
     /// built, shared by [`release_sandbox`](Self::release_sandbox) and the
     /// deactivation teardown.
-    fn emit_sandbox_released(&self, ctx: &GrainCtx<Agent<S>>) {
+    fn emit_sandbox_released(&self, ctx: &EntityCtx<Agent<S>>) {
         ctx.system().emit(
             HarnessEvent::SandboxReleased {
                 session: Self::session(ctx),
@@ -1603,7 +1603,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Drop and release the bound sandbox, emitting `SandboxReleased` (H8).
     /// Synchronous teardown is launched off the command path.
-    fn release_sandbox(&self, act: &mut Activation<S>, ctx: &GrainCtx<Agent<S>>) {
+    fn release_sandbox(&self, act: &mut Activation<S>, ctx: &EntityCtx<Agent<S>>) {
         let (release, announce) = Self::take_sandbox(act);
         if let Some(sandbox) = release {
             ctx.system()
@@ -1635,33 +1635,33 @@ impl<S: HarnessSystem> Agent<S> {
     }
 }
 
-impl<S: HarnessSystem> Grain for Agent<S> {
+impl<S: HarnessSystem> Entity for Agent<S> {
     type System = S;
     type State = SessionState;
     type Event = Record;
-    // The session's durable workspace (granary §7.11): a real directory the
+    // The session's durable workspace (entity §7.11): a real directory the
     // sandbox tiers run over, captured after each tool call so the delta
-    // commits atomically with the `ToolOutcome` record (G19).
+    // commits atomically with the `ToolOutcome` record (E19).
     type Facets = (Ws,);
     // The fallback type name; the harness hosts each kind under its own name via
-    // `granary_named`, so a session's grain type is its `KindId` (§2.2).
-    const GRAIN_TYPE: &'static str = "harness.Agent";
+    // `entities_named`, so a session's entity type is its `KindId` (§2.2).
+    const ENTITY_TYPE: &'static str = "harness.Agent";
 
     fn apply(state: &mut SessionState, event: &Record) {
         state.apply(event);
     }
 
-    fn register(registry: &mut GrainRegistry<Self>) {
+    fn register(registry: &mut EntityRegistry<Self>) {
         // The network allowlist: only the wire commands (§7.3). The internal
         // self-tells (Advance/ModelDone/ToolDone/CancelDone) are local-only, so
-        // no peer can inject them. Reading a run is not here: `tail` rides granary's
-        // gateway-level event read (granary §7.5), a framework built-in that
+        // no peer can inject them. Reading a run is not here: `tail` rides entity's
+        // gateway-level event read (entity §7.5), a framework built-in that
         // never touches the activation (§10.2).
         registry.accept::<Submit<S>>();
         registry.accept::<Cancel>();
     }
 
-    async fn on_activate(&mut self, ctx: &GrainCtx<Self>) -> Result<(), BoxError> {
+    async fn on_activate(&mut self, ctx: &EntityCtx<Self>) -> Result<(), BoxError> {
         let mut act = self.lock();
         // Opening grants `Workspace` and nothing else (§5.6 item 1); every other
         // tier is re-acquired under a journaled record this activation.
@@ -1672,8 +1672,8 @@ impl<S: HarnessSystem> Grain for Agent<S> {
         drop(act);
         // Off the activation latency path: sweep checkpoint chunks a prior
         // activation orphaned (the blob handle unions the facet roots, so the
-        // restored manifest's chunks always survive, granary §7.12/F3) and
-        // re-fan the live ones to the current replicas (granary §7.10).
+        // restored manifest's chunks always survive, entity §7.12/F3) and
+        // re-fan the live ones to the current replicas (entity §7.10).
         let blobs = ctx.blobs();
         ctx.system().launch(Box::pin(async move {
             let _ = blobs.gc(&BTreeSet::new()).await;
@@ -1682,7 +1682,7 @@ impl<S: HarnessSystem> Grain for Agent<S> {
         Ok(())
     }
 
-    async fn on_deactivate(&mut self, ctx: &GrainCtx<Self>) {
+    async fn on_deactivate(&mut self, ctx: &EntityCtx<Self>) {
         // Release the sandbox on every deactivation — idle hibernation, migration,
         // or forced step-down (H8). The workspace goes with it (§5.5). Scope the
         // lock so the guard is dropped before the async release.
@@ -1711,34 +1711,34 @@ impl<S: HarnessSystem> Grain for Agent<S> {
     }
 }
 
-impl<S: HarnessSystem> GrainHandler<Submit<S>> for Agent<S> {
+impl<S: HarnessSystem> EntityHandler<Submit<S>> for Agent<S> {
     async fn handle(
         &self,
         state: &SessionState,
         msg: Submit<S>,
-        ctx: &GrainCtx<Self>,
+        ctx: &EntityCtx<Self>,
     ) -> (Vec<Record>, Result<Accepted, SubmitReject>) {
         self.on_submit(state, msg, ctx)
     }
 }
 
-impl<S: HarnessSystem> GrainHandler<Cancel> for Agent<S> {
+impl<S: HarnessSystem> EntityHandler<Cancel> for Agent<S> {
     async fn handle(
         &self,
         state: &SessionState,
         msg: Cancel,
-        ctx: &GrainCtx<Self>,
+        ctx: &EntityCtx<Self>,
     ) -> (Vec<Record>, ()) {
         (self.on_cancel(state, msg.turn, ctx), ())
     }
 }
 
-impl<S: HarnessSystem> GrainHandler<Advance> for Agent<S> {
+impl<S: HarnessSystem> EntityHandler<Advance> for Agent<S> {
     async fn handle(
         &self,
         state: &SessionState,
         _msg: Advance,
-        ctx: &GrainCtx<Self>,
+        ctx: &EntityCtx<Self>,
     ) -> (Vec<Record>, ()) {
         let events = self.advance(state, ctx);
         if !events.is_empty() {
@@ -1748,12 +1748,12 @@ impl<S: HarnessSystem> GrainHandler<Advance> for Agent<S> {
     }
 }
 
-impl<S: HarnessSystem> GrainHandler<ModelDone> for Agent<S> {
+impl<S: HarnessSystem> EntityHandler<ModelDone> for Agent<S> {
     async fn handle(
         &self,
         state: &SessionState,
         msg: ModelDone,
-        ctx: &GrainCtx<Self>,
+        ctx: &EntityCtx<Self>,
     ) -> (Vec<Record>, ()) {
         (
             self.on_model_done(state, msg.turn, msg.step, msg.result, ctx),
@@ -1762,12 +1762,12 @@ impl<S: HarnessSystem> GrainHandler<ModelDone> for Agent<S> {
     }
 }
 
-impl<S: HarnessSystem> GrainHandler<ToolDone> for Agent<S> {
+impl<S: HarnessSystem> EntityHandler<ToolDone> for Agent<S> {
     async fn handle(
         &self,
         state: &SessionState,
         msg: ToolDone,
-        ctx: &GrainCtx<Self>,
+        ctx: &EntityCtx<Self>,
     ) -> (Vec<Record>, ()) {
         (
             self.on_tool_done(state, msg.turn, msg.call, msg.outcome, ctx),
@@ -1776,12 +1776,12 @@ impl<S: HarnessSystem> GrainHandler<ToolDone> for Agent<S> {
     }
 }
 
-impl<S: HarnessSystem> GrainHandler<CancelDone> for Agent<S> {
+impl<S: HarnessSystem> EntityHandler<CancelDone> for Agent<S> {
     async fn handle(
         &self,
         state: &SessionState,
         msg: CancelDone,
-        ctx: &GrainCtx<Self>,
+        ctx: &EntityCtx<Self>,
     ) -> (Vec<Record>, ()) {
         (self.on_cancel_done(state, msg.turn, msg.call, ctx), ())
     }
@@ -1802,11 +1802,11 @@ pub(crate) enum AttachOutcome {
     Lapsed,
     /// The submit was permanently rejected (§7.4): never worth retrying.
     Rejected(SubmitReject),
-    /// The grain was unreachable: a transport failure a retry might clear.
-    Unreachable(GrainError),
+    /// The entity was unreachable: a transport failure a retry might clear.
+    Unreachable(EntityError),
 }
 
-/// One submit-and-await-outcome attempt against a grain (§7.4): spawn an
+/// One submit-and-await-outcome attempt against an entity (§7.4): spawn an
 /// ephemeral reply mailbox, `Submit` the turn carrying it, and await the run's
 /// `RunCompleted` bounded by `within`. Wrapping it in a retry loop is safe
 /// because re-submitting the same `TurnId` is idempotent (H7). The mailbox
@@ -1816,7 +1816,7 @@ pub(crate) enum AttachOutcome {
 /// attempt (§7.4).
 pub(crate) async fn submit_and_attach<S: HarnessSystem>(
     system: &S,
-    grain: &granary::GrainRef<Agent<S>>,
+    entity: &entity::EntityRef<Agent<S>>,
     kind: &KindId,
     turn: &Turn,
     parent: Option<&Lineage>,
@@ -1831,7 +1831,7 @@ pub(crate) async fn submit_and_attach<S: HarnessSystem>(
         parent: parent.cloned(),
         reply_to: Some(mailbox),
     };
-    match grain.ask_timeout(submit, within).await {
+    match entity.ask_timeout(submit, within).await {
         Ok(Ok(_accepted)) => {
             let sleep = system.sleep(within);
             match select(rx, sleep).await {
@@ -1858,7 +1858,7 @@ pub(crate) async fn submit_and_attach<S: HarnessSystem>(
 /// backstop (§9.2 item 3).
 async fn run_child<S: HarnessSystem>(
     system: S,
-    child_ref: granary::GrainRef<Agent<S>>,
+    child_ref: entity::EntityRef<Agent<S>>,
     child: &ChildRef,
     prompt: String,
     parent: Lineage,

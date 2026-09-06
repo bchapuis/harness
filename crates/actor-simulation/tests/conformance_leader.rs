@@ -727,7 +727,7 @@ fn a_leader_that_cannot_send_is_deposed_when_it_hears_the_new_term() {
 fn a_send_only_leader_is_a_zombie_that_stalls_the_control_plane() {
     // Characterization of the KNOWN gap: actor-cluster's Raft has no check-quorum,
     // so a leader that has lost contact with a quorum does not step down on its own
-    // (granary-vv-findings). A one-way partition blocking the leader's INBOUND (it
+    // (entity-vv-findings). A one-way partition blocking the leader's INBOUND (it
     // can still heartbeat OUTWARD) makes the zombie concrete: the followers keep
     // hearing it, so they never elect; the leader never receives acks, so it can
     // never commit; and without check-quorum it never resigns. The control plane

@@ -84,8 +84,8 @@ use serde::de::DeserializeOwned;
 /// silently read as missing, and a durable fence coming back as *no fence* is a safety
 /// property lost, not a compatibility inconvenience.
 ///
-/// Giving a sidecar a header is what lifts that, and granary's fence and seal have since
-/// taken it: `granary.store.fence` and `granary.store.seal` carry a magic and a revision
+/// Giving a sidecar a header is what lifts that, and entity's fence and seal have since
+/// taken it: `entity.store.fence` and `entity.store.seal` carry a magic and a revision
 /// (compatibility §3), so a digest change there becomes an ordinary revision bump, and a
 /// mismatch is a *refusal naming the file* rather than an absence. What remains frozen is
 /// the case this paragraph describes — and the reason to reach for a header before
@@ -180,13 +180,13 @@ static REPLACE_SEQ: AtomicU64 = AtomicU64::new(0);
 ///
 /// Unique per call, and that is the whole point. A fixed `<name>.tmp` is safe only
 /// while one caller at a time replaces a given name, and that is not a property this
-/// crate can promise on the caller's behalf: granary's blob store puts concurrently
+/// crate can promise on the caller's behalf: entity's blob store puts concurrently
 /// through a thread pool, and content addressing means two puts landing on *the same*
 /// name is the normal case, not a rare one — an image full of identical blocks hashes
 /// every one of them to a single id. Two calls sharing a scratch path corrupt each
 /// other in both directions: the second `File::create` truncates the first's
 /// half-written bytes, and whichever renames second finds the path already gone and
-/// fails with `ENOENT`. Callers that treat an I/O error as unrecoverable — the grain
+/// fails with `ENOENT`. Callers that treat an I/O error as unrecoverable — the entity
 /// store poisons itself — turn that into a node that has stopped accepting writes.
 ///
 /// The pid is in the name because uniqueness has to hold across processes too: two
@@ -196,7 +196,7 @@ static REPLACE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// A crash between create and rename leaves the scratch file behind, where the old
 /// fixed name would have been reused by the next call. Every directory this crate's
 /// callers scan already skips names it cannot decode — a blob id, a shard number — so
-/// a stray is inert, and granary's blob sweep removes anything not retained.
+/// a stray is inert, and entity's blob sweep removes anything not retained.
 fn temp_name(name: &str) -> String {
     let seq = REPLACE_SEQ.fetch_add(1, Ordering::Relaxed);
     format!("{name}.{}.{seq}.tmp", std::process::id())
@@ -240,7 +240,7 @@ fn parent_dir(path: &Path) -> &Path {
 ///
 /// Reusing one buffer is what makes an append allocation-free, but the capacity it reaches
 /// is the largest batch that log has ever written. A caller holding one log per object —
-/// granary keeps one per grain — would otherwise pay for every log's worst batch, forever.
+/// entity keeps one per entity — would otherwise pay for every log's worst batch, forever.
 /// A floor rather than a ceiling: [`append_batch`](Wal::append_batch) keeps whichever is
 /// larger of this and the batch it just wrote, so a steady large writer is not punished
 /// and a one-off spike is still handed back.
@@ -289,7 +289,7 @@ const FRAME: compat::Stamp =
 /// never had to mention which filled the field. And because a file says which digest wrote
 /// it, both are *read* — a log stamped kind 1 opens and replays on a build that prefers
 /// kind 2. The alternative, refusing it, would have made a routine upgrade unreadable for
-/// every Raft log, grain segment, and blob log at once.
+/// every Raft log, entity segment, and blob log at once.
 const ACCEPTED_CHECKSUMS: compat::Accepted =
     compat::Accepted::new(Digest::Fnv1a.kind(), Digest::Xxh3.kind());
 
@@ -806,7 +806,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         // produced and the frames are never staged in a second buffer.
         //
         // This one buffer is *not* the reused `scratch`. It is sized by the whole
-        // compacted segment rather than by one batch, and with a log per grain, parking
+        // compacted segment rather than by one batch, and with a log per entity, parking
         // that capacity on every `Wal` for the life of the process would trade a bounded
         // allocation on a cold path for unbounded resident memory.
         self.digest = Digest::WRITES;
@@ -1013,7 +1013,7 @@ mod tests {
     /// Many threads replacing *one* name at once: every call succeeds, and the file
     /// left behind is one writer's whole bytes rather than a mix of several.
     ///
-    /// This is granary's blob store put path, which is content-addressed and runs
+    /// This is entity's blob store put path, which is content-addressed and runs
     /// through a thread pool: identical content is identical id is one name, so an
     /// image whose blocks repeat sends a wave of concurrent replaces at a single
     /// path. With one shared scratch name they truncated each other's bytes and all
@@ -1076,7 +1076,7 @@ mod tests {
     fn a_log_at_an_older_digest_still_opens_and_keeps_its_digest() {
         // The reserved field earning its keep. A log stamped kind 1 was written by a build
         // that computed FNV-1a; this build prefers XXH3 and must still read it, because
-        // refusing would make an ordinary upgrade unreadable for every Raft log, grain
+        // refusing would make an ordinary upgrade unreadable for every Raft log, entity
         // segment, and blob log on a node at once.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log");
@@ -1112,7 +1112,7 @@ mod tests {
         // Pinned against literals, not against a second implementation, because the point
         // is the *value* — a sidecar carries no header, so a reader can only recompute and
         // compare, and a caller reads a mismatch as "torn or absent". If this ever changes,
-        // granary's durable fence silently reads back as *no fence* (G15). The log's frames
+        // entity's durable fence silently reads back as *no fence* (E15). The log's frames
         // are free to move digests precisely because their header names which one wrote
         // them; these bytes have nowhere to record that, so they cannot.
         assert_eq!(checksum(b""), 0xcbf2_9ce4_8422_2325);

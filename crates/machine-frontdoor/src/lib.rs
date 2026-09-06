@@ -11,9 +11,9 @@
 //!
 //! Two seams keep the cluster and the transport out of the SSH code:
 //!
-//! - [`MachineAuthority`] — the grain-cluster half: the host key, the
+//! - [`MachineAuthority`] — the entity-cluster half: the host key, the
 //!   authorized-key check, and the journaled `Attach`/`Detach`. Production
-//!   wires it to a `GrainRef` over the machine's leader.
+//!   wires it to a `EntityRef` over the machine's leader.
 //! - [`ChannelBackend`] — the transport half: one byte stream per channel to
 //!   the guest agent. Production supplies the node's `machine_host::MachineHost`,
 //!   which reaches the guest however that node holds it.
@@ -30,7 +30,7 @@ pub use ssh::serve_connection;
 
 use std::future::Future;
 
-use granary::GrainName;
+use entity::EntityName;
 use russh::keys::PrivateKey;
 use russh::keys::PublicKey;
 use russh::keys::ssh_key::private::Ed25519Keypair;
@@ -77,8 +77,8 @@ pub fn host_key_from_seed(seed: &[u8]) -> Result<PrivateKey, FrontDoorError> {
 /// stream twice to cross the seam.
 pub use machine_host::Duplex;
 
-/// The grain-cluster half of the front door (machine §5.1). Production wires
-/// this over a `GrainRef<Machine>` to the machine's leader; tests supply a
+/// The entity-cluster half of the front door (machine §5.1). Production wires
+/// this over a `EntityRef<Machine>` to the machine's leader; tests supply a
 /// fake. Every method is per-connection or per-channel: nothing here holds
 /// cluster state.
 pub trait MachineAuthority: Send + Sync + 'static {
@@ -86,26 +86,26 @@ pub trait MachineAuthority: Send + Sync + 'static {
     /// [`host_key_from_seed`]).
     fn host_key(
         &self,
-        machine: &GrainName,
+        machine: &EntityName,
     ) -> impl Future<Output = Result<PrivateKey, FrontDoorError>> + Send;
 
     /// Whether the machine's *current* journaled policy authorizes `key`
     /// (M4): a revoked key stops authorizing the next attach. Verified at the
     /// front door; no key material enters the guest.
-    fn authorizes(&self, machine: &GrainName, key: &PublicKey)
+    fn authorizes(&self, machine: &EntityName, key: &PublicKey)
     -> impl Future<Output = bool> + Send;
 
     /// Journal the attachment with its principal (M4) and boot the microVM if
     /// needed; returns the attachment id used to detach.
     fn attach(
         &self,
-        machine: &GrainName,
+        machine: &EntityName,
         principal: &str,
     ) -> impl Future<Output = Result<u64, FrontDoorError>> + Send;
 
     /// Journal the detachment (machine §5.1). Best-effort: a lost detach is
     /// reconciled by the machine's death watch on this front door.
-    fn detach(&self, machine: &GrainName, attachment: u64) -> impl Future<Output = ()> + Send;
+    fn detach(&self, machine: &EntityName, attachment: u64) -> impl Future<Output = ()> + Send;
 }
 
 /// The transport half of the front door (machine §5.1): open one byte stream
@@ -115,7 +115,7 @@ pub trait MachineAuthority: Send + Sync + 'static {
 pub trait ChannelBackend: Send + Sync + 'static {
     fn open(
         &self,
-        machine: &GrainName,
+        machine: &EntityName,
         kind: ChannelKind,
     ) -> impl Future<Output = std::io::Result<Box<dyn Duplex>>> + Send;
 }

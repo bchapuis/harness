@@ -53,7 +53,7 @@ rustix = { workspace = true, optional = true }
 [dev-dependencies]
 spec.workspace = true
 actor-simulation.workspace = true
-granary.workspace = true
+entity.workspace = true
 futures.workspace = true
 tempfile.workspace = true
 wat.workspace = true

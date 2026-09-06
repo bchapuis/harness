@@ -2,20 +2,20 @@
 //!
 //! A [`Kind`] is a named agent definition — system prompt, toolset, sandbox
 //! profile, model parameters, default budget, delegation allowlist — plus the
-//! [`GranaryConfig`] for the grain type it hosts. Every node MUST register every
+//! [`EntityConfig`] for the entity type it hosts. Every node MUST register every
 //! kind (§7.1).
 //!
-//! A `KindId` **is** a grain type (§2.2). The harness hosts one `Agent` grain
-//! ([`crate::agent`]) under each kind's name via `granary_named`
-//! ([`crate::client::Harness::builder`]), so each kind is its own grain type —
-//! its own gateway, shard map, namespace, and `GranaryConfig` — while sharing
-//! one run loop. A session of a kind is one grain of that type.
+//! A `KindId` **is** an entity type (§2.2). The harness hosts one `Agent` entity
+//! ([`crate::agent`]) under each kind's name via `entities_named`
+//! ([`crate::client::Harness::builder`]), so each kind is its own entity type —
+//! its own gateway, shard map, namespace, and `EntityConfig` — while sharing
+//! one run loop. A session of a kind is one entity of that type.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use granary::GranaryConfig;
+use entity::EntityConfig;
 use serde_json::Value;
 
 use crate::budget::Budget;
@@ -30,7 +30,7 @@ use crate::tool::ToolRegistry;
 
 /// A named agent definition (harness spec §2.2, §7.1): system prompt, toolset,
 /// sandbox profile, model parameters, default budget, delegation allowlist, and
-/// the grain type's [`GranaryConfig`]. Every node MUST register every kind.
+/// the entity type's [`EntityConfig`]. Every node MUST register every kind.
 #[derive(Clone, Debug)]
 pub struct Kind {
     pub system_prompt: String,
@@ -41,15 +41,15 @@ pub struct Kind {
     /// Child kinds this kind may delegate to (§8.1). Non-empty ⇒ the built-in
     /// `delegate` tool is in the model's toolset.
     pub delegates: Vec<KindId>,
-    /// The grain type's configuration (§7.1, granary Appendix A): shard count,
+    /// The entity type's configuration (§7.1, entity Appendix A): shard count,
     /// replication factor, idle window, snapshot policy. The harness passes it to
-    /// `granary_named` when it hosts this kind's grain type.
-    pub config: GranaryConfig,
+    /// `entities_named` when it hosts this kind's entity type.
+    pub config: EntityConfig,
 }
 
 impl Kind {
-    /// Start a kind from its system prompt, with conservative defaults. The grain
-    /// config defaults to granary's, whose idle window is minutes rather than seconds
+    /// Start a kind from its system prompt, with conservative defaults. The entity
+    /// config defaults to entity's, whose idle window is minutes rather than seconds
     /// (§7.2) — which suits a session, since the gap between turns is the user's
     /// reading time and a model call is itself seconds long.
     pub fn new(system_prompt: impl Into<String>) -> Kind {
@@ -60,7 +60,7 @@ impl Kind {
             profile: SandboxProfile::default(),
             default_budget: Budget::new(100_000, 25),
             delegates: Vec::new(),
-            config: GranaryConfig::default(),
+            config: EntityConfig::default(),
         }
     }
 
@@ -119,9 +119,9 @@ impl Kind {
         self
     }
 
-    /// Set the grain type's shard/replication/idle/snapshot policy (§7.1,
-    /// granary Appendix A).
-    pub fn grain(mut self, config: GranaryConfig) -> Kind {
+    /// Set the entity type's shard/replication/idle/snapshot policy (§7.1,
+    /// entity Appendix A).
+    pub fn entity(mut self, config: EntityConfig) -> Kind {
         self.config = config;
         self
     }
@@ -138,7 +138,7 @@ impl Kind {
     /// A digest of the definition, pinned by `SessionCreated` (§7.1, §10.5) so a
     /// reader can tell whether a journal reconstruction is exact or merely
     /// indicative because a deployment changed the kind mid-session. Covers each
-    /// tool's declared tier, the profile's effective cap (§5.6), and the grain
+    /// tool's declared tier, the profile's effective cap (§5.6), and the entity
     /// config.
     ///
     /// The canonical form is length-prefixed (netstring-style) with a count
@@ -194,7 +194,7 @@ impl Kind {
 }
 
 /// The cluster-wide `KindId → Kind` map (harness spec §7.1), identical on every
-/// node. The harness hosts one grain type per registered kind (§2.2).
+/// node. The harness hosts one entity type per registered kind (§2.2).
 #[derive(Clone, Debug, Default)]
 pub struct Kinds {
     map: BTreeMap<KindId, Arc<Kind>>,
@@ -232,7 +232,7 @@ impl Kinds {
         self.map.get(kind).cloned()
     }
 
-    /// Every registered `(KindId, Kind)`, for hosting one grain type per kind.
+    /// Every registered `(KindId, Kind)`, for hosting one entity type per kind.
     pub fn iter(&self) -> impl Iterator<Item = (&KindId, &Arc<Kind>)> {
         self.map.iter()
     }

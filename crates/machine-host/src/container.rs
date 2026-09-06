@@ -14,7 +14,7 @@
 //!   `Native` tier needs, whose virtue is requiring *nothing* inside the image.
 //! - [`MachineHost::start`] holds a **block image** guest: the runner image
 //!   loop-mounts `spec.disk` and chroots into it, so the guest is the disk's own
-//!   rootfs and its writes land in that very file (grain §7.15). The container
+//!   rootfs and its writes land in that very file (entity §7.15). The container
 //!   half is `guest/machine-docker/init.sh`; `--privileged` is what `losetup`
 //!   and `mount` cost, and the reason this mechanism is a development one.
 //!

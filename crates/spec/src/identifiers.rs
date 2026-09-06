@@ -1,6 +1,6 @@
 //! The identifiers the specifications name, checked against the tree.
 //!
-//! The specs are written in terms of the code: `GrainHandler`, `ReadReply::head`,
+//! The specs are written in terms of the code: `EntityHandler`, `ReadReply::head`,
 //! `load_snapshot()`. Three hundred-odd such names across the set, and a rename
 //! moves the code while the prose keeps the old one — the same failure the
 //! citation gate catches for sections, one level down.
@@ -64,7 +64,7 @@ pub const SCANNED: &[&str] = &[
     "actor",
     "utilities",
     "wal",
-    "granary",
+    "entity",
     "blob",
     "drive",
     "harness",
@@ -167,7 +167,7 @@ pub const EXEMPT: &[Exempt] = &[
     e(
         "Quorum",
         Why::DeclaredAbsent,
-        "granary §7.4 names the two durability tiers Local and Quorum; the code \
+        "entity §7.4 names the two durability tiers Local and Quorum; the code \
          distinguishes them by which Replicator is installed, not by a named variant",
     ),
     e(
@@ -179,7 +179,7 @@ pub const EXEMPT: &[Exempt] = &[
     e(
         "MachineId",
         Why::DeclaredAbsent,
-        "machine §1: a machine's identity is a GrainName, and MachineId is the spec's \
+        "machine §1: a machine's identity is a EntityName, and MachineId is the spec's \
          word for it rather than a type",
     ),
 ];
@@ -291,7 +291,7 @@ fn harvest(text: &str, names: &mut BTreeSet<String>) {
                 "fn" | "struct" | "enum" | "trait" | "type" | "const" | "static" | "union" | "mod"
             ) && let Some(next) = words.peek()
             {
-                // The name is what the word *starts* with: `GrainHandler<M>:` and
+                // The name is what the word *starts* with: `EntityHandler<M>:` and
                 // `peer_version(&self)` both carry their name in front of the
                 // punctuation, not behind it.
                 if let Some(name) = leading_ident(next) {
@@ -494,8 +494,8 @@ mod tests {
     #[test]
     fn a_declaration_is_indexed_whatever_its_visibility() {
         let index =
-            indexed("pub struct GrainRef;\nfn fold(x: u8) {}\npub(crate) type Seq = u64;\n");
-        assert!(index.contains("GrainRef"));
+            indexed("pub struct EntityRef;\nfn fold(x: u8) {}\npub(crate) type Seq = u64;\n");
+        assert!(index.contains("EntityRef"));
         assert!(index.contains("fold"));
         assert!(index.contains("Seq"));
     }
@@ -529,8 +529,8 @@ mod tests {
     #[test]
     fn a_type_name_is_a_claim() {
         assert_eq!(
-            claimed("GrainHandler"),
-            Some(("GrainHandler", "GrainHandler"))
+            claimed("EntityHandler"),
+            Some(("EntityHandler", "EntityHandler"))
         );
     }
 

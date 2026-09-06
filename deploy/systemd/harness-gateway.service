@@ -2,8 +2,8 @@
 #
 # The gateway joins the same cluster as a non-voting, non-hosting CLIENT (the Orleans
 # cluster-client pattern). It verifies a caller's bearer token to a tenant, then
-# addresses the session's grain directly over the actor transport — no forwarding hop.
-# Because it holds `GrainRef`s and rides the receptionist gossip it sits INSIDE the
+# addresses the session's entity directly over the actor transport — no forwarding hop.
+# Because it holds `EntityRef`s and rides the receptionist gossip it sits INSIDE the
 # cluster's trust boundary and presents the cluster secret; untrusted callers reach it
 # only over HTTP with a bearer token.
 #

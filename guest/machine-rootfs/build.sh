@@ -15,7 +15,7 @@
 # Unlike guest/fc-rootfs (the sandbox's host-owned agent-as-init image), this
 # is the *user's own rootfs*: the agent is an ordinary service the rootfs's
 # own init (openrc) starts, not pid 1 (machine §2.1). The whole image persists
-# block-for-block as the disk facet (grain §7.15), so a machine provisioned
+# block-for-block as the disk facet (entity §7.15), so a machine provisioned
 # from it diverges by dirty blocks as its guest writes.
 #
 # Docker is the only requirement, so this runs on macOS too — building needs

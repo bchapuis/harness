@@ -5,7 +5,7 @@
 #
 # The gateway is the single public edge: an Orleans-style cluster *client* that
 # joins the transport as a non-voting, non-hosting member and addresses session
-# grains directly. The nodes have no client-facing listener — they host grains
+# entities directly. The nodes have no client-facing listener — they host entities
 # and vote in Raft; each admits the gateway with `--client`.
 #
 # The gateway runs in INSECURE dev mode here (no --auth-tokens): the bearer token
@@ -42,7 +42,7 @@ mkdir -p "$DATA"
 
 # A real model composes the shell commands this demo runs, so they execute
 # confined in a per-session container — never as your user. The container's
-# workspace is backed by a durable filesystem grain, so a session's files
+# workspace is backed by a durable filesystem entity, so a session's files
 # survive hibernation and migration.
 if ! docker version >/dev/null 2>&1; then
   echo "The demo runs \`shell\` inside docker containers; start Docker (or colima) first." >&2
@@ -71,7 +71,7 @@ trap cleanup EXIT INT TERM
 echo "▸ booting three nodes (logs in $DATA/node*.log)"
 for i in 1 2 3; do
   # Each node keeps its own data dir: the journal replicates over the
-  # transport (a quorum append per grain), so nodes share nothing on disk.
+  # transport (a quorum append per entity), so nodes share nothing on disk.
   # They find each other on loopback here; --bind-host and --peer span hosts.
   # --client admits the gateway (id $GATEWAY_ID) as a non-voting member.
   "$BIN" node --id "$i" --data "$DATA/node$i" --api-url "$API_URL" \

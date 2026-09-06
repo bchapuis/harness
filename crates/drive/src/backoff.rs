@@ -24,7 +24,7 @@ use actor_core::Instant;
 /// The schedule a drive backs off on (spec §3.4).
 ///
 /// The defaults are chosen so a transient failure retries promptly and a
-/// permanent one stops holding the activation within one idle window (granary
+/// permanent one stops holding the activation within one idle window (entity
 /// §10 puts `idle_after` in minutes): four doublings from 500 ms reach the 8 s
 /// cap, at which point the key is at rest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,7 +107,7 @@ impl<K: Ord> Backoff<K> {
     /// **At the cap the drive arms no timer**, and that is the whole of the
     /// at-rest rule (§6). Arming one anyway would be worse than useless: the
     /// activation would become quiescent, hibernate, and then be woken by its own
-    /// stale timer a moment later, so the grain would churn instead of resting
+    /// stale timer a moment later, so the entity would churn instead of resting
     /// and the clause would buy nothing. Giving up the timer is giving up
     /// *unattended* progress, which is exactly what §6 trades away — the debt is
     /// a fold, so a caller's next contact ([`wake`](Backoff::wake)) or the next

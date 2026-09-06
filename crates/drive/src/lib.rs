@@ -1,7 +1,7 @@
-//! The autonomous grain (drive spec): a grain that drives itself.
+//! The autonomous entity (drive spec): an entity that drives itself.
 //!
-//! A grain waits. It holds durable state, admits a command, decides records,
-//! commits them, and replies (granary §4.2, §6). An **autonomous** grain does
+//! An entity waits. It holds durable state, admits a command, decides records,
+//! commits them, and replies (entity §4.2, §6). An **autonomous** entity does
 //! not wait: its activation re-derives the work its committed state calls for,
 //! launches what is not yet in flight, folds each outcome back, and stops when
 //! there is nothing left. The agentic harness builds that mechanism by hand,
@@ -16,38 +16,38 @@
 //! dispatch list (§3.2), the recovery set (§4.4), and the straggler filter
 //! (§4.5).
 //!
-//! Everything beneath is granary's and is not re-implemented here: this crate
+//! Everything beneath is entity's and is not re-implemented here: this crate
 //! defines **no journal, no fence, no placement function, and no resume
 //! protocol**, and names no durable type of its own. Every record a driven
-//! grain writes is the consumer's [`Grain::Event`]; the drive's own state —
+//! entity writes is the consumer's [`Entity::Event`]; the drive's own state —
 //! claims, backoff, subscribers — is ephemeral by specification (§3.3, §3.4,
 //! §7.1).
 //!
-//! # Wiring a driven grain
+//! # Wiring a driven entity
 //!
-//! A consumer implements [`Driven`] beside its [`Grain`], holds a [`Drive`] in
+//! A consumer implements [`Driven`] beside its [`Entity`], holds a [`Drive`] in
 //! its behavior, and forwards four hooks. There is deliberately no blanket
-//! `GrainHandler` impl (the orphan rule forbids one, and granary's stance is
+//! `EntityHandler` impl (the orphan rule forbids one, and entity's stance is
 //! that the hand-written form is normative), so the two commands are two small
 //! handlers:
 //!
 //! ```ignore
-//! impl Grain for Fanout {
-//!     async fn on_activate(&mut self, ctx: &GrainCtx<Self>) -> Result<(), BoxError> {
+//! impl Entity for Fanout {
+//!     async fn on_activate(&mut self, ctx: &EntityCtx<Self>) -> Result<(), BoxError> {
 //!         self.drive.on_activate(ctx);
 //!         Ok(())
 //!     }
 //!     fn can_hibernate(&self, _state: &Self::State) -> bool { self.drive.quiescent() }
-//!     fn register(r: &mut GrainRegistry<Self>) { /* the drive's commands are local-only */ }
+//!     fn register(r: &mut EntityRegistry<Self>) { /* the drive's commands are local-only */ }
 //! }
 //!
-//! impl GrainHandler<Nudge> for Fanout {
-//!     async fn handle(&self, state: &Self::State, _: Nudge, ctx: &GrainCtx<Self>)
+//! impl EntityHandler<Nudge> for Fanout {
+//!     async fn handle(&self, state: &Self::State, _: Nudge, ctx: &EntityCtx<Self>)
 //!         -> (Vec<Self::Event>, ()) { (self.drive.advance(self, state, ctx), ()) }
 //! }
 //!
-//! impl GrainHandler<Settled<Self>> for Fanout {
-//!     async fn handle(&self, state: &Self::State, msg: Settled<Self>, ctx: &GrainCtx<Self>)
+//! impl EntityHandler<Settled<Self>> for Fanout {
+//!     async fn handle(&self, state: &Self::State, msg: Settled<Self>, ctx: &EntityCtx<Self>)
 //!         -> (Vec<Self::Event>, ()) { (self.drive.settled(self, state, msg, ctx).await, ()) }
 //! }
 //! ```
@@ -70,9 +70,9 @@ pub mod testing;
 
 use std::future::Future;
 
-use granary::Grain;
-use granary::GrainCtx;
-use granary::GrainName;
+use entity::Entity;
+use entity::EntityCtx;
+use entity::EntityName;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -89,7 +89,7 @@ pub use subscribers::Subscribers;
 /// One unit of work the committed state calls for, and how to recover it
 /// (spec §3.1).
 ///
-/// `key` is the effect's identity within its grain, `effect` the consumer's own
+/// `key` is the effect's identity within its entity, `effect` the consumer's own
 /// opaque description of the work, and `on_dangling` the policy the drive
 /// applies if a crash leaves the effect's fate unknown (§4.4). None of the three
 /// is journaled by the drive: a `Pending` is re-derived, in full, on every
@@ -145,7 +145,7 @@ pub enum OnDangling {
 }
 
 /// Why an effect produced no outcome (spec §4.3). A failing effect does not fail
-/// the grain: the drive settles it as a value the consumer's fold records and
+/// the entity: the drive settles it as a value the consumer's fold records and
 /// reacts to.
 ///
 /// **Only [`Interrupted`](EffectError::Interrupted) is the drive's to mint**
@@ -181,9 +181,9 @@ impl std::fmt::Display for EffectError {
 impl std::error::Error for EffectError {}
 
 /// What an effect legitimately needs from outside itself (spec §4.1): the
-/// grain's name and the system's seams (clock, entropy, task launching).
+/// entity's name and the system's seams (clock, entropy, task launching).
 ///
-/// It carries **no** access to the grain's state, journal, or facets, which is
+/// It carries **no** access to the entity's state, journal, or facets, which is
 /// how "`perform` touches none of them" is enforced rather than asked for.
 /// Everything else an effect needs — the consumer's own model, sandbox, or
 /// network seams — the consumer clones out of `&self` before returning the
@@ -193,17 +193,17 @@ impl std::error::Error for EffectError {}
 /// as a detached task and must therefore be `'static`.
 #[derive(Clone)]
 pub struct Perform<S> {
-    name: GrainName,
+    name: EntityName,
     system: S,
 }
 
 impl<S> Perform<S> {
-    pub(crate) fn new(name: GrainName, system: S) -> Self {
+    pub(crate) fn new(name: EntityName, system: S) -> Self {
         Perform { name, system }
     }
 
-    /// The grain this effect belongs to.
-    pub fn name(&self) -> &GrainName {
+    /// The entity this effect belongs to.
+    pub fn name(&self) -> &EntityName {
         &self.name
     }
 
@@ -215,56 +215,56 @@ impl<S> Perform<S> {
     }
 }
 
-/// A grain that drives itself (spec §2.1, §3, §4).
+/// An entity that drives itself (spec §2.1, §3, §4).
 ///
-/// A **supertrait of [`Grain`]**, which is what makes `Self::State`,
-/// `Self::Event`, and [`GrainCtx<Self>`] below mean what they mean: a driven
-/// grain is an ordinary grain that has additionally said what work its state
+/// A **supertrait of [`Entity`]**, which is what makes `Self::State`,
+/// `Self::Event`, and [`EntityCtx<Self>`] below mean what they mean: a driven
+/// entity is an ordinary entity that has additionally said what work its state
 /// calls for.
 ///
 /// Three methods, but only two new *things*: [`pending`](Driven::pending) is the
 /// function and [`perform`](Driven::perform) the seam, while
-/// [`settle`](Driven::settle) is an ordinary grain decision under the ordinary
-/// rules (granary §4.2), differing from a handler only in that the drive holds
+/// [`settle`](Driven::settle) is an ordinary entity decision under the ordinary
+/// rules (entity §4.2), differing from a handler only in that the drive holds
 /// the command it answers.
 ///
 /// The two handler supertraits are the wiring, made a compile-time obligation
-/// rather than a documented one: a driven grain that has not routed [`Nudge`] to
+/// rather than a documented one: a driven entity that has not routed [`Nudge`] to
 /// [`Drive::advance`] and [`Settled`] to [`Drive::settled`] does not compile,
-/// which is the posture granary takes for its own calls (G10). There is
+/// which is the posture entity takes for its own calls (E10). There is
 /// deliberately no blanket impl supplying them — the orphan rule forbids one, and
-/// granary's stance is that the hand-written form is normative.
+/// entity's stance is that the hand-written form is normative.
 pub trait Driven:
-    Grain + granary::GrainHandler<Nudge> + granary::GrainHandler<Settled<Self>>
+    Entity + entity::EntityHandler<Nudge> + entity::EntityHandler<Settled<Self>>
 {
-    /// An effect's identity within this grain (§3.1).
+    /// An effect's identity within this entity (§3.1).
     ///
     /// Re-derived on every activation and **never journaled by the drive**, so
     /// it needs no stability across deployments and no registry. The bounds are
     /// the ordinary command bounds, because a key rides the [`Settled`] command
-    /// through the grain's mailbox (§4.2) and orders the claim and backoff
+    /// through the entity's mailbox (§4.2) and orders the claim and backoff
     /// tables (§3.3, §3.4).
     ///
-    /// A key MUST be **unique over the grain's whole journal**, not merely
+    /// A key MUST be **unique over the entity's whole journal**, not merely
     /// within one desired set: the straggler filter's only test is presence in
     /// the set (§4.5), so a key that leaves and later re-enters would let an
     /// outcome launched under the first occurrence be settled as the second's.
     type Key: actor_serialization::SerializationRequirement + Clone + Ord + std::fmt::Debug;
 
-    /// One unit of work performed outside the grain: the consumer's own type,
+    /// One unit of work performed outside the entity: the consumer's own type,
     /// opaque to the drive. Carried from `pending` to `perform` and never across
     /// a wire, so it needs no serialization.
     type Effect: Send + 'static;
 
     /// What an effect returns. Rides [`Settled`] back onto the command path, so
-    /// it carries the command bounds; `Clone` because `GrainRef::tell` takes it
-    /// (granary §4.3).
+    /// it carries the command bounds; `Clone` because `EntityRef::tell` takes it
+    /// (entity §4.3).
     type Outcome: actor_serialization::SerializationRequirement + Clone;
 
-    /// The effects this grain's **committed** state calls for (§3.1).
+    /// The effects this entity's **committed** state calls for (§3.1).
     ///
-    /// MUST be pure and deterministic — the same obligation [`Grain::apply`]
-    /// carries (granary §4.1, G2), for the same reason: a resumed activation
+    /// MUST be pure and deterministic — the same obligation [`Entity::apply`]
+    /// carries (entity §4.1, E2), for the same reason: a resumed activation
     /// that disagreed with the one it replaced about what work is outstanding
     /// would either abandon work or duplicate it. It MUST NOT perform I/O, read
     /// the clock, or use entropy, and it MUST NOT read the activation's
@@ -273,11 +273,11 @@ pub trait Driven:
     /// no longer be a function of the journal (D1).
     fn pending(&self, state: &Self::State) -> Vec<Pending<Self::Key, Self::Effect>>;
 
-    /// Perform one effect (§4.1). The **only** place a driven grain performs
+    /// Perform one effect (§4.1). The **only** place a driven entity performs
     /// I/O.
     ///
     /// It runs outside the activation, in a task the drive launched, holding no
-    /// lock on the grain and no claim on its mailbox — which is why the returned
+    /// lock on the entity and no claim on its mailbox — which is why the returned
     /// future is `'static` and cannot borrow `&self`. An implementation clones
     /// the seams it needs out of `&self` first, then returns a future owning
     /// them.
@@ -289,23 +289,23 @@ pub trait Driven:
 
     /// Fold one effect's outcome into records (§4.2).
     ///
-    /// A **decision**, under exactly the rules a [`GrainHandler`] decision
-    /// follows (granary §4.2): it MUST NOT mutate state, MUST NOT perform
+    /// A **decision**, under exactly the rules a [`EntityHandler`] decision
+    /// follows (entity §4.2): it MUST NOT mutate state, MUST NOT perform
     /// durable I/O, and MUST NOT await anything. It returns the records that
-    /// make the outcome durable; the grain's output gate commits them; the
+    /// make the outcome durable; the entity's output gate commits them; the
     /// commit re-enters the drive.
     ///
-    /// Returning no records is legal and commits nothing (granary §7.5) — the
+    /// Returning no records is legal and commits nothing (entity §7.5) — the
     /// way a consumer says "this outcome changed nothing" — which then leaves
     /// the key in the desired set for the backoff timer to relaunch (§3.2 item
     /// 3), since this settle committed nothing to bring the next drive.
     ///
-    /// [`GrainHandler`]: granary::GrainHandler
+    /// [`EntityHandler`]: entity::EntityHandler
     fn settle(
         &self,
         state: &Self::State,
         key: &Self::Key,
         outcome: Result<Self::Outcome, EffectError>,
-        ctx: &GrainCtx<Self>,
+        ctx: &EntityCtx<Self>,
     ) -> impl Future<Output = Vec<Self::Event>> + Send;
 }

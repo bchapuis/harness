@@ -4,7 +4,7 @@
 #
 # This boots a three-node cluster (three OS processes on your machine, each with
 # its own journal, replicated over the transport), provisions a machine, and
-# opens an SSH front door on each node. The machine is a *grain*: its whole
+# opens an SSH front door on each node. The machine is a *entity*: its whole
 # rootfs is durable state, so it survives disconnection, idle hibernation, and
 # the death of the node it was running on. See docs/machine-spec.md.
 #
@@ -184,7 +184,7 @@ cleanup() { kill ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
 # --- The cluster -----------------------------------------------------------------
-# Every node is identical: it hosts machine grains, votes in Raft, and opens an
+# Every node is identical: it hosts machine entities, votes in Raft, and opens an
 # SSH front door for this machine on its own port. Three doors, not one, because
 # a door dies with its node — and reconnecting through a survivor is the whole
 # point of the failure drill below.
@@ -199,14 +199,14 @@ for i in 1 2 3; do
 done
 
 # Wait for the doors, not the transport: a node prints its front-door line only
-# once the cluster has elected a leader and it is hosting machine grains.
+# once the cluster has elected a leader and it is hosting machine entities.
 # Provisioning before that just spends the CLI's retry budget waiting.
 for i in 1 2 3; do
   until grep -q 'ssh front door' "$DATA/node$i.log" 2>/dev/null; do sleep 0.3; done
 done
 
 # --- The machine -----------------------------------------------------------------
-# Provisioning is an ordinary journaled grain command (machine §3), not an admin
+# Provisioning is an ordinary journaled entity command (machine §3), not an admin
 # API: the disk starts as the base image's checkpoint manifest and diverges by
 # dirty blocks as the guest writes. The machine's SSH host key is born here too,
 # so its identity survives every move it will make.
@@ -230,7 +230,7 @@ EOF
 
 if [ "$KIND" = "firecracker" ]; then
 cat <<EOF
-  SSH in. The first connection activates the grain and boots the microVM against
+  SSH in. The first connection activates the entity and boots the microVM against
   the rehydrated disk, so expect a few seconds; the username is recorded as the
   principal (machine §5.1), and the host key you pin is the machine's own
   journaled identity:
@@ -260,7 +260,7 @@ cat <<EOF
 EOF
 elif [ "$KIND" = "docker" ]; then
 cat <<EOF
-  SSH in. The first connection activates the grain, loop-mounts the rehydrated
+  SSH in. The first connection activates the entity, loop-mounts the rehydrated
   disk image in a container and chroots into it, so expect a second or two; the
   username is recorded as the principal (machine §5.1), and the host key you pin
   is the machine's own journaled identity:

@@ -1,6 +1,6 @@
 //! The machine-readable D-catalogue, D1–D7 (drive spec §9).
 //!
-//! The drive analogue of the core, granary, and harness catalogues: one table
+//! The drive analogue of the core, entity, and harness catalogues: one table
 //! linking each invariant to the code that verifies it, guarded by the drift test
 //! in `conformance_catalogue.rs`. `invariant: n` reads as "Dn".
 //!
@@ -74,7 +74,7 @@ const D_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 7,
         spec: "drive §6, §3.4",
-        property: "Quiescence: an activation permits hibernation exactly when nothing is in flight and every member of its desired set is at rest; launchable work vetoes eviction until it settles or backs off to the cap, and a grain hibernated while quiescent re-derives the same set on activation",
+        property: "Quiescence: an activation permits hibernation exactly when nothing is in flight and every member of its desired set is at rest; launchable work vetoes eviction until it settles or backs off to the cap, and an entity hibernated while quiescent re-derives the same set on activation",
         verify: &[
             Verify::Checker("drive-cycle"),
             Verify::SimTest("conformance_cycle.rs, drive_swarm.rs"),

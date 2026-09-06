@@ -4,8 +4,8 @@
 //! One entry, one exit. The cycle is entered by a commit — of a command's
 //! records or of a settled outcome's — by rehydration, by a backoff elapsing, or
 //! by an explicit nudge; and it exits when the desired set has come to rest and
-//! nothing is in flight, which is **quiescence** (§6): the grain has become an
-//! ordinary waiting grain again and MAY hibernate.
+//! nothing is in flight, which is **quiescence** (§6): the entity has become an
+//! ordinary waiting entity again and MAY hibernate.
 //!
 //! Everything the cycle holds is ephemeral activation state, rebuilt from
 //! nothing on every activation and never journaled (§3.3): journaling a claim
@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use actor_core::ActorSystem;
 use actor_core::Manifest;
 use actor_core::Message;
-use granary::GrainCtx;
+use entity::EntityCtx;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -50,8 +50,8 @@ enum Phase<K> {
 /// An ordinary self-addressed command, and the way back into the cycle after
 /// anything that commits nothing: a consumer's own event, or a backoff elapsing.
 /// Like [`Settled`], a **local-only** self-tell — a consumer MUST NOT `accept`
-/// it in its `GrainRegistry`, which is the deserialization allowlist for
-/// *network* commands (granary §5.5). Nothing outside the grain has any business
+/// it in its `EntityRegistry`, which is the deserialization allowlist for
+/// *network* commands (entity §5.5). Nothing outside the entity has any business
 /// injecting an effect outcome or driving another node's activation.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct Nudge;
@@ -63,9 +63,9 @@ impl Message for Nudge {
 
 /// The per-activation state the cycle keeps. Never journaled (§3.3, §3.4).
 struct Scope<K: Ord> {
-    /// Which keys this activation has launched: granary's launch-once posture
-    /// (granary §7.17) with the drive's own lifetime rule. It is deliberately
-    /// not granary's `LaunchGuard`, because the two release differently — the
+    /// Which keys this activation has launched: entity's launch-once posture
+    /// (entity §7.17) with the drive's own lifetime rule. It is deliberately
+    /// not entity's `LaunchGuard`, because the two release differently — the
     /// steps facet's guard is reset wholesale when a run ends, where a claim
     /// here is dropped exactly when its key leaves the desired set (§3.2 step 2),
     /// which is what keeps the straggler filter exact.
@@ -104,12 +104,12 @@ impl<K: Ord> Scope<K> {
     }
 }
 
-/// The drive: one reconciliation engine, held in a driven grain's behavior
+/// The drive: one reconciliation engine, held in a driven entity's behavior
 /// (spec §2.1).
 ///
 /// Internally synchronized, so a consumer holds it as a plain field and reaches
 /// it through `&self` from its handlers, `can_hibernate`, and `on_deactivate` —
-/// the shape granary's own per-activation state already takes.
+/// the shape entity's own per-activation state already takes.
 pub struct Drive<D: Driven> {
     scope: Mutex<Scope<D::Key>>,
     policy: BackoffPolicy,
@@ -137,18 +137,18 @@ impl<D: Driven> Drive<D> {
         self.scope.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    // -- the grain hooks -----------------------------------------------------
+    // -- the entity hooks -----------------------------------------------------
 
     /// Forget every claim and backoff count, arm the first drive, and nudge.
     ///
-    /// A consumer calls this from `Grain::on_activate`. A re-activation starts
+    /// A consumer calls this from `Entity::on_activate`. A re-activation starts
     /// clean by specification: the claims are ephemeral (§3.3) and the counts
     /// start at zero (§3.4). The nudge is what makes the first drive happen at
-    /// all on a grain nobody is about to command — a resumed one with work still
+    /// all on an entity nobody is about to command — a resumed one with work still
     /// outstanding, which is the whole of resume (§4.4).
-    pub fn on_activate(&self, ctx: &GrainCtx<D>) {
+    pub fn on_activate(&self, ctx: &EntityCtx<D>) {
         *self.lock() = Scope::new(self.policy);
-        // No state to classify from here (granary §4.1: `on_activate` sees no
+        // No state to classify from here (entity §4.1: `on_activate` sees no
         // state); the first handler or the first drive does that (§4.4). A fresh
         // scope has no at-rest key to wake, so the plain re-entry suffices.
         self.nudge_only(ctx);
@@ -158,7 +158,7 @@ impl<D: Driven> Drive<D> {
     /// nothing in flight and every member of the desired set at rest — the set
     /// empty, or its remaining members backed off to the cap.
     ///
-    /// A consumer calls this from `Grain::can_hibernate` and MAY narrow it
+    /// A consumer calls this from `Entity::can_hibernate` and MAY narrow it
     /// further by conjoining its own condition; it never has to widen it. The
     /// harness narrows exactly once, for a turn accepted into its queue but not
     /// yet started: work owed *now* that no effect represents, so it is invisible
@@ -168,7 +168,7 @@ impl<D: Driven> Drive<D> {
     /// because `can_hibernate` takes no seams and so cannot read the clock. That
     /// is the same answer and a cheaper one: a cycle runs on every commit and on
     /// every backoff expiry, so the conclusion is never staler than the last
-    /// thing that happened to this grain. Before the first drive has run it is
+    /// thing that happened to this entity. Before the first drive has run it is
     /// `false` — an activation that has not yet resolved its dangling set has no
     /// business hibernating.
     pub fn quiescent(&self) -> bool {
@@ -197,7 +197,7 @@ impl<D: Driven> Drive<D> {
     /// this message, and the harness draws the same line today (harness §9.2 item
     /// 3, where the next message to drive the session re-launches an abandoned
     /// propagation).
-    pub fn nudge(&self, driven: &D, state: &D::State, ctx: &GrainCtx<D>) {
+    pub fn nudge(&self, driven: &D, state: &D::State, ctx: &EntityCtx<D>) {
         let mut scope = self.lock();
         if matches!(scope.phase, Phase::Fresh) {
             Self::classify(&mut scope, &driven.pending(state));
@@ -219,7 +219,7 @@ impl<D: Driven> Drive<D> {
 
     /// Nudge without waking at-rest keys: the drive's own re-entry, from the
     /// backoff timer (§3.2 item 3).
-    fn nudge_only(&self, ctx: &GrainCtx<D>) {
+    fn nudge_only(&self, ctx: &EntityCtx<D>) {
         let this = ctx.this();
         ctx.system().launch(Box::pin(async move {
             let _ = this.tell(Nudge).await;
@@ -231,13 +231,13 @@ impl<D: Driven> Drive<D> {
     /// Run one drive (spec §3.2): reconcile the desired set against what this
     /// activation has launched, and return the records the drive itself decided.
     ///
-    /// The body of a consumer's `GrainHandler<Nudge>`. The drive decides no
+    /// The body of a consumer's `EntityHandler<Nudge>`. The drive decides no
     /// records of its own — every outcome, including a dangling `Interrupt`,
     /// reaches the journal as a [`Settled`] command — so this always returns
     /// empty. It returns `Vec<D::Event>` anyway so the handler reads like every
     /// other decision and so a later revision can journal without changing every
     /// consumer.
-    pub fn advance(&self, driven: &D, state: &D::State, ctx: &GrainCtx<D>) -> Vec<D::Event> {
+    pub fn advance(&self, driven: &D, state: &D::State, ctx: &EntityCtx<D>) -> Vec<D::Event> {
         let desired = driven.pending(state);
         let now = ctx.system().now();
         let mut scope = self.lock();
@@ -300,7 +300,7 @@ impl<D: Driven> Drive<D> {
         for key in interrupted {
             ctx.system().emit(
                 DriveEvent::Interrupted {
-                    grain: ctx.name().clone(),
+                    entity: ctx.name().clone(),
                     key: format!("{key:?}"),
                     node: ctx.system().node(),
                 }
@@ -311,7 +311,7 @@ impl<D: Driven> Drive<D> {
         if announce {
             ctx.system().emit(
                 DriveEvent::Quiescent {
-                    grain: ctx.name().clone(),
+                    entity: ctx.name().clone(),
                     node: ctx.system().node(),
                 }
                 .into(),
@@ -321,7 +321,7 @@ impl<D: Driven> Drive<D> {
     }
 
     /// Fold one settled outcome (spec §4.2, §4.5): the body of a consumer's
-    /// `GrainHandler<Settled<Self>>`.
+    /// `EntityHandler<Settled<Self>>`.
     ///
     /// Discards a straggler — an outcome whose key has left the desired set —
     /// without calling [`Driven::settle`] and without writing any record (D5).
@@ -332,7 +332,7 @@ impl<D: Driven> Drive<D> {
         driven: &D,
         state: &D::State,
         msg: Settled<D>,
-        ctx: &GrainCtx<D>,
+        ctx: &EntityCtx<D>,
     ) -> Vec<D::Event> {
         let Settled { key, outcome } = msg;
         let desired = driven.pending(state);
@@ -349,7 +349,7 @@ impl<D: Driven> Drive<D> {
             // The straggler test is the desired set itself, which is why it is
             // exact and needs no separate bookkeeping: a key is in the set
             // exactly while its outcome is not yet journaled. Exactness rests on
-            // keys being unique over the grain's whole journal (§3.1) — with a
+            // keys being unique over the entity's whole journal (§3.1) — with a
             // key reused across occurrences the test would decide presence, not
             // identity.
             let straggler = !desired.iter().any(|p| p.key == key);
@@ -361,7 +361,7 @@ impl<D: Driven> Drive<D> {
         if straggler {
             ctx.system().emit(
                 DriveEvent::Discarded {
-                    grain: ctx.name().clone(),
+                    entity: ctx.name().clone(),
                     key: format!("{key:?}"),
                     node: ctx.system().node(),
                 }
@@ -395,7 +395,7 @@ impl<D: Driven> Drive<D> {
                 .failed(key.clone(), ctx.system().now(), jitter)
         };
         let event = DriveEvent::Settled {
-            grain: ctx.name().clone(),
+            entity: ctx.name().clone(),
             key: format!("{key:?}"),
             node: ctx.system().node(),
             ok,
@@ -436,17 +436,17 @@ impl<D: Driven> Drive<D> {
 
     /// Hand one effect to the spawner and return (§3.2). The drive MUST NOT await
     /// a launch: the activation therefore never blocks, which is what lets a
-    /// grain with a hundred outstanding effects hold no thread and, once
+    /// entity with a hundred outstanding effects hold no thread and, once
     /// quiescent, no memory.
-    fn launch(&self, driven: &D, ctx: &GrainCtx<D>, key: D::Key, effect: D::Effect) {
+    fn launch(&self, driven: &D, ctx: &EntityCtx<D>, key: D::Key, effect: D::Effect) {
         let cx = Perform::new(ctx.name().clone(), ctx.system().clone());
         // `perform` runs outside the activation, so its future is `'static` and
-        // holds no borrow of the grain: the consumer cloned what it needs out of
+        // holds no borrow of the entity: the consumer cloned what it needs out of
         // `&self` before returning it.
         let fut = driven.perform(effect, cx);
         ctx.system().emit(
             DriveEvent::Launched {
-                grain: ctx.name().clone(),
+                entity: ctx.name().clone(),
                 key: format!("{key:?}"),
                 node: ctx.system().node(),
             }
@@ -464,7 +464,7 @@ impl<D: Driven> Drive<D> {
 
     /// Self-`tell` a synthesized outcome: the path a dangling `Interrupt` takes to
     /// the command barrier (§3.2, §4.4).
-    fn deliver(&self, ctx: &GrainCtx<D>, key: D::Key, outcome: Result<D::Outcome, EffectError>) {
+    fn deliver(&self, ctx: &EntityCtx<D>, key: D::Key, outcome: Result<D::Outcome, EffectError>) {
         let this = ctx.this();
         ctx.system().launch(Box::pin(async move {
             let _ = this.tell(Settled::<D> { key, outcome }).await;

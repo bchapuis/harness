@@ -1,0 +1,45 @@
+[package]
+name = "machine-entity"
+description = "Persistent machines: a durable, name-addressed lightweight VM as an entity (machine spec)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The production binding (machine §2.1): a real guest, held through
+# `machine_host::MachineHost` — a Firecracker microVM (Linux + /dev/kvm) or a
+# container holding the same rootfs (anywhere docker runs). The machine's drive
+# is the disk facet's image (entity §7.15) and its /workspace syncs through
+# `machine-host`'s shared tar codec (machine §4). Which mechanism is the node's
+# runtime choice, so one feature carries both; builds everywhere.
+host = ["dep:machine-host", "machine-host/ws", "dep:machine-proto", "dep:tokio", "tokio/process"]
+# Egress plumbing (machine §5.2): the per-machine tap device and node NAT that
+# realize the journaled policy. Linux + CAP_NET_ADMIN; shells out to `ip`/`nft`.
+# The pure rule generator (`nft_ruleset`) is available without the feature.
+net = []
+
+[dependencies]
+actor-core.workspace = true
+entity.workspace = true
+serde = { workspace = true }
+# The workspace file commands (machine §3) confine paths by capability
+# handle, as the sandbox's Workspace tier does (sandbox §3.1, S1).
+cap-std.workspace = true
+machine-host = { workspace = true, optional = true }
+machine-proto = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+spec.workspace = true
+entity = { workspace = true, features = ["testing"] }
+actor-cluster.workspace = true
+actor-simulation.workspace = true
+futures.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros"] }

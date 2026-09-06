@@ -300,7 +300,7 @@ impl ClusterWorkload for BlobSwarm {
         // run's end has such an ask frozen (a paused caller's timeout timer is
         // paused too); it would resolve on heal, so it is not a silent loss. The
         // data path's no-loss is covered anyway — clients await every op to an
-        // outcome. (Granary's swarm keeps the checker because it issues no
+        // outcome. (Entities's swarm keeps the checker because it issues no
         // continuous background asks.)
         let mut invariants: Vec<Box<dyn Invariant>> = default_invariants()
             .into_iter()

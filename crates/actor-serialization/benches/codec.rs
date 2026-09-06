@@ -6,7 +6,7 @@
 //! over a second of CPU per copy. That claim has never been measured. These benchmarks
 //! measure it, on the two shapes that behave differently:
 //!
-//! - `bytes` is a `Vec<u8>` — the shape the warning is about, and the shape a grain's
+//! - `bytes` is a `Vec<u8>` — the shape the warning is about, and the shape an entity's
 //!   journaled event or a blob actually is.
 //! - `record` is an ordinary struct of strings and numbers, where the two formats are
 //!   much closer and JSON's readability is worth something.

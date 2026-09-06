@@ -2,7 +2,7 @@
 # harness-gateway StatefulSet that joins the same cluster as a non-voting,
 # non-hosting CLIENT (the Orleans cluster-client pattern). Each pod has its OWN
 # data volume (no shared filesystem) and a stable DNS name; the journal replicates
-# over the transport (a quorum append per grain), so the nodes share nothing on
+# over the transport (a quorum append per entity), so the nodes share nothing on
 # disk.
 #
 # Why the gateway is a StatefulSet (not a Deployment): as a cluster client it
@@ -136,11 +136,11 @@ spec:
           # (docs/hardware-envelope.md §1: local NVMe, tens of cores, 128-256 GB).
           # Several defaults are set on the assumption that memory is abundant —
           # the manifest is held whole, segments and host handles are cached by the
-          # thousand — so a node run at 512Mi will OOM under any real grain count.
+          # thousand — so a node run at 512Mi will OOM under any real entity count.
           #
           # For production, size a node to the envelope and give it a real
           # descriptor budget; the store's segment cache alone wants ~65k
-          # (crates/granary/src/file_store.rs, DEFAULT_SEGMENT_CAPACITY):
+          # (crates/entity/src/file_store.rs, DEFAULT_SEGMENT_CAPACITY):
           #
           #   resources:
           #     requests: { cpu: "8",  memory: "32Gi" }
@@ -196,7 +196,7 @@ spec:
 # The gateway tier: the public HTTP/SSE edge, joined to the cluster as a
 # non-voting CLIENT. It verifies a caller's bearer token to a tenant (it
 # terminates auth, with the harness-auth tenants file) and addresses the
-# session's grain directly over the transport — no control protocol. Holds no
+# session's entity directly over the transport — no control protocol. Holds no
 # durable state, so scale `replicas` freely (each gets its own non-voting id;
 # admit more by extending the nodes' --client flags). Public TLS is expected to
 # terminate at an Ingress/LoadBalancer; the transport link is plaintext, guarded

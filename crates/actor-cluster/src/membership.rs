@@ -350,7 +350,7 @@ impl MembershipCommand {
 /// `ACMEMB` cannot be confused with the unstamped predecessor, whose first byte is
 /// a transition tag in `0..=4`. `A` is `0x41`, so the confusion the magic has to
 /// rule out is ruled out by construction rather than by arithmetic — the same
-/// easier half of the job that `granary.shardmap`'s `GRSMAP` gets from JSON's
+/// easier half of the job that `entity.shardmap`'s `GRSMAP` gets from JSON's
 /// leading `{`, and that `wal`'s header has to do the hard way.
 ///
 /// **The nine bytes are the argument against, and they lose.** A magic and a

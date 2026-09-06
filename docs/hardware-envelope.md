@@ -13,7 +13,7 @@ Written down once so a review can do arithmetic instead of arguing, and so a num
 - **Storage.** Directly-attached NVMe, typically software RAID. **Power-loss protection varies by drive model and must be verified** — without it a flush costs fifteen times more (two rows in §2, not one).
 - **Network. A 1 Gbps uplink**, 10 Gbps available at extra cost. Replication and public serving share that one 125 MB/s port, and private traffic between nodes rides the same interface. This is the constraint everything below is downstream of.
 
-Two structural consequences: there are **no availability zones** — failure domains are racks and datacenter sites, which is what `GranaryConfig::failure_domains` must be given — and **no managed block storage**, so a lost node is a lost replica.
+Two structural consequences: there are **no availability zones** — failure domains are racks and datacenter sites, which is what `EntityConfig::failure_domains` must be given — and **no managed block storage**, so a lost node is a lost replica.
 
 > Confirm core count, drive model, PLP, and port speed against the machine actually rented; these vary by tier and change over time. The rules depend on the *shape* of the table, not any single row.
 
@@ -56,7 +56,7 @@ Four inversions fall out of it. They are the content of this document.
 
 **I4 — The session's clock is the model's, not the machine's.** A quorum append at ~1 ms is 0.003% of an agent turn. Everything in the storage and consensus layers is, from the session's point of view, free. What *is* visible is measured in seconds: a failover window, a cold rehydrate that ships megabytes, a capture that takes minutes.
 
-Two facts that moved as everyone expects: **memory holds the set, not a slice** (128 GB against grains measured in kilobytes), and **cores are abundant while coordination between them is not** (a shared mutex on a hot path is this decade's disk seek).
+Two facts that moved as everyone expects: **memory holds the set, not a slice** (128 GB against entities measured in kilobytes), and **cores are abundant while coordination between them is not** (a shared mutex on a hot path is this decade's disk seek).
 
 ## 3. What follows
 
@@ -70,7 +70,7 @@ Defaults, each overridable by a measurement.
 
 **hw §3.4 — Find the serial resource; it is not the device.** Suspects in order: the uplink, a chain of round trips, a shared lock, a single control loop. The NVMe device is last.
 
-**hw §3.5 — File-per-object is limited by metadata, not throughput.** The cost of one file per grain is inodes, directory size, and descriptors — not the un-shared fsync, which is what the classic objection is about.
+**hw §3.5 — File-per-object is limited by metadata, not throughput.** The cost of one file per entity is inodes, directory size, and descriptors — not the un-shared fsync, which is what the classic objection is about.
 
 **hw §3.6 — A number copied from another system is not a default.** Durable Objects evicts at ten seconds because it prices multi-tenant memory. `RLIMIT_NOFILE` is 65536 because a 2010 distribution said so. SQLite pages are 4 KiB because that was a disk sector. Re-derive the number here, or write down that it was inherited.
 
@@ -78,11 +78,11 @@ Defaults, each overridable by a measurement.
 
 **hw §3.8 — Below a millisecond on the session path is invisible; above a hundred is not.** From I4: no saved microseconds justify a weaker bound or a harder-to-read module. Conversely, failover windows, cold starts, capture and restore, and uplink saturation are real user-visible latency and deserve the effort microseconds do not.
 
-**hw §3.9 — Every replicated byte is billed R−1 times to the uplink.** Dedup, delta encoding, and compression pay R−1 times over; so does write amplification, in the wrong direction. A snapshot that ships whole state, a checkpoint that re-sends unchanged blocks, a rebalance that copies a shard: each costs 8 ms per megabyte per peer. This is the arithmetic that put facet 0's state through content-defined chunking (granary §7.12): a 2 MB transcript snapshotted whole cost 16 ms of uplink per peer for one appended turn, and now costs what the turn changed.
+**hw §3.9 — Every replicated byte is billed R−1 times to the uplink.** Dedup, delta encoding, and compression pay R−1 times over; so does write amplification, in the wrong direction. A snapshot that ships whole state, a checkpoint that re-sends unchanged blocks, a rebalance that copies a shard: each costs 8 ms per megabyte per peer. This is the arithmetic that put facet 0's state through content-defined chunking (entity §7.12): a 2 MB transcript snapshotted whole cost 16 ms of uplink per peer for one appended turn, and now costs what the turn changed.
 
 ## 4. Where this already decided something
 
-The decisions this envelope settled — group commit withdrawn, `sync_all` over `sync_data`, whole-log verification on open, XXH3 and BLAKE3, chunked content-addressed blobs, the manifest held whole, local replay reads — each carry their reasoning in the code that implements them, as do the ones it has *not* settled: compression on the replication path is measured and argued in granary's `benches/compress.rs` (a bench-only `lz4_flex`; nothing on the wire compresses), and the grain store's manifest flush at `FileGrainStore::segment_id`. The reviews that produced all of them are in the history.
+The decisions this envelope settled — group commit withdrawn, `sync_all` over `sync_data`, whole-log verification on open, XXH3 and BLAKE3, chunked content-addressed blobs, the manifest held whole, local replay reads — each carry their reasoning in the code that implements them, as do the ones it has *not* settled: compression on the replication path is measured and argued in entity's `benches/compress.rs` (a bench-only `lz4_flex`; nothing on the wire compresses), and the entity store's manifest flush at `FileEntityStore::segment_id`. The reviews that produced all of them are in the history.
 
 ## 5. What this does not license
 

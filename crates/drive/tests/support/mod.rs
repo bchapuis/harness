@@ -1,13 +1,13 @@
-//! A driven grain and a scripted effect, shared by the conformance suites.
+//! A driven entity and a scripted effect, shared by the conformance suites.
 //!
-//! `Fanout` is the drive spec's Appendix A worked example, made real: a grain
+//! `Fanout` is the drive spec's Appendix A worked example, made real: an entity
 //! that fans a job out to N workers, collects their results, and finishes. It
 //! journals its own records, holds no memo, and — this is the point — writes no
 //! dispatch loop, no in-flight table, no "did I already launch this", no
 //! recovery pass, no straggler check, and no `can_hibernate` body of its own.
 //!
 //! `Script` is the drive spec §10 simulation seam: the one row the drive adds to
-//! the table the grain already virtualizes. A scripted effect is a deterministic
+//! the table the entity already virtualizes. A scripted effect is a deterministic
 //! function of the key and the seed, with seeded latency, failure, and
 //! never-returning ("crash mid-effect") outcomes.
 
@@ -42,21 +42,21 @@ use drive::Pending;
 use drive::Perform;
 use drive::Settled;
 use drive::testing::DriveCycle;
-use granary::Grain;
-use granary::GrainCtx;
-use granary::GrainEvent;
-use granary::GrainHandler;
-use granary::GrainRegistry;
-use granary::Granary;
-use granary::GranaryConfig;
-use granary::GranaryExt;
-use granary::GranarySystem;
+use entity::Entity;
+use entity::EntityCtx;
+use entity::EntityEvent;
+use entity::EntityHandler;
+use entity::EntityRegistry;
+use entity::Entities;
+use entity::EntityConfig;
+use entity::EntityExt;
+use entity::EntitySystem;
 use serde::Deserialize;
 use serde::Serialize;
 
 pub type TaskId = u32;
 
-/// The grain type every suite hosts `Fanout` under.
+/// The entity type every suite hosts `Fanout` under.
 pub const FANOUT_TYPE: &str = "test.Fanout";
 
 /// What a scripted effect does when its key is performed.
@@ -147,7 +147,7 @@ fn lock(seam: &Seam) -> std::sync::MutexGuard<'_, Script> {
     seam.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-// --- The grain: ordinary granary. Records, a fold, handlers (granary §4.1, §4.2).
+// --- The entity: ordinary entity. Records, a fold, handlers (entity §4.1, §4.2).
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
@@ -194,12 +194,12 @@ pub enum FanoutRecord {
     },
 }
 
-pub struct Fanout<S: GranarySystem> {
+pub struct Fanout<S: EntitySystem> {
     pub seam: Seam,
     pub drive: Drive<Fanout<S>>,
 }
 
-impl<S: GranarySystem> Fanout<S> {
+impl<S: EntitySystem> Fanout<S> {
     pub fn new(seam: Seam) -> Self {
         Fanout {
             seam,
@@ -208,16 +208,16 @@ impl<S: GranarySystem> Fanout<S> {
     }
 }
 
-impl<S: GranarySystem> Grain for Fanout<S> {
+impl<S: EntitySystem> Entity for Fanout<S> {
     type System = S;
     type State = FanoutState;
     type Event = FanoutRecord;
     type Facets = ();
-    const GRAIN_TYPE: &'static str = "test.Fanout";
+    const ENTITY_TYPE: &'static str = "test.Fanout";
 
     fn apply(state: &mut FanoutState, record: &FanoutRecord) {
         match record {
-            // Idempotent by task id (granary §2.2): a request re-asked after an
+            // Idempotent by task id (entity §2.2): a request re-asked after an
             // ambiguous failure — a timeout, a leader move mid-append — may
             // commit twice, and the second must not double the work.
             FanoutRecord::Requested { tasks, silent } => {
@@ -238,18 +238,18 @@ impl<S: GranarySystem> Grain for Fanout<S> {
         }
     }
 
-    fn register(r: &mut GrainRegistry<Self>) {
-        // The network allowlist (granary §5.5). The drive's `Nudge` and
+    fn register(r: &mut EntityRegistry<Self>) {
+        // The network allowlist (entity §5.5). The drive's `Nudge` and
         // `Settled` are local self-tells and are deliberately absent: nothing
-        // outside the grain injects an effect outcome.
+        // outside the entity injects an effect outcome.
         r.accept::<Request>();
         r.accept::<Retract>();
         r.accept::<Status>();
     }
 
-    async fn on_activate(&mut self, ctx: &GrainCtx<Self>) -> Result<(), actor_core::BoxError> {
+    async fn on_activate(&mut self, ctx: &EntityCtx<Self>) -> Result<(), actor_core::BoxError> {
         // Forget every claim and count, arm the first drive, and nudge so a
-        // resumed grain with work outstanding drives it without a caller (§4.4).
+        // resumed entity with work outstanding drives it without a caller (§4.4).
         self.drive.on_activate(ctx);
         Ok(())
     }
@@ -264,7 +264,7 @@ impl<S: GranarySystem> Grain for Fanout<S> {
 // --- The drive: what the committed state calls for, how to do one, what an
 // --- outcome means.
 
-impl<S: GranarySystem> Driven for Fanout<S> {
+impl<S: EntitySystem> Driven for Fanout<S> {
     type Key = TaskId;
     type Effect = Task;
     type Outcome = Answer;
@@ -326,7 +326,7 @@ impl<S: GranarySystem> Driven for Fanout<S> {
         state: &FanoutState,
         key: &TaskId,
         outcome: Result<Answer, EffectError>,
-        _ctx: &GrainCtx<Self>,
+        _ctx: &EntityCtx<Self>,
     ) -> Vec<FanoutRecord> {
         if state.silent.contains(key) {
             // "This outcome changed nothing" (§4.2): no record, so nothing
@@ -349,23 +349,23 @@ impl<S: GranarySystem> Driven for Fanout<S> {
 // --- The two handlers the drive requires. `Driven`'s supertraits make these a
 // --- compile-time obligation rather than a documented one.
 
-impl<S: GranarySystem> GrainHandler<Nudge> for Fanout<S> {
+impl<S: EntitySystem> EntityHandler<Nudge> for Fanout<S> {
     async fn handle(
         &self,
         state: &FanoutState,
         _msg: Nudge,
-        ctx: &GrainCtx<Self>,
+        ctx: &EntityCtx<Self>,
     ) -> (Vec<FanoutRecord>, ()) {
         (self.drive.advance(self, state, ctx), ())
     }
 }
 
-impl<S: GranarySystem> GrainHandler<Settled<Fanout<S>>> for Fanout<S> {
+impl<S: EntitySystem> EntityHandler<Settled<Fanout<S>>> for Fanout<S> {
     async fn handle(
         &self,
         state: &FanoutState,
         msg: Settled<Fanout<S>>,
-        ctx: &GrainCtx<Self>,
+        ctx: &EntityCtx<Self>,
     ) -> (Vec<FanoutRecord>, ()) {
         // The drive re-enters the cycle itself after a committed settle, or arms
         // the backoff timer after one that committed nothing (§3.2 items 1, 3).
@@ -390,12 +390,12 @@ impl Message for Request {
     const MANIFEST: Manifest = Manifest::new("test.FanoutRequest");
 }
 
-impl<S: GranarySystem> GrainHandler<Request> for Fanout<S> {
+impl<S: EntitySystem> EntityHandler<Request> for Fanout<S> {
     async fn handle(
         &self,
         state: &FanoutState,
         msg: Request,
-        ctx: &GrainCtx<Self>,
+        ctx: &EntityCtx<Self>,
     ) -> (Vec<FanoutRecord>, ()) {
         self.drive.nudge(self, state, ctx);
         (
@@ -418,19 +418,19 @@ impl Message for Retract {
     const MANIFEST: Manifest = Manifest::new("test.FanoutRetract");
 }
 
-impl<S: GranarySystem> GrainHandler<Retract> for Fanout<S> {
+impl<S: EntitySystem> EntityHandler<Retract> for Fanout<S> {
     async fn handle(
         &self,
         state: &FanoutState,
         msg: Retract,
-        ctx: &GrainCtx<Self>,
+        ctx: &EntityCtx<Self>,
     ) -> (Vec<FanoutRecord>, ()) {
         self.drive.nudge(self, state, ctx);
         (vec![FanoutRecord::Retracted { task: msg.0 }], ())
     }
 }
 
-/// A read: no records, commits nothing (granary §7.5).
+/// A read: no records, commits nothing (entity §7.5).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Status;
 
@@ -442,12 +442,12 @@ impl Message for Status {
     const MANIFEST: Manifest = Manifest::new("test.FanoutStatus");
 }
 
-impl<S: GranarySystem> GrainHandler<Status> for Fanout<S> {
+impl<S: EntitySystem> EntityHandler<Status> for Fanout<S> {
     async fn handle(
         &self,
         state: &FanoutState,
         _msg: Status,
-        _ctx: &GrainCtx<Self>,
+        _ctx: &EntityCtx<Self>,
     ) -> (Vec<FanoutRecord>, StatusReply) {
         let outstanding = self.pending(state).into_iter().map(|p| p.key).collect();
         (vec![], (state.done.clone(), state.finished, outstanding))
@@ -489,27 +489,27 @@ pub fn sim_system(sim: &Simulation, recorder: &Recorder) -> SimSystem {
 pub fn fanouts(
     system: &SimSystem,
     seam: &Seam,
-    config: GranaryConfig,
-) -> Granary<Fanout<SimSystem>> {
+    config: EntityConfig,
+) -> Entities<Fanout<SimSystem>> {
     let seam = seam.clone();
-    system.granary_named::<Fanout<SimSystem>>(
+    system.entities_named::<Fanout<SimSystem>>(
         FANOUT_TYPE,
         config,
         Arc::new(move || Fanout::new(seam.clone())),
     )
 }
 
-/// Ask `key`'s grain on the single-node tier and return its reply. `block_on`
+/// Ask `key`'s entity on the single-node tier and return its reply. `block_on`
 /// returns at the reply; whatever the command set in motion runs on the next
 /// `run_for`.
-pub fn ask<M>(sim: &Simulation, fanouts: &Granary<Fanout<SimSystem>>, key: &str, msg: M) -> M::Reply
+pub fn ask<M>(sim: &Simulation, fanouts: &Entities<Fanout<SimSystem>>, key: &str, msg: M) -> M::Reply
 where
     M: Message + Clone + Send + 'static,
     M::Reply: Send + 'static,
-    Fanout<SimSystem>: GrainHandler<M>,
+    Fanout<SimSystem>: EntityHandler<M>,
 {
-    let grain = fanouts.grain(key);
-    sim.block_on(async move { grain.ask(msg).await.expect("the grain replies") })
+    let entity = fanouts.entity(key);
+    sim.block_on(async move { entity.ask(msg).await.expect("the entity replies") })
 }
 
 pub fn seam() -> Seam {
@@ -595,12 +595,12 @@ pub fn announced_quiescence(events: &[Event]) -> bool {
         .any(|e| matches!(e, DriveEvent::Quiescent { .. }))
 }
 
-/// Whether any grain hibernated (granary §13).
+/// Whether any entity hibernated (entity §13).
 pub fn hibernated(events: &[Event]) -> bool {
     events.iter().any(|e| {
         matches!(
-            e.as_app::<GrainEvent>(),
-            Some(GrainEvent::Deactivated { .. })
+            e.as_app::<EntityEvent>(),
+            Some(EntityEvent::Deactivated { .. })
         )
     })
 }

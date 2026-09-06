@@ -6,7 +6,7 @@ non-voting, non-hosting **client** (the Orleans cluster-client pattern). Each po
 has its own data volume and stable DNS name. Unlike the single-host `demo-agent.sh`,
 the nodes run on separate pods, and so potentially separate machines. As there,
 they share nothing on disk: the journal replicates over the transport, a quorum
-append per grain (spec §7.2).
+append per entity (spec §7.2).
 
 ```
    HTTP  ─►  Service: harness-gateway  ─►  StatefulSet harness-gw (N clients)
@@ -21,8 +21,8 @@ append per grain (spec §7.2).
 ```
 
 The gateway verifies a caller's bearer token to a tenant (it terminates auth),
-then addresses the session's grain **directly** over the actor transport — no
-control protocol, no forwarding hop. Because it holds `GrainRef`s and rides the
+then addresses the session's entity **directly** over the actor transport — no
+control protocol, no forwarding hop. Because it holds `EntityRef`s and rides the
 receptionist gossip, the gateway sits **inside** the cluster's trust boundary
 (it presents the cluster secret); untrusted callers reach it only over HTTP with
 a bearer token. The session-key scope is what keeps tenants isolated.
@@ -154,7 +154,7 @@ kubectl delete pod harness-1 --grace-period=5
 kubectl logs harness-0 | grep -E 'Suspected|Unreachable'
 
 # Re-issue the SAME prompt (same turn id) through the gateway. The new owner
-# recovers the grain's head from a quorum, folds the journal, and resumes from
+# recovers the entity's head from a quorum, folds the journal, and resumes from
 # the last committed record — the run completes as if nothing happened:
 curl -N -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
   -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
@@ -167,7 +167,7 @@ it rejoins as the same node and new sessions place onto it again.
 ## Sandbox boundary
 
 The manifest runs `--sandbox durable`: the `Workspace` tier is backed by a
-durable filesystem grain (granary §7.10), so a session's files survive
+durable filesystem entity (entity §7.10), so a session's files survive
 hibernation, migration, and node loss. It needs no extra in-cluster runtime —
 the right starter default — but it offers the typed file tools
 (`read_file`/`write_file`/`edit_file`/`list_dir`/`remove`) only: **no `shell`

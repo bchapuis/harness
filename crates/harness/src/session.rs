@@ -1,15 +1,15 @@
 //! Session identity, records, and the fold (harness spec §2, §6.3).
 //!
-//! A session *is* a grain (§2.1): its [`SessionId`] is the key half of a
-//! `GrainName` (`(KindId, SessionId)`, §2.2), each [`Record`] is the grain's
-//! `Event`, and [`SessionState`] is the grain's `State` — the pure,
-//! deterministic fold of the journal that granary rehydrates on activation
+//! A session *is* an entity (§2.1): its [`SessionId`] is the key half of a
+//! `EntityName` (`(KindId, SessionId)`, §2.2), each [`Record`] is the entity's
+//! `Event`, and [`SessionState`] is the entity's `State` — the pure,
+//! deterministic fold of the journal that entity rehydrates on activation
 //! (invariant H1). Anything not journaled is lost on deactivation.
 //!
-//! Identity is layered (§2.2): `SessionId` (= the `GrainName` key: durable,
+//! Identity is layered (§2.2): `SessionId` (= the `EntityName` key: durable,
 //! application-chosen) → `ActorId` (one activation, system-assigned) → `TurnId`
-//! (one run). The `KindId` is the session's grain *type* (granary hosts one
-//! `Agent` grain under each kind's name via `granary_named`); granary owns
+//! (one run). The `KindId` is the session's entity *type* (entity hosts one
+//! `Agent` entity under each kind's name via `entities_named`); entity owns
 //! name→shard→leader resolution.
 
 use std::collections::BTreeMap;
@@ -57,7 +57,7 @@ macro_rules! id_string {
 
 id_string! {
     /// A session's durable identity (harness spec §2.2): the key half of the
-    /// grain's `GrainName`, application-chosen, surviving activation restarts and
+    /// entity's `EntityName`, application-chosen, surviving activation restarts and
     /// shard-leadership moves; an `ActorId` does not.
     SessionId
 }
@@ -149,9 +149,9 @@ impl Completion {
 
 /// A run's abnormal terminal outcome (harness spec §3.1) — an application
 /// error living **inside the reply**, distinct from transport/durability
-/// `GrainError`. Exactly these three: "a tool misbehaved" is not a run failure
+/// `EntityError`. Exactly these three: "a tool misbehaved" is not a run failure
 /// (§5.4), and durability failure is not a run outcome at all — it is the
-/// grain's outer `GrainError::Unavailable`, which *pauses* the run rather than
+/// entity's outer `EntityError::Unavailable`, which *pauses* the run rather than
 /// ending it (§3.1, §6.4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunError {
@@ -242,7 +242,7 @@ pub enum RecordBody {
         call: CallId,
         outcome: Result<Value, ToolError>,
     },
-    /// A delegation's intent (§8.1): the child kind (its grain type, needed to
+    /// A delegation's intent (§8.1): the child kind (its entity type, needed to
     /// address the child for cancel propagation, §9.2), the child session and
     /// turn — both derived deterministically from this session, this turn, and
     /// the call, so a re-executed delegation re-derives the same pair — plus the
@@ -259,7 +259,7 @@ pub enum RecordBody {
     /// the next model call after a mid-activation `EnvironmentLost`, and
     /// surfaced to the model with that request.
     ///
-    /// The workspace's durable subtree is the agent's own facet (granary §7.11)
+    /// The workspace's durable subtree is the agent's own facet (entity §7.11)
     /// and always survives — a routine reactivation never resets. What this
     /// record narrows to is the activation's working state: regenerable excluded
     /// trees (`target/`, `node_modules/`), running processes, and held tiers.
@@ -415,7 +415,7 @@ pub(crate) struct PendingCall {
     pub child: Option<ChildRef>,
 }
 
-/// A recorded delegation target (§8.1, §9.2): the child's kind (grain type),
+/// A recorded delegation target (§8.1, §9.2): the child's kind (entity type),
 /// session, turn, and carved budget — enough to address it and cancel it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ChildRef {
@@ -481,11 +481,11 @@ pub struct SessionState {
 }
 
 impl SessionState {
-    /// Fold one committed record — the grain's `apply` (granary §4.1), pure and
+    /// Fold one committed record — the entity's `apply` (entity §4.1), pure and
     /// deterministic, run on the live commit path and on every replay. Total: a
     /// record that fits no transition (a malformed journal) is ignored rather
     /// than panicking. The fold keeps projections only — the raw records stay
-    /// in the grain's journal, which serves `tail` directly (§10.2).
+    /// in the entity's journal, which serves `tail` directly (§10.2).
     pub(crate) fn apply(&mut self, record: &Record) {
         match &record.body {
             RecordBody::SessionCreated {

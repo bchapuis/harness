@@ -3,8 +3,8 @@
 //! spend, the sandbox bind/release pair — so the H-invariants are checkable over
 //! a run's stream. They carry nothing about a session's content: records are the
 //! durable, user-facing account (§10.1). Activation, deactivation, and the
-//! single-writer fence are the grain's events (`Activated`/`Deactivated`/
-//! `LeaderChanged`, granary §13), not duplicated here.
+//! single-writer fence are the entity's events (`Activated`/`Deactivated`/
+//! `LeaderChanged`, entity §13), not duplicated here.
 //!
 //! Each event rides the core stream as [`Event::App`] (core spec §16), so
 //! checkers observe one totally ordered sequence interleaved with the core
@@ -18,13 +18,13 @@ use crate::session::SessionId;
 use crate::session::TurnId;
 
 /// One harness event (harness spec §10.4): the events a stream checker cannot
-/// reconstruct from the grain's own.
+/// reconstruct from the entity's own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HarnessEvent {
     /// A run began for a newly journaled turn: fires once per `(session, turn)`
     /// — on the activation whose append committed the turn — under any
     /// duplication or retry (H7). A resume emits **no** second `RunStarted`: a
-    /// checker recognizes a resume as the grain's `Activated` followed by a
+    /// checker recognizes a resume as the entity's `Activated` followed by a
     /// `ModelCompleted` on an already-started turn (§10.4). `parent` is the
     /// delegating session for a run started by delegation (§8.1).
     RunStarted {
@@ -62,7 +62,7 @@ pub enum HarnessEvent {
     },
     /// The activation opened its sandbox — first sandboxed call (§5.3).
     /// Alternates with [`SandboxReleased`](HarnessEvent::SandboxReleased)
-    /// within the grain's activation window (H8).
+    /// within the entity's activation window (H8).
     SandboxBound { session: SessionId, node: NodeId },
     /// That sandbox was torn down — deactivation, loss, or step-down.
     SandboxReleased { session: SessionId, node: NodeId },

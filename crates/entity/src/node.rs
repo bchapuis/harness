@@ -1,0 +1,192 @@
+//! The capabilities a **node** provides to every entity type it hosts (spec §7.4,
+//! §13), as distinct from the per-type settings in [`EntityConfig`].
+//!
+//! Two things in this crate are scoped to the node rather than to an entity type: the
+//! blocking-I/O pool, which exists to bound *this node's* concurrent device work, and
+//! the metrics registry, which an operator reads to judge *this node's* health. Both
+//! once lived in [`EntityConfig`], which is per entity type, and that placement was
+//! wrong in a way that showed up at every call site: a node hosting three types wrote
+//! the same two handles into three configs, and a config that omitted one silently got
+//! a *second* pool — an inline one — rather than the node's. Neither mistake is
+//! visible in a type signature, and the second is invisible at runtime too, right up
+//! until a stalled device blocks the executor the pool was added to protect.
+//!
+//! So they hang here instead. A deployment builds one [`EntityNode`], sets what it
+//! has, and hosts every type through it; the handles are resolved once, when the node
+//! is built, rather than rebuilt per call.
+
+use std::sync::Arc;
+
+use crate::alarm_index::AlarmIndex;
+use crate::config::EntityConfig;
+use crate::entity::Entity;
+use crate::entityref::Entities;
+use crate::system::EntitySystem;
+
+/// The node-scoped handles every entity type on a node shares.
+///
+/// Cheap to clone (two `Arc`s) and resolved at construction, so a hot path reads a
+/// handle rather than building the default one again.
+#[derive(Clone)]
+pub(crate) struct NodeCapabilities {
+    io: Arc<dyn crate::BlockingIo>,
+    metrics: Arc<dyn crate::EntityMetrics>,
+}
+
+impl Default for NodeCapabilities {
+    /// The documented defaults: blocking store I/O runs inline on the calling async
+    /// worker, and measurements are discarded. Correct, and what the deterministic
+    /// simulation requires (§14) — see [`crate::blocking`] for why the pool is a seam
+    /// rather than a default.
+    fn default() -> NodeCapabilities {
+        NodeCapabilities {
+            io: Arc::new(crate::InlineIo),
+            metrics: Arc::new(()),
+        }
+    }
+}
+
+impl NodeCapabilities {
+    /// This node's blocking-I/O seam (§7.4).
+    pub(crate) fn blocking_io(&self) -> &Arc<dyn crate::BlockingIo> {
+        &self.io
+    }
+
+    /// This node's metrics sink (§13).
+    pub(crate) fn metrics(&self) -> &Arc<dyn crate::EntityMetrics> {
+        &self.metrics
+    }
+}
+
+impl std::fmt::Debug for NodeCapabilities {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeCapabilities")
+            .field("blocking_io", &"<seam>")
+            .field("metrics", &"<sink>")
+            .finish()
+    }
+}
+
+/// A node's entity hosting, carrying the capabilities every type it hosts shares
+/// (spec §7.4, §13).
+///
+/// Obtained from [`EntityExt::entity_node`](crate::EntityExt::entity_node),
+/// configured once, and then used in place of the `system.entity(..)` calls:
+///
+/// ```ignore
+/// let node = system
+///     .entity_node()
+///     .blocking_io(Arc::new(ThreadPoolIo::sized_for_host()))
+///     .metrics(Arc::clone(&metrics));
+///
+/// let alarms: Entities<AlarmIndex<_>> = node.entity(alarm_config);
+/// let machines: Entities<Machine> = node.entities_named_with_alarms(..., alarms);
+/// ```
+///
+/// Hosting a type straight off the system (`system.entity(..)`) still works and takes
+/// the defaults — the shape every test and the `Local` tier want.
+#[derive(Clone)]
+pub struct EntityNode<S: EntitySystem> {
+    system: S,
+    capabilities: NodeCapabilities,
+}
+
+impl<S: EntitySystem> EntityNode<S> {
+    pub(crate) fn new(system: S) -> EntityNode<S> {
+        EntityNode {
+            system,
+            capabilities: NodeCapabilities::default(),
+        }
+    }
+
+    /// Where this node's blocking store I/O runs (spec §7.4).
+    ///
+    /// Without it every fsync runs on the async worker that is also driving this
+    /// node's Raft heartbeats and its other shards' quorum waits, so a slow device
+    /// becomes spurious elections and a rehydration storm rather than merely slow
+    /// writes. Supply [`ThreadPoolIo`](crate::ThreadPoolIo) on real storage; see
+    /// [`crate::blocking`] for why the case for it is the tail rather than the median.
+    #[must_use]
+    pub fn blocking_io(mut self, io: Arc<dyn crate::BlockingIo>) -> EntityNode<S> {
+        self.capabilities.io = io;
+        self
+    }
+
+    /// Where this node reports its operator-facing measurements (spec §13).
+    ///
+    /// Distinct from the event stream, which is the checker's interface: see
+    /// [`crate::metrics`] for why both exist.
+    #[must_use]
+    pub fn metrics(mut self, metrics: Arc<dyn crate::EntityMetrics>) -> EntityNode<S> {
+        self.capabilities.metrics = metrics;
+        self
+    }
+
+    /// Host entities of type `G` under its own `G::ENTITY_TYPE`, building each
+    /// activation with `G::default` — this node's form of
+    /// [`EntityExt::entity`](crate::EntityExt::entity).
+    pub fn entities<G>(&self, config: EntityConfig) -> Entities<G>
+    where
+        G: Entity<System = S> + Default,
+    {
+        self.entities_named(G::ENTITY_TYPE, config, Arc::new(G::default))
+    }
+
+    /// Host entities of type `G` under an explicit runtime type name with a
+    /// caller-supplied activation factory — this node's form of
+    /// [`EntityExt::entities_named`](crate::EntityExt::entities_named).
+    pub fn entities_named<G>(
+        &self,
+        entity_type: &'static str,
+        config: EntityConfig,
+        factory: Arc<dyn Fn() -> G + Send + Sync>,
+    ) -> Entities<G>
+    where
+        G: Entity<System = S>,
+    {
+        crate::entityref::build_entities::<S, G>(
+            &self.system,
+            entity_type,
+            config,
+            &self.capabilities,
+            factory,
+            None,
+        )
+    }
+
+    /// Host entities of type `G` with durable-alarm firing — this node's form of
+    /// [`EntityExt::entities_with_alarms`](crate::EntityExt::entities_with_alarms).
+    pub fn entities_with_alarms<G>(
+        &self,
+        config: EntityConfig,
+        index: Entities<AlarmIndex<S>>,
+    ) -> Entities<G>
+    where
+        G: Entity<System = S> + Default,
+    {
+        self.entities_named_with_alarms(G::ENTITY_TYPE, config, Arc::new(G::default), index)
+    }
+
+    /// Host entities of type `G` under an explicit runtime type name with durable-alarm
+    /// firing — this node's form of
+    /// [`EntityExt::entities_named_with_alarms`](crate::EntityExt::entities_named_with_alarms).
+    pub fn entities_named_with_alarms<G>(
+        &self,
+        entity_type: &'static str,
+        config: EntityConfig,
+        factory: Arc<dyn Fn() -> G + Send + Sync>,
+        index: Entities<AlarmIndex<S>>,
+    ) -> Entities<G>
+    where
+        G: Entity<System = S>,
+    {
+        crate::entityref::build_entities_with_alarms::<S, G>(
+            &self.system,
+            entity_type,
+            config,
+            &self.capabilities,
+            factory,
+            index,
+        )
+    }
+}

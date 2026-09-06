@@ -36,7 +36,7 @@ pub enum SupervisionDecision {
 /// Raft, and the singleton activation discipline (which is why the singleton
 /// pair sits here even though a proxy emits it: its discipline is a
 /// framework-catalogued invariant, not application vocabulary). Everything a
-/// *layered* spec defines — granary's grain events, the harness's §10.4
+/// *layered* spec defines — entity's entity events, the harness's §10.4
 /// stream — rides [`Event::App`] instead, so core is never edited for a layer
 /// above it. If a new event's invariant is checked by the framework
 /// catalogue, it earns a variant; otherwise it is an [`AppEvent`].

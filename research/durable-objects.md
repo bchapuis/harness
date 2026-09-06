@@ -1,7 +1,7 @@
 # Cloudflare Durable Objects: properties, and how they replicate without a global consensus bottleneck
 
 **Status:** Research note
-**Purpose:** Understand Durable Objects (DO) as a building block that fuses compute with durable, replicated storage behind a single global address, and extract the lessons that apply to grains-on-actors in this repo (the actor framework in `docs/distributed-actor-spec.md` and the replicated-journal idea).
+**Purpose:** Understand Durable Objects (DO) as a building block that fuses compute with durable, replicated storage behind a single global address, and extract the lessons that apply to entities-on-actors in this repo (the actor framework in `docs/distributed-actor-spec.md` and the replicated-journal idea).
 
 Sources are listed at the end. Where a claim is inferred rather than stated by Cloudflare, it is marked **(inferred)**.
 
@@ -85,8 +85,8 @@ A leader election *does* happen for an object — but only on **migration, evict
 
 The lesson for the replicated-journal / "Raft journal groups" idea is exactly this decomposition:
 
-- **Do not put all grains on one Raft group.** Use **one journal group per grain** (or per small shard of grains). The memory note "replicated Journal (Raft journal groups)" is already plural — keep it that way and resist any temptation to collapse to a single cluster-wide log.
-- **Within a single-activation grain you do not need consensus to order writes** — only to make them durable. The grain's single activation is the stable leader of its own journal; ordering comes free from the serial executor (`docs/distributed-actor-spec.md` §6). You only need the *log-replication* half: append the already-ordered journal entry to a quorum.
+- **Do not put all entities on one Raft group.** Use **one journal group per entity** (or per small shard of entities). The memory note "replicated Journal (Raft journal groups)" is already plural — keep it that way and resist any temptation to collapse to a single cluster-wide log.
+- **Within a single-activation entity you do not need consensus to order writes** — only to make them durable. The entity's single activation is the stable leader of its own journal; ordering comes free from the serial executor (`docs/distributed-actor-spec.md` §6). You only need the *log-replication* half: append the already-ordered journal entry to a quorum.
 - **Keep placement off the write path.** Single-activation is a control-plane lease (your leader-based or registry-based modes, §9.4.2/§9.4.3), consulted on activation and migration, not on every message. Leader election for a journal group should be a rare reconfiguration, triggered by failure/migration, never by ordinary traffic.
 - **A durability barrier on the reply, not a consensus round.** Map the output gate onto `ReplyHandle::send` (§4.5): hold the reply until the journal entry is quorum-acked. The handler stays naive and sequential.
 
@@ -111,23 +111,23 @@ In short: Raft is a bottleneck only when it is one big shared log doing ordering
 
 ---
 
-## 7. Mapping to the actor framework + grain idea
+## 7. Mapping to the actor framework + entity idea
 
-`docs/distributed-actor-spec.md` already supplies the actor half and most of the hard distributed-systems machinery (membership, failure detection, supervision, the replicated journal). A "grain on top of actors" adds three things, all small given what exists:
+`docs/distributed-actor-spec.md` already supplies the actor half and most of the hard distributed-systems machinery (membership, failure detection, supervision, the replicated journal). A "entity on top of actors" adds three things, all small given what exists:
 
-| DO property | In the actor spec today | Gap to close for a grain |
+| DO property | In the actor spec today | Gap to close for an entity |
 |---|---|---|
 | Single instance per name | `ActorId` = node + path + incarnation; explicit `spawn` | **Virtual activation**: address by stable name, activate on first message, single-activation lease. Lives in the leader-based control plane (§9.4.3 already reserves the log for "singleton placement"). |
 | Colocated durable storage | actors are in-memory only | **A per-actor journal seam**: load-on-activate, persist-on-change. |
 | Output gate (durable before reply) | replies are synchronous, no durability barrier | Hold the reply in `ReplyHandle::send` (§4.5) until the journal entry is quorum-acked. |
 | Input gate (no reentrancy across awaits) | serial executor (§6) | Mostly present; extend gating to cover outstanding storage ops. |
-| Quorum-replicated log | replicated Journal / Raft journal groups | Strongest existing piece. Keep it **per grain**, and use only the log-replication half (Section 4.3). |
-| Alarms | none | Durable timers that re-activate the grain. |
+| Quorum-replicated log | replicated Journal / Raft journal groups | Strongest existing piece. Keep it **per entity**, and use only the log-replication half (Section 4.3). |
+| Alarms | none | Durable timers that re-activate the entity. |
 | Hibernation | actor lives until stopped | Hibernate-on-idle, rehydrate-from-journal. Requires the journal seam first. |
 
-Framing: **a grain is your actor plus a name-based virtual identity, a per-actor journal seam, and a durability barrier on the reply path.** Everything else you already have.
+Framing: **an entity is your actor plus a name-based virtual identity, a per-actor journal seam, and a durability barrier on the reply path.** Everything else you already have.
 
-One placement caveat: a DO is a *singleton activation* (one live copy, platform-placed), which trades availability for the single-coordinator guarantee — during migration or partition the object can be briefly unreachable. The gossip-based mode (§9.4.4) chooses the opposite (AP). So "grain" belongs to the **leader-based** or **registry-based** modes, where authoritative placement exists, not the gossip mode.
+One placement caveat: a DO is a *singleton activation* (one live copy, platform-placed), which trades availability for the single-coordinator guarantee — during migration or partition the object can be briefly unreachable. The gossip-based mode (§9.4.4) chooses the opposite (AP). So "entity" belongs to the **leader-based** or **registry-based** modes, where authoritative placement exists, not the gossip mode.
 
 ---
 

@@ -1,6 +1,6 @@
 [package]
 name = "tenancy"
-description = "An ownership-index grain: principals own and enumerate their grains, layered on granary"
+description = "An ownership-index entity: principals own and enumerate their entities, layered on entity"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-granary.workspace = true
+entity.workspace = true
 actor-core.workspace = true
 serde.workspace = true
 
@@ -17,9 +17,9 @@ serde.workspace = true
 actor-cluster.workspace = true
 actor-simulation.workspace = true
 futures.workspace = true
-# `testing` for the shared G3/G5 and G6 checkers the swarm attaches — test
+# `testing` for the shared E3/E5 and E6 checkers the swarm attaches — test
 # support, never shipped in a production build (docs/simulation-testing.md).
-granary = { workspace = true, features = ["testing"] }
+entity = { workspace = true, features = ["testing"] }
 serde.workspace = true
 
 [lints]

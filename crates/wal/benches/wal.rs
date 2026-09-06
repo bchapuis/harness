@@ -9,7 +9,7 @@
 //! `alloc` even on a machine whose fsync costs a millisecond.
 //!
 //! Replay is where the checksum's throughput reaches the product: `Wal::open` verifies
-//! every frame in the file before the first grain activates.
+//! every frame in the file before the first entity activates.
 
 use divan::Bencher;
 use divan::black_box;
@@ -91,7 +91,7 @@ fn append(bencher: Bencher, records: usize) {
 /// Recovery: read the file, verify every frame's checksum, and decode every record.
 ///
 /// No fsync is on this path, so the timing is the checksum and postcard decode directly —
-/// and it is the latency a node pays before its first grain can serve a request.
+/// and it is the latency a node pays before its first entity can serve a request.
 #[divan::bench(args = [1_000, 10_000, 100_000])]
 fn replay(bencher: Bencher, records: usize) {
     let dir = tempfile::tempdir().expect("scratch dir");

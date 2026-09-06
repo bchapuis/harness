@@ -1,14 +1,14 @@
 //! Cluster conformance (harness spec §7; invariants H3, H6, H7): the Agent
-//! grain hosted on a real 3-node `ClusterSystem`, sessions placed by granary's
+//! entity hosted on a real 3-node `ClusterSystem`, sessions placed by entity's
 //! shard map and driven from several nodes. A session activates on its shard's
 //! leader (§7.2); a re-submitted `TurnId` never starts a second run (H7); the
-//! grain's single-writer fence (G1) keeps each transcript one total order — the
+//! entity's single-writer fence (E1) keeps each transcript one total order — the
 //! harness builds no fence of its own (§6.2). Failover after a leader crash is
-//! the grain's rehydration (§7.5), exercised here by crashing a node and
+//! the entity's rehydration (§7.5), exercised here by crashing a node and
 //! re-submitting until the run completes on the new leader.
 //!
-//! This is the converged-cluster check. Pushing granary's `Quorum`-tier consensus
-//! through a *continuous* partition/crash nemesis is granary's own V&V remit
+//! This is the converged-cluster check. Pushing entity's `Quorum`-tier consensus
+//! through a *continuous* partition/crash nemesis is entity's own V&V remit
 //! (its swarm harness), not the harness's.
 
 mod support;
@@ -27,8 +27,8 @@ use actor_core::Spawner;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
-use granary::GrainEvent;
-use granary::GranaryConfig;
+use entity::EntityEvent;
+use entity::EntityConfig;
 use harness::Budget;
 use harness::Harness;
 use harness::Kind;
@@ -74,11 +74,11 @@ fn kinds() -> Kinds {
             .budget(Budget::new(10_000, 10))
             // Two shards over the 3-node cluster, replicated, no hibernation
             // during the test.
-            .grain(GranaryConfig {
+            .entity(EntityConfig {
                 shards: 2,
                 replication_factor: 3,
                 idle_after: Duration::from_secs(60),
-                ..GranaryConfig::default()
+                ..EntityConfig::default()
             }),
     )
 }
@@ -159,7 +159,7 @@ fn sessions_run_once_across_a_converged_cluster() {
     }
 
     // Each session ran exactly once — one submitted turn, one terminal outcome —
-    // on the grain's fence (H7, H3, G1).
+    // on the entity's fence (H7, H3, E1).
     for i in 0..SESSIONS {
         let harness = harnesses[i % harnesses.len()].clone();
         let session = harness
@@ -167,7 +167,7 @@ fn sessions_run_once_across_a_converged_cluster() {
             .unwrap();
         let records: Vec<RecordBody> = drive(&sim, Duration::from_secs(10), async move {
             loop {
-                if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
+                if let Ok(page) = session.tail(entity::Seq::new(0), harness::TAIL_PAGE).await {
                     return page.events.into_iter().map(|(_, r)| r.body).collect();
                 }
             }
@@ -237,7 +237,7 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
             .unwrap();
         async move {
             loop {
-                if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
+                if let Ok(page) = session.tail(entity::Seq::new(0), harness::TAIL_PAGE).await {
                     return page.events.into_iter().map(|(_, r)| r.body).collect();
                 }
             }
@@ -259,11 +259,11 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
 // -- crash-window cancel propagation (§9.2, H5) ------------------------------
 
 fn delegation_kinds() -> Kinds {
-    let grain = || GranaryConfig {
+    let entity = || EntityConfig {
         shards: 2,
         replication_factor: 3,
         idle_after: Duration::from_secs(600),
-        ..GranaryConfig::default()
+        ..EntityConfig::default()
     };
     Kinds::new()
         .register(
@@ -271,13 +271,13 @@ fn delegation_kinds() -> Kinds {
             Kind::new("parent agent")
                 .delegates_to(&["child"])
                 .budget(Budget::new(100_000, 10))
-                .grain(grain()),
+                .entity(entity()),
         )
         .register(
             "child",
             Kind::new("child agent")
                 .budget(Budget::new(50_000, 10))
-                .grain(grain()),
+                .entity(entity()),
         )
 }
 
@@ -311,13 +311,13 @@ fn delegation_model(sim: &Simulation) -> Arc<dyn harness::Model> {
     })
 }
 
-/// The node of `key`'s most recent grain activation (grain §13).
+/// The node of `key`'s most recent entity activation (entity §13).
 fn last_activation(sink: &CollectingSink, key: &str) -> Option<NodeId> {
     sink.events()
         .iter()
-        .filter_map(|e| e.as_app::<GrainEvent>())
+        .filter_map(|e| e.as_app::<EntityEvent>())
         .filter_map(|e| match e {
-            GrainEvent::Activated { node, name } if name.key() == key => Some(*node),
+            EntityEvent::Activated { node, name } if name.key() == key => Some(*node),
             _ => None,
         })
         .next_back()
@@ -337,7 +337,7 @@ fn await_journal(
     let clock = sim.clock();
     drive(sim, settle, async move {
         loop {
-            if let Ok(page) = session.tail(granary::Seq::new(0), harness::TAIL_PAGE).await {
+            if let Ok(page) = session.tail(entity::Seq::new(0), harness::TAIL_PAGE).await {
                 let bodies: Vec<RecordBody> =
                     page.events.into_iter().map(|(_, r)| r.body).collect();
                 if ready(&bodies) {
@@ -695,12 +695,12 @@ fn assert_invariants(events: &[Event]) {
 }
 
 /// Regression (the standalone-harness `NotLeader` livelock): a kind carries a
-/// `GranaryConfig`, so each kind becomes a `Quorum`-tier grain type that needs the
+/// `EntityConfig`, so each kind becomes a `Quorum`-tier entity type that needs the
 /// system's Raft engine to elect a shard leader. Building the harness on a
 /// cluster left in the default `Static` membership mode — no `.with_leader(...)`,
-/// hence no engine — must panic at construction (granary's guard), not hand back
+/// hence no engine — must panic at construction (entity's guard), not hand back
 /// a harness whose every turn would loop on `NotLeader`. This is the deployment
-/// layer inheriting the guard `tests/requires_consensus.rs` checks in granary.
+/// layer inheriting the guard `tests/requires_consensus.rs` checks in entity.
 #[test]
 #[should_panic(expected = "leader-based consensus")]
 fn building_a_harness_without_consensus_panics() {

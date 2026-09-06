@@ -1,16 +1,16 @@
 //! Test support for the harness conformance suite (harness spec §11, §12).
 //!
-//! The harness adds **two** rows to the table granary already virtualizes
+//! The harness adds **two** rows to the table entity already virtualizes
 //! (§12.1): the **scripted model** (a deterministic function of the request) and
 //! the **scripted sandbox** (deterministic outcomes per call). The journal is
-//! the grain's, so the harness tests drive the real granary host, gateway, and
+//! the entity's, so the harness tests drive the real entity host, gateway, and
 //! rehydration code under the same seed — simulating the harness *runs the real
 //! consensus path*, with the agent's loop the only new code on it.
 //!
 //! Plus the continuous H-invariant checkers (§11) and the machine-readable
 //! [`harness_catalogue`], guarded by the same drift-test pattern as the core and
-//! granary catalogues. Activation, deactivation, and the single-writer fence are
-//! observed through the **grain's** events (`Activated`/`Deactivated`, granary
+//! entity catalogues. Activation, deactivation, and the single-writer fence are
+//! observed through the **entity's** events (`Activated`/`Deactivated`, entity
 //! §13), not duplicated by the harness.
 
 #![allow(dead_code)]
@@ -73,11 +73,11 @@ pub fn harness_on(
 
 /// Read a session's whole journal via `tail` (§10.2), paging from the last
 /// `Seq` of each full page (one call is clamped to `TAIL_PAGE`) — the journal
-/// is the grain's, so the transcript is read back through the gateway's
-/// journal read (granary §7.5), not a test-held store.
+/// is the entity's, so the transcript is read back through the gateway's
+/// journal read (entity §7.5), not a test-held store.
 pub async fn tail_records(session: &harness::SessionRef<SimSystem>) -> Vec<harness::Record> {
     let mut records = Vec::new();
-    let mut from = granary::Seq::new(0);
+    let mut from = entity::Seq::new(0);
     loop {
         let page = session.tail(from, harness::TAIL_PAGE).await.expect("tail");
         let page = page.events;
@@ -117,7 +117,7 @@ type SandboxFactory = Arc<dyn Fn(&SimSystem) -> Arc<dyn SandboxProvider> + Send 
 
 /// A reusable single-run workload (§12): builds a harness on the simulation's
 /// `LocalSystem` with the given seams, runs `body`, and checks the harness
-/// invariants over the run's event stream. The journal is the grain's; the seams
+/// invariants over the run's event stream. The journal is the entity's; the seams
 /// come from factories so a seam that needs the run's clock (a `SlowModel`) is
 /// built from the handed system, while a caller-held seam (whose stats are read
 /// after the run) is captured and cloned by a constant factory ([`Scenario::new`]).
@@ -192,11 +192,11 @@ impl actor_simulation::Workload for Scenario {
 
 /// A kind config with an aggressive idle window, so a single test run exercises
 /// idle hibernation and sandbox release (§7.2, H8).
-pub fn brisk_idle() -> granary::GranaryConfig {
-    granary::GranaryConfig {
+pub fn brisk_idle() -> entity::EntityConfig {
+    entity::EntityConfig {
         idle_after: Duration::from_secs(1),
-        // The agent's workspace facet materializes a real directory per grain
-        // (granary §7.11); a fresh tempdir per kind map keeps parallel tests
+        // The agent's workspace facet materializes a real directory per entity
+        // (entity §7.11); a fresh tempdir per kind map keeps parallel tests
         // from sharing scratch paths. Kept (not dropped) so it outlives the
         // config; the OS reaps the temp tree.
         data_dir: Some(
@@ -204,7 +204,7 @@ pub fn brisk_idle() -> granary::GranaryConfig {
                 .expect("workspace scratch tempdir")
                 .keep(),
         ),
-        ..granary::GranaryConfig::default()
+        ..entity::EntityConfig::default()
     }
 }
 
@@ -578,7 +578,7 @@ pub fn audit_tier_acquisition(records: &[harness::Record], kind: &harness::Kind)
 /// The harness invariant catalogue (harness spec §11): machine readable
 /// alongside the conformance suite, guarded by the drift test in
 /// `conformance_catalogue.rs`. `invariant: n` reads as "Hn". **H2 is retired**
-/// (§11): the single-writer fence is wholly the grain's (G1), so it has no
+/// (§11): the single-writer fence is wholly the entity's (E1), so it has no
 /// harness invariant; the numbers H3–H8 are kept stable rather than renumbered.
 pub fn harness_catalogue() -> &'static [CatalogueEntry] {
     HARNESS_CATALOGUE

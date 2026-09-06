@@ -325,7 +325,7 @@ scenario suite, and give nextest a name to filter on: `binary(/swarm/)` is how
 load-bearing rather than a convention.
 
 Two organizing axes are both allowed, which is what clause 2 is for. Most crates
-name a sweep file after its **area** — `grain_swarm.rs`, `sql_swarm.rs`,
+name a sweep file after its **area** — `entity_swarm.rs`, `sql_swarm.rs`,
 `ws_swarm.rs` — and pair an invariant sweep with a reproducibility sweep over
 the same workload. `actor-simulation` instead hoists every reproducibility sweep
 in the crate into `conformance_determinism.rs`, by **shape**, so there is one
@@ -436,7 +436,7 @@ An at-quiescence assertion is a claim about a run that has stopped happening,
 and a run only stops happening if you let it. Two things get this wrong.
 
 **Wait for the calls to close.** A call issued at the end of the drive carries
-its own deadline, and a subsystem may fan out more calls behind it — granary's
+its own deadline, and a subsystem may fan out more calls behind it — entity's
 quorum append returns at quorum latency and drains the slower replicas
 afterwards, each with a seconds-long timeout. `drive_cluster` therefore flushes
 and then keeps advancing while any `ask` is in flight, up to a cap. So "still
@@ -465,7 +465,7 @@ runs out of budget makes no claim rather than a false one.
 **Some subsystems never quiesce, and the answer is per checker, not per sweep.**
 A background loop that polls for as long as its node lives has something in
 flight at *any* stopping point, so a quiescence assertion over it fails on a
-fraction of seeds no matter how long the runner waits. Granary's alarm driver
+fraction of seeds no matter how long the runner waits. The entity layer's alarm driver
 sweeps its shard's index every 500 ms (`ALARM_DRIVE_INTERVAL`) and breaks two
 default checkers; `blob-store`'s reconcile loop probes owners continuously and
 breaks one of them — and the two checkers do not deserve the same remedy.
@@ -474,7 +474,7 @@ subsystem drops it whole, which both `alarm_swarm.rs` and `blob-store`'s
 `swarm.rs` do. `serial-execution` is two claims in one: `observe` asserts no
 reentrant dispatch, which is real safety and holds fine, and only
 `at_quiescence` asserts nothing is left open. `blob-store`'s swarm keeps it
-whole; only the alarm driver, which re-activates grains forever, leaves a
+whole; only the alarm driver, which re-activates entities forever, leaves a
 dispatch open at an arbitrary stopping point, and dropping the checker whole
 would throw away the safety half, so `alarm_swarm.rs` wraps the real one in
 `NotReentrant` and overrides the final call alone. Read a failing checker
@@ -543,8 +543,8 @@ Two kinds of state end up on a workload, and only one belongs there:
   tasks with a local `Arc<Mutex<_>>`.
 
 Getting this wrong does not fail loudly, it fails *convincingly*: seed N's
-expectations are checked against seed N+1's freshly empty grains, so the sweep
-reports acknowledged writes that vanished — a textbook G14 violation, on a system
+expectations are checked against seed N+1's freshly empty entities, so the sweep
+reports acknowledged writes that vanished — a textbook E14 violation, on a system
 that did nothing wrong.
 
 The tell, when a sweep claims a durability violation: check whether it fails on
@@ -555,15 +555,15 @@ every seed *except the first*. Seed 0 has nothing to inherit.
 A durability claim is only as good as the reply it trusts, and three mistakes
 recur in workloads that assert one:
 
-- **A no-op commits nothing.** `tenancy`'s directory grain, built on granary,
+- **A no-op commits nothing.** `tenancy`'s directory entity, built on entity,
   answers a `Record` whose name is already owned with identical metadata with
   `Recorded::Unchanged`. That reports what the serving activation believed; it
-  journals no record, so granary's output gate never held a reply for it and a
+  journals no record, so entity's output gate never held a reply for it and a
   quorum-less recovery may have seeded that belief with an uncommitted record
-  (grain §7.5). Only outcomes that journal — `Recorded::Created`,
+  (entity §7.5). Only outcomes that journal — `Recorded::Created`,
   `Recorded::Updated` — are acknowledgements.
-- **A read is not a probe.** Granary's read contract is read-your-leader
-  (relaxed), *not* linearizable under partition (grain §7.5). To observe committed
+- **A read is not a probe.** The entity layer's read contract is read-your-leader
+  (relaxed), *not* linearizable under partition (entity §7.5). To observe committed
   state, issue a trivial *writing* command rather than a query.
 - **A mutating command needs an idempotency key.** At-most-once delivery means a
   duplicated frame runs the command twice (§7.2); a deposit without a key
@@ -579,23 +579,23 @@ recur in workloads that assert one:
 3. Size it: `sweep_seeds` unless a seed costs seconds, then `slow_seeds`.
 4. If it injects faults, add a coverage sweep with `coverage_seeds`. That covers
    the transport's faults, the ones `FaultStats` counts. For a fault the wire
-   cannot see — a grain that hibernates, a process that dies — tally the events
+   cannot see — an entity that hibernates, a process that dies — tally the events
    that say so and assert once at the end, and then ask **which kind of claim it
    is**, because that decides where it goes:
 
    - Something the *workload* drives holds however narrow the run, so it can
      ride the invariant sweep. Make it actually deterministic: idle past
      `idle_after` on a fixed cadence rather than a seeded coin, and snapshot
-     often enough that a grain has a checkpoint to return from before it first
-     hibernates. `granary`'s `support::Exercised` is the shared tally.
+     often enough that an entity has a checkpoint to return from before it first
+     hibernates. `entity`'s `support::Exercised` is the shared tally.
    - Something the *nemesis* draws is a property of the seed range, so it needs
      `coverage_seeds`, which never narrows. At `slow_seeds`' single local seed a
      six-round nemesis misses any one action about two runs in five, so the same
      assertion on an invariant sweep is not stricter, only flaky.
-5. If it needs a grain or actor a scenario suite already drives, take it from
+5. If it needs an entity or actor a scenario suite already drives, take it from
    `tests/support/` rather than writing a second one. A fixture whose *shape*
    has to differ between the scenarios and the sweep takes a config field, not a
-   second copy — `granary`'s `support::pipeline` switches its alarm-backed sleep
+   second copy — `entity`'s `support::pipeline` switches its alarm-backed sleep
    off for the sweep that way.
 6. When soak finds a failing seed, add it to `corpus.txt` — and write the
    scenario test once you know what broke.
@@ -606,7 +606,7 @@ and asserts nothing:
 - **A constant-valued fixture cannot say which write won.** For a property about
   *which* of several attempts is the durable one — a memoized step result, a
   first-writer-wins register, a deduplicated command — the fixture's effect must
-  produce a **different value each time it runs**. `granary`'s steps sweep
+  produce a **different value each time it runs**. `entity`'s steps sweep
   hands every step launch a fresh ordinal for exactly this reason: with a
   constant, a memo that was overwritten and one that was preserved read
   identically, and the check passes either way.
@@ -630,13 +630,13 @@ One question decides it: **whose contract is this a claim about?**
 | the claim is about | it lives in | example |
 |--------------------|-------------|---------|
 | the actor framework | `actor-simulation` | `NoSilentLoss`, `OneLeaderPerTerm` |
-| one crate's contract | that crate's `testing` feature | `granary::testing::CommitMonotonic` |
+| one crate's contract | that crate's `testing` feature | `entity::testing::CommitMonotonic` |
 | one suite's workload | that suite's own file | `SingletonConverged` in `conformance_swarm.rs` |
 
 The middle tier is feature-gated because it is test support, not part of the
-crate's API, and it must not ship in a production build. `granary` and `harness`
+crate's API, and it must not ship in a production build. `entity` and `harness`
 both have one; a crate reaches another's by enabling it in dev-dependencies
-(`granary = { workspace = true, features = ["testing"] }`), and its own by
+(`entity = { workspace = true, features = ["testing"] }`), and its own by
 depending on itself (`harness = { path = ".", features = ["testing"] }`).
 
 Each shared invariant is constructed with the label it reports under, so a suite
@@ -648,16 +648,16 @@ Box::new(CommitMonotonic::new("machine-commit-monotonic", "machine"))
 
 Before writing an invariant, check whether one of the first two tiers already
 has it. Near-identical names across layers are the trap — the cluster-utilities
-`SingletonAtMostOnePerNode` (U2, off `SingletonStarted`) and the grain
-`ActivationSingletonPerNode` (G6, off `GrainEvent::Activated`) are different
+`SingletonAtMostOnePerNode` (U2, off `SingletonStarted`) and the entity
+`ActivationSingletonPerNode` (E6, off `EntityEvent::Activated`) are different
 claims, and each doc comment points at the other.
 
 ### Where a fixture goes
 
 **Fixtures** live in `tests/support/`, shared between the test binaries of one
-crate. `support::Ledger` is the SQL-facet grain that `sql.rs` and `sql_swarm.rs`
-both drive, and `support::CounterGrain` is what `grains.rs` and `grain_swarm.rs`
-share — so a sweep covers the same grain the scenarios specify. A crate with no
+crate. `support::Ledger` is the SQL-facet entity that `sql.rs` and `sql_swarm.rs`
+both drive, and `support::CounterEntity` is what `entities.rs` and `entity_swarm.rs`
+share — so a sweep covers the same entity the scenarios specify. A crate with no
 `testing` feature may also keep suite-local invariants here; the moment a second
 crate wants one, it has become a contract claim and moves up a tier.
 
@@ -667,7 +667,7 @@ crate wants one, it has become a contract claim and moves up a tier.
 inline in the spec. The [cluster utilities](cluster-utilities-spec.md) carry
 their own, separately numbered catalogue (U1, U2, …; machine-readable as
 `utilities_catalogue()`), held to the same drift discipline, as do the layers
-above: the wal (L1–L5), granary (G1–G21, plus the facet contract F1–F4), the
+above: the wal (L1–L5), entity (E1–E21, plus the facet contract F1–F4), the
 harness (H1–H8), the sandbox (S1–S5), the machine (M1–M6), and the blob store
 (B1–B7). Format compatibility (V1–V6) is the one catalogue with no Rust copy to
 drift from: V3 is a compile-time assertion inside `compat::Window`, and V4 and V5

@@ -2,7 +2,7 @@
 //!
 //! One subcommand, `node`, boots one cluster node (silo): the production runtime
 //! (tokio, TCP), its own file journal replicated to peers, the Anthropic model,
-//! and a workspace sandbox. A node hosts grains and votes in Raft; it has no
+//! and a workspace sandbox. A node hosts entities and votes in Raft; it has no
 //! client-facing listener. The public edge is the separate `harness-gateway`
 //! binary.
 //!

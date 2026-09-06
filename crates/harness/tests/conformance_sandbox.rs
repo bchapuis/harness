@@ -57,7 +57,7 @@ fn shell_kind() -> Kinds {
                 Tier::Workspace,
             )
             .budget(Budget::new(10_000, 10))
-            .grain(brisk_idle()),
+            .entity(brisk_idle()),
     )
 }
 
@@ -249,7 +249,7 @@ fn a_slow_tool_is_bounded_by_its_declared_timeout() {
                 timeout: Some(Duration::from_secs(1)),
             })
             .budget(Budget::new(10_000, 10))
-            .grain(brisk_idle()),
+            .entity(brisk_idle()),
     );
     let model = ScriptedModel::steps(vec![
         Ok(tool_call("c1", "slow", json!({}))),
@@ -324,7 +324,7 @@ fn tiered_kind() -> Kinds {
             )
             .sandbox(SandboxProfile::default().cap([Tier::Workspace, Tier::Compute]))
             .budget(Budget::new(10_000, 10))
-            .grain(brisk_idle()),
+            .entity(brisk_idle()),
     )
 }
 

@@ -1,8 +1,8 @@
 //! The invariant *ranges* the specs cite of each other, resolved against the
 //! catalogues they name.
 //!
-//! A spec names a sibling's catalogue by its extent: `grain §N` (its invariants as
-//! **G1–G20**), "the harness (H1–H8)", "core §18.5 #1–#22". The range is a
+//! A spec names a sibling's catalogue by its extent: `entity §N` (its invariants as
+//! **E1–E20**), "the harness (H1–H8)", "core §18.5 #1–#22". The range is a
 //! citation like any other — it points at a catalogue and says how far it runs —
 //! but where [`crate::citations`] resolves a `§` against a heading and
 //! [`crate::identifiers`] resolves a backticked name against the tree, nothing
@@ -10,8 +10,8 @@
 //! leaves every sibling that stated its old extent describing a shorter document
 //! than the one on disk, and each of those sentences still reads exactly right.
 //!
-//! That is not hypothetical. `G21` was catalogued at granary §7.16 and every
-//! citation of granary's extent went on saying `G1–G20` — six of them across four
+//! That is not hypothetical. `E21` was catalogued at entity §7.16 and every
+//! citation of entity's extent went on saying `E1–E20` — six of them across four
 //! documents: the harness and machine preambles, the machine's §7,
 //! `docs/README.md`, and `simulation-testing.md`. Every one parses, resolves, and
 //! passes every other gate.
@@ -29,12 +29,12 @@
 //!
 //! What holds without exception is the pair:
 //!
-//! - **No range runs past the end.** A citation naming `G22` is naming an
+//! - **No range runs past the end.** A citation naming `E22` is naming an
 //!   invariant no catalogue defines, whatever the surrounding sentence meant.
 //! - **The end is named somewhere.** Across the whole document set, some range
 //!   reaches the catalogue's last invariant. One spec's sub-span is another's
 //!   full extent, so the union is what carries the claim — and a catalogue that
-//!   grows past every citation of it is precisely the `G21` case.
+//!   grows past every citation of it is precisely the `E21` case.
 //!
 //! Together they pin the extent from both sides without a rule about what any one
 //! sentence intended. The second is also what makes a catalogue nothing cites at
@@ -66,7 +66,7 @@ pub enum Owner {
 
 /// Every label a range citation can carry.
 ///
-/// The letters are the catalogues' own (`G` for `G1`, `#` for the core's bare
+/// The letters are the catalogues' own (`G` for `E1`, `#` for the core's bare
 /// numbering). A label absent from this table fails [`resolve`] rather than being
 /// skipped, so a new catalogue is registered here as part of adding it — the way
 /// a new spec is registered in [`DOCUMENTS`].
@@ -74,7 +74,7 @@ pub const LABELS: &[(&str, Owner)] = &[
     ("#", Owner::Catalogue("core")),
     ("U", Owner::Catalogue("utilities")),
     ("L", Owner::Catalogue("wal")),
-    ("G", Owner::Catalogue("granary")),
+    ("E", Owner::Catalogue("entity")),
     ("B", Owner::Catalogue("blob")),
     ("H", Owner::Catalogue("harness")),
     ("S", Owner::Catalogue("sandbox")),
@@ -82,7 +82,7 @@ pub const LABELS: &[(&str, Owner)] = &[
     (
         "F",
         Owner::Unregistered(
-            "granary §7.12's facet contract: four rows beside the G catalogue rather \
+            "entity §7.12's facet contract: four rows beside the G catalogue rather \
              than a site of its own, and no crate holds a Rust copy of it",
         ),
     ),
@@ -98,7 +98,7 @@ pub const LABELS: &[(&str, Owner)] = &[
     ),
 ];
 
-/// One `G1–G20` as written, with where it was written.
+/// One `E1–E20` as written, with where it was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Range {
     /// The label both endpoints carry: `G`, `#`.
@@ -138,7 +138,7 @@ pub fn resolve(label: &str) -> Option<Owner> {
 
 /// Every invariant range in `text`, in source order.
 ///
-/// A range is two same-labelled numbers around a dash: `G1–G20`, `#1–#22`,
+/// A range is two same-labelled numbers around a dash: `E1–E20`, `#1–#22`,
 /// `H3–H8`. Both the en dash the specs use and a plain hyphen are accepted, since
 /// which one a sentence carries is a typographic accident and neither should
 /// change what a gate sees.
@@ -281,17 +281,17 @@ mod tests {
 
     #[test]
     fn reads_a_range_with_either_dash() {
-        let found = ranges("its invariants as **G1–G20**, and the harness (H1-H8)");
+        let found = ranges("its invariants as **E1–E20**, and the harness (H1-H8)");
         assert_eq!(found.len(), 2);
         assert_eq!(
             (found[0].label.as_str(), found[0].low, found[0].high),
-            ("G", 1, 20)
+            ("E", 1, 20)
         );
         assert_eq!(
             (found[1].label.as_str(), found[1].low, found[1].high),
             ("H", 1, 8)
         );
-        assert_eq!(found[0].text, "G1–G20");
+        assert_eq!(found[0].text, "E1–E20");
     }
 
     #[test]
@@ -327,12 +327,12 @@ mod tests {
 
     #[test]
     fn skips_a_pair_whose_labels_disagree() {
-        assert!(ranges("G1–H20").is_empty());
+        assert!(ranges("E1–H20").is_empty());
     }
 
     #[test]
     fn counts_lines_across_several_ranges() {
-        let found = ranges("G1–G21\n\n\nS1–S5\nM1–M6");
+        let found = ranges("E1–E21\n\n\nS1–S5\nM1–M6");
         assert_eq!(found.iter().map(|r| r.line).collect::<Vec<_>>(), [1, 4, 5]);
     }
 

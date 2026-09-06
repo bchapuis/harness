@@ -181,7 +181,7 @@ impl App {
 
     /// The current turn's id: the client-chosen idempotency key (§7.4). A
     /// per-process `nonce` makes it unique across restarts, so a fresh prompt is
-    /// never the persisted id of a finished run — which the grain would dedup,
+    /// never the persisted id of a finished run — which the entity would dedup,
     /// committing no new records and leaving the stream (and the UI) hung.
     fn turn_id(&self) -> String {
         format!("t-{}-{}", self.nonce, self.turn_counter)

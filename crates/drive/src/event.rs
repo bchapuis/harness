@@ -4,12 +4,12 @@
 //! (harness §10.1).
 //!
 //! Each event rides the core stream as [`Event::App`] (core §16), alongside the
-//! grain's own (granary §13), so a checker observes one totally ordered sequence
+//! entity's own (entity §13), so a checker observes one totally ordered sequence
 //! and the seed-reproducibility contract covers these too. Recover them with
 //! `event.as_app::<DriveEvent>()`.
 //!
 //! The vocabulary is kept to what a stream checker cannot reconstruct from the
-//! grain's own events: activation, deactivation, leadership, and commit are read
+//! entity's own events: activation, deactivation, leadership, and commit are read
 //! from `Activated`, `Deactivated`, `LeaderChanged`, and `Committed`, and the
 //! drive mints no duplicates of them. [`Discarded`](DriveEvent::Discarded) is
 //! present because a discarded outcome leaves no record anywhere — the one thing
@@ -18,18 +18,18 @@
 
 use actor_core::Event;
 use actor_core::NodeId;
-use granary::GrainName;
+use entity::EntityName;
 
 /// One drive event (drive spec §8).
 ///
 /// `key` is the effect's key rendered with its `Debug` form: the checkers
 /// compare keys for identity, and a `DriveEvent` must be one concrete type
-/// across every driven grain type on the stream, so it cannot be generic over
+/// across every driven entity type on the stream, so it cannot be generic over
 /// `Driven::Key`.
 ///
-/// Every variant carries the `node` hosting the activation, as the grain's own
-/// events do (granary §13) and for the same reason: a claim's life is
-/// per-activation, and under failover two activations of one grain — a deposed
+/// Every variant carries the `node` hosting the activation, as the entity's own
+/// events do (entity §13) and for the same reason: a claim's life is
+/// per-activation, and under failover two activations of one entity — a deposed
 /// leader still running down its launches and its successor — are distinguishable
 /// on the stream only by the node that emits.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub enum DriveEvent {
     /// An effect was claimed and handed to the spawner (§3.2). Exactly one per
     /// claim: a re-drive never relaunches an effect in flight (D3).
     Launched {
-        grain: GrainName,
+        entity: EntityName,
         key: String,
         node: NodeId,
     },
@@ -46,7 +46,7 @@ pub enum DriveEvent {
     /// is on its way through the mailbox. Opens the claim its `Settled` closes,
     /// so D6's "none dropped, none resolved twice" reads off the stream.
     Interrupted {
-        grain: GrainName,
+        entity: EntityName,
         key: String,
         node: NodeId,
     },
@@ -66,7 +66,7 @@ pub enum DriveEvent {
     /// leaves no `Settled` claiming records that never became durable. A settle
     /// that decided no records has nothing to wait for and emits at once.
     Settled {
-        grain: GrainName,
+        entity: EntityName,
         key: String,
         node: NodeId,
         /// `Ok` versus `Err` (§4.3), and nothing more about either.
@@ -77,13 +77,13 @@ pub enum DriveEvent {
     /// A straggling outcome was dropped: its key had left the desired set by the
     /// time it arrived (§4.5). No record is written for it.
     Discarded {
-        grain: GrainName,
+        entity: EntityName,
         key: String,
         node: NodeId,
     },
     /// The desired set came to rest and nothing is in flight (§6), so the
     /// activation now permits hibernation.
-    Quiescent { grain: GrainName, node: NodeId },
+    Quiescent { entity: EntityName, node: NodeId },
 }
 
 impl From<DriveEvent> for Event {

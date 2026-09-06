@@ -1,6 +1,6 @@
 //! Resume conformance (harness spec §6.2, §7.5; invariant H1): a session
 //! hibernates between turns and rehydrates from the journal on the next contact
-//! (granary §9, §10); the resumed journal matches an uninterrupted control run,
+//! (entity §9, §10); the resumed journal matches an uninterrupted control run,
 //! record for record — the differential test behind H1. (Mid-run crash/migration
 //! resume of a *dangling* call, §5.5, is a `Quorum`-tier leadership-move phenomenon,
 //! exercised under the clustered simulation; the `Local` tier is faultless by design.)
@@ -16,7 +16,7 @@ use actor_core::Event;
 use actor_core::LocalSystemBuilder;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
-use granary::GrainEvent;
+use entity::EntityEvent;
 use harness::Budget;
 use harness::Harness;
 use harness::Kind;
@@ -49,7 +49,7 @@ fn worker_kinds() -> Kinds {
                 Tier::Workspace,
             )
             .budget(Budget::new(10_000, 10))
-            .grain(brisk_idle()),
+            .entity(brisk_idle()),
     )
 }
 
@@ -119,8 +119,8 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
     // The session activated more than once: it hibernated and rehydrated (§10).
     let activations = events
         .iter()
-        .filter_map(|e| e.as_app::<GrainEvent>())
-        .filter(|e| matches!(e, GrainEvent::Activated { .. }))
+        .filter_map(|e| e.as_app::<EntityEvent>())
+        .filter(|e| matches!(e, EntityEvent::Activated { .. }))
         .count();
     assert!(
         activations >= 2,
@@ -136,7 +136,7 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
     assert_eq!(starts, 2, "one RunStarted per turn, none for the resume");
 
     // No `WorkspaceReset` on resume: the workspace is the agent's own durable
-    // facet (granary §7.11), rematerialized on reactivation — a routine resume
+    // facet (entity §7.11), rematerialized on reactivation — a routine resume
     // is never a loss (§5.5). Only a mid-activation `EnvironmentLost` resets.
     assert!(
         !resumed

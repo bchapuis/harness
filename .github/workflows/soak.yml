@@ -92,24 +92,24 @@ jobs:
           SWARM_SEEDS: ${{ steps.seeds.outputs.sim }}
         run: cargo test -p actor-simulation --no-fail-fast
 
-      - name: Soak granary and blob-store
+      - name: Soak entity and blob-store
         if: ${{ !cancelled() }}
         env:
           SWARM_SEED_BASE: ${{ steps.seeds.outputs.base }}
           SWARM_SEEDS: ${{ steps.seeds.outputs.store }}
-        # `--features sql` because granary's SQL facet (spec §7.14) is off by
+        # `--features sql` because entity's SQL facet (spec §7.14) is off by
         # default, and its suites — `sql.rs` and `sql_swarm.rs`, 11 tests
         # including two cluster sweeps — are `#![cfg(feature = "sql")]`. Without
         # the flag they compile to zero tests, so the facet was soaked by nobody
         # and had rotted into a build error before anyone noticed.
-        run: cargo test -p granary --features sql -p blob-store -p tenancy --no-fail-fast
+        run: cargo test -p entity --features sql -p blob-store -p tenancy --no-fail-fast
 
       - name: Soak harness and machine (expensive seeds)
         if: ${{ !cancelled() }}
         env:
           SWARM_SEED_BASE: ${{ steps.seeds.outputs.base }}
           SWARM_SEEDS: ${{ steps.seeds.outputs.heavy }}
-        run: cargo test -p harness -p machine-grain --no-fail-fast
+        run: cargo test -p harness -p machine-entity --no-fail-fast
 
       - name: Report the replay command on failure
         if: failure()

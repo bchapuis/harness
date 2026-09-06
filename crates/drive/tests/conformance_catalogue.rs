@@ -2,7 +2,7 @@
 //! the live checker set, and the specification's own table must agree — a
 //! checker added in code but not recorded in the catalogue (or vice versa), a
 //! suite renamed under a pointer, or a row moved in one copy fails the build,
-//! the same pattern guarding the core, granary, and harness catalogues.
+//! the same pattern guarding the core, entity, and harness catalogues.
 //!
 //! The checker agreement is checked **per (checker, invariant) pair**, as the
 //! harness's is: one name carries four D-invariants here, so a name set would be

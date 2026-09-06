@@ -18,7 +18,7 @@ export async function loadConfig(secrets: vscode.SecretStorage): Promise<Gateway
   };
 }
 
-/** The session kind (grain type) to list and address. */
+/** The session kind (entity type) to list and address. */
 export function currentKind(): string {
   return vscode.workspace.getConfiguration("harness").get<string>("kind", "assistant");
 }

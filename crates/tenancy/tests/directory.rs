@@ -1,6 +1,6 @@
-//! The directory grain on the single-node `Local` tier (granary §7.4).
+//! The directory entity on the single-node `Local` tier (entity §7.4).
 //!
-//! Drives a principal's [`Directory`] through the public `GrainRef` API only:
+//! Drives a principal's [`Directory`] through the public `EntityRef` API only:
 //! record ownership with listing metadata, enumerate it, query by type, forget
 //! one, clear the rest. Asserts the ownership-index contract — idempotent
 //! record/forget, metadata round-trips, stable enumeration — and that the index
@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use actor_core::LocalSystemBuilder;
 use actor_simulation::Simulation;
-use granary::GrainName;
-use granary::GranaryConfig;
-use granary::GranaryExt;
+use entity::EntityConfig;
+use entity::EntityExt;
+use entity::EntityName;
 use tenancy::Clear;
 use tenancy::Contains;
 use tenancy::Count;
@@ -28,12 +28,12 @@ use tenancy::Record;
 use tenancy::Recorded;
 use tenancy::Types;
 
-fn owned(key: &str) -> GrainName {
-    GrainName::new("app.Session", key)
+fn owned(key: &str) -> EntityName {
+    EntityName::new("app.Session", key)
 }
 
-fn named(grain_type: &str, key: &str) -> GrainName {
-    GrainName::new(grain_type, key)
+fn named(entity_type: &str, key: &str) -> EntityName {
+    EntityName::new(entity_type, key)
 }
 
 fn meta(label: &str, created_at: u64) -> Meta {
@@ -48,9 +48,9 @@ fn meta(label: &str, created_at: u64) -> Meta {
 fn records_enumerates_and_forgets() {
     let sim = Simulation::new(0);
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
-    let directories = system.granary::<Directory<_>>(GranaryConfig::default());
-    // One directory per principal: the principal id is the grain key.
-    let dir = directories.grain("tenant/alice");
+    let directories = system.entities::<Directory<_>>(EntityConfig::default());
+    // One directory per principal: the principal id is the entity key.
+    let dir = directories.entity("tenant/alice");
 
     sim.block_on(async move {
         // Record is idempotent on identical metadata, and updates on changed.
@@ -152,14 +152,14 @@ fn records_enumerates_and_forgets() {
 }
 
 #[test]
-fn queries_grains_by_type() {
+fn queries_entities_by_type() {
     let sim = Simulation::new(0);
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
-    let directories = system.granary::<Directory<_>>(GranaryConfig::default());
-    let dir = directories.grain("tenant/carol");
+    let directories = system.entities::<Directory<_>>(EntityConfig::default());
+    let dir = directories.entity("tenant/carol");
 
     sim.block_on(async move {
-        // A principal with several grains across several types.
+        // A principal with several entities across several types.
         for (name, m) in [
             (named("app.Session", "s/2"), meta("second", 2)),
             (named("app.Session", "s/1"), meta("first", 1)),
@@ -174,7 +174,7 @@ fn queries_grains_by_type() {
         // with metadata attached.
         let sessions = dir
             .ask(ListByType {
-                grain_type: "app.Session".into(),
+                entity_type: "app.Session".into(),
             })
             .await
             .unwrap();
@@ -186,7 +186,7 @@ fn queries_grains_by_type() {
 
         let repos = dir
             .ask(ListByType {
-                grain_type: "app.Repo".into(),
+                entity_type: "app.Repo".into(),
             })
             .await
             .unwrap();
@@ -198,7 +198,7 @@ fn queries_grains_by_type() {
         // A type the principal owns none of yields nothing.
         assert!(
             dir.ask(ListByType {
-                grain_type: "app.Other".into()
+                entity_type: "app.Other".into()
             })
             .await
             .unwrap()
@@ -207,7 +207,7 @@ fn queries_grains_by_type() {
 
         assert_eq!(
             dir.ask(CountByType {
-                grain_type: "app.Repo".into()
+                entity_type: "app.Repo".into()
             })
             .await
             .unwrap(),
@@ -215,7 +215,7 @@ fn queries_grains_by_type() {
         );
         assert_eq!(
             dir.ask(CountByType {
-                grain_type: "app.Sandbox".into()
+                entity_type: "app.Sandbox".into()
             })
             .await
             .unwrap(),
@@ -244,12 +244,12 @@ fn index_survives_hibernation() {
     let sim = Simulation::new(7);
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
     // Aggressive idle window so the directory hibernates between the two batches.
-    let directories = system.granary::<Directory<_>>(GranaryConfig {
+    let directories = system.entities::<Directory<_>>(EntityConfig {
         idle_after: Duration::from_millis(10),
         snapshot_every: 2,
-        ..GranaryConfig::default()
+        ..EntityConfig::default()
     });
-    let dir = directories.grain("tenant/bob");
+    let dir = directories.entity("tenant/bob");
 
     sim.block_on(async move {
         dir.ask(Record {
@@ -266,12 +266,12 @@ fn index_survives_hibernation() {
         .unwrap();
     });
 
-    // Drive past the idle window: the grain snapshots, hibernates, and stops.
+    // Drive past the idle window: the entity snapshots, hibernates, and stops.
     sim.run();
 
     // A fresh ref re-activates the name; the journaled index and its metadata
     // rehydrate intact.
-    let reread = directories.grain("tenant/bob");
+    let reread = directories.entity("tenant/bob");
     let listing = sim.block_on(async move { reread.ask(List).await.unwrap() });
     let view: Vec<_> = listing
         .iter()

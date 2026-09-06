@@ -10,7 +10,7 @@
 //! §7) and the full fault swarm (spec §8) land in their own phases; this is the
 //! happy-path-plus-delete proof that the tier composes over the actor framework.
 //!
-//! The harness mirrors granary's `tests/clustered_grains.rs`, swapping the
+//! The harness mirrors entity's `tests/clustered_entities.rs`, swapping the
 //! leader/raft network for SWIM gossip membership — a blob store needs the serving
 //! set, not consensus (spec §1, §4).
 
@@ -57,7 +57,7 @@ fn config() -> BlobConfig {
 }
 
 /// Drive an async call to completion under the perpetually-running cluster loops
-/// (the pattern from granary's cluster harness — SWIM never quiesces, so the run
+/// (the pattern from entity's cluster harness — SWIM never quiesces, so the run
 /// is time-bounded rather than quiescence-driven).
 fn drive<T: Send + 'static>(
     sim: &Simulation,

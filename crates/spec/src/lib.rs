@@ -7,18 +7,18 @@
 //! reports the places they no longer describe anything, one module per way the
 //! prose comes loose:
 //!
-//! - [`citations`] — a `§` reference resolves to a section that exists. `grain
+//! - [`citations`] — a `§` reference resolves to a section that exists. `entity
 //!   §7.12` after §7 is renumbered is the ordinary break, and the specs are
 //!   layered so that each cites the ones beneath it, which makes the citation the
 //!   load-bearing part of the layering rather than a convenience.
-//! - [`identifiers`] — a backticked `GrainHandler` or `load_snapshot()` still
+//! - [`identifiers`] — a backticked `EntityHandler` or `load_snapshot()` still
 //!   names something the tree declares. The same failure one level down: a rename
 //!   moves the code and leaves the prose behind.
 //! - [`catalogue`] — a spec's invariant table and the Rust copy beside the suite
 //!   that verifies it agree on which invariants exist, where they are defined, and
 //!   what verifies them. Two hand-maintained copies of one fact, previously
 //!   compared by nothing.
-//! - [`ranges`] — a spec naming a sibling's catalogue by its extent, `G1–G20`,
+//! - [`ranges`] — a spec naming a sibling's catalogue by its extent, `E1–E20`,
 //!   still names the whole of it. The third way one document falls behind another:
 //!   the citation resolves, the identifiers resolve, and the extent is a release
 //!   out of date because the catalogue it names grew a row.
@@ -85,7 +85,7 @@ pub struct DocSpec {
     /// Short stable handle, used in failure messages and by [`Unprefixed`].
     pub id: &'static str,
     /// Path relative to the repository root. Its file name also resolves a
-    /// markdown-link prefix, so `[granary](granary-spec.md) §7.12` finds it.
+    /// markdown-link prefix, so `[entity](entity-spec.md) §7.12` finds it.
     pub path: &'static str,
     /// The prefixes other documents use to name this one. Matched
     /// case-insensitively, so a sentence may open with `Actor §7`.
@@ -120,9 +120,9 @@ pub const DOCUMENTS: &[DocSpec] = &[
         unprefixed: Unprefixed::Own,
     },
     DocSpec {
-        id: "granary",
-        path: "docs/granary-spec.md",
-        aliases: &["granary", "grain"],
+        id: "entity",
+        path: "docs/entity-spec.md",
+        aliases: &["entity"],
         unprefixed: Unprefixed::Own,
     },
     DocSpec {
@@ -131,7 +131,7 @@ pub const DOCUMENTS: &[DocSpec] = &[
         aliases: &["blob", "blob-store"],
         unprefixed: Unprefixed::Own,
     },
-    // The autonomous grain (the `drive` crate). Cites the harness above it: the
+    // The autonomous entity (the `drive` crate). Cites the harness above it: the
     // harness is the layer it generalizes and does not yet sit on it.
     DocSpec {
         id: "drive",
@@ -172,7 +172,7 @@ pub const DOCUMENTS: &[DocSpec] = &[
     },
     // Numbers nothing of its own, and is written against the actor spec's §16–§18
     // (see its opening paragraph): every bare `§N` in it is an actor citation. It
-    // cites granary as well, and says so with a prefix each time — this list stays
+    // cites entity as well, and says so with a prefix each time — this list stays
     // one document long so that remains true rather than becoming a convention a
     // reader has to infer per sentence.
     DocSpec {
@@ -220,6 +220,6 @@ pub const DOCUMENTS: &[DocSpec] = &[
         id: "durable-sqlite",
         path: "research/durable-sqlite-and-filesystem.md",
         aliases: &["durable-sqlite-and-filesystem"],
-        unprefixed: Unprefixed::OwnThen(&["granary"]),
+        unprefixed: Unprefixed::OwnThen(&["entity"]),
     },
 ];

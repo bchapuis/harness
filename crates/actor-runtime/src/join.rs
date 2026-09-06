@@ -60,7 +60,7 @@ pub struct JoinOptions {
     pub secret: String,
     /// The **one** codec value for the three places that must agree: the
     /// transport's framing, the message layer, and any store stamp derived
-    /// from it (granary §7.4).
+    /// from it (entity §7.4).
     pub codec: Arc<dyn Codec>,
     /// The observability sink (spec §16).
     pub events: Arc<dyn EventSink>,
@@ -191,7 +191,7 @@ pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
 /// peer is in the membership view and the control group has elected a leader
 /// (so shard groups can elect too). A convenience, not a correctness
 /// requirement — the layers above absorb a command issued before convergence
-/// (e.g. granary's bounded redirect, G13).
+/// (e.g. entity's bounded redirect, E13).
 ///
 /// `expected` is the cluster size; `members()` reports peers only (never this
 /// node) plus any admitted client, so the bar is the peer quorum

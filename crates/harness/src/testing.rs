@@ -11,22 +11,22 @@ use actor_core::Event;
 use actor_core::NodeId;
 use actor_simulation::Invariant;
 use actor_simulation::default_invariants;
-use granary::GrainEvent;
-use granary::GrainName;
+use entity::EntityEvent;
+use entity::EntityName;
 
 use crate::HarnessEvent;
 use crate::SessionId;
 use crate::TurnId;
 
-/// The session a grain event names, by its key (§2.2: the `GrainName` key is the
+/// The session an entity event names, by its key (§2.2: the `EntityName` key is the
 /// `SessionId`). Tests use unique session keys, so the key identifies the run.
-fn session_of(name: &GrainName) -> SessionId {
+fn session_of(name: &EntityName) -> SessionId {
     SessionId::new(name.key())
 }
 
 /// **Effect containment and single per-node activation** (H6 per-node half, H8):
-/// activation is the grain's (`Activated`/`Deactivated` strictly alternate per
-/// session and node, granary §13); the harness's `SandboxBound`/`SandboxReleased`
+/// activation is the entity's (`Activated`/`Deactivated` strictly alternate per
+/// session and node, entity §13); the harness's `SandboxBound`/`SandboxReleased`
 /// alternate **within** that window and the sandbox is released before
 /// deactivation; and a `ModelCompleted` only fires inside a live activation.
 #[derive(Default)]
@@ -49,19 +49,19 @@ impl Invariant for HarnessEventGrammar {
     }
 
     fn observe(&mut self, event: &Event) -> Result<(), String> {
-        // Activation lifecycle from the grain's own events (granary §13).
-        if let Some(grain) = event.as_app::<GrainEvent>() {
-            match grain {
-                GrainEvent::Activated { node, name } => {
+        // Activation lifecycle from the entity's own events (entity §13).
+        if let Some(entity) = event.as_app::<EntityEvent>() {
+            match entity {
+                EntityEvent::Activated { node, name } => {
                     let w = self.window(session_of(name), *node);
                     if w.0 {
                         return Err(format!(
-                            "second activation of {name} on {node} without deactivation (G6)"
+                            "second activation of {name} on {node} without deactivation (E6)"
                         ));
                     }
                     *w = (true, false);
                 }
-                GrainEvent::Deactivated { node, name } => {
+                EntityEvent::Deactivated { node, name } => {
                     let w = self.window(session_of(name), *node);
                     if w.1 {
                         return Err(format!(
@@ -170,7 +170,7 @@ impl Invariant for RunDiscipline {
     }
 }
 
-/// The default checker set for harness workloads: the core and grain invariants
+/// The default checker set for harness workloads: the core and entity invariants
 /// plus the harness's continuous H-checkers (§11).
 pub fn harness_invariants() -> Vec<Box<dyn Invariant>> {
     let mut invariants = default_invariants();

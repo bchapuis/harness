@@ -1,7 +1,7 @@
 //! The invariant catalogues, read out of the specifications.
 //!
 //! Each spec carries an invariant catalogue, and each is *also* written down in
-//! Rust beside the suite that verifies it — `g_catalogue()`, `b_catalogue()`,
+//! Rust beside the suite that verifies it — `e_catalogue()`, `b_catalogue()`,
 //! `core_catalogue()`, and their siblings. The Rust table is what the per-crate
 //! `conformance_catalogue.rs` drift test already guards: it holds the numbering
 //! complete and every test file it points at real.
@@ -24,7 +24,7 @@
 //! catalogue (actor §18.5) is a numbered list instead ([`Shape`]).
 //!
 //! The `Verified by` columns are not written alike, which is worth knowing before
-//! trusting one: granary, utilities, sandbox, and harness name test **files**,
+//! trusting one: entity, utilities, sandbox, and harness name test **files**,
 //! wal names test **functions**, and blob and machine name functions where their
 //! Rust catalogues name files. Only matching vocabularies can be compared, and
 //! [`Pointers`] records which is which per site — so where the suite axis is
@@ -67,7 +67,7 @@ pub enum Shape {
 /// leaving the comparison quietly empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pointers {
-    /// Test files, `` `grains.rs` `` or `` `harness-sandbox/tests/workspace.rs` ``.
+    /// Test files, `` `entities.rs` `` or `` `harness-sandbox/tests/workspace.rs` ``.
     /// Compared by stem, so the path a spec writes matches the bare file name a
     /// catalogue writes, and the `compile_fail.rs` runner matches the
     /// `compile_fail` case directory beside it.
@@ -84,13 +84,13 @@ pub enum Pointers {
 /// Where one invariant catalogue lives in the specifications.
 #[derive(Debug, Clone, Copy)]
 pub struct CatalogueSite {
-    /// Short handle, used in failure messages: `granary`, `core`.
+    /// Short handle, used in failure messages: `entity`, `core`.
     pub id: &'static str,
     /// The [`crate::DocSpec::id`] of the spec that carries it.
     pub doc: &'static str,
     /// The section number the catalogue lives under, e.g. `15`.
     pub section: &'static str,
-    /// The letter the labels carry: `G` for `G1`, empty for the core's bare `1.`.
+    /// The letter the labels carry: `G` for `E1`, empty for the core's bare `1.`.
     pub label: &'static str,
     /// How the specification writes it.
     pub shape: Shape,
@@ -131,10 +131,10 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         pointers: Pointers::Functions,
     },
     CatalogueSite {
-        id: "granary",
-        doc: "granary",
+        id: "entity",
+        doc: "entity",
         section: "15",
-        label: "G",
+        label: "E",
         shape: Shape::Table,
         pointers: Pointers::Files,
     },
@@ -183,7 +183,7 @@ pub const CATALOGUES: &[CatalogueSite] = &[
 /// One catalogue row, reduced to the parts both copies state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    /// The number within its catalogue: `7` for `G7`.
+    /// The number within its catalogue: `7` for `E7`.
     pub number: u8,
     /// The sections that define it, as written: `["6", "8"]` for `§6, §8`.
     pub sections: Vec<String>,
@@ -195,7 +195,7 @@ impl Row {
     /// Build the implementation's side of a row from a Rust catalogue entry.
     ///
     /// `spec` is the entry's section list in any of the forms the tables use
-    /// (`§6, §8`, `granary §6, §8`, `wal §3.2-§3.4`) — only the numbers are kept.
+    /// (`§6, §8`, `entity §6, §8`, `wal §3.2-§3.4`) — only the numbers are kept.
     ///
     /// `verify` is the text of the entry's `Verify` entries, passed whole. A
     /// caller need not sort them: several are prose with the file names embedded
@@ -225,17 +225,17 @@ impl Row {
 pub enum Mismatch {
     /// The specification lists an invariant the Rust catalogue does not.
     Undocumented {
-        /// The invariant's label, e.g. `G7`.
+        /// The invariant's label, e.g. `E7`.
         label: String,
     },
     /// The Rust catalogue lists an invariant the specification does not.
     Unimplemented {
-        /// The invariant's label, e.g. `G7`.
+        /// The invariant's label, e.g. `E7`.
         label: String,
     },
     /// The two copies name different defining sections.
     Sections {
-        /// The invariant's label, e.g. `G7`.
+        /// The invariant's label, e.g. `E7`.
         label: String,
         /// What the specification's `Defined in` column says.
         documented: Vec<String>,
@@ -244,7 +244,7 @@ pub enum Mismatch {
     },
     /// The two copies name different verifying suites.
     Suites {
-        /// The invariant's label, e.g. `G7`.
+        /// The invariant's label, e.g. `E7`.
         label: String,
         /// Named by the specification and not by the Rust catalogue.
         only_documented: Vec<String>,
@@ -431,7 +431,7 @@ fn heading(line: &str) -> Option<(usize, String)> {
 
 /// Rows of the first table in `body` that has `Invariant` and `Verified by`
 /// columns. Columns are found by header name: the harness table carries a fifth
-/// `Grain basis` column the others do not.
+/// `Entity basis` column the others do not.
 fn table_rows(body: &str, site: &CatalogueSite) -> Vec<Row> {
     let mut lines = body.lines().skip_while(|l| {
         !(l.starts_with('|') && l.contains("Invariant") && l.contains("Verified by"))
@@ -491,13 +491,13 @@ fn cells(line: &str) -> Vec<&str> {
         .collect()
 }
 
-/// `**G7**` with label `G` → `7`; `1` with an empty label → `1`.
+/// `**E7**` with label `G` → `7`; `1` with an empty label → `1`.
 fn label_number(cell: &str, label: &str) -> Option<u8> {
     let bare = cell.trim_matches(|c| c == '*' || c == '`' || c == ' ');
     bare.strip_prefix(label)?.parse().ok()
 }
 
-/// Every `§`-number in `text`, in order: `granary §6, §8` → `["6", "8"]`.
+/// Every `§`-number in `text`, in order: `entity §6, §8` → `["6", "8"]`.
 fn section_numbers(text: &str) -> Vec<String> {
     text.match_indices('§')
         .filter_map(|(pos, _)| {
@@ -542,7 +542,7 @@ fn pointer_tokens(text: &str, kind: Pointers) -> BTreeSet<String> {
         .map(|token| token.trim_matches(|c: char| c == '.' || c == ':' || c == '*'))
         .filter(|token| match kind {
             // A `.rs` file, or a path under a `tests/` directory —
-            // `granary/tests/compile_fail` is a trybuild case directory and
+            // `entity/tests/compile_fail` is a trybuild case directory and
             // counts. A slash alone is not enough: the prose around these names
             // says things like "open/release accounting".
             Pointers::Files => token.ends_with(".rs") || token.contains("tests/"),
@@ -560,7 +560,7 @@ fn pointer_tokens(text: &str, kind: Pointers) -> BTreeSet<String> {
         .collect()
 }
 
-/// `granary/tests/compile_fail` and `compile_fail.rs` both reduce to
+/// `entity/tests/compile_fail` and `compile_fail.rs` both reduce to
 /// `compile_fail`, so a spec naming the trybuild runner matches a catalogue
 /// naming its case directory.
 fn stem(pointer: &str) -> String {
@@ -579,10 +579,10 @@ mod tests {
     use super::*;
 
     const GRANARY: CatalogueSite = CatalogueSite {
-        id: "granary",
-        doc: "granary",
+        id: "entity",
+        doc: "entity",
         section: "15",
-        label: "G",
+        label: "E",
         shape: Shape::Table,
         pointers: Pointers::Files,
     };
@@ -610,31 +610,31 @@ mod tests {
     #[test]
     fn a_table_row_yields_its_number_sections_and_files() {
         let body = "\n| | Invariant | Defined in | Verified by |\n|---|---|---|---|\n\
-                    | **G1** | **Single writer.** Only the leader appends. | §6, §8 | \
-                    `clustered_grains.rs`, `grains.rs` |\n";
+                    | **E1** | **Single writer.** Only the leader appends. | §6, §8 | \
+                    `clustered_entities.rs`, `entities.rs` |\n";
         let rows = table_rows(body, &GRANARY);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].number, 1);
         assert_eq!(rows[0].sections, ["6", "8"]);
         assert_eq!(
             rows[0].pointers,
-            ["clustered_grains".to_string(), "grains".to_string()].into(),
+            ["clustered_entities".to_string(), "entities".to_string()].into(),
         );
     }
 
     #[test]
     fn a_verified_by_cell_keeps_files_and_drops_prose() {
-        let cell = "`grains.rs`, `grain_swarm.rs` (the `ActivationSingletonPerNode` checker)";
+        let cell = "`entities.rs`, `entity_swarm.rs` (the `ActivationSingletonPerNode` checker)";
         assert_eq!(
             suite_pointers(cell, Pointers::Files),
-            ["grains".to_string(), "grain_swarm".to_string()].into(),
+            ["entities".to_string(), "entity_swarm".to_string()].into(),
             "a checker's name is prose, not a file",
         );
     }
 
     #[test]
     fn a_trybuild_runner_and_its_case_directory_are_one_pointer() {
-        assert_eq!(stem("compile_fail.rs"), stem("granary/tests/compile_fail"));
+        assert_eq!(stem("compile_fail.rs"), stem("entity/tests/compile_fail"));
     }
 
     #[test]
@@ -652,9 +652,9 @@ mod tests {
 
     #[test]
     fn columns_are_found_by_name_not_position() {
-        let body = "\n| # | Invariant | Defined in | Verified by | Grain basis |\n\
+        let body = "\n| # | Invariant | Defined in | Verified by | Entity basis |\n\
                     |---|---|---|---|---|\n\
-                    | H1 | **Fold.** | §6.2 | `sessions.rs` | G2 |\n";
+                    | H1 | **Fold.** | §6.2 | `sessions.rs` | E2 |\n";
         let site = CatalogueSite {
             label: "H",
             ..GRANARY
@@ -682,14 +682,14 @@ mod tests {
     fn a_row_built_from_a_rust_entry_splits_comma_separated_files() {
         let row = Row::new(
             3,
-            "granary §1, §9",
+            "entity §1, §9",
             Pointers::Files,
-            ["grains.rs, grain_swarm.rs"],
+            ["entities.rs, entity_swarm.rs"],
         );
         assert_eq!(row.sections, ["1", "9"]);
         assert_eq!(
             row.pointers,
-            ["grains".to_string(), "grain_swarm".to_string()].into(),
+            ["entities".to_string(), "entity_swarm".to_string()].into(),
         );
     }
 
@@ -714,14 +714,14 @@ mod tests {
             Row::new(4, "§9", Pointers::Files, ["d.rs"]),
         ];
         let found = compare(&GRANARY, &documented, &implemented);
-        assert!(found.contains(&Mismatch::Undocumented { label: "G3".into() }));
-        assert!(found.contains(&Mismatch::Unimplemented { label: "G4".into() }));
+        assert!(found.contains(&Mismatch::Undocumented { label: "E3".into() }));
+        assert!(found.contains(&Mismatch::Unimplemented { label: "E4".into() }));
         assert!(
             found
                 .iter()
-                .any(|m| matches!(m, Mismatch::Sections { label, .. } if label == "G2"))
+                .any(|m| matches!(m, Mismatch::Sections { label, .. } if label == "E2"))
         );
-        assert_eq!(found.len(), 3, "G1 agrees: {found:?}");
+        assert_eq!(found.len(), 3, "E1 agrees: {found:?}");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! One node of the standalone machine deployment: the production runtime wired
-//! to the machine grain (machine spec).
+//! to the machine entity (machine spec).
 //!
-//! A node hosts machine grains, votes in Raft, and runs an **in-process SSH
+//! A node hosts machine entities, votes in Raft, and runs an **in-process SSH
 //! front door** (machine §5.1). The front door is in-process rather than a
 //! separate tier — the shape `harness-gateway` takes for sessions — for one
 //! reason: a bridged channel ends at a node-local vsock socket, and the
@@ -10,9 +10,9 @@
 //! node currently leads, and a client reconnects (machine §6) when leadership
 //! moves.
 //!
-//! Every node is identical: same grain type, same seams, same runtime binding. A
-//! machine is a grain, so durability, placement, and the single-writer fence
-//! are granary's; this file only chooses the bindings and opens the ports.
+//! Every node is identical: same entity type, same seams, same runtime binding. A
+//! machine is an entity, so durability, placement, and the single-writer fence
+//! are entity's; this file only chooses the bindings and opens the ports.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -35,19 +35,19 @@ use actor_runtime::Encryption;
 use actor_runtime::FileRaftWAL;
 use actor_runtime::JoinOptions;
 use actor_runtime::TcpCluster;
-use granary::AlarmIndex;
-use granary::FileGrainStore;
-use granary::GrainName;
-use granary::Granary;
-use granary::GranaryConfig;
-use granary::GranaryExt;
+use entity::AlarmIndex;
+use entity::FileEntityStore;
+use entity::EntityName;
+use entity::Entities;
+use entity::EntityConfig;
+use entity::EntityExt;
 use machine_frontdoor::serve_connection;
-use machine_grain::MACHINE_TYPE;
-use machine_grain::Machine;
-use machine_grain::fake::FakeRuntimeProvider;
+use machine_entity::MACHINE_TYPE;
+use machine_entity::Machine;
+use machine_entity::fake::FakeRuntimeProvider;
 
 use crate::authority::FrontDoor;
-use crate::authority::GrainAuthority;
+use crate::authority::EntityAuthority;
 use crate::authority::NodeMachine;
 use crate::backend::LocalBackend;
 use crate::provider::NodeRuntimeProvider;
@@ -82,7 +82,7 @@ pub struct NodeOptions {
     pub port_base: u16,
     /// The cluster secret peers must present (core §15).
     pub secret: String,
-    /// Shards the machine grain type is spread over; every node must agree, and
+    /// Shards the machine entity type is spread over; every node must agree, and
     /// so must any cluster client (a name must hash to the same shard).
     pub shards: usize,
     /// The kind of machine this node runs. No default: an operator who does not
@@ -115,7 +115,7 @@ impl Default for NodeOptions {
             admin: None,
             port_base: 7601,
             secret: "machine-standalone".to_string(),
-            shards: GranaryConfig::default().shards,
+            shards: EntityConfig::default().shards,
             machine: None,
             fc_binary: "firecracker".to_string(),
             fc_kernel: String::new(),
@@ -137,7 +137,7 @@ const DOOR_TIMEOUT: Duration = Duration::from_secs(30);
 /// deposed the activation owning the guest — killing a live SSH session by way of a
 /// checkpoint. The timeout was covering for that stall.
 ///
-/// The stall is gone: both scans now run on the node's blocking-I/O pool (granary
+/// The stall is gone: both scans now run on the node's blocking-I/O pool (entity
 /// §7.4, `disk.rs`), so a capture no longer costs the node its heartbeats. What remains
 /// to cover is ordinary scheduling jitter on a laptop running three debug nodes, which
 /// is what the library's own defaults are sized for. Every group inherits this
@@ -169,7 +169,7 @@ const RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(250);
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The most a stop waits on the shard handoff. The handoff is bounded on its
-/// own (granary's `hand_off_leadership`: a fixed number of rounds, each one
+/// own (entity's `hand_off_leadership`: a fixed number of rounds, each one
 /// transfer round trip per led shard), so this is the backstop against a
 /// transport that stops answering, sized well inside the unit's 120 s stop
 /// budget (`deploy/systemd`).
@@ -181,7 +181,7 @@ const HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 const LEAVE_GRACE: Duration = Duration::from_secs(4);
 
 /// Boot the node, open its doors, and host machines until SIGTERM or SIGINT,
-/// then stop gracefully: hand off every shard this node leads (granary spec
+/// then stop gracefully: hand off every shard this node leads (entity spec
 /// §8.3), announce the departure, and release the transport.
 pub async fn run(opts: NodeOptions) -> Result<(), String> {
     if opts.id < 1 || opts.id > opts.nodes {
@@ -199,8 +199,8 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     )?;
     let node = NodeId::new(opts.id);
     // One codec value for the three places that must agree: the transport's
-    // framing, the message layer granary encodes records and snapshots with, and
-    // the grain store's stamp naming that codec (granary §7.4). Binary, not the
+    // framing, the message layer entity encodes records and snapshots with, and
+    // the entity store's stamp naming that codec (entity §7.4). Binary, not the
     // library's JSON default: a machine's disk moves as 1 MiB blocks through the
     // blob path, and a payload is encoded twice — once as the message, again as
     // the frame field carrying it. Under JSON that pair costs ~10.7 MiB and over
@@ -241,7 +241,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
                 // worth reading: it used to be an order of magnitude slower than
                 // the defaults, but only to survive a capture that blocked the
                 // executor. That stall is gone (the scans run on the blocking-I/O
-                // pool, granary §7.4), so the timings answer to the network again.
+                // pool, entity §7.4), so the timings answer to the network again.
                 // Failure detection stays well inside the machine's lease (M5).
                 swim: SwimConfig {
                     probe_interval: Duration::from_secs(2),
@@ -270,34 +270,34 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // host cannot supply is a configuration error, not a half-booted node.
     let host = machine_host(&opts, machine_kind)?;
     let provider = Arc::new(runtime_provider(&host, node, &system));
-    let grain_store = FileGrainStore::factory(opts.data.join("grains"), codec.as_ref());
+    let entity_store = FileEntityStore::factory(opts.data.join("entities"), codec.as_ref());
     // This node's shared capabilities, set once and used to host every type below
-    // (granary §7.4, §13). The I/O pool matters most in this deployment: a machine's
+    // (entity §7.4, §13). The I/O pool matters most in this deployment: a machine's
     // disk facet writes whole 1 MiB image blocks, so an inline fsync would stall the
     // executor hardest here — and the node is also running Raft heartbeats on it.
-    let granary_node = system
-        .granary_node()
-        .blocking_io(Arc::new(granary::ThreadPoolIo::sized_for_host()))
-        .metrics(Arc::new(granary::AtomicGrainMetrics::new()));
-    let config = GranaryConfig {
+    let entity_node = system
+        .entity_node()
+        .blocking_io(Arc::new(entity::ThreadPoolIo::sized_for_host()))
+        .metrics(Arc::new(entity::AtomicEntityMetrics::new()));
+    let config = EntityConfig {
         shards: opts.shards,
-        grain_store: Some(grain_store.clone()),
+        entity_store: Some(entity_store.clone()),
         // Where the disk facet materializes each machine's image and the
-        // workspace facet its files (grain §7.11, §7.15) — under --data, so a
+        // workspace facet its files (entity §7.11, §7.15) — under --data, so a
         // restarted node finds its own.
         data_dir: Some(opts.data.join("facets")),
-        ..GranaryConfig::default()
+        ..EntityConfig::default()
     };
-    // The shared alarm index (grain §16). The machine's checkpoint alarm is
+    // The shared alarm index (entity §16). The machine's checkpoint alarm is
     // also its session lease (machine §4, M5), and a lease that only fired
-    // while the grain happened to be awake would not bound anything: the index
+    // while the entity happened to be awake would not bound anything: the index
     // is what re-activates a due machine after hibernation or failover.
-    let alarms: Granary<AlarmIndex<TcpCluster>> = granary_node.granary(GranaryConfig {
-        grain_store: Some(grain_store),
+    let alarms: Entities<AlarmIndex<TcpCluster>> = entity_node.entities(EntityConfig {
+        entity_store: Some(entity_store),
         shards: opts.shards,
-        ..GranaryConfig::default()
+        ..EntityConfig::default()
     });
-    let machines: Granary<NodeMachine> = granary_node.granary_named_with_alarms(
+    let machines: Entities<NodeMachine> = entity_node.entities_named_with_alarms(
         MACHINE_TYPE,
         config,
         Arc::new(move || Machine::new(Arc::clone(&provider))),
@@ -331,7 +331,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // so a machine death-watches it and reaps the attachment if this process
     // dies without detaching (machine §5.1).
     let door = system.spawn(FrontDoor).id().clone();
-    let authority = Arc::new(GrainAuthority::new(machines.clone(), door, DOOR_TIMEOUT));
+    let authority = Arc::new(EntityAuthority::new(machines.clone(), door, DOOR_TIMEOUT));
     for (port, name) in &opts.doors {
         let addr: SocketAddr = format!("{}:{port}", opts.bind_host)
             .parse()
@@ -339,7 +339,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| format!("bind door {addr}: {e}"))?;
-        let machine = GrainName::new(MACHINE_TYPE, name.clone());
+        let machine = EntityName::new(MACHINE_TYPE, name.clone());
         eprintln!("[{node}] ssh front door for {machine} on {addr}");
         tokio::spawn(serve_door(
             listener,
@@ -410,8 +410,8 @@ async fn shutdown_signal() {
 /// against the machine's journaled keys, attaches, and bridges (machine §5.1).
 async fn serve_door(
     listener: tokio::net::TcpListener,
-    machine: GrainName,
-    authority: Arc<GrainAuthority>,
+    machine: EntityName,
+    authority: Arc<EntityAuthority>,
     node: NodeId,
     host: Option<Arc<dyn machine_host::MachineHost>>,
 ) {
@@ -437,7 +437,7 @@ async fn serve_door(
     }
 }
 
-/// Bind the grain factory's provider to what this node holds guests with.
+/// Bind the entity factory's provider to what this node holds guests with.
 fn runtime_provider(
     host: &Option<Arc<dyn machine_host::MachineHost>>,
     node: NodeId,
@@ -450,9 +450,9 @@ fn runtime_provider(
         )),
         #[cfg(feature = "host")]
         Some(mechanism) => {
-            NodeRuntimeProvider::Hosted(machine_grain::hosted::HostedRuntimeProvider::new(
+            NodeRuntimeProvider::Hosted(machine_entity::hosted::HostedRuntimeProvider::new(
                 Arc::clone(mechanism),
-                machine_grain::hosted::HostedRuntimeConfig::new(node.to_string()),
+                machine_entity::hosted::HostedRuntimeConfig::new(node.to_string()),
             ))
         }
         // Unreachable: `machine_host` answers `None` for every mode this build
@@ -502,10 +502,10 @@ fn machine_host(
                         .to_string(),
                 );
             }
-            machine_grain::hosted::microvm_host(&opts.fc_binary, &opts.fc_kernel)
+            machine_entity::hosted::microvm_host(&opts.fc_binary, &opts.fc_kernel)
         }
         MachineKind::Docker => {
-            machine_grain::hosted::container_host(&opts.docker_cli, &opts.docker_image)
+            machine_entity::hosted::container_host(&opts.docker_cli, &opts.docker_image)
         }
     };
     Ok(Some(mechanism))

@@ -3,8 +3,8 @@
 //! The gateway builds a [`TcpCluster`] in [`MembershipMode::Static`]: it speaks
 //! the cluster secret, dials the nodes, and is brought into the membership view
 //! (`add_member`) so it receives the receptionist gossip — but it runs no Raft
-//! engine, so it never votes, and it never calls `granary_named`, so it never
-//! hosts a grain. Its node id is OUTSIDE the voter roster `1..=nodes`, and each
+//! engine, so it never votes, and it never calls `entities_named`, so it never
+//! hosts an entity. Its node id is OUTSIDE the voter roster `1..=nodes`, and each
 //! node must admit it with `--client <id>=<host>`.
 //!
 //! The transport is plaintext, guarded by the cluster secret; a deployment

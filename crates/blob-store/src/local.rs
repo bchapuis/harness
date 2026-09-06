@@ -75,7 +75,7 @@ struct TombstoneBody {
 
 /// Bytes of an **unstamped** tombstone record: `deleted_at` (u64 LE) followed by
 /// its checksum (u64 LE), which is the shape this format had before it carried a
-/// stamp, and the shape the grain store's fence file still has (granary
+/// stamp, and the shape the entity store's fence file still has (entity
 /// `file_store`). A reader adopts it; nothing writes it.
 const TOMBSTONE_LEGACY_BYTES: usize = 16;
 

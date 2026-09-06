@@ -10,7 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 actor-simulation = { workspace = true, optional = true }
-granary.workspace = true
+entity.workspace = true
 actor-core.workspace = true
 actor-cluster.workspace = true
 serde.workspace = true

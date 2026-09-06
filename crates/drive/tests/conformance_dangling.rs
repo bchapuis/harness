@@ -9,7 +9,7 @@
 //! again, `Interrupt` settles it `Interrupted` without a launch — dropping none
 //! and resolving none twice.
 //!
-//! Every scenario here runs the real granary host, gateway, shard groups, and
+//! Every scenario here runs the real entity host, gateway, shard groups, and
 //! rehydration on a three-node cluster: a crash is a process death
 //! (`SimNetwork::restart`), which takes the effect's task with it, and a migration
 //! is a voluntary leadership hand-off under which the deposed activation's effect
@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use actor_simulation::Recorder;
 use actor_simulation::Simulation;
-use granary::Seq;
+use entity::Seq;
 use support::Answer;
 use support::FanoutRecord;
 use support::Outcome;
@@ -61,7 +61,7 @@ fn a_crash_between_launch_and_settle_relaunches_a_reexecute_effect_once() {
     // rest of the scenario — node 1's map names node 2, node 2 redirects to node
     // 1 — so no call routes. That is a question for the cluster's leader
     // re-discovery after a restart, not for the drive; it wants a reproduction in
-    // granary's clustered suite, where no test yet restarts a shard leader and
+    // entity's clustered suite, where no test yet restarts a shard leader and
     // then routes to it.
     let sim = Simulation::new(109);
     let recorder = Recorder::new();
@@ -95,7 +95,7 @@ fn a_crash_between_launch_and_settle_relaunches_a_reexecute_effect_once() {
     let dead = cluster.crash_leader_of(key, &script);
     sim.run_for(Duration::from_secs(3)); // the shard re-elects
 
-    // Resumption is caller-driven: the next contact activates the grain on the
+    // Resumption is caller-driven: the next contact activates the entity on the
     // new leader, whose first drive is the dangling set.
     let (done, _, outstanding) = cluster.ask(&sim, key, Status);
     assert!(
@@ -205,11 +205,11 @@ fn a_migration_under_an_effect_in_flight_resolves_it_at_the_new_leader() {
         .iter()
         .position(|n| n.node() == old_leader)
         .expect("the leader is one of ours");
-    let granary = cluster.granaries[leading].clone();
+    let entity = cluster.hosts[leading].clone();
     cluster::drive(
         &sim,
         CALL,
-        async move { granary.hand_off_leadership().await },
+        async move { entity.hand_off_leadership().await },
     );
     sim.run_for(Duration::from_secs(2));
     let successor = cluster.leader_of(key);
@@ -233,9 +233,9 @@ fn a_migration_under_an_effect_in_flight_resolves_it_at_the_new_leader() {
     let (done, finished, outstanding) = cluster.ask(&sim, key, Status);
     assert!(matches!(done.get(&0), Some(Answer::Ok)));
     assert!(finished && outstanding.is_empty());
-    let grain = cluster.anchor().grain(key);
+    let entity = cluster.anchor().entity(key);
     let history = cluster::drive(&sim, CALL, async move {
-        grain.events(Seq::ZERO, 1024).await.expect("journal read")
+        entity.events(Seq::ZERO, 1024).await.expect("journal read")
     });
     let answered = history
         .events

@@ -1,0 +1,85 @@
+error[E0277]: the trait bound `Switch: EntityHandler<Unhandled>` is not satisfied
+  --> tests/compile_fail/unhandled_entity_ask.rs:89:24
+   |
+89 |     let _ = switch.ask(Unhandled).await;
+   |                    --- ^^^^^^^^^ unsatisfied trait bound
+   |                    |
+   |                    required by a bound introduced by this call
+   |
+help: the trait `EntityHandler<Unhandled>` is not implemented for `Switch`
+  --> tests/compile_fail/unhandled_entity_ask.rs:16:1
+   |
+16 | struct Switch;
+   | ^^^^^^^^^^^^^
+help: `Switch` implements trait `EntityHandler<M>`
+  --> tests/compile_fail/unhandled_entity_ask.rs:51:1
+   |
+51 | impl EntityHandler<Toggle> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EntityHandler<Toggle>`
+...
+72 | impl EntityHandler<IsOn> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EntityHandler<IsOn>`
+note: required by a bound in `EntityRef::<G>::ask`
+  --> src/entityref.rs
+   |
+   |     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, EntityError>
+   |                  --- required by a bound in this associated function
+   |     where
+   |         G: EntityHandler<M>,
+   |            ^^^^^^^^^^^^^^^^ required by this bound in `EntityRef::<G>::ask`
+
+error[E0277]: the trait bound `Switch: EntityHandler<Unhandled>` is not satisfied
+  --> tests/compile_fail/unhandled_entity_ask.rs:89:13
+   |
+89 |     let _ = switch.ask(Unhandled).await;
+   |             ^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `EntityHandler<Unhandled>` is not implemented for `Switch`
+  --> tests/compile_fail/unhandled_entity_ask.rs:16:1
+   |
+16 | struct Switch;
+   | ^^^^^^^^^^^^^
+help: `Switch` implements trait `EntityHandler<M>`
+  --> tests/compile_fail/unhandled_entity_ask.rs:51:1
+   |
+51 | impl EntityHandler<Toggle> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EntityHandler<Toggle>`
+...
+72 | impl EntityHandler<IsOn> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EntityHandler<IsOn>`
+note: required by a bound in `EntityRef::<G>::ask`
+  --> src/entityref.rs
+   |
+   |     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, EntityError>
+   |                  --- required by a bound in this associated function
+   |     where
+   |         G: EntityHandler<M>,
+   |            ^^^^^^^^^^^^^^^^ required by this bound in `EntityRef::<G>::ask`
+
+error[E0277]: the trait bound `Switch: EntityHandler<Unhandled>` is not satisfied
+  --> tests/compile_fail/unhandled_entity_ask.rs:89:35
+   |
+89 |     let _ = switch.ask(Unhandled).await;
+   |                                   ^^^^^ unsatisfied trait bound
+   |
+help: the trait `EntityHandler<Unhandled>` is not implemented for `Switch`
+  --> tests/compile_fail/unhandled_entity_ask.rs:16:1
+   |
+16 | struct Switch;
+   | ^^^^^^^^^^^^^
+help: `Switch` implements trait `EntityHandler<M>`
+  --> tests/compile_fail/unhandled_entity_ask.rs:51:1
+   |
+51 | impl EntityHandler<Toggle> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EntityHandler<Toggle>`
+...
+72 | impl EntityHandler<IsOn> for Switch {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EntityHandler<IsOn>`
+note: required by a bound in `EntityRef::<G>::ask`
+  --> src/entityref.rs
+   |
+   |     pub async fn ask<M>(&self, msg: M) -> Result<M::Reply, EntityError>
+   |                  --- required by a bound in this associated function
+   |     where
+   |         G: EntityHandler<M>,
+   |            ^^^^^^^^^^^^^^^^ required by this bound in `EntityRef::<G>::ask`

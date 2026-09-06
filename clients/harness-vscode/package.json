@@ -60,7 +60,7 @@
         "harness.kind": {
           "type": "string",
           "default": "assistant",
-          "description": "Session kind (grain type) to list and address, e.g. \"assistant\"."
+          "description": "Session kind (entity type) to list and address, e.g. \"assistant\"."
         },
         "harness.withinSecs": {
           "type": "number",

@@ -69,7 +69,7 @@ fn the_index_still_finds_the_tree() {
         "only {} names indexed under crates/; the scan has regressed",
         index.len(),
     );
-    for name in ["GrainHandler", "GrainRef", "Verify", "CatalogueEntry"] {
+    for name in ["EntityHandler", "EntityRef", "Verify", "CatalogueEntry"] {
         assert!(index.contains(name), "{name} should be indexed");
     }
 }

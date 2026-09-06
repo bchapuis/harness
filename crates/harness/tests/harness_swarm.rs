@@ -2,10 +2,10 @@
 //!
 //! Two claims over the same faulted workload. **Determinism:** the same
 //! `(workload, seed)` reproduces the full event stream byte-for-byte —
-//! harness *and* grain events — with model and sandbox faults firing under seed
+//! harness *and* entity events — with model and sandbox faults firing under seed
 //! control. **Invariants:** the H-invariants hold across a seed sweep while
-//! those faults flow. The journal, the fence, and resume are the grain's, so
-//! simulating the harness runs granary's real consensus/rehydration code.
+//! those faults flow. The journal, the fence, and resume are the entity's, so
+//! simulating the harness runs entity's real consensus/rehydration code.
 //!
 //! Named `*swarm.rs` because both are sweeps, and a sweep fails by naming a
 //! seed rather than a sequence (docs/simulation-testing.md). Harness has one
@@ -86,7 +86,7 @@ impl Workload for FaultyWorkload {
                     Tier::Workspace,
                 )
                 .budget(Budget::new(10_000, 10))
-                .grain(brisk_idle()),
+                .entity(brisk_idle()),
         );
         let script = ScriptedModel::steps(vec![
             Ok(tool_call("c1", "shell", json!({}))),
@@ -142,7 +142,7 @@ impl Workload for FaultyWorkload {
 #[test]
 fn the_event_stream_reproduces_byte_for_byte_per_seed() {
     // The determinism contract over the real stream (core spec §18.1 #1), harness
-    // and grain events included: one leak — a wall clock, an OS thread, an
+    // and entity events included: one leak — a wall clock, an OS thread, an
     // unseeded draw — breaks this, which is the point.
     for seed in [3, 17, 5151] {
         let faultless = FaultyWorkload::new("repro-faultless", 3, 0);

@@ -1,25 +1,25 @@
 //! The drive under the cluster fault swarm (drive spec §9, §10).
 //!
 //! The scenario suites assert D1–D7 through scripted runs. This file applies them
-//! the V&V way: a [`ClusterWorkload`] of driven grains swept across seeds while
+//! the V&V way: a [`ClusterWorkload`] of driven entities swept across seeds while
 //! the nemesis injects partitions, crashes, restarts, pauses, heals, loss,
 //! duplication, and delay, with the drive's continuous checker (`drive-cycle`)
-//! and granary's commit monotonicity watching the whole stream.
+//! and entity's commit monotonicity watching the whole stream.
 //!
 //! **What is scripted.** Every effect is a deterministic function of its key
 //! (§10): a seeded latency, a failure on every fourth key, and a recovery policy
 //! that alternates `Reexecute` and `Interrupt` — so the sweep drives both
 //! dangling resolutions whenever the nemesis kills a leader mid-effect.
 //!
-//! **What re-activates a grain.** Resumption is caller-driven: a grain whose
+//! **What re-activates an entity.** Resumption is caller-driven: an entity whose
 //! leader died stays cold until a message reaches it, so the workload polls every
-//! grain's `Status` on a fixed cadence. Each poll is at once the touch that
-//! re-activates a cold grain (whose first drive is the dangling set, §4.4), the
-//! wake for a grain that hibernated at quiescence under the short idle window,
+//! entity's `Status` on a fixed cadence. Each poll is at once the touch that
+//! re-activates a cold entity (whose first drive is the dangling set, §4.4), the
+//! wake for an entity that hibernated at quiescence under the short idle window,
 //! and an observation. A poll the faults refuse is simply not an observation.
 //!
 //! **What it cannot promise per seed.** Whether a leader dies with an effect in
-//! flight is the nemesis's to decide, so the coverage claims — some grain finished,
+//! flight is the nemesis's to decide, so the coverage claims — some entity finished,
 //! some effect was relaunched across activations, every fault type fired — sit on
 //! their own `coverage_seeds` sweep, which never narrows, rather than on the
 //! invariant sweep (docs/simulation-testing.md, *Adding a sweep*).
@@ -48,8 +48,8 @@ use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_cluster_swarm_coverage;
 use actor_simulation::sweep_seeds;
 use drive::testing::drive_invariants_under_failover;
-use granary::GranaryConfig;
-use granary::testing::CommitMonotonic;
+use entity::EntityConfig;
+use entity::testing::CommitMonotonic;
 use support::Outcome;
 use support::Seam;
 use support::Status;
@@ -63,16 +63,16 @@ use support::task;
 use support::with_script;
 
 const SHARDS: usize = 2;
-/// How many driven grains one run requests work of.
-const GRAINS: usize = 4;
-/// How many effects each grain fans out.
+/// How many driven entities one run requests work of.
+const ENTITIES: usize = 4;
+/// How many effects each entity fans out.
 const TASKS: TaskId = 6;
-/// The hibernation window: short, so a grain that reaches quiescence hibernates
+/// The hibernation window: short, so an entity that reaches quiescence hibernates
 /// and the next poll re-activates it, exercising D7's round trip under faults.
 const IDLE_AFTER: Duration = Duration::from_millis(150);
 /// Per-call deadline. Short so a refused call fails fast and the run keeps moving.
 const CALL_DEADLINE: Duration = Duration::from_secs(3);
-/// How many poll rounds a run makes over every grain.
+/// How many poll rounds a run makes over every entity.
 const ROUNDS: usize = 14;
 /// The gap between rounds: past `IDLE_AFTER`, and inside the span of the slower
 /// effects, so a crash mid-effect is re-driven by the next round.
@@ -92,7 +92,7 @@ fn outcome(key: TaskId) -> Outcome {
 /// The sweep-wide tallies that say what the sweep reached.
 #[derive(Clone, Default)]
 struct Reached {
-    /// Grains observed `finished` by a poll, across the sweep.
+    /// Entities observed `finished` by a poll, across the sweep.
     finished: Arc<AtomicUsize>,
     /// Keys whose effect ran on more than one activation, across the sweep — the
     /// dangling chain (§4.4) the nemesis has to produce for D6 to be tested at all.
@@ -105,12 +105,12 @@ struct DriveSwarm {
     reached: Reached,
 }
 
-fn config() -> GranaryConfig {
-    GranaryConfig {
+fn config() -> EntityConfig {
+    EntityConfig {
         shards: SHARDS,
         idle_after: IDLE_AFTER,
         snapshot_every: 4,
-        ..GranaryConfig::default()
+        ..EntityConfig::default()
     }
 }
 
@@ -152,7 +152,7 @@ impl ClusterWorkload for DriveSwarm {
         let reached = self.reached.clone();
         Box::pin(async move {
             // One run's script and ledger, not the sweep's: emptied before any
-            // grain can be touched, so the ledger is a function of the seed alone.
+            // entity can be touched, so the ledger is a function of the seed alone.
             with_script(&script, |s| {
                 s.reset();
                 for key in 0..TASKS {
@@ -168,8 +168,8 @@ impl ClusterWorkload for DriveSwarm {
 
             // Every request and every poll is issued from the first node's handle,
             // which the nemesis never restarts; routing is unaffected.
-            let requests = (0..GRAINS).map(|g| {
-                let grain = hosts[0].grain(format!("job/{g}"));
+            let requests = (0..ENTITIES).map(|g| {
+                let entity = hosts[0].entity(format!("job/{g}"));
                 async move {
                     let tasks = (0..TASKS)
                         .map(|k| {
@@ -180,7 +180,7 @@ impl ClusterWorkload for DriveSwarm {
                             }
                         })
                         .collect();
-                    let _ = grain.ask_timeout(request(tasks), CALL_DEADLINE).await;
+                    let _ = entity.ask_timeout(request(tasks), CALL_DEADLINE).await;
                 }
             });
             futures::future::join_all(requests).await;
@@ -192,11 +192,11 @@ impl ClusterWorkload for DriveSwarm {
                 let last = round + 1 == ROUNDS;
                 let front = hosts[0].clone();
                 let finished = Arc::clone(&finished);
-                let polls = (0..GRAINS).map(move |g| {
-                    let grain = front.grain(format!("job/{g}"));
+                let polls = (0..ENTITIES).map(move |g| {
+                    let entity = front.entity(format!("job/{g}"));
                     let finished = Arc::clone(&finished);
                     async move {
-                        if let Ok((_, true, _)) = grain.ask_timeout(Status, CALL_DEADLINE).await
+                        if let Ok((_, true, _)) = entity.ask_timeout(Status, CALL_DEADLINE).await
                             && last
                         {
                             finished.fetch_add(1, Ordering::Relaxed);
@@ -223,7 +223,7 @@ impl ClusterWorkload for DriveSwarm {
         let mut invariants = drive_invariants_under_failover();
         invariants.push(Box::new(CommitMonotonic::new(
             "drive-commit-monotonic",
-            "grain",
+            "entity",
         )));
         invariants
     }
@@ -240,19 +240,19 @@ fn workload() -> DriveSwarm {
 #[test]
 fn the_drive_cycle_holds_under_the_cluster_swarm() {
     // The safety claims, and only them: D3, D5, and D7's checkable half through
-    // `drive-cycle`, and the grain's commit monotonicity beneath it.
+    // `drive-cycle`, and the entity's commit monotonicity beneath it.
     let workload = workload();
     if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{failure}");
     }
     println!(
-        "finished {} grain poll(s), relaunched {} key(s) across activations",
+        "finished {} entity poll(s), relaunched {} key(s) across activations",
         workload.reached.finished.load(Ordering::Relaxed),
         workload.reached.relaunched.load(Ordering::Relaxed),
     );
 }
 
-/// What the sweep actually reached, on a range that never narrows: some grain
+/// What the sweep actually reached, on a range that never narrows: some entity
 /// finished its work under faults (D2), some effect was relaunched by a
 /// successor activation (the dangling chain of D6, which only a leader death
 /// mid-effect produces), and every transport fault type fired.
@@ -268,7 +268,7 @@ fn the_drive_swarm_reaches_a_finish_a_relaunch_and_every_fault() {
     println!("finished {finished}, relaunched {relaunched}, faults {stats:?}");
     assert!(
         finished > 0,
-        "no grain finished its work on any seed, so the sweep asserted the cycle \
+        "no entity finished its work on any seed, so the sweep asserted the cycle \
          over runs that never completed"
     );
     assert!(

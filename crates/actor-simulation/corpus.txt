@@ -107,19 +107,19 @@ linearizable-remote-register 88000261
 #
 # `[no-silent-loss] N ask(s) still pending at quiescence` — spec §18.5 #1 — and,
 # where a dispatch was the thing still in flight, `[serial-execution] dispatch
-# ... never completed`. Reproduced across four granary workloads and machine,
+# ... never completed`. Reproduced across four entity workloads and machine,
 # which share only the actor framework and the cluster driver underneath. Three
 # causes, found in that order, each one hiding the next:
 #
 #  1. The driver called quiescence too early. It flushed a fixed 2s after the
-#     traffic finished — no longer than the deadline granary's own quorum append
+#     traffic finished — no longer than the deadline entity's own quorum append
 #     carries, and that append fans out further asks behind it (the drained
 #     stragglers of a committed quorum, §7.2). A call issued at the end of the
 #     drive could not possibly have closed by the time the question was asked, so
 #     a live call was reported as a lost one. `drive_cluster` now flushes and
 #     then keeps advancing while any ask is in flight, capped, so a genuinely
 #     abandoned one still reaches the invariant.
-#  2. `try_join_all` abandoned asks for real. Granary fanned out blob puts, blob
+#  2. `try_join_all` abandoned asks for real. Entity fanned out blob puts, blob
 #     gets, and spilled-value reads with `futures::future::try_join_all`, which
 #     returns on the first error and drops the futures still in flight — with the
 #     `ask`s they had already issued. Those never reach a reply or a `CallError`,
@@ -131,28 +131,28 @@ linearizable-remote-register 88000261
 #
 # Pruned to a couple of seeds per workload.
 
-granary-account-swarm 60000014   # ask pending: flush shorter than the call deadline (1)
-granary-account-swarm 94000001
-granary-blob-swarm 94000191      # ask abandoned by `try_join_all` (2)
-granary-blob-swarm 99000090
-granary-ws-swarm 94000683        # same, on the workspace checkpoint's chunk puts (2)
-granary-ws-swarm 99000858
+entity-account-swarm 60000014   # ask pending: flush shorter than the call deadline (1)
+entity-account-swarm 94000001
+entity-blob-swarm 94000191      # ask abandoned by `try_join_all` (2)
+entity-blob-swarm 99000090
+entity-ws-swarm 94000683        # same, on the workspace checkpoint's chunk puts (2)
+entity-ws-swarm 99000858
 
 # Found the first time the SQL facet's swarm ever ran — it is behind
 # `--features sql`, which neither ci.yml nor soak.yml enabled, and the suite had
 # bit-rotted into a compile error in the meantime.
-granary-sql-account-swarm 95000206
+entity-sql-account-swarm 95000206
 
 machine-swarm 70000001
 
 # --- Acknowledged write lost when two commands encode identically -------------
 #
-# `[grain-commit-monotonic] grain bank.Account/account/1 committed seq 2 not
-# after previous head 2 (G3/G5)`. Unmasked by the fixes above; a genuine G14
+# `[entity-commit-monotonic] entity bank.Account/account/1 committed seq 2 not
+# after previous head 2 (E3/E5)`. Unmasked by the fixes above; a genuine E14
 # violation, and the most serious thing the corpus turned up.
 #
 # A replica refuses an append that lands on a slot it has already filled — the
-# optimistic head check of granary §8, which is what stops a leader whose
+# optimistic head check of entity §8, which is what stops a leader whose
 # recovered head is stale from overwriting a committed record. It made an
 # exception for a re-delivered append, and identified one *by its bytes*. But
 # bytes are not an identity: this workload deposits one cent every time, so two
@@ -160,32 +160,32 @@ machine-swarm 70000001
 # (its read quorum was not reached, so it fell back to its local view, §7.5)
 # appended onto the occupied slot, every replica read it as a duplicate and
 # stored it, and the append committed. Two clients were told their deposit was
-# durable; the grain held one record.
+# durable; the entity held one record.
 #
 # Fixed in `store.rs`: an append may proceed onto an occupied slot only if it is
 # the same append — same shard term as well as same bytes — and the check now
 # covers every slot of the batch, not just the first. Pinned by
 # `store::tests::an_identical_record_from_a_newer_term_is_still_a_stale_head`.
 
-granary-account-swarm 41000332
+entity-account-swarm 41000332
 
 # --- Workspace read judged against an outcome the spec calls ambiguous --------
 #
-# `a read returned bytes other than the last committed write (F1/G14)`. Also
+# `a read returned bytes other than the last committed write (F1/E14)`. Also
 # unmasked by the fixes above, and a bug in the claim rather than the code.
 #
-# `granary-ws-swarm` recorded a path's expected content only on a successful
+# `entity-ws-swarm` recorded a path's expected content only on a successful
 # `Put` and treated every failure as if nothing had happened. But `Unavailable`
-# is ambiguous by definition (granary §7.2, §11): the record may already sit on a
+# is ambiguous by definition (entity §7.2, §11): the record may already sit on a
 # replica minority, and the next activation's quorum recovery can find it on a
 # majority and adopt it — the spec's own fault list asks for exactly this case to
-# be exercised. Reading those bytes back is correct. `GrainError::Unavailable`'s
+# be exercised. Reading those bytes back is correct. `EntityError::Unavailable`'s
 # doc comment said the opposite ("so the write did not commit"), which is how the
 # claim came to be written that way; both are fixed.
 
-granary-ws-swarm 6
+entity-ws-swarm 6
 
-# --- A command applied to the wrong grain after a node restart ----------------
+# --- A command applied to the wrong entity after a node restart ----------------
 #
 # `p2 acknowledged Record(app.Session/keep-c1-2) ... and a committed probe found
 # it absent`. Around 1 seed in 1,500, only in workloads whose nemesis restarts a
@@ -197,10 +197,10 @@ granary-ws-swarm 6
 # re-issues `node-2//user/2#0`, the very id its predecessor used, and spawn order
 # does not survive a restart, so that id now names a different actor.
 #
-# Granary caches a resolved host ref per grain (`HostCache`), guarded before each
+# Entity caches a resolved host ref per entity (`HostCache`), guarded before each
 # send by a leadership check but not by liveness. So a ref cached before the
 # restart still looked good afterwards and delivered to whatever now sat at that
-# path — another grain's host. The `Record` was applied to principal `p0`'s
+# path — another entity's host. The `Record` was applied to principal `p0`'s
 # directory, committed there, and answered `Created`; `p2`, which the caller had
 # addressed, never saw it. `ActorId::incarnation` exists precisely to separate a
 # fresh actor from "a resigned predecessor that reused the same path" and was
@@ -210,7 +210,7 @@ granary-ws-swarm 6
 # (`LocalHost::with_incarnation`), threaded through `ClusterConfig::incarnation`;
 # the simulation passes the scheduler domain, which is already one per incarnation.
 # A stale ref now fails to resolve, which is a `DeadLetter` — the one outcome that
-# proves the command never ran (§2.2) — so `GrainRef` re-resolves and re-issues.
+# proves the command never ran (§2.2) — so `EntityRef` re-resolves and re-issues.
 #
 # Kept as a corpus seed because the sweep that found it only reaches this with a
 # restart, a deactivation, and a cached ref lining up.

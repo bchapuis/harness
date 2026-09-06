@@ -4,7 +4,7 @@
 //! Two consumers boot Firecracker VMs and share the process-hygiene code
 //! between them: the agent sandbox's `Native` tier (`harness-sandbox`,
 //! per-call tar sync over vsock) and the persistent machine
-//! (`crates/machine-grain`, whose drive is the disk facet's image, grain §7.15).
+//! (`crates/machine-entity`, whose drive is the disk facet's image, entity §7.15).
 //! This module owns the mechanics identical for both and nothing
 //! protocol-shaped:
 //!

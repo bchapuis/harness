@@ -14,7 +14,7 @@ use actor_simulation::Verify;
 /// S4 is deliberately verified in the *harness* suite
 /// (`harness/tests/conformance_sandbox.rs`): the acquisition discipline is
 /// loop conduct, observed through the journal — a write-ahead-order audit at
-/// quiescence (harness §6.3, G5), never a stream checker (harness spec §5.6
+/// quiescence (harness §6.3, E5), never a stream checker (harness spec §5.6
 /// item 6).
 ///
 /// Each `verify` entry names suites and nothing else, as its siblings do and as

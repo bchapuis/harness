@@ -103,7 +103,7 @@ for mib in "${SIZES[@]}"; do
   done
 
   # The front-door line, not the transport: a node prints it only once a leader is
-  # elected and it is hosting machine grains. Creating before that spends the CLI's
+  # elected and it is hosting machine entities. Creating before that spends the CLI's
   # retry budget rather than measuring anything.
   for i in $(seq 1 "$NODES"); do
     waited=0

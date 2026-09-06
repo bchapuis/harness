@@ -1,6 +1,6 @@
 //! The machine-readable B-catalogue, B1–B7 (blob-store spec §9).
 //!
-//! The blob store's analogue of the core, utilities, harness, sandbox, granary,
+//! The blob store's analogue of the core, utilities, harness, sandbox, entity,
 //! and machine catalogues: one table linking each invariant to the code that
 //! verifies it, guarded by the drift test in `conformance_catalogue.rs`.
 //! `invariant: n` reads as "Bn".
@@ -60,11 +60,11 @@ const B_CATALOGUE: &[CatalogueEntry] = &[
         spec: "blob §4",
         property: "No consensus on the data path: no election, term, agreement round, or write-time read-repair; concurrent writers of the same content do not coordinate and do not fork",
         // Structural, and checked as such: the crate depends on `actor-cluster`, not
-        // `granary`, so there is no consensus group available for the data path to
+        // `entity`, so there is no consensus group available for the data path to
         // run. The drift test asserts that from Cargo.toml — the day someone adds a
-        // granary dependency, this invariant needs re-arguing rather than assuming.
+        // entity dependency, this invariant needs re-arguing rather than assuming.
         verify: &[Verify::CompileTime(
-            "blob-store depends on actor-cluster, not granary: no consensus group exists to run \
+            "blob-store depends on actor-cluster, not entity: no consensus group exists to run \
              (asserted from Cargo.toml by conformance_catalogue.rs), plus the B2 convergence tests",
         )],
     },

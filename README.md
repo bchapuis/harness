@@ -66,12 +66,12 @@ authenticated form with opaque per-tenant tokens.
   HTTP/SSE tier that is the single public boundary. It joins the actor transport
   as a non-voting, non-hosting member (the Orleans cluster-client pattern),
   terminates tenant auth (a bearer token → a principal), and addresses the
-  session's grain **directly** — no control protocol, no per-node listener, no
+  session's entity **directly** — no control protocol, no per-node listener, no
   forwarding hop. It holds no durable state, so it scales independently; SSE
   carries the live record stream.
 - **Multi-tenant isolation** (`crates/tenancy`): each tenant's sessions stay
-  isolated under a principal-scoped grain name and are listed through an
-  ownership-index grain (`tenancy`, itself another journaled actor). The gateway
+  isolated under a principal-scoped entity name and are listed through an
+  ownership-index entity (`tenancy`, itself another journaled actor). The gateway
   is where auth terminates, so it joins inside the cluster's trust boundary;
   untrusted callers reach it only over HTTP with a bearer token.
 - **Two clients** (`crates/harness-tui`, `clients/harness-vscode`): the only
@@ -79,8 +79,8 @@ authenticated form with opaque per-tenant tokens.
   HTTP/SSE surface and speak nothing else — a terminal chat UI, and a VS Code
   extension that surfaces a session as an agent in the Agents window. Each lists
   a tenant's sessions, submits a prompt, and streams the run's records live.
-- **Persistent machines** (`crates/machine-grain`, `crates/machine-host`,
-  `crates/machine-frontdoor`): the agent's sibling. Same grain, different
+- **Persistent machines** (`crates/machine-entity`, `crates/machine-host`,
+  `crates/machine-frontdoor`): the agent's sibling. Same entity, different
   consumer — a lightweight VM you address by name and reach over SSH, whose
   *whole rootfs* is the durable state. Not an agent: no run loop, no model, no
   autonomy, just a box that survives.
@@ -93,7 +93,7 @@ authenticated form with opaque per-tenant tokens.
 
 Same cluster, different thing on top of it: three nodes, a machine named
 `dev-box`, and an SSH front door on each node. `ssh alice@127.0.0.1 -p 2222`
-lands you in a Firecracker microVM whose disk is a grain — installed packages
+lands you in a Firecracker microVM whose disk is an entity — installed packages
 and all — so it outlives disconnection, idle hibernation, and the node it was
 running on. The front door authenticates your key against the machine's
 *journaled* key set and presents the machine's own journaled host key, so your
@@ -129,10 +129,10 @@ the guides, and the testing conventions. The paths worth taking first:
   silos, with the gateway joining it as a cluster client.
 - [docs/agentic-harness-spec.md](docs/agentic-harness-spec.md): why the journal
   is the session.
-- [docs/granary-spec.md](docs/granary-spec.md): the substrate under all of it —
-  what a grain is, the fenced journal, shards and snapshots, and the facet model
+- [docs/entity-spec.md](docs/entity-spec.md): the substrate under all of it —
+  what an entity is, the fenced journal, shards and snapshots, and the facet model
   every storage feature is built from.
-- [docs/machine-spec.md](docs/machine-spec.md): why a machine is a grain plus
+- [docs/machine-spec.md](docs/machine-spec.md): why a machine is an entity plus
   durable storage and a network seam — the disk facet, the session-grained
   capture cadence, the self-fencing lease, and the SSH front door.
 - [docs/sandbox-spec.md](docs/sandbox-spec.md): the execution tiers a tool call

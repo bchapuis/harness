@@ -115,7 +115,7 @@ fn an_exhausted_budget_ends_the_run_with_no_further_calls() {
                 Tier::Workspace,
             )
             .budget(Budget::new(100_000, 3))
-            .grain(brisk_idle()),
+            .entity(brisk_idle()),
     );
     let model = ScriptedModel::new(|req| {
         let step = req
@@ -156,7 +156,7 @@ fn token_exhaustion_is_enforced_before_the_call() {
                 Tier::Workspace,
             )
             .budget(Budget::new(250, 100))
-            .grain(brisk_idle()),
+            .entity(brisk_idle()),
     );
     let model = ScriptedModel::new(|req| {
         let step = req
@@ -185,13 +185,13 @@ fn tree_kinds() -> Kinds {
             Kind::new("parent agent")
                 .delegates_to(&["child"])
                 .budget(Budget::new(10_000, 10))
-                .grain(brisk_idle()),
+                .entity(brisk_idle()),
         )
         .register(
             "child",
             Kind::new("child agent")
                 .budget(Budget::new(2_000, 4))
-                .grain(brisk_idle()),
+                .entity(brisk_idle()),
         )
 }
 

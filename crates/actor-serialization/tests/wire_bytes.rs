@@ -2,7 +2,7 @@
 //!
 //! Several message types in this workspace carry their payload as
 //! `#[serde(with = "serde_bytes")] Vec<u8>` (or `serde_bytes::ByteBuf`) rather than a
-//! plain `Vec<u8>` — granary's `StoreBlob`, `StoreSnapshot` and `StoreRecord`,
+//! plain `Vec<u8>` — entity's `StoreBlob`, `StoreSnapshot` and `StoreRecord`,
 //! blob-store's `StoreBlob`. That is a **performance** change: it reaches
 //! `serialize_bytes`/`deserialize_bytes` instead of serde's default sequence path,
 //! which is worth ~160x on encode and ~670x on decode for a mebibyte under postcard
@@ -59,7 +59,7 @@ struct Tagged {
     trailing: String,
 }
 
-/// The `Vec<Vec<u8>>` shape, which `#[serde(with)]` cannot reach — granary's
+/// The `Vec<Vec<u8>>` shape, which `#[serde(with)]` cannot reach — entity's
 /// `StoreRecord::records` uses `Vec<ByteBuf>` instead, and it has to be neutral too.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 struct PlainMany {
@@ -140,7 +140,7 @@ fn a_vector_of_byte_vectors_is_neutral_too() {
         assert_eq!(
             untagged, bytes,
             "{name} encodes `Vec<Vec<u8>>` and `Vec<ByteBuf>` differently — \
-             granary's `StoreRecord::records` relies on them agreeing",
+             entity's `StoreRecord::records` relies on them agreeing",
         );
     }
 }

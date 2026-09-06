@@ -4,7 +4,7 @@
 //! The drive's central claim is that resume is not a special case: the desired
 //! set an activation's first drive computes after a crash is the very function
 //! its predecessor was computing on the live path, over the same committed
-//! prefix. That is decidable by difference. Three views of one grain are held
+//! prefix. That is decidable by difference. Three views of one entity are held
 //! equal here — the live activation before the crash, the successor after it, and
 //! an **offline fold** of the journal the test reads back and folds itself with
 //! the consumer's own `apply` and `pending` — and any ephemeral state leaking into
@@ -18,9 +18,9 @@ use actor_simulation::Recorder;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
 use drive::Driven;
-use granary::Grain;
-use granary::Granary;
-use granary::Seq;
+use entity::Entity;
+use entity::Entities;
+use entity::Seq;
 use support::Fanout;
 use support::FanoutState;
 use support::Outcome;
@@ -37,18 +37,18 @@ use support::with_script;
 const CALL: Duration = Duration::from_secs(8);
 const SLOW: Duration = Duration::from_secs(30);
 
-/// The desired set an offline fold of the grain's journal computes: `apply` over
+/// The desired set an offline fold of the entity's journal computes: `apply` over
 /// every committed record, then the consumer's `pending`. Reads the journal
-/// through the public read path (granary §7.5), so it sees exactly the committed
+/// through the public read path (entity §7.5), so it sees exactly the committed
 /// prefix and nothing an activation held in memory.
 fn folded_outstanding(
     sim: &Simulation,
-    granary: &Granary<Fanout<SimNode>>,
+    entities: &Entities<Fanout<SimNode>>,
     key: &str,
 ) -> Vec<TaskId> {
-    let grain = granary.grain(key);
+    let entity = entities.entity(key);
     let history = cluster::drive(sim, CALL, async move {
-        grain.events(Seq::ZERO, 1024).await.expect("journal read")
+        entity.events(Seq::ZERO, 1024).await.expect("journal read")
     });
     let mut state = FanoutState::default();
     for (_, record) in &history.events {

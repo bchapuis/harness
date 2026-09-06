@@ -1,15 +1,15 @@
 //! The agentic harness (agentic-harness-spec.md): compound AI sessions run as
-//! **grains** on a mutualized cluster. An agent is a grain ([`granary`]) plus
+//! **entities** on a mutualized cluster. An agent is an entity ([`entity`]) plus
 //! three things — a self-driving loop, a model seam, and a sandbox — and nothing
 //! else: identity, the journal, the single-writer fence, placement, activation,
-//! hibernation, and lossless failover are all inherited from the grain unchanged.
+//! hibernation, and lossless failover are all inherited from the entity unchanged.
 //!
-//! The design in one sentence (§2.1): **the grain is the session; the activation
+//! The design in one sentence (§2.1): **the entity is the session; the activation
 //! and the sandbox are disposable; the seams are the only world.** The loop runs
-//! as the grain's activation behavior — serial, journaled, effect-free outside
-//! its two seams (the [`Model`] and the [`Sandbox`]) and the grain's own journal
+//! as the entity's activation behavior — serial, journaled, effect-free outside
+//! its two seams (the [`Model`] and the [`Sandbox`]) and the entity's own journal
 //! — and every tool effect lands in one isolated environment per session (§5.1).
-//! Time, randomness, task spawning, transport, and the journal come from granary
+//! Time, randomness, task spawning, transport, and the journal come from entity
 //! and the core seams, so one seed reproduces an entire multi-node agentic run
 //! (§12).
 //!
@@ -85,11 +85,11 @@ pub use tool::ToolDecl;
 pub use tool::ToolError;
 pub use tool::ToolRegistry;
 
-// Re-exported granary types that appear in the harness's public surface, so a
-// consumer needs no direct granary dependency for ordinary use.
-pub use granary::EventHistory;
-pub use granary::FileGrainStore;
-pub use granary::GrainError;
-pub use granary::GrainStoreFactory;
-pub use granary::GranaryConfig;
-pub use granary::Seq;
+// Re-exported entity types that appear in the harness's public surface, so a
+// consumer needs no direct entity dependency for ordinary use.
+pub use entity::EventHistory;
+pub use entity::FileEntityStore;
+pub use entity::EntityError;
+pub use entity::EntityStoreFactory;
+pub use entity::EntityConfig;
+pub use entity::Seq;

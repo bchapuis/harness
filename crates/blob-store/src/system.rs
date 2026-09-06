@@ -1,4 +1,4 @@
-//! The `BlobSystem` capability seam (the `GranarySystem` analogue, granary §7.3).
+//! The `BlobSystem` capability seam (the `EntitySystem` analogue, entity §7.3).
 //!
 //! The `Clustered` tier and its background loops need capabilities the bare
 //! [`ActorSystem`] trait does not expose: virtual time (for reconcile and tombstone

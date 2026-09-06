@@ -1,5 +1,5 @@
 //! Tail conformance (harness spec §10.2): reading a run is a journal read at
-//! the granary gateway, not a session command — so observation neither wakes a
+//! the entity gateway, not a session command — so observation neither wakes a
 //! hibernated session (rehydration plus workspace rematerialization) nor loses
 //! records across the hibernation it leaves undisturbed.
 
@@ -13,8 +13,8 @@ use actor_core::EventSink;
 use actor_core::LocalSystemBuilder;
 use actor_simulation::Recorder;
 use actor_simulation::Simulation;
-use granary::GrainEvent;
-use granary::Seq;
+use entity::EntityEvent;
+use entity::Seq;
 use harness::Harness;
 use harness::Kind;
 use harness::Kinds;
@@ -56,7 +56,7 @@ fn tail_leaves_a_hibernated_session_asleep() {
                 Tier::Workspace,
             )
             .sandbox(SandboxProfile::image("base"))
-            .grain(brisk_idle()),
+            .entity(brisk_idle()),
     );
     let harness = Harness::cluster(system.clone(), &kinds, model, sandboxes);
     let session = harness.session("worker", SessionId::new("s1")).unwrap();
@@ -76,9 +76,9 @@ fn tail_leaves_a_hibernated_session_asleep() {
         recorder
             .events()
             .iter()
-            .filter_map(|e| e.as_app::<GrainEvent>().cloned())
+            .filter_map(|e| e.as_app::<EntityEvent>().cloned())
             .filter(|e| match e {
-                GrainEvent::Activated { name, .. } | GrainEvent::Deactivated { name, .. } => {
+                EntityEvent::Activated { name, .. } | EntityEvent::Deactivated { name, .. } => {
                     name.key() == "s1"
                 }
                 _ => false,
@@ -88,7 +88,7 @@ fn tail_leaves_a_hibernated_session_asleep() {
     assert!(
         session_events(&recorder)
             .iter()
-            .any(|e| matches!(e, GrainEvent::Deactivated { .. })),
+            .any(|e| matches!(e, EntityEvent::Deactivated { .. })),
         "the idle session must hibernate",
     );
 
@@ -127,7 +127,7 @@ fn tail_leaves_a_hibernated_session_asleep() {
     });
     let activated = session_events(&recorder)
         .iter()
-        .filter(|e| matches!(e, GrainEvent::Activated { .. }))
+        .filter(|e| matches!(e, EntityEvent::Activated { .. }))
         .count();
     assert_eq!(
         activated, 1,
@@ -136,11 +136,11 @@ fn tail_leaves_a_hibernated_session_asleep() {
 }
 
 /// A kind config that snapshots aggressively, so a short run crosses the
-/// compaction trigger (granary §9) and truncates the journal's prefix.
-fn compacting(snapshot_every: u64) -> granary::GranaryConfig {
-    granary::GranaryConfig {
+/// compaction trigger (entity §9) and truncates the journal's prefix.
+fn compacting(snapshot_every: u64) -> entity::EntityConfig {
+    entity::EntityConfig {
         snapshot_every,
-        // The workspace facet materializes a real directory per grain; a fresh
+        // The workspace facet materializes a real directory per entity; a fresh
         // tempdir keeps parallel tests from sharing scratch paths (see
         // `support::brisk_idle`).
         data_dir: Some(
@@ -148,7 +148,7 @@ fn compacting(snapshot_every: u64) -> granary::GranaryConfig {
                 .expect("workspace scratch tempdir")
                 .keep(),
         ),
-        ..granary::GranaryConfig::default()
+        ..entity::EntityConfig::default()
     }
 }
 
@@ -162,7 +162,7 @@ fn a_compacted_session_announces_truncation_to_tail_and_follower() {
     // journal stays readable past the last snapshot.
     let model = Arc::new(ScriptedModel::steps(Vec::new()));
     let sandboxes = Arc::new(ScriptedSandboxes::echo());
-    let kinds = Kinds::new().register("worker", Kind::new("worker").grain(compacting(6)));
+    let kinds = Kinds::new().register("worker", Kind::new("worker").entity(compacting(6)));
     let harness = Harness::cluster(system.clone(), &kinds, model, sandboxes);
     let session = harness.session("worker", SessionId::new("s1")).unwrap();
 

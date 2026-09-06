@@ -2,7 +2,7 @@
 //!
 //! Two failure layers stay distinct on the wire, exactly as the harness keeps
 //! them apart (spec §12/§14): a *transport or durability* failure of reaching or
-//! committing a command — a [`GrainError`] — becomes an HTTP status here; an
+//! committing a command — a [`EntityError`] — becomes an HTTP status here; an
 //! *application outcome* the run itself produced ([`RunOutcome`]'s `RunError`) is
 //! **not** an error at this layer, it is a `200` whose body carries the outcome.
 //!
@@ -18,12 +18,12 @@ use axum::http::StatusCode;
 use axum::http::header::WWW_AUTHENTICATE;
 use axum::response::IntoResponse;
 use axum::response::Response;
-use harness::GrainError;
+use harness::EntityError;
 use serde_json::json;
 
 /// A client-facing gateway error: a stable machine `code`, an HTTP `status`, and
 /// a human `message`. Built from the edge's own validation ([`bad_request`],
-/// [`unauthorized`]) and from a [`GrainError`] — never from a run's own
+/// [`unauthorized`]) and from a [`EntityError`] — never from a run's own
 /// `RunError` (see the module docs).
 ///
 /// [`bad_request`]: GatewayError::bad_request
@@ -75,7 +75,7 @@ impl GatewayError {
     }
 }
 
-impl From<GrainError> for GatewayError {
+impl From<EntityError> for GatewayError {
     /// Map a transport/durability failure to an HTTP status (spec §12/§14):
     ///
     /// - `Call(Timeout)` → `504` — the deadline lapsed reaching/committing.
@@ -83,13 +83,13 @@ impl From<GrainError> for GatewayError {
     ///   transient: no quorum, backpressure, or a leadership move; retryable.
     /// - anything else (`DeadLetter`, `Unhandled`, `Serialization`, `System`) →
     ///   `502` — an upstream failure the client cannot fix by retrying.
-    fn from(e: GrainError) -> GatewayError {
+    fn from(e: EntityError) -> GatewayError {
         let (status, code) = match &e {
-            GrainError::Call(CallError::Timeout) => (StatusCode::GATEWAY_TIMEOUT, "timeout"),
-            GrainError::Call(CallError::Unreachable | CallError::MailboxFull)
-            | GrainError::Unavailable(_)
-            | GrainError::NotLeader(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
-            GrainError::Call(_) => (StatusCode::BAD_GATEWAY, "upstream"),
+            EntityError::Call(CallError::Timeout) => (StatusCode::GATEWAY_TIMEOUT, "timeout"),
+            EntityError::Call(CallError::Unreachable | CallError::MailboxFull)
+            | EntityError::Unavailable(_)
+            | EntityError::NotLeader(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+            EntityError::Call(_) => (StatusCode::BAD_GATEWAY, "upstream"),
         };
         GatewayError::new(status, code, e.to_string())
     }
@@ -111,33 +111,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grain_errors_map_to_transport_statuses() {
+    fn entity_errors_map_to_transport_statuses() {
         assert_eq!(
-            GatewayError::from(GrainError::Call(CallError::Timeout)).status(),
+            GatewayError::from(EntityError::Call(CallError::Timeout)).status(),
             StatusCode::GATEWAY_TIMEOUT
         );
         assert_eq!(
-            GatewayError::from(GrainError::Call(CallError::Unreachable)).status(),
+            GatewayError::from(EntityError::Call(CallError::Unreachable)).status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(
-            GatewayError::from(GrainError::Call(CallError::MailboxFull)).status(),
+            GatewayError::from(EntityError::Call(CallError::MailboxFull)).status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(
-            GatewayError::from(GrainError::Unavailable("no quorum".into())).status(),
+            GatewayError::from(EntityError::Unavailable("no quorum".into())).status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
         // A contract/system failure the client cannot retry away is 502.
         assert_eq!(
-            GatewayError::from(GrainError::Call(CallError::Unhandled)).status(),
+            GatewayError::from(EntityError::Call(CallError::Unhandled)).status(),
             StatusCode::BAD_GATEWAY
         );
     }
 
     #[test]
     fn event_data_is_the_stable_code_and_message() {
-        let e = GatewayError::from(GrainError::Call(CallError::Timeout));
+        let e = GatewayError::from(EntityError::Call(CallError::Timeout));
         let v: serde_json::Value = serde_json::from_str(&e.to_event_data()).unwrap();
         assert_eq!(v["code"], "timeout");
         assert!(v["message"].as_str().is_some());

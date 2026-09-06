@@ -46,7 +46,7 @@ const SYNC_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The reconcile loop for one node. Holds a `Weak` to the node's [`Inner`] and
 /// exits once the last [`ClusteredBlobStore`](crate::ClusteredBlobStore) handle is
-/// dropped, so it never keeps a torn-down node alive (the granary pattern).
+/// dropped, so it never keeps a torn-down node alive (the entity pattern).
 pub(crate) async fn reconcile_loop<S: BlobSystem>(inner: Weak<Inner<S>>) {
     loop {
         let Some(inner) = inner.upgrade() else {

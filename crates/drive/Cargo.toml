@@ -1,6 +1,6 @@
 [package]
 name = "drive"
-description = "The autonomous grain: a durable object that re-derives and drives the work its committed state calls for"
+description = "The autonomous entity: a durable object that re-derives and drives the work its committed state calls for"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 actor-simulation = { workspace = true, optional = true }
-granary.workspace = true
+entity.workspace = true
 actor-serialization.workspace = true
 actor-core.workspace = true
 serde.workspace = true
@@ -22,10 +22,10 @@ spec.workspace = true
 drive = { path = ".", features = ["testing"] }
 actor-simulation.workspace = true
 # The clustered tier the dangling, resume, and swarm suites run on: a driven
-# grain's crash and migration scenarios are shard-leader moves (§4.4, §6).
+# entity's crash and migration scenarios are shard-leader moves (§4.4, §6).
 actor-cluster.workspace = true
-# Granary's own continuous checkers, mounted beside the drive's in the swarm.
-granary = { workspace = true, features = ["testing"] }
+# Entity's own continuous checkers, mounted beside the drive's in the swarm.
+entity = { workspace = true, features = ["testing"] }
 
 [features]
 # The continuous D-checkers over the drive's event stream, for the conformance

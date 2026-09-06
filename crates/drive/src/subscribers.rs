@@ -19,13 +19,13 @@
 //!    by callers re-contacting after a resume — like the claims and for the same
 //!    reason: a reply-to is a routing address, not a fact about the work.
 //! 2. A notification MUST be sent only **after** the record carrying the outcome
-//!    commits (granary §6), so no caller holds a completion the journal could
+//!    commits (entity §6), so no caller holds a completion the journal could
 //!    lose. [`take`](Subscribers::take) is therefore the only way to get the
 //!    registered addresses out, and a consumer calls it from its post-commit
 //!    pass.
 //! 3. A notification is a `tell` (core §3.3): at-most-once, best-effort,
 //!    **delivery and not the source of truth**. The committed record is. A lost
-//!    notification is recovered by the caller re-contacting the grain, never by
+//!    notification is recovered by the caller re-contacting the entity, never by
 //!    a transparent retry (core §1.2).
 //! 4. A caller arriving after the outcome has committed MUST be answered
 //!    immediately from the fold, not registered — otherwise it waits for a

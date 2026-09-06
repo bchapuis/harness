@@ -14,7 +14,7 @@
 /// Where an activation-scoped resource stands (spec §6).
 pub enum BindingState<T> {
     /// Nothing held, nothing in flight. The next effect that needs the resource
-    /// triggers the open (lazily, so a grain that never needs one never pays).
+    /// triggers the open (lazily, so an entity that never needs one never pays).
     Closed,
     /// An open is in flight. **Joins the hibernation veto**: an open in flight
     /// is an outcome the activation still owes itself, and it is the one piece

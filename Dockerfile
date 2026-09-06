@@ -2,7 +2,7 @@
 # HTTP/SSE edge, a cluster client) and ship both on a small Python base.
 #
 # The Kubernetes manifest runs `--sandbox durable`: the model gets the typed
-# file tools over a durable workspace grain and no `shell` at all, so nothing
+# file tools over a durable workspace entity and no `shell` at all, so nothing
 # the model composes ever executes in this container. The runtime base is
 # python:3.12-slim anyway — the same tools demo-agent.sh hands the model — so
 # the image is ready for an operator who adds an interpreter path later.

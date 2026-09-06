@@ -1,8 +1,8 @@
 //! A namespaced, content-addressed object store on the actor framework
 //! (blob-store spec).
 //!
-//! The crate sits beside granary, not above it (spec §1): a blob store is built
-//! from plain cluster actors and needs none of the grain machinery — no virtual
+//! The crate sits beside entity, not above it (spec §1): a blob store is built
+//! from plain cluster actors and needs none of the entity machinery — no virtual
 //! identity, no journal, no single-activation lease. A blob is an immutable byte
 //! string named by the BLAKE3 hash of its content **within a consumer-chosen
 //! namespace** (spec §2). A content hash names exactly one byte sequence for all

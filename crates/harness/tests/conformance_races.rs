@@ -1,4 +1,4 @@
-//! Run-loop race conformance: the grain's serial mailbox gives no ordering
+//! Run-loop race conformance: the entity's serial mailbox gives no ordering
 //! guarantee between a client's `Submit` and the loop's own self-driving
 //! messages (`Advance`, `ModelDone`), so the loop's fold-external flags must
 //! stay correct under any interleaving (§3.2). Two races regress here:
