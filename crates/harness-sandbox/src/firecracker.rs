@@ -72,7 +72,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use cap_std::fs::Dir;
-use harness::OnDangling;
+use harness::OnOrphan;
 use harness::Tier;
 use harness::ToolDecl;
 use harness::ToolError;
@@ -123,7 +123,7 @@ pub fn fc_shell_tool() -> ToolDecl {
             "required": ["command"]
         }),
         tier: Tier::Native,
-        on_dangling: OnDangling::Interrupt,
+        on_orphan: OnOrphan::Interrupt,
         timeout: None,
     }
 }

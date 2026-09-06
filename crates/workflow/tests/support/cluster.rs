@@ -23,10 +23,10 @@ use actor_simulation::Recorder;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
-use entity::EntityHandler;
 use entity::Entities;
 use entity::EntityConfig;
 use entity::EntityExt;
+use entity::EntityHandler;
 
 use super::FANOUT_TYPE;
 use super::Fanout;
@@ -109,11 +109,7 @@ pub fn cluster(sim: &Simulation, recorder: &Recorder, seam: &Seam) -> Cluster {
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
     let hosts: Vec<_> = nodes.iter().map(|n| host(n, seam)).collect();
     sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
-    Cluster {
-        net,
-        nodes,
-        hosts,
-    }
+    Cluster { net, nodes, hosts }
 }
 
 impl Cluster {
@@ -163,8 +159,8 @@ impl Cluster {
     /// replies at once or is refused: the scenarios' crash points are tuned
     /// against that envelope, and a restart that lands a few seconds earlier in
     /// a shard group's life can leave the survivors disagreeing about its leader
-    /// (see `conformance_dangling.rs` on seed 101). That is the cluster's to
-    /// resolve, not the drive's; the fixed step keeps the scenarios on the side of
+    /// (see `conformance_orphan.rs` on seed 101). That is the cluster's to
+    /// resolve, not the workflow's; the fixed step keeps the scenarios on the side of
     /// it they were written for.
     ///
     /// Retrying a write after an ambiguous failure may commit it twice, which is
@@ -193,7 +189,7 @@ impl Cluster {
     }
 }
 
-/// Drive a call for exactly `settle` of virtual time under the perpetually-running
+/// Engine a call for exactly `settle` of virtual time under the perpetually-running
 /// cluster loops, then read it back. Unlike `Simulation::block_on` it does not
 /// return early, which is what gives every step of a scenario the same envelope.
 pub fn drive<T: Send + 'static>(

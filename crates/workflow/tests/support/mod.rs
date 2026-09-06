@@ -1,12 +1,12 @@
-//! A driven entity and a scripted effect, shared by the conformance suites.
+//! A workflow entity and a scripted effect, shared by the conformance suites.
 //!
-//! `Fanout` is the drive spec's Appendix A worked example, made real: an entity
+//! `Fanout` is the workflow spec's Appendix A worked example, made real: an entity
 //! that fans a job out to N workers, collects their results, and finishes. It
 //! journals its own records, holds no memo, and — this is the point — writes no
 //! dispatch loop, no in-flight table, no "did I already launch this", no
 //! recovery pass, no straggler check, and no `can_hibernate` body of its own.
 //!
-//! `Script` is the drive spec §10 simulation seam: the one row the drive adds to
+//! `Script` is the workflow spec §10 simulation seam: the one row the workflow adds to
 //! the table the entity already virtualizes. A scripted effect is a deterministic
 //! function of the key and the seed, with seeded latency, failure, and
 //! never-returning ("crash mid-effect") outcomes.
@@ -32,27 +32,27 @@ use actor_simulation::Checker;
 use actor_simulation::Recorder;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
-use drive::Drive;
-use drive::DriveEvent;
-use drive::Driven;
-use drive::EffectError;
-use drive::Nudge;
-use drive::OnDangling;
-use drive::Pending;
-use drive::Perform;
-use drive::Settled;
-use drive::testing::DriveCycle;
+use entity::Entities;
 use entity::Entity;
+use entity::EntityConfig;
 use entity::EntityCtx;
 use entity::EntityEvent;
+use entity::EntityExt;
 use entity::EntityHandler;
 use entity::EntityRegistry;
-use entity::Entities;
-use entity::EntityConfig;
-use entity::EntityExt;
 use entity::EntitySystem;
 use serde::Deserialize;
 use serde::Serialize;
+use workflow::EffectError;
+use workflow::Engine;
+use workflow::OnOrphan;
+use workflow::Pending;
+use workflow::Perform;
+use workflow::Settled;
+use workflow::Tick;
+use workflow::Workflow;
+use workflow::WorkflowEvent;
+use workflow::testing::WorkflowCycle;
 
 pub type TaskId = u32;
 
@@ -69,7 +69,7 @@ pub enum Outcome {
     /// Never return: the effect is in flight forever, which is how a suite holds
     /// a claim open across a hibernation attempt or a step-down.
     Hang,
-    /// Panic inside `perform`, which the drive catches at the task boundary and
+    /// Panic inside `perform`, which the workflow catches at the task boundary and
     /// settles as `Failed` (§4.3).
     Panic,
 }
@@ -89,7 +89,7 @@ impl Default for Outcome {
 pub struct Script {
     per_key: BTreeMap<TaskId, Outcome>,
     /// Every key performed, in order. Length per key is the number of times the
-    /// effect really ran, which is what D3 is about.
+    /// effect really ran, which is what W3 is about.
     performed: Vec<TaskId>,
     /// Every key whose effect *returned*, in order. The pair with `performed` is
     /// what separates "launched twice" from "two outcomes in flight", which is
@@ -124,7 +124,7 @@ impl Script {
     }
 
     /// How many keys ran more than once — across activations, since one
-    /// activation launches a key at most once per claim (D3).
+    /// activation launches a key at most once per claim (W3).
     pub fn relaunched(&self) -> usize {
         let mut runs: BTreeMap<TaskId, usize> = BTreeMap::new();
         for key in &self.performed {
@@ -155,7 +155,7 @@ pub struct Task {
     /// The recovery policy this task's effect declares (§4.4). Journaled with
     /// the task, because `pending` must re-derive it identically on every
     /// activation and it is part of what the consumer decided.
-    pub on_dangling: OnDangling,
+    pub on_orphan: OnOrphan,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,14 +196,14 @@ pub enum FanoutRecord {
 
 pub struct Fanout<S: EntitySystem> {
     pub seam: Seam,
-    pub drive: Drive<Fanout<S>>,
+    pub engine: Engine<Fanout<S>>,
 }
 
 impl<S: EntitySystem> Fanout<S> {
     pub fn new(seam: Seam) -> Self {
         Fanout {
             seam,
-            drive: Drive::default(),
+            engine: Engine::default(),
         }
     }
 }
@@ -239,7 +239,7 @@ impl<S: EntitySystem> Entity for Fanout<S> {
     }
 
     fn register(r: &mut EntityRegistry<Self>) {
-        // The network allowlist (entity §5.5). The drive's `Nudge` and
+        // The network allowlist (entity §5.5). The workflow's `Tick` and
         // `Settled` are local self-tells and are deliberately absent: nothing
         // outside the entity injects an effect outcome.
         r.accept::<Request>();
@@ -248,23 +248,23 @@ impl<S: EntitySystem> Entity for Fanout<S> {
     }
 
     async fn on_activate(&mut self, ctx: &EntityCtx<Self>) -> Result<(), actor_core::BoxError> {
-        // Forget every claim and count, arm the first drive, and nudge so a
+        // Forget every claim and count, arm the first tick, and tick so a
         // resumed entity with work outstanding drives it without a caller (§4.4).
-        self.drive.on_activate(ctx);
+        self.engine.on_activate(ctx);
         Ok(())
     }
 
     fn can_hibernate(&self, _state: &FanoutState) -> bool {
         // Derived, not hand-written (§6). A consumer with work that no effect
         // represents would conjoin its own clause here; this one has none.
-        self.drive.quiescent()
+        self.engine.quiescent()
     }
 }
 
-// --- The drive: what the committed state calls for, how to do one, what an
+// --- The workflow: what the committed state calls for, how to do one, what an
 // --- outcome means.
 
-impl<S: EntitySystem> Driven for Fanout<S> {
+impl<S: EntitySystem> Workflow for Fanout<S> {
     type Key = TaskId;
     type Effect = Task;
     type Outcome = Answer;
@@ -279,7 +279,7 @@ impl<S: EntitySystem> Driven for Fanout<S> {
             .map(|t| Pending {
                 key: t.id,
                 effect: t.clone(),
-                on_dangling: t.on_dangling,
+                on_orphan: t.on_orphan,
             })
             .collect()
     }
@@ -330,7 +330,7 @@ impl<S: EntitySystem> Driven for Fanout<S> {
     ) -> Vec<FanoutRecord> {
         if state.silent.contains(key) {
             // "This outcome changed nothing" (§4.2): no record, so nothing
-            // commits and only the backoff timer brings the next drive.
+            // commits and only the backoff timer brings the next tick.
             return Vec::new();
         }
         let answer = match outcome {
@@ -346,17 +346,17 @@ impl<S: EntitySystem> Driven for Fanout<S> {
     }
 }
 
-// --- The two handlers the drive requires. `Driven`'s supertraits make these a
+// --- The two handlers the workflow requires. `Workflow`'s supertraits make these a
 // --- compile-time obligation rather than a documented one.
 
-impl<S: EntitySystem> EntityHandler<Nudge> for Fanout<S> {
+impl<S: EntitySystem> EntityHandler<Tick> for Fanout<S> {
     async fn handle(
         &self,
         state: &FanoutState,
-        _msg: Nudge,
+        _msg: Tick,
         ctx: &EntityCtx<Self>,
     ) -> (Vec<FanoutRecord>, ()) {
-        (self.drive.advance(self, state, ctx), ())
+        (self.engine.advance(self, state, ctx), ())
     }
 }
 
@@ -367,15 +367,15 @@ impl<S: EntitySystem> EntityHandler<Settled<Fanout<S>>> for Fanout<S> {
         msg: Settled<Fanout<S>>,
         ctx: &EntityCtx<Self>,
     ) -> (Vec<FanoutRecord>, ()) {
-        // The drive re-enters the cycle itself after a committed settle, or arms
+        // The workflow re-enters the cycle itself after a committed settle, or arms
         // the backoff timer after one that committed nothing (§3.2 items 1, 3).
-        (self.drive.settled(self, state, msg, ctx).await, ())
+        (self.engine.settled(self, state, msg, ctx).await, ())
     }
 }
 
 // --- The consumer's own commands.
 
-/// Request `tasks`, journaling the intent. The effects launch from the drive
+/// Request `tasks`, journaling the intent. The effects launch from the workflow
 /// that follows the commit, never from this handler — intent before effect (§5)
 /// is the cycle's shape, not a check.
 #[derive(Clone, Serialize, Deserialize)]
@@ -397,7 +397,7 @@ impl<S: EntitySystem> EntityHandler<Request> for Fanout<S> {
         msg: Request,
         ctx: &EntityCtx<Self>,
     ) -> (Vec<FanoutRecord>, ()) {
-        self.drive.nudge(self, state, ctx);
+        self.engine.tick(self, state, ctx);
         (
             vec![FanoutRecord::Requested {
                 tasks: msg.tasks,
@@ -425,7 +425,7 @@ impl<S: EntitySystem> EntityHandler<Retract> for Fanout<S> {
         msg: Retract,
         ctx: &EntityCtx<Self>,
     ) -> (Vec<FanoutRecord>, ()) {
-        self.drive.nudge(self, state, ctx);
+        self.engine.tick(self, state, ctx);
         (vec![FanoutRecord::Retracted { task: msg.0 }], ())
     }
 }
@@ -459,14 +459,14 @@ impl<S: EntitySystem> EntityHandler<Status> for Fanout<S> {
 pub fn task(id: TaskId) -> Task {
     Task {
         id,
-        on_dangling: OnDangling::Reexecute,
+        on_orphan: OnOrphan::Reexecute,
     }
 }
 
 pub fn interrupting_task(id: TaskId) -> Task {
     Task {
         id,
-        on_dangling: OnDangling::Interrupt,
+        on_orphan: OnOrphan::Interrupt,
     }
 }
 
@@ -502,7 +502,12 @@ pub fn fanouts(
 /// Ask `key`'s entity on the single-node tier and return its reply. `block_on`
 /// returns at the reply; whatever the command set in motion runs on the next
 /// `run_for`.
-pub fn ask<M>(sim: &Simulation, fanouts: &Entities<Fanout<SimSystem>>, key: &str, msg: M) -> M::Reply
+pub fn ask<M>(
+    sim: &Simulation,
+    fanouts: &Entities<Fanout<SimSystem>>,
+    key: &str,
+    msg: M,
+) -> M::Reply
 where
     M: Message + Clone + Send + 'static,
     M::Reply: Send + 'static,
@@ -527,19 +532,19 @@ pub fn read_script<T>(seam: &Seam, f: impl FnOnce(&Script) -> T) -> T {
 // --- Reading the stream. Each takes a snapshot of the recorder, so a test
 // --- clones the log once per group of assertions rather than once per question.
 
-/// The drive's own events, in stream order.
-pub fn drive_events(events: &[Event]) -> Vec<DriveEvent> {
+/// The workflow's own events, in stream order.
+pub fn drive_events(events: &[Event]) -> Vec<WorkflowEvent> {
     events
         .iter()
-        .filter_map(Event::as_app::<DriveEvent>)
+        .filter_map(Event::as_app::<WorkflowEvent>)
         .cloned()
         .collect()
 }
 
-fn keys(events: &[Event], select: impl Fn(&DriveEvent) -> Option<&str>) -> Vec<String> {
+fn keys(events: &[Event], select: impl Fn(&WorkflowEvent) -> Option<&str>) -> Vec<String> {
     events
         .iter()
-        .filter_map(Event::as_app::<DriveEvent>)
+        .filter_map(Event::as_app::<WorkflowEvent>)
         .filter_map(|e| select(e).map(str::to_string))
         .collect()
 }
@@ -547,7 +552,7 @@ fn keys(events: &[Event], select: impl Fn(&DriveEvent) -> Option<&str>) -> Vec<S
 /// Every key launched, on any node.
 pub fn launched(events: &[Event]) -> Vec<String> {
     keys(events, |e| match e {
-        DriveEvent::Launched { key, .. } => Some(key),
+        WorkflowEvent::Launched { key, .. } => Some(key),
         _ => None,
     })
 }
@@ -555,15 +560,15 @@ pub fn launched(events: &[Event]) -> Vec<String> {
 /// Every key launched by `node`'s activation.
 pub fn launched_on(events: &[Event], node: NodeId) -> Vec<String> {
     keys(events, |e| match e {
-        DriveEvent::Launched { key, node: n, .. } if *n == node => Some(key),
+        WorkflowEvent::Launched { key, node: n, .. } if *n == node => Some(key),
         _ => None,
     })
 }
 
-/// Every dangling key `node`'s activation resolved `Interrupted` (§4.4).
+/// Every orphaned key `node`'s activation resolved `Interrupted` (§4.4).
 pub fn interrupted_on(events: &[Event], node: NodeId) -> Vec<String> {
     keys(events, |e| match e {
-        DriveEvent::Interrupted { key, node: n, .. } if *n == node => Some(key),
+        WorkflowEvent::Interrupted { key, node: n, .. } if *n == node => Some(key),
         _ => None,
     })
 }
@@ -571,7 +576,7 @@ pub fn interrupted_on(events: &[Event], node: NodeId) -> Vec<String> {
 /// Every key whose outcome was discarded as a straggler (§4.5).
 pub fn discarded(events: &[Event]) -> Vec<String> {
     keys(events, |e| match e {
-        DriveEvent::Discarded { key, .. } => Some(key),
+        WorkflowEvent::Discarded { key, .. } => Some(key),
         _ => None,
     })
 }
@@ -581,7 +586,7 @@ pub fn settled(events: &[Event]) -> Vec<(String, bool)> {
     drive_events(events)
         .into_iter()
         .filter_map(|e| match e {
-            DriveEvent::Settled { key, committed, .. } => Some((key, committed)),
+            WorkflowEvent::Settled { key, committed, .. } => Some((key, committed)),
             _ => None,
         })
         .collect()
@@ -591,8 +596,8 @@ pub fn settled(events: &[Event]) -> Vec<(String, bool)> {
 pub fn announced_quiescence(events: &[Event]) -> bool {
     events
         .iter()
-        .filter_map(Event::as_app::<DriveEvent>)
-        .any(|e| matches!(e, DriveEvent::Quiescent { .. }))
+        .filter_map(Event::as_app::<WorkflowEvent>)
+        .any(|e| matches!(e, WorkflowEvent::Quiescent { .. }))
 }
 
 /// Whether any entity hibernated (entity §13).
@@ -605,18 +610,18 @@ pub fn hibernated(events: &[Event]) -> bool {
     })
 }
 
-/// Hold the drive's grammar over a recorded stream at the end of a clustered
+/// Hold the workflow's grammar over a recorded stream at the end of a clustered
 /// scenario, through the same `Checker` the swarm runner uses — the failover
 /// checker, because every such scenario deposes a leader with claims open, which
 /// is legal (§6).
 pub fn assert_grammar(events: Vec<Event>) {
-    let checker = Checker::new(vec![Box::new(DriveCycle::under_failover())]);
+    let checker = Checker::new(vec![Box::new(WorkflowCycle::under_failover())]);
     for event in events {
         checker.emit(event);
     }
     let violations = checker.finish();
     assert!(
         violations.is_empty(),
-        "drive-cycle violated: {violations:?}"
+        "workflow-cycle violated: {violations:?}"
     );
 }

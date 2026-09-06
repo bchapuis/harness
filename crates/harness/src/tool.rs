@@ -31,10 +31,10 @@ use crate::sandbox::Tier;
 /// kind's registry iff the kind permits sub-agents.
 pub const DELEGATE: &str = "delegate";
 
-/// Resume's policy for a dangling call: intent journaled, outcome not
+/// Resume's policy for an orphaned call: intent journaled, outcome not
 /// (harness spec §5.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OnDangling {
+pub enum OnOrphan {
     /// Blind re-execution is safe: the call is idempotent, or dedups
     /// (`delegate`, §8.1).
     Reexecute,
@@ -55,8 +55,8 @@ pub struct ToolDecl {
     /// `Sandbox::call`, and covered by the kind digest (§7.1).
     #[serde(default)]
     pub tier: Tier,
-    /// The declared recovery policy for a dangling call (§5.5).
-    pub on_dangling: OnDangling,
+    /// The declared recovery policy for an orphaned call (§5.5).
+    pub on_orphan: OnOrphan,
     /// Per-call execution bound, timed by `Clock` (§5.3 item 3); `None` uses
     /// the harness default.
     pub timeout: Option<Duration>,
@@ -154,7 +154,7 @@ pub enum ToolError {
     /// The per-tool timeout elapsed (§5.3 item 3). The call's effects may
     /// still land; only its outcome is bounded.
     Timeout,
-    /// A dangling call declared [`OnDangling::Interrupt`] was resolved on
+    /// An orphaned call declared [`OnOrphan::Interrupt`] was resolved on
     /// resume (§5.5); the model decides whether to retry the side effect.
     Interrupted,
     /// The model named a tool outside the registry — synthesized, nothing was

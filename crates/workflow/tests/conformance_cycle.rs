@@ -1,7 +1,7 @@
-//! The drive cycle end to end (drive spec §3, §5, §6): D1, D2, D4, D7.
+//! The workflow cycle end to end (workflow spec §3, §5, §6): W1, W2, W4, W7.
 //!
 //! Every test here runs the **real entity host, gateway, and journal** under one
-//! seed (§10): the drive cycle is the only new code on the simulated path. What
+//! seed (§10): the workflow cycle is the only new code on the simulated path. What
 //! the assertions are about is not the plumbing but the four claims the cycle
 //! makes — that the desired set is a pure function of committed state, that
 //! everything in it eventually launches, that nothing launches before the record
@@ -14,9 +14,8 @@ use std::time::Duration;
 
 use actor_simulation::Recorder;
 use actor_simulation::Simulation;
-use drive::DriveEvent;
-use entity::EntityEvent;
 use entity::EntityConfig;
+use entity::EntityEvent;
 use support::Answer;
 use support::Outcome;
 use support::Request;
@@ -26,20 +25,21 @@ use support::announced_quiescence;
 use support::ask;
 use support::drive_events;
 use support::fanouts;
-use support::launched;
 use support::hibernated;
+use support::launched;
 use support::read_script;
 use support::request;
 use support::seam;
 use support::sim_system;
 use support::task;
 use support::with_script;
+use workflow::WorkflowEvent;
 
 /// Long enough for the request to commit, every effect to run, and the backoff
 /// schedule to reach its cap (500 ms + 1 s + 2 s + 4 s = 7.5 s of delays) with
 /// room for the idle window on top.
 ///
-/// Bounded rather than `sim.run()`, because a driven entity is a *perpetual*
+/// Bounded rather than `sim.run()`, because a workflow entity is a *perpetual*
 /// workload in the sense actor-simulation means: an activation that vetoes
 /// hibernation reschedules its idle check forever, and a backed-off key re-arms
 /// its timer, so the scheduler never empties and `run()` would not return.
@@ -72,13 +72,13 @@ fn the_desired_set_dispatches_every_task_and_the_entity_finishes() {
     assert_eq!(
         read_script(&script, |s| s.total_runs()),
         5,
-        "five tasks, five performs: no effect ran twice (D3)"
+        "five tasks, five performs: no effect ran twice (W3)"
     );
 }
 
 #[test]
 fn nothing_launches_before_the_record_that_wanted_it_commits() {
-    // D4, intent before effect. Not enforced by a check: a drive reads
+    // W4, intent before effect. Not enforced by a check: a tick reads
     // *committed* state, so an effect whose intent has not committed is not in
     // `pending(state)` and there is nothing to launch (§5). The stream shows it:
     // every `Launched` must follow the `Committed` that admitted its key.
@@ -99,7 +99,7 @@ fn nothing_launches_before_the_record_that_wanted_it_commits() {
             committed += 1;
             first_commit_at.get_or_insert(i);
         }
-        if let Some(DriveEvent::Launched { .. }) = e.as_app::<DriveEvent>() {
+        if let Some(WorkflowEvent::Launched { .. }) = e.as_app::<WorkflowEvent>() {
             first_launch_at.get_or_insert(i);
         }
     }
@@ -111,13 +111,13 @@ fn nothing_launches_before_the_record_that_wanted_it_commits() {
     assert!(
         commit < launch,
         "a launch at {launch} preceded the first commit at {commit}: \
-         an effect ran before the record that wanted it was durable (D4)"
+         an effect ran before the record that wanted it was durable (W4)"
     );
 }
 
 #[test]
 fn the_desired_set_is_a_pure_function_of_committed_state() {
-    // D1. Two activations that fold the same journal prefix compute the same
+    // W1. Two activations that fold the same journal prefix compute the same
     // desired set: the entity hibernates, re-activates, and its outstanding work
     // is the same set — re-derived, never carried across in memory.
     let sim = Simulation::new(13);
@@ -138,19 +138,19 @@ fn the_desired_set_is_a_pure_function_of_committed_state() {
     let (_, _, before) = ask(&sim, &fanouts, "job/2", Status);
     assert_eq!(before, vec![3, 4], "the hung tasks are what is outstanding");
 
-    // The hung effects hold claims, so the entity must not have hibernated (D7);
+    // The hung effects hold claims, so the entity must not have hibernated (W7);
     // force a fresh fold by reading through a new handle after a long idle.
     sim.run_for(SETTLE);
     let (_, _, after) = ask(&sim, &fanouts, "job/2", Status);
     assert_eq!(
         before, after,
-        "the same journal prefix computes the same desired set (D1)"
+        "the same journal prefix computes the same desired set (W1)"
     );
 }
 
 #[test]
 fn a_hibernated_entity_re_derives_and_re_drives_its_outstanding_work() {
-    // D1 and D7 together, across a real eviction: the entity finishes its work,
+    // W1 and W7 together, across a real eviction: the entity finishes its work,
     // hibernates because the desired set is empty, and a later request drives a
     // fresh activation with no memory of the first.
     let sim = Simulation::new(17);
@@ -164,7 +164,7 @@ fn a_hibernated_entity_re_derives_and_re_drives_its_outstanding_work() {
 
     assert!(
         hibernated(&recorder.events()),
-        "an idle entity whose desired set emptied must hibernate (D7)"
+        "an idle entity whose desired set emptied must hibernate (W7)"
     );
     assert!(
         announced_quiescence(&recorder.events()),
@@ -182,14 +182,14 @@ fn a_hibernated_entity_re_derives_and_re_drives_its_outstanding_work() {
     assert_eq!(
         read_script(&script, |s| s.runs(0)),
         1,
-        "the re-activation did not re-run work the journal already answered (D1)"
+        "the re-activation did not re-run work the journal already answered (W1)"
     );
 }
 
 #[test]
 fn an_activation_with_an_effect_in_flight_does_not_hibernate() {
-    // D7's veto half. A hung effect holds its claim, so `can_hibernate` — which
-    // is the drive's derived quiescence and nothing hand-written — must refuse
+    // W7's veto half. A hung effect holds its claim, so `can_hibernate` — which
+    // is the workflow's derived quiescence and nothing hand-written — must refuse
     // eviction for as long as the outcome could still arrive.
     let sim = Simulation::new(19);
     let recorder = Recorder::new();
@@ -203,12 +203,12 @@ fn an_activation_with_an_effect_in_flight_does_not_hibernate() {
 
     assert!(
         !hibernated(&recorder.events()),
-        "an activation holding an in-flight effect must not hibernate (D7)"
+        "an activation holding an in-flight effect must not hibernate (W7)"
     );
     assert_eq!(
         launched(&recorder.events()),
         vec!["0"],
-        "and must not relaunch it (D3)"
+        "and must not relaunch it (W3)"
     );
 }
 
@@ -259,7 +259,7 @@ fn a_failing_effect_is_a_value_and_the_run_still_finishes() {
 fn a_settle_that_commits_nothing_is_relaunched_by_the_backoff_timer() {
     // The entry point §3.2 item 3 exists for exactly this. A settle that returns
     // no records commits nothing, so nothing re-enters the cycle through entry
-    // point 1; without a timer-driven drive the key would be stranded and D2
+    // point 1; without a timer-driven drive the key would be stranded and W2
     // would not hold.
     let sim = Simulation::new(29);
     let recorder = Recorder::new();
@@ -282,19 +282,19 @@ fn a_settle_that_commits_nothing_is_relaunched_by_the_backoff_timer() {
     assert!(
         runs > 1,
         "a key whose settle committed nothing must be relaunched by the backoff \
-         timer; it ran {runs} time(s), so nothing re-entered the cycle (D2, §3.2 item 3)"
+         timer; it ran {runs} time(s), so nothing re-entered the cycle (W2, §3.2 item 3)"
     );
 
     // And every one of those launches is a distinct claim, each closed by its
-    // own settle: the stream must show them strictly alternating (D3).
+    // own settle: the stream must show them strictly alternating (W3).
     let mut open = false;
     for e in drive_events(&recorder.events()) {
         match e {
-            DriveEvent::Launched { .. } => {
-                assert!(!open, "a relaunch while the previous claim was open (D3)");
+            WorkflowEvent::Launched { .. } => {
+                assert!(!open, "a relaunch while the previous claim was open (W3)");
                 open = true;
             }
-            DriveEvent::Settled { committed, .. } => {
+            WorkflowEvent::Settled { committed, .. } => {
                 assert!(open, "a settle with no claim behind it");
                 assert!(!committed, "this key's settle never commits");
                 open = false;

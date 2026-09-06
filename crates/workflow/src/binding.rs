@@ -1,12 +1,12 @@
-//! An activation-scoped external resource (drive spec §6).
+//! An activation-scoped external resource (workflow spec §6).
 //!
 //! A consumer frequently holds something for the life of an activation — the
 //! harness's sandbox (harness §5.3), the machine's runtime binding (machine
 //! §2.1) — with an open-once lifecycle, a release on every deactivation, and a
 //! hibernation veto while the open is in flight.
 //!
-//! The drive supplies this as a **component rather than a trait method**,
-//! because the resource's type and its open path are the consumer's: the drive
+//! The workflow supplies this as a **component rather than a trait method**,
+//! because the resource's type and its open path are the consumer's: the workflow
 //! owns only the state machine and the rule that a failed open settles the
 //! effects that needed it rather than retrying invisibly. A consumer that does
 //! not need one declares nothing.
@@ -22,7 +22,7 @@ pub enum BindingState<T> {
     Opening,
     /// Held and usable.
     Open(T),
-    /// The last open failed. The next drive settles the effects that needed the
+    /// The last open failed. The next tick settles the effects that needed the
     /// resource with this reason rather than retrying invisibly, so the failure
     /// reaches the consumer's fold instead of spinning under it.
     Failed(String),
@@ -83,13 +83,13 @@ impl<T> Binding<T> {
         self.state = BindingState::Open(resource);
     }
 
-    /// The open failed. The reason is surfaced, not swallowed: the next drive
+    /// The open failed. The reason is surfaced, not swallowed: the next tick
     /// settles the effects that needed the resource with it.
     pub fn failed(&mut self, why: impl Into<String>) {
         self.state = BindingState::Failed(why.into());
     }
 
-    /// The failure this binding is holding, if any — read by the drive when it
+    /// The failure this binding is holding, if any — read by the workflow when it
     /// settles the effects that needed the resource.
     pub fn failure(&self) -> Option<&str> {
         match &self.state {

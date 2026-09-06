@@ -2,7 +2,7 @@
 //! hibernates between turns and rehydrates from the journal on the next contact
 //! (entity §9, §10); the resumed journal matches an uninterrupted control run,
 //! record for record — the differential test behind H1. (Mid-run crash/migration
-//! resume of a *dangling* call, §5.5, is a `Quorum`-tier leadership-move phenomenon,
+//! resume of a *orphaned* call, §5.5, is a `Quorum`-tier leadership-move phenomenon,
 //! exercised under the clustered simulation; the `Local` tier is faultless by design.)
 
 mod support;

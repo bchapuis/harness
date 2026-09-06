@@ -53,7 +53,7 @@ use std::sync::Mutex;
 
 use cap_std::fs::Dir;
 use harness::ComputeLimits;
-use harness::OnDangling;
+use harness::OnOrphan;
 use harness::Tier;
 use harness::ToolDecl;
 use harness::ToolError;
@@ -77,7 +77,7 @@ use crate::provider::TierStats;
 pub(crate) const QJS_MODULE: &str = "qjs.wasm";
 
 /// The JavaScript tool declaration (the QuickJS runner's model-facing face):
-/// scripts are arbitrary code, so a dangling call interrupts rather than
+/// scripts are arbitrary code, so an orphaned call interrupts rather than
 /// blindly re-executing (harness spec §5.5).
 pub fn run_js_tool() -> ToolDecl {
     ToolDecl {
@@ -110,7 +110,7 @@ pub fn run_js_tool() -> ToolDecl {
             }
         }),
         tier: Tier::Compute,
-        on_dangling: OnDangling::Interrupt,
+        on_orphan: OnOrphan::Interrupt,
         timeout: None,
     }
 }

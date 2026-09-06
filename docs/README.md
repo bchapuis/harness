@@ -13,8 +13,8 @@ suite, so there is no Rust copy to hold it against (its V3 is asserted at compil
 time and its V4/V5 by the golden corpus instead, compatibility §4). They layer
 bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`,
 `entity §N`, and so on) — citations the build resolves rather than trusts (the
-`spec` crate, under Testing). The one exception is the drive, which cites the
-harness above it: the harness is the layer the drive generalizes and does not yet
+`spec` crate, under Testing). The one exception is the workflow, which cites the
+harness above it: the harness is the layer the workflow generalizes and does not yet
 sit on it, so it is at once the motivation and the measure, and the dependency
 will run the other way once it does.
 
@@ -25,7 +25,7 @@ will run the other way once it does.
 | storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | L1–L5 |
 | | [entity-spec](entity-spec.md) | durable objects ("entities"): the journal, the single-writer fence, shards, snapshots, the facet model | E1–E21, F1–F4 |
 | | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside entity (standalone; no in-tree consumer yet) | B1–B7 |
-| consumers | [drive-spec](drive-spec.md) | the autonomous entity: the desired set of effects, intent before effect, dangling resolution, quiescence | D1–D7 |
+| consumers | [workflow-spec](workflow-spec.md) | the autonomous entity: the desired set of effects, intent before effect, orphaned resolution, quiescence | W1–W7 |
 | | [agentic-harness-spec](agentic-harness-spec.md) | the agent: an entity plus a run loop, a model seam, and a sandbox | H1–H8 |
 | | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the harness's sandbox seam | S1–S5 |
 | | [machine-spec](machine-spec.md) | the agent's sibling: a durable lightweight VM as an entity, reached over SSH | M1–M6 |

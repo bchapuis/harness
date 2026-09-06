@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use cap_std::fs::Dir;
-use harness::OnDangling;
+use harness::OnOrphan;
 use harness::Tier;
 use harness::ToolDecl;
 use harness::ToolError;
@@ -28,7 +28,7 @@ const READ_CAP: usize = 256 * 1024;
 
 /// The workspace tier's tool declarations, ready for [`harness::Kind::tool`]:
 /// every declaration is `Tier::Workspace`, and every tool is idempotent, so
-/// blind re-execution after a crash is safe (`OnDangling::Reexecute`,
+/// blind re-execution after a crash is safe (`OnOrphan::Reexecute`,
 /// harness spec §5.5).
 pub fn workspace_tools() -> Vec<ToolDecl> {
     let decl = |name: &str, description: &str, schema: Value| ToolDecl {
@@ -36,7 +36,7 @@ pub fn workspace_tools() -> Vec<ToolDecl> {
         description: description.to_string(),
         input_schema: schema,
         tier: Tier::Workspace,
-        on_dangling: OnDangling::Reexecute,
+        on_orphan: OnOrphan::Reexecute,
         timeout: None,
     };
     vec![

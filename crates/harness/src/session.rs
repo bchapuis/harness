@@ -406,7 +406,7 @@ pub(crate) struct QueuedTurn {
 
 /// A journaled call intent whose outcome is not yet journaled. While the run
 /// is live these are the in-flight calls of the current step; at activation
-/// they are the **dangling calls** resume must resolve (§5.5).
+/// they are the **orphaned calls** resume must resolve (§5.5).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PendingCall {
     pub name: String,

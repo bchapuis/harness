@@ -24,7 +24,7 @@ use crate::sandbox::SandboxProfile;
 use crate::sandbox::Tier;
 use crate::session::KindId;
 use crate::session::content_digest;
-use crate::tool::OnDangling;
+use crate::tool::OnOrphan;
 use crate::tool::ToolDecl;
 use crate::tool::ToolRegistry;
 
@@ -71,7 +71,7 @@ impl Kind {
     }
 
     /// Declare a sandboxed tool (§5.2) at its required tier (§5.6), with the
-    /// safe dangling policy (`Interrupt`, §5.5): on a crash-resume boundary the
+    /// safe orphaned policy (`Interrupt`, §5.5): on a crash-resume boundary the
     /// model, not the harness, decides whether to retry the side effect. An
     /// idempotent tool opts into blind re-execution via [`Kind::tool`]. The tier
     /// is explicit, never defaulted: it is digest-covered deployment
@@ -88,7 +88,7 @@ impl Kind {
             description: description.into(),
             input_schema: input_schema.clone(),
             tier,
-            on_dangling: OnDangling::Interrupt,
+            on_orphan: OnOrphan::Interrupt,
             timeout: None,
         });
         self
@@ -157,7 +157,7 @@ impl Kind {
             frame(&decl.description);
             frame(&decl.input_schema.to_string());
             frame(&format!("{:?}", decl.tier));
-            frame(&format!("{:?}", decl.on_dangling));
+            frame(&format!("{:?}", decl.on_orphan));
             // Frame durations by their nanosecond count, not `Debug`: `Duration`'s
             // Debug format is a std detail, but this digest is journaled and compared
             // cluster-wide (§7.1), so it must not shift under a std upgrade.

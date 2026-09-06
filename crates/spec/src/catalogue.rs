@@ -147,10 +147,10 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         pointers: Pointers::Functions,
     },
     CatalogueSite {
-        id: "drive",
-        doc: "drive",
+        id: "workflow",
+        doc: "workflow",
         section: "9",
-        label: "D",
+        label: "W",
         shape: Shape::Table,
         pointers: Pointers::Files,
     },

@@ -155,7 +155,7 @@ fn the_typed_tools_round_trip() {
     let listed = call(&sandbox, "list_dir", json!({})).expect("list");
     assert_eq!(listed, json!({"entries": []}));
     // A missing path is success: the tool is idempotent, as its
-    // `OnDangling::Reexecute` declaration asserts.
+    // `OnOrphan::Reexecute` declaration asserts.
     call(
         &sandbox,
         "remove",

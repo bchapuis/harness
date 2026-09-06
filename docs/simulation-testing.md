@@ -435,7 +435,7 @@ reach it.
 An at-quiescence assertion is a claim about a run that has stopped happening,
 and a run only stops happening if you let it. Two things get this wrong.
 
-**Wait for the calls to close.** A call issued at the end of the drive carries
+**Wait for the calls to close.** A call issued at the end of the workflow carries
 its own deadline, and a subsystem may fan out more calls behind it — entity's
 quorum append returns at quorum latency and drains the slower replicas
 afterwards, each with a seconds-long timeout. `drive_cluster` therefore flushes

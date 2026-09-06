@@ -1,11 +1,11 @@
-//! Dangling effects and resume (drive spec §4.4, §3.3, §6): D6, and D3's
+//! Orphaned effects and resume (workflow spec §4.4, §3.3, §6): W6, and W3's
 //! cross-activation half.
 //!
 //! An effect's intent is journaled before it launches and its outcome after
-//! (§5). A crash or a migration between the two leaves it **dangling**: the
+//! (§5). A crash or a migration between the two leaves it **orphaned**: the
 //! journal says it was wanted, and nothing says whether it ran. The desired set
-//! computed by the next activation's first drive is the dangling set, and the
-//! drive resolves each member by its declared policy — `Reexecute` launches it
+//! computed by the next activation's first tick is the orphan set, and the
+//! workflow resolves each member by its declared policy — `Reexecute` launches it
 //! again, `Interrupt` settles it `Interrupted` without a launch — dropping none
 //! and resolving none twice.
 //!
@@ -14,8 +14,8 @@
 //! (`SimNetwork::restart`), which takes the effect's task with it, and a migration
 //! is a voluntary leadership hand-off under which the deposed activation's effect
 //! keeps running and its outcome reaches the successor as §4.5's straggler.
-//! Hibernation is deliberately absent: D7 forbids hibernating with a claim open,
-//! so it cannot leave an effect dangling, and `conformance_cycle.rs` pins that.
+//! Hibernation is deliberately absent: W7 forbids hibernating with a claim open,
+//! so it cannot leave an effect orphaned, and `conformance_cycle.rs` pins that.
 
 mod support;
 
@@ -47,20 +47,20 @@ const CALL: Duration = Duration::from_secs(8);
 /// a scenario once relaunched.
 const SLOW: Duration = Duration::from_secs(20);
 
-/// The drive's grammar, held over the whole recorded stream at the end of a
+/// The workflow's grammar, held over the whole recorded stream at the end of a
 /// scenario — the clustered checker, because every scenario here deposes a
 /// leader with claims open, which is legal (§6).
 
 #[test]
 fn a_crash_between_launch_and_settle_relaunches_a_reexecute_effect_once() {
-    // D6 for `Reexecute`, and D3's admission: across activations an effect MAY run
+    // W6 for `Reexecute`, and W3's admission: across activations an effect MAY run
     // twice, and the settled record — not the launch — is the durable fact.
     //
     // Seed 109 restarts node 3. Under seed 101 the leader is node 2, and after
     // its restart the two survivors disagree about who leads the shard for the
     // rest of the scenario — node 1's map names node 2, node 2 redirects to node
     // 1 — so no call routes. That is a question for the cluster's leader
-    // re-discovery after a restart, not for the drive; it wants a reproduction in
+    // re-discovery after a restart, not for the workflow; it wants a reproduction in
     // entity's clustered suite, where no test yet restarts a shard leader and
     // then routes to it.
     let sim = Simulation::new(109);
@@ -96,29 +96,29 @@ fn a_crash_between_launch_and_settle_relaunches_a_reexecute_effect_once() {
     sim.run_for(Duration::from_secs(3)); // the shard re-elects
 
     // Resumption is caller-driven: the next contact activates the entity on the
-    // new leader, whose first drive is the dangling set.
+    // new leader, whose first tick is the orphan set.
     let (done, _, outstanding) = cluster.ask(&sim, key, Status);
     assert!(
         done.contains_key(&1),
-        "the settled task is in the fold (D1)"
+        "the settled task is in the fold (W1)"
     );
     assert_eq!(
         outstanding,
         vec![0],
-        "the dangling set is exactly what was in flight"
+        "the orphan set is exactly what was in flight"
     );
     sim.run_for(Duration::from_millis(500));
     assert_eq!(
         read_script(&script, |s| (s.runs(0), s.runs(1))),
         (2, 1),
-        "the dangling Reexecute effect ran again; the settled one did not (D6, D3)"
+        "the orphaned Reexecute effect ran again; the settled one did not (W6, W3)"
     );
     let successor = cluster.leader_of(key);
     assert_ne!(successor, dead);
     assert_eq!(
         launched_on(&recorder.events(), successor),
         vec!["0".to_string()],
-        "the successor's first drive launched exactly the dangling member"
+        "the successor's first tick launched exactly the orphaned member"
     );
 
     // Nothing is dropped: the relaunch settles and the work finishes.
@@ -132,7 +132,7 @@ fn a_crash_between_launch_and_settle_relaunches_a_reexecute_effect_once() {
 
 #[test]
 fn a_crash_between_launch_and_settle_settles_an_interrupt_effect_without_relaunch() {
-    // D6 for `Interrupt`: nothing is launched, the synthesized outcome rides the
+    // W6 for `Interrupt`: nothing is launched, the synthesized outcome rides the
     // mailbox and commits as an ordinary command, and the consumer decides.
     let sim = Simulation::new(103);
     let recorder = Recorder::new();
@@ -169,7 +169,7 @@ fn a_crash_between_launch_and_settle_settles_an_interrupt_effect_without_relaunc
     assert_eq!(
         interrupted_on(&recorder.events(), successor),
         vec!["0".to_string()],
-        "resolved exactly once, on the successor (D6)"
+        "resolved exactly once, on the successor (W6)"
     );
     assert!(
         launched_on(&recorder.events(), successor).is_empty(),
@@ -186,7 +186,7 @@ fn a_migration_under_an_effect_in_flight_resolves_it_at_the_new_leader() {
     // running on the old node and its outcome, routed to whoever now leads,
     // settles the key first — an effect of a previous activation reaching a
     // leader that has since re-derived the world — and the relaunch's own outcome
-    // then finds its key absent and is discarded (D5).
+    // then finds its key absent and is discarded (W5).
     let sim = Simulation::new(107);
     let recorder = Recorder::new();
     let script = seam();
@@ -216,12 +216,12 @@ fn a_migration_under_an_effect_in_flight_resolves_it_at_the_new_leader() {
     assert_ne!(successor, old_leader, "leadership moved");
 
     let (_, _, outstanding) = cluster.ask(&sim, key, Status);
-    assert_eq!(outstanding, vec![0], "re-derived on the successor (D1)");
+    assert_eq!(outstanding, vec![0], "re-derived on the successor (W1)");
     sim.run_for(Duration::from_millis(500));
     assert_eq!(
         read_script(&script, |s| s.runs(0)),
         2,
-        "the successor relaunched the abandoned key (§6, D3 across activations)"
+        "the successor relaunched the abandoned key (§6, W3 across activations)"
     );
 
     // Both launches complete, and exactly one outcome becomes the record. The
@@ -242,7 +242,7 @@ fn a_migration_under_an_effect_in_flight_resolves_it_at_the_new_leader() {
         .iter()
         .filter(|(_, r)| matches!(r, FanoutRecord::Answered { task: 0, .. }))
         .count();
-    assert_eq!(answered, 1, "two outcomes, one record (D5, §4.5)");
+    assert_eq!(answered, 1, "two outcomes, one record (W5, §4.5)");
     assert!(
         discarded(&recorder.events()).len() <= 1,
         "at most the successor's own relaunch was discarded as a straggler"

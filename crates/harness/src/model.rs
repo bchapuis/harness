@@ -82,7 +82,7 @@ pub struct ModelRequest {
 
 /// One tool call the model requested (harness spec §5.2). The `id` is the
 /// model API's tool-use id, or one the harness assigned on receipt; it is the
-/// key dangling-call resolution (§5.5) and child derivation (§8.1) match by.
+/// key orphaned-call resolution (§5.5) and child derivation (§8.1) match by.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: CallId,

@@ -131,12 +131,12 @@ pub const DOCUMENTS: &[DocSpec] = &[
         aliases: &["blob", "blob-store"],
         unprefixed: Unprefixed::Own,
     },
-    // The autonomous entity (the `drive` crate). Cites the harness above it: the
+    // The autonomous entity (the `workflow` crate). Cites the harness above it: the
     // harness is the layer it generalizes and does not yet sit on it.
     DocSpec {
-        id: "drive",
-        path: "docs/drive-spec.md",
-        aliases: &["drive"],
+        id: "workflow",
+        path: "docs/workflow-spec.md",
+        aliases: &["workflow"],
         unprefixed: Unprefixed::Own,
     },
     DocSpec {

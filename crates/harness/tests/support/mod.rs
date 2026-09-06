@@ -520,7 +520,7 @@ pub use harness::testing::harness_invariants;
 /// acquired or executed tier lies within the kind's cap.
 ///
 /// Synthesized outcomes — an unknown name, malformed arguments (§5.4), or a
-/// dangling call resolved as `Interrupted` on resume (§5.5) — carry no effect and
+/// orphaned call resolved as `Interrupted` on resume (§5.5) — carry no effect and
 /// are exempt.
 pub fn audit_tier_acquisition(records: &[harness::Record], kind: &harness::Kind) {
     let cap = kind.tier_cap();

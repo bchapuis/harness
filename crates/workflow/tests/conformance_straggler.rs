@@ -1,9 +1,9 @@
-//! Straggler rejection end to end (drive spec §4.5, §3.1): D5.
+//! Straggler rejection end to end (workflow spec §4.5, §3.1): W5.
 //!
 //! An outcome MAY arrive after its key has left the desired set — a timeout
 //! racing the real result, a retracted effect completing anyway, an effect of a
 //! previous activation reaching a leader that has since re-derived the world.
-//! The drive discards such a `Settled` without calling `settle`, and writes no
+//! The workflow discards such a `Settled` without calling `settle`, and writes no
 //! record for it.
 //!
 //! The suite has two halves, and the second is the more interesting. The first
@@ -11,7 +11,7 @@
 //! The second shows what the filter rests on. Its only test is **presence in the
 //! set**, not identity, so §3.1's rule that a key is unique over the entity's
 //! whole journal is not decoration: with a key reused across occurrences the
-//! drive settles the *first* occurrence's outcome as the second's, and no
+//! workflow settles the *first* occurrence's outcome as the second's, and no
 //! machinery here can tell. That test exists so the obligation is pinned by a
 //! run rather than by a sentence.
 
@@ -49,7 +49,7 @@ fn config() -> EntityConfig {
 
 #[test]
 fn an_outcome_whose_key_left_the_desired_set_is_discarded_and_writes_nothing() {
-    // D5. The effect is slow enough that the retract lands first: the key leaves
+    // W5. The effect is slow enough that the retract lands first: the key leaves
     // the desired set with its effect still running, and the outcome that
     // arrives afterwards has nothing to be settled against.
     let sim = Simulation::new(41);
@@ -86,19 +86,19 @@ fn an_outcome_whose_key_left_the_desired_set_is_discarded_and_writes_nothing() {
     assert_eq!(
         discarded(&recorder.events()),
         vec!["0".to_string()],
-        "the outcome of a key absent from the desired set is discarded (D5)"
+        "the outcome of a key absent from the desired set is discarded (W5)"
     );
     assert!(
         !settled(&recorder.events())
             .iter()
             .any(|(key, _)| key == "0"),
-        "a discarded outcome never reaches `settle` (D5)"
+        "a discarded outcome never reaches `settle` (W5)"
     );
 
     let (done, _, outstanding) = ask(&sim, &fanouts, "job/0", Status);
     assert!(
         !done.contains_key(&0),
-        "no record is written for a discarded outcome (D5)"
+        "no record is written for a discarded outcome (W5)"
     );
     assert!(
         done.contains_key(&1),
@@ -141,11 +141,11 @@ fn a_retracted_key_that_never_returns_leaves_the_activation_free_to_rest() {
 fn a_reused_key_lets_the_first_occurrences_outcome_be_settled_as_the_seconds() {
     // §3.1 and §4.5 together, stated as the failure they prevent. The filter
     // decides *presence*, not identity. Reuse a key across occurrences and the
-    // drive cannot tell them apart: the straggler of the first finds its key
+    // workflow cannot tell them apart: the straggler of the first finds its key
     // present again and is settled as the second's outcome, while the second's
     // own result arrives to an absent key and is dropped.
     //
-    // This is not a bug in the drive. It is why "a key MUST be unique over the
+    // This is not a bug in the workflow. It is why "a key MUST be unique over the
     // entity's whole journal" is the consumer's obligation and normative — the
     // harness's synthesized call ids and step keys repeat across runs, and have
     // to be qualified by the turn before they can sit here.
@@ -169,11 +169,11 @@ fn a_reused_key_lets_the_first_occurrences_outcome_be_settled_as_the_seconds() {
     ask(&sim, &fanouts, "job/2", request(vec![task(0)]));
     sim.run_for(Duration::from_millis(200));
 
-    // Retract, let the drive release the claim, and re-request the *same* key: a
-    // second visit to one call site, which §3.1 forbids and nothing in the drive
+    // Retract, let the workflow release the claim, and re-request the *same* key: a
+    // second visit to one call site, which §3.1 forbids and nothing in the workflow
     // can detect.
     ask(&sim, &fanouts, "job/2", Retract(0));
-    // The retract's drive must run before the re-request, or the second
+    // The retract's tick must run before the re-request, or the second
     // occurrence inherits the first's still-open claim instead of launching.
     sim.run_for(Duration::from_millis(10));
     with_script(&script, |s| {

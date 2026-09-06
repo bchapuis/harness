@@ -1,20 +1,20 @@
-//! The drive under the cluster fault swarm (drive spec §9, §10).
+//! The workflow under the cluster fault swarm (workflow spec §9, §10).
 //!
-//! The scenario suites assert D1–D7 through scripted runs. This file applies them
-//! the V&V way: a [`ClusterWorkload`] of driven entities swept across seeds while
+//! The scenario suites assert W1–W7 through scripted runs. This file applies them
+//! the V&V way: a [`ClusterWorkload`] of workflow entities swept across seeds while
 //! the nemesis injects partitions, crashes, restarts, pauses, heals, loss,
-//! duplication, and delay, with the drive's continuous checker (`drive-cycle`)
+//! duplication, and delay, with the workflow's continuous checker (`workflow-cycle`)
 //! and entity's commit monotonicity watching the whole stream.
 //!
 //! **What is scripted.** Every effect is a deterministic function of its key
 //! (§10): a seeded latency, a failure on every fourth key, and a recovery policy
 //! that alternates `Reexecute` and `Interrupt` — so the sweep drives both
-//! dangling resolutions whenever the nemesis kills a leader mid-effect.
+//! orphaned resolutions whenever the nemesis kills a leader mid-effect.
 //!
 //! **What re-activates an entity.** Resumption is caller-driven: an entity whose
 //! leader died stays cold until a message reaches it, so the workload polls every
 //! entity's `Status` on a fixed cadence. Each poll is at once the touch that
-//! re-activates a cold entity (whose first drive is the dangling set, §4.4), the
+//! re-activates a cold entity (whose first tick is the orphan set, §4.4), the
 //! wake for an entity that hibernated at quiescence under the short idle window,
 //! and an observation. A poll the faults refuse is simply not an observation.
 //!
@@ -47,7 +47,6 @@ use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_cluster_swarm_coverage;
 use actor_simulation::sweep_seeds;
-use drive::testing::drive_invariants_under_failover;
 use entity::EntityConfig;
 use entity::testing::CommitMonotonic;
 use support::Outcome;
@@ -61,14 +60,15 @@ use support::request;
 use support::seam;
 use support::task;
 use support::with_script;
+use workflow::testing::workflow_invariants_under_failover;
 
 const SHARDS: usize = 2;
-/// How many driven entities one run requests work of.
+/// How many workflow entities one run requests work of.
 const ENTITIES: usize = 4;
 /// How many effects each entity fans out.
 const TASKS: TaskId = 6;
 /// The hibernation window: short, so an entity that reaches quiescence hibernates
-/// and the next poll re-activates it, exercising D7's round trip under faults.
+/// and the next poll re-activates it, exercising W7's round trip under faults.
 const IDLE_AFTER: Duration = Duration::from_millis(150);
 /// Per-call deadline. Short so a refused call fails fast and the run keeps moving.
 const CALL_DEADLINE: Duration = Duration::from_secs(3);
@@ -95,7 +95,7 @@ struct Reached {
     /// Entities observed `finished` by a poll, across the sweep.
     finished: Arc<AtomicUsize>,
     /// Keys whose effect ran on more than one activation, across the sweep — the
-    /// dangling chain (§4.4) the nemesis has to produce for D6 to be tested at all.
+    /// orphaned chain (§4.4) the nemesis has to produce for W6 to be tested at all.
     relaunched: Arc<AtomicUsize>,
 }
 
@@ -116,7 +116,7 @@ fn config() -> EntityConfig {
 
 impl ClusterWorkload for DriveSwarm {
     fn name(&self) -> &'static str {
-        "drive-swarm"
+        "workflow-swarm"
     }
 
     fn node_count(&self) -> usize {
@@ -220,9 +220,9 @@ impl ClusterWorkload for DriveSwarm {
     }
 
     fn invariants(&self) -> Vec<Box<dyn Invariant>> {
-        let mut invariants = drive_invariants_under_failover();
+        let mut invariants = workflow_invariants_under_failover();
         invariants.push(Box::new(CommitMonotonic::new(
-            "drive-commit-monotonic",
+            "workflow-commit-monotonic",
             "entity",
         )));
         invariants
@@ -239,8 +239,8 @@ fn workload() -> DriveSwarm {
 
 #[test]
 fn the_drive_cycle_holds_under_the_cluster_swarm() {
-    // The safety claims, and only them: D3, D5, and D7's checkable half through
-    // `drive-cycle`, and the entity's commit monotonicity beneath it.
+    // The safety claims, and only them: W3, W5, and W7's checkable half through
+    // `workflow-cycle`, and the entity's commit monotonicity beneath it.
     let workload = workload();
     if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{failure}");
@@ -253,8 +253,8 @@ fn the_drive_cycle_holds_under_the_cluster_swarm() {
 }
 
 /// What the sweep actually reached, on a range that never narrows: some entity
-/// finished its work under faults (D2), some effect was relaunched by a
-/// successor activation (the dangling chain of D6, which only a leader death
+/// finished its work under faults (W2), some effect was relaunched by a
+/// successor activation (the orphaned chain of W6, which only a leader death
 /// mid-effect produces), and every transport fault type fired.
 #[test]
 fn the_drive_swarm_reaches_a_finish_a_relaunch_and_every_fault() {
@@ -274,7 +274,7 @@ fn the_drive_swarm_reaches_a_finish_a_relaunch_and_every_fault() {
     assert!(
         relaunched > 0,
         "no effect was relaunched by a successor activation on any seed, so the \
-         dangling path (§4.4) was never exercised under faults"
+         orphaned path (§4.4) was never exercised under faults"
     );
     assert!(
         stats.dropped > 0 && stats.duplicated > 0 && stats.delayed > 0 && stats.blocked > 0,
@@ -283,7 +283,7 @@ fn the_drive_swarm_reaches_a_finish_a_relaunch_and_every_fault() {
 }
 
 /// The determinism contract over this workload (actor §18.1): the same seed
-/// twice, byte-identical event streams — drive events included (§9).
+/// twice, byte-identical event streams — workflow events included (§9).
 #[test]
 fn the_drive_swarm_replays_identically() {
     if let Err(divergence) = replay_cluster_swarm(&workload(), sweep_seeds(0..8)) {

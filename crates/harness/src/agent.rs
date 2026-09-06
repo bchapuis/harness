@@ -86,7 +86,7 @@ use crate::session::outcome_label;
 use crate::session::turn_digest;
 use crate::tool::DELEGATE;
 use crate::tool::DelegateInput;
-use crate::tool::OnDangling;
+use crate::tool::OnOrphan;
 use crate::tool::ToolError;
 
 /// How many *consecutive* times an unreachable peer is retried before a
@@ -350,8 +350,8 @@ struct RunScope {
     /// Calls whose outcome is journaled or synthesized: dedups a straggler
     /// (a timeout racing the real outcome, §9.2 item 4).
     resolved: BTreeSet<CallId>,
-    /// Whether dangling calls have been resolved for the resumed run (§5.5).
-    dangling_resolved: bool,
+    /// Whether orphaned calls have been resolved for the resumed run (§5.5).
+    orphans_resolved: bool,
 }
 
 impl RunScope {
@@ -359,7 +359,7 @@ impl RunScope {
     fn reset(&mut self) {
         self.launched.reset();
         self.resolved.clear();
-        self.dangling_resolved = false;
+        self.orphans_resolved = false;
     }
 }
 
@@ -868,8 +868,8 @@ impl<S: HarnessSystem> Agent<S> {
         };
         let turn = live.turn.clone();
 
-        // (c) Resume: resolve dangling calls once (§5.5).
-        if let Some(events) = self.resolve_dangling(ctx, kind, &mut act, live, &turn) {
+        // (c) Resume: resolve orphaned calls once (§5.5).
+        if let Some(events) = self.resolve_orphans(ctx, kind, &mut act, live, &turn) {
             return events;
         }
 
@@ -879,7 +879,7 @@ impl<S: HarnessSystem> Agent<S> {
         }
 
         // (e) Execute every journaled intent not yet launched or resolved
-        //     (§3.1 step 4; on resume this is dangling re-execution, §5.5).
+        //     (§3.1 step 4; on resume this is orphaned re-execution, §5.5).
         self.dispatch_pending(state, ctx, kind, &mut act, live, &turn)
     }
 
@@ -912,9 +912,9 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// (c) Resume: on the first advance of a live run the pending set is exactly
-    /// the dangling calls; resolve each whose policy is `Interrupt` (§5.5).
+    /// the orphaned calls; resolve each whose policy is `Interrupt` (§5.5).
     /// `Some(events)` ⇒ commit them and stop; `None` ⇒ fall through.
-    fn resolve_dangling(
+    fn resolve_orphans(
         &self,
         ctx: &EntityCtx<Agent<S>>,
         kind: &Kind,
@@ -922,13 +922,13 @@ impl<S: HarnessSystem> Agent<S> {
         live: &LiveRun,
         turn: &TurnId,
     ) -> Option<Vec<Record>> {
-        if act.run.dangling_resolved {
+        if act.run.orphans_resolved {
             return None;
         }
-        act.run.dangling_resolved = true;
+        act.run.orphans_resolved = true;
         let mut events = Vec::new();
         for (call, pending) in &live.pending {
-            if self.dangling_policy(pending, kind) == OnDangling::Interrupt {
+            if self.orphan_policy(pending, kind) == OnOrphan::Interrupt {
                 events.push(self.fail_call(act, ctx, turn, call, ToolError::Interrupted));
             }
         }
@@ -984,7 +984,7 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// (e) Execute every journaled intent not yet launched or resolved (§3.1
-    /// step 4; on resume, dangling re-execution, §5.5). Synthesized failures and
+    /// step 4; on resume, orphaned re-execution, §5.5). Synthesized failures and
     /// acquisition/delegation intents are journaled first and re-advanced; once
     /// none remain, every ready call launches. Returns the records to journal.
     fn dispatch_pending(
@@ -1104,7 +1104,7 @@ impl<S: HarnessSystem> Agent<S> {
             .map(|c| c.root.clone())
             .unwrap_or_else(|| Self::session(ctx));
         // A ready call that cannot launch after claiming resolves as a failure
-        // instead of dangling (see `launch_call`); those records commit like
+        // instead of orphaned (see `launch_call`); those records commit like
         // any synthesized outcome.
         let mut failed = Vec::new();
         for (call, pending) in ready {
@@ -1113,17 +1113,17 @@ impl<S: HarnessSystem> Agent<S> {
         failed
     }
 
-    /// The recovery policy for a dangling call (§5.5): `delegate` re-executes by
+    /// The recovery policy for an orphaned call (§5.5): `delegate` re-executes by
     /// construction (its re-submission dedups, §8.1); a sandboxed tool follows
     /// its declaration, defaulting to `Interrupt` if the declaration vanished.
-    fn dangling_policy(&self, pending: &PendingCall, kind: &Kind) -> OnDangling {
+    fn orphan_policy(&self, pending: &PendingCall, kind: &Kind) -> OnOrphan {
         if pending.name == DELEGATE {
-            OnDangling::Reexecute
+            OnOrphan::Reexecute
         } else {
             kind.tools
                 .get(&pending.name)
-                .map(|d| d.on_dangling)
-                .unwrap_or(OnDangling::Interrupt)
+                .map(|d| d.on_orphan)
+                .unwrap_or(OnOrphan::Interrupt)
         }
     }
 
@@ -1668,7 +1668,7 @@ impl<S: HarnessSystem> Entity for Agent<S> {
         act.env.tiers_held = BTreeSet::from([Tier::Workspace]);
         act.env.reconciled = false;
         act.env.lost_this_activation = false;
-        act.run.dangling_resolved = false;
+        act.run.orphans_resolved = false;
         drop(act);
         // Off the activation latency path: sweep checkpoint chunks a prior
         // activation orphaned (the blob handle unions the facet roots, so the

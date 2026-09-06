@@ -1,8 +1,8 @@
-//! Differential resume (drive spec §3.1, §4.4): D1 and D6, decided by comparing
+//! Differential resume (workflow spec §3.1, §4.4): W1 and W6, decided by comparing
 //! independent computations of the same desired set.
 //!
-//! The drive's central claim is that resume is not a special case: the desired
-//! set an activation's first drive computes after a crash is the very function
+//! The workflow's central claim is that resume is not a special case: the desired
+//! set an activation's first tick computes after a crash is the very function
 //! its predecessor was computing on the live path, over the same committed
 //! prefix. That is decidable by difference. Three views of one entity are held
 //! equal here — the live activation before the crash, the successor after it, and
@@ -17,9 +17,8 @@ use std::time::Duration;
 use actor_simulation::Recorder;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
-use drive::Driven;
-use entity::Entity;
 use entity::Entities;
+use entity::Entity;
 use entity::Seq;
 use support::Fanout;
 use support::FanoutState;
@@ -33,6 +32,7 @@ use support::request;
 use support::seam;
 use support::task;
 use support::with_script;
+use workflow::Workflow;
 
 const CALL: Duration = Duration::from_secs(8);
 const SLOW: Duration = Duration::from_secs(30);
@@ -65,8 +65,8 @@ fn folded_outstanding(
 
 #[test]
 fn the_successors_first_drive_is_the_desired_set_its_predecessor_was_computing() {
-    // D1 and D6 as one differential: live-before == offline fold == live-after ==
-    // what the successor's first drive launched.
+    // W1 and W6 as one differential: live-before == offline fold == live-after ==
+    // what the successor's first tick launched.
     let sim = Simulation::new(211);
     let recorder = Recorder::new();
     let script = seam();
@@ -96,7 +96,7 @@ fn the_successors_first_drive_is_the_desired_set_its_predecessor_was_computing()
     let folded_before = folded_outstanding(&sim, cluster.anchor(), key);
     assert_eq!(
         folded_before, live_before,
-        "the live activation's desired set is a function of the journal alone (D1)"
+        "the live activation's desired set is a function of the journal alone (W1)"
     );
 
     cluster.crash_leader_of(key, &script);
@@ -105,7 +105,7 @@ fn the_successors_first_drive_is_the_desired_set_its_predecessor_was_computing()
     let (done, _, live_after) = cluster.ask(&sim, key, Status);
     assert_eq!(
         live_after, live_before,
-        "two activations folding the same prefix compute the same desired set (D1)"
+        "two activations folding the same prefix compute the same desired set (W1)"
     );
     assert_eq!(done.len(), 3, "and the same answers");
     let folded_after = folded_outstanding(&sim, cluster.anchor(), key);
@@ -118,13 +118,13 @@ fn the_successors_first_drive_is_the_desired_set_its_predecessor_was_computing()
     assert_eq!(
         relaunched,
         vec!["3", "4", "5"],
-        "the first drive's desired set is the dangling set, launched in full and \
-         nothing else (D6)"
+        "the first tick's desired set is the orphan set, launched in full and \
+         nothing else (W6)"
     );
     assert_eq!(
         read_script(&script, |s| (0..3).map(|k| s.runs(k)).collect::<Vec<_>>()),
         vec![1, 1, 1],
-        "settled work is not re-derived as work (D1)"
+        "settled work is not re-derived as work (W1)"
     );
 }
 
@@ -161,7 +161,7 @@ fn a_second_crash_re_derives_what_the_first_resume_had_already_settled() {
     assert!(done.contains_key(&0));
     assert_eq!(outstanding, vec![1]);
 
-    // Second crash: only task 1 is dangling now, because task 0's record is in
+    // Second crash: only task 1 is orphaned now, because task 0's record is in
     // the journal the third activation folds.
     cluster.crash_leader_of(key, &script);
     sim.run_for(Duration::from_secs(3));
@@ -173,6 +173,6 @@ fn a_second_crash_re_derives_what_the_first_resume_had_already_settled() {
     assert_eq!(
         read_script(&script, |s| (s.runs(0), s.runs(1))),
         (2, 3),
-        "task 0 ran on the first two activations only; task 1 on all three (D1, D6)"
+        "task 0 ran on the first two activations only; task 1 on all three (W1, W6)"
     );
 }

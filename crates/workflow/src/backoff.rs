@@ -1,17 +1,17 @@
-//! Per-key backoff (drive spec §3.4), and the cap that puts a key **at rest**
+//! Per-key backoff (workflow spec §3.4), and the cap that puts a key **at rest**
 //! (§6).
 //!
 //! An effect that settles unproductively — `Err`, or a settle that returns no
 //! records — and stays in the desired set would otherwise be relaunched by the
-//! very next drive, at the rate the drive cycles. So the drive holds a per-key
+//! very next tick, at the rate the engine cycles. So the engine holds a per-key
 //! count of consecutive unproductive settles and delays that key's next launch
 //! by a capped exponential backoff, timed by `Clock` and jittered from
 //! `Entropy`, so the delay is virtual and seed-reproducible under simulation.
 //!
 //! The count is activation state, like the claim: a re-activation starts at
-//! zero. The drive imposes **no attempt bound** — bounding the work is the
+//! zero. The engine imposes **no attempt bound** — bounding the work is the
 //! consumer's, because only the consumer knows what the work is worth. What the
-//! drive bounds is the *delay*, and reaching the cap has a second meaning: a key
+//! workflow bounds is the *delay*, and reaching the cap has a second meaning: a key
 //! backed off to the cap is at rest, no longer holding the activation resident.
 //! Without that, "no attempt bound" and the quiescence rule would together pin
 //! an activation forever on one permanently failing effect.
@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use actor_core::Instant;
 
-/// The schedule a drive backs off on (spec §3.4).
+/// The schedule a tick backs off on (spec §3.4).
 ///
 /// The defaults are chosen so a transient failure retries promptly and a
 /// permanent one stops holding the activation within one idle window (entity
@@ -31,7 +31,7 @@ use actor_core::Instant;
 pub struct BackoffPolicy {
     /// The first delay, doubled per consecutive unproductive settle.
     pub base: Duration,
-    /// The ceiling. A key delayed by the cap is **at rest** (§6): the drive
+    /// The ceiling. A key delayed by the cap is **at rest** (§6): the engine
     /// stops treating it as work that must keep this activation resident.
     pub cap: Duration,
 }
@@ -47,9 +47,9 @@ impl Default for BackoffPolicy {
 
 impl BackoffPolicy {
     /// The delay after `failures` consecutive unproductive settles, before
-    /// jitter: the core's capped exponential schedule (core §11.2), so the drive
+    /// jitter: the core's capped exponential schedule (core §11.2), so the engine
     /// and the supervisor back off the same way. Saturates at
-    /// [`cap`](BackoffPolicy::cap) rather than overflowing: the drive has no
+    /// [`cap`](BackoffPolicy::cap) rather than overflowing: the engine has no
     /// attempt bound, so `failures` is unbounded by design.
     fn delay(&self, failures: u32) -> Duration {
         if failures == 0 {
@@ -75,7 +75,7 @@ struct Entry {
 /// The per-key backoff table: ephemeral activation state, rebuilt from nothing
 /// on every activation (spec §3.4).
 ///
-/// `K` is the consumer's [`Driven::Key`](crate::Driven::Key).
+/// `K` is the consumer's [`Workflow::Key`](crate::Workflow::Key).
 pub struct Backoff<K: Ord> {
     policy: BackoffPolicy,
     entries: BTreeMap<K, Entry>,
@@ -95,7 +95,7 @@ impl<K: Ord> Backoff<K> {
         }
     }
 
-    /// Record one unproductive settle of `key` and return how long the drive
+    /// Record one unproductive settle of `key` and return how long the engine
     /// must wait before relaunching it — or `None` if the key has reached the
     /// cap and is now **at rest**.
     ///
@@ -104,7 +104,7 @@ impl<K: Ord> Backoff<K> {
     /// drawn from `[0, delay/2)` and *added*, so a burst of failures across many
     /// keys spreads rather than resonating.
     ///
-    /// **At the cap the drive arms no timer**, and that is the whole of the
+    /// **At the cap the engine arms no timer**, and that is the whole of the
     /// at-rest rule (§6). Arming one anyway would be worse than useless: the
     /// activation would become quiescent, hibernate, and then be woken by its own
     /// stale timer a moment later, so the entity would churn instead of resting
@@ -148,7 +148,7 @@ impl<K: Ord> Backoff<K> {
 
     /// Clear every at-rest key, so a caller-driven drive retries it.
     ///
-    /// This is the difference between the drive's own timer re-entering the cycle
+    /// This is the difference between the engine's own timer re-entering the cycle
     /// and *someone asking*. The harness draws the same line today: it abandons a
     /// propagation launch after bounded retries, and "the next message that drives
     /// the session — on this same activation or a later one — re-launches the
@@ -164,7 +164,7 @@ impl<K: Ord> Backoff<K> {
         self.entries.remove(key);
     }
 
-    /// Drop every key absent from the desired set — the drive's step 2 (§3.2),
+    /// Drop every key absent from the desired set — the engine's step 2 (§3.2),
     /// which bounds this table by the work outstanding rather than by the work
     /// ever done.
     pub fn retain_keys(&mut self, live: impl Fn(&K) -> bool) {
@@ -183,7 +183,7 @@ impl<K: Ord> Backoff<K> {
         }
     }
 
-    /// Whether `key` is **at rest** (§6): backed off to the cap, so the drive
+    /// Whether `key` is **at rest** (§6): backed off to the cap, so the engine
     /// has stopped arming a timer for it and it no longer holds the activation
     /// resident.
     ///
@@ -274,7 +274,10 @@ mod tests {
         assert!(b.at_rest(&1));
         b.wake();
         assert!(!b.at_rest(&1));
-        assert!(b.ready(&1, t0()), "someone asked, so the drive tries again");
+        assert!(
+            b.ready(&1, t0()),
+            "someone asked, so the engine tries again"
+        );
         assert_eq!(b.failures(&1), 0, "the retry budget starts over");
     }
 

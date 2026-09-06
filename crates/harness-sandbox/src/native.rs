@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use harness::OnDangling;
+use harness::OnOrphan;
 use harness::Tier;
 use harness::ToolDecl;
 use harness::ToolError;
@@ -64,9 +64,9 @@ const PIDS_LIMIT: u32 = 512;
 const CONTAINER_PREFIX: &str = "harness-sb";
 
 /// The native tier's tool declaration, ready for [`harness::Kind::tool`]:
-/// arbitrary commands are not idempotent, so a dangling call interrupts and
+/// arbitrary commands are not idempotent, so an orphaned call interrupts and
 /// the model decides whether to retry the side effect
-/// (`OnDangling::Interrupt`, harness spec §5.5).
+/// (`OnOrphan::Interrupt`, harness spec §5.5).
 pub fn shell_tool() -> ToolDecl {
     ToolDecl {
         name: "shell".to_string(),
@@ -83,7 +83,7 @@ pub fn shell_tool() -> ToolDecl {
             "required": ["command"]
         }),
         tier: Tier::Native,
-        on_dangling: OnDangling::Interrupt,
+        on_orphan: OnOrphan::Interrupt,
         timeout: None,
     }
 }

@@ -66,7 +66,7 @@ pub const SCANNED: &[&str] = &[
     "wal",
     "entity",
     "blob",
-    "drive",
+    "workflow",
     "harness",
     "sandbox",
     "machine",

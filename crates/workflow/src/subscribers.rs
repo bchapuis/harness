@@ -1,16 +1,16 @@
-//! Awaiting a durable outcome (drive spec §7.1).
+//! Awaiting a durable outcome (workflow spec §7.1).
 //!
 //! Autonomous work outlives the request that started it. A caller that asked for
 //! it therefore cannot receive it as a reply: a reply handle is resolved exactly
 //! once within the delivery of one message (core §4.5) and the work spans many.
-//! Every consumer of the drive meets this the same way — an ack, a registered
+//! Every consumer of the workflow meets this the same way — an ack, a registered
 //! reply-to, and a later notification (harness §7.3) — so the pattern is
 //! supplied here as a **component**, with a normative discipline and no trait
 //! method.
 //!
 //! It is a component and not a trait method because the *key* and the *payload*
 //! are the consumer's, and because a consumer with no external callers — one
-//! driven entirely by alarms — should carry none of it.
+//! workflow entirely by alarms — should carry none of it.
 //!
 //! The discipline (§7.1), which this type enforces where it can and documents
 //! where it cannot:

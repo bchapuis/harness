@@ -126,7 +126,7 @@ Reporting a loss requires detecting it: a provider that can observe that the env
 | `Sandbox::call(tier, …)`, lazy open, per-activation binding (H8) | harness §5.3 |
 | Tier cap and the profile's egress allowlist | harness §5.3 item 4 |
 | Acquisition discipline, `TierAcquired`, write-ahead position | harness §5.6, §6.4 |
-| `WorkspaceReset`, dangling calls, the divergence window | harness §5.5 |
+| `WorkspaceReset`, orphaned calls, the divergence window | harness §5.5 |
 | Digest coverage (cluster-wide agreement on tiers and cap) | harness §7.1 |
 | Tier grants and withholdings, the cap's set shape | §2 |
 | Per-tier provider obligations and the threat model | §3 |

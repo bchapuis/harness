@@ -80,7 +80,7 @@ pub use session::Turn;
 pub use session::TurnId;
 pub use tool::DELEGATE;
 pub use tool::DelegateInput;
-pub use tool::OnDangling;
+pub use tool::OnOrphan;
 pub use tool::ToolDecl;
 pub use tool::ToolError;
 pub use tool::ToolRegistry;

@@ -19,7 +19,7 @@ use harness::CallId;
 use harness::Kind;
 use harness::KindId;
 use harness::Kinds;
-use harness::OnDangling;
+use harness::OnOrphan;
 use harness::Record;
 use harness::RecordBody;
 use harness::SandboxProfile;
@@ -245,7 +245,7 @@ fn a_slow_tool_is_bounded_by_its_declared_timeout() {
                 description: "slow tool".to_string(),
                 input_schema: json!({ "type": "object" }),
                 tier: Tier::Workspace,
-                on_dangling: OnDangling::Interrupt,
+                on_orphan: OnOrphan::Interrupt,
                 timeout: Some(Duration::from_secs(1)),
             })
             .budget(Budget::new(10_000, 10))
