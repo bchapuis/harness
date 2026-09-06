@@ -16,8 +16,8 @@
 //! - [`timer`] — the alarm-bearing `Timer`, generic over the hosting system, so
 //!   `alarm_index.rs` drives it on the `Local` tier and `alarm_cluster.rs` and
 //!   `alarm_loss.rs` drive the same grain on the clustered one.
-//! - [`pipeline`] — the workflow-facet `Pipeline`, likewise generic over the
-//!   system, shared by `workflow.rs` (scenarios) and `workflow_swarm.rs` (the
+//! - [`pipeline`] — the steps-facet `Pipeline`, likewise generic over the
+//!   system, shared by `steps.rs` (scenarios) and `steps_swarm.rs` (the
 //!   sweep). Its shape varies by `PipelineConfig` rather than by a second grain,
 //!   so the sweep asserts against the object the scenarios specify.
 //!

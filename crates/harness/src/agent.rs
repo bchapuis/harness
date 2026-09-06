@@ -23,7 +23,7 @@
 //! Everything else — the journal, the single-writer fence, placement,
 //! activation, hibernation, lossless failover — is the grain's (§2.1). Ephemeral
 //! activation state (the sandbox handle, held tiers, the subscriber set, the
-//! launch-once guard — granary's workflow [`LaunchGuard`], granary §7.17) lives
+//! launch-once guard — granary's steps facet's [`LaunchGuard`], granary §7.17) lives
 //! behind a [`Mutex`] on the grain behavior, rebuilt per activation and never
 //! journaled (§5.5, §5.6, §7.4).
 
@@ -341,7 +341,7 @@ enum StepKey {
 /// [`reset`](RunScope::reset), since runs are serialized one at a time.
 #[derive(Default)]
 struct RunScope {
-    /// Effects this activation has launched: granary's workflow launch-once
+    /// Effects this activation has launched: granary's steps-facet launch-once
     /// guard (granary §7.17), fold-external, so `Advance` does not relaunch an
     /// effect whose outcome has not yet committed. A resume starts a fresh guard
     /// and re-launches whatever the journal still shows unresolved (§5.5): the

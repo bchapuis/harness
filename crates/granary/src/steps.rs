@@ -1,10 +1,10 @@
-//! The workflow facet (spec §7.17): durable **step memoization** for the
+//! The steps facet (spec §7.17): durable **step memoization** for the
 //! Cloudflare-Workflows-style `step`/`sleep`/`retry` pattern, layered on the event
 //! fold, the [`Alarm`](crate::Alarm) facet, and a grain's self-driving loop.
 //!
 //! **The durable core is memoization.** A workflow is a re-entrant decision the
 //! grain re-drives after every commit (harness §3). Each **step** runs an external
-//! effect *once*; its result is journaled under the workflow tag and folded into a
+//! effect *once*; its result is journaled under the steps tag and folded into a
 //! `step id → bytes` map. On replay — a later drive, a re-activation, a failover —
 //! a completed step resolves from the map instead of re-running, so effects are
 //! at-most-once across crashes. `sleep` is a step whose effect is a durable
@@ -43,13 +43,13 @@ use crate::grain::GrainCtx;
 /// a completed step resolves to the same memoized result every time.
 pub type StepId = u32;
 
-/// The workflow facet marker (spec §7.17): declare `type Facets = (Workflow, Alarm, …)`
-/// and reach the memoized steps through [`GrainCtx::workflow`](crate::GrainCtx::workflow).
-pub struct Workflow;
+/// The steps facet marker (spec §7.17): declare `type Facets = (Steps, Alarm, …)`
+/// and reach the memoized steps through [`GrainCtx::steps`](crate::GrainCtx::steps).
+pub struct Steps;
 
-impl Sealed for Workflow {}
+impl Sealed for Steps {}
 
-/// One workflow record (spec §7.17): a step's memoized result under the workflow tag.
+/// One workflow record (spec §7.17): a step's memoized result under the steps tag.
 /// `bytes` is the caller's `postcard`-encoded step output — opaque to the facet.
 #[derive(Serialize, Deserialize)]
 struct StepRecord {
@@ -59,7 +59,7 @@ struct StepRecord {
 
 /// The committed form: each completed step's memoized result.
 #[derive(Clone, Default, Serialize, Deserialize)]
-pub struct WorkflowForm {
+pub struct StepsForm {
     steps: BTreeMap<StepId, Vec<u8>>,
 }
 
@@ -67,17 +67,17 @@ pub struct WorkflowForm {
 /// draining to one record each. A step recorded twice in one command keeps the last
 /// (a re-drive within a command should not happen, but last-write matches the fold).
 #[derive(Default)]
-pub struct WorkflowStage {
+pub struct StepsStage {
     staged: BTreeMap<StepId, Vec<u8>>,
 }
 
-impl Facet for Workflow {
+impl Facet for Steps {
     const TAG: u8 = 5;
 
-    type Form = WorkflowForm;
-    type Stage = WorkflowStage;
+    type Form = StepsForm;
+    type Stage = StepsStage;
 
-    fn drain(stage: WorkflowStage) -> Vec<Vec<u8>> {
+    fn drain(stage: StepsStage) -> Vec<Vec<u8>> {
         stage
             .staged
             .into_iter()
@@ -85,33 +85,33 @@ impl Facet for Workflow {
             .collect()
     }
 
-    fn fold(form: &mut WorkflowForm, payload: &[u8]) -> Result<(), FacetError> {
-        let rec: StepRecord = decode_payload("workflow record", payload)?;
+    fn fold(form: &mut StepsForm, payload: &[u8]) -> Result<(), FacetError> {
+        let rec: StepRecord = decode_payload("steps record", payload)?;
         form.steps.insert(rec.id, rec.bytes);
         Ok(())
     }
 
-    async fn snapshot(form: &WorkflowForm, _env: &FacetEnv) -> Result<Vec<u8>, FacetError> {
+    async fn snapshot(form: &StepsForm, _env: &FacetEnv) -> Result<Vec<u8>, FacetError> {
         Ok(encode_payload(form))
     }
 
-    async fn restore(part: Option<&[u8]>, _env: &FacetEnv) -> Result<WorkflowForm, FacetError> {
+    async fn restore(part: Option<&[u8]>, _env: &FacetEnv) -> Result<StepsForm, FacetError> {
         match part {
-            Some(bytes) => decode_payload("workflow restore", bytes),
-            None => Ok(WorkflowForm::default()),
+            Some(bytes) => decode_payload("steps restore", bytes),
+            None => Ok(StepsForm::default()),
         }
     }
 
-    fn roots(_form: &WorkflowForm) -> BTreeSet<BlobId> {
+    fn roots(_form: &StepsForm) -> BTreeSet<BlobId> {
         BTreeSet::new()
     }
 }
 
 /// The handler-facing workflow accessor (spec §7.17), obtained from
-/// [`GrainCtx::workflow`](crate::GrainCtx::workflow).
-pub struct WorkflowHandle<'a, G: Grain, I>
+/// [`GrainCtx::steps`](crate::GrainCtx::steps).
+pub struct StepsHandle<'a, G: Grain, I>
 where
-    G::Facets: HasFacet<Workflow, I>,
+    G::Facets: HasFacet<Steps, I>,
 {
     cell: &'a std::sync::Arc<FacetCell<G::Facets>>,
     _index: std::marker::PhantomData<I>,
@@ -119,29 +119,29 @@ where
 
 impl<G: Grain> GrainCtx<G> {
     /// The grain's workflow step memo (spec §7.17). Compiles exactly when the grain
-    /// declares the [`Workflow`] facet (`type Facets = (Workflow, …)`). Recording is
+    /// declares the [`Steps`] facet (`type Facets = (Steps, …)`). Recording is
     /// valid only inside a command handler (§7.12); reads are valid anywhere.
-    pub fn workflow<I>(&self) -> WorkflowHandle<'_, G, I>
+    pub fn steps<I>(&self) -> StepsHandle<'_, G, I>
     where
-        G::Facets: HasFacet<Workflow, I>,
+        G::Facets: HasFacet<Steps, I>,
     {
-        WorkflowHandle {
+        StepsHandle {
             cell: self.facet_cell(),
             _index: std::marker::PhantomData,
         }
     }
 }
 
-impl<G: Grain, I> WorkflowHandle<'_, G, I>
+impl<G: Grain, I> StepsHandle<'_, G, I>
 where
-    G::Facets: HasFacet<Workflow, I>,
+    G::Facets: HasFacet<Steps, I>,
 {
     /// The memoized result of step `id`, decoded, or `None` if the step has not yet
     /// completed. Resolves a result recorded earlier this command over the committed
     /// map (read-your-staged-writes, §7.12). A completed step returns `Some` on every
     /// re-drive and after any replay.
     pub fn result<T: DeserializeOwned>(&self, id: StepId) -> Result<Option<T>, GrainError> {
-        let bytes = self.cell.with_overlay::<Workflow, I, _>(|form, stage| {
+        let bytes = self.cell.with_overlay::<Steps, I, _>(|form, stage| {
             stage
                 .and_then(|s| s.staged.get(&id))
                 .or_else(|| form.steps.get(&id))
@@ -149,7 +149,7 @@ where
         });
         match bytes {
             None => Ok(None),
-            Some(bytes) => decode_payload("workflow result", &bytes)
+            Some(bytes) => decode_payload("steps result", &bytes)
                 .map(Some)
                 .map_err(|e| GrainError::Call(actor_core::CallError::Serialization(e.to_string()))),
         }
@@ -157,7 +157,7 @@ where
 
     /// Whether step `id` has completed (committed or staged this command).
     pub fn is_done(&self, id: StepId) -> bool {
-        self.cell.with_overlay::<Workflow, I, _>(|form, stage| {
+        self.cell.with_overlay::<Steps, I, _>(|form, stage| {
             stage.is_some_and(|s| s.staged.contains_key(&id)) || form.steps.contains_key(&id)
         })
     }
@@ -173,7 +173,7 @@ where
     /// value arrived as opaque `postcard` bytes over a [`StepDone`]).
     pub fn record_bytes(&self, id: StepId, bytes: Vec<u8>) {
         self.cell
-            .with_stage::<Workflow, I, _>(|stage| stage.staged.insert(id, bytes));
+            .with_stage::<Steps, I, _>(|stage| stage.staged.insert(id, bytes));
     }
 }
 
@@ -185,13 +185,13 @@ where
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StepDone {
     pub id: StepId,
-    /// The step's `postcard`-encoded output (see [`WorkflowHandle::record`]).
+    /// The step's `postcard`-encoded output (see [`StepsHandle::record`]).
     pub bytes: Vec<u8>,
 }
 
 impl StepDone {
     /// Build a `StepDone` from a step id and its result value, `postcard`-encoding
-    /// the value the same way [`WorkflowHandle::result`] decodes it.
+    /// the value the same way [`StepsHandle::result`] decodes it.
     pub fn new<T: Serialize>(id: StepId, value: &T) -> StepDone {
         StepDone {
             id,
@@ -209,14 +209,14 @@ impl Message for StepDone {
 /// Stages the memo record so the step resolves on the next drive, unless it is
 /// already recorded (a duplicate `StepDone` after a re-launch commits nothing, the
 /// idempotency §7.5 gives for free). Returns the empty event list the handler
-/// journals — the workflow facet carries the durable change.
+/// journals — the steps facet carries the durable change.
 pub fn complete_step<G, I>(ctx: &GrainCtx<G>, msg: StepDone) -> Vec<G::Event>
 where
     G: Grain,
-    G::Facets: HasFacet<Workflow, I>,
+    G::Facets: HasFacet<Steps, I>,
 {
-    if !ctx.workflow::<I>().is_done(msg.id) {
-        ctx.workflow::<I>().record_bytes(msg.id, msg.bytes);
+    if !ctx.steps::<I>().is_done(msg.id) {
+        ctx.steps::<I>().record_bytes(msg.id, msg.bytes);
     }
     Vec::new()
 }

@@ -1,5 +1,5 @@
-//! The workflow-facet `Pipeline` grain, shared by `workflow.rs` (scenarios) and
-//! `workflow_swarm.rs` (the sweep) — granary §7.17.
+//! The steps-facet `Pipeline` grain, shared by `steps.rs` (scenarios) and
+//! `steps_swarm.rs` (the sweep) — granary §7.17.
 //!
 //! A self-driving re-entrant workflow: fetch → (sleep) → double → `Finished`, the
 //! reference shape a linear DSL would generate. Two things about it are load-
@@ -24,8 +24,8 @@
 //! difference between a seed that observes the property and one that observes
 //! nothing.
 //!
-//! Generic over the hosting system, like [`granary::AlarmIndex`], so `workflow.rs`
-//! drives it on the `Local` tier and `workflow_swarm.rs` drives the same grain on
+//! Generic over the hosting system, like [`granary::AlarmIndex`], so `steps.rs`
+//! drives it on the `Local` tier and `steps_swarm.rs` drives the same grain on
 //! the clustered one.
 
 use std::collections::BTreeMap;
@@ -46,7 +46,7 @@ use granary::GranarySystem;
 use granary::LaunchGuard;
 use granary::StepDone;
 use granary::StepId;
-use granary::Workflow;
+use granary::Steps;
 use granary::complete_step;
 use serde::Deserialize;
 use serde::Serialize;
@@ -238,7 +238,7 @@ impl<S: GranarySystem> Pipeline<S> {
         if state.finished.is_some() {
             return Vec::new();
         }
-        let wf = ctx.workflow();
+        let wf = ctx.steps();
 
         // Step FETCH: an external effect, launched once per activation, its result
         // memoized. Its value is a fresh ordinal, so a memo that was overwritten
@@ -316,7 +316,7 @@ impl<S: GranarySystem> Grain for Pipeline<S> {
     type System = S;
     type State = PipelineState;
     type Event = PipelineEvent;
-    type Facets = (Workflow, Alarm);
+    type Facets = (Steps, Alarm);
     const GRAIN_TYPE: &'static str = PIPELINE_TYPE;
 
     fn apply(state: &mut PipelineState, event: &PipelineEvent) {
@@ -338,7 +338,7 @@ impl<S: GranarySystem> Grain for Pipeline<S> {
         // Regression net: activation has no command stage armed, so this read
         // must answer from the committed form, not panic about command scope
         // (workflow reads are valid anywhere, granary §7.17).
-        let _ = ctx.workflow().is_done(STEP_FETCH);
+        let _ = ctx.steps().is_done(STEP_FETCH);
         // Resume an in-flight workflow after a (re)activation — and start one on the
         // first, so the workflow needs no message of its own to begin.
         self.schedule_drive(ctx);
@@ -347,7 +347,7 @@ impl<S: GranarySystem> Grain for Pipeline<S> {
 
     // The sleep fires here with no caller: record the WOKE gate and re-drive.
     async fn on_alarm(&self, _state: &PipelineState, ctx: &GrainCtx<Self>) -> Vec<PipelineEvent> {
-        ctx.workflow().record(STEP_WOKE, &());
+        ctx.steps().record(STEP_WOKE, &());
         self.schedule_drive(ctx);
         Vec::new()
     }
@@ -452,7 +452,7 @@ impl<S: GranarySystem> GrainHandler<ReadMemo> for Pipeline<S> {
         _m: ReadMemo,
         ctx: &GrainCtx<Self>,
     ) -> (Vec<PipelineEvent>, Option<u32>) {
-        let memo: Option<u32> = ctx.workflow().result(STEP_FETCH).expect("decode");
+        let memo: Option<u32> = ctx.steps().result(STEP_FETCH).expect("decode");
         (vec![], memo)
     }
 }

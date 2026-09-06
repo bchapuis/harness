@@ -1,13 +1,13 @@
 //! Durable-workflow scenarios under deterministic simulation (granary §7.17).
 //!
-//! Exercises the [`Workflow`](granary::Workflow) step memo + the
+//! Exercises the [`Steps`](granary::Steps) step memo + the
 //! [`Alarm`](granary::Alarm)-backed `sleep` through the self-driving
 //! [`Pipeline`](support::pipeline::Pipeline) grain — the reference shape a linear
 //! DSL would generate. One seed each, hand-built: `sleep` resumes the workflow with
 //! no caller (the alarm), a `retry` step re-launches after a failed effect, and the
 //! memo carries completed steps across hibernation.
 //!
-//! The property these state and `workflow_swarm.rs` sweeps is the memo's
+//! The property these state and `steps_swarm.rs` sweeps is the memo's
 //! **write-once** rule: `complete_step` records only a step that is not already
 //! done, so the first committed result wins. Here it is asserted on a clean
 //! single-node run — the necessary counterpart to the sweep, which bounds what can
@@ -159,7 +159,7 @@ fn a_relaunched_step_does_not_overwrite_the_memo() {
     // completion — deadline and all — before the second read was ever issued, and
     // there would be no in-flight window left to interrupt.
     //
-    // This is the shape `workflow_swarm.rs` sweeps under the nemesis; here it is
+    // This is the shape `steps_swarm.rs` sweeps under the nemesis; here it is
     // pinned on one seed with no faults at all, so a failure names an interleaving
     // rather than a distribution.
     let fx = Effects::default();

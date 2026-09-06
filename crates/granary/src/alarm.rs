@@ -1,7 +1,7 @@
 //! The alarm facet (spec §7.16): a stored timer that
 //! re-activates a grain to run its [`on_alarm`](crate::Grain::on_alarm) handler
 //! with no caller present — the basis for retries, timeouts, batch flushes, and
-//! the durable-step [`workflow`](crate::workflow) API.
+//! the durable-step [`steps`](crate::steps) API.
 //!
 //! **Storage is a logical facet (§7.12).** A grain holds at most one pending
 //! alarm — the Durable Objects model (DO §5). Its due time is durable in the

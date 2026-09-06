@@ -66,7 +66,7 @@ struct Scope<K: Ord> {
     /// Which keys this activation has launched: granary's launch-once posture
     /// (granary §7.17) with the drive's own lifetime rule. It is deliberately
     /// not granary's `LaunchGuard`, because the two release differently — the
-    /// workflow facet's guard is reset wholesale when a run ends, where a claim
+    /// steps facet's guard is reset wholesale when a run ends, where a claim
     /// here is dropped exactly when its key leaves the desired set (§3.2 step 2),
     /// which is what keeps the straggler filter exact.
     claims: BTreeSet<K>,

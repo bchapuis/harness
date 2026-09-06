@@ -18,10 +18,10 @@
 //! Beyond the event fold, a grain composes **facets** (spec §7.12) by declaring
 //! `type Facets`: the [`Kv`] map (§7.13), the [`Ws`] workspace directory
 //! (§7.11), the SQL database (§7.14, behind the `sql` cargo feature), the
-//! [`Alarm`] durable timer (§7.16), and the [`Workflow`] step memo (§7.17). A
+//! [`Alarm`] durable timer (§7.16), and the [`Steps`] step memo (§7.17). A
 //! handler writes through the compile-time-gated `ctx` accessors —
 //! [`kv()`](GrainCtx::kv), [`ws()`](GrainCtx::ws), `sql()`,
-//! [`alarm()`](GrainCtx::alarm), [`workflow()`](GrainCtx::workflow) — and all of a
+//! [`alarm()`](GrainCtx::alarm), [`steps()`](GrainCtx::steps) — and all of a
 //! command's records, events and facet operations alike, commit as **one
 //! atomic tagged batch** in the grain's single journal, snapshot as one
 //! composite, and share one unioned blob root set.
@@ -30,7 +30,7 @@
 //!
 //! The [`Alarm`] facet stores a single per-grain deadline; when it passes the
 //! runtime fires [`Grain::on_alarm`] with **no caller present** (spec §7.16). The
-//! [`Workflow`] step memo builds on it: each step's effect runs at most once
+//! [`Steps`] step memo builds on it: each step's effect runs at most once
 //! across crashes because its result is journaled and memoized. An alarm fires
 //! while its grain is resident and re-arms on re-activation. To fire
 //! with **no access after a node failover or hibernation**, host a type with
@@ -121,7 +121,7 @@ mod sql;
 mod store;
 mod subscription;
 mod system;
-mod workflow;
+mod steps;
 mod ws;
 
 pub use alarm::Alarm;
@@ -224,12 +224,12 @@ pub use system::FailureDomains;
 pub use system::GranarySystem;
 pub use system::ShardId;
 pub use system::shard_for;
-pub use workflow::LaunchGuard;
-pub use workflow::StepDone;
-pub use workflow::StepId;
-pub use workflow::Workflow;
-pub use workflow::WorkflowHandle;
-pub use workflow::complete_step;
+pub use steps::LaunchGuard;
+pub use steps::StepDone;
+pub use steps::StepId;
+pub use steps::Steps;
+pub use steps::StepsHandle;
+pub use steps::complete_step;
 pub use ws::MAX_TREE_BYTES;
 pub use ws::Ws;
 pub use ws::WsCapture;

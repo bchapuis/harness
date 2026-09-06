@@ -757,7 +757,7 @@ A grain declaring `Facets = (Disk,)` persists the guest's **entire rootfs** over
 
 **Status: implemented** (`alarm.rs`, `alarm_index.rs`).
 
-The alarm facet gives a grain a **durable timer**: at most one pending deadline (the Durable Objects model, DO §5), armed or cancelled through `ctx.alarm()` and fired as a callerless invocation of the grain's `on_alarm` handler. It is the basis for retries, timeouts, batch flushes, and the workflow facet's `sleep` (§7.17).
+The alarm facet gives a grain a **durable timer**: at most one pending deadline (the Durable Objects model, DO §5), armed or cancelled through `ctx.alarm()` and fired as a callerless invocation of the grain's `on_alarm` handler. It is the basis for retries, timeouts, batch flushes, and the steps facet's `sleep` (§7.17).
 
 - **Storage is a trivially logical facet.** `Set(due)` and `Clear` records under the alarm tag fold into a single `Option` deadline (last write wins); the folded form is the source of truth for whether and when the grain fires. Arming and cancelling stage into the command's atomic batch like a KV write (§7.12); the encoded form is the snapshot contribution; the root set is empty.
 - **Firing is the runtime half, through the same barrier.** After each commit and on activation the host reads the folded deadline and arms an **epoch-guarded in-activation timer**; when it elapses, the host delivers itself a callerless `AlarmDue` command that runs `on_alarm` through the ordinary §6 barrier (input gate, one atomic batch, output gate), so an alarm's effects are as durable and as fenced as any command's. The epoch guard makes a superseded timer's late `AlarmDue` a no-op, a cancellation without a race.
@@ -766,18 +766,18 @@ The alarm facet gives a grain a **durable timer**: at most one pending deadline 
 
 ---
 
-### 7.17 The workflow facet (logical)
+### 7.17 The steps facet (logical)
 
-**Status: implemented** (`workflow.rs`).
+**Status: implemented** (`steps.rs`).
 
-The workflow facet gives a grain **durable step memoization**: the Cloudflare-Workflows-style `step`/`sleep`/`retry` pattern, layered on the event fold, the alarm facet (§7.16), and a grain's self-driving loop (the agentic harness's `advance` loop is the reference consumer, harness §3).
+The steps facet gives a grain **durable step memoization**: the Cloudflare-Workflows-style `step`/`sleep`/`retry` pattern, layered on the event fold, the alarm facet (§7.16), and a grain's self-driving loop (the agentic harness's `advance` loop is the reference consumer, harness §3).
 
-- **The durable core is a memo.** A workflow is a re-entrant decision the grain re-drives after every commit. Each **step** runs an external effect once; the facet journals its result under the workflow tag and folds it into a `step id → bytes` map. On any later drive (a re-activation, a failover) a completed step resolves from the map instead of re-running, so effects are at-most-once across crashes. Step ids are the workflow's stable call-site ordinals, deterministic across re-drives and replay.
+- **The durable core is a memo.** A workflow is a re-entrant decision the grain re-drives after every commit. Each **step** runs an external effect once; the facet journals its result under the steps tag and folds it into a `step id → bytes` map. On any later drive (a re-activation, a failover) a completed step resolves from the map instead of re-running, so effects are at-most-once across crashes. Step ids are the workflow's stable call-site ordinals, deterministic across re-drives and replay.
 
-  **The memo is write-once**, and that — not "the effect ran once" — is what a test can assert. The launch guard below is per-activation and never journaled, so a re-activation MAY legitimately re-launch a step whose result has not yet committed, and the same effect MAY therefore run several times; what MUST hold is that the **first committed result wins** and every later `StepDone` for that step commits nothing. Verified by `workflow.rs` (scripted, single-node) and `workflow_swarm.rs` (the same grain under the cluster nemesis), which read a step's memo repeatedly and require every answer to agree.
+  **The memo is write-once**, and that — not "the effect ran once" — is what a test can assert. The launch guard below is per-activation and never journaled, so a re-activation MAY legitimately re-launch a step whose result has not yet committed, and the same effect MAY therefore run several times; what MUST hold is that the **first committed result wins** and every later `StepDone` for that step commits nothing. Verified by `steps.rs` (scripted, single-node) and `steps_swarm.rs` (the same grain under the cluster nemesis), which read a step's memo repeatedly and require every answer to agree.
 - **`sleep` is a step whose effect is an alarm** (§7.16); `retry` is a step that re-launches after an alarm-backed backoff.
 - **What the grain still wires.** Launching a step's effect off the command path and self-`tell`ing its result back is grain-specific (the effect's type is), so the facet supplies the durable half (the memo's `result`/`record`) plus a generic `StepDone` command that journals a returned result; the "already launched this activation" guard (`LaunchGuard`, generic over the claim key) is ephemeral activation state. A linear `async` DSL over these is deferred (§16).
-- **Which half a grain adopts depends on where its results already live.** The memo serves grains whose step results are *not* part of their event vocabulary. A grain whose results are already rich journaled events with their own fold and consumers — the harness agent's `ModelResponse`/`ToolOutcome` records — MUST NOT memoize them a second time under the workflow tag (one decision, two folds); such a grain adopts only the launch-once guard, keyed by its own step identity. The agent is the reference for that posture; a plain effect-runner adopts both halves. Generalizing the half this facet leaves to the grain — the launch, the guard, the self-`tell`, and the recovery of whatever a crash left dangling — is the subject of a proposed layer above granary, the drive ([`drive-spec.md`](drive-spec.md)), which re-derives what the guard is keyed by from committed state instead of tracking it. Nothing here waits on it: the memo and the guard are what a grain uses today.
+- **Which half a grain adopts depends on where its results already live.** The memo serves grains whose step results are *not* part of their event vocabulary. A grain whose results are already rich journaled events with their own fold and consumers — the harness agent's `ModelResponse`/`ToolOutcome` records — MUST NOT memoize them a second time under the steps tag (one decision, two folds); such a grain adopts only the launch-once guard, keyed by its own step identity. The agent is the reference for that posture; a plain effect-runner adopts both halves. Generalizing the half this facet leaves to the grain — the launch, the guard, the self-`tell`, and the recovery of whatever a crash left dangling — is the subject of a proposed layer above granary, the drive ([`drive-spec.md`](drive-spec.md)), which re-derives what the guard is keyed by from committed state instead of tracking it. Nothing here waits on it: the memo and the guard are what a grain uses today.
 
 ---
 
@@ -941,7 +941,7 @@ A `granary` implementation conforms iff every invariant holds, verified under de
 
 Named here, specified elsewhere or later, so the core stays small:
 
-- **A linear workflow DSL.** An `async` `step`/`sleep`/`retry` surface over the workflow facet's memo and commands (§7.17), so a workflow reads as straight-line code rather than a hand-driven re-entrant loop.
+- **A linear workflow DSL.** An `async` `step`/`sleep`/`retry` surface over the steps facet's memo and commands (§7.17), so a workflow reads as straight-line code rather than a hand-driven re-entrant loop.
 - **Hibernatable connections.** Parking a record subscription (§7.9) — or a WebSocket/stream connection — *across* hibernation, holding the registration while the grain sleeps and re-delivering on wake (DO §5), so a follower need not re-subscribe after every idle eviction.
 - **Third-party facets.** Publishing the facet seam (§7.12) for out-of-crate facets, once the record-tag registry and cross-version compatibility rules have settled.
 - **SQL lazy page hydration (a capture VFS).** A VFS shim for the SQL facet (§7.14) that both captures WAL frames below SQLite and faults database pages in from blobs on first access, so a large database activates without materializing whole — the upgrade over the reference WAL-tailing capture.
@@ -1098,7 +1098,7 @@ granary/                 # the grain runtime, built on actor-core + actor-cluste
                          #   from Set/Clear records and fired as a callerless AlarmDue
   alarm_index.rs         # the per-shard alarm index (§7.16): the durable GrainName → due
                          #   directory a new leader sweeps to re-activate grains owing a wake
-  workflow.rs            # the workflow facet (§7.17): durable step memoization
+  steps.rs            # the steps facet (§7.17): durable step memoization
                          #   (step/sleep/retry) plus the launch-once guard
   facet_blobs.rs         # blob machinery shared by the checkpointing facets (§7.12): the F3
                          #   root-keeping discipline and the chunked blob-area transfers

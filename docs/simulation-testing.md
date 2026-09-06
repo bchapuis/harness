@@ -606,7 +606,7 @@ and asserts nothing:
 - **A constant-valued fixture cannot say which write won.** For a property about
   *which* of several attempts is the durable one — a memoized step result, a
   first-writer-wins register, a deduplicated command — the fixture's effect must
-  produce a **different value each time it runs**. `granary`'s workflow sweep
+  produce a **different value each time it runs**. `granary`'s steps sweep
   hands every step launch a fresh ordinal for exactly this reason: with a
   constant, a memo that was overwritten and one that was preserved read
   identically, and the check passes either way.

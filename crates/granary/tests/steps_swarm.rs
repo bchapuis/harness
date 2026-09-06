@@ -1,6 +1,6 @@
 //! Durable workflows under the cluster fault swarm (granary §7.17).
 //!
-//! `workflow.rs` asserts the workflow facet's properties through *scripted*
+//! `steps.rs` asserts the steps facet's properties through *scripted*
 //! scenarios on one node. This file applies the one that matters most the V&V way:
 //! a [`ClusterWorkload`] swept across seeds while the nemesis injects partitions,
 //! crashes, restarts, pauses, heals, loss, duplication, and delay.
@@ -166,7 +166,7 @@ struct MemoWriteOnce {
 
 impl Invariant for MemoWriteOnce {
     fn name(&self) -> &'static str {
-        "workflow-memo-write-once"
+        "steps-memo-write-once"
     }
 
     fn observe(&mut self, _event: &Event) -> Result<(), String> {
@@ -192,7 +192,7 @@ impl Invariant for MemoWriteOnce {
 
 // --- The workload -------------------------------------------------------------
 
-struct WorkflowSwarm {
+struct StepsSwarm {
     nodes: usize,
     fx: Effects,
     memos: Memos,
@@ -231,9 +231,9 @@ fn host(node: &SimNode, fx: &Effects) -> Granary<Pipeline> {
     )
 }
 
-impl ClusterWorkload for WorkflowSwarm {
+impl ClusterWorkload for StepsSwarm {
     fn name(&self) -> &'static str {
-        "granary-workflow-swarm"
+        "granary-steps-swarm"
     }
 
     fn node_count(&self) -> usize {
@@ -350,7 +350,7 @@ impl ClusterWorkload for WorkflowSwarm {
             memos: self.memos.clone(),
         }));
         invariants.push(Box::new(CommitMonotonic::new(
-            "workflow-commit-monotonic",
+            "steps-commit-monotonic",
             support::pipeline::PIPELINE_TYPE,
         )));
         invariants.push(Box::new(self.exercised.clone()));
@@ -358,8 +358,8 @@ impl ClusterWorkload for WorkflowSwarm {
     }
 }
 
-fn workload() -> WorkflowSwarm {
-    WorkflowSwarm {
+fn workload() -> StepsSwarm {
+    StepsSwarm {
         nodes: 3,
         fx: Effects::default(),
         memos: Memos::default(),
