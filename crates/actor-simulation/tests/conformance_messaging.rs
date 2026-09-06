@@ -624,6 +624,7 @@ mod local_model {
                 log.tell(Note(i)).await.unwrap();
             }
         });
+        sim.run();
 
         assert_eq!(*seen.lock().unwrap(), (0..10).collect::<Vec<_>>());
     }

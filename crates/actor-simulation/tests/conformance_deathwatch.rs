@@ -289,6 +289,7 @@ fn local_watch_yields_terminated_once_on_stop() {
         clock.sleep(Duration::from_millis(1)).await;
         target.tell(WatchStop).await.unwrap();
     });
+    sim.run();
 
     assert_eq!(*got.lock().unwrap(), vec![TerminationReason::Stopped]);
 }
@@ -391,6 +392,7 @@ fn watch_reports_failure_when_handler_panics() {
         clock.sleep(Duration::from_millis(1)).await;
         target.tell(Boom).await.unwrap();
     });
+    sim.run();
 
     assert_eq!(*got.lock().unwrap(), vec![TerminationReason::Failed]);
 }

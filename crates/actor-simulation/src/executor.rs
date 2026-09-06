@@ -370,8 +370,23 @@ impl Simulation {
         }
     }
 
-    /// Spawn `future`, run to quiescence, and return its output. Panics if the
-    /// future has not completed once the runtime is quiescent.
+    /// Spawn `future`, drive the runtime until it resolves, and return its
+    /// output.
+    ///
+    /// Returns at the poll that completes the future: whatever else is ready or
+    /// timed at that point stays in the scheduler for the next [`run`],
+    /// [`run_for`], or `block_on`. Draining the world is a separate operation,
+    /// and deliberately so — a workload that never quiesces (a grain whose idle
+    /// check re-arms while it vetoes hibernation, a failure detector) would
+    /// otherwise turn an awaited reply into a loop that never returns and
+    /// records events without bound.
+    ///
+    /// Panics if the runtime quiesces — nothing ready, no timer left — before
+    /// the future completes: the future was waiting on something nobody will
+    /// ever send.
+    ///
+    /// [`run`]: Simulation::run
+    /// [`run_for`]: Simulation::run_for
     pub fn block_on<F>(&self, future: F) -> F::Output
     where
         F: Future + Send + 'static,
@@ -389,11 +404,18 @@ impl Simulation {
                 None,
             );
         }
-        self.run();
-        cell.lock()
-            .expect("result mutex poisoned")
-            .take()
-            .expect("future did not complete at quiescence")
+        loop {
+            while let Some(id) = self.take_ready() {
+                self.poll_task(id);
+                if let Some(value) = cell.lock().expect("result mutex poisoned").take() {
+                    return value;
+                }
+            }
+            assert!(
+                self.advance_time(),
+                "block_on: the runtime quiesced before the future completed"
+            );
+        }
     }
 
     /// Pick the next ready task. With more than one ready, selection is

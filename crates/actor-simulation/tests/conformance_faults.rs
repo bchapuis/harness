@@ -104,6 +104,7 @@ fn per_pair_fifo_survives_latency_jitter() {
             remote.tell(Seq(i)).await.unwrap();
         }
     });
+    sim.run();
 
     // Despite per-frame jitter, frames on one directed pair arrive in send order.
     assert_eq!(*log.lock().unwrap(), (0..10).collect::<Vec<_>>());

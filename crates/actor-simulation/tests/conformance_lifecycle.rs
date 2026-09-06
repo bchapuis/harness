@@ -116,6 +116,7 @@ fn failed_startup_emits_assign_then_resign_no_ready() {
             _system: PhantomData,
         });
     });
+    sim.run();
     let lifecycle: Vec<&str> = recorder
         .events()
         .iter()
@@ -332,6 +333,7 @@ mod local_lifecycle {
             let actor = system.spawn(Stoppable);
             actor.tell(Stop).await.unwrap();
         });
+        sim.run();
 
         let lifecycle = lifecycle_only(&recorder.events());
         assert_eq!(
@@ -362,6 +364,7 @@ mod local_lifecycle {
         sim.block_on(async move {
             let _ = system.spawn(FailStart);
         });
+        sim.run();
 
         // assign → resign, no ready: the id was reserved but never became live.
         assert_eq!(

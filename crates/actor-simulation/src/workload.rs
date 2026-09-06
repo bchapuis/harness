@@ -231,7 +231,13 @@ pub(crate) fn drive_local<W: Workload>(workload: &W, seed: u64, events: Arc<dyn 
         .events(events)
         .build();
 
+    // The workload's future resolving is not the end of the run: the drain to
+    // quiescence is what lets the checkers see every reply, retry, and
+    // lifecycle event the workload set in motion, and `block_on` stops at the
+    // resolution. A single-node run is quiescence-driven by contract
+    // (docs/simulation-testing.md), so the drain is explicit here.
     sim.block_on(workload.run(system));
+    sim.run();
 }
 
 /// Run a workload once under a given seed, returning any invariant violations.

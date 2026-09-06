@@ -109,6 +109,7 @@ fn restart_emits_a_supervised_restart_decision() {
         let actor = system.spawn_with(|| Restartable);
         let _ = actor.tell(Boom).await;
     });
+    sim.run();
     assert_eq!(
         supervised_decisions(&recorder.events()),
         vec![SupervisionDecision::Restart]
@@ -122,6 +123,7 @@ fn default_stop_emits_a_supervised_stop_decision() {
         let actor = system.spawn(Stoppable);
         let _ = actor.tell(Boom).await;
     });
+    sim.run();
     assert_eq!(
         supervised_decisions(&recorder.events()),
         vec![SupervisionDecision::Stop]
@@ -168,6 +170,7 @@ fn terminated_delivery_is_emitted_to_each_watcher() {
         let _ = target.tell(Stop).await;
         (target.id().clone(), watcher.id().clone())
     });
+    sim.run();
 
     let deliveries: Vec<(_, _, _)> = recorder
         .events()

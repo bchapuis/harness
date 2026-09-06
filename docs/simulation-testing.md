@@ -87,7 +87,8 @@ let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())
     .mailbox_capacity(cap)
     .events(sink)            // §16 stream, the substrate every check reads
     .build();
-sim.block_on(workload.run(system));
+sim.block_on(workload.run(system)); // returns when the workload's future resolves
+sim.run();                          // the drain to quiescence is a separate, explicit step
 
 // Cluster: real ClusterSystem nodes over an in-memory Transport (SimNetwork)
 // that injects seeded loss/dup/delay and partition/crash (§7, §18.2, §18.3).
