@@ -126,7 +126,7 @@ pub const CATALOGUES: &[CatalogueSite] = &[
         id: "wal",
         doc: "wal",
         section: "7",
-        label: "W",
+        label: "L",
         shape: Shape::Table,
         pointers: Pointers::Functions,
     },

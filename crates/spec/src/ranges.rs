@@ -39,7 +39,7 @@
 //! Together they pin the extent from both sides without a rule about what any one
 //! sentence intended. The second is also what makes a catalogue nothing cites at
 //! all fail rather than pass vacuously: `docs/README.md` rendered the wal
-//! catalogue's column as `—` while `wal §7` held W1–W5 and
+//! catalogue's column as `—` while `wal §7` held L1–L5 and
 //! `crates/wal/tests/conformance_catalogue.rs` compared them, and the extent went
 //! unstated by the entire set.
 
@@ -73,7 +73,7 @@ pub enum Owner {
 pub const LABELS: &[(&str, Owner)] = &[
     ("#", Owner::Catalogue("core")),
     ("U", Owner::Catalogue("utilities")),
-    ("W", Owner::Catalogue("wal")),
+    ("L", Owner::Catalogue("wal")),
     ("G", Owner::Catalogue("granary")),
     ("B", Owner::Catalogue("blob")),
     ("H", Owner::Catalogue("harness")),

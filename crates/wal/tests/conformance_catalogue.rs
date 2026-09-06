@@ -1,4 +1,4 @@
-//! Catalogue drift test (wal spec §7): the machine-readable W1–W5 table stays
+//! Catalogue drift test (wal spec §7): the machine-readable L1–L5 table stays
 //! complete, and every test it names still exists.
 //!
 //! # Why this one is self-contained
@@ -34,7 +34,7 @@ struct CatalogueEntry {
     tests: &'static [&'static str],
 }
 
-const W_CATALOGUE: &[CatalogueEntry] = &[
+const L_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 1,
         spec: "wal §3.1",
@@ -103,27 +103,27 @@ fn crate_sources() -> String {
 }
 
 #[test]
-fn every_invariant_w1_through_w5_is_present_exactly_once() {
-    let mut numbers: Vec<u8> = W_CATALOGUE.iter().map(|e| e.invariant).collect();
+fn every_invariant_l1_through_l5_is_present_exactly_once() {
+    let mut numbers: Vec<u8> = L_CATALOGUE.iter().map(|e| e.invariant).collect();
     numbers.sort_unstable();
     assert_eq!(
         numbers,
         (1..=5).collect::<Vec<u8>>(),
-        "the catalogue must list W1..=W5, each exactly once",
+        "the catalogue must list L1..=L5, each exactly once",
     );
 }
 
 #[test]
 fn every_entry_has_spec_property_and_a_verification_method() {
-    for e in W_CATALOGUE {
+    for e in L_CATALOGUE {
         assert!(
             !e.tests.is_empty(),
-            "W{} names no verifying test",
+            "L{} names no verifying test",
             e.invariant
         );
         assert!(
             !e.spec.is_empty() && !e.property.is_empty(),
-            "W{} is missing spec or property text",
+            "L{} is missing spec or property text",
             e.invariant
         );
     }
@@ -134,11 +134,11 @@ fn every_entry_has_spec_property_and_a_verification_method() {
 #[test]
 fn every_named_test_exists() {
     let sources = crate_sources();
-    for e in W_CATALOGUE {
+    for e in L_CATALOGUE {
         for name in e.tests {
             assert!(
                 sources.contains(&format!("fn {name}(")),
-                "W{} names test {name:?}, which is not defined in this crate — \
+                "L{} names test {name:?}, which is not defined in this crate — \
                  a rename left the spec's \"Verified by\" column pointing at nothing",
                 e.invariant,
             );
@@ -154,10 +154,10 @@ fn every_named_test_exists() {
 /// re-stamping rule, the `max_record`/magic aliasing assert — and requiring a
 /// W-number for each would push those numbers into the spec to satisfy a test,
 /// which is backwards. The crash-point suite has no such cases: it exists solely
-/// to decide W1 and W2.
+/// to decide L1 and L2.
 #[test]
 fn every_crash_point_test_is_claimed_by_an_invariant() {
-    let claimed: Vec<&str> = W_CATALOGUE
+    let claimed: Vec<&str> = L_CATALOGUE
         .iter()
         .flat_map(|e| e.tests.iter().copied())
         .collect();
@@ -200,7 +200,7 @@ fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("wal");
     let root = spec::workspace_root(env!("CARGO_MANIFEST_DIR"));
     let documented = catalogue::documented(&root, site).expect("wal spec §7 parses");
-    let implemented: Vec<catalogue::Row> = W_CATALOGUE
+    let implemented: Vec<catalogue::Row> = L_CATALOGUE
         .iter()
         .map(|e| catalogue::Row::new(e.invariant, e.spec, site.pointers, e.tests.iter().copied()))
         .collect();
@@ -208,7 +208,7 @@ fn the_specification_and_this_catalogue_agree() {
     let found = catalogue::compare(site, &documented, &implemented);
     assert!(
         found.is_empty(),
-        "wal spec §7 and W_CATALOGUE disagree:\n  {}\n",
+        "wal spec §7 and L_CATALOGUE disagree:\n  {}\n",
         found
             .iter()
             .map(ToString::to_string)

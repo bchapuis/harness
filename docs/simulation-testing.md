@@ -667,7 +667,7 @@ crate wants one, it has become a contract claim and moves up a tier.
 inline in the spec. The [cluster utilities](cluster-utilities-spec.md) carry
 their own, separately numbered catalogue (U1, U2, …; machine-readable as
 `utilities_catalogue()`), held to the same drift discipline, as do the layers
-above: the wal (W1–W5), granary (G1–G21, plus the facet contract F1–F4), the
+above: the wal (L1–L5), granary (G1–G21, plus the facet contract F1–F4), the
 harness (H1–H8), the sandbox (S1–S5), the machine (M1–M6), and the blob store
 (B1–B7). Format compatibility (V1–V6) is the one catalogue with no Rust copy to
 drift from: V3 is a compile-time assertion inside `compat::Window`, and V4 and V5

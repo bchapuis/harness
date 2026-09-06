@@ -22,7 +22,7 @@ will run the other way once it does.
 |---|---|---|---|
 | substrate | [distributed-actor-spec](distributed-actor-spec.md) | actors, messages, transport, membership, SWIM, supervision, receptionist, deterministic simulation | #1–#22 |
 | | [cluster-utilities-spec](cluster-utilities-spec.md) | rendezvous placement, group routers, the cluster singleton | U1–U2 |
-| storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | W1–W5 |
+| storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | L1–L5 |
 | | [granary-spec](granary-spec.md) | durable objects ("grains"): the journal, the single-writer fence, shards, snapshots, the facet model | G1–G21, F1–F4 |
 | | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside granary (standalone; no in-tree consumer yet) | B1–B7 |
 | consumers | [drive-spec](drive-spec.md) | the autonomous grain: the desired set of effects, intent before effect, dangling resolution, quiescence | D1–D7 |
