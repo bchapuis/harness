@@ -20,9 +20,9 @@ Three principles govern the strategy.
   crashes, loss, duplication, delay, and reordering under seed control (§18.3),
   and prove the injection actually fired.
 
-## The harness is owned, not imported
+## The agent runtime is owned, not imported
 
-Build the harness; do not import one. The spec routes every source of
+Build the agent runtime; do not import one. The spec routes every source of
 nondeterminism through four traits — `Clock`, `Entropy`, `Spawner` (§4.6), and
 `Transport` (§7) — and §18.2 mandates that simulation reuse *those same traits*,
 swapping only the implementations. A generic network or scheduler crate

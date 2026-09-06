@@ -1,11 +1,11 @@
 //! The agent: an autonomous entity (agent spec §3).
 //!
-//! A session *is* an entity ([`entity`]). What the harness adds is **autonomy**:
+//! A session *is* an entity ([`entity`]). What the agent runtime adds is **autonomy**:
 //! an agent's activation drives itself forward — model→tools→model — until a run
 //! reaches a terminal outcome. The entity model is decide/apply: [`Entity::apply`]
 //! folds records into [`SessionState`], and each [`EntityHandler`] is a *pure
 //! decision* returning the records to journal plus a reply (entity §4.2). The
-//! loop rides three entity seams, none of which the harness re-implements:
+//! loop rides three entity seams, none of which the agent runtime re-implements:
 //!
 //! - **The output gate** (entity §6): a handler's records commit before its
 //!   reply releases, so "intent before effect" (§6.4) is free — a handler that
@@ -432,7 +432,7 @@ impl<S: HarnessSystem> Default for Activation<S> {
 
 /// The agent entity (agent spec §3): one `Agent` Rust type hosted under each
 /// kind's name (`entities_named`, §2.2). The behavior is built fresh per
-/// activation by the harness's factory, which injects the node's seams via
+/// activation by the agent runtime's factory, which injects the node's seams via
 /// [`Shared`]; the folded [`SessionState`] is the entity's `State`, rebuilt from
 /// the journal by entity.
 pub struct Agent<S: HarnessSystem> {
@@ -449,7 +449,7 @@ pub struct Agent<S: HarnessSystem> {
 
 impl<S: HarnessSystem> Agent<S> {
     /// Build a fresh activation's behavior, injecting this node's seams and this
-    /// entity type's kind (§7.4). Called by the harness factory passed to
+    /// entity type's kind (§7.4). Called by the agent runtime factory passed to
     /// `entities_named`.
     pub(crate) fn new(shared: Arc<Shared<S>>, kind: Arc<Kind>, seams: Seams) -> Agent<S> {
         Agent {
@@ -1643,7 +1643,7 @@ impl<S: HarnessSystem> Entity for Agent<S> {
     // sandbox tiers run over, captured after each tool call so the delta
     // commits atomically with the `ToolOutcome` record (E19).
     type Facets = (Ws,);
-    // The fallback type name; the harness hosts each kind under its own name via
+    // The fallback type name; the agent runtime hosts each kind under its own name via
     // `entities_named`, so a session's entity type is its `KindId` (§2.2).
     const ENTITY_TYPE: &'static str = "agent.Agent";
 

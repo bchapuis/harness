@@ -257,7 +257,7 @@ fn the_drive_cycle_holds_under_the_cluster_swarm() {
 /// successor activation (the orphaned chain of W6, which only a leader death
 /// mid-effect produces), and every transport fault type fired.
 #[test]
-fn the_drive_swarm_reaches_a_finish_a_relaunch_and_every_fault() {
+fn the_workflow_swarm_reaches_a_finish_a_relaunch_and_every_fault() {
     let workload = workload();
     let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..24)) {
         Ok(stats) => stats,
@@ -285,7 +285,7 @@ fn the_drive_swarm_reaches_a_finish_a_relaunch_and_every_fault() {
 /// The determinism contract over this workload (actor §18.1): the same seed
 /// twice, byte-identical event streams — workflow events included (§9).
 #[test]
-fn the_drive_swarm_replays_identically() {
+fn the_workflow_swarm_replays_identically() {
     if let Err(divergence) = replay_cluster_swarm(&workload(), sweep_seeds(0..8)) {
         panic!("{divergence}");
     }

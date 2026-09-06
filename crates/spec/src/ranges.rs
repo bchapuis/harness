@@ -2,7 +2,7 @@
 //! catalogues they name.
 //!
 //! A spec names a sibling's catalogue by its extent: `entity §N` (its invariants as
-//! **E1–E20**), "the harness (A1–A8)", "core §18.5 #1–#22". The range is a
+//! **E1–E20**), "the agent runtime (A1–A8)", "core §18.5 #1–#22". The range is a
 //! citation like any other — it points at a catalogue and says how far it runs —
 //! but where [`crate::citations`] resolves a `§` against a heading and
 //! [`crate::identifiers`] resolves a backticked name against the tree, nothing
@@ -12,7 +12,7 @@
 //!
 //! That is not hypothetical. `E21` was catalogued at entity §7.16 and every
 //! citation of entity's extent went on saying `E1–E20` — six of them across four
-//! documents: the harness and machine preambles, the machine's §7,
+//! documents: the agent runtime and machine preambles, the machine's §7,
 //! `docs/README.md`, and `simulation-testing.md`. Every one parses, resolves, and
 //! passes every other gate.
 //!
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn reads_a_range_with_either_dash() {
-        let found = ranges("its invariants as **E1–E20**, and the harness (A1-A8)");
+        let found = ranges("its invariants as **E1–E20**, and the agent runtime (A1-A8)");
         assert_eq!(found.len(), 2);
         assert_eq!(
             (found[0].label.as_str(), found[0].low, found[0].high),

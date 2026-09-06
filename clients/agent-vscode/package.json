@@ -1,7 +1,7 @@
 {
   "name": "agent-vscode",
   "displayName": "Agent",
-  "description": "Drive a agent session from the VS Code Agents window, over the gateway's HTTP/SSE edge.",
+  "description": "Drive an agent session from the VS Code Agents window, over the gateway's HTTP/SSE edge.",
   "version": "0.1.0",
   "publisher": "agent",
   "private": true,

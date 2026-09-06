@@ -12,7 +12,7 @@
 //!   spec gives the tier to bound a blob ("an implementation SHOULD bound a blob's
 //!   size"). A `put` past the bound must be rejected, not silently accepted.
 //!
-//! The harness mirrors `tests/clustered.rs` (SWIM gossip membership).
+//! The agent runtime mirrors `tests/clustered.rs` (SWIM gossip membership).
 
 use std::sync::Arc;
 use std::sync::Mutex;

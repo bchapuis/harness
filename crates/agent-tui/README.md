@@ -1,6 +1,6 @@
 # agent-tui
 
-A terminal client for the agentic harness: a two-pane chat UI over the gateway's
+A terminal client for the agent runtime: a two-pane chat UI over the gateway's
 HTTP/SSE edge (`crates/agent-gateway`). It authenticates as a tenant with a
 bearer token, lists that tenant's sessions, and drives one — submit a prompt and
 watch the run's records stream in live as a transcript.

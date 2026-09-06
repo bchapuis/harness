@@ -10,7 +10,7 @@
 //! §7) and the full fault swarm (spec §8) land in their own phases; this is the
 //! happy-path-plus-delete proof that the tier composes over the actor framework.
 //!
-//! The harness mirrors entity's `tests/clustered_entities.rs`, swapping the
+//! The agent runtime mirrors entity's `tests/clustered_entities.rs`, swapping the
 //! leader/raft network for SWIM gossip membership — a blob store needs the serving
 //! set, not consensus (spec §1, §4).
 

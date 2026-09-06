@@ -1,6 +1,6 @@
 //! The gateway's client-facing error model.
 //!
-//! Two failure layers stay distinct on the wire, exactly as the harness keeps
+//! Two failure layers stay distinct on the wire, exactly as the agent runtime keeps
 //! them apart (spec §12/§14): a *transport or durability* failure of reaching or
 //! committing a command — a [`EntityError`] — becomes an HTTP status here; an
 //! *application outcome* the run itself produced ([`RunOutcome`]'s `RunError`) is

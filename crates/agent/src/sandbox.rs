@@ -123,7 +123,7 @@ impl std::fmt::Display for SandboxError {
 /// as `Arc<dyn Sandbox>` behind the seam.
 pub trait Sandbox: Send + Sync + 'static {
     /// Execute one declared, sandboxed tool call to completion inside the
-    /// environment, at the call's declared tier (§5.2, §5.6). The harness
+    /// environment, at the call's declared tier (§5.2, §5.6). The agent runtime
     /// passes the tier — the provider holds no registry and cannot derive it
     /// (§5.3 item 1) — and passes only declared, cap-checked tiers, so a
     /// conforming pair grants nothing the journal does not show (sandbox

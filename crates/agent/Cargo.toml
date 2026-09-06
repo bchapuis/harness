@@ -1,6 +1,6 @@
 [package]
 name = "agent"
-description = "The agentic harness: compound AI sessions as journaled actors on the cluster"
+description = "The agent runtime: compound AI sessions as journaled actors on the cluster"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

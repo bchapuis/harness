@@ -130,7 +130,7 @@ pub fn fc_shell_tool() -> ToolDecl {
 
 /// Deployment-level Firecracker configuration, handed to
 /// [`crate::TieredSandboxes::with_firecracker`]: the node's VMM assets. Which
-/// base rootfs a session boots is solely the profile's `image` (harness spec
+/// base rootfs a session boots is solely the profile's `image` (agent spec
 /// §5.3 item 4), a host path to an ext4 containing `/sbin/fc-agent`; keeping
 /// it out of this config keeps the choice inside the digest the cluster
 /// agrees on.

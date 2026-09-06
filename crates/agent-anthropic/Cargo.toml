@@ -1,6 +1,6 @@
 [package]
 name = "agent-anthropic"
-description = "Production Model seam for the agentic harness: the Anthropic Messages API client"
+description = "Production Model seam for the agent runtime: the Anthropic Messages API client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

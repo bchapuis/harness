@@ -183,7 +183,7 @@ fn a_single_seed_replays_identically() {
     assert!(run_seed(&workload, 12345).is_ok());
 }
 
-/// A workload that abandons an in-flight ask, to prove the harness actually
+/// A workload that abandons an in-flight ask, to prove the agent runtime actually
 /// catches a silently-lost call rather than passing everything.
 struct DropsAnAsk;
 

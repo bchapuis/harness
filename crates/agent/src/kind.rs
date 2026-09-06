@@ -5,7 +5,7 @@
 //! [`EntityConfig`] for the entity type it hosts. Every node MUST register every
 //! kind (§7.1).
 //!
-//! A `KindId` **is** an entity type (§2.2). The harness hosts one `Agent` entity
+//! A `KindId` **is** an entity type (§2.2). The agent runtime hosts one `Agent` entity
 //! ([`crate::agent`]) under each kind's name via `entities_named`
 //! ([`crate::client::Harness::builder`]), so each kind is its own entity type —
 //! its own gateway, shard map, namespace, and `EntityConfig` — while sharing
@@ -42,7 +42,7 @@ pub struct Kind {
     /// `delegate` tool is in the model's toolset.
     pub delegates: Vec<KindId>,
     /// The entity type's configuration (§7.1, entity Appendix A): shard count,
-    /// replication factor, idle window, snapshot policy. The harness passes it to
+    /// replication factor, idle window, snapshot policy. The agent runtime passes it to
     /// `entities_named` when it hosts this kind's entity type.
     pub config: EntityConfig,
 }
@@ -72,7 +72,7 @@ impl Kind {
 
     /// Declare a sandboxed tool (§5.2) at its required tier (§5.6), with the
     /// safe orphaned policy (`Interrupt`, §5.5): on a crash-resume boundary the
-    /// model, not the harness, decides whether to retry the side effect. An
+    /// model, not the agent runtime, decides whether to retry the side effect. An
     /// idempotent tool opts into blind re-execution via [`Kind::tool`]. The tier
     /// is explicit, never defaulted: it is digest-covered deployment
     /// configuration (§7.1).
@@ -194,7 +194,7 @@ impl Kind {
 }
 
 /// The cluster-wide `KindId → Kind` map (agent spec §7.1), identical on every
-/// node. The harness hosts one entity type per registered kind (§2.2).
+/// node. The agent runtime hosts one entity type per registered kind (§2.2).
 #[derive(Clone, Debug, Default)]
 pub struct Kinds {
     map: BTreeMap<KindId, Arc<Kind>>,

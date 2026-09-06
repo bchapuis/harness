@@ -59,7 +59,7 @@ fn worker_kinds() -> Kinds {
 fn two_turn_model() -> ScriptedModel {
     ScriptedModel::new(|req| match req.transcript.last() {
         Some(agent::Entry::ToolResult { .. }) => Ok(final_message("done")),
-        // Empty call id: the harness assigns a deterministic per-step id.
+        // Empty call id: the agent runtime assigns a deterministic per-step id.
         _ => Ok(tool_call("", "fetch", json!({}))),
     })
 }
@@ -112,7 +112,7 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
     let (resumed, events) = run_two_turns(71, "s-resume", true);
     let (control, _) = run_two_turns(71, "s-resume", false);
 
-    // The harness checkers hold over the resumed run's full stream (§11).
+    // The agent runtime checkers hold over the resumed run's full stream (§11).
     let violations = check_events(&events);
     assert!(violations.is_empty(), "checkers: {violations:?}");
 

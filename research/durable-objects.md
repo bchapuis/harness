@@ -99,7 +99,7 @@ In short: Raft is a bottleneck only when it is one big shared log doing ordering
 - **Activation.** The identity always exists conceptually; the runtime materializes the object on first access near the caller.
 - **Migration / eviction.** The platform may evict or move an object at any time — for capacity, region failover, or deploy. From the object's view this is "a long pause between cycles"; it rehydrates from durable storage. **In-memory state is not preserved** across eviction or crash, so in-memory state is a cache, never the source of truth.
 - **Hibernation.** After idle time the object leaves memory; persisted storage survives. Hibernatable WebSockets park connections so the object can sleep without dropping them or being billed for idle time, re-delivering messages via callbacks (`webSocketMessage`, `webSocketClose`, `webSocketError`).
-- **Alarms.** `storage.setAlarm()` durably schedules a future `alarm()` invocation with no client connected — the basis for queues, retries, timeouts, and batch flushes. This maps onto the harness's ticket/waiter and perpetual-loop patterns.
+- **Alarms.** `storage.setAlarm()` durably schedules a future `alarm()` invocation with no client connected — the basis for queues, retries, timeouts, and batch flushes. This maps onto the agent runtime's ticket/waiter and perpetual-loop patterns.
 
 ---
 

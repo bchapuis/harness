@@ -1,7 +1,7 @@
 //! The node's admin socket: how `create`, `status`, and `key` reach the
 //! cluster.
 //!
-//! **Why the CLI is not a cluster client.** The harness gateway joins the
+//! **Why the CLI is not a cluster client.** The agent runtime gateway joins the
 //! transport as a non-voting member and addresses entities directly, and that is
 //! the right shape for it: it is *long-lived*. A CLI process lives for one
 //! command. A member that short never survives long enough for the failure

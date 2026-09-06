@@ -8,7 +8,7 @@ import type { GatewayClient } from "./gatewayClient.js";
  * has records, so a freshly-named session would otherwise be invisible until
  * its first turn.
  */
-export class HarnessSessionItemProvider implements vscode.ChatSessionItemProvider {
+export class AgentSessionItemProvider implements vscode.ChatSessionItemProvider {
   private readonly emitter = new vscode.EventEmitter<void>();
   readonly onDidChangeChatSessionItems = this.emitter.event;
   private readonly pending = new Set<string>();

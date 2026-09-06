@@ -2,7 +2,7 @@
 //!
 //! The continuous H-checkers: the event grammar that bounds effects to a live
 //! activation (A6/A8), and run discipline over `(session, turn)` (A3/A7). Test
-//! support behind the `testing` feature, not part of the harness API.
+//! support behind the `testing` feature, not part of the agent runtime API.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -26,7 +26,7 @@ fn session_of(name: &EntityName) -> SessionId {
 
 /// **Effect containment and single per-node activation** (A6 per-node half, A8):
 /// activation is the entity's (`Activated`/`Deactivated` strictly alternate per
-/// session and node, entity §13); the harness's `SandboxBound`/`SandboxReleased`
+/// session and node, entity §13); the agent runtime's `SandboxBound`/`SandboxReleased`
 /// alternate **within** that window and the sandbox is released before
 /// deactivation; and a `ModelCompleted` only fires inside a live activation.
 #[derive(Default)]
@@ -171,7 +171,7 @@ impl Invariant for RunDiscipline {
 }
 
 /// The default checker set for harness workloads: the core and entity invariants
-/// plus the harness's continuous H-checkers (§11).
+/// plus the agent runtime's continuous H-checkers (§11).
 pub fn agent_invariants() -> Vec<Box<dyn Invariant>> {
     let mut invariants = default_invariants();
     invariants.push(Box::new(AgentEventGrammar::default()));

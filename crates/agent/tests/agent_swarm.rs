@@ -1,14 +1,14 @@
-//! The harness's swarm sweeps (agent spec §12; core spec §18.1).
+//! The agent runtime's swarm sweeps (agent spec §12; core spec §18.1).
 //!
 //! Two claims over the same faulted workload. **Determinism:** the same
 //! `(workload, seed)` reproduces the full event stream byte-for-byte —
 //! harness *and* entity events — with model and sandbox faults firing under seed
 //! control. **Invariants:** the H-invariants hold across a seed sweep while
 //! those faults flow. The journal, the fence, and resume are the entity's, so
-//! simulating the harness runs entity's real consensus/rehydration code.
+//! simulating the agent runtime runs entity's real consensus/rehydration code.
 //!
 //! Named `*swarm.rs` because both are sweeps, and a sweep fails by naming a
-//! seed rather than a sequence (docs/simulation-testing.md). Harness has one
+//! seed rather than a sequence (docs/simulation-testing.md). The agent runtime has one
 //! area, so the crate name is the area name.
 
 mod support;

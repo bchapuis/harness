@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the QuickJS runner to wasm and install it as the committed artifact.
 #
-# Requirements (not needed for a normal `cargo build` of the harness):
+# Requirements (not needed for a normal `cargo build` of the agent runtime):
 #   - rustup target wasm32-wasip1
 #   - a WASI SDK (clang + wasm sysroot), for rquickjs's quickjs-ng C build
 #   - libclang, for rquickjs's bindgen on wasm32-wasip1

@@ -11,7 +11,7 @@ const PARTICIPANT = "agent";
  * gateway's SSE run into the chat view. Cancellation aborts the stream and asks
  * the gateway to cancel the turn.
  */
-export class HarnessSessionContentProvider implements vscode.ChatSessionContentProvider {
+export class AgentSessionContentProvider implements vscode.ChatSessionContentProvider {
   /** Highest record seq seen per session — the exclusive resume cursor. */
   private readonly lastSeq = new Map<string, number>();
 

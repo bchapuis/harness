@@ -7,7 +7,7 @@
 //! claim still open.
 //!
 //! Test support behind the `testing` feature, not part of the workflow's API, and
-//! mountable by any consumer's swarm as entity and the harness both ship theirs.
+//! mountable by any consumer's swarm as entity and the agent runtime both ship theirs.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

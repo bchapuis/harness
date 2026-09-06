@@ -52,7 +52,7 @@
 //!   spec twice and only the first says so. The inheritance is this crate's
 //!   inference, but it binds like a written prefix, which means a citation that
 //!   changes document mid-list has to say so. One did — `entity §6, §6.2`, where
-//!   the second is the harness's own — and saying so was the cheaper fix.
+//!   the second is the agent runtime's own — and saying so was the cheaper fix.
 //! - **An unprefixed citation follows the citing document's own convention**,
 //!   declared per document as [`Unprefixed`]. Most specs number their own sections
 //!   and mean themselves. Some number nothing and mean one particular spec

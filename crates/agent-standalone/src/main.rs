@@ -1,4 +1,4 @@
-//! `agent-standalone`: a runnable deployment of the agentic harness.
+//! `agent-standalone`: a runnable deployment of the agent runtime.
 //!
 //! One subcommand, `node`, boots one cluster node (silo): the production runtime
 //! (tokio, TCP), its own file journal replicated to peers, the Anthropic model,

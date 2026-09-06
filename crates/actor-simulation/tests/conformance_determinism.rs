@@ -659,7 +659,7 @@ impl Workload for NonDeterministic {
 
 #[test]
 fn the_checker_catches_a_determinism_leak() {
-    // Mirrors `harness_detects_a_silently_lost_ask`: prove the harness fails on a
+    // Mirrors `harness_detects_a_silently_lost_ask`: prove the agent runtime fails on a
     // genuinely non-reproducible run rather than passing everything.
     let divergence = check_reproducible(&NonDeterministic, 1)
         .expect_err("ambient nondeterminism must be caught");

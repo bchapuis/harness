@@ -131,7 +131,7 @@ pub const DOCUMENTS: &[DocSpec] = &[
         aliases: &["blob", "blob-store"],
         unprefixed: Unprefixed::Own,
     },
-    // The autonomous entity (the `workflow` crate). Cites the harness above it: the
+    // The autonomous entity (the `workflow` crate). Cites the agent runtime above it: the
     // harness is the layer it generalizes and does not yet sit on it.
     DocSpec {
         id: "workflow",
@@ -145,7 +145,7 @@ pub const DOCUMENTS: &[DocSpec] = &[
         aliases: &["agent"],
         unprefixed: Unprefixed::Own,
     },
-    // §5 relates the tier model to the harness's own §5, and cites into it bare.
+    // §5 relates the tier model to the agent runtime's own §5, and cites into it bare.
     DocSpec {
         id: "sandbox",
         path: "docs/sandbox-spec.md",
@@ -181,7 +181,7 @@ pub const DOCUMENTS: &[DocSpec] = &[
         aliases: &["simulation-testing"],
         unprefixed: Unprefixed::Other(&["actor"]),
     },
-    // A deployment guide for the harness; its bare `spec §6.1` is the harness spec.
+    // A deployment guide for the agent runtime; its bare `spec §6.1` is the agent runtime spec.
     DocSpec {
         id: "standalone",
         path: "docs/standalone-deployment.md",

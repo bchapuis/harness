@@ -334,7 +334,7 @@ fn a_compacted_entity_reports_its_base_instead_of_a_silent_gap() {
 
 // --- can_hibernate: an entity that vetoes idle hibernation (§10) ----------------
 
-/// An entity that never permits idle hibernation. The agentic harness overrides
+/// An entity that never permits idle hibernation. The agent runtime overrides
 /// `can_hibernate` this way while a run is live (agent §7.2).
 #[derive(Default)]
 struct PinnedEntity;
@@ -632,11 +632,11 @@ fn account_balance_survives_reactivation() {
 
 #[test]
 fn entity_named_hosts_one_entity_under_many_type_names() {
-    // The extension point the agentic harness rides (§5.1): one Rust entity (its
+    // The extension point the agent runtime rides (§5.1): one Rust entity (its
     // run loop) hosted under many runtime type names — one per kind. Each name is
     // its own entity type (its own gateway key, shard map, and namespace), so the
     // same key under two names addresses two **independent** entities. The factory
-    // also replaces `G::default`, the seam the harness uses to inject per-node
+    // also replaces `G::default`, the seam the agent runtime uses to inject per-node
     // handles into each fresh activation.
     let sim = Simulation::new(5);
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();

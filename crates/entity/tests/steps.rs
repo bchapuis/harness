@@ -214,7 +214,7 @@ fn a_relaunched_step_does_not_overwrite_the_memo() {
 
 #[test]
 fn launch_guard_claims_by_arbitrary_key() {
-    // The guard is generic over the consumer's step key (the harness agent
+    // The guard is generic over the consumer's step key (the agent runtime agent
     // keys tool steps by the model's call id): claims are per-key, readable
     // without claiming, and reset restores idleness.
     let mut guard: LaunchGuard<String> = LaunchGuard::default();

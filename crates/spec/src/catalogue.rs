@@ -430,7 +430,7 @@ fn heading(line: &str) -> Option<(usize, String)> {
 }
 
 /// Rows of the first table in `body` that has `Invariant` and `Verified by`
-/// columns. Columns are found by header name: the harness table carries a fifth
+/// columns. Columns are found by header name: the agent runtime table carries a fifth
 /// `Entity basis` column the others do not.
 fn table_rows(body: &str, site: &CatalogueSite) -> Vec<Row> {
     let mut lines = body.lines().skip_while(|l| {
@@ -578,7 +578,7 @@ fn stem(pointer: &str) -> String {
 mod tests {
     use super::*;
 
-    const GRANARY: CatalogueSite = CatalogueSite {
+    const ENTITY: CatalogueSite = CatalogueSite {
         id: "entity",
         doc: "entity",
         section: "15",
@@ -612,7 +612,7 @@ mod tests {
         let body = "\n| | Invariant | Defined in | Verified by |\n|---|---|---|---|\n\
                     | **E1** | **Single writer.** Only the leader appends. | §6, §8 | \
                     `clustered_entities.rs`, `entities.rs` |\n";
-        let rows = table_rows(body, &GRANARY);
+        let rows = table_rows(body, &ENTITY);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].number, 1);
         assert_eq!(rows[0].sections, ["6", "8"]);
@@ -657,7 +657,7 @@ mod tests {
                     | A1 | **Fold.** | §6.2 | `sessions.rs` | E2 |\n";
         let site = CatalogueSite {
             label: "A",
-            ..GRANARY
+            ..ENTITY
         };
         let rows = table_rows(body, &site);
         assert_eq!(rows.len(), 1);
@@ -713,7 +713,7 @@ mod tests {
             Row::new(2, "§9", Pointers::Files, ["b.rs"]),
             Row::new(4, "§9", Pointers::Files, ["d.rs"]),
         ];
-        let found = compare(&GRANARY, &documented, &implemented);
+        let found = compare(&ENTITY, &documented, &implemented);
         assert!(found.contains(&Mismatch::Undocumented { label: "E3".into() }));
         assert!(found.contains(&Mismatch::Unimplemented { label: "E4".into() }));
         assert!(
@@ -729,7 +729,7 @@ mod tests {
         let site = CatalogueSite {
             shape: Shape::NumberedList,
             pointers: Pointers::Prose,
-            ..GRANARY
+            ..ENTITY
         };
         let documented = vec![Row::new(1, "§6", Pointers::Prose, Vec::<String>::new())];
         let implemented = vec![Row::new(1, "§6", Pointers::Files, ["conformance_swarm.rs"])];

@@ -1,6 +1,6 @@
 //! Catalogue drift test (sandbox spec §6): the machine-readable S1–S5
 //! catalogue stays complete and accurate — the same pattern guarding the core,
-//! utilities, and harness catalogues.
+//! utilities, and agent catalogues.
 
 mod support;
 
@@ -19,7 +19,7 @@ use support::s_catalogue;
 /// that misses this table fails the build here, as it does everywhere else.
 ///
 /// A bare name is a file under this crate's `tests/`; a name with a slash is
-/// relative to `crates/`, which is how S4 reaches the harness suite that owns it.
+/// relative to `crates/`, which is how S4 reaches the agent runtime suite that owns it.
 #[test]
 fn every_file_pointer_references_a_real_file() {
     let tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
@@ -78,7 +78,7 @@ fn no_entry_claims_a_continuous_checker() {
     // execution carries no events for one to consume (agent spec §5.6
     // item 6). Anyone adding a `Verify::Checker` entry here must wire the
     // checker into a live invariant set first — and then this assertion,
-    // like its harness sibling, becomes the drift test between the two.
+    // like its agent sibling, becomes the drift test between the two.
     for entry in s_catalogue() {
         assert!(
             !entry.verify.iter().any(|v| matches!(v, Verify::Checker(_))),

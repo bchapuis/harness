@@ -12,7 +12,7 @@
 //! - `resolve` isolates what `ActorRef` adds over an already-resolved mailbox — the
 //!   registry lookup every send repeats — and sweeps the live-actor count, because that
 //!   lookup walks a map keyed by actor id.
-//! - `spawn` covers actor creation, which the harness pays per delegation.
+//! - `spawn` covers actor creation, which the agent runtime pays per delegation.
 //!
 //! Allocation counts are reported beside the timings and are the steadier number of the
 //! two: a send is short enough that scheduler noise moves the median more than a removed
@@ -191,7 +191,7 @@ fn resolve(bencher: Bencher, live: usize) {
 }
 
 /// Actor creation: id assignment, the mailbox channel, the registry insert, and the task
-/// launch. The harness pays this per delegation, so it is on the loop's path, not only at
+/// launch. The agent runtime pays this per delegation, so it is on the loop's path, not only at
 /// startup.
 ///
 /// Each iteration gets a fresh system, built in `with_inputs` so its construction is

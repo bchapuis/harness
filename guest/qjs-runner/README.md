@@ -9,7 +9,7 @@ handle, and injected seed as any other Compute guest.
 
 This crate is **outside** the main Cargo workspace (note the empty
 `[workspace]` table in `Cargo.toml`). A normal `cargo build`/`cargo test` of
-the harness never compiles it; only `build.sh` does.
+the agent runtime never compiles it; only `build.sh` does.
 
 ## What the script sees
 

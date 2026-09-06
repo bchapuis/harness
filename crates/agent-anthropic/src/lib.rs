@@ -116,7 +116,7 @@ pub fn encode_request(req: &ModelRequest) -> Value {
                 );
             }
             // The workspace-loss notice (§5.5): it answers no CallId, so it
-            // enters as input content the harness authors — the encoding's
+            // enters as input content the agent runtime authors — the encoding's
             // analogue of a user message.
             Entry::WorkspaceReset => push(
                 "user",
@@ -200,7 +200,7 @@ struct ApiErrorBody {
     message: String,
 }
 
-/// Map an HTTP outcome onto the harness's [`ModelError`] taxonomy (§4.3).
+/// Map an HTTP outcome onto the agent runtime's [`ModelError`] taxonomy (§4.3).
 fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
     if response.status == 200 {
         let parsed: ApiResponse = serde_json::from_slice(&response.body)

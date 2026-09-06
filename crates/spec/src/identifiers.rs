@@ -38,7 +38,7 @@
 //! - **Not this tree's** — `Option`, `HashMap`, `Serialize`, Akka's `ClusterClient`.
 //! - **Not an identifier** — the `Rev` column of a table, the `TODO` the docs
 //!   promise you will not find, SQL's `TRUNCATE`.
-//! - **Named to say it does not exist** — the harness "mints no `RunResumed` event
+//! - **Named to say it does not exist** — the agent runtime "mints no `RunResumed` event
 //!   of its own"; `Transport::local_window` is a seam compatibility §4 records as
 //!   built and pulled back. This kind is the reason a plain "every name must
 //!   resolve" rule would be wrong: a specification says what a system does *not*
@@ -156,7 +156,7 @@ pub const EXEMPT: &[Exempt] = &[
         "RunResumed",
         Why::DeclaredAbsent,
         "agent §10: a resume is recognized from Activated plus ModelCompleted, so \
-         \"the harness mints no RunResumed event of its own\"",
+         \"the agent runtime mints no RunResumed event of its own\"",
     ),
     e(
         "Transport::local_window",

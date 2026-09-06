@@ -1,4 +1,4 @@
-//! `agent-tui`: a terminal client for the agentic harness.
+//! `agent-tui`: a terminal client for the agent runtime.
 //!
 //! It talks to a `agent-gateway` over its HTTP/SSE surface — nothing else. It
 //! authenticates as a tenant with a bearer token, lists that tenant's sessions,

@@ -1,6 +1,6 @@
 //! The model seam (agent spec §4): one inference request, one response.
 //!
-//! The harness core depends only on the [`Model`] trait: `agent-anthropic`
+//! The agent runtime core depends only on the [`Model`] trait: `agent-anthropic`
 //! implements it over the Anthropic Messages API in production, and the
 //! simulator supplies a scripted model — a deterministic function of the request
 //! and the run's seed (§12.2). A completion request is side-effect-free, so an
@@ -10,7 +10,7 @@
 //! never silently.
 //!
 //! The trait returns a [`BoxFuture`] rather than using `async fn` so it stays
-//! object-safe: the harness injects seams as `Arc<dyn Model>`.
+//! object-safe: the agent runtime injects seams as `Arc<dyn Model>`.
 
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ use crate::session::CallId;
 use crate::session::Entry;
 
 /// Model parameters of a kind (agent spec §7.1): deployment configuration
-/// the harness stores and transmits, not interprets.
+/// the agent runtime stores and transmits, not interprets.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelParams {
     /// The provider-side model identifier.
@@ -51,7 +51,7 @@ impl Default for ModelParams {
 
 /// One declared tool as the model sees it (agent spec §4.1): name,
 /// description, input schema — the interface half of a [`ToolDecl`]
-/// (§5.2), without the harness-side recovery policy.
+/// (§5.2), without the agent runtime-side recovery policy.
 ///
 /// [`ToolDecl`]: crate::tool::ToolDecl
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -81,7 +81,7 @@ pub struct ModelRequest {
 }
 
 /// One tool call the model requested (agent spec §5.2). The `id` is the
-/// model API's tool-use id, or one the harness assigned on receipt; it is the
+/// model API's tool-use id, or one the agent runtime assigned on receipt; it is the
 /// key orphaned-call resolution (§5.5) and child derivation (§8.1) match by.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -125,7 +125,7 @@ impl std::fmt::Display for ModelError {
     }
 }
 
-/// Inference: one request, one response; no streaming in v1 (harness spec
+/// Inference: one request, one response; no streaming in v1 (agent spec
 /// §13). The first harness seam.
 pub trait Model: Send + Sync + 'static {
     fn complete(&self, req: ModelRequest) -> BoxFuture<'static, Result<ModelResponse, ModelError>>;

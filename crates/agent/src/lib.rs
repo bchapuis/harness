@@ -1,4 +1,4 @@
-//! The agentic harness (agent-spec.md): compound AI sessions run as
+//! The agent runtime (agent-spec.md): compound AI sessions run as
 //! **entities** on a mutualized cluster. An agent is an entity ([`entity`]) plus
 //! three things — a self-driving loop, a model seam, and a sandbox — and nothing
 //! else: identity, the journal, the single-writer fence, placement, activation,
@@ -85,7 +85,7 @@ pub use tool::ToolDecl;
 pub use tool::ToolError;
 pub use tool::ToolRegistry;
 
-// Re-exported entity types that appear in the harness's public surface, so a
+// Re-exported entity types that appear in the agent runtime's public surface, so a
 // consumer needs no direct entity dependency for ordinary use.
 pub use entity::EventHistory;
 pub use entity::FileEntityStore;

@@ -8,7 +8,7 @@
 //! §2.2), injecting the node's model and sandbox seams into every activation
 //! through the factory.
 //!
-//! [`HarnessSystem`] is the harness's name for the system it runs on — exactly
+//! [`HarnessSystem`] is the agent runtime's name for the system it runs on — exactly
 //! a [`EntitySystem`]; its §10.4 events ride the core `emit` seam onto the
 //! same observability stream the entity's events use.
 
@@ -145,7 +145,7 @@ impl Default for HarnessConfig {
 
 /// The node-global addressing context shared by a [`Harness`] and every `Agent`
 /// activation it hosts (§7.4): the per-kind entity directory (for routing and
-/// delegation), the cluster-wide kind registry, and the harness tuning. It holds
+/// delegation), the cluster-wide kind registry, and the agent runtime tuning. It holds
 /// **no** activation seams — those live on the hosted kind's [`Seams`].
 pub(crate) struct Shared<S: HarnessSystem> {
     pub(crate) kinds: Kinds,
@@ -349,7 +349,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
         self
     }
 
-    /// Override the harness tuning (§7.2); defaults to [`HarnessConfig::default`].
+    /// Override the agent runtime tuning (§7.2); defaults to [`HarnessConfig::default`].
     pub fn config(mut self, config: HarnessConfig) -> Self {
         self.config = config;
         self
@@ -491,7 +491,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
 }
 
 impl<S: HarnessSystem> HarnessBuilder<S, NoRoutes> {
-    /// Build the harness. Infallible: there is nothing to discover. Panics if a
+    /// Build the agent runtime. Infallible: there is nothing to discover. Panics if a
     /// hosted kind's delegation allowlist names a kind this node neither hosts
     /// nor routes (§7.1) — a deployment configuration error.
     pub fn build(self) -> Harness<S> {
@@ -501,7 +501,7 @@ impl<S: HarnessSystem> HarnessBuilder<S, NoRoutes> {
 }
 
 impl<S: HarnessSystem> HarnessBuilder<S, HasRoutes> {
-    /// Build the harness, or `None` until every routed kind's host gateway has
+    /// Build the agent runtime, or `None` until every routed kind's host gateway has
     /// gossiped into this node's receptionist (poll). Hosting side effects run
     /// only once all routed kinds resolve. Panics if a hosted kind's delegation
     /// allowlist names a kind this node neither hosts nor routes (§7.1) — a

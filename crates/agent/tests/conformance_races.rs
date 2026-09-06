@@ -57,7 +57,7 @@ fn probing_kind() -> Kinds {
     )
 }
 
-/// One id-less tool call per turn, then a final message: the harness
+/// One id-less tool call per turn, then a final message: the agent runtime
 /// synthesizes `call-{step}-{i}` ids, so every run's first call is
 /// `call-1-0` — consecutive runs collide exactly when stale per-run state
 /// leaks across the run boundary.

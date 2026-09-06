@@ -149,7 +149,7 @@ impl<K: Ord> Backoff<K> {
     /// Clear every at-rest key, so a caller-driven drive retries it.
     ///
     /// This is the difference between the engine's own timer re-entering the cycle
-    /// and *someone asking*. The harness draws the same line today: it abandons a
+    /// and *someone asking*. The agent runtime draws the same line today: it abandons a
     /// propagation launch after bounded retries, and "the next message that drives
     /// the session — on this same activation or a later one — re-launches the
     /// send" (agent §9.2 item 3). A key at rest is waiting for exactly that

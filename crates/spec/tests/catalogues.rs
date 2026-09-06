@@ -57,7 +57,7 @@ fn every_catalogue_parses_into_rows() {
     }
 }
 
-/// Numbering is per catalogue and starts at one. The harness catalogue has no A2
+/// Numbering is per catalogue and starts at one. The agent runtime catalogue has no A2
 /// (agent §11), so this asserts a contiguous run only up to that documented gap
 /// rather than assuming one.
 #[test]

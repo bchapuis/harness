@@ -402,10 +402,10 @@ pub(crate) fn capped(bytes: &[u8]) -> String {
     format!("{}… [truncated {} bytes]", &text[..end], text.len() - end)
 }
 
-/// Distinguish a lost environment from an ordinary outcome (harness spec
+/// Distinguish a lost environment from an ordinary outcome (agent spec
 /// §5.5): when the session's workspace directory no longer exists on disk
 /// the environment itself is gone, whatever the call reported.
-/// `EnvironmentLost` engages the harness's reset protocol (drop the binding,
+/// `EnvironmentLost` engages the agent runtime's reset protocol (drop the binding,
 /// journal `WorkspaceReset`). The loss outranks even an `Ok`: the open handle
 /// keeps a deleted directory's fd alive, so a call can "succeed" against it
 /// (an empty listing, a tar sync of nothing) while its effects have no

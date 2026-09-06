@@ -1771,7 +1771,7 @@ mod tests {
                     committed.entry((group, src)).or_default().push(command);
                 }
                 // A test that drives compaction replaces the recorded log with the
-                // snapshot's commands; the harness here only exercises plain applies.
+                // snapshot's commands; the agent runtime here only exercises plain applies.
                 Committed::Snapshot { .. } => {}
             }
         }

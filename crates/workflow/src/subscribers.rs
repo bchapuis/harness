@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 /// The reply-tos registered against in-flight work (spec §7.1): ephemeral
 /// activation state, never journaled.
 ///
-/// `K` identifies the unit of work a caller is waiting on (the harness's
+/// `K` identifies the unit of work a caller is waiting on (the agent runtime's
 /// `TurnId`); `V` is the consumer's own notification address (an `ActorRef` to a
 /// reply mailbox). Several callers may wait on one `K` — that is what
 /// "attaching to a live run" is.

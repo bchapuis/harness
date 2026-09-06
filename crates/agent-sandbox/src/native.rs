@@ -14,7 +14,7 @@
 //!
 //! Conduct:
 //!
-//! - **Timeouts bound the outcome, not the effect.** The harness enforces a
+//! - **Timeouts bound the outcome, not the effect.** The agent runtime enforces a
 //!   tool timeout by dropping the call future, which kills the `docker exec`
 //!   *client* only (`kill_on_drop`); the process inside the container
 //!   survives until [`NativeTier::release`]'s `rm -f`. That is the contract
@@ -94,7 +94,7 @@ pub(crate) struct NativeTier {
     /// This node's container mechanism, which owns every CLI invocation
     /// (`machine_host::container`): the tier owns what a `Native` call *means*.
     host: ContainerHost,
-    /// The profile's image reference, provider-interpreted (harness spec
+    /// The profile's image reference, provider-interpreted (agent spec
     /// §5.3 item 4). Empty fails per-call: no silent network-pulled default.
     image: String,
     /// Host path of the session workspace, retained for the bind mount only

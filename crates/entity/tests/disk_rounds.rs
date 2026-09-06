@@ -421,7 +421,7 @@ fn pipelining_the_puts_is_what_makes_a_block_cheap_and_not_its_size() {
     // A band rather than a figure. In principle the win is the full `IN_FLIGHT`-fold;
     // in practice an import also reads and writes the image and the transport's
     // per-frame latency is seeded rather than fixed, so demanding the factor itself
-    // would be asserting the harness. A quarter of it is far outside anything those
+    // would be asserting the agent runtime. A quarter of it is far outside anything those
     // can account for, and far inside what a regression to a serial loop would show.
     let speedup = serial.as_secs_f64() / pipelined.as_secs_f64();
     assert!(

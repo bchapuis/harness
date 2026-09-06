@@ -1,17 +1,17 @@
-//! Test support for the harness conformance suite (agent spec §11, §12).
+//! Test support for the agent runtime conformance suite (agent spec §11, §12).
 //!
-//! The harness adds **two** rows to the table entity already virtualizes
+//! The agent runtime adds **two** rows to the table entity already virtualizes
 //! (§12.1): the **scripted model** (a deterministic function of the request) and
 //! the **scripted sandbox** (deterministic outcomes per call). The journal is
-//! the entity's, so the harness tests drive the real entity host, gateway, and
-//! rehydration code under the same seed — simulating the harness *runs the real
+//! the entity's, so the agent runtime tests drive the real entity host, gateway, and
+//! rehydration code under the same seed — simulating the agent runtime *runs the real
 //! consensus path*, with the agent's loop the only new code on it.
 //!
 //! Plus the continuous H-invariant checkers (§11) and the machine-readable
 //! [`agent_catalogue`], guarded by the same drift-test pattern as the core and
 //! entity catalogues. Activation, deactivation, and the single-writer fence are
 //! observed through the **entity's** events (`Activated`/`Deactivated`, entity
-//! §13), not duplicated by the harness.
+//! §13), not duplicated by the agent runtime.
 
 #![allow(dead_code)]
 
@@ -116,7 +116,7 @@ type ModelFactory = Arc<dyn Fn(&SimSystem) -> Arc<dyn Model> + Send + Sync>;
 type SandboxFactory = Arc<dyn Fn(&SimSystem) -> Arc<dyn SandboxProvider> + Send + Sync>;
 
 /// A reusable single-run workload (§12): builds a harness on the simulation's
-/// `LocalSystem` with the given seams, runs `body`, and checks the harness
+/// `LocalSystem` with the given seams, runs `body`, and checks the agent runtime
 /// invariants over the run's event stream. The journal is the entity's; the seams
 /// come from factories so a seam that needs the run's clock (a `SlowModel`) is
 /// built from the handed system, while a caller-held seam (whose stats are read
@@ -326,7 +326,7 @@ impl actor_core::EventSink for CollectingSink {
     }
 }
 
-/// Feed a recorded stream through the harness checkers after the fact.
+/// Feed a recorded stream through the agent runtime checkers after the fact.
 pub fn check_events(events: &[Event]) -> Vec<String> {
     let mut invariants = agent_invariants();
     let mut violations = Vec::new();
@@ -505,7 +505,7 @@ impl SandboxProvider for ScriptedSandboxes {
 }
 
 // The continuous H-invariant checkers (§11) are *not* defined here: they are
-// claims about the harness's contract rather than scaffolding for one suite, so
+// claims about the agent runtime's contract rather than scaffolding for one suite, so
 // they live in `agent::testing` behind the `testing` feature, shared by every
 // suite in this crate. Re-exported so call sites keep reading `support::…`.
 pub use agent::testing::agent_invariants;
@@ -575,7 +575,7 @@ pub fn audit_tier_acquisition(records: &[agent::Record], kind: &agent::Kind) {
 // The H catalogue (§11)
 // ---------------------------------------------------------------------------
 
-/// The harness invariant catalogue (agent spec §11): machine readable
+/// The agent runtime invariant catalogue (agent spec §11): machine readable
 /// alongside the conformance suite, guarded by the drift test in
 /// `conformance_catalogue.rs`. `invariant: n` reads as "Hn". **A2 is retired**
 /// (§11): the single-writer fence is wholly the entity's (E1), so it has no

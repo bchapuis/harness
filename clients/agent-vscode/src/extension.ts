@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 import { currentKind, loadConfig, TOKEN_SECRET_KEY } from "./config.js";
 import { GatewayClient } from "./gatewayClient.js";
-import { HarnessSessionContentProvider } from "./contentProvider.js";
-import { HarnessSessionItemProvider } from "./sessionProvider.js";
+import { AgentSessionContentProvider } from "./contentProvider.js";
+import { AgentSessionItemProvider } from "./sessionProvider.js";
 
 const SESSION_TYPE = "agent";
 
@@ -10,8 +10,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const makeClient = async () => new GatewayClient(await loadConfig(context.secrets));
   const getKind = () => currentKind();
 
-  const items = new HarnessSessionItemProvider(makeClient, getKind);
-  const content = new HarnessSessionContentProvider(makeClient, getKind);
+  const items = new AgentSessionItemProvider(makeClient, getKind);
+  const content = new AgentSessionContentProvider(makeClient, getKind);
 
   context.subscriptions.push(
     items,
@@ -33,7 +33,7 @@ export function deactivate(): void {
   // Disposables are registered on context.subscriptions; nothing extra to do.
 }
 
-async function newSession(items: HarnessSessionItemProvider): Promise<void> {
+async function newSession(items: AgentSessionItemProvider): Promise<void> {
   const name = await vscode.window.showInputBox({
     title: "New Agent Session",
     prompt: "Name for the new session (created on its first prompt)",
@@ -51,7 +51,7 @@ async function newSession(items: HarnessSessionItemProvider): Promise<void> {
   );
 }
 
-async function setToken(secrets: vscode.SecretStorage, items: HarnessSessionItemProvider): Promise<void> {
+async function setToken(secrets: vscode.SecretStorage, items: AgentSessionItemProvider): Promise<void> {
   const token = await vscode.window.showInputBox({
     title: "Agent Gateway Token",
     prompt: "Bearer token sent to the gateway (stored in SecretStorage). Leave empty to clear.",

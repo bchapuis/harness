@@ -1,5 +1,5 @@
 //! Test support: the machine-readable S-catalogue (sandbox spec §6),
-//! mirroring the core, utilities, and harness catalogues in form and guarded
+//! mirroring the core, utilities, and agent catalogues in form and guarded
 //! by the same drift-test pattern (`conformance_catalogue.rs`).
 
 #![allow(dead_code)]
@@ -11,7 +11,7 @@ use actor_simulation::Verify;
 /// readable alongside this crate's conformance suite. `invariant: n` reads
 /// as "Sn".
 ///
-/// S4 is deliberately verified in the *harness* suite
+/// S4 is deliberately verified in the *agent* suite
 /// (`agent/tests/conformance_sandbox.rs`): the acquisition discipline is
 /// loop conduct, observed through the journal — a write-ahead-order audit at
 /// quiescence (agent §6.3, E5), never a stream checker (agent spec §5.6

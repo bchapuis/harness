@@ -14,7 +14,7 @@ time and its V4/V5 by the golden corpus instead, compatibility §4). They layer
 bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`,
 `entity §N`, and so on) — citations the build resolves rather than trusts (the
 `spec` crate, under Testing). The one exception is the workflow, which cites the
-harness above it: the harness is the layer the workflow generalizes and does not yet
+harness above it: the agent runtime is the layer the workflow generalizes and does not yet
 sit on it, so it is at once the motivation and the measure, and the dependency
 will run the other way once it does.
 
@@ -27,7 +27,7 @@ will run the other way once it does.
 | | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside entity (standalone; no in-tree consumer yet) | B1–B7 |
 | consumers | [workflow-spec](workflow-spec.md) | the autonomous entity: the desired set of effects, intent before effect, orphaned resolution, quiescence | W1–W7 |
 | | [agent-spec](agent-spec.md) | the agent: an entity plus a run loop, a model seam, and a sandbox | A1–A8 |
-| | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the harness's sandbox seam | S1–S5 |
+| | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the agent runtime's sandbox seam | S1–S5 |
 | | [machine-spec](machine-spec.md) | the agent's sibling: a durable lightweight VM as an entity, reached over SSH | M1–M6 |
 | cross-cutting | [compatibility-spec](compatibility-spec.md) | format revisions, the boundary registry, the read-new-first policy | V1–V6 |
 
@@ -77,7 +77,7 @@ One layer has a design note rather than a spec:
   because a Rust catalogue lives in a `tests/` module only its own crate can
   import. All eight are compared on which invariants exist and which sections
   define them, and seven on their "Verified by" column as well — by file for
-  entity, utilities, sandbox, and the harness, by test function for wal, blob,
+  entity, utilities, sandbox, and the agent runtime, by test function for wal, blob,
   and machine, whichever the spec itself names. The one that is not says why at
   the site: the core catalogue is a numbered list and names no suites at all
   (actor §18.6 carries that).

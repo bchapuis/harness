@@ -22,7 +22,7 @@ use support::agent_catalogue;
 
 /// Every suite the catalogue names still exists.
 ///
-/// Its pointers are paths relative to `crates/`: the harness's own suites plus the
+/// Its pointers are paths relative to `crates/`: the agent runtime's own suites plus the
 /// ones it shares with the sandbox provider. A rename that misses this table fails
 /// here, as it does in the sibling catalogues.
 #[test]
@@ -86,7 +86,7 @@ fn every_checker_covers_exactly_the_invariants_the_catalogue_gives_it() {
 
 #[test]
 fn the_declared_checkers_are_exactly_the_live_ones() {
-    // The harness-specific checkers: the harness set minus the core defaults.
+    // The agent runtime-specific checkers: the agent runtime set minus the core defaults.
     let core: BTreeSet<String> = default_invariants()
         .iter()
         .map(|i| i.name().to_string())
@@ -125,7 +125,7 @@ fn the_catalogue_covers_the_live_h_invariants() {
     }
 }
 
-/// The table above and the agentic-harness spec's §11 copy of it are the same
+/// The table above and the agentic-agent spec's §11 copy of it are the same
 /// table.
 ///
 /// The rest of this file holds the Rust copy internally consistent. This holds it

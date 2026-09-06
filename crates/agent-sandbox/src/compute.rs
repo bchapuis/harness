@@ -196,7 +196,7 @@ impl ComputeTier {
     }
 
     /// Execute one compute call to completion. Synchronous by design: fuel,
-    /// not the harness timeout, bounds a runaway guest (crate docs).
+    /// not the agent runtime timeout, bounds a runaway guest (crate docs).
     pub(crate) fn run(
         &self,
         dir: &Arc<Dir>,

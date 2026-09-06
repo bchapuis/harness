@@ -78,7 +78,7 @@ impl<S: EntitySystem> Entity for Studio<S> {
     ) -> impl Future<Output = Result<(), BoxError>> + Send {
         // Off the activation latency path: sweep chunks a prior activation
         // orphaned and re-fan the live checkpoint chunks to the current
-        // replicas (§7.10 B6) — the same conduct as the harness agent.
+        // replicas (§7.10 B6) — the same conduct as the agent runtime agent.
         let blobs = ctx.blobs();
         let system = ctx.system().clone();
         async move {

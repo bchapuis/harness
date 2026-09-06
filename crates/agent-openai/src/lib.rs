@@ -136,7 +136,7 @@ pub fn encode_request(req: &ModelRequest) -> Value {
                 }));
             }
             // The workspace-loss notice (§5.5): it answers no CallId, so it
-            // enters as a user message the harness authors.
+            // enters as a user message the agent runtime authors.
             Entry::WorkspaceReset => messages.push(json!({
                 "role": "user",
                 "content": "[harness] The workspace was reset: files, processes, and \
@@ -230,7 +230,7 @@ struct ApiErrorBody {
     message: String,
 }
 
-/// Map an HTTP outcome onto the harness's [`ModelError`] taxonomy (§4.3).
+/// Map an HTTP outcome onto the agent runtime's [`ModelError`] taxonomy (§4.3).
 fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
     if response.status == 200 {
         let parsed: ApiResponse = serde_json::from_slice(&response.body)
@@ -277,7 +277,7 @@ fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
         // overload. Compatible servers use 500/502/503 (and Anthropic-style
         // 529) for the same conditions.
         500 | 502 | 503 | 529 => ModelError::Overloaded,
-        // An over-long prompt is reported as an invalid request; the harness
+        // An over-long prompt is reported as an invalid request; the agent runtime
         // distinguishes it because the run must fail explicitly on it
         // (§1.1, §4.3). Detection is by code, or by message across the servers
         // that omit it — the leakiest part of "compatible".

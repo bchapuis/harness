@@ -387,7 +387,7 @@ fn console_tail(control: &Path) -> Option<String> {
 }
 
 /// Kill a previous *process death's* orphan VM (`kill_on_drop` covers every
-/// in-process path; only a killed harness process leaks). The pid file names
+/// in-process path; only a killed host process leaks). The pid file names
 /// the candidate; the `/proc` command line naming this control directory is
 /// the pid-reuse guard — a recycled pid belongs to someone else and is left
 /// alone.

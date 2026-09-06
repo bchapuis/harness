@@ -52,7 +52,7 @@ authenticated form with opaque per-tenant tokens.
   SWIM failure detection, rendezvous placement, a mutual-TLS-capable TCP
   transport. Seeded deterministic simulation tests all of it, FoundationDB-style:
   one seed reproduces an entire multi-node run, partitions and all.
-- An **agentic harness** on top (`crates/agent`): each session is an actor
+- An **agent runtime** on top (`crates/agent`): each session is an actor
   whose only state is a fenced, append-only journal. Model, journal, and sandbox
   are injected seams (`crates/agent-anthropic` is the Anthropic one).
 - A **standalone deployment** (`crates/agent-standalone`): the binary the demo
@@ -99,7 +99,7 @@ running on. The front door authenticates your key against the machine's
 *journaled* key set and presents the machine's own journaled host key, so your
 `known_hosts` pin survives every move the machine makes.
 
-The failure drill is the same shape as the harness's: kill the node holding your
+The failure drill is the same shape as the agent runtime's: kill the node holding your
 session, reconnect through another node's door, and find your files where you
 left them — rewound at most to the last capture, never forked.
 

@@ -9,7 +9,7 @@
 //!
 //! This is the converged-cluster check. Pushing entity's `Quorum`-tier consensus
 //! through a *continuous* partition/crash nemesis is entity's own V&V remit
-//! (its swarm harness), not the harness's.
+//! (its swarm harness), not the agent runtime's.
 
 mod support;
 
@@ -696,7 +696,7 @@ fn assert_invariants(events: &[Event]) {
 
 /// Regression (the standalone-harness `NotLeader` livelock): a kind carries a
 /// `EntityConfig`, so each kind becomes a `Quorum`-tier entity type that needs the
-/// system's Raft engine to elect a shard leader. Building the harness on a
+/// system's Raft engine to elect a shard leader. Building the agent runtime on a
 /// cluster left in the default `Static` membership mode — no `.with_leader(...)`,
 /// hence no engine — must panic at construction (entity's guard), not hand back
 /// a harness whose every turn would loop on `NotLeader`. This is the deployment

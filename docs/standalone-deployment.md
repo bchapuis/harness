@@ -1,7 +1,7 @@
-# Standalone deployment: a three-node agentic harness
+# Standalone deployment: a three-node agent runtime
 
 This guide installs `agent-standalone` — the runnable deployment of the
-agentic harness — and walks through a three-node cluster: one OS process per
+agent runtime — and walks through a three-node cluster: one OS process per
 node, each with its own data directory, agentic sessions backed by the
 Anthropic API, and the failure drill (kill a node, watch its sessions resume on
 a survivor). It starts on one host and spans machines with two flags ("Across
@@ -390,7 +390,7 @@ over HTTP — and needs no API key.
 
 ## How it maps to the spec
 
-| this deployment | agentic harness spec |
+| this deployment | agent runtime spec |
 |---|---|
 | `--data/entities`, a quorum append per entity fenced by the shard term | the fenced, per-session journal (§6.1–§6.2, §7.2); the journal **is** the session (§2.1) |
 | killing a node, then re-issuing the same `turn` id over HTTP | caller-driven resumption (§7.5), idempotent turns (A7) |

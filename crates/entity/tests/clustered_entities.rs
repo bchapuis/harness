@@ -7,7 +7,7 @@
 //! committed state survives a shard-leader crash (**E14**, **E12**), a call that
 //! races a leadership change is absorbed by the bounded redirect (§5.4), and a
 //! shard that loses its quorum pauses writes as `Unavailable` rather than forking
-//! (**E11**, CP). The harness mirrors `tests/raft_journal.rs`; the entity is the
+//! (**E11**, CP). The agent runtime mirrors `tests/raft_journal.rs`; the entity is the
 //! Appendix A `Account`, hosted on the clustered `SimNode`.
 
 use std::sync::Arc;

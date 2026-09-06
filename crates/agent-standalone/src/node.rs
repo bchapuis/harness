@@ -1,5 +1,5 @@
 //! One node (silo) of the standalone deployment: the production runtime wired to
-//! the harness. A node hosts entities and votes in Raft; it has no client-facing
+//! the agent runtime. A node hosts entities and votes in Raft; it has no client-facing
 //! listener. The public edge is `agent-gateway`, a trusted cluster *client*
 //! that joins this transport as a non-voting member and addresses the entities
 //! directly (design: `docs/multi-tenant-edge.md`).

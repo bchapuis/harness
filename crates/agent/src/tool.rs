@@ -58,7 +58,7 @@ pub struct ToolDecl {
     /// The declared recovery policy for an orphaned call (§5.5).
     pub on_orphan: OnOrphan,
     /// Per-call execution bound, timed by `Clock` (§5.3 item 3); `None` uses
-    /// the harness default.
+    /// the agent runtime default.
     pub timeout: Option<Duration>,
 }
 

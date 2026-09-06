@@ -123,7 +123,7 @@ fn control_dir(workspace: &Path) -> PathBuf {
         .display()
         .to_string();
     let digest = agent::session::content_digest(&workspace);
-    std::env::temp_dir().join(format!("harness-fc-{digest:016x}"))
+    std::env::temp_dir().join(format!("agent-fc-{digest:016x}"))
 }
 
 fn vm_pids(control: &Path) -> Vec<String> {
@@ -368,7 +368,7 @@ async fn a_vanished_workspace_escalates_to_environment_lost() {
     shell(&sandbox, "true").await.expect("first");
     std::fs::remove_dir_all(&ws).expect("external loss");
 
-    // Only EnvironmentLost engages the harness's reset protocol (§5.5).
+    // Only EnvironmentLost engages the agent runtime's reset protocol (§5.5).
     let lost = shell(&sandbox, "true").await;
     assert!(
         matches!(lost, Err(ToolError::EnvironmentLost(_))),

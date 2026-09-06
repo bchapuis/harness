@@ -1,6 +1,6 @@
 [package]
 name = "agent-standalone"
-description = "A standalone multi-process deployment of the agentic harness: TCP nodes (silos) hosting entities over a shared file journal and the Anthropic model"
+description = "A standalone multi-process deployment of the agent runtime: TCP nodes (silos) hosting entities over a shared file journal and the Anthropic model"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -69,7 +69,7 @@ id_string! {
 }
 id_string! {
     /// One requested tool call, unique within its run (agent spec §5.2):
-    /// the model API's tool-use id, or one the harness assigned on receipt.
+    /// the model API's tool-use id, or one the agent runtime assigned on receipt.
     CallId
 }
 id_string! {
@@ -298,7 +298,7 @@ pub enum Entry {
         call: CallId,
         outcome: Result<Value, ToolError>,
     },
-    /// The workspace-loss notice (§5.5): input content the harness authors,
+    /// The workspace-loss notice (§5.5): input content the agent runtime authors,
     /// the encoding's analogue of a user message — it answers no `CallId`,
     /// so it cannot ride a tool result.
     WorkspaceReset,

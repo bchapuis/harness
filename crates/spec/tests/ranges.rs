@@ -48,7 +48,7 @@ fn every_range_names_a_known_catalogue() {
 
 /// No citation names an invariant past the end of the catalogue it names.
 ///
-/// The span may skip a number — the harness catalogue has no A2 and `A1–A8` is
+/// The span may skip a number — the agent runtime catalogue has no A2 and `A1–A8` is
 /// still how its extent is written — but it may not run off the end, whatever the
 /// surrounding sentence meant by it.
 #[test]

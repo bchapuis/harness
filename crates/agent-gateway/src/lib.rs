@@ -1,5 +1,5 @@
-//! The harness gateway: the public HTTP/SSE edge, an Orleans-style cluster
-//! **client** of the harness cluster.
+//! The agent runtime gateway: the public HTTP/SSE edge, an Orleans-style cluster
+//! **client** of the agent runtime cluster.
 //!
 //! It is the public multi-tenant edge (design: `docs/multi-tenant-edge.md`).
 //! A caller presents a bearer token; the gateway verifies it to a [`PrincipalId`]

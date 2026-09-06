@@ -2,7 +2,7 @@
 //! §8): re-replication after a departure (**B6**) and tombstone reclamation
 //! (**B7** liveness).
 //!
-//! The harness mirrors `tests/clustered.rs` (SWIM gossip membership), sized to
+//! The agent runtime mirrors `tests/clustered.rs` (SWIM gossip membership), sized to
 //! whatever node set a test needs.
 
 use std::sync::Arc;

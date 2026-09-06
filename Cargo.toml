@@ -85,7 +85,7 @@ machine-proto = { path = "crates/machine-proto", version = "0.1.0" }
 # journaled key set and bridges channels to the guest over vsock.
 machine-frontdoor = { path = "crates/machine-frontdoor", version = "0.1.0" }
 
-# The agentic harness (Appendix B layout of the agentic harness spec).
+# The agent runtime (Appendix B layout of the agent runtime spec).
 agent = { path = "crates/agent", version = "0.1.0" }
 agent-anthropic = { path = "crates/agent-anthropic", version = "0.1.0" }
 agent-openai = { path = "crates/agent-openai", version = "0.1.0" }

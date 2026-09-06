@@ -41,7 +41,7 @@
 //!   registration-time cap check makes such a call unreachable in a
 //!   correctly configured deployment (agent spec §5.3 item 4). Under every
 //!   feature set alike, a profile that *names* egress (or explicitly caps in
-//!   `Network`) fails at `open` instead, as a `SandboxError` the harness
+//!   `Network`) fails at `open` instead, as a `SandboxError` the agent runtime
 //!   turns into a `ToolError` outcome per call that needed the sandbox:
 //!   holding `Native` implies `Network`'s grants (sandbox spec §2.2), and
 //!   neither native realization has a dataplane (`--network none` for the
@@ -53,7 +53,7 @@
 //!
 //! **Execution is synchronous inside the returned future.** Workspace tools
 //! are small, capped operations; a compute guest is bounded by fuel, not by
-//! the harness's per-tool timeout — the timeout bounds the *outcome*, and a
+//! the agent runtime's per-tool timeout — the timeout bounds the *outcome*, and a
 //! fuel-exhausted guest traps deterministically (sandbox spec §3.2). Not
 //! implemented: async fuel-yield and epoch interruption (sandbox spec §7),
 //! whose epoch ticking needs an ambient timer thread the determinism

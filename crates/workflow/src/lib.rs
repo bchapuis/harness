@@ -4,7 +4,7 @@
 //! commits them, and replies (entity §4.2, §6). An **autonomous** entity does
 //! not wait: its activation re-derives the work its committed state calls for,
 //! launches what is not yet in flight, folds each outcome back, and stops when
-//! there is nothing left. The agentic harness builds that mechanism by hand,
+//! there is nothing left. The agent runtime builds that mechanism by hand,
 //! welded to one agentic policy (agent §3); this crate is the mechanism on
 //! its own, with no model, tool, or prompt in it.
 //!
@@ -129,7 +129,7 @@ impl<K, E> Pending<K, E> {
 /// Resume's policy for a **orphaned** effect — one whose intent committed and
 /// whose outcome did not, so nothing says whether it ran (spec §4.4).
 ///
-/// This is the workflow's type, and the home of the decision. The harness declares
+/// This is the workflow's type, and the home of the decision. The agent runtime declares
 /// the same two variants per tool (agent §5.2) and re-exports this rather than
 /// keeping a second copy: a tool declaration's recovery policy is exactly what
 /// its [`Pending`] carries.

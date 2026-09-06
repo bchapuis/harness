@@ -309,7 +309,7 @@ fn a_key_backed_off_to_the_cap_stops_holding_the_activation_resident() {
     // §6's at-rest clause. §3.4 imposes no attempt bound, so without it one
     // permanently unproductive effect would veto eviction forever and pin an
     // activation whose only remaining work is a timer — strictly worse than what
-    // the harness does today (agent §9.2 item 3).
+    // the agent runtime does today (agent §9.2 item 3).
     let sim = Simulation::new(31);
     let recorder = Recorder::new();
     let system = sim_system(&sim, &recorder);
