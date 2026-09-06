@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::alarm_index::AlarmIndex;
 use crate::config::EntityConfig;
 use crate::entity::Entity;
-use crate::entityref::Entities;
+use crate::entity_ref::Entities;
 use crate::system::EntitySystem;
 
 /// The node-scoped handles every entity type on a node shares.
@@ -71,7 +71,7 @@ impl std::fmt::Debug for NodeCapabilities {
 /// (spec §7.4, §13).
 ///
 /// Obtained from [`EntityExt::entity_node`](crate::EntityExt::entity_node),
-/// configured once, and then used in place of the `system.entity(..)` calls:
+/// configured once, and then used in place of the `system.entities(..)` calls:
 ///
 /// ```ignore
 /// let node = system
@@ -79,11 +79,11 @@ impl std::fmt::Debug for NodeCapabilities {
 ///     .blocking_io(Arc::new(ThreadPoolIo::sized_for_host()))
 ///     .metrics(Arc::clone(&metrics));
 ///
-/// let alarms: Entities<AlarmIndex<_>> = node.entity(alarm_config);
+/// let alarms: Entities<AlarmIndex<_>> = node.entities(alarm_config);
 /// let machines: Entities<Machine> = node.entities_named_with_alarms(..., alarms);
 /// ```
 ///
-/// Hosting a type straight off the system (`system.entity(..)`) still works and takes
+/// Hosting a type straight off the system (`system.entities(..)`) still works and takes
 /// the defaults — the shape every test and the `Local` tier want.
 #[derive(Clone)]
 pub struct EntityNode<S: EntitySystem> {
@@ -144,7 +144,7 @@ impl<S: EntitySystem> EntityNode<S> {
     where
         G: Entity<System = S>,
     {
-        crate::entityref::build_entities::<S, G>(
+        crate::entity_ref::build_entities::<S, G>(
             &self.system,
             entity_type,
             config,
@@ -180,7 +180,7 @@ impl<S: EntitySystem> EntityNode<S> {
     where
         G: Entity<System = S>,
     {
-        crate::entityref::build_entities_with_alarms::<S, G>(
+        crate::entity_ref::build_entities_with_alarms::<S, G>(
             &self.system,
             entity_type,
             config,

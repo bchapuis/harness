@@ -10,6 +10,7 @@
 
 # Runtime data of demo-agent.sh / agent-standalone (journals, workspaces, node logs)
 /agent-data
+/harness-data
 
 # Runtime data of demo-machine.sh / machine-standalone (journals, disk images,
 # node logs, and the demo's own ssh keypair)

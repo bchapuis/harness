@@ -70,7 +70,7 @@ const S_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 5,
         spec: "sandbox §2.3; agent §5.3",
-        property: "Per-tier release: release tears down every provisioned tier's environment and is idempotent; deactivation releases all held tiers (the per-tier face of harness A8)",
+        property: "Per-tier release: release tears down every provisioned tier's environment and is idempotent; deactivation releases all held tiers (the per-tier face of agent A8)",
         verify: &[Verify::SimTest(
             "workspace.rs, compute.rs, native.rs, firecracker.rs",
         )],

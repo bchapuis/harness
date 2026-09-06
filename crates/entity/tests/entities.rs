@@ -531,7 +531,7 @@ fn account_entity_end_to_end() {
         // Committed + durable: the reply reflects post-command state.
         assert_eq!(acct.ask(Deposit { cents: 1000 }).await.unwrap(), 1000);
         assert_eq!(acct.ask(Withdraw { cents: 500 }).await.unwrap(), Ok(500));
-        // Application outcome — an error value inside the reply, not a EntityError.
+        // Application outcome — an error value inside the reply, not an EntityError.
         assert_eq!(
             acct.ask(Withdraw { cents: 9999 }).await.unwrap(),
             Err(Overdraft)

@@ -463,7 +463,7 @@ fn harness_config() -> HarnessConfig {
 }
 
 /// The observability stream on stderr (agent spec §10.4): membership and
-/// reachability transitions, and every harness event. Dispatch-level core events
+/// reachability transitions, and every agent event. Dispatch-level core events
 /// are swallowed as noise.
 struct StderrEvents {
     node: NodeId,

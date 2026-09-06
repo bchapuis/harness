@@ -49,8 +49,10 @@ pub enum EntityEvent {
         name: EntityName,
         at: u64,
     },
-    /// An activation hibernated on idle and dropped its in-memory state (§10);
-    /// the journal survives, so the next message rehydrates it (invariant **E12**).
+    /// An activation ended and dropped its in-memory state: idle hibernation
+    /// (§10) or a forced step-down on a leadership move or quorum loss (§8,
+    /// §11). The journal survives either, so the next message rehydrates it
+    /// (invariant **E12**).
     Deactivated { node: NodeId, name: EntityName },
     /// This node won a shard's leader election at `term` (§8, §13). Emitted by
     /// the new leader itself, once per term it observes, so the stream carries

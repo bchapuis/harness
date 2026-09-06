@@ -1,4 +1,4 @@
-# A agent-gateway on bare metal: the cluster's only tenant-facing process.
+# An agent-gateway on bare metal: the cluster's only tenant-facing process.
 #
 # The gateway joins the same cluster as a non-voting, non-hosting CLIENT (the Orleans
 # cluster-client pattern). It verifies a caller's bearer token to a tenant, then

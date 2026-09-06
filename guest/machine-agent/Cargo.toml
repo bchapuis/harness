@@ -17,7 +17,7 @@ libc = "0.2"
 machine-proto = { path = "../../crates/machine-proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Same major as the host codec (crates/microvm) and guest/fc-agent: the tar
+# Same major as the host codec (crates/machine-host) and guest/fc-agent: the tar
 # streams must stay mutually intelligible.
 tar = "0.4"
 

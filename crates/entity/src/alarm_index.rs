@@ -22,7 +22,7 @@
 //! # Shape
 //!
 //! One index entity per **(target entity type, shard)**, keyed
-//! [`index_key`](index_key)-style, holding a `EntityName → due-nanos` map — a small
+//! [`index_key`](index_key)-style, holding an `EntityName → due-nanos` map — a small
 //! event-sourced map with a pure fold, mirroring
 //! [`tenancy::Directory`](../../tenancy/index.html). Reads
 //! (`due_before`) serve locally from the activation (§7.5); registration is

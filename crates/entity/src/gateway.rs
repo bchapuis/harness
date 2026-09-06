@@ -49,7 +49,7 @@ use crate::config::EntityConfig;
 use crate::entity::Entity;
 use crate::entity::EntityName;
 use crate::entity::events_in_page;
-use crate::entityref::Entities;
+use crate::entity_ref::Entities;
 use crate::error::EntityError;
 use crate::host::CommittedCell;
 use crate::host::HEAD_UNPUBLISHED;

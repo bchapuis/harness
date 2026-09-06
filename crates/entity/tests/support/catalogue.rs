@@ -1,8 +1,8 @@
-//! The machine-readable G-catalogue, E1–E21 (entity spec §15).
+//! The machine-readable E-catalogue, E1–E21 (entity spec §15).
 //!
-//! The entity analogue of the core, utilities, harness, and sandbox catalogues:
+//! The entity analogue of the core, utilities, agent, and sandbox catalogues:
 //! one table linking each invariant to the code that verifies it, guarded by the
-//! drift test in `conformance_catalogue.rs`. `invariant: n` reads as "Gn".
+//! drift test in `conformance_catalogue.rs`. `invariant: n` reads as "En".
 //!
 //! It exists because the spec's "Verified by" column is prose, and prose rots
 //! silently: a renamed or deleted suite leaves the column pointing at nothing, and

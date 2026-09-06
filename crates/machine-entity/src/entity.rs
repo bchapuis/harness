@@ -61,7 +61,7 @@ use crate::runtime::BootSpec;
 use crate::runtime::MachineRuntime;
 use crate::runtime::MachineRuntimeProvider;
 
-/// The machine's stable entity type (machine §1: `MachineId` is a `EntityName`
+/// The machine's stable entity type (machine §1: `MachineId` is an `EntityName`
 /// with this type and the machine's name as the key).
 pub const MACHINE_TYPE: &str = "machine";
 

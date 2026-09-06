@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::blobs::EntityBlobs;
-use crate::entityref::EntityRef;
+use crate::entity_ref::EntityRef;
 use crate::facet::EVENT_TAG;
 use crate::facet::FacetCell;
 use crate::facet::FacetSet;
@@ -34,7 +34,7 @@ use crate::system::EntitySystem;
 
 /// The stable, cluster-wide identity of an entity (spec §3): a `(entity type, key)`
 /// pair, where `key` is an arbitrary application string (`"account/42"`, a UUID,
-/// a tenant id). Unlike an `ActorId`, a `EntityName` names a logical object, not a
+/// a tenant id). Unlike an `ActorId`, an `EntityName` names a logical object, not a
 /// node — it is not locality-classifiable on its own (§5.1).
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct EntityName {
@@ -85,7 +85,7 @@ impl NoEvent {
 /// The implementing type is the **behavior**: immutable configuration. The
 /// runtime supplies identity, durability, the gates, and the lifecycle.
 ///
-/// `Self::System` must be a [`EntitySystem`] — a system that can host entities
+/// `Self::System` must be an [`EntitySystem`] — a system that can host entities
 /// (`Local` [`LocalSystem`](actor_core::LocalSystem), or a `Quorum` shard-hosting
 /// clustered system).
 pub trait Entity: Sized + Send + 'static {
@@ -150,7 +150,7 @@ pub trait Entity: Sized + Send + 'static {
     }
 
     /// Called when the entity's durable alarm fires (spec §7.16), with no caller
-    /// present. Like a [`EntityHandler`] minus the reply: a **decision** returning
+    /// present. Like an [`EntityHandler`] minus the reply: a **decision** returning
     /// the events to journal, and it MAY re-arm or cancel the alarm through
     /// [`ctx.alarm()`](EntityCtx::alarm) (staged into the same atomic batch).
     /// Delivered only while a deadline armed through the [`Alarm`] facet is due.

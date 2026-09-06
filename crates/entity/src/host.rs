@@ -9,7 +9,7 @@
 //!   the commit with no `.await` between the fold and the reply — so no second
 //!   command ever observes half-committed state.
 //! - **Output gate** (§6): the reply is simply the value the handler returns
-//!   *after* the commit await; a failed commit returns a `EntityError` instead, so
+//!   *after* the commit await; a failed commit returns an `EntityError` instead, so
 //!   no observer is ever told an effect happened that did not durably happen
 //!   (invariant **E5**).
 //!
@@ -57,7 +57,7 @@ use std::sync::Arc;
 use crate::alarm_index::AlarmIndex;
 use crate::alarm_index::Sync as AlarmSync;
 use crate::alarm_index::index_key;
-use crate::entityref::Entities;
+use crate::entity_ref::Entities;
 use crate::journal::AppendOutcome;
 use crate::journal::DynEntityJournal;
 use crate::journal::EntityJournalError;
@@ -430,8 +430,8 @@ impl<G: Entity> Host<G> {
         // activation aborts (§10) and must leave no `Activated` on the stream — a
         // phantom `Activated` with no matching `Deactivated` would both misreport
         // the lifecycle (§13) and corrupt a E6 activation checker.
-        let gctx = self.entity_ctx(ctx);
-        self.entity.on_activate(&gctx).await?;
+        let ectx = self.entity_ctx(ctx);
+        self.entity.on_activate(&ectx).await?;
         // An entity whose folded state names live peers re-watches them here, and a
         // watch-after-death fires immediately, reconciling what died while the
         // entity slept (actor §12).
@@ -496,8 +496,8 @@ impl<G: Entity> Host<G> {
             self.forced_step_down(ctx).await;
             return Err(EntityError::Unavailable(format!("facet begin: {e}")));
         }
-        let gctx = self.entity_ctx(ctx);
-        let (events, reply) = decide(&self.entity, &self.state, &gctx, &with).await;
+        let ectx = self.entity_ctx(ctx);
+        let (events, reply) = decide(&self.entity, &self.state, &ectx, &with).await;
         self.commit(events, ctx).await?;
         self.register_watches(ctx);
         Ok(reply)
@@ -508,10 +508,10 @@ impl<G: Entity> Host<G> {
     /// the handler runs, stage a cancel of the fired alarm, so the deadline clears
     /// atomically unless `on_alarm` re-arms it (consume-on-fire).
     async fn run_alarm(&mut self, ctx: &Ctx<Host<G>>) -> Result<(), EntityError> {
-        self.run_decision(ctx, (), |entity, state, gctx, ()| {
-            gctx.facet_cell().clear_alarm_stage();
+        self.run_decision(ctx, (), |entity, state, ectx, ()| {
+            ectx.facet_cell().clear_alarm_stage();
             entity
-                .on_alarm(state, gctx)
+                .on_alarm(state, ectx)
                 .map(|events| (events, ()))
                 .boxed()
         })
@@ -527,9 +527,9 @@ impl<G: Entity> Host<G> {
         msg: Terminated,
         ctx: &Ctx<Host<G>>,
     ) -> Result<(), EntityError> {
-        self.run_decision(ctx, msg, |entity, state, gctx, msg| {
+        self.run_decision(ctx, msg, |entity, state, ectx, msg| {
             entity
-                .on_peer_terminated(state, gctx, &msg.id, msg.reason)
+                .on_peer_terminated(state, ectx, &msg.id, msg.reason)
                 .map(|events| (events, ()))
                 .boxed()
         })
@@ -696,8 +696,8 @@ impl<G: Entity> Host<G> {
     /// hibernation (§10) it takes **no snapshot**.
     async fn forced_step_down(&mut self, ctx: &Ctx<Host<G>>) {
         self.facets.discard();
-        let gctx = self.entity_ctx(ctx);
-        self.entity.on_deactivate(&gctx).await;
+        let ectx = self.entity_ctx(ctx);
+        self.entity.on_deactivate(&ectx).await;
         self.step_down(ctx);
     }
 
@@ -782,8 +782,8 @@ impl<G: Entity> Host<G> {
     /// reads come from the *local* store (§9), so that cost stays on the side of the
     /// machine with capacity to spare (hw §3.1).
     async fn hibernate(&mut self, ctx: &Ctx<Host<G>>) {
-        let gctx = self.entity_ctx(ctx);
-        self.entity.on_deactivate(&gctx).await;
+        let ectx = self.entity_ctx(ctx);
+        self.entity.on_deactivate(&ectx).await;
         self.maybe_snapshot(ctx).await;
         self.step_down(ctx); // emit Deactivated + stop, the one deactivation seam
     }
@@ -918,8 +918,8 @@ where
         msg: RunTyped<M>,
         ctx: &Ctx<Host<G>>,
     ) -> Result<M::Reply, EntityError> {
-        self.run_decision(ctx, (), move |entity, state, gctx, ()| {
-            entity.handle(state, msg.0, gctx).boxed()
+        self.run_decision(ctx, (), move |entity, state, ectx, ()| {
+            entity.handle(state, msg.0, ectx).boxed()
         })
         .await
     }
@@ -1014,7 +1014,7 @@ impl<G: Entity> Handler<CheckIdle> for Host<G> {
         //
         // A pending durable alarm pins the entity resident (spec §7.16) unless its
         // *current* deadline is acked-registered in the per-shard [`AlarmIndex`],
-        // so the driver's leader sweep (entityref.rs) will re-activate it at its due
+        // so the driver's leader sweep (entity_ref.rs) will re-activate it at its due
         // time with no caller. Anything short of that keeps the safe default: stay
         // resident, where the local timer guarantees the fire, and let the
         // reschedule below retry the registration.

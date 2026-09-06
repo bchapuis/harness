@@ -1,4 +1,4 @@
-//! The continuous D-checkers over the workflow's event stream (workflow spec §9).
+//! The continuous W-checkers over the workflow's event stream (workflow spec §9).
 //!
 //! One checker, `workflow-cycle`, carrying four of the seven invariants: it is the
 //! grammar of a claim's life. A key is launched (or resolved as orphaned), and
@@ -246,7 +246,7 @@ impl Invariant for WorkflowCycle {
     }
 }
 
-/// Which D-invariant each tick checker enforces, as `(checker name, D number)`
+/// Which W-invariant each tick checker enforces, as `(checker name, W number)`
 /// — the pairing §9's "Verified by" column asserts, stated from the checker's
 /// side, and held equal to the catalogue's per pair by `conformance_catalogue`.
 pub fn checker_coverage() -> &'static [(&'static str, u8)] {

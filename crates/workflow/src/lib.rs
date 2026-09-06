@@ -25,7 +25,7 @@
 //!
 //! # Wiring a workflow entity
 //!
-//! A consumer implements [`Workflow`] beside its [`Entity`], holds a [`Engine`] in
+//! A consumer implements [`Workflow`] beside its [`Entity`], holds an [`Engine`] in
 //! its behavior, and forwards four hooks. There is deliberately no blanket
 //! `EntityHandler` impl (the orphan rule forbids one, and entity's stance is
 //! that the hand-written form is normative), so the two commands are two small
@@ -289,7 +289,7 @@ pub trait Workflow:
 
     /// Fold one effect's outcome into records (§4.2).
     ///
-    /// A **decision**, under exactly the rules a [`EntityHandler`] decision
+    /// A **decision**, under exactly the rules an [`EntityHandler`] decision
     /// follows (entity §4.2): it MUST NOT mutate state, MUST NOT perform
     /// durable I/O, and MUST NOT await anything. It returns the records that
     /// make the outcome durable; the entity's output gate commits them; the

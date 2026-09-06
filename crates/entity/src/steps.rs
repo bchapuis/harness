@@ -49,7 +49,7 @@ pub struct Steps;
 
 impl Sealed for Steps {}
 
-/// One workflow record (spec §7.17): a step's memoized result under the steps tag.
+/// One steps record (spec §7.17): a step's memoized result under the steps tag.
 /// `bytes` is the caller's `postcard`-encoded step output — opaque to the facet.
 #[derive(Serialize, Deserialize)]
 struct StepRecord {

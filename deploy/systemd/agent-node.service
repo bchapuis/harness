@@ -1,4 +1,4 @@
-# A agent-standalone node (silo) on bare metal.
+# An agent-standalone node (silo) on bare metal.
 #
 # One unit per machine. Every node's identity, peer roster, and data directory come
 # from /etc/agent/node.env (see node.env.example); nothing here is host-specific, so

@@ -1,6 +1,6 @@
 //! The machine-readable B-catalogue, B1–B7 (blob-store spec §9).
 //!
-//! The blob store's analogue of the core, utilities, harness, sandbox, entity,
+//! The blob store's analogue of the core, utilities, agent, sandbox, entity,
 //! and machine catalogues: one table linking each invariant to the code that
 //! verifies it, guarded by the drift test in `conformance_catalogue.rs`.
 //! `invariant: n` reads as "Bn".

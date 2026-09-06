@@ -104,7 +104,7 @@ jobs:
         # and had rotted into a build error before anyone noticed.
         run: cargo test -p entity --features sql -p blob-store -p tenancy --no-fail-fast
 
-      - name: Soak harness and machine (expensive seeds)
+      - name: Soak agent and machine (expensive seeds)
         if: ${{ !cancelled() }}
         env:
           SWARM_SEED_BASE: ${{ steps.seeds.outputs.base }}

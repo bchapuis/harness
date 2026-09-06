@@ -179,7 +179,7 @@ pub const EXEMPT: &[Exempt] = &[
     e(
         "MachineId",
         Why::DeclaredAbsent,
-        "machine §1: a machine's identity is a EntityName, and MachineId is the spec's \
+        "machine §1: a machine's identity is an EntityName, and MachineId is the spec's \
          word for it rather than a type",
     ),
 ];

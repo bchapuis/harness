@@ -216,7 +216,7 @@ fn drive<T: Send + 'static>(
 
 /// Bring up a 3-node leader cluster and host `Account` on every node, so each
 /// creates the shards' Raft groups and registers its gateway (§5.3). Returns the
-/// network (for fault injection), the systems, and a `Entities` handle per node.
+/// network (for fault injection), the systems, and an `Entities` handle per node.
 fn cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, Vec<Entities<Account>>) {
     let net = leader_net(sim);
     let systems = vec![net.join(A), net.join(B), net.join(C)];
@@ -268,7 +268,7 @@ fn entity_is_callable_from_a_non_leader_node() {
     assert_eq!(
         overdraft,
         Ok(Err(Overdraft)),
-        "overdraw is an application error, not a EntityError"
+        "overdraw is an application error, not an EntityError"
     );
     assert_eq!(balance, Ok(500), "the overdraw left the balance unchanged");
 }

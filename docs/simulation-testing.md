@@ -637,7 +637,7 @@ The middle tier is feature-gated because it is test support, not part of the
 crate's API, and it must not ship in a production build. `entity` and `harness`
 both have one; a crate reaches another's by enabling it in dev-dependencies
 (`entity = { workspace = true, features = ["testing"] }`), and its own by
-depending on itself (`harness = { path = ".", features = ["testing"] }`).
+depending on itself (`agent = { path = ".", features = ["testing"] }`).
 
 Each shared invariant is constructed with the label it reports under, so a suite
 still names its own violations:
@@ -668,7 +668,7 @@ inline in the spec. The [cluster utilities](cluster-utilities-spec.md) carry
 their own, separately numbered catalogue (U1, U2, …; machine-readable as
 `utilities_catalogue()`), held to the same drift discipline, as do the layers
 above: the wal (L1–L5), entity (E1–E21, plus the facet contract F1–F4), the
-harness (A1–A8), the sandbox (S1–S5), the machine (M1–M6), and the blob store
+workflow (W1–W7), the agent (A1–A8), the sandbox (S1–S5), the machine (M1–M6), and the blob store
 (B1–B7). Format compatibility (V1–V6) is the one catalogue with no Rust copy to
 drift from: V3 is a compile-time assertion inside `compat::Window`, and V4 and V5
 are policy, held by the golden corpus and the mixed-version sweep (compatibility

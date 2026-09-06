@@ -1,6 +1,8 @@
-# Keep the build context small and the build cache stable.
-/target
-/.git
-/agent-data
-/.smoketmp
 **/*.log
+/.git
+/.smoketmp
+/agent-data
+/harness-data
+/machine-data
+/target
+# Keep the build context small and the build cache stable.

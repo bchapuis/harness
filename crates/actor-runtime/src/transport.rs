@@ -77,7 +77,7 @@ pub use actor_cluster::WIRE;
 /// with a plain `Unreachable` as the only symptom.
 ///
 /// `host` may be an IP literal, used as-is, or a name — a container or pod DNS
-/// name like `harness-0.harness` — resolved through the system resolver, which is
+/// name like `agent-0.agent` — resolved through the system resolver, which is
 /// what lets a roster span machines instead of loopback.
 ///
 /// An id whose port would not fit is an error, not a panic: ids reach here from an

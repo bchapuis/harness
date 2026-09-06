@@ -2,7 +2,7 @@
 //!
 //! Two failure layers stay distinct on the wire, exactly as the agent runtime keeps
 //! them apart (spec §12/§14): a *transport or durability* failure of reaching or
-//! committing a command — a [`EntityError`] — becomes an HTTP status here; an
+//! committing a command — an [`EntityError`] — becomes an HTTP status here; an
 //! *application outcome* the run itself produced ([`RunOutcome`]'s `RunError`) is
 //! **not** an error at this layer, it is a `200` whose body carries the outcome.
 //!
@@ -23,7 +23,7 @@ use serde_json::json;
 
 /// A client-facing gateway error: a stable machine `code`, an HTTP `status`, and
 /// a human `message`. Built from the edge's own validation ([`bad_request`],
-/// [`unauthorized`]) and from a [`EntityError`] — never from a run's own
+/// [`unauthorized`]) and from an [`EntityError`] — never from a run's own
 /// `RunError` (see the module docs).
 ///
 /// [`bad_request`]: GatewayError::bad_request

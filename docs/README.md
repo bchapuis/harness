@@ -13,9 +13,8 @@ suite, so there is no Rust copy to hold it against (its V3 is asserted at compil
 time and its V4/V5 by the golden corpus instead, compatibility §4). They layer
 bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`,
 `entity §N`, and so on) — citations the build resolves rather than trusts (the
-`spec` crate, under Testing). The one exception is the workflow, which cites the
-harness above it: the agent runtime is the layer the workflow generalizes and does not yet
-sit on it, so it is at once the motivation and the measure, and the dependency
+`spec` crate, under Testing). The one exception is the workflow, which cites the agent runtime above it: that is the
+layer the workflow generalizes and does not yet sit on, so it is at once the motivation and the measure, and the dependency
 will run the other way once it does.
 
 | | Spec | Owns | Invariants |
@@ -25,7 +24,7 @@ will run the other way once it does.
 | storage | [wal-spec](wal-spec.md) | the framed, checksummed write-ahead log primitive | L1–L5 |
 | | [entity-spec](entity-spec.md) | durable objects ("entities"): the journal, the single-writer fence, shards, snapshots, the facet model | E1–E21, F1–F4 |
 | | [blob-store-spec](blob-store-spec.md) | a namespaced, content-addressed object store beside entity (standalone; no in-tree consumer yet) | B1–B7 |
-| consumers | [workflow-spec](workflow-spec.md) | the autonomous entity: the desired set of effects, intent before effect, orphaned resolution, quiescence | W1–W7 |
+| consumers | [workflow-spec](workflow-spec.md) | the autonomous entity: the desired set of effects, intent before effect, orphan resolution, quiescence | W1–W7 |
 | | [agent-spec](agent-spec.md) | the agent: an entity plus a run loop, a model seam, and a sandbox | A1–A8 |
 | | [sandbox-spec](sandbox-spec.md) | the execution-tier model behind the agent runtime's sandbox seam | S1–S5 |
 | | [machine-spec](machine-spec.md) | the agent's sibling: a durable lightweight VM as an entity, reached over SSH | M1–M6 |
@@ -75,9 +74,9 @@ One layer has a design note rather than a spec:
   and the machine-readable one beside the suite are held equal rather than
   maintained twice. Each crate's `conformance_catalogue.rs` runs the comparison,
   because a Rust catalogue lives in a `tests/` module only its own crate can
-  import. All eight are compared on which invariants exist and which sections
-  define them, and seven on their "Verified by" column as well — by file for
-  entity, utilities, sandbox, and the agent runtime, by test function for wal, blob,
+  import. All nine are compared on which invariants exist and which sections
+  define them, and eight on their "Verified by" column as well — by file for
+  entity, utilities, workflow, agent, and sandbox, by test function for wal, blob,
   and machine, whichever the spec itself names. The one that is not says why at
   the site: the core catalogue is a numbered list and names no suites at all
   (actor §18.6 carries that).
@@ -136,7 +135,7 @@ grepping the code, and is answered by reading these sections instead:
   no boundary is mid-flight; §4 records what was built and pulled back, and what
   would reopen it.
 - Each layer's own deferrals, declined with their reasons: [entity
-  §16](entity-spec.md), [machine §8](machine-spec.md), [harness
+  §16](entity-spec.md), [machine §8](machine-spec.md), [agent
   §13](agent-spec.md), [sandbox §7](sandbox-spec.md),
   [cluster-utilities §7](cluster-utilities-spec.md), [wal §8](wal-spec.md).
 - [simulation-testing](simulation-testing.md), *Where the sweeps do not yet

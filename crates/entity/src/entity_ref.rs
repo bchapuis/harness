@@ -79,7 +79,7 @@ const EVENT_SCAN_FLOOR: usize = 256;
 /// The cached handles, in two generations so the cache stays **bounded** without an
 /// intrusive recency list (spec §5.4).
 ///
-/// Bounding it is not housekeeping. A `EntityRef` is handed out per name, and the
+/// Bounding it is not housekeeping. An `EntityRef` is handed out per name, and the
 /// gateway is one long-lived process fronting every tenant, so an unbounded map grows
 /// with the number of *distinct names the process has ever addressed* — unbounded in
 /// exactly the deployment that is scaled horizontally and expected to stay up. Worse,
@@ -282,8 +282,8 @@ impl<G: Entity> HostCache<G> {
 /// entity accepts `M` (invariant **E10**).
 ///
 /// It also carries an optional, **non-serialized** [`HostCache`] (present when
-/// obtained from a [`Entities`] on this node): repeated calls hit the cache and go
-/// straight to the host, off the gateway (§5.4). A `EntityRef` rebuilt from the
+/// obtained from an [`Entities`] on this node): repeated calls hit the cache and go
+/// straight to the host, off the gateway (§5.4). An `EntityRef` rebuilt from the
 /// wire, or a self-reference from [`EntityCtx`](crate::EntityCtx), has no cache and
 /// resolves through the gateway each call — correct, just not cached.
 ///
@@ -418,7 +418,7 @@ impl<G: Entity> EntityRef<G> {
 
     /// Subscribe to the entity's committed records (spec §7.9), returning the
     /// committed `head` with the live stream. A framework built-in, available for
-    /// every entity type without a `EntityHandler` bound — the push analogue of
+    /// every entity type without an `EntityHandler` bound — the push analogue of
     /// `load`/`head`.
     ///
     /// Delivery is best-effort; the caller MUST reconcile by `Seq` (§7.9,
@@ -574,7 +574,7 @@ impl<G: Entity> EntityRef<G> {
     /// **E13**). Driving the loop here, not in the gateway's serial handler, keeps
     /// one slow resolution from blocking another entity's activation on that node.
     ///
-    /// `target` starts at this ref's own gateway — local for a `Entities`-minted
+    /// `target` starts at this ref's own gateway — local for an `Entities`-minted
     /// ref, the source node's for a wire-arrived one — and is moved toward the
     /// leader by hints and re-discovery; it is a `&mut` so a caller issuing
     /// several requests (a paging read, [`events`](Self::events)) keeps the
@@ -779,7 +779,7 @@ impl<G: Entity> Clone for Entities<G> {
 }
 
 impl<G: Entity> Entities<G> {
-    /// Address an entity of this type by key (spec Appendix A): a [`EntityRef`] with
+    /// Address an entity of this type by key (spec Appendix A): an [`EntityRef`] with
     /// no activation yet — the first message activates it. The ref shares this
     /// handle's host cache (§5.4).
     pub fn entity(&self, key: impl Into<String>) -> EntityRef<G> {
@@ -863,14 +863,14 @@ impl<G: Entity> Entities<G> {
 
 /// Host entities of a type on a system (spec Appendix A). Implemented for every
 /// [`EntitySystem`], so `system.entities::<G>(config)` starts the gateway and
-/// returns a [`Entities`] handle.
+/// returns an [`Entities`] handle.
 pub trait EntityExt: EntitySystem {
     /// This node's entity hosting, carrying the capabilities every type it hosts
     /// shares (spec §7.4, §13): the blocking-I/O pool and the metrics registry.
     ///
     /// Both are properties of the *node*, not of an entity type, so a deployment sets
     /// them once here and hosts every type through the returned handle. Hosting
-    /// straight off the system — `system.entity(..)` — is the same call with both
+    /// straight off the system — `system.entities(..)` — is the same call with both
     /// defaulted (inline I/O, discarded metrics), which is what the `Local` tier and
     /// the deterministic simulation want.
     ///

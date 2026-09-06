@@ -2,7 +2,7 @@
 //! complete, and every file it points at still exists.
 //!
 //! The machine's spec↔code drift gate, the same pattern guarding the core,
-//! utilities, harness, sandbox, and entity catalogues. It fails the build if an
+//! utilities, agent, sandbox, and entity catalogues. It fails the build if an
 //! M-number is missing or duplicated, if an entry claims no verification method, or
 //! if a pointer names a file that no longer exists — which is what keeps §7's
 //! "Verified by" column mechanically true rather than merely written down.

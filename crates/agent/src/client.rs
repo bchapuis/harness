@@ -9,7 +9,7 @@
 //! through the factory.
 //!
 //! [`HarnessSystem`] is the agent runtime's name for the system it runs on — exactly
-//! a [`EntitySystem`]; its §10.4 events ride the core `emit` seam onto the
+//! an [`EntitySystem`]; its §10.4 events ride the core `emit` seam onto the
 //! same observability stream the entity's events use.
 
 use std::collections::BTreeMap;
@@ -60,14 +60,14 @@ use crate::session::TurnId;
 /// Interned entity-type names, keyed by kind name (entity keys purely by string,
 /// §5.1). A build re-tried in a discovery poll loop ([`Harness::client`]) reuses
 /// the leaked name instead of leaking a fresh copy each attempt.
-static GRAIN_TYPE_IDS: LazyLock<Mutex<HashMap<String, &'static str>>> =
+static ENTITY_TYPE_IDS: LazyLock<Mutex<HashMap<String, &'static str>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// An entity type name must be `&'static` (the `EntityName` tag, §5.1); kinds are a
 /// bounded deployment-time set, so interning one leaked `&'static str` per
 /// distinct kind name is sound.
 fn leak_entity_type(kind_id: &KindId) -> &'static str {
-    let mut ids = GRAIN_TYPE_IDS
+    let mut ids = ENTITY_TYPE_IDS
         .lock()
         .expect("entity-type name cache poisoned");
     if let Some(id) = ids.get(kind_id.as_str()) {
@@ -78,7 +78,7 @@ fn leak_entity_type(kind_id: &KindId) -> &'static str {
     id
 }
 
-/// The system a harness runs on — exactly a [`EntitySystem`] (the agent is a
+/// The system a harness runs on — exactly an [`EntitySystem`] (the agent is a
 /// entity, §2.1; its events ride [`ActorSystem::emit`]). The name is the
 /// harness's own vocabulary for the requirement, so a consumer writes
 /// `S: HarnessSystem` without naming the storage layer; the blanket impl makes
@@ -671,7 +671,7 @@ impl<S: HarnessSystem> Follower<S> {
     /// The next in-order records after the last ones returned (at least one),
     /// or a [`Followed::Truncated`] when compaction has outrun the cursor.
     /// Blocks until records are available, attaching, backfilling, and
-    /// re-subscribing transparently. A `EntityError` is a real durability
+    /// re-subscribing transparently. An `EntityError` is a real durability
     /// outcome (the shard cannot serve right now) the caller may surface and
     /// retry.
     pub async fn next(&mut self) -> Result<Followed, EntityError> {

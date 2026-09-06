@@ -66,7 +66,7 @@ pub enum Owner {
 
 /// Every label a range citation can carry.
 ///
-/// The letters are the catalogues' own (`G` for `E1`, `#` for the core's bare
+/// The letters are the catalogues' own (`E` for `E1`, `#` for the core's bare
 /// numbering). A label absent from this table fails [`resolve`] rather than being
 /// skipped, so a new catalogue is registered here as part of adding it — the way
 /// a new spec is registered in [`DOCUMENTS`].
@@ -82,7 +82,7 @@ pub const LABELS: &[(&str, Owner)] = &[
     (
         "F",
         Owner::Unregistered(
-            "entity §7.12's facet contract: four rows beside the G catalogue rather \
+            "entity §7.12's facet contract: four rows beside the E catalogue rather \
              than a site of its own, and no crate holds a Rust copy of it",
         ),
     ),
@@ -101,7 +101,7 @@ pub const LABELS: &[(&str, Owner)] = &[
 /// One `E1–E20` as written, with where it was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Range {
-    /// The label both endpoints carry: `G`, `#`.
+    /// The label both endpoints carry: `E`, `#`.
     pub label: String,
     /// The first invariant named.
     pub low: u8,

@@ -162,7 +162,7 @@ fn control() -> (Vec<Vec<u8>>, &'static str) {
     }
 }
 
-/// The record payloads: real entity segments from a harness run — an agent session's
+/// The record payloads: real entity segments from an agent run — an agent session's
 /// journal, the thing a snapshot and a record batch are cut from.
 fn records() -> (Vec<Vec<u8>>, &'static str) {
     let real = sample("agent-data", "segments", |m| m.len() > 0, 64);

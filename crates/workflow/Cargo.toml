@@ -21,14 +21,14 @@ spec.workspace = true
 # Its own `testing` module, for this crate's conformance suites.
 workflow = { path = ".", features = ["testing"] }
 actor-simulation.workspace = true
-# The clustered tier the orphaned, resume, and swarm suites run on: a workflow
+# The clustered tier the orphan, resume, and swarm suites run on: a workflow
 # entity's crash and migration scenarios are shard-leader moves (§4.4, §6).
 actor-cluster.workspace = true
 # Entity's own continuous checkers, mounted beside the workflow's in the swarm.
 entity = { workspace = true, features = ["testing"] }
 
 [features]
-# The continuous D-checkers over the workflow's event stream, for the conformance
+# The continuous W-checkers over the workflow's event stream, for the conformance
 # suites in this crate and any consumer's swarm. Test support, so it stays out
 # of a production build.
 testing = ["dep:actor-simulation"]

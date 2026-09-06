@@ -61,7 +61,7 @@ use crate::provider::capped;
 const PIDS_LIMIT: u32 = 512;
 
 /// Names this tier's containers apart from any other consumer's on one host.
-const CONTAINER_PREFIX: &str = "harness-sb";
+const CONTAINER_PREFIX: &str = "agent-sb";
 
 /// The native tier's tool declaration, ready for [`agent::Kind::tool`]:
 /// arbitrary commands are not idempotent, so an orphaned call interrupts and

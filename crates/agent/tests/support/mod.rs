@@ -7,8 +7,8 @@
 //! rehydration code under the same seed — simulating the agent runtime *runs the real
 //! consensus path*, with the agent's loop the only new code on it.
 //!
-//! Plus the continuous H-invariant checkers (§11) and the machine-readable
-//! [`agent_catalogue`], guarded by the same drift-test pattern as the core and
+//! Plus the continuous A-invariant checkers (§11) and the machine-readable
+//! [`a_catalogue`], guarded by the same drift-test pattern as the core and
 //! entity catalogues. Activation, deactivation, and the single-writer fence are
 //! observed through the **entity's** events (`Activated`/`Deactivated`, entity
 //! §13), not duplicated by the agent runtime.
@@ -504,7 +504,7 @@ impl SandboxProvider for ScriptedSandboxes {
     }
 }
 
-// The continuous H-invariant checkers (§11) are *not* defined here: they are
+// The continuous A-invariant checkers (§11) are *not* defined here: they are
 // claims about the agent runtime's contract rather than scaffolding for one suite, so
 // they live in `agent::testing` behind the `testing` feature, shared by every
 // suite in this crate. Re-exported so call sites keep reading `support::…`.
@@ -572,19 +572,19 @@ pub fn audit_tier_acquisition(records: &[agent::Record], kind: &agent::Kind) {
 }
 
 // ---------------------------------------------------------------------------
-// The H catalogue (§11)
+// The A catalogue (§11)
 // ---------------------------------------------------------------------------
 
 /// The agent runtime invariant catalogue (agent spec §11): machine readable
 /// alongside the conformance suite, guarded by the drift test in
-/// `conformance_catalogue.rs`. `invariant: n` reads as "Hn". **A2 is retired**
+/// `conformance_catalogue.rs`. `invariant: n` reads as "An". **A2 is retired**
 /// (§11): the single-writer fence is wholly the entity's (E1), so it has no
 /// harness invariant; the numbers A3–A8 are kept stable rather than renumbered.
-pub fn agent_catalogue() -> &'static [CatalogueEntry] {
-    AGENT_CATALOGUE
+pub fn a_catalogue() -> &'static [CatalogueEntry] {
+    A_CATALOGUE
 }
 
-const AGENT_CATALOGUE: &[CatalogueEntry] = &[
+const A_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 1,
         spec: "agent §6.2, §7.5",

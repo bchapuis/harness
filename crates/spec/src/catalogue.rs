@@ -90,7 +90,7 @@ pub struct CatalogueSite {
     pub doc: &'static str,
     /// The section number the catalogue lives under, e.g. `15`.
     pub section: &'static str,
-    /// The letter the labels carry: `G` for `E1`, empty for the core's bare `1.`.
+    /// The letter the labels carry: `E` for `E1`, empty for the core's bare `1.`.
     pub label: &'static str,
     /// How the specification writes it.
     pub shape: Shape,

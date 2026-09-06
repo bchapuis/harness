@@ -81,7 +81,7 @@ impl Protocol for ChatCompletions {
 pub type OpenAiModel<C, E> = ProtocolModel<ChatCompletions, C, E>;
 
 // ---------------------------------------------------------------------------
-// Request encoding (harness Entry → Chat Completions API)
+// Request encoding (agent Entry → Chat Completions API)
 // ---------------------------------------------------------------------------
 
 /// Encode a [`ModelRequest`] as a Chat Completions request body. Public for
@@ -139,7 +139,7 @@ pub fn encode_request(req: &ModelRequest) -> Value {
             // enters as a user message the agent runtime authors.
             Entry::WorkspaceReset => messages.push(json!({
                 "role": "user",
-                "content": "[harness] The workspace was reset: files, processes, and \
+                "content": "[agent] The workspace was reset: files, processes, and \
                             servers from earlier in this conversation no longer exist. \
                             Re-derive anything you need before relying on it.",
             })),

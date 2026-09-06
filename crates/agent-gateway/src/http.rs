@@ -10,7 +10,7 @@
 //! `records` returns the journal's `base` beside the page, and a stream whose
 //! cursor the compactor overtakes emits `truncated` before resuming.
 //!
-//! There is no control protocol underneath: the handler holds a `EntityRef` and
+//! There is no control protocol underneath: the handler holds an `EntityRef` and
 //! calls the entity directly ([`SessionRef::prompt_within`], [`SessionRef::tail`],
 //! [`SessionRef::follow`]), and records tenancy ownership through the client
 //! `Entities<Directory>`.

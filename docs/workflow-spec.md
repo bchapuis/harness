@@ -48,7 +48,7 @@ A workflow entity is an entity plus one function and one seam:
 
 The trait carries a third method, `settle` (§4.2), and it is not a third thing to learn: it is an ordinary entity decision under the ordinary rules (entity §4.2), differing from a handler only in that the workflow holds the command it answers.
 
-`Workflow` is a **supertrait of `Entity`**, which is what gives `Self::State`, `Self::Event`, and `EntityCtx<Self>` below their meaning: a workflow entity is an ordinary entity that has also said what work its state calls for. Its other two supertraits make the wiring a compile-time obligation: a workflow entity that has not routed `Tick` to `Engine::advance` and `Settled` to `Engine::settled` does not compile, the posture entity takes for its own calls (E10). No blanket impl supplies the two handlers, because the orphan rule forbids one and entity holds the hand-written form to be normative, so a consumer writes them once, as two small forwarders. The consumer holds a `Engine` in its behavior and forwards four hooks to it: `on_activate`, `can_hibernate`, and the two handlers. The whole surface, elaborated per method in §3 and §4:
+`Workflow` is a **supertrait of `Entity`**, which is what gives `Self::State`, `Self::Event`, and `EntityCtx<Self>` below their meaning: a workflow entity is an ordinary entity that has also said what work its state calls for. Its other two supertraits make the wiring a compile-time obligation: a workflow entity that has not routed `Tick` to `Engine::advance` and `Settled` to `Engine::settled` does not compile, the posture entity takes for its own calls (E10). No blanket impl supplies the two handlers, because the orphan rule forbids one and entity holds the hand-written form to be normative, so a consumer writes them once, as two small forwarders. The consumer holds an `Engine` in its behavior and forwards four hooks to it: `on_activate`, `can_hibernate`, and the two handlers. The whole surface, elaborated per method in §3 and §4:
 
 ```rust
 pub trait Workflow: Entity + EntityHandler<Tick> + EntityHandler<Settled<Self>> {
@@ -147,11 +147,11 @@ The workflow **never journals the key**. It is re-derived on every activation as
 A tick MUST run:
 
 1. after **every** commit of records, a command's or a settled outcome's (§4.2);
-2. once after **rehydration**, as the activation's first tick (entity §10), ticked from `on_activate`: the workflow that resolves the orphan set (§4.4);
-3. when a key's **backoff elapses** (§3.4): the workflow sleeps the delay on `Clock` through `Spawner` and re-enters through the tick below. It re-enters once more, without a delay, when a key **reaches the cap** and comes to rest, because the settle that put it there committed nothing and only a tick can conclude quiescence (§6);
+2. once after **rehydration**, as the activation's first tick (entity §10), ticked from `on_activate`: the tick that resolves the orphan set (§4.4);
+3. when a key's **backoff elapses** (§3.4): the `Engine` sleeps the delay on `Clock` through `Spawner` and re-enters through the tick below. It re-enters once more, without a delay, when a key **reaches the cap** and comes to rest, because the settle that put it there committed nothing and only a tick can conclude quiescence (§6);
 4. on an explicit **tick**, delivered as an ordinary self-addressed command: how a consumer re-enters the cycle after an event that commits nothing.
 
-Entry point 3 is not a convenience. A settle that fails and a settle that returns no records on purpose (§4.2) both leave their key in the desired set and both commit nothing, so neither can re-enter through entry point 1; without a timer-driven drive a backed-off effect is stranded and **W2 does not hold**. The sleep is virtual under simulation and its jitter comes from `Entropy`, so the relaunch lands at an instant one seed reproduces (§10).
+Entry point 3 is not a convenience. A settle that fails and a settle that returns no records on purpose (§4.2) both leave their key in the desired set and both commit nothing, so neither can re-enter through entry point 1; without a timer-driven tick a backed-off effect is stranded and **W2 does not hold**. The sleep is virtual under simulation and its jitter comes from `Entropy`, so the relaunch lands at an instant one seed reproduces (§10).
 
 Entry point 2 launches directly but **cannot itself commit**: entity journals only through the per-command protocol (entity §6), and no rehydration hook can persist (entity §4.1, where `on_activate` returns no events and sees no state). An orphaned effect the first tick resolves rather than relaunches (§4.4) therefore enters the mailbox as a synthesized `Settled` (§4.2) and commits as an ordinary command, ordered like the tick against whatever command woke the activation. The orphan set is *classified* at the activation's first sight of committed state, which is not always the first tick. A command already in the mailbox is handled ahead of the rehydration tick, and its handler sees the committed state before its own records, on a fresh activation the rehydrated state exactly. So the first handler that re-enters the cycle (entry point 1 or 4, through `Engine::tick`, which takes the state for this reason) or delivers an outcome (`Settled`) classifies from the state it was given. Only the resolution rides the mailbox, because a read of committed state can produce a message but not a record.
 
@@ -210,7 +210,7 @@ fn settle(
 ) -> impl Future<Output = Vec<Self::Event>> + Send;
 ```
 
-`settle` is a **decision**, under exactly the rules a `EntityHandler` decision follows (entity §4.2): it MUST NOT mutate state, MUST NOT perform durable I/O, and MUST NOT await anything. It returns the records that make the outcome durable; the entity's output gate commits them; the commit re-enters the workflow (§3.2). The workflow itself launches that tick, so a consumer wires nothing beyond forwarding the two commands. Returning no records is legal and commits nothing (entity §7.5). It is how a consumer says "this outcome changed nothing", and it leaves the key in the desired set for the workflow the backoff timer brings (§3.2 item 3), since this settle committed nothing to bring one.
+`settle` is a **decision**, under exactly the rules an `EntityHandler` decision follows (entity §4.2): it MUST NOT mutate state, MUST NOT perform durable I/O, and MUST NOT await anything. It returns the records that make the outcome durable; the entity's output gate commits them; the commit re-enters the workflow (§3.2). The workflow itself launches that tick, so a consumer wires nothing beyond forwarding the two commands. Returning no records is legal and commits nothing (entity §7.5). It is how a consumer says "this outcome changed nothing", and it leaves the key in the desired set for the workflow the backoff timer brings (§3.2 item 3), since this settle committed nothing to bring one.
 
 There is no reply, by design. `Settled` is delivered as a `tell` (core §3.3), because there is no caller to answer: the effect's result is durable when its records commit, and anything waiting on it waits on the record, not on the message (§7.1).
 
@@ -380,7 +380,7 @@ Under seed control a simulated workflow MUST be able to inject at least: effect 
 
 ## 11. Future work
 
-- **Alarm-driven drives.** A drive triggered by the alarm facet (entity §7.16) rather than by a commit or a caller, so an entity can hold work it will do *later* without holding an activation. This lifts the agent runtime's caller-driven resumption (agent §7.5, §13), and it is small: an alarm's firing is one more entry point to §3.2.
+- **Alarm-driven ticks.** A tick triggered by the alarm facet (entity §7.16) rather than by a commit or a caller, so an entity can hold work it will do *later* without holding an activation. This lifts the agent runtime's caller-driven resumption (agent §7.5, §13), and it is small: an alarm's firing is one more entry point to §3.2.
 - **A step DSL over the workflow.** The `async` `step`/`sleep`/`retry` surface deferred at entity §16, written over the workflow rather than beside it: `step` becomes a memoized effect (entity §7.17), `sleep` an alarm, and the re-entrant cycle the thing the DSL compiles to.
 - **The programmable agent.** The layer above: transcript, model seam, tool dispatch, and compaction, with the loop written by the application. It is the reason this document exists, and it is specified separately.
 - **Effect priority and concurrency bounds.** The desired set is launched in full today. A consumer with a hundred outstanding effects and one sandbox needs a bound, and the bound belongs here rather than in each consumer, but its shape (a per-key class, a token count, a fairness rule) should be chosen against a second consumer's needs, not the agent runtime's alone.
@@ -472,22 +472,22 @@ What is *not* written above is the point. There is no dispatch loop, no in-fligh
 ## Appendix B: Crate and module layout
 
 ```
-drive/                  # the autonomous entity (this spec): an entity that drives itself
+workflow/                  # the autonomous entity (this spec): an entity that drives itself
   lib.rs                #   the Workflow trait, Pending, OnOrphan, EffectError (§3, §4)
   cycle.rs              #   the workflow cycle: its entry points, desired-set
                         #     reconciliation, claims, launch, quiescence (§3.2, §3.3, §6)
   settle.rs             #   the Settled command, its manifest and handler (§4.2)
-  orphan.rs           #   first-sight classification and policy resolution (§4.4)
+  orphan.rs             #   first-sight classification and policy resolution (§4.4)
   backoff.rs            #   per-key backoff off Clock/Entropy, the timer that re-enters
                         #     the cycle, and the cap that puts a key at rest (§3.4, §6)
   binding.rs            #   Binding<T>: an activation-scoped external resource (§6)
   subscribers.rs        #   Subscribers<K, V>: the await-a-durable-outcome component (§7.1)
   event.rs              #   the checker-facing event vocabulary (§8)
-  testing.rs            #   the continuous D-checkers over that stream, behind the
+  testing.rs            #   the continuous W-checkers over that stream, behind the
                         #     `testing` feature, as entity and the agent runtime both ship
   tests/
     support/            #   Fanout (Appendix A, made real), the scripted effect seam
-                        #     (§10), the D-catalogue, and the three-node cluster
+                        #     (§10), the W-catalogue, and the three-node cluster
     conformance_cycle.rs, conformance_straggler.rs,      # the suites §9 names
     conformance_orphan.rs, conformance_resume.rs,
     workflow_swarm.rs, conformance_catalogue.rs
@@ -501,7 +501,7 @@ drive/                  # the autonomous entity (this spec): an entity that driv
 
 The measure of the seam, still to be taken: the agent runtime does not yet sit on the workflow. Each row is machinery the agent runtime owns today and would consume instead; the last column names what it becomes a case of.
 
-| Today, in `harness/agent.rs` | Under the workflow | Becomes |
+| Today, in `agent/agent.rs` | Under the workflow | Becomes |
 |---|---|---|
 | `RunScope::launched` (`LaunchGuard<StepKey>`) | claims, in the cycle | W3 |
 | `dispatch_pending`, `launch_call`, `launch_open`, `launch_delegation` | `pending` + `perform` | W2, W4 |

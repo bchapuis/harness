@@ -29,7 +29,7 @@ machines").
 
 Each `node` process is a full cluster member: a TCP transport on loopback, a
 static three-node roster with the SWIM failure detector running observe-only,
-and one node's harness — host actor, session actors, and the three seams:
+and one node's agent runtime — host actor, session actors, and the three seams:
 
 - **Model** — the Anthropic Messages API (`agent-anthropic`), over a small
   tokio/rustls HTTP client.
@@ -45,7 +45,7 @@ and one node's harness — host actor, session actors, and the three seams:
   runs.
 
 Sessions are placed by rendezvous hashing over the members every node
-currently considers serving. The gateway holds a `EntityRef` per session and the
+currently considers serving. The gateway holds an `EntityRef` per session and the
 transport routes each `ask` to the session's current owner, so the gateway
 addresses any session regardless of which node hosts it.
 
@@ -129,7 +129,7 @@ agent-standalone node --id 1 --data ./agent-data \
 ```
 
 A hostname resolves through the system resolver, so container or pod DNS names
-(`harness-0.harness.default.svc`, say) work directly. The transport stays
+(`agent-0.agent.default.svc`, say) work directly. The transport stays
 plaintext, guarded by `--secret`; keep the roster on a trusted network, or
 provision TLS, before crossing untrusted links (see Limitations).
 
@@ -268,7 +268,7 @@ opens. Raise the limit to at least **70000** or the process hits the kernel's
 before the store's cache ever evicts anything:
 
 ```ini
-# /etc/systemd/system/harness-node.service
+# /etc/systemd/system/agent-node.service
 [Service]
 LimitNOFILE=131072
 ```

@@ -76,7 +76,7 @@ fn hibernated(recorder: &Recorder) -> bool {
 // --- Tests --------------------------------------------------------------------
 
 #[test]
-fn workflow_runs_steps_sleeps_and_finishes() {
+fn steps_run_sleep_and_finish() {
     let fx = Effects::default();
     let (sim, _rec, entities) = rig(
         1,

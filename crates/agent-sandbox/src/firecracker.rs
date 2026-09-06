@@ -92,7 +92,7 @@ const VSOCK_PORT: u32 = 52;
 
 /// The control-directory prefix ([`machine_host::microvm::control_path`]) for this tier's
 /// VMs, distinct from the machine's `harness-machine`.
-const CONTROL_PREFIX: &str = "harness-fc";
+const CONTROL_PREFIX: &str = "agent-fc";
 
 /// Cap on any single non-tar (JSON) frame: the bound on a malicious or
 /// corrupted frame header.

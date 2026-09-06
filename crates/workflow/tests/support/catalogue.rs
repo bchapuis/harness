@@ -1,8 +1,8 @@
-//! The machine-readable D-catalogue, W1–W7 (workflow spec §9).
+//! The machine-readable W-catalogue, W1–W7 (workflow spec §9).
 //!
-//! The workflow analogue of the core, entity, and harness catalogues: one table
+//! The workflow analogue of the core, entity, and agent catalogue: one table
 //! linking each invariant to the code that verifies it, guarded by the drift test
-//! in `conformance_catalogue.rs`. `invariant: n` reads as "Dn".
+//! in `conformance_catalogue.rs`. `invariant: n` reads as "Wn".
 //!
 //! `SimTest` pointers name files under this crate's `tests/` directory. The
 //! `Checker` entries name `workflow-cycle`, the one continuous checker this crate

@@ -1,6 +1,6 @@
 //! The machine-readable M-catalogue, M1–M6 (machine spec §7).
 //!
-//! The machine's analogue of the core, utilities, harness, sandbox, and entity
+//! The machine's analogue of the core, utilities, agent, sandbox, and entity
 //! catalogues: one table linking each invariant to the code that verifies it,
 //! guarded by the drift test in `conformance_catalogue.rs`. `invariant: n` reads
 //! as "Mn".

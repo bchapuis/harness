@@ -161,7 +161,7 @@ Because all three are snapshot-plus-replay of the journal, a restarted, migrated
 ### 4.1 The trait
 
 ```rust
-/// Inference: one request, one response; no streaming in v1 (§13). The first harness seam.
+/// Inference: one request, one response; no streaming in v1 (§13). The first agent-runtime seam.
 pub trait Model: Send + Sync + 'static {
     async fn complete(&self, req: ModelRequest) -> Result<ModelResponse, ModelError>;
 }
@@ -240,7 +240,7 @@ Every declared tool is **sandboxed**: its call dispatches through the `Sandbox` 
 ### 5.3 The sandbox seam
 
 ```rust
-/// Provisioning of isolated execution environments. The third harness seam.
+/// Provisioning of isolated execution environments. The third agent-runtime seam.
 /// `workspace` is the session's workspace-facet directory (entity §7.11),
 /// rematerialized by the entity before the open: the sandbox runs over it and
 /// never owns its durability.
@@ -335,7 +335,7 @@ A session's cluster life is the entity's life cycle (entity §10), and the journ
 
 ### 7.1 Kinds
 
-Each node's harness is configured with the same `KindId → Kind` map: system prompt, `ToolRegistry`, `SandboxProfile`, model parameters, default budget, delegation allowlist (§8.1). A `KindId` is a `entity_type` (entity §5.1); the kind is the entity type's configuration (its `EntityConfig`: shard count, replication factor, idle window, snapshot policy; entity Appendix A). Kinds are code-and-config, agreed cluster-wide like the codec (core §5): a session created with a kind MUST be resumable on any node, so every node MUST register every kind. A `SessionCreated` record pins the session's kind and a **digest** of its definition (§10.5); the digest covers, among the definition's fields, each tool's declared tier and the profile's tier cap (§5.6). A node cannot activate a kind it lacks: the per-kind factory captures the kind's definition, so an activation of a hosted entity type resolves its kind without a lookup; `HarnessBuilder::host` panics at build for a kind the registry does not hold, and `Harness::session` returns `UnknownKind` for a kind the node's directory neither hosts nor routes (§7.4). A missing kind is a deployment error surfaced before any run starts (nothing journaled, no `RunStarted`), never a silent fallback.
+Each node's agent runtime is configured with the same `KindId → Kind` map: system prompt, `ToolRegistry`, `SandboxProfile`, model parameters, default budget, delegation allowlist (§8.1). A `KindId` is an `entity_type` (entity §5.1); the kind is the entity type's configuration (its `EntityConfig`: shard count, replication factor, idle window, snapshot policy; entity Appendix A). Kinds are code-and-config, agreed cluster-wide like the codec (core §5): a session created with a kind MUST be resumable on any node, so every node MUST register every kind. A `SessionCreated` record pins the session's kind and a **digest** of its definition (§10.5); the digest covers, among the definition's fields, each tool's declared tier and the profile's tier cap (§5.6). A node cannot activate a kind it lacks: the per-kind factory captures the kind's definition, so an activation of a hosted entity type resolves its kind without a lookup; `HarnessBuilder::host` panics at build for a kind the registry does not hold, and `Harness::session` returns `UnknownKind` for a kind the node's directory neither hosts nor routes (§7.4). A missing kind is a deployment error surfaced before any run starts (nothing journaled, no `RunStarted`), never a silent fallback.
 
 Registration is knowledge; a node's **directory** — the kinds it *hosts* (entity types it serves, seams injected) plus the kinds it only *routes to* (the cluster-client path, entity §5.3) — is per-node deployment shape. Harness construction MUST reject a directory that does not close over delegation: every hosted kind's delegation allowlist (§8.1) must be contained in the directory, because the parent's own node launches the child `Submit` (§8.1) and delivers owed cancels (§9.2) through its route for the child's kind — uncovered, every delegation to that kind would fail per-call, and an owed cancel would wait on a better-configured node leading the shard (A5's liveness). The rejection is at build, as loud as a duplicate tool name (§5.2), so the gap is a deployment error, never a mid-run discovery.
 
@@ -355,8 +355,8 @@ A session is addressed as an entity, and its commands are entity commands (entit
 
 | Command | Reply (`M::Reply`) | Manifest |
 |---|---|---|
-| `Submit { kind, turn, parent?, reply_to: Option<ActorRef<…>> }` | `Result<Accepted, SubmitReject>`† | `harness.Submit` |
-| `Cancel { turn }` | `()` | `harness.Cancel` |
+| `Submit { kind, turn, parent?, reply_to: Option<ActorRef<…>> }` | `Result<Accepted, SubmitReject>`† | `agent.Submit` |
+| `Cancel { turn }` | `()` | `agent.Cancel` |
 
 The session names no payload field: it is the entity name the command is addressed to (entity §5.4). `parent` carries a delegating parent's lineage (§8.1, §10.3) and is absent on a root submit.
 
@@ -385,8 +385,8 @@ A read (`tail`, and any future query that emits no record) commits nothing (enti
 ```rust
 let h = Harness::cluster(system, kinds, model, sandboxes);
 //   per node: registers each kind's gateway and injects the model and sandbox seams (§4, §5.3);
-//   the journal is the entity's, configured per kind (§7.1), not a harness seam.
-let s = h.session("researcher", SESSION_ID)?;      // a EntityRef<Agent>; name→shard is a pure local hash,
+//   the journal is the entity's, configured per kind (§7.1), not an agent-runtime seam.
+let s = h.session("researcher", SESSION_ID)?;      // an EntityRef<Agent>; name→shard is a pure local hash,
                                                    //   no I/O (entity §5.1, §5.4); the one failure is a
                                                    //   directory miss — a kind this node neither hosts nor
                                                    //   routes. Kind names arrive from outside (a URL path
@@ -421,7 +421,7 @@ Resumption is **caller-driven**: the entity does not scan for orphaned work (ent
 The agent runtime provides one built-in tool, `delegate`, the only tool that executes in the loop rather than the sandbox (§5.2), present in a kind's registry iff the kind permits sub-agents. Its input names a child kind plus a prompt and, optionally, a budget request. The child kind MUST belong to the parent kind's **delegation allowlist** (§7.1): naming any other kind is a synthesized `ToolError` (§5.4), so a locked-down kind cannot escalate its privileges by delegating to a permissive one. Its execution is a child `Submit`:
 
 1. the parent journals the delegation (a `ChildRun` record: the child `SessionId` and the child turn's `TurnId`, both derived deterministically from the parent session, the parent's `TurnId`, and the delegation's `CallId` (§5.2), plus the carved budget, §9.1; one run may delegate many times, so the call, not the turn, is the unit of derivation); the derivation length-prefixes each component, so distinct `(session, turn, call)` triples always derive distinct ids — ids are application-chosen, and a bare separator join would let crafted ids collide; a re-executed delegation re-derives the same pair (§5.5), and cancel propagation reads it from the record (§9.2);
-2. the launched task `Submit`s to the child session (a `EntityRef`) carrying a **reply-to** ref and **awaits the child's `RunCompleted`** notification (§7.3); it never block-`ask`s the child, whose run may be arbitrarily long. The await re-attaches on the submit-deadline cadence (each lapse re-registers on whatever activation then hosts the child, §7.5; the derived `TurnId` keeps every re-attempt safe, A7) and is bounded in total by a **budget-scaled wait**: a configurable floor plus a configurable per-step allowance × the child's carved `steps` (the floor SHOULD default to about **10 minutes**, the allowance to about the per-tool timeout, §5.3 item 3) — the carve is the right scale because the step bound is compositional (§9.1 item 3), so it bounds the whole subtree's model calls, not one level's. Past the bound the delegation resolves as a synthesized `ToolError` for the parent's model to react to (§5.4); the lapse cancels nothing — the child runs on, its budget the backstop (§9.2 item 3), and its `ChildRun` now has a journaled outcome, so a later cancel of the parent no longer propagates to it (§9.2 item 2). A *consecutively unreachable* child is bounded separately, by a transport retry limit with backoff (any accepted submit resets it), surfacing the same way (§5.4). The child is a **full session**: an entity in its own right, journaled, budgeted, placed on its own shard wherever the cluster puts it (entity §5), supervised on its leader;
+2. the launched task `Submit`s to the child session (an `EntityRef`) carrying a **reply-to** ref and **awaits the child's `RunCompleted`** notification (§7.3); it never block-`ask`s the child, whose run may be arbitrarily long. The await re-attaches on the submit-deadline cadence (each lapse re-registers on whatever activation then hosts the child, §7.5; the derived `TurnId` keeps every re-attempt safe, A7) and is bounded in total by a **budget-scaled wait**: a configurable floor plus a configurable per-step allowance × the child's carved `steps` (the floor SHOULD default to about **10 minutes**, the allowance to about the per-tool timeout, §5.3 item 3) — the carve is the right scale because the step bound is compositional (§9.1 item 3), so it bounds the whole subtree's model calls, not one level's. Past the bound the delegation resolves as a synthesized `ToolError` for the parent's model to react to (§5.4); the lapse cancels nothing — the child runs on, its budget the backstop (§9.2 item 3), and its `ChildRun` now has a journaled outcome, so a later cancel of the parent no longer propagates to it (§9.2 item 2). A *consecutively unreachable* child is bounded separately, by a transport retry limit with backoff (any accepted submit resets it), surfacing the same way (§5.4). The child is a **full session**: an entity in its own right, journaled, budgeted, placed on its own shard wherever the cluster puts it (entity §5), supervised on its leader;
 3. the child's outcome arrives as one more message into the parent's loop (§3.2) and becomes the tool's outcome (§5.4): journaled, then shown to the parent's model.
 
 Delegation thereby inherits every property of §7 with no new machinery: a child on a crashed leader resumes on the new leader (§7.5); a parent that crashes and resumes finds the delegation orphaned and, since `delegate` is declared `Reexecute`, re-executes it; the child's journaled `TurnId` dedups the re-submission and re-registers the parent's fresh reply-to (§7.4), so the outcome is delivered whether the child is still running or already done.
@@ -465,7 +465,7 @@ Operating agents means seeing what the model said, which tools ran, what a run c
 The entity's journal (entity §7) is the single source of truth for what a session did, and every observation API is normatively a **read of it**. The agent runtime MUST NOT keep a second durable account of session activity: a parallel trace or audit store would restate the journal's decision in a second module, and the two would drift. The division of labor:
 
 - **Records** are durable and user-facing: the transcript, the tool calls and outcomes, the costs, the tree links. They *are* the entity's events (§6.1). If an observer needs it, it is a record.
-- **Events** (§10.4) are ephemeral and checker-facing: they describe the *machinery around* sessions (activation, leadership, run pairing) so the H-invariants are checkable over a run's stream (core §16, entity §13). They carry nothing about a session's content.
+- **Events** (§10.4) are ephemeral and checker-facing: they describe the *machinery around* sessions (activation, leadership, run pairing) so the A-invariants are checkable over a run's stream (core §16, entity §13). They carry nothing about a session's content.
 
 Each record carries the leader's `Clock` reading at write time. The timestamp is observational metadata: the fold (§6.2) MUST NOT let it influence behavior. Under simulation it is virtual and therefore deterministic (core §18.1), so timestamped journals still reproduce byte-identically.
 
@@ -517,7 +517,7 @@ Aggregate metrics (spend per kind and per tree, grouped by `root`; run latency; 
 
 ## 11. Conformance
 
-The agent runtime catalogue mirrors the entity, core, and utilities catalogues and is machine-readable alongside the agent runtime's conformance suite (`agent_catalogue()`), guarded by the same drift-test pattern. It lists only what is specific to the *agent*; the entity's own guarantees are cited in the entity-basis column rather than re-proved here. The deterministic fold (E2/E3) and single activation (E6) reappear as the agent-level A1 and A6, which add resume-equivalence and autonomy to them, while the single-writer fence (E1) has **no** agent invariant at all: it is wholly the entity's, appearing only as the basis other agent invariants build on (A6's one leader, A7's single commit). There is deliberately no **A2**: the write-ahead obligation that number would carry is wholly the entity's output gate (§6.3, E5), and A3–A8 keep stable numbers.
+The agent runtime catalogue mirrors the entity, core, and utilities catalogues and is machine-readable alongside the agent runtime's conformance suite (`a_catalogue()`), guarded by the same drift-test pattern. It lists only what is specific to the *agent*; the entity's own guarantees are cited in the entity-basis column rather than re-proved here. The deterministic fold (E2/E3) and single activation (E6) reappear as the agent-level A1 and A6, which add resume-equivalence and autonomy to them, while the single-writer fence (E1) has **no** agent invariant at all: it is wholly the entity's, appearing only as the basis other agent invariants build on (A6's one leader, A7's single commit). There is deliberately no **A2**: the write-ahead obligation that number would carry is wholly the entity's output gate (§6.3, E5), and A3–A8 keep stable numbers.
 
 | # | Invariant | Defined in | Verified by | Entity basis |
 |---|---|---|---|---|
@@ -545,11 +545,11 @@ The agent runtime adds **two** rows to the table the entity already virtualizes 
 | `Sandbox` (§5.3) | a deployment-supplied `SandboxProvider` (process, container, or microVM; §13) | **scripted sandbox**: deterministic outcomes per call and seed; seeded open failures, latency, crashes, environment loss, and tier-provisioning failure |
 | *(journal)* | *the `EntityJournal` (entity §7.3, §7.4): single-node or sharded-Raft* | *the entity's simulation seam (entity §14); the agent runtime drives the real consensus code, not a model of it* |
 
-The `harness` crate itself MUST satisfy core §18.1: no wall clock, no OS threads, no unseeded randomness; all I/O launched through `Spawner` (§3.2). The agent runtime's `http` module owns the HTTP seam the production adapters share: `HttpPost`, the one socket operation a deployment implements over its HTTP stack; `HttpResponse` and `HttpError`, an exchange reduced to what a protocol decides on; the `Protocol` trait, an adapter's wire-specific four (the path, the headers carrying the key, the request JSON, and the `classify` mapping of a response onto `ModelError`); and `ProtocolModel`, the shared shell holding the socket, the key, the seams, and the bounded retry engine (`RetryPolicy`: 4 attempts, exponential backoff from a 500 ms base capped at 8 s, with up to one base of seeded jitter; `RateLimited`, `Overloaded`, and `Api` retry, nothing else). The core crate performs no I/O: `HttpPost` is a trait, and its production implementation (the standalone deployment's, built on the separate `agent-http` substrate) is injected at construction. Each production `Model` crate (`agent-anthropic`, `agent-openai`) is a `Protocol` impl plus a `ProtocolModel` alias, the single home of its own wire protocol and nothing else; production sandbox providers are likewise separate crates. Because the journal, the fence, placement, and resume are the entity's, simulating the agent runtime *runs the real entity host, gateway, shard, and rehydration code* (entity §14) under the same seed. The agent's loop is the only new code on the simulated path.
+The `agent` crate itself MUST satisfy core §18.1: no wall clock, no OS threads, no unseeded randomness; all I/O launched through `Spawner` (§3.2). The agent runtime's `http` module owns the HTTP seam the production adapters share: `HttpPost`, the one socket operation a deployment implements over its HTTP stack; `HttpResponse` and `HttpError`, an exchange reduced to what a protocol decides on; the `Protocol` trait, an adapter's wire-specific four (the path, the headers carrying the key, the request JSON, and the `classify` mapping of a response onto `ModelError`); and `ProtocolModel`, the shared shell holding the socket, the key, the seams, and the bounded retry engine (`RetryPolicy`: 4 attempts, exponential backoff from a 500 ms base capped at 8 s, with up to one base of seeded jitter; `RateLimited`, `Overloaded`, and `Api` retry, nothing else). The core crate performs no I/O: `HttpPost` is a trait, and its production implementation (the standalone deployment's, built on the separate `agent-http` substrate) is injected at construction. Each production `Model` crate (`agent-anthropic`, `agent-openai`) is a `Protocol` impl plus a `ProtocolModel` alias, the single home of its own wire protocol and nothing else; production sandbox providers are likewise separate crates. Because the journal, the fence, placement, and resume are the entity's, simulating the agent runtime *runs the real entity host, gateway, shard, and rehydration code* (entity §14) under the same seed. The agent's loop is the only new code on the simulated path.
 
 ### 12.2 Fault injection
 
-Under seed control, a simulated harness run MUST be able to inject at least, on top of the core and entity faults (core §18.3, entity §14):
+Under seed control, a simulated agent run MUST be able to inject at least, on top of the core and entity faults (core §18.3, entity §14):
 
 - **Model:** latency, `RateLimited`/`Overloaded` bursts, `ContextOverflow`, unknown tool names, malformed or schema-violating arguments (rejected by the loop and the executing tool respectively, §5.4), pathological tool-call loops (exercising budgets).
 - **Sandbox:** open failure, execution latency, a crash mid-call (orphaned calls, §5.5), loss of the environment between steps (forcing a fresh sandbox and `WorkspaceReset`), and provisioning failure at an acquired tier.
@@ -624,7 +624,7 @@ match s.prompt(Turn::new(TurnId::new("t-1"), "Summarize the corpus on X.")).awai
 ## Appendix B: Crate and module layout
 
 ```
-harness/                # the agent runtime (this spec): an agent is an entity (§2)
+agent/                # the agent runtime (this spec): an agent is an entity (§2)
   agent.rs              #   the Agent entity: Entity/EntityHandler impls, the run loop,
                         #     steps, the fold over records (§3, §6)
   session.rs            #   SessionId (= EntityName), TurnId, Turn, Record (= the entity Event) (§2, §6)
@@ -639,7 +639,7 @@ harness/                # the agent runtime (this spec): an agent is an entity (
                         #     ephemeral reply-to actor behind the blocking `prompt` convenience (§7.4)
   budget.rs             #   Budget, spend accounting, carve-outs, cancellation (§9)
   event.rs              #   the agent runtime's checker-facing Event vocabulary (§10.4)
-  testing.rs            #   the continuous H-checkers over that stream — run discipline
+  testing.rs            #   the continuous A-checkers over that stream — run discipline
                         #     (A3/A7) and effect containment (A6/A8) — behind the
                         #     `testing` feature, not part of the agent runtime API (§11)
 
@@ -660,4 +660,4 @@ agent-sandbox/        # tiered SandboxProvider (sandbox §3): Workspace by cap-s
                         #   container or a Firecracker microVM (feature-gated); ships s_catalogue()
 ```
 
-`harness` depends on `entity` (the entity: identity, journal, fence, placement, activation, hibernation), and through it on `actor-core`, `actor-cluster`, and `actor-serialization`. It defines **no journal, no placement function, no fence, and no resume protocol** of its own; each is consumed from entity. The single durable thing the agent runtime names is the `Record` type (the entity's event) and its `apply` fold. Test-only pieces (the scripted model, the scripted sandbox, `agent_catalogue()`, the conformance suites) live with the agent runtime's tests, dev-depending on `actor-simulation` and entity's simulation seam; the continuous checkers are the exception, shipping in `testing.rs` behind the `testing` feature because they are claims about the *agent runtime's* contract that any consumer's swarm can mount, as entity's own `testing.rs` does for the entity. The crate observes the workspace conventions: edition 2024, `unsafe_code = "forbid"`, `clippy::all = "warn"`, serde derives only.
+`agent` depends on `entity` (the entity: identity, journal, fence, placement, activation, hibernation), and through it on `actor-core`, `actor-cluster`, and `actor-serialization`. It defines **no journal, no placement function, no fence, and no resume protocol** of its own; each is consumed from entity. The single durable thing the agent runtime names is the `Record` type (the entity's event) and its `apply` fold. Test-only pieces (the scripted model, the scripted sandbox, `a_catalogue()`, the conformance suites) live with the agent runtime's tests, dev-depending on `actor-simulation` and entity's simulation seam; the continuous checkers are the exception, shipping in `testing.rs` behind the `testing` feature because they are claims about the *agent runtime's* contract that any consumer's swarm can mount, as entity's own `testing.rs` does for the entity. The crate observes the workspace conventions: edition 2024, `unsafe_code = "forbid"`, `clippy::all = "warn"`, serde derives only.

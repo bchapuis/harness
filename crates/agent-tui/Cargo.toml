@@ -1,6 +1,6 @@
 [package]
 name = "agent-tui"
-description = "A terminal client for the agent runtime: connects to a agent-gateway over HTTP/SSE, lists a tenant's sessions, and streams a turn's records live as a chat transcript"
+description = "A terminal client for the agent runtime: connects to an agent-gateway over HTTP/SSE, lists a tenant's sessions, and streams a turn's records live as a chat transcript"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

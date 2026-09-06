@@ -485,7 +485,7 @@ impl EntityRecords {
         }
     }
 
-    /// Reconstruct a segment from a [`EntityCheckpoint`] (the file store's replay of a
+    /// Reconstruct a segment from an [`EntityCheckpoint`] (the file store's replay of a
     /// compacted segment).
     pub(crate) fn from_checkpoint(checkpoint: EntityCheckpoint) -> EntityRecords {
         EntityRecords {

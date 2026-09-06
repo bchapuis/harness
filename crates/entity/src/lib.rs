@@ -7,7 +7,7 @@
 //! `actor-core`.
 //!
 //! Author an entity by implementing [`Entity`] (state, events, the pure
-//! [`apply`](Entity::apply) fold) and a [`EntityHandler`] per command (the
+//! [`apply`](Entity::apply) fold) and an [`EntityHandler`] per command (the
 //! decide/apply split, §4.2), then host it with
 //! [`system.entities::<G>(config)`](EntityExt::entity) and address it by name
 //! with [`Entities::entity`]. A command's reply is held until its events are
@@ -50,7 +50,7 @@
 //!   into shards (`EntityConfig::shards`), each a leader-election Raft group holding
 //!   no entity data (§7.1) over which a per-entity **quorum append** (§7.2) makes a
 //!   entity's records durable on the shard's replicas, fenced by the shard term. A
-//!   entity activates on its shard's leader (§5.2), a [`EntityRef`] call from any node
+//!   entity activates on its shard's leader (§5.2), an [`EntityRef`] call from any node
 //!   routes name→shard→leader (§5.4), the §8 single-writer fence and the
 //!   `NotLeader`/`Unavailable` durability outcomes (§11) apply, and a new leader
 //!   recovers each entity's head from a write quorum by read-repair on activation, so
@@ -100,7 +100,7 @@ mod corpus;
 mod disk;
 mod election;
 mod entity;
-mod entityref;
+mod entity_ref;
 mod error;
 mod event;
 mod facet;
@@ -161,9 +161,9 @@ pub use entity::EventHistory;
 pub use entity::EventsFuture;
 pub use entity::NoEvent;
 pub use entity::accepted_manifests;
-pub use entityref::Entities;
-pub use entityref::EntityExt;
-pub use entityref::EntityRef;
+pub use entity_ref::Entities;
+pub use entity_ref::EntityExt;
+pub use entity_ref::EntityRef;
 pub use error::EntityError;
 pub use event::EntityEvent;
 pub use facet::Facet;

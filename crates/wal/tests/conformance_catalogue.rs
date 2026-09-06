@@ -25,7 +25,7 @@ use std::path::Path;
 
 use spec::catalogue;
 
-/// One row of the W-catalogue: the invariant number, the spec sections defining
+/// One row of the L-catalogue: the invariant number, the spec sections defining
 /// it, a one-line property, and the test functions verifying it.
 struct CatalogueEntry {
     invariant: u8,

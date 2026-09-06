@@ -229,7 +229,7 @@ pub struct Advance;
 
 impl Message for Advance {
     type Reply = ();
-    const MANIFEST: Manifest = Manifest::new("agent.agent.Advance");
+    const MANIFEST: Manifest = Manifest::new("agent.Advance");
 }
 
 /// One model call finished (§3.1 step 2): its outcome, back on the loop.
@@ -247,7 +247,7 @@ pub struct ModelDone {
 
 impl Message for ModelDone {
     type Reply = ();
-    const MANIFEST: Manifest = Manifest::new("agent.agent.ModelDone");
+    const MANIFEST: Manifest = Manifest::new("agent.ModelDone");
 }
 
 /// One tool call or delegation finished (§5.4, §8.1): its outcome, back on the
@@ -261,7 +261,7 @@ pub struct ToolDone {
 
 impl Message for ToolDone {
     type Reply = ();
-    const MANIFEST: Manifest = Manifest::new("agent.agent.ToolDone");
+    const MANIFEST: Manifest = Manifest::new("agent.ToolDone");
 }
 
 /// One propagated `Cancel` was acked by the child of `(turn, call)` (§9.2):
@@ -275,7 +275,7 @@ pub struct CancelDone {
 
 impl Message for CancelDone {
     type Reply = ();
-    const MANIFEST: Manifest = Manifest::new("agent.agent.CancelDone");
+    const MANIFEST: Manifest = Manifest::new("agent.CancelDone");
 }
 
 // ===========================================================================

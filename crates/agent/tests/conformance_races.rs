@@ -81,7 +81,7 @@ fn a_submit_racing_the_post_end_advance_starts_clean() {
     // A's resolved `call-1-0`, and an unswept loop skips the call forever —
     // the run hangs and the prompt times out.
     scenario_sweep(
-        "harness-races/submit-post-end",
+        "agent-races/submit-post-end",
         sweep_seeds(0..96),
         |seed| {
             let make_model = |system: &SimSystem| -> Arc<dyn Model> {

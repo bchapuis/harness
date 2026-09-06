@@ -18,7 +18,7 @@ and the family is obvious at a glance:
 Two conventions apply elsewhere in the tree and are deliberately left alone:
 
 - **A script that builds one artifact sits next to that artifact and is called `build.sh`** — `guest/fc-rootfs`, `guest/machine-rootfs`, `guest/machine-docker`, `guest/qjs-runner`. The directory supplies the subject, so the filename only needs the verb. CI cache keys hash these paths.
-- **A script that drives one deployment sits with its manifests** — `k8s/deploy.sh`, next to the `harness.yaml` it applies and the `README.md` that explains the manual walkthrough it automates.
+- **A script that drives one deployment sits with its manifests** — `k8s/deploy.sh`, next to the `agent.yaml` it applies and the `README.md` that explains the manual walkthrough it automates.
 
 Every script here `cd`s to the workspace root on entry, so it runs correctly from
 any working directory.

@@ -126,7 +126,7 @@ impl std::fmt::Display for ModelError {
 }
 
 /// Inference: one request, one response; no streaming in v1 (agent spec
-/// §13). The first harness seam.
+/// §13). The first agent-runtime seam.
 pub trait Model: Send + Sync + 'static {
     fn complete(&self, req: ModelRequest) -> BoxFuture<'static, Result<ModelResponse, ModelError>>;
 }

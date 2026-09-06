@@ -9,7 +9,7 @@
 //! Under colima, only `$HOME` and `/tmp/colima` are shared with the VM by
 //! default — point `TMPDIR` somewhere under `$HOME` if provisioning fails
 //! with a mount error. A test that panics mid-flight can stray a container:
-//! `docker ps -a --filter name=harness-sb-` lists them.
+//! `docker ps -a --filter name=agent-sb-` lists them.
 
 #![cfg(feature = "native")]
 
@@ -78,7 +78,7 @@ async fn workspace(
 }
 
 /// The session's containers, by docker's substring name filter: the
-/// provider's names are `harness-sb-<workspace>-<digest>`, so filtering on
+/// provider's names are `agent-sb-<workspace>-<digest>`, so filtering on
 /// the prefix finds them without knowing the digest.
 fn containers(name_prefix: &str) -> Vec<String> {
     let output = std::process::Command::new("docker")
@@ -299,11 +299,11 @@ async fn release_removes_the_container_and_is_idempotent() {
     let sandbox = open(&provider, "rel", &dir.path().join("rel")).await;
 
     shell(&sandbox, "true").await.expect("shell");
-    assert_eq!(containers("harness-sb-rel").len(), 1, "container exists");
+    assert_eq!(containers("agent-sb-rel").len(), 1, "container exists");
 
     sandbox.release().await;
     assert_eq!(
-        containers("harness-sb-rel").len(),
+        containers("agent-sb-rel").len(),
         0,
         "release removes the container (S5)"
     );
@@ -327,7 +327,7 @@ async fn an_externally_killed_container_is_single_tier_loss() {
     let sandbox = open(&provider, "stl", &dir.path().join("stl")).await;
 
     shell(&sandbox, "true").await.expect("first");
-    let names = containers("harness-sb-stl");
+    let names = containers("agent-sb-stl");
     assert_eq!(names.len(), 1);
     // The world removes the container behind the provider's back, while the
     // workspace survives.
@@ -363,7 +363,7 @@ async fn a_vanished_workspace_escalates_to_environment_lost() {
     // Remove the container first (a live bind mount can keep the directory
     // serving inside the container), then the host directory: the whole
     // environment is gone.
-    let names = containers("harness-sb-lost");
+    let names = containers("agent-sb-lost");
     assert_eq!(names.len(), 1);
     let killed = std::process::Command::new("docker")
         .args(["rm", "-f", &names[0]])

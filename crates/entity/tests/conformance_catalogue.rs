@@ -2,8 +2,8 @@
 //! stays complete, and every file it points at still exists.
 //!
 //! This is the spec↔code drift gate for entity, the same pattern that guards the
-//! core, utilities, harness, and sandbox catalogues. It fails the build if a
-//! G-number is missing or duplicated, if an entry claims no verification method,
+//! core, utilities, agent, and sandbox catalogues. It fails the build if a
+//! E-number is missing or duplicated, if an entry claims no verification method,
 //! or if a `SimTest`/`CompileFail` pointer names a file that no longer exists —
 //! which is what makes §15's "Verified by" column mechanically true rather than
 //! merely written down.

@@ -11,7 +11,7 @@ is the edge UI in front of it. That is the same boundary the VS Code extension i
 `clients/agent-vscode` sits on, over the same REST + Server-Sent-Events
 protocol — one client in the terminal, one in an editor.
 
-The one shared dependency is `harness` itself, for the record and outcome types
+The one shared dependency is `agent` itself, for the record and outcome types
 the gateway serializes onto the wire. Sharing them keeps the client in lockstep
 with the server's JSON rather than mirroring a second copy that can drift.
 

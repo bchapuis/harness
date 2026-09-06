@@ -68,7 +68,7 @@ impl Protocol for Messages {
 pub type AnthropicModel<C, E> = ProtocolModel<Messages, C, E>;
 
 // ---------------------------------------------------------------------------
-// Request encoding (harness Entry → Messages API)
+// Request encoding (agent Entry → Messages API)
 // ---------------------------------------------------------------------------
 
 /// Encode a [`ModelRequest`] as a Messages API request body. Public for
@@ -122,7 +122,7 @@ pub fn encode_request(req: &ModelRequest) -> Value {
                 "user",
                 json!({
                     "type": "text",
-                    "text": "[harness] The workspace was reset: files, processes, and \
+                    "text": "[agent] The workspace was reset: files, processes, and \
                              servers from earlier in this conversation no longer exist. \
                              Re-derive anything you need before relying on it.",
                 }),
@@ -237,7 +237,7 @@ fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
         (429, _) => ModelError::RateLimited,
         (529, _) | (_, "overloaded_error") => ModelError::Overloaded,
         // The API reports an over-long prompt as an invalid request; the
-        // harness distinguishes it because the run must fail explicitly on
+        // the agent runtime distinguishes it because the run must fail explicitly on
         // it (§1.1, §4.3).
         (400, _) if detail.message.contains("prompt is too long") => ModelError::ContextOverflow,
         (400, _) | (_, "invalid_request_error") => ModelError::InvalidRequest(detail.message),

@@ -33,7 +33,7 @@
 //!   entity — it introduces no new transport, journal, or consensus.
 //! - **Not the auth boundary.** *Who* may read or mutate a principal's directory is
 //!   decided at each consumer's authenticating edge, where the principal is actually
-//!   known — never here. A `EntityRef<Directory>` is an in-cluster capability among
+//!   known — never here. An `EntityRef<Directory>` is an in-cluster capability among
 //!   trusted peers, not a tenant-safe token.
 //! - **Not a deleter of what it indexes.** The directory *forgets* names; it cannot
 //!   reach into another entity. Tearing a principal's entities down is driven by the

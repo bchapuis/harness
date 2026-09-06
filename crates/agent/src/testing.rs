@@ -1,6 +1,6 @@
-//! Shared simulation invariants over harness events (agent spec §11).
+//! Shared simulation invariants over agent events (agent spec §11).
 //!
-//! The continuous H-checkers: the event grammar that bounds effects to a live
+//! The continuous A-checkers: the event grammar that bounds effects to a live
 //! activation (A6/A8), and run discipline over `(session, turn)` (A3/A7). Test
 //! support behind the `testing` feature, not part of the agent runtime API.
 
@@ -170,8 +170,8 @@ impl Invariant for RunDiscipline {
     }
 }
 
-/// The default checker set for harness workloads: the core and entity invariants
-/// plus the agent runtime's continuous H-checkers (§11).
+/// The default checker set for agent workloads: the core and entity invariants
+/// plus the agent runtime's continuous A-checkers (§11).
 pub fn agent_invariants() -> Vec<Box<dyn Invariant>> {
     let mut invariants = default_invariants();
     invariants.push(Box::new(AgentEventGrammar::default()));
@@ -179,7 +179,7 @@ pub fn agent_invariants() -> Vec<Box<dyn Invariant>> {
     invariants
 }
 
-/// Which H-invariant each harness checker enforces, as `(checker name, H
+/// Which A-invariant each agent checker enforces, as `(checker name, H
 /// number)` — the pairing §11's "Verified by" column asserts, stated from the
 /// checker's side.
 ///

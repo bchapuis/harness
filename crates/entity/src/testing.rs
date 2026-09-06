@@ -134,7 +134,7 @@ impl Invariant for ActivationSingletonPerNode {
     }
 }
 
-/// A [`EntityStore`](crate::EntityStore) with a fixed answer: every write returns
+/// An [`EntityStore`](crate::EntityStore) with a fixed answer: every write returns
 /// `refusal`, every read is empty, every enumeration is empty.
 ///
 /// The deterministic stand-in for a store that never acknowledges — an index whose
@@ -264,7 +264,7 @@ impl crate::EntityStore for StaticEntityStore {
     }
 }
 
-/// A [`EntityStore`](crate::EntityStore) wrapper that reports its snapshot at a seq
+/// An [`EntityStore`](crate::EntityStore) wrapper that reports its snapshot at a seq
 /// `ahead` slots **beyond** the one it was saved at, leaving records, head, and
 /// snapshot bytes untouched.
 ///

@@ -399,7 +399,7 @@ fn a_step_memo_is_write_once_under_the_cluster_swarm() {
 /// local width of 8 (docs/simulation-testing.md, *Adding a sweep*, and
 /// `Exercised`'s own note, which `disk_swarm.rs` reached the same way).
 #[test]
-fn the_workflow_swarm_observes_a_memo_something_tried_to_overwrite() {
+fn the_steps_swarm_observes_a_memo_something_tried_to_overwrite() {
     let workload = workload();
     let stats = match run_cluster_swarm_coverage(&workload, coverage_seeds(0..24)) {
         Ok(stats) => stats,
@@ -433,7 +433,7 @@ fn the_workflow_swarm_observes_a_memo_something_tried_to_overwrite() {
 /// check itself introduced, and the memo values the check reads are drawn from
 /// them.
 #[test]
-fn the_workflow_swarm_replays_identically() {
+fn the_steps_swarm_replays_identically() {
     if let Err(divergence) = replay_cluster_swarm(&workload(), sweep_seeds(0..8)) {
         panic!("{divergence}");
     }

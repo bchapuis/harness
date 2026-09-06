@@ -2,10 +2,10 @@
 //! the live checker set, and the specification's own table must agree — a
 //! checker added in code but not recorded in the catalogue (or vice versa), a
 //! suite renamed under a pointer, or a row moved in one copy fails the build,
-//! the same pattern guarding the core, entity, and harness catalogues.
+//! the same pattern guarding the core, entity, and agent catalogue.
 //!
 //! The checker agreement is checked **per (checker, invariant) pair**, as the
-//! harness's is: one name carries four D-invariants here, so a name set would be
+//! harness's is: one name carries four W-invariant here, so a name set would be
 //! blind to one row quietly dropping its `Verify::Checker` while a sibling row
 //! still names the same checker.
 
@@ -93,7 +93,7 @@ fn every_checker_covers_exactly_the_invariants_the_catalogue_gives_it() {
     assert_eq!(
         declared,
         catalogued_pairs(),
-        "a checker's declared coverage (workflow::testing::checker_coverage) and the D \
+        "a checker's declared coverage (workflow::testing::checker_coverage) and the W \
          catalogue's Verify::Checker rows name different (checker, invariant) pairs (§9)"
     );
 }

@@ -295,7 +295,7 @@ impl FileEntityStore {
     /// # Errors
     ///
     /// [`io::ErrorKind::InvalidData`] when the store was written by another codec
-    /// or at a `entity.store` revision this build does not accept; otherwise any
+    /// or at an `entity.store` revision this build does not accept; otherwise any
     /// filesystem error opening the directory or its index files.
     pub fn open(dir: impl Into<PathBuf>, codec: &str) -> io::Result<FileEntityStore> {
         let dir = dir.into();
@@ -369,7 +369,7 @@ impl FileEntityStore {
             .clone()
     }
 
-    /// A [`EntityStoreFactory`] rooted at `root`: each hosted entity type's records live
+    /// An [`EntityStoreFactory`] rooted at `root`: each hosted entity type's records live
     /// in its own `root/<entity_type>/<node>/` directory. Caches per `(entity_type,
     /// node)` so repeated hostings in one process share a single instance (single
     /// writer); a restart constructs a fresh factory and reopens from disk. Panics if a

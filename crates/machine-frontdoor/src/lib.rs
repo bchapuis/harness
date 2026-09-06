@@ -13,7 +13,7 @@
 //!
 //! - [`MachineAuthority`] — the entity-cluster half: the host key, the
 //!   authorized-key check, and the journaled `Attach`/`Detach`. Production
-//!   wires it to a `EntityRef` over the machine's leader.
+//!   wires it to an `EntityRef` over the machine's leader.
 //! - [`ChannelBackend`] — the transport half: one byte stream per channel to
 //!   the guest agent. Production supplies the node's `machine_host::MachineHost`,
 //!   which reaches the guest however that node holds it.
@@ -78,7 +78,7 @@ pub fn host_key_from_seed(seed: &[u8]) -> Result<PrivateKey, FrontDoorError> {
 pub use machine_host::Duplex;
 
 /// The entity-cluster half of the front door (machine §5.1). Production wires
-/// this over a `EntityRef<Machine>` to the machine's leader; tests supply a
+/// this over an `EntityRef<Machine>` to the machine's leader; tests supply a
 /// fake. Every method is per-connection or per-channel: nothing here holds
 /// cluster state.
 pub trait MachineAuthority: Send + Sync + 'static {

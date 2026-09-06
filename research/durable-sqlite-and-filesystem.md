@@ -85,7 +85,7 @@ Four interception points, from best-fit to worst for this runtime:
 
 4. **FUSE (the LiteFS approach) — only if you cannot link the engine.** LiteFS interposes a FUSE filesystem under the DB file, watches `-wal` writes and lock transitions to infer transaction boundaries, and packages changed pages into LTX files. Language-agnostic and fully transparent, but adds a syscall tax, a mount, and privileges, and forces you to *reconstruct* commit boundaries from lock state. Since entity hosts the engine in-process, options 1–2 dominate.
 
-**Avoid `cr-sqlite`.** It is CRDT row-level merge for *multi-writer* convergence; entity entities are single-writer (the term fence), so physical frame shipping gives byte-identity for free and CRDT merge would only throw that away.
+**Avoid `cr-sqlite`.** It is CRDT row-level merge for *multi-writer* convergence; entities are single-writer (the term fence), so physical frame shipping gives byte-identity for free and CRDT merge would only throw that away.
 
 ### 3.4 The gates map exactly
 

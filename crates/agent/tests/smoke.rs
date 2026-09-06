@@ -1,5 +1,5 @@
 //! A minimal end-to-end smoke test: a prompt drives one tool step and then a
-//! final message, the loop running as an entity entity.
+//! final message, the loop running as an entity.
 
 mod support;
 

@@ -1,5 +1,0 @@
-WARNING: no --auth-tokens: the gateway is INSECURE — the bearer token is taken as the tenant, unverified. Loopback only; provide --auth-tokens to authenticate.
-[gateway node-100] joined the cluster (client of nodes 1..=3)
-gateway listening on 127.0.0.1:8080
-[gateway] POST /v1/assistant/http-demo/prompt -> 200
-[gateway] shutdown signal received; draining
