@@ -435,13 +435,11 @@ fn discover_and_call_holds_across_seeds_in_leader_mode() {
     let workload = DiscoverAndCall {
         nodes: 3,
         rounds: 12,
-        mode: ClusterModeSpec::Leader {
-            swim: swarm_swim(),
-            voters: 3,
-            election_timeout: Duration::from_millis(500),
-            heartbeat_interval: Duration::from_millis(100),
-            downing: DowningPolicy::Timeout(Duration::from_millis(300)),
-        },
+        mode: ClusterModeSpec::leader(
+            swarm_swim(),
+            3,
+            DowningPolicy::Timeout(Duration::from_millis(300)),
+        ),
     };
     if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");
@@ -536,12 +534,7 @@ impl ClusterWorkload for WatchUnderChaos {
     }
 
     fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(200),
-            indirect_count: 2,
-        }
+        swarm_swim()
     }
 
     fn mode(&self) -> ClusterModeSpec {
@@ -597,13 +590,11 @@ fn watch_gossip_mode(workload_swim: SwimConfig) -> ClusterModeSpec {
 }
 
 fn watch_leader_mode(workload_swim: SwimConfig) -> ClusterModeSpec {
-    ClusterModeSpec::Leader {
-        swim: workload_swim,
-        voters: 3,
-        election_timeout: Duration::from_millis(500),
-        heartbeat_interval: Duration::from_millis(100),
-        downing: DowningPolicy::Timeout(Duration::from_millis(300)),
-    }
+    ClusterModeSpec::leader(
+        workload_swim,
+        3,
+        DowningPolicy::Timeout(Duration::from_millis(300)),
+    )
 }
 
 fn watch_swim() -> SwimConfig {
@@ -710,13 +701,7 @@ impl ClusterWorkload for RestartChurn {
     }
 
     fn mode(&self) -> ClusterModeSpec {
-        ClusterModeSpec::Leader {
-            swim: self.swim(),
-            voters: 3,
-            election_timeout: Duration::from_millis(500),
-            heartbeat_interval: Duration::from_millis(100),
-            downing: DowningPolicy::Conservative,
-        }
+        ClusterModeSpec::leader(self.swim(), 3, DowningPolicy::Conservative)
     }
 
     fn setup(&self, ctx: &ClusterCtx) {
@@ -971,24 +956,18 @@ fn singleton_chaos_converges_in_registry_mode() {
 fn singleton_chaos_converges_in_leader_mode() {
     let workload = SingletonChaos {
         nodes: 3,
-        mode: ClusterModeSpec::Leader {
-            swim: swarm_swim(),
-            voters: 3,
-            election_timeout: Duration::from_millis(500),
-            heartbeat_interval: Duration::from_millis(100),
-            // Conservative downing, for the reason the gossip twin above gives,
-            // which leader mode takes further. An aggressive timeout under the
-            // nemesis's total partitions lets each isolated side down the rest,
-            // and `down` is terminal (spec invariant #15) — a heal cannot undo
-            // it. In leader mode the voter set is fixed, so a node the previous
-            // leader downed still votes; the survivors elect a new leader that
-            // downs *it*, and the cluster can end with every node `Down`, an
-            // empty serving set on all of them, and no anchor to host the
-            // singleton anywhere. That cluster has converged, on nothing, and a
-            // global exactly-one is not a claim about it. `watch-under-chaos`
-            // sweeps the quorum-committed downing path in leader mode instead.
-            downing: DowningPolicy::Conservative,
-        },
+        // Conservative downing, for the reason the gossip twin above gives, which
+        // leader mode takes further. An aggressive timeout under the nemesis's
+        // total partitions lets each isolated side down the rest, and `down` is
+        // terminal (spec invariant #15) — a heal cannot undo it. In leader mode
+        // the voter set is fixed, so a node the previous leader downed still
+        // votes; the survivors elect a new leader that downs *it*, and the cluster
+        // can end with every node `Down`, an empty serving set on all of them, and
+        // no anchor to host the singleton anywhere. That cluster has converged, on
+        // nothing, and a global exactly-one is not a claim about it.
+        // `watch-under-chaos` sweeps the quorum-committed downing path in leader
+        // mode instead.
+        mode: ClusterModeSpec::leader(swarm_swim(), 3, DowningPolicy::Conservative),
     };
     if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..48)) {
         panic!("{failure}");

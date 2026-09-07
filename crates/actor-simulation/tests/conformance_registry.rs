@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use actor_cluster::MemberStatus;
 use actor_cluster::Reachability;
-use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorRef;
 use actor_core::ActorSystem;
@@ -38,26 +37,17 @@ use actor_core::TerminationReason;
 use actor_simulation::FaultPolicy;
 use actor_simulation::Recorder;
 use actor_simulation::RegistryFaultPolicy;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::SimRegistry;
 use actor_simulation::Simulation;
+use actor_simulation::swim_config;
 use serde::Deserialize;
 use serde::Serialize;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
-
-/// Fast SWIM so a few simulated seconds cover several probe/gossip rounds.
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
 
 /// The sync-loop cadence these tests run with.
 const SYNC: Duration = Duration::from_millis(100);
@@ -69,7 +59,7 @@ fn registry_cluster(sim: &Simulation, nodes: &[NodeId]) -> (SimRegistry, SimNetw
     for &node in nodes {
         registry.register(node);
     }
-    let net = SimNetwork::new(sim).with_registry(swim(), registry.client(), SYNC);
+    let net = SimNetwork::new(sim).with_registry(swim_config(), registry.client(), SYNC);
     (registry, net)
 }
 
@@ -151,7 +141,7 @@ fn admission_is_the_registry_entry() {
     registry.register(A);
     registry.register(B);
     let net = SimNetwork::new(&sim)
-        .with_registry(swim(), registry.client(), SYNC)
+        .with_registry(swim_config(), registry.client(), SYNC)
         .with_events(Arc::new(recorder.clone()));
     let a = net.join(A);
     let b = net.join(B);
@@ -199,7 +189,7 @@ fn drain_then_resume_round_trips_cluster_wide() {
         registry.register(node);
     }
     let net = SimNetwork::new(&sim)
-        .with_registry(swim(), registry.client(), SYNC)
+        .with_registry(swim_config(), registry.client(), SYNC)
         .with_events(Arc::new(recorder.clone()));
     let a = net.join(A);
     let b = net.join(B);
@@ -506,7 +496,7 @@ fn a_stale_and_laggy_registry_still_converges() {
     for node in [A, B, C] {
         registry.register(node);
     }
-    let net = SimNetwork::new(&sim).with_registry(swim(), registry.client(), SYNC);
+    let net = SimNetwork::new(&sim).with_registry(swim_config(), registry.client(), SYNC);
     let a = net.join(A);
     let b = net.join(B);
     let c = net.join(C);
@@ -553,7 +543,7 @@ fn a_registry_decision_converges_under_transport_faults() {
         registry.register(node);
     }
     let net = SimNetwork::new(&sim)
-        .with_registry(swim(), registry.client(), SYNC)
+        .with_registry(swim_config(), registry.client(), SYNC)
         .with_faults(faults);
     let a = net.join(A);
     let b = net.join(B);

@@ -23,10 +23,10 @@ use actor_core::Entropy;
 use actor_core::NodeId;
 
 use crate::FaultStats;
-use crate::faults::RegistryFaultPolicy;
 use crate::SimClock;
 use crate::SimEntropy;
 use crate::Simulation;
+use crate::faults::RegistryFaultPolicy;
 
 /// How many past snapshots a stale read may be served from.
 const HISTORY_DEPTH: usize = 32;

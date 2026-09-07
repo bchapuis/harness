@@ -10,12 +10,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::SwimConfig;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use actor_simulation::swim_config;
 use blob_store::BlobConfig;
 use blob_store::BlobId;
 use blob_store::BlobStore;
@@ -28,15 +28,6 @@ const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
 const D: NodeId = NodeId::new(4);
-
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
 
 fn config() -> BlobConfig {
     // R = 3, W = 3: a put stores on all three owners synchronously, so the test
@@ -72,7 +63,7 @@ type Node = (NodeId, ClusteredBlobStore<SimNode>);
 /// spawns its reconcile loop). Returns the network, the per-node stores keyed by
 /// node, and the tempdirs.
 fn cluster(sim: &Simulation, nodes: &[NodeId]) -> (SimNetwork, Vec<Node>, Vec<tempfile::TempDir>) {
-    let net = SimNetwork::new(sim).with_gossip(swim(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let systems: Vec<SimNode> = nodes.iter().map(|&n| net.join(n)).collect();
     sim.run_for(Duration::from_secs(2));
 

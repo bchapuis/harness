@@ -18,14 +18,14 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::RaftConfig;
-use actor_cluster::SwimConfig;
 use actor_core::NodeId;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use actor_simulation::raft_config;
 use actor_simulation::scenario_sweep;
 use actor_simulation::sweep_seeds;
+use actor_simulation::swim_config;
 use entity::AlarmIndex;
 use entity::AllPending;
 use entity::DueBefore;
@@ -50,22 +50,6 @@ const C: NodeId = NodeId::new(3);
 const SHARDS: usize = 2;
 
 // --- Cluster harness (mirrors clustered_entities.rs) ----------------------------
-
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
-
-fn raft() -> RaftConfig {
-    let mut config = RaftConfig::new(vec![A, B, C]);
-    config.election_timeout = Duration::from_millis(500);
-    config.heartbeat_interval = Duration::from_millis(100);
-    config
-}
 
 fn config() -> EntityConfig {
     EntityConfig {
@@ -101,7 +85,11 @@ type Indexes = Vec<Entities<AlarmIndex<SimNode>>>;
 /// type wired to it (`entities_with_alarms`) on every node. Returns the network (for
 /// the crash), the per-node timer handles, and the per-node index handles.
 fn cluster(sim: &Simulation) -> (SimNetwork, Vec<Entities<Timer>>, Indexes) {
-    let net = SimNetwork::new(sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(sim).with_leader(
+        swim_config(),
+        raft_config(vec![A, B, C]),
+        DowningPolicy::Conservative,
+    );
     let systems = [net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
     let indexes: Vec<Entities<AlarmIndex<SimNode>>> = systems
@@ -228,7 +216,11 @@ fn an_alarm_fires_after_a_split_moves_its_entity() {
     let recorder = Recorder::new();
     let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());
     let net = SimNetwork::new(&sim)
-        .with_leader(swim(), raft(), DowningPolicy::Conservative)
+        .with_leader(
+            swim_config(),
+            raft_config(vec![A, B, C]),
+            DowningPolicy::Conservative,
+        )
         .with_events(sink);
     let systems = [net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2));

@@ -10,8 +10,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::RaftConfig;
-use actor_cluster::SwimConfig;
 use actor_core::ActorSystem;
 use actor_core::Manifest;
 use actor_core::Message;
@@ -20,6 +18,8 @@ use actor_core::Spawner;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use actor_simulation::raft_config;
+use actor_simulation::swim_config;
 use entity::Entity;
 use entity::EntityConfig;
 use entity::EntityCtx;
@@ -105,22 +105,6 @@ impl EntityHandler<Read> for Counter {
 
 // --- Harness (mirrors tests/clustered_entities.rs) ------------------------------
 
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
-
-fn raft() -> RaftConfig {
-    let mut config = RaftConfig::new(vec![A, B, C]);
-    config.election_timeout = Duration::from_millis(500);
-    config.heartbeat_interval = Duration::from_millis(100);
-    config
-}
-
 fn config() -> EntityConfig {
     EntityConfig {
         shards: 2,
@@ -150,7 +134,11 @@ fn drive<T: Send + 'static>(
 #[test]
 fn a_non_hosting_client_routes_to_a_cluster_entity() {
     let sim = Simulation::new(1);
-    let net = SimNetwork::new(&sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(&sim).with_leader(
+        swim_config(),
+        raft_config(vec![A, B, C]),
+        DowningPolicy::Conservative,
+    );
 
     // Hosts: a 3-node leader cluster hosting the Counter entity.
     let hosts = [net.join(A), net.join(B), net.join(C)];
@@ -210,7 +198,11 @@ fn ask_timeout_is_bounded_by_its_deadline_even_while_the_shard_cannot_elect() {
     // deadline must bound the WHOLE call — resolution and ask, across both
     // dispatch attempts share one budget — never a per-step window that stacks.
     let sim = Simulation::new(3);
-    let net = SimNetwork::new(&sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(&sim).with_leader(
+        swim_config(),
+        raft_config(vec![A, B, C]),
+        DowningPolicy::Conservative,
+    );
     let a = net.join(A);
     sim.run_for(Duration::from_secs(1));
     let entities = a.entities::<Counter>(config());

@@ -223,19 +223,14 @@ impl FileRaftWAL {
         let term_path = dir.join("term");
         let (term, voted_for) = match fs::read(&term_path) {
             Ok(bytes) => {
-                // Two questions, asked in this order and answered differently. Bytes
-                // carrying the magic are *this* format, so a revision outside the
-                // window is refused as a version skew (**V2**) and never handed to
-                // the JSON decoder; only bytes without it are the unstamped
-                // predecessor, which JSON reads exactly as it always did.
-                let body = if TERM.is_stamped(&bytes) {
-                    let (_, body) = TERM
-                        .unstamp(&bytes)
-                        .map_err(|err| skew_error("raft term file", &term_path, err))?;
-                    body
-                } else {
-                    &bytes[..]
-                };
+                // Both forms decode with the same JSON decoder, so the whole of the
+                // adoption is choosing the body (**V5**): a stamped file at a
+                // revision outside the window is refused as a skew (**V2**) and
+                // never reaches the decoder, while the unstamped predecessor is
+                // read exactly as it always was.
+                let body = TERM
+                    .adopt(&bytes)
+                    .map_err(|err| skew_error("raft term file", &term_path, err))?;
                 let record: TermRecord = serde_json::from_slice(body).map_err(|err| {
                     corrupt_error(
                         "raft term file",

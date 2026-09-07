@@ -350,17 +350,13 @@ fn admit(
              rather than skip an entry its peers will apply"
         )
     };
-    let body = if SHARDMAP.is_stamped(command) {
-        // Stamped: the revision is admitted before the body is looked at (**V2**),
-        // so a later revision is refused by name rather than half-parsed.
-        SHARDMAP
-            .unstamp(command)
-            .map_err(|err| refusal(err.to_string()))?
-            .1
-    } else {
-        // The unstamped predecessor, read by its own decoder.
-        command.as_slice()
-    };
+    // Both forms decode with the same JSON decoder, so adoption is the whole of
+    // the boundary here (**V5**): a stamped entry at a revision this build refuses
+    // is named as a skew (**V2**) rather than half-parsed, and the unstamped
+    // predecessor is read by the decoder it was written for.
+    let body = SHARDMAP
+        .adopt(command)
+        .map_err(|err| refusal(err.to_string()))?;
     serde_json::from_slice(body)
         .map(Some)
         .map_err(|err| refusal(err.to_string()))

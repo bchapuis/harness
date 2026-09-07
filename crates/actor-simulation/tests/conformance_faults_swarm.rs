@@ -78,6 +78,18 @@ struct Chatter {
     rounds: u64,
 }
 
+/// The swarm suites' detector cadence: a nemesis partitions and heals inside one
+/// run, so suspicion matures faster here than the tree's default
+/// ([`actor_simulation::swim_config`]) sets it.
+fn swarm_swim() -> SwimConfig {
+    SwimConfig {
+        probe_interval: Duration::from_millis(100),
+        rtt: Duration::from_millis(50),
+        suspect_timeout: Duration::from_millis(200),
+        indirect_count: 2,
+    }
+}
+
 impl ClusterWorkload for Chatter {
     fn name(&self) -> &'static str {
         "cov-chatter"
@@ -88,12 +100,7 @@ impl ClusterWorkload for Chatter {
     }
 
     fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(200),
-            indirect_count: 2,
-        }
+        swarm_swim()
     }
 
     fn mode(&self) -> ClusterModeSpec {
@@ -178,12 +185,7 @@ impl ClusterWorkload for RegistryChatter {
     }
 
     fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(200),
-            indirect_count: 2,
-        }
+        swarm_swim()
     }
 
     fn mode(&self) -> ClusterModeSpec {
@@ -294,12 +296,7 @@ impl ClusterWorkload for UtilityChatter {
     }
 
     fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(200),
-            indirect_count: 2,
-        }
+        swarm_swim()
     }
 
     fn mode(&self) -> ClusterModeSpec {

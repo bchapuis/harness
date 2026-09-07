@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorSystem;
 use actor_core::BoxFuture;
@@ -102,22 +101,8 @@ impl ClusterWorkload for Narrative {
     fn node_count(&self) -> usize {
         3
     }
-    fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(300),
-            indirect_count: 2,
-        }
-    }
     fn mode(&self) -> ClusterModeSpec {
-        ClusterModeSpec::Leader {
-            swim: self.swim(),
-            voters: 3,
-            election_timeout: Duration::from_millis(500),
-            heartbeat_interval: Duration::from_millis(100),
-            downing: DowningPolicy::Conservative,
-        }
+        ClusterModeSpec::leader(self.swim(), 3, DowningPolicy::Conservative)
     }
     fn setup(&self, _ctx: &ClusterCtx) {
         let len = (1u64 << 20) + (1 << 19);

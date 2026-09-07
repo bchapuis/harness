@@ -247,6 +247,34 @@ impl Stamp {
         bytes.starts_with(self.magic)
     }
 
+    /// The body to decode, **adopting** an unstamped predecessor: the payload of a
+    /// stamped input, or the whole of an unstamped one (**V5**).
+    ///
+    /// This is the adopting reader's whole move, in the one order that is sound.
+    /// The magic decides *which decoder runs* before any of them does: bytes
+    /// carrying it are this format, so a revision outside the window is refused as
+    /// a version skew (**V2**) and never reaches the decoder; only bytes without it
+    /// are the predecessor, which its own decoder reads exactly as it always did.
+    ///
+    /// Asking the two questions the other way round — or answering
+    /// [`Incompatible::Version`] by trying the old decoder — turns a refusal into
+    /// the misparse the stamp was added to stop, which is why every durable
+    /// boundary in the tree adopts through this one method rather than writing the
+    /// sequence out again.
+    ///
+    /// # Errors
+    ///
+    /// [`Incompatible::Version`] when the input is stamped at a revision outside
+    /// the window. An unstamped input is never an error here: adoption is what
+    /// this method is for.
+    pub fn adopt<'a>(&self, bytes: &'a [u8]) -> Result<&'a [u8], Incompatible> {
+        if self.is_stamped(bytes) {
+            self.unstamp(bytes).map(|(_, body)| body)
+        } else {
+            Ok(bytes)
+        }
+    }
+
     /// Prefix `body` with the magic and the revision this build writes.
     pub fn stamp(&self, body: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.magic.len() + size_of::<u16>() + body.len());
@@ -528,6 +556,32 @@ mod tests {
             STAMP.unstamp(&bytes),
             Err(Incompatible::Version { .. })
         ));
+    }
+
+    #[test]
+    fn adopt_reads_the_predecessor_whole_and_still_refuses_a_skew() {
+        const STAMP: Stamp = Stamp::new(b"TESTMG", WIRE);
+        let legacy = &b"{\"legacy\":true}"[..];
+        assert_eq!(
+            STAMP.adopt(legacy).expect("the predecessor is adopted"),
+            legacy,
+            "an unstamped input is handed to its own decoder whole",
+        );
+        assert_eq!(
+            STAMP
+                .adopt(&STAMP.stamp(b"payload"))
+                .expect("a readable revision yields its body"),
+            b"payload",
+        );
+        let mut skewed = STAMP.stamp(b"payload");
+        skewed[6..8].copy_from_slice(&9u16.to_le_bytes());
+        assert!(
+            matches!(
+                STAMP.adopt(&skewed),
+                Err(Incompatible::Version { found, .. }) if found == Version(9)
+            ),
+            "a revision outside the window must never fall through to the old decoder",
+        );
     }
 
     #[test]

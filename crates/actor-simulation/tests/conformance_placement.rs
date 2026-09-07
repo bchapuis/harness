@@ -10,26 +10,16 @@
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::SwimConfig;
 use actor_cluster::placement;
 use actor_core::NodeId;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimRegistry;
 use actor_simulation::Simulation;
+use actor_simulation::swim_config;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
-
-/// Fast SWIM so a few simulated seconds cover several probe/gossip rounds.
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
 
 fn five_nodes() -> Vec<NodeId> {
     (1..=5).map(NodeId::new).collect()
@@ -137,7 +127,7 @@ fn converged_nodes_compute_identical_owners() {
     // The cluster half of U1: three converged views derive equal serving sets,
     // so `place` agrees everywhere (utilities spec §2.2 item 2).
     let sim = Simulation::new(7);
-    let net = SimNetwork::new(&sim).with_gossip(swim(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let a = net.join(A);
     let b = net.join(B);
     let c = net.join(C);
@@ -166,7 +156,7 @@ fn a_drained_member_leaves_the_serving_set_until_resumed() {
         registry.register(node);
     }
     let sync = Duration::from_millis(200);
-    let net = SimNetwork::new(&sim).with_registry(swim(), registry.client(), sync);
+    let net = SimNetwork::new(&sim).with_registry(swim_config(), registry.client(), sync);
     let a = net.join(A);
     let _b = net.join(B);
     let _c = net.join(C);
@@ -194,7 +184,7 @@ fn an_unreachable_member_leaves_the_serving_set_until_healed() {
     // Utilities spec §2.1: placement is stricter than the receptionist filter —
     // a confirmed-unreachable member owns nothing until reachability recovers.
     let sim = Simulation::new(13);
-    let net = SimNetwork::new(&sim).with_gossip(swim(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let a = net.join(A);
     let _b = net.join(B);
     let _c = net.join(C);

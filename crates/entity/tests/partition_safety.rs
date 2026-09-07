@@ -29,8 +29,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::RaftConfig;
-use actor_cluster::SwimConfig;
 use actor_core::ActorSystem;
 use actor_core::Clock;
 use actor_core::Entropy;
@@ -46,8 +44,10 @@ use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
 use actor_simulation::check_linearizable;
+use actor_simulation::raft_config;
 use actor_simulation::scenario_sweep;
 use actor_simulation::sweep_seeds;
+use actor_simulation::swim_config;
 use entity::Entities;
 use entity::Entity;
 use entity::EntityConfig;
@@ -139,24 +139,12 @@ impl EntityHandler<ReadBalance> for Account {
 
 // --- Harness (mirrors tests/clustered_entities.rs) ------------------------------
 
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
-
-fn raft() -> RaftConfig {
-    let mut config = RaftConfig::new(vec![A, B, C]);
-    config.election_timeout = Duration::from_millis(500);
-    config.heartbeat_interval = Duration::from_millis(100);
-    config
-}
-
 fn leader_net(sim: &Simulation) -> SimNetwork {
-    SimNetwork::new(sim).with_leader(swim(), raft(), DowningPolicy::Conservative)
+    SimNetwork::new(sim).with_leader(
+        swim_config(),
+        raft_config(vec![A, B, C]),
+        DowningPolicy::Conservative,
+    )
 }
 
 /// One shard, replicated on all three nodes — so partitioning one node away always

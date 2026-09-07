@@ -35,7 +35,6 @@ mod support;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::SwimConfig;
 use actor_core::ActorSystem;
 use actor_core::BoxFuture;
 use actor_core::Clock;
@@ -114,23 +113,8 @@ impl ClusterWorkload for SubscriptionSwarm {
         self.nodes
     }
 
-    fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(300),
-            indirect_count: 2,
-        }
-    }
-
     fn mode(&self) -> ClusterModeSpec {
-        ClusterModeSpec::Leader {
-            swim: self.swim(),
-            voters: self.nodes,
-            election_timeout: Duration::from_millis(500),
-            heartbeat_interval: Duration::from_millis(100),
-            downing: DowningPolicy::Conservative,
-        }
+        ClusterModeSpec::leader(self.swim(), self.nodes, DowningPolicy::Conservative)
     }
 
     fn rehost(&self) -> Option<Rehost> {

@@ -210,6 +210,27 @@ pub enum ClusterModeSpec {
     },
 }
 
+impl ClusterModeSpec {
+    /// Leader mode at the tree's simulated Raft timings
+    /// ([`ELECTION_TIMEOUT`](crate::config::ELECTION_TIMEOUT),
+    /// [`HEARTBEAT_INTERVAL`](crate::config::HEARTBEAT_INTERVAL)) — what every
+    /// clustered swarm in the tree wants, so the two durations are named here
+    /// rather than written out per workload.
+    ///
+    /// A workload whose scenarios need their own cadence builds
+    /// [`Leader`](ClusterModeSpec::Leader) directly; the fields stay public, and
+    /// doing so is then the statement that the timings are load-bearing.
+    pub fn leader(swim: SwimConfig, voters: usize, downing: DowningPolicy) -> ClusterModeSpec {
+        ClusterModeSpec::Leader {
+            swim,
+            voters,
+            election_timeout: crate::config::ELECTION_TIMEOUT,
+            heartbeat_interval: crate::config::HEARTBEAT_INTERVAL,
+            downing,
+        }
+    }
+}
+
 /// A distributed test scenario (spec §18.4). `setup` builds actors and
 /// registrations; `drive` issues traffic and resolves when its work is done; the
 /// runner injects faults and checks `invariants` continuously and at the end.
@@ -221,8 +242,13 @@ pub trait ClusterWorkload {
     fn node_count(&self) -> usize;
 
     /// SWIM configuration for the run (used by the default
-    /// [`mode`](Self::mode), the gossip-based control plane).
-    fn swim(&self) -> SwimConfig;
+    /// [`mode`](Self::mode), the gossip-based control plane). Defaults to the
+    /// tree's simulated timings ([`swim_config`](crate::swim_config)); a workload
+    /// overrides it only when its scenarios need their own detector cadence, and
+    /// the override is then the statement that they do.
+    fn swim(&self) -> SwimConfig {
+        crate::swim_config()
+    }
 
     /// The membership mode to sweep under (spec §9.4). Defaults to
     /// **gossip-based** with conservative downing; a workload overrides this to

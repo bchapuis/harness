@@ -36,14 +36,14 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::RaftConfig;
-use actor_cluster::SwimConfig;
 use actor_core::NodeId;
 use actor_simulation::FaultPolicy;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use actor_simulation::raft_config;
 use actor_simulation::sweep_seeds;
+use actor_simulation::swim_config;
 use entity::AlarmIndex;
 use entity::Entities;
 use entity::EntityConfig;
@@ -79,22 +79,6 @@ const CALL_DEADLINE: Duration = Duration::from_secs(10);
 const SETTLE: Duration = Duration::from_secs(10);
 
 // --- Harness (mirrors alarm_cluster.rs) ---------------------------------------
-
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
-
-fn raft() -> RaftConfig {
-    let mut config = RaftConfig::new(vec![A, B, C]);
-    config.election_timeout = Duration::from_millis(500);
-    config.heartbeat_interval = Duration::from_millis(100);
-    config
-}
 
 fn config() -> EntityConfig {
     EntityConfig {
@@ -147,8 +131,8 @@ enum Wiring {
 /// wiring alone and not by how many Raft groups are running.
 fn cluster(sim: &Simulation, wiring: Wiring, one_in: u64) -> Vec<Entities<Timer>> {
     let net = SimNetwork::new(sim).with_faults(lossy(one_in)).with_leader(
-        swim(),
-        raft(),
+        swim_config(),
+        raft_config(vec![A, B, C]),
         DowningPolicy::Conservative,
     );
     let systems = [net.join(A), net.join(B), net.join(C)];

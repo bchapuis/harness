@@ -35,17 +35,17 @@ use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
 use actor_cluster::MemberStatus;
-use actor_cluster::RaftConfig;
-use actor_cluster::SwimConfig;
 use actor_core::Event;
 use actor_core::NodeId;
 use actor_core::Spawner;
 use actor_simulation::Recorder;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use actor_simulation::raft_config;
 use actor_simulation::scenario_sweep;
 use actor_simulation::sweep_seeds;
+use actor_simulation::swim_config;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -55,22 +55,6 @@ const E: NodeId = NodeId::new(5);
 const F: NodeId = NodeId::new(6); // a non-voter member: the drain/resume payload
 
 const VOTERS: [NodeId; 5] = [A, B, C, D, E];
-
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
-
-fn raft() -> RaftConfig {
-    let mut config = RaftConfig::new(VOTERS.to_vec());
-    config.election_timeout = Duration::from_millis(500);
-    config.heartbeat_interval = Duration::from_millis(100);
-    config
-}
 
 fn drive<T: Send + 'static>(
     sim: &Simulation,
@@ -95,7 +79,11 @@ fn drive<T: Send + 'static>(
 fn storm_cluster(sim: &Simulation) -> (SimNetwork, Vec<SimNode>, SimNode, Recorder) {
     let recorder = Recorder::new();
     let net = SimNetwork::new(sim)
-        .with_leader(swim(), raft(), DowningPolicy::Conservative)
+        .with_leader(
+            swim_config(),
+            raft_config(VOTERS.to_vec()),
+            DowningPolicy::Conservative,
+        )
         .with_events(Arc::new(recorder.clone()));
     let systems: Vec<SimNode> = VOTERS.iter().map(|&n| net.join(n)).collect();
     sim.run_for(Duration::from_secs(3)); // elect the first leader

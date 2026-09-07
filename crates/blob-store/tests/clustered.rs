@@ -20,12 +20,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::SwimConfig;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use actor_simulation::swim_config;
 use blob_store::BlobConfig;
 use blob_store::BlobError;
 use blob_store::BlobId;
@@ -38,15 +38,6 @@ use blob_store::placement;
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
-
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
 
 fn config() -> BlobConfig {
     BlobConfig {
@@ -86,7 +77,7 @@ fn cluster(
     Vec<ClusteredBlobStore<SimNode>>,
     Vec<tempfile::TempDir>,
 ) {
-    let net = SimNetwork::new(sim).with_gossip(swim(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let systems: Vec<SimNode> = [A, B, C].iter().map(|&n| net.join(n)).collect();
     sim.run_for(Duration::from_secs(2)); // let SWIM converge on the serving set
 

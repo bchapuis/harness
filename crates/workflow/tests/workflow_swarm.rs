@@ -32,7 +32,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::SwimConfig;
 use actor_core::ActorSystem;
 use actor_core::BoxFuture;
 use actor_core::Clock;
@@ -130,18 +129,8 @@ impl ClusterWorkload for DriveSwarm {
         }))
     }
 
-    fn swim(&self) -> SwimConfig {
-        cluster::swim()
-    }
-
     fn mode(&self) -> ClusterModeSpec {
-        ClusterModeSpec::Leader {
-            swim: self.swim(),
-            voters: self.nodes,
-            election_timeout: cluster::ELECTION_TIMEOUT,
-            heartbeat_interval: cluster::HEARTBEAT_INTERVAL,
-            downing: DowningPolicy::Conservative,
-        }
+        ClusterModeSpec::leader(self.swim(), self.nodes, DowningPolicy::Conservative)
     }
 
     fn setup(&self, _ctx: &ClusterCtx) {}

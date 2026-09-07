@@ -17,9 +17,7 @@ use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
 use actor_cluster::MemberStatus;
-use actor_cluster::RaftConfig;
 use actor_cluster::Reachability;
-use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorRef;
 use actor_core::ActorSystem;
@@ -31,34 +29,18 @@ use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::SimRegistry;
 use actor_simulation::Simulation;
+use actor_simulation::raft_config;
+use actor_simulation::swim_config;
 use serde::Deserialize;
 use serde::Serialize;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
-
-/// Fast SWIM so a few simulated seconds cover several probe/gossip rounds.
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
-
-/// Fast Raft timing: 500ms election timeout (plus jitter), 100ms heartbeats.
-fn raft(voters: &[NodeId]) -> RaftConfig {
-    let mut config = RaftConfig::new(voters.to_vec());
-    config.election_timeout = Duration::from_millis(500);
-    config.heartbeat_interval = Duration::from_millis(100);
-    config
-}
 
 /// Drive an async system call to completion under perpetually-running detector
 /// and Raft loops (`block_on` would never quiesce): launch the future and
@@ -113,8 +95,11 @@ fn a_restarted_voter_recovers_its_persisted_raft_state() {
     // state from its persisted log and the leader's replication, then takes
     // part in committing the next transition.
     let sim = Simulation::new(1);
-    let net =
-        SimNetwork::new(&sim).with_leader(swim(), raft(&[A, B, C]), DowningPolicy::Conservative);
+    let net = SimNetwork::new(&sim).with_leader(
+        swim_config(),
+        raft_config(vec![A, B, C]),
+        DowningPolicy::Conservative,
+    );
     let a = net.join(A);
     let b = net.join(B);
     let c = net.join(C);
@@ -158,8 +143,11 @@ fn restarting_a_majority_does_not_lose_committed_state() {
     // restarted voter, so the committed drain can only survive if their logs
     // really did (leader completeness over persisted logs).
     let sim = Simulation::new(2);
-    let net =
-        SimNetwork::new(&sim).with_leader(swim(), raft(&[A, B, C]), DowningPolicy::Conservative);
+    let net = SimNetwork::new(&sim).with_leader(
+        swim_config(),
+        raft_config(vec![A, B, C]),
+        DowningPolicy::Conservative,
+    );
     let a = net.join(A);
     let _b = net.join(B);
     let c = net.join(C);
@@ -199,8 +187,11 @@ fn a_restarted_registry_member_keeps_its_membership() {
     let registry = SimRegistry::new(&sim);
     registry.register(A);
     registry.register(B);
-    let net =
-        SimNetwork::new(&sim).with_registry(swim(), registry.client(), Duration::from_millis(100));
+    let net = SimNetwork::new(&sim).with_registry(
+        swim_config(),
+        registry.client(),
+        Duration::from_millis(100),
+    );
     let a = net.join(A);
     let _b = net.join(B);
     sim.run_for(Duration::from_millis(500));
@@ -276,7 +267,7 @@ fn a_restarted_gossip_member_recovers_reachability() {
     // a higher one for it, and direct probes — not the gossip merge — restore
     // it to reachable. Conservative downing keeps it a member throughout.
     let sim = Simulation::new(5);
-    let net = SimNetwork::new(&sim).with_gossip(swim(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let a = net.join(A);
     let b = net.join(B);
     let _c = net.join(C);

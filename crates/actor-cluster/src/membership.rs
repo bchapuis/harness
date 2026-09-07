@@ -310,23 +310,15 @@ impl MembershipCommand {
     /// tag and a short or damaged payload are one answer, and the two have opposite
     /// fixes — run the node on a build that accepts the entry, or repair a log.
     ///
-    /// **An unstamped payload is adopted as revision 1** ([`MEMBERSHIP`]). Every
-    /// transition committed before the stamp existed is still in some cluster's
-    /// log, and a build that refused them would refuse its own history — the first
-    /// rolling upgrade would stop every node on the oldest entry it replayed. The
-    /// adoption asks `is_stamped` first, so a *stamped* payload at an unreadable
-    /// revision is still refused rather than handed to the old decoder, which is
-    /// the misparse a bare "try the previous format" fallback would introduce.
+    /// **An unstamped payload is adopted as revision 1** ([`MEMBERSHIP`],
+    /// [`compat::Stamp::adopt`]). Every transition committed before the stamp existed is
+    /// still in some cluster's log, and a build that refused them would refuse its
+    /// own history — the first rolling upgrade would stop every node on the oldest
+    /// entry it replayed. Adoption keeps a *stamped* payload at an unreadable
+    /// revision refused rather than handed to the old decoder, which is the
+    /// misparse a bare "try the previous format" fallback would introduce.
     pub fn admit(bytes: &[u8]) -> Result<MembershipCommand, String> {
-        let body = if MEMBERSHIP.is_stamped(bytes) {
-            // Stamped: the revision is admitted before the body is looked at
-            // (**V2**), so a later revision is refused by name rather than
-            // half-parsed.
-            MEMBERSHIP.unstamp(bytes).map_err(|err| err.to_string())?.1
-        } else {
-            // The unstamped predecessor, read by its own decoder.
-            bytes
-        };
+        let body = MEMBERSHIP.adopt(bytes).map_err(|err| err.to_string())?;
         MembershipCommand::decode(body).ok_or_else(|| {
             format!(
                 "{} bytes, tag {:?}, is not a transition this build can name",

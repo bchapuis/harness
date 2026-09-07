@@ -304,6 +304,18 @@ struct DiscoverAndCall {
     rounds: u64,
 }
 
+/// The swarm suites' detector cadence: a nemesis partitions and heals inside one
+/// run, so suspicion matures faster here than the tree's default
+/// ([`actor_simulation::swim_config`]) sets it.
+fn swarm_swim() -> SwimConfig {
+    SwimConfig {
+        probe_interval: Duration::from_millis(100),
+        rtt: Duration::from_millis(50),
+        suspect_timeout: Duration::from_millis(200),
+        indirect_count: 2,
+    }
+}
+
 impl ClusterWorkload for DiscoverAndCall {
     fn name(&self) -> &'static str {
         "repro-discover-and-call"
@@ -314,12 +326,7 @@ impl ClusterWorkload for DiscoverAndCall {
     }
 
     fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(200),
-            indirect_count: 2,
-        }
+        swarm_swim()
     }
 
     fn mode(&self) -> ClusterModeSpec {
@@ -398,12 +405,7 @@ impl ClusterWorkload for RegistryChurn {
     }
 
     fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(200),
-            indirect_count: 2,
-        }
+        swarm_swim()
     }
 
     fn mode(&self) -> ClusterModeSpec {
@@ -488,22 +490,15 @@ impl ClusterWorkload for LeaderChurn {
     }
 
     fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(200),
-            indirect_count: 2,
-        }
+        swarm_swim()
     }
 
     fn mode(&self) -> ClusterModeSpec {
-        ClusterModeSpec::Leader {
-            swim: self.swim(),
-            voters: 3,
-            election_timeout: Duration::from_millis(500),
-            heartbeat_interval: Duration::from_millis(100),
-            downing: DowningPolicy::Timeout(Duration::from_millis(300)),
-        }
+        ClusterModeSpec::leader(
+            self.swim(),
+            3,
+            DowningPolicy::Timeout(Duration::from_millis(300)),
+        )
     }
 
     fn setup(&self, ctx: &ClusterCtx) {
@@ -558,22 +553,11 @@ impl ClusterWorkload for RestartReplay {
     }
 
     fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(200),
-            indirect_count: 2,
-        }
+        swarm_swim()
     }
 
     fn mode(&self) -> ClusterModeSpec {
-        ClusterModeSpec::Leader {
-            swim: self.swim(),
-            voters: 3,
-            election_timeout: Duration::from_millis(500),
-            heartbeat_interval: Duration::from_millis(100),
-            downing: DowningPolicy::Conservative,
-        }
+        ClusterModeSpec::leader(self.swim(), 3, DowningPolicy::Conservative)
     }
 
     fn setup(&self, ctx: &ClusterCtx) {
@@ -709,12 +693,7 @@ impl ClusterWorkload for UtilitiesChurn {
     }
 
     fn swim(&self) -> SwimConfig {
-        SwimConfig {
-            probe_interval: Duration::from_millis(100),
-            rtt: Duration::from_millis(50),
-            suspect_timeout: Duration::from_millis(200),
-            indirect_count: 2,
-        }
+        swarm_swim()
     }
 
     fn mode(&self) -> ClusterModeSpec {

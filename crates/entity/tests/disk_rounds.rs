@@ -70,8 +70,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::RaftConfig;
-use actor_cluster::SwimConfig;
 use actor_core::Clock;
 use actor_core::Manifest;
 use actor_core::Message;
@@ -80,6 +78,8 @@ use actor_core::Spawner;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use actor_simulation::raft_config;
+use actor_simulation::swim_config;
 use entity::Disk;
 use entity::DiskCaptureStats;
 use entity::DiskError;
@@ -175,22 +175,6 @@ impl EntityHandler<TinyPuts> for DiskBox {
 
 // --- The clustered harness ----------------------------------------------------
 
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
-
-fn raft() -> RaftConfig {
-    let mut config = RaftConfig::new(vec![NodeId::new(1), NodeId::new(2), NodeId::new(3)]);
-    config.election_timeout = Duration::from_millis(500);
-    config.heartbeat_interval = Duration::from_millis(100);
-    config
-}
-
 /// R = 3 over the 3-node cluster, so every blob put is a real quorum round to a
 /// majority. Snapshotting is off: a checkpoint in the middle of a measured import
 /// would add rounds that belong to §9 rather than to the capture path.
@@ -213,7 +197,11 @@ fn cluster(
     sim: &Simulation,
     scratch: &std::path::Path,
 ) -> (SimNetwork, Vec<SimNode>, Vec<Entities<DiskBox>>) {
-    let net = SimNetwork::new(sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(sim).with_leader(
+        swim_config(),
+        raft_config(vec![NodeId::new(1), NodeId::new(2), NodeId::new(3)]),
+        DowningPolicy::Conservative,
+    );
     let systems = vec![
         net.join(NodeId::new(1)),
         net.join(NodeId::new(2)),

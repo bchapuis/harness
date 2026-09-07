@@ -129,10 +129,13 @@ impl<K, E> Pending<K, E> {
 /// Resume's policy for a **orphaned** effect — one whose intent committed and
 /// whose outcome did not, so nothing says whether it ran (spec §4.4).
 ///
-/// This is the workflow's type, and the home of the decision. The agent runtime declares
-/// the same two variants per tool (agent §5.2) and re-exports this rather than
-/// keeping a second copy: a tool declaration's recovery policy is exactly what
-/// its [`Pending`] carries.
+/// This is the workflow's type, and the home of the decision. The agent runtime
+/// declares the same two variants per tool today (agent §5.2, `ToolDecl::on_orphan`),
+/// a second copy that stands only until it sits on this layer: the dependency runs
+/// the other way for now (docs/README.md), and re-exporting across it would invert
+/// the layering ahead of the refactor that earns it. Once it does sit here, that
+/// field holds this type, because a tool declaration's recovery policy is exactly
+/// what its [`Pending`] carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum OnOrphan {
     /// Launch it again, as an ordinary launch. The consumer has declared the

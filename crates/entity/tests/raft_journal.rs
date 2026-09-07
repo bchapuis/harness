@@ -20,8 +20,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::RaftConfig;
-use actor_cluster::SwimConfig;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::NodeId;
@@ -29,6 +27,8 @@ use actor_core::Spawner;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use actor_simulation::raft_config;
+use actor_simulation::swim_config;
 use entity::Entities;
 use entity::Entity;
 use entity::EntityConfig;
@@ -121,24 +121,12 @@ impl EntityHandler<ReadBalance> for Account {
 
 // --- Harness -------------------------------------------------------------------
 
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
-
-fn raft() -> RaftConfig {
-    let mut config = RaftConfig::new(vec![A, B, C]);
-    config.election_timeout = Duration::from_millis(500);
-    config.heartbeat_interval = Duration::from_millis(100);
-    config
-}
-
 fn leader_net(sim: &Simulation) -> SimNetwork {
-    SimNetwork::new(sim).with_leader(swim(), raft(), DowningPolicy::Conservative)
+    SimNetwork::new(sim).with_leader(
+        swim_config(),
+        raft_config(vec![A, B, C]),
+        DowningPolicy::Conservative,
+    )
 }
 
 /// A per-`(entity_type, node)` entity store that **survives a restart**: the factory

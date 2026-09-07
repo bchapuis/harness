@@ -17,8 +17,6 @@ use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
 use actor_cluster::MemberStatus;
-use actor_cluster::RaftConfig;
-use actor_cluster::SwimConfig;
 use actor_core::Actor;
 use actor_core::ActorRef;
 use actor_core::ActorSystem;
@@ -35,9 +33,11 @@ use actor_core::Spawner;
 use actor_core::Terminated;
 use actor_core::TerminationReason;
 use actor_simulation::Recorder;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use actor_simulation::raft_config;
+use actor_simulation::swim_config;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -46,27 +46,9 @@ const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
 const D: NodeId = NodeId::new(4);
 
-/// Fast SWIM so a few simulated seconds cover several probe/gossip rounds.
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
-
-/// Fast Raft timing: 500ms election timeout (plus jitter), 100ms heartbeats.
-fn raft(voters: &[NodeId]) -> RaftConfig {
-    let mut config = RaftConfig::new(voters.to_vec());
-    config.election_timeout = Duration::from_millis(500);
-    config.heartbeat_interval = Duration::from_millis(100);
-    config
-}
-
 /// A three-voter leader-mode network.
 fn leader_net(sim: &Simulation, downing: DowningPolicy) -> SimNetwork {
-    SimNetwork::new(sim).with_leader(swim(), raft(&[A, B, C]), downing)
+    SimNetwork::new(sim).with_leader(swim_config(), raft_config(vec![A, B, C]), downing)
 }
 
 /// Drive an async system call (an operator command, an `ask`) to completion

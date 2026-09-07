@@ -238,11 +238,15 @@ pub fn scenario_sweep(name: &str, seeds: impl IntoIterator<Item = u64>, mut run:
         }
         return;
     }
-    let (seeds_run, failed) =
-        sweep_generic(seeds, true, |(seen, _): &(u64, String)| *seen, |seed| {
+    let (seeds_run, failed) = sweep_generic(
+        seeds,
+        true,
+        |(seen, _): &(u64, String)| *seen,
+        |seed| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(seed)))
                 .map_err(|payload| (seed, crate::workload::panic_detail(payload.as_ref())))
-        });
+        },
+    );
     if failed.is_empty() {
         return;
     }

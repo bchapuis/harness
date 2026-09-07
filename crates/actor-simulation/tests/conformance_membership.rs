@@ -26,23 +26,15 @@ use actor_core::Message;
 use actor_core::NodeId;
 use actor_core::Spawner;
 use actor_simulation::Recorder;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use actor_simulation::swim_config;
 use serde::Deserialize;
 use serde::Serialize;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
-
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
 
 struct Greeter;
 
@@ -68,7 +60,6 @@ impl Handler<Greet> for Greeter {
     }
 }
 
-/// Fast SWIM timings so a run covers detection in a fraction of a virtual second.
 fn fast_swim() -> SwimConfig {
     SwimConfig {
         probe_interval: Duration::from_millis(100),
@@ -128,7 +119,7 @@ fn reachability_transitions_are_observable() {
     let sim = Simulation::new(1);
     let recorder = Recorder::new();
     let net = SimNetwork::new(&sim)
-        .with_gossip(swim(), DowningPolicy::Conservative)
+        .with_gossip(swim_config(), DowningPolicy::Conservative)
         .with_events(Arc::new(recorder.clone()));
     let _a = net.join(A);
     let _b = net.join(B);
@@ -159,7 +150,7 @@ fn reachability_transitions_are_observable() {
 #[test]
 fn conservative_policy_never_downs_across_a_long_partition() {
     let sim = Simulation::new(2);
-    let net = SimNetwork::new(&sim).with_gossip(swim(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let node_a = net.join(A);
     let _b = net.join(B);
 
@@ -185,7 +176,7 @@ fn indirect_probing_keeps_a_lossy_but_reachable_peer_up() {
     // (spec §10 #2). Contrast `gossip::a_suspected_node_refutes_a_false_suspicion`,
     // which disables indirect probing so the suspicion forms.
     let sim = Simulation::new(5);
-    let net = SimNetwork::new(&sim).with_gossip(swim(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let a = net.join(A);
     let _b = net.join(B);
     let _c = net.join(C);
@@ -208,7 +199,7 @@ fn the_coordinator_role_falls_over_when_the_coordinator_leaves() {
     // election — the lowest-address up, reachable member — that falls over when
     // that node gracefully leaves (spec §9.3).
     let sim = Simulation::new(7);
-    let net = SimNetwork::new(&sim).with_gossip(swim(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let a = net.join(A);
     let b = net.join(B);
     let c = net.join(C);
@@ -238,7 +229,7 @@ fn the_coordinator_only_acts_on_a_stable_fully_reachable_view() {
     // joiner stays `Joining`; once the view heals and holds stable for the
     // window, the admission goes through.
     let sim = Simulation::new(8);
-    let net = SimNetwork::new(&sim).with_gossip(swim(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
     let a = net.join(A);
     let _b = net.join(B);
     let c = net.join(C);
@@ -278,8 +269,10 @@ fn downing_is_exempt_from_the_stability_gate() {
     // the node being downed is unreachable by definition. The coordinator downs
     // it even though its view is not fully reachable.
     let sim = Simulation::new(9);
-    let net = SimNetwork::new(&sim)
-        .with_gossip(swim(), DowningPolicy::Timeout(Duration::from_millis(400)));
+    let net = SimNetwork::new(&sim).with_gossip(
+        swim_config(),
+        DowningPolicy::Timeout(Duration::from_millis(400)),
+    );
     let a = net.join(A);
     let _b = net.join(B);
     let _c = net.join(C);

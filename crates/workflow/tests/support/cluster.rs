@@ -13,8 +13,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::RaftConfig;
-use actor_cluster::SwimConfig;
 use actor_core::EventSink;
 use actor_core::Message;
 use actor_core::NodeId;
@@ -23,6 +21,8 @@ use actor_simulation::Recorder;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
+use actor_simulation::raft_config;
+use actor_simulation::swim_config;
 use entity::Entities;
 use entity::EntityConfig;
 use entity::EntityExt;
@@ -38,25 +38,6 @@ pub const C: NodeId = NodeId::new(3);
 
 /// The shard groups' Raft timings, shared by the scenario cluster and the
 /// swarm's `ClusterModeSpec` so the two tiers cannot drift apart.
-pub const ELECTION_TIMEOUT: Duration = Duration::from_millis(500);
-pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
-
-pub fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
-
-pub fn raft() -> RaftConfig {
-    let mut config = RaftConfig::new(vec![A, B, C]);
-    config.election_timeout = ELECTION_TIMEOUT;
-    config.heartbeat_interval = HEARTBEAT_INTERVAL;
-    config
-}
-
 /// Two shards, no idle hibernation within a scenario, and no snapshots: every
 /// rehydration replays the journal, and `conformance_resume.rs`'s offline fold
 /// reads every record through the public read path, which a snapshot would
@@ -103,7 +84,11 @@ pub struct Cluster {
 pub fn cluster(sim: &Simulation, recorder: &Recorder, seam: &Seam) -> Cluster {
     let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());
     let net = SimNetwork::new(sim)
-        .with_leader(swim(), raft(), DowningPolicy::Conservative)
+        .with_leader(
+            swim_config(),
+            raft_config(vec![A, B, C]),
+            DowningPolicy::Conservative,
+        )
         .with_events(sink);
     let nodes = vec![net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader

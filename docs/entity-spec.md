@@ -1,7 +1,7 @@
 # Entity: Durable Objects for the Distributed Actor Framework
 
 **Status:** Draft v3
-**Scope:** A virtual, durable, single-activation object, a **entity**, addressable by a global name, with colocated event-sourced storage and a durability barrier on the reply path, built on the actor framework of [`distributed-actor-spec.md`](distributed-actor-spec.md).
+**Scope:** A virtual, durable, single-activation object, an **entity**, addressable by a global name, with colocated event-sourced storage and a durability barrier on the reply path, built on the actor framework of [`distributed-actor-spec.md`](distributed-actor-spec.md).
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
 
@@ -17,7 +17,7 @@ Throughout, `entity` is the crate and namespace name and an entity is the durabl
 
 ## 1. What an entity is
 
-A **entity** is a unit of single-threaded compute fused with strongly-consistent, durable, colocated storage, addressed by a globally-unique **name**. At most one live **activation** of an entity exists in the cluster at a time; every message for the name routes to that activation. The runtime creates the activation on first access, migrates it, and evicts it when idle; its durable state survives all of these. The entity's identity is permanent and conceptual; the activation is disposable.
+An **entity** is a unit of single-threaded compute fused with strongly-consistent, durable, colocated storage, addressed by a globally-unique **name**. At most one live **activation** of an entity exists in the cluster at a time; every message for the name routes to that activation. The runtime creates the activation on first access, migrates it, and evicts it when idle; its durable state survives all of these. The entity's identity is permanent and conceptual; the activation is disposable.
 
 This is the actor model (actor §3) specialized in four ways:
 
@@ -39,7 +39,7 @@ An entity's in-memory activation is a **cache** of state folded from the journal
 - **Durable by construction.** A handler's effects become visible only after the events it produced are durable (§6). A crash loses no acknowledged write.
 - **Strong consistency that scales with the cluster, not the object count.** Consensus is sharded (§7). The cluster runs O(shards) Raft groups and splits them as it grows; there is no single cluster-wide log on the write path, and there is no per-entity consensus group. Activating an entity takes no consensus at all (§10).
 - **Single-writer safety under partition.** An entity never forks. The shard leader is its only writer, and an append fenced by a stale term cannot reach a quorum, so two leaders never both commit (§8).
-- **Pluggability.** The journal is a seam with two reference tiers, single-node `Local` and clustered `Quorum` (§7.4), over a per-shard leader-election group for placement (§7.1) and per-entity quorum replication for durability (§7.2), as transport and the control plane are pluggable in the actor framework.
+- **Pluggability.** The journal is a seam with two reference *durability tiers*, single-node `Local` and clustered `Quorum` (§7.4), over a per-shard leader-election group for placement (§7.1) and per-entity quorum replication for durability (§7.2), as transport and the control plane are pluggable in the actor framework.
 - **One substrate, many facets.** Durable features beyond the event fold are **facets**: the KV map (§7.13), the workspace directory (§7.11), the SQLite database (§7.14), the disk image (§7.15), the alarm deadline (§7.16), the steps memo (§7.17). Each is an interpretation over the two storage primitives (ordered records and immutable blobs), sharing one journal, one atomic commit per command, and one composite snapshot (§7.12). A new feature MUST NOT add a third replication mechanism.
 - **One programming model.** The handler is ordinary sequential Rust; the input and output gates (§6) supply atomicity-on-the-outside and durability-before-effects with no explicit locking.
 
@@ -61,7 +61,7 @@ An entity's in-memory activation is a **cache** of state folded from the journal
 | **`EntityName`** | The stable, cluster-wide, serializable identity of an entity. A `(entity_type, key)` pair; `key` is an arbitrary application string. |
 | **Shard** | A partition of one entity type's namespace and the unit of *placement*: a small per-shard Raft group (the **leader-election group**) owning leadership and term, and holding as its Raft membership the *realized* replica set for that type's entities whose names fall in its range, holding *no* entity data (§7.1, §8). The entities' data is durable by per-entity quorum append, not a shared log. |
 | **Shard leader** | The single node elected by a shard's leader-election group to write and host every entity in the shard's range, for one term (§5.2, §8). |
-| **Replicator** | The per-entity durability mechanism: it quorum-appends an entity's records to the shard's replicas, fenced by the shard term, and recovers an entity's head from a quorum on activation. Two tiers: single-node `Local`, clustered `Quorum` (§7.2, §7.4). |
+| **Replicator** | The per-entity durability mechanism: it quorum-appends an entity's records to the shard's replicas, fenced by the shard term, and recovers an entity's head from a quorum on activation. Two **durability tiers**: single-node `Local`, clustered `Quorum` (§7.2, §7.4). |
 | **Shard map** | The cluster's consensus-agreed record of the *intended* allocation: which nodes should replicate each shard and which key range it covers. A per-entity-type map group seeded from the leader-based control plane, reconciled into each shard's realized membership (§7.6). |
 | **Activation** | The live, in-memory instance of an entity on the leader of its shard. Disposable; rebuilt from the journal. |
 | **Event** | A serializable value appended to an entity's journal; the unit of durable change. |
@@ -72,6 +72,9 @@ An entity's in-memory activation is a **cache** of state folded from the journal
 | **Facet** | A durable storage feature of one entity (the event fold, the KV map §7.13, the workspace §7.11, the SQL database §7.14, the disk image §7.15, the alarm §7.16, the steps memo §7.17), defined entirely as an interpretation over the two storage primitives: what its records mean, what it keeps in blobs, what it contributes to the snapshot (§7.12). |
 | **Facet tag** | The stable identifier a multi-facet entity's records carry, dispatching each record to its facet on replay; an unrecognized tag aborts activation (§7.12). Tags are `0..=0x7F`, the high bit being reserved as the record envelope's revision escape (§7.12). |
 | **`Seq`** | The position of an event in one entity's total order; first event at 1. |
+| **Base** | An entity's compaction floor: the highest `Seq` its store has truncated behind a snapshot. Slots at or below it are gone from the log and live only in the snapshot, so every event read reports it (§7.5, §9). |
+| **Event projection** | The view of the journal an event read returns: `EntityCtx::events` and `EntityRef::events` in full, the subscription sink's record filter in part (§7.5). |
+| **Durability tier** | Which Replicator a deployment runs, `Local` or `Quorum` (§7.4). Unrelated to the agent runtime's *capability* tiers (agent §5.6), which share only the word. |
 | **Quorum** | The majority of a shard's replicas whose acknowledgment makes a per-entity append durable (§7.2), or commits a leader-election entry. |
 | **Term** | The shard's leadership term; it increases on every leadership change and is the single-writer fencing token every append carries (§8). |
 | **Gateway** | The node-local actor that routes a call to the right shard leader and owns the activation table for shards this node leads (§5.3). |
@@ -136,7 +139,7 @@ pub trait Entity: Sized + Send + 'static {
         -> impl Future<Output = ()> + Send { async {} }
 
     /// Whether the activation MAY idle-hibernate now (§10). Consulted only on idle
-    /// eviction; a forced step-down ignores it. The default always permits it. A
+    /// eviction; a forced step-down ignores it. The default always permits it. An
     /// entity with autonomous, not-yet-journaled work (the agent runtime's live
     /// run) overrides this to veto eviction until the work settles; the host
     /// reschedules the idle check rather than evicting mid-flight.
@@ -146,6 +149,8 @@ pub trait Entity: Sized + Send + 'static {
     /// through the §6 barrier (return the events to journal; an empty result
     /// commits nothing, §7.5). Specified where their machinery is: `on_alarm`
     /// with the alarm facet (§7.16), `on_peer_terminated` with death watch (§4.3).
+    /// `on_alarm` is not gated by the declared facet set: an entity that never
+    /// declares the alarm facet may implement it and is never called (§7.16).
     fn on_alarm(&self, state: &Self::State, ctx: &EntityCtx<Self>)
         -> impl Future<Output = Vec<Self::Event>> + Send { async { Vec::new() } }
     fn on_peer_terminated(&self, state: &Self::State, ctx: &EntityCtx<Self>,
@@ -251,10 +256,8 @@ impl<G: Entity> EntityRef<G> {
     /// below, served by the shard leader's gateway straight from the journal
     /// **without get-or-activating the entity** (§7.5): polling a hibernated
     /// entity leaves it hibernated (§10). A framework built-in like `subscribe`.
-    /// Same projection contract as `EntityCtx::events`: real `Seq`s with facet
-    /// gaps, fewer than `limit` only at the head, the compaction `base` on
-    /// every reply (§9); a failed or corrupt journal
-    /// read is `EntityError::Unavailable` — transient, always safe to re-ask.
+    /// Returns the event projection (§7.5): real `Seq`s with facet gaps, a
+    /// short page only at the head, and the compaction `base` on every reply.
     pub async fn events(&self, from: Seq, limit: usize)
         -> Result<EventHistory<G::Event>, EntityError>;
 }
@@ -283,14 +286,11 @@ impl<G: Entity> EntityCtx<G> {
     fn this(&self) -> EntityRef<G>;
     fn system(&self) -> &G::System;
     /// Up to `limit` of this entity's committed events after `from`, decoded,
-    /// in ascending `Seq` order: the load-path form of the subscription's
-    /// event projection (§7.9). Facet records (§7.12) are skipped, so the
-    /// returned `Seq`s are the journal's real slots, with gaps where other
-    /// facets' records sit; fewer than `limit` events come back only at the
-    /// head, and the reply carries the compaction `base` (§9) like the
-    /// gateway read's. A local, fence-free journal read (§7.3), bounded by
-    /// the activation's committed head (§7.5), read-your-leader like
-    /// any query — read-only, so the no-`persist` rule below holds.
+    /// in ascending `Seq` order: the in-handler form of the event projection
+    /// (§7.5), identical in contract to the gateway read and the subscription
+    /// sink. A local, fence-free journal read (§7.3), bounded by the
+    /// activation's committed head (§7.5), read-your-leader like any query —
+    /// read-only, so the no-`persist` rule below holds.
     fn events(&self, from: Seq, limit: usize)
         -> BoxFuture<'static, Result<EventHistory<G::Event>, EntityJournalError>>;
     /// Death-watch an actor by id (actor §12): when it terminates — including
@@ -398,7 +398,12 @@ Three ordering rules are normative (invariant **E1**):
 
 ---
 
-## 7. Durability and replication
+## 7. Durability, replication, and facets
+
+Two layers, and they are different abstractions:
+
+- **§7.1–§7.10, the substrate.** How an entity's bytes become durable: shards and placement (§7.1), the per-entity quorum append (§7.2), the journal seam and its durability tiers (§7.3, §7.4), reads (§7.5), the shard map and its elasticity (§7.6–§7.8), record subscriptions (§7.9), and the second storage primitive, the content-addressed blob area (§7.10). This is the layer that has a fence, a quorum, and a recovery protocol.
+- **§7.11–§7.17, the facets.** What is built on it: the facet model (§7.12) and the built-in facets under it — the workspace directory (§7.11), the KV map (§7.13), the SQLite database (§7.14), the disk image (§7.15), the alarm deadline (§7.16), the steps memo (§7.17). None of them adds a replication path, a fence, or a recovery protocol; §7.12 states the contract they share.
 
 ### 7.1 Shards: the unit of placement
 
@@ -535,9 +540,15 @@ pub enum EntityJournalError {
 
 The records are the entity's `Event`s and state is the `apply` fold (§4.1); a snapshot is the serialized `State`. (Interpreting an entity's records as something other than an event log — the SQL facet's WAL frames — is the facet model's physical class, §7.12/§7.14, over this same Replicator substrate.) The host neither names nor depends on the parts below the seam, which is what keeps the substrate replaceable with no change above it.
 
+**Why one trait, and why it is named for the records.** The substrate is two primitives (§7.10), yet the host sees a single trait carrying both, plus a `term()` that is neither. Three compressions, each with a cost:
+
+- **The blobs ride the record seam** because they are the *same* bytes' second half: an entity's blobs are replicated to the same replicas, recovered on the same activation, transferred by the same migration and split passes, and simulated under the same seed. The cost is a seam the blob half nearly doubles, where the deep-module preference argues for fewer methods. Splitting them apart is cheap and stays available — a blob supertrait the journal extends, leaving one implementing type and one construction site — and it would narrow the one consumer above the seam, `EntityBlobs`, to the half it actually calls; it is declined because the two are never deployed apart, not because it is hard.
+- **The name follows the ordered half** because that half is what the `Seq`, the term fence, and the recovery protocol are about, and the blob half is defined by having *none* of them (§7.10). A neutral name would hide exactly the asymmetry an implementer must respect.
+- **`term()` is a read of placement, not a control of it.** Placement is decided below the seam by the leader-election group (§8); the seam exposes only the current answer, because the gateway's non-activating read needs a validity token for its cached head floor (§7.5) and the alternative — routing that question around the seam — would give the host a second dependency on the layer this trait exists to hide.
+
 ### 7.4 Durability tiers: the two Replicators
 
-The durability concern is the **Replicator** (§7.3), and it admits multiple implementations; two are reference tiers, chosen at deployment like a membership mode (actor §9.4):
+The durability concern is the **Replicator** (§7.3), and it admits multiple implementations; two are reference **durability tiers**, chosen at deployment like a membership mode (actor §9.4). "Tier" carries other senses in this specification set, so it is never left bare here.
 
 1. **`Local` (single-node).** One linearizable local store (in-memory, or a local file log with the hard-link/optimistic-concurrency fence of the agent runtime prior art). An append commits on local fsync; there is no leader-election group and no term, because a single node is always its own writer. Best for: embedded, single-node, tests, and the deterministic simulator (§14). CP trivially (one writer, one store), not fault-tolerant to node loss.
 **Where the store's blocking I/O runs is a seam.** A store call is synchronous by contract — when it returns, its outcome is settled — so for a file-backed store someone must block on the fsync. That MUST NOT be the async worker driving the append: the same worker drives the node's leader-election heartbeats and its other shards' quorum waits, so one slow device stalls heartbeats past the election timeout, shards re-elect, their entities step down (§6), and the next access rehydrates them — a cluster-wide event produced by a local hiccup, and one that generates more I/O while the device is already the bottleneck. A deployment on real storage therefore SHOULD run store calls on a pool of threads separate from the async runtime. This is a seam rather than a fixed behavior because the deterministic simulation (§14) runs the *production* store under virtual time, and a real thread pool there would make a run depend on OS scheduling, breaking the seed-reproducibility of actor §18.1; the default therefore runs the call inline, and a deployment opts into a pool. The seam changes only *which thread* blocks: the guard, the fence promise, and the in-memory apply still happen under the entity's segment lock, in the same order, so it adds no ordering guarantee and removes none.
@@ -552,9 +563,18 @@ The durability concern is the **Replicator** (§7.3), and it admits multiple imp
 
 A command that emits no events (a query) commits nothing (§6 step 2). The leader serves it from the entity's in-memory activation, a local, replication-free read with **no per-read consensus** (DO §4.3, §4.4). Reads scale with the leaders' capacity and never wait on replication.
 
-**The non-activating event read (`EntityRef::events`, §4.3).** A second read form skips the activation entirely: the shard leader's **gateway** (§5.3) serves an entity's committed events straight from the journal's `load` (§7.3), without get-or-activating the entity — so observation never wakes a hibernated entity (§10), which is what makes continuous polling compatible with hibernation's economics. It applies the same record-to-event projection as the subscription sink and `EntityCtx::events` (§7.9, §4.3): facet records (§7.12) are skipped, the returned `Seq`s are the journal's real slots, and a record that will not split or decode surfaces as `Unavailable` — corruption, never silently dropped (`Unavailable` here reports a failed local read; a read commits nothing, so re-asking is always safe). Each wire page is bounded server-side (the gateway scans at most a fixed number of records per ask, SHOULD default to about **1024**) and carries an explicit cursor, an at-head flag, and the store's compaction **base** (§9) — slots at or below the base are subsumed by the entity's snapshot, so a caller reading from below it learns its history starts truncated instead of mistaking the drained prefix for facet gaps; the base MUST ride **every** page, not just the first, because compaction is bounded by no reader's cursor (a snapshot at the head can outrun a slow pager mid-read). With those three fields a page diluted by facet records still makes progress and the caller-side loop preserves the "fewer than `limit` only at the head" contract; the paging loop and the event decode run on the **caller**, keeping the serial gateway to one bounded local read per ask (§5.3). Like `Activate`, the read is answered only on the shard's leader — a non-leader replies `NotLeader(hint)` for the caller's bounded redirect (§5.4) — so its consistency is exactly the read-your-leader contract below, stale only where every read is.
+**The event projection: what an event read returns.** The two read forms — `EntityCtx::events` in a handler and `EntityRef::events` over the wire (§4.3) — return the same view of the journal:
 
-**The read serves at or below a committed-head floor, never the raw store.** The local store alone cannot tell a committed record from a tentative one: a leader writes its own replica before its quorum resolves (§7.2), and a fresh leader's store may hold undecided records — or miss committed ones — until a `head` recovery read-repairs it (§8). The activation path is shielded by construction (rehydration runs the recovery, and the input gate orders reads behind in-flight appends, §6); the gateway read, which bypasses both, MUST therefore bound every page by the entity's committed head. A **resident** activation publishes its committed head to the gateway (updated at recovery and on each commit), so reads of an active entity serve up to the last commit and never an in-flight slot. For a **hibernated** name the gateway recovers a floor once per leadership — a spawned `head` recovery (§8), which also backfills this leader's store, so the subsequent local reads are complete — cached under the shard term it ran under: the term is the validity token, since regained leadership is always a higher term (§8.1) and an activation starting locally invalidates the entry. While the floor is being established the caller sees a transient *warming* reply and re-asks under its own deadline, exactly as it waits out an election (§5.4). Records above the floor are simply not served yet — the next poll sees them once committed — so no observer is ever shown an unacknowledged write (**E5**), and the anomaly budget stays what read-your-leader already grants: staleness, never invention.
+- **The `Seq`s are the journal's own.** Facet records (§7.12) are skipped, so the returned slots have gaps where other facets' records sit. A caller pages by re-asking from the last `Seq` it saw, never by arithmetic on `Seq`s.
+- **A short page means the head.** Fewer than `limit` events come back only when the read has reached the entity's committed head, so page shape is never a way to learn that history was truncated. A truncated prefix and a facet gap look identical in the `Seq`s alone, which is why the base below is announced rather than deduced.
+- **Every reply carries the compaction `base`** (§9). Slots at or below it are subsumed by the entity's snapshot and no re-read recovers them: `base <= from` means the page is complete history from `from`. The base MUST ride **every** page, not just the first, because compaction is bounded by no reader's cursor — a snapshot at the head can outrun a slow pager mid-read.
+- **Corruption is loud.** A record that will not split or decode surfaces as `Unavailable`, never a silently dropped slot. `Unavailable` on a read reports a failed local read; a read commits nothing, so re-asking is always safe.
+
+The subscription sink (§7.9) shares the first rule only — it decodes facet-0 records and skips the rest — and neither of the paging rules applies to a push: a batch carries no base and delivery MAY drop, duplicate, or reorder, which is what the sink's seq reconciliation against `load` is for (**E16**).
+
+**The non-activating event read (`EntityRef::events`, §4.3).** This read form skips the activation entirely: the shard leader's **gateway** (§5.3) serves the projection straight from the journal's `load` (§7.3), without get-or-activating the entity — so observation never wakes a hibernated entity (§10), which is what makes continuous polling compatible with hibernation's economics. Each wire page is bounded server-side (the gateway scans at most a fixed number of records per ask, SHOULD default to about **1024**) and carries an explicit cursor, an at-head flag, and the base, which is what lets a page diluted by facet records still make progress while the caller-side loop preserves the projection's contract; the paging loop and the event decode run on the **caller**, keeping the serial gateway to one bounded local read per ask (§5.3). Like `Activate`, the read is answered only on the shard's leader — a non-leader replies `NotLeader(hint)` for the caller's bounded redirect (§5.4) — so its consistency is exactly the read-your-leader contract below, stale only where every read is.
+
+**The read serves at or below a committed-head floor, never the raw store.** The local store alone cannot tell a committed record from a tentative one: a leader writes its own replica before its quorum resolves (§7.2), and a fresh leader's store may hold undecided records — or miss committed ones — until a `head` recovery read-repairs it (§8). The activation path is shielded by construction (rehydration runs the recovery, and the input gate orders reads behind in-flight appends, §6); the gateway read, which bypasses both, MUST therefore bound every page by the entity's committed head. A **resident** activation publishes its committed head to the gateway (updated at recovery and on each commit), so reads of an active entity serve up to the last commit and never an in-flight slot. For a **hibernated** name the gateway recovers a floor once per leadership — a spawned `head` recovery (§8), which also backfills this leader's store, so the subsequent local reads are complete — cached under the shard term it ran under: the term is the validity token, since regained leadership is always a higher term (§8.1) and an activation starting locally invalidates the entry. While the floor is being established the gateway answers a transient *warming* reply, which `EntityRef` absorbs: it backs off and re-asks under the caller's own deadline, exactly as it waits out an election (§5.4). The state never reaches the caller, which is why §12 carries no variant for it; only the deadline lapsing does, as `Unavailable`. Records above the floor are simply not served yet — the next poll sees them once committed — so no observer is ever shown an unacknowledged write (**E5**), and the anomaly budget stays what read-your-leader already grants: staleness, never invention.
 
 **The contract is read-your-leader (relaxed), not linearizable under partition.** Because the activation is colocated with the shard leader (§5.2) and the read path does not reconfirm leadership per call, a leader that has been deposed but not yet fenced, an isolated minority leader that has not yet learned it lost the election, MAY serve a stale read until its activation stops. Writes never fork (the shard term fences the commit, §8); only reads can be stale, and only on the minority side of a partition. A caller that needs a linearizable read in the meantime issues a trivial *writing* command (one that emits an event): it rides the §6 output gate, so it commits through the shard leader and reflects committed state, or fails (`NotLeader`/`Unavailable`) on a deposed leader.
 
@@ -566,14 +586,22 @@ The **shard map** records, for each shard, its key range and its replica set; le
 
 A leader-only **allocator** keeps each shard's committed replica set equal to its rendezvous choice over the current cluster voters, and a leader-only **reconcile** loop drives each group it leads (the map group and the shard leader-election groups it holds) toward its intended membership, so shards rebalance onto and off of changed members as the cluster grows or shrinks. Because the leader-election group holds no entity data (§7.1), catching up its prefix is *not* enough: the new replica MUST NOT stand in for a member of the *current* majority before it holds each entity's committed records and latest snapshot — a voter that lacked the entity data would break the quorum intersection E14 relies on (it could join a recovery quorum holding none of an entity's records). Under the joint quorum below a target replica counts toward the **target** majority from the `Assign` commit, before its catch-up, which is safe only because a majority of `current` is still required alongside it until `Migrated` flips the set.
 
-**Replica-set migration (implemented).** A changed rendezvous choice therefore never replaces a committed set outright; it runs a **joint-quorum migration**:
+**Replica-set migration.** A changed rendezvous choice therefore never replaces a committed set outright; it runs a **joint-quorum migration**:
 
 1. The allocator proposes `Assign { shard, replicas }`; on an already-allocated shard this commits the new set as the shard's **target**, leaving `current` in place. From that commit, every per-entity append, snapshot, and recovery on the shard uses the **joint quorum** — a majority of `current` AND a majority of `target`, fanned to the union — so every pre-migration commit (on a majority of `current`) and every in-migration commit (on both majorities) stays intersected by every recovery read. The allocator proposes nothing further for a shard while its migration is in flight.
 2. A node newly in the union creates the shard's leader-election group as a non-member over the *current* voters (no election disruption; the reconcile loop, which drives the group toward the union during migration, promotes it) and builds its journal over the joint sets. A continuing replica's journal switches to the joint sets in place — the replica sets are **live**, read per operation, never a construction-time snapshot.
 3. The shard leader's **migration driver** catches every entity up on the target: it enumerates the shard's entities from a read quorum of `current` (the union of their local lists — any read majority sees every committed entity), then per entity runs the §8 recovery (whose joint write-back lands the records on the target replicas), re-persists the best snapshot on the joint quorum (a compacted entity's prefix exists only in its snapshot), and copies the blob area verified-by-content. Every step is idempotent; a leader change mid-migration re-drives on the new leader, and a failed step just retries.
 4. Only after a complete pass does the driver propose `Migrated { shard }`: applying it flips `current = target`, departing nodes drop their journals, and the reconcile loop shrinks the group's voters to the new set. A node that departed keeps a stale local view of the group it left, so a routing hint from a believed leader is trusted only when the committed map still lists that node as a replica (§5.4).
 
-**A committed command a node cannot decode MUST stop that node's map, never be skipped.** The map's log is agreed, so an entry one node skips is one its peers apply, and the skipping node's allocation is then not a *prefix* of the committed log but a **gap** in it — a `SplitCommitted` applied without the `SplitStarted` under it. The two nodes disagree about which node owns a range, which is exactly the divergence running the map through consensus was supposed to make impossible, and skipping violates [compatibility](compatibility-spec.md) **V2** directly. So a node that cannot decode a committed command refuses it and stops applying, permanently: its allocation freezes at the last command it could apply, it hands off every shard it leads to a replica whose map is still advancing (§8.3), and its proposer loops stop with it — an allocator sweeping a frozen view would read a shard it never learned about as unallocated and propose a *founding* assignment over the real one, turning a node that stopped reading the log into one that corrupts it. Stopping is safe where skipping was not: a frozen prefix is the state of a node that is merely *behind*, which every path here already tolerates, and a stale leader cannot serve a moved range from it either, because the authoritative barrier is the replica stores' durable append bound (§7.7), not the map. The node stays in the map group and keeps acknowledging its appends — quorum there is about the log being *durable*, not about this build having applied it, and a restart onto a build that can read the entry applies it — and it reports why it stopped, for the health probe that decides it is a node to replace. The payload carries its own boundary, `entity.shardmap` ([compatibility](compatibility-spec.md) §3): a `GRSMAP` magic and a `u16` revision ahead of the JSON, because the `actor.raft.log` stamp it rides covers the **envelope** and not this. So a build meeting a command from a later build refuses it by *revision* rather than by parse failure, which is the difference between an operator reading a mixed-version rollout and reading a damaged log. An **unstamped payload is adopted as revision 1**: every command committed before the boundary existed is still in some cluster's log, and a build that refused them would refuse its own history. Adoption is gated on the magic, so a *stamped* payload at a revision this build does not accept is still refused rather than handed to the older decoder.
+**A committed command a node cannot decode MUST stop that node's map, never be skipped.**
+
+**The rule.** A node that cannot decode a committed map command refuses it and stops applying, permanently. Its allocation freezes at the last command it could apply, it hands off every shard it leads to a replica whose map is still advancing (§8.3), and its proposer loops stop with it — an allocator sweeping a frozen view would read a shard it never learned about as unallocated and propose a *founding* assignment over the real one, turning a node that stopped reading the log into one that corrupts it.
+
+**Why not skip.** The map's log is agreed, so an entry one node skips is one its peers apply, and the skipping node's allocation is then not a *prefix* of the committed log but a **gap** in it — a `SplitCommitted` applied without the `SplitStarted` under it. The two nodes would disagree about which node owns a range, exactly the divergence running the map through consensus was supposed to make impossible, and skipping violates [compatibility](compatibility-spec.md) **V2** directly.
+
+**Why stopping is safe where skipping was not.** A frozen prefix is the state of a node that is merely *behind*, which every path here already tolerates, and a stale leader cannot serve a moved range from it either, because the authoritative barrier is the replica stores' durable append bound (§7.7), not the map. The node stays in the map group and keeps acknowledging its appends — quorum there is about the log being *durable*, not about this build having applied it, and a restart onto a build that can read the entry applies it — and it reports why it stopped, for the health probe that decides it is a node to replace.
+
+**How a build tells "later" from "damaged".** The payload carries its own boundary, `entity.shardmap` ([compatibility](compatibility-spec.md) §3): a `GRSMAP` magic and a `u16` revision ahead of the JSON, because the `actor.raft.log` stamp it rides covers the **envelope** and not this. A build meeting a command from a later build then refuses it by *revision* rather than by parse failure, which is the difference between an operator reading a mixed-version rollout and reading a damaged log. An **unstamped payload is adopted as revision 1**: every command committed before the boundary existed is still in some cluster's log, and a build that refused them would refuse its own history. Adoption is gated on the magic, so a *stamped* payload at a revision this build does not accept is still refused rather than handed to the older decoder.
 
 The writer emits the stamped form too, rather than taking **V4**'s two releases over it. That ordering exists to protect peers already in the field on a build that cannot read `GRSMAP…` — for which the failure is worse the older the peer is: a build with the refusal above halts, and a build predating it skips the entry and diverges. There is no such fleet here, so the boundary landed in one step; V4 binds the first change made once there is one ([compatibility](compatibility-spec.md) §3).
 
@@ -645,8 +673,6 @@ The blob path carries **no `Seq`, no term, and no read-repair**. A content hash 
 
 ### 7.11 The workspace facet (physical)
 
-**Status: implemented** (`ws.rs`).
-
 The workspace facet gives an entity a **real, node-local directory** — the working set a shell, container, or microVM runs against, with no interposition and no typed-API translation. The directory is the live truth for the activation; durability comes from **capture**: after a command's side effects have landed on disk, the handler calls `ctx.ws().capture()`, which diffs the durable subtree against the committed index (stat-pruned, content-hash-verified) and stages one record per changed file — the file's bytes **inline**, plus one record naming the deleted paths. The staged records join the command's atomic batch (§7.12, **E19**): the command's reply, its events, and the workspace delta commit together or not at all. Replay applies the recorded bytes byte-deterministically, never by re-execution (**F1**). An unchanged tree stages nothing and rides the §7.5 read path.
 
 - **The physical discipline (E20/F4).** The directory mutates before durability — tools write it directly, between and during commands. On `Committed` the host keeps the materialization; on **any** other outcome it deletes the directory and steps down; the next activation rematerializes from the composite snapshot plus committed delta records. The directory is a rebuildable cache (§1), keyed under `EntityConfig::data_dir` by **node and entity** — a materialization is activation-local, and under the simulator many nodes share one process, so a failover must never land two nodes' materializations of one entity on one path.
@@ -657,8 +683,6 @@ The workspace facet gives an entity a **real, node-local directory** — the wor
 ---
 
 ### 7.12 The facet model: one substrate, many storage features
-
-**Status: implemented.** The facet seam (`facet.rs`) and every built-in facet — KV (§7.13), workspace (§7.11), SQL (§7.14), disk (§7.15), alarm (§7.16), steps (§7.17) — are in the crate.
 
 Durable Objects exposes several storage APIs to one object but implements **one** replicated substrate (DO §4.2). The entity layer applies the same discipline over its two-part substrate (§7.10): ordered records and immutable blobs. A **facet** is a durable storage feature of one entity defined entirely by three answers, and nothing else:
 
@@ -672,7 +696,7 @@ A facet gets no replication path, no fence, and no recovery protocol of its own;
 
 **The tag space reserves its high bit, and is split in two.** A facet tag is `0..=0x7F`; a leading byte at or above `0x80` is not a tag but the escape into a later **envelope revision** ([compatibility](compatibility-spec.md) §3), and a build that does not implement that revision MUST refuse the record by revision rather than report it as an unrecognized tag — the two have different causes and different fixes.
 
-Within the tag range, `0..=0x3F` is reserved for facets defined in this crate and `0x40..=0x7F` for facets defined outside it, so the two can be allocated independently. A tag is permanent — it is the dispatch key for every record ever written under it — so a collision between a built-in facet and a third-party one is not a build error, it is two readings of the same durable byte. Revision 1, the only one defined, is `[tag][payload]` with no escape, so the reservation costs nothing on disk and every record ever written is already a stamped revision-1 record, which lets the envelope change later (a record-level digest, per-record compression, a wider tag space) without migrating a byte. It does **not** version a facet's *payload* schema, which evolves separately: `postcard` appends enum variants safely, so a facet's operation enum grows at its end. Subscriptions (§7.9) are the entity's **event projection**: the typed sink decodes facet-0 records and skips other facets' — their seqs appear as gaps the subscriber's seq-reconciliation already absorbs (E16 holds per projection).
+Within the tag range, `0..=0x3F` is reserved for facets defined in this crate and `0x40..=0x7F` for facets defined outside it, so the two can be allocated independently. A tag is permanent — it is the dispatch key for every record ever written under it — so a collision between a built-in facet and a third-party one is not a build error, it is two readings of the same durable byte. Revision 1, the only one defined, is `[tag][payload]` with no escape, so the reservation costs nothing on disk and every record ever written is already a stamped revision-1 record, which lets the envelope change later (a record-level digest, per-record compression, a wider tag space) without migrating a byte. It does **not** version a facet's *payload* schema, which evolves separately: `postcard` appends enum variants safely, so a facet's operation enum grows at its end. Subscriptions (§7.9) deliver the **event projection** (§7.5): the typed sink decodes facet-0 records and skips other facets', whose seqs appear as the gaps the subscriber's seq-reconciliation already absorbs (E16 holds per projection).
 
 **Two facet classes.** The classes differ in where a mutation lives before the commit:
 
@@ -700,15 +724,15 @@ The payload is **stamped** with a magic and a revision ([compatibility](compatib
 | **F3** | **Complete roots.** The facet's reported root set covers every blob its restored form can reference; nothing it can later `get` is outside it. |
 | **F4** | **Discard safety** (physical only). Discarding the materialization at any moment and rehydrating from the composite snapshot plus records reproduces the identical form. |
 
-**Apps are libraries over facets, never facets.** A git-style artifact store is refs in the KV facet plus objects in blobs (§7.10), and a work queue is events or KV. A feature earns facet-hood only when it needs **host participation**: a transaction lifecycle and discard (SQL), a per-command overlay (KV), a timer that re-activates the entity (alarms, §7.16). Everything else layers above, in user code.
+**Apps are libraries over facets, never facets.** A git-style artifact store is refs in the KV facet plus objects in blobs (§7.10), and a work queue is events or KV. A feature earns facet-hood on one of two grounds, and nothing else: it needs **durable records the application's own `Event` type must not have to carry** — hence its own tag and snapshot contribution, which is what the KV map, the workspace, the database, the image, and the step memo each need — or it needs **host participation no library can obtain**: discard of a materialization on a non-committed outcome (every physical facet, **E20**), or callerless delivery driven from the folded form (the alarm, §7.16). "It needs a per-command overlay" is not a ground, since every logical facet has one by construction; the overlay is what facet-hood *gives* a feature, not what earns it. The two examples above are libraries because their vocabulary is one the application is content to own: a git store's refs are KV keys it is happy to name.
+
+The steps facet is the boundary case, and §7.17 works it: the memo earns a tag, while the launch and the guard's keying stay with the entity, and the layer that generalizes those is the workflow, above entity rather than another facet.
 
 **The seam stays internal.** The facet trait is not public API; publishing it for out-of-crate facets is deferred (§16).
 
 ---
 
 ### 7.13 The KV facet (logical)
-
-**Status: implemented** (`kv.rs`).
 
 The KV facet gives an entity an ordered map of small values — configuration, refs, cursors, indices — without designing an event vocabulary for it: `ctx.kv()` offers `get`, `put`, `delete`, and ordered prefix listing (`keys`/`list`), staged per command (§7.12) and read-your-staged-writes within the handler.
 
@@ -719,8 +743,6 @@ The KV facet gives an entity an ordered map of small values — configuration, r
 ---
 
 ### 7.14 The SQL facet (physical)
-
-**Status: implemented** (`sql.rs`, behind the `sql` cargo feature).
 
 The SQL facet gives an entity a **private, on-disk SQLite database** (DO §2.3, §4.2). The handler runs ordinary SQL through `ctx.sql()` against a local file: reads are leader-local and replication-free (§7.5), writes are transactional, and nondeterministic SQL (`random()`, `datetime('now')`, autoincrement) is fine, because replication is physical, never re-execution. (A *statement-sourced* SQLite entity — SQL text as events, folded by re-execution — remains expressible with plain event sourcing and no facet; it is an application pattern, not this facet.)
 
@@ -735,13 +757,13 @@ The SQL facet gives an entity a **private, on-disk SQLite database** (DO §2.3, 
 
 ### 7.15 The disk facet (physical)
 
-**Status: implemented** (`disk.rs`). The physical seam it rides is the SQL facet's (§7.14): capture at a quiescent point, checkpoint into content-addressed blobs, discard on non-commit, rehydrate then replay. The disk facet is that machinery with **dirty blocks** for WAL frames and a **raw image** for the database file; capture bytes travel as blobs and capture rides an explicit command. Blob-referencing records use the seam's one post-replay hook, **`rehydrate`**: called once after restore + replay, before the first command, it is where a facet whose records carry blob ids rather than bytes fetches and applies them, so the fold stays synchronous and pure. Every other facet keeps the no-op default.
-
 The disk facet gives an entity a **raw block image**: a fixed-size disk a microVM mounts as its rootfs, the whole-machine analogue of the workspace facet's directory (§7.11). Where the workspace facet captures changed *files* and the SQL facet captures WAL *frames*, the disk facet captures changed **blocks**. A session's dirty set can run to gigabytes, far past the replicator's message bounds, so the block *bytes* never ride the record: a **capture** `put`s each dirty block as a content-addressed blob (§7.10) and stages exactly **one** record, a **capture manifest** carrying the image size and the ordered `(block index, BlobId)` list, which joins the command's atomic batch (§7.12, **E19**). One capture, one record, one commit: a capture is atomic by construction, and a crash can never leave a committed *prefix* of one. The blob `put`s precede staging (*plan, then stage*, §7.12), and blobs orphaned by a failed commit are unreferenced by any root and swept by the host's unioned GC. Replay decodes each manifest into a pending set (the fold, pure — **F1** holds on the recorded bytes); the post-replay `rehydrate` hook then fetches each pending manifest's blocks, verified by content (**E17**), writes each at its offset, and truncates to the recorded size, byte-deterministically, before the first command runs. An unchanged image stages nothing and rides the §7.5 read path.
+
+The physical seam the disk facet rides is the SQL facet's (§7.14): capture at a quiescent point, checkpoint into content-addressed blobs, discard on non-commit, rehydrate then replay. The disk facet is that machinery with **dirty blocks** for WAL frames and a **raw image** for the database file; capture bytes travel as blobs and capture rides an explicit command. Blob-referencing records use the seam's one post-replay hook, **`rehydrate`**: called once after restore + replay, before the first command, it is where a facet whose records carry blob ids rather than bytes fetches and applies them, so the fold stays synchronous and pure. Every other facet keeps the no-op default.
 
 **Capture rides a command.** §7.12's staging rule is unchanged: nothing is staged from `on_activate`/`on_deactivate`. Because the guest writes the image *between* commands, the consumer drives every capture through an explicit **capture command**, a host-delivered command like the alarm's `AlarmDue` (§7.16), passing through the ordinary §6 barrier: input gate, one atomic batch, output gate. A consumer that must capture before a lifecycle boundary (idle hibernation, a planned migration) runs its capture command to completion and only then permits the boundary; the machine spec's quiescent points are exactly this (machine §4). `can_hibernate` refuses eviction while the live image holds uncaptured writes, so the §10 idle path cannot silently strand a dirty image.
 
-An entity declaring `Facets = (Disk,)` persists the guest's **entire rootfs** over the same two primitives, with no new replication path, where the agent runtime's Native tier persists only the workspace tar (sandbox §3.5). Its worked consumer is the persistent machine ([`machine-spec.md`](machine-spec.md)), which owns *when* the image is captured: a machine's command unit is a whole session, not a single message (machine §4).
+An entity declaring `Facets = (Disk,)` persists the guest's **entire rootfs** over the same two primitives, with no new replication path, where the agent runtime's `Native` capability tier persists only the workspace tar (sandbox §3.5). Its worked consumer is the persistent machine ([`machine-spec.md`](machine-spec.md)), which owns *when* the image is captured: a machine's command unit is a whole session, not a single message (machine §4).
 
 - **The scan runs off the async executor.** A capture reads and hashes every block of the image, and an import reads and writes every block of the source; at 1 MiB blocks that is seconds of device and CPU work for an image of any size. It MUST NOT run on the worker driving the node's consensus: a node that stops serving heartbeats for the length of a scan is a node its peers elect around, and the shard they elect around is precisely the one whose machine is being captured — so the checkpoint deposes the activation that owns the guest. This is the §7.4 blocking-I/O seam applied to a facet rather than to the store, and it is what allows a deployment's election timeout to be sized for the network rather than for the longest scan. The scan proceeds a **wave** at a time, so moving it off the executor does not raise the facet's peak memory past the bound the blob-put pipeline already holds, and blocks whose hash still matches the committed index are discarded without leaving the pool.
 
@@ -755,20 +777,17 @@ An entity declaring `Facets = (Disk,)` persists the guest's **entire rootfs** ov
 
 ### 7.16 The alarm facet (logical)
 
-**Status: implemented** (`alarm.rs`, `alarm_index.rs`).
-
 The alarm facet gives an entity a **durable timer**: at most one pending deadline (the Durable Objects model, DO §5), armed or cancelled through `ctx.alarm()` and fired as a callerless invocation of the entity's `on_alarm` handler. It is the basis for retries, timeouts, batch flushes, and the steps facet's `sleep` (§7.17).
 
 - **Storage is a trivially logical facet.** `Set(due)` and `Clear` records under the alarm tag fold into a single `Option` deadline (last write wins); the folded form is the source of truth for whether and when the entity fires. Arming and cancelling stage into the command's atomic batch like a KV write (§7.12); the encoded form is the snapshot contribution; the root set is empty.
 - **Firing is the runtime half, through the same barrier.** After each commit and on activation the host reads the folded deadline and arms an **epoch-guarded in-activation timer**; when it elapses, the host delivers itself a callerless `AlarmDue` command that runs `on_alarm` through the ordinary §6 barrier (input gate, one atomic batch, output gate), so an alarm's effects are as durable and as fenced as any command's. The epoch guard makes a superseded timer's late `AlarmDue` a no-op, a cancellation without a race.
+- **Two surfaces here are ungated, and both are dead code rather than a hole.** `on_alarm` (§4.1) is declared on `Entity` itself, so an entity that implements it without declaring `Facets = (Alarm, …)` compiles and is never called: nothing arms a deadline for it, since only the facet's folded form yields one. Hosting through `entities_with_alarms` is ungated in the same way — a type without the facet may be wired to the index and gains nothing. Both are places the compile-time gating of §7.12 stops short, and both are reachable: the hosting bound is a `where` clause on two signatures, and the hook could move behind `EntityRegistry` (which already runs with the facet set in scope) the way a command handler is registered. Until they do, the inertness is stated rather than enforced.
 - **Consume-on-fire (E21).** The fired deadline's `Clear` joins the same batch as `on_alarm`'s own records, so the alarm clears atomically with its effects unless the handler re-arms (last write wins in the shared stage): a re-arming handler chains, a consumed alarm stops, and a failed commit leaves the deadline pending to fire again. One arm therefore commits **at most one** effect. The bound is on effects that commit rather than on handler invocations, and the distinction is the whole of it: a fire whose commit fails runs again, which is this invariant holding, not breaking.
 - **A pending alarm vetoes hibernation until the index acknowledges it.** An entity owing a wake MUST stay resident — where its in-activation timer fires on time — unless something else will wake it. The per-shard **alarm index** is that something: one small index entity per (entity type, shard) holds an `EntityName → due` map, registered on every alarm change; the alarm **driver** sweeps the index for the shards its node leads and re-activates each entity owing a wake, whose activation re-arms its own timer (**E3**). This covers both deactivation paths, **failover** and **voluntary hibernation**, but the host may hibernate an alarmed entity only when the *current* deadline is **acked-registered**: registration is an `ask` whose reply releases only after the index entity's commit (the output gate, §6), retried on the idle tick until acked, never awaited on the command path. A registration that has not (yet) acked keeps the entity resident. The index is a *hint*, the entity's own facet the source of truth, so a stale entry reconciles on the next activation — a spurious wake at worst, never a lost or double fire.
 
 ---
 
 ### 7.17 The steps facet (logical)
-
-**Status: implemented** (`steps.rs`).
 
 The steps facet gives an entity **durable step memoization**: the Cloudflare-Workflows-style `step`/`sleep`/`retry` pattern, layered on the event fold, the alarm facet (§7.16), and an entity's self-driving loop (the agent runtime's `advance` loop is the reference consumer, agent §3).
 
@@ -933,7 +952,7 @@ The catalogue is machine-readable as `e_catalogue()` beside this crate's conform
 | **E20** | **Physical facets expose only durable state.** A physical facet's materialization is a rebuildable cache: its mutations are unobservable before the commit (the §6 gates) and it is discarded on any non-committed outcome; rehydration from the composite snapshot plus records reproduces it exactly. | §7.12, §7.14 | `sql.rs`, `ws_local.rs` |
 | **E21** | **An alarm fires at most once per arm.** One armed deadline commits at most one callerless `on_alarm` effect: the fired deadline's `Clear` joins the same atomic batch as the handler's own records, and the epoch guard makes a superseded timer's late delivery a no-op. The bound is on effects that **commit**, not on handler invocations — a fire whose commit fails leaves the deadline pending and runs again, which is the guarantee holding rather than breaking. | §7.16 | `alarm.rs`, `alarm_cluster.rs`, `alarm_swarm.rs` |
 
-A `entity` implementation conforms iff every invariant holds, verified under deterministic simulation (§14) for the distributed ones and by compile-fail tests for **E10**. Facets add the per-facet contract **F1–F4** (§7.12), verified generically per facet under the same simulation.
+An `entity` implementation conforms iff every invariant holds, verified under deterministic simulation (§14) for the distributed ones and by compile-fail tests for **E10**. Facets add the per-facet contract **F1–F4** (§7.12), verified generically per facet under the same simulation.
 
 ---
 
@@ -963,7 +982,7 @@ Named here, specified elsewhere or later, so the core stays small:
 let system = ClusterSystem::start("node-a", config_leader_based).await?;
 
 // --- Host entities of type Account: registers the gateway and joins/leads shards ---
-let accounts: Entity<Account> = system.entity(EntityConfig {
+let accounts: Entities<Account> = system.entities(EntityConfig {
     shards: 16,                             // initial partitions of this type's namespace (§7.1)
     replication_factor: 3,                  // replicas per shard (§7.1)
     shard_target_bytes: 256 << 20,          // opt-in auto-split past this size (§7.7); 0 (default) off
@@ -1010,11 +1029,11 @@ let node = system
     .blocking_io(Arc::new(ThreadPoolIo::sized_for_host()))   // §7.4; default: inline
     .metrics(Arc::clone(&metrics));                          // §13; default: discarded
 
-let accounts: Entity<Account> = node.entity(config_accounts);
-let orders:   Entity<Order>   = node.entity(config_orders);   // one pool, one sink
+let accounts: Entities<Account> = node.entities(config_accounts);
+let orders:   Entities<Order>   = node.entities(config_orders); // one pool, one sink
 ```
 
-Hosting straight off the system (`system.entity(config)`, above) is the same call with both
+Hosting straight off the system (`system.entities(config)`, above) is the same call with both
 defaulted — inline I/O and discarded measurements — which is the `Local` tier's shape and
 what the deterministic simulation requires (§14). Making them per-type fields instead would
 be expressible but wrong in a way nothing catches: a node hosting three types would write the
@@ -1022,7 +1041,7 @@ same two handles into three configs, and a config that omitted one would silentl
 *second*, inline pool rather than the node's — invisible in a signature and invisible at
 runtime, until a stalled device blocks the executor the pool was added to protect.
 
-**Hosting one entity under many type names (`entities_named`).** `entity(config)` hosts a
+**Hosting one entity under many type names (`entities_named`).** `entities(config)` hosts a
 type under its own `ENTITY_TYPE`, built by `G::default` per activation, the common case.
 A caller that must host **one Rust entity as several distinct entity types at runtime** uses
 `entities_named`, which adds two extension points:
@@ -1033,8 +1052,8 @@ fn entities_named<G: Entity<System = Self>>(
     entity_type: &'static str,                       // overrides G::ENTITY_TYPE (§5.1)
     config: EntityConfig,
     factory: Arc<dyn Fn() -> G + Send + Sync>,      // overrides G::default (per-activation seam injection)
-) -> Entity<G>;
-// entity(config) == entities_named(G::ENTITY_TYPE, config, Arc::new(G::default))
+) -> Entities<G>;
+// entities(config) == entities_named(G::ENTITY_TYPE, config, Arc::new(G::default))
 ```
 
 Each `entity_type` is a fully distinct entity type: its own gateway (one `gateway_key` per
@@ -1055,7 +1074,8 @@ entity/                 # the entity runtime, built on actor-core + actor-cluste
                          #   EntityRegistry (the per-entity dispatch builder, §4, §5.5)
   host.rs                # the host actor: durability protocol, rehydrate, hibernate (§6, §9, §10)
   gateway.rs             # per-node gateway: routing, activation table, NotLeader redirect, non-activating read (§5.3, §5.4, §7.5)
-  entity_ref.rs            # EntityRef + Entity handle + the system extension (`entity`/`entity`) (§4.3, §5.4)
+  entity_ref.rs          # EntityRef, the Entities type handle (whose `entity(key)` addresses
+                         #   one), and the system extension that hosts a type (§4.3, §5.4)
   journal.rs             # the EntityJournal seam + AppendOutcome + Seq + DynEntityJournal (§7.3)
   election.rs            # the per-shard leader-election group: a small Raft group owning leadership/term/replica-set (§8)
   replicator.rs          # the Replicator: per-entity quorum append fenced by the shard term; its
@@ -1111,5 +1131,5 @@ entity/                 # the entity runtime, built on actor-core + actor-cluste
 clustered `ActorSystem`, the leader-based control plane, and the Raft
 implementation the shards reuse), and `actor-serialization` (the codec and
 dispatch building blocks). It is orthogonal to and independent of the agentic
-`harness` crate. As in the actor framework, no *required* macro crate exists; any
+`agent` crate. As in the actor framework, no *required* macro crate exists; any
 `#[derive(Entity)]` is an optional convenience layered above the model.

@@ -35,6 +35,7 @@ mod check;
 mod clock;
 mod cluster;
 mod cluster_swarm;
+mod config;
 mod corpus;
 mod coverage;
 mod entropy;
@@ -62,6 +63,10 @@ pub use transport::SimNetwork;
 pub use transport::SimNode;
 pub use transport::SimTransport;
 pub use workload::SimSystem;
+
+// --- The control-plane timings a simulated cluster runs under -----------------
+pub use config::raft_config;
+pub use config::swim_config;
 
 // --- Workloads and their runners ----------------------------------------------
 // A workload drives the system through its public API; a runner executes it

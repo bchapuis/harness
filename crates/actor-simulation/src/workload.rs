@@ -203,10 +203,12 @@ pub(crate) fn sweep_collecting(
     collect: bool,
     mut run: impl FnMut(u64) -> Result<(), RunFailure>,
 ) -> Result<(), SweepFailure> {
-    let (seeds_run, failures) =
-        crate::sweep::sweep_generic(seeds, collect, |failure: &RunFailure| failure.seed, |seed| {
-            caught(workload, seed, || run(seed))
-        });
+    let (seeds_run, failures) = crate::sweep::sweep_generic(
+        seeds,
+        collect,
+        |failure: &RunFailure| failure.seed,
+        |seed| caught(workload, seed, || run(seed)),
+    );
     if failures.is_empty() {
         Ok(())
     } else {

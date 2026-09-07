@@ -20,8 +20,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::RaftConfig;
-use actor_cluster::SwimConfig;
 use actor_core::EventSink;
 use actor_core::LocalSystemBuilder;
 use actor_core::Manifest;
@@ -33,6 +31,8 @@ use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
+use actor_simulation::raft_config;
+use actor_simulation::swim_config;
 use entity::BlobId;
 use entity::Entities;
 use entity::Entity;
@@ -337,22 +337,6 @@ fn blobs_survive_hibernation() {
 
 // --- Quorum tier --------------------------------------------------------------
 
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
-
-fn raft() -> RaftConfig {
-    let mut config = RaftConfig::new(vec![NodeId::new(1), NodeId::new(2), NodeId::new(3)]);
-    config.election_timeout = Duration::from_millis(500);
-    config.heartbeat_interval = Duration::from_millis(100);
-    config
-}
-
 fn config() -> EntityConfig {
     // R = 3 over the 3-node cluster; the write quorum is the majority (2), computed
     // by the replicator — there is no separate knob.
@@ -390,7 +374,11 @@ fn cluster_cfg(
     sim: &Simulation,
     cfg: EntityConfig,
 ) -> (SimNetwork, Vec<SimNode>, Vec<Entities<BlobEntity<SimNode>>>) {
-    let net = SimNetwork::new(sim).with_leader(swim(), raft(), DowningPolicy::Conservative);
+    let net = SimNetwork::new(sim).with_leader(
+        swim_config(),
+        raft_config(vec![NodeId::new(1), NodeId::new(2), NodeId::new(3)]),
+        DowningPolicy::Conservative,
+    );
     let systems = vec![
         net.join(NodeId::new(1)),
         net.join(NodeId::new(2)),

@@ -18,7 +18,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::RaftConfig;
 use actor_cluster::SwimConfig;
 use actor_core::Clock;
 use actor_core::Event;
@@ -27,8 +26,7 @@ use actor_core::Spawner;
 use actor_simulation::SimNetwork;
 use actor_simulation::SimNode;
 use actor_simulation::Simulation;
-use entity::EntityEvent;
-use entity::EntityConfig;
+use actor_simulation::raft_config;
 use agent::Budget;
 use agent::Harness;
 use agent::Kind;
@@ -39,6 +37,8 @@ use agent::SessionId;
 use agent::Tier;
 use agent::Turn;
 use agent::TurnId;
+use entity::EntityConfig;
+use entity::EntityEvent;
 use serde_json::json;
 
 use support::CollectingSink;
@@ -53,13 +53,6 @@ const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
 const SESSIONS: usize = 4;
-
-fn raft() -> RaftConfig {
-    let mut config = RaftConfig::new(vec![A, B, C]);
-    config.election_timeout = Duration::from_millis(500);
-    config.heartbeat_interval = Duration::from_millis(100);
-    config
-}
 
 fn kinds() -> Kinds {
     Kinds::new().register(
@@ -115,7 +108,11 @@ fn cluster(
     sink: Arc<dyn actor_core::EventSink>,
 ) -> (SimNetwork, Vec<Harness<SimNode>>) {
     let net = SimNetwork::new(sim)
-        .with_leader(SwimConfig::default(), raft(), DowningPolicy::Conservative)
+        .with_leader(
+            SwimConfig::default(),
+            raft_config(vec![A, B, C]),
+            DowningPolicy::Conservative,
+        )
         .with_events(sink);
     let systems = [net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
@@ -364,7 +361,11 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
     let sim = Simulation::new(23);
     let sink = CollectingSink::default();
     let net = SimNetwork::new(&sim)
-        .with_leader(SwimConfig::default(), raft(), DowningPolicy::Conservative)
+        .with_leader(
+            SwimConfig::default(),
+            raft_config(vec![A, B, C]),
+            DowningPolicy::Conservative,
+        )
         .with_events(Arc::new(sink.clone()));
     let systems = [net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader
@@ -555,7 +556,11 @@ fn an_acked_queued_turn_survives_a_leader_crash_and_runs_on_resume() {
     let sim = Simulation::new(31);
     let sink = CollectingSink::default();
     let net = SimNetwork::new(&sim)
-        .with_leader(SwimConfig::default(), raft(), DowningPolicy::Conservative)
+        .with_leader(
+            SwimConfig::default(),
+            raft_config(vec![A, B, C]),
+            DowningPolicy::Conservative,
+        )
         .with_events(Arc::new(sink.clone()));
     let systems = [net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2)); // elect the control-plane leader

@@ -15,17 +15,17 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use actor_cluster::DowningPolicy;
-use actor_cluster::SwimConfig;
 use actor_core::ActorId;
 use actor_core::CallError;
 use actor_core::Event;
 use actor_core::NodeId;
 use actor_core::Spawner;
 use actor_simulation::Recorder;
-use actor_simulation::SimNode;
 use actor_simulation::SimNetwork;
+use actor_simulation::SimNode;
 use actor_simulation::SimRegistry;
 use actor_simulation::Simulation;
+use actor_simulation::swim_config;
 use support::Greet;
 use support::Greeter;
 use support::Stop;
@@ -35,15 +35,6 @@ const NAME: &str = "greeter-singleton";
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
-
-fn swim() -> SwimConfig {
-    SwimConfig {
-        probe_interval: Duration::from_millis(100),
-        rtt: Duration::from_millis(50),
-        suspect_timeout: Duration::from_millis(300),
-        indirect_count: 2,
-    }
-}
 
 /// Host the singleton on `node`: same name, factory, and stop message on every
 /// hosting node, per utilities spec §4 item 1.
@@ -106,7 +97,7 @@ fn a_converged_cluster_activates_exactly_one_instance() {
     let sim = Simulation::new(51);
     let recorder = Recorder::new();
     let net = SimNetwork::new(&sim)
-        .with_gossip(swim(), DowningPolicy::Conservative)
+        .with_gossip(swim_config(), DowningPolicy::Conservative)
         .with_events(Arc::new(recorder.clone()));
     let a = net.join(A);
     let b = net.join(B);
@@ -154,7 +145,10 @@ fn an_anchor_crash_re_activates_on_a_new_anchor() {
     let sim = Simulation::new(53);
     let recorder = Recorder::new();
     let net = SimNetwork::new(&sim)
-        .with_gossip(swim(), DowningPolicy::Timeout(Duration::from_millis(300)))
+        .with_gossip(
+            swim_config(),
+            DowningPolicy::Timeout(Duration::from_millis(300)),
+        )
         .with_events(Arc::new(recorder.clone()));
     let a = net.join(A);
     let b = net.join(B);
@@ -198,7 +192,7 @@ fn draining_the_anchor_hands_off_gracefully() {
         registry.register(node);
     }
     let net = SimNetwork::new(&sim)
-        .with_registry(swim(), registry.client(), Duration::from_millis(200))
+        .with_registry(swim_config(), registry.client(), Duration::from_millis(200))
         .with_events(Arc::new(recorder.clone()));
     let a = net.join(A);
     let b = net.join(B);
@@ -230,7 +224,7 @@ fn a_partition_may_dual_activate_but_heals_to_exactly_one() {
     let sim = Simulation::new(61);
     let recorder = Recorder::new();
     let net = SimNetwork::new(&sim)
-        .with_gossip(swim(), DowningPolicy::Conservative)
+        .with_gossip(swim_config(), DowningPolicy::Conservative)
         .with_events(Arc::new(recorder.clone()));
     let a = net.join(A);
     let b = net.join(B);
