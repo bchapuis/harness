@@ -33,15 +33,16 @@ pub const DELEGATE: &str = "delegate";
 
 /// Resume's policy for an orphaned call: intent journaled, outcome not
 /// (agent spec §5.5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OnOrphan {
-    /// Blind re-execution is safe: the call is idempotent, or dedups
-    /// (`delegate`, §8.1).
-    Reexecute,
-    /// Resolve as [`ToolError::Interrupted`]; the model decides whether to
-    /// retry the side effect.
-    Interrupt,
-}
+///
+/// This is [`workflow::OnOrphan`], not a type of the agent runtime's own. A
+/// tool call is one effect of an autonomous entity, and its recovery policy is
+/// exactly what a [`workflow::Pending`] carries (workflow §4.4), so the
+/// declaration and the mechanism name the same two variants because they are
+/// the same decision, not because they agree. [`ToolError::Interrupted`] is
+/// still the agent runtime's own: the loop synthesizes a *tool outcome* the
+/// model reads, where the workflow mints an [`EffectError`](workflow::EffectError)
+/// for a consumer's fold.
+pub use workflow::OnOrphan;
 
 /// One declared tool (agent spec §5.2).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

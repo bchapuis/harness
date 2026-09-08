@@ -147,6 +147,7 @@ dependencies = [
  "serde_json",
  "spec",
  "tempfile",
+ "workflow",
 ]
 
 [[package]]

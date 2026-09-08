@@ -8,10 +8,21 @@
 //! welded to one agentic policy (agent §3); this crate is the mechanism on
 //! its own, with no model, tool, or prompt in it.
 //!
+//! The agent runtime is moving onto it rather than beside it. It already takes
+//! this crate's [`OnOrphan`] for its own tool declarations, and its dispatcher is
+//! held against a fold-only desired set (`agent`'s `desired` module) by an
+//! assertion at every launch site: the standing check that its launch decision
+//! reads nothing outside the journal, which is the one property [`Workflow`]
+//! cannot be given by a consumer that lacks it. What remains before the agent
+//! can implement the trait is its **environment reconciliation**: a failed
+//! sandbox open, a tier acquisition, and a lost workspace each gate a launch from
+//! the activation rather than the fold (agent §5.4, §5.5, §5.6), and all three
+//! must move ahead of the tick so [`Workflow::pending`] stays pure (W1).
+//!
 //! The whole of it rests on one decision: **the work outstanding is a pure
 //! function of committed state**, [`Workflow::pending`], never a journaled queue.
 //! A set re-derived from the journal needs no reconciliation after a crash,
-//! because recovery computes the same function over the same records — so
+//! because recovery computes the same function over the same records, so
 //! resume stops being a special case, and the desired set is at once the
 //! dispatch list (§3.2), the recovery set (§4.4), and the straggler filter
 //! (§4.5).
@@ -126,16 +137,16 @@ impl<K, E> Pending<K, E> {
     }
 }
 
-/// Resume's policy for a **orphaned** effect — one whose intent committed and
+/// Resume's policy for a **orphaned** effect: one whose intent committed and
 /// whose outcome did not, so nothing says whether it ran (spec §4.4).
 ///
-/// This is the workflow's type, and the home of the decision. The agent runtime
-/// declares the same two variants per tool today (agent §5.2, `ToolDecl::on_orphan`),
-/// a second copy that stands only until it sits on this layer: the dependency runs
-/// the other way for now (docs/README.md), and re-exporting across it would invert
-/// the layering ahead of the refactor that earns it. Once it does sit here, that
-/// field holds this type, because a tool declaration's recovery policy is exactly
-/// what its [`Pending`] carries.
+/// This is the workflow's type, and the home of the decision. The agent runtime's
+/// `ToolDecl::on_orphan` (agent §5.2) **is** this type: a tool declaration's
+/// recovery policy is exactly what its [`Pending`] carries, so the two were one
+/// decision written twice until `agent` took its dependency on this crate. What
+/// the agent still keeps of its own is the *outcome* an interrupted call
+/// synthesizes: a `ToolError` the model reads, where a workflow mints an
+/// [`EffectError`] for a consumer's fold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum OnOrphan {
     /// Launch it again, as an ordinary launch. The consumer has declared the

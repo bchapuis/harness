@@ -7,15 +7,18 @@ testing conventions.
 ## Specifications
 
 Normative, RFC 2119, each carrying its own invariant catalogue, and all but one
-a drift test that keeps the catalogue mechanically true — the exception is
+a drift test that keeps the catalogue mechanically true. The exception is
 compatibility, whose table names neither a defining section nor a verifying
 suite, so there is no Rust copy to hold it against (its V3 is asserted at compile
 time and its V4/V5 by the golden corpus instead, compatibility §4). They layer
 bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`,
-`entity §N`, and so on) — citations the build resolves rather than trusts (the
+`entity §N`, and so on), citations the build resolves rather than trusts (the
 `spec` crate, under Testing). The one exception is the workflow, which cites the agent runtime above it: that is the
-layer the workflow generalizes and does not yet sit on, so it is at once the motivation and the measure, and the dependency
-will run the other way once it does.
+layer the workflow generalizes, so it is at once the motivation and the measure. The crate dependency
+now runs the right way (`agent` depends on `workflow` and takes its `OnOrphan`), but only the vocabulary has moved so far,
+not the mechanism, so the citations still point up. They turn around when the agent implements `Workflow` rather than
+re-deriving it: what stands in the way is the environment reconciliation of agent §5.4, §5.5 and §5.6, which gates a launch
+from the activation rather than the fold and so must move ahead of the tick before `Workflow::pending` can be pure (W1).
 
 | | Spec | Owns | Invariants |
 |---|---|---|---|

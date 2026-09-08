@@ -58,9 +58,16 @@ agent-http = { path = "crates/agent-http", version = "0.1.0" }
 # Entity: durable objects ("entities") built on the actor framework (entity spec).
 entity = { path = "crates/entity", version = "0.1.0" }
 
+# Workflow: the autonomous entity (workflow spec); the desired set as a pure
+# function of committed state, intent before effect, orphan resolution, and
+# quiescence, with no model, tool, or prompt in it. The agent runtime is one
+# policy over this mechanism and is moving onto it; until that lands the agent
+# still carries a hand-built copy of the dispatch half.
+workflow = { path = "crates/workflow", version = "0.1.0" }
+
 # Blob store: a namespaced, content-addressed object store on the actor
 # framework, beside entity (blob-store spec). A standalone product with no
-# in-tree consumer yet — entity's colocated blobs (§7.10) serve the live path.
+# in-tree consumer yet: entity's colocated blobs (§7.10) serve the live path.
 blob-store = { path = "crates/blob-store", version = "0.1.0" }
 
 # Tenancy: an ownership-index entity layered on entity, so principals own and

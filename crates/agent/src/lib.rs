@@ -22,6 +22,10 @@
 pub mod agent;
 pub mod budget;
 pub mod client;
+/// The desired set, as a pure function of committed state: the agent runtime's
+/// `Workflow::pending` ahead of the trait impl. Crate-internal while the
+/// dispatcher is still the one that launches.
+mod desired;
 pub mod event;
 pub mod http;
 pub mod kind;

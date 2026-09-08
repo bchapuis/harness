@@ -11,6 +11,11 @@ rust-version.workspace = true
 [dependencies]
 actor-simulation = { workspace = true, optional = true }
 entity.workspace = true
+# The autonomy mechanism the agent's loop is one policy over (workflow spec
+# §2.1). The agent held a hand-built copy of it, including its own `OnOrphan`,
+# while the layering ran the other way; this dependency is that inversion,
+# taken one piece at a time.
+workflow.workspace = true
 actor-core.workspace = true
 actor-cluster.workspace = true
 serde.workspace = true

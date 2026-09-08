@@ -324,13 +324,13 @@ struct SandboxState {
 /// One launched effect of the live run (§3.1): the claim key of the run's
 /// [`LaunchGuard`]. A model call is claimed under the step it answers
 /// (`own_steps` at issue, §3.1 step 2); a tool call or delegation under its
-/// `CallId` (§3.1 step 4). Claims are never released — a committed response
+/// `CallId` (§3.1 step 4). Claims are never released: a committed response
 /// advances `own_steps`, so the next model claim is a fresh key, and a committed
 /// `ToolOutcome` removes the call from the pending set the dispatcher scans. A
 /// straggler therefore has nothing to "unlock" into a duplicate launch (§9.1 item 4,
 /// §9.2 item 4).
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum StepKey {
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum StepKey {
     /// The model call answering step `own_steps` (§3.1 step 2).
     Model(u32),
     /// The tool call (or delegation) `CallId` names (§3.1 step 4).
@@ -844,6 +844,38 @@ impl<S: HarnessSystem> Agent<S> {
         )]
     }
 
+    /// Hold the dispatcher against the pure desired set (workflow §3.1, W1):
+    /// every effect this activation launches MUST be a member of
+    /// [`desired`](crate::desired::desired) over the same committed state.
+    ///
+    /// The check that the agent runtime can sit on the workflow's mechanism,
+    /// run by every suite in the crate, including the seeded swarm and cluster
+    /// runs, where a resumed activation recomputes the set from a journal it did
+    /// not write. A failure means the launch decision depends on something
+    /// outside the fold, which is the one thing the inversion cannot carry.
+    ///
+    /// Only soundness is asserted, never the converse: a member may be blocked
+    /// this round by a claim or by the environment reconciliation the dispatcher
+    /// still performs inline (§5.4, §5.5, §5.6), so the set is a superset of
+    /// what launches until that gating is hoisted out.
+    ///
+    /// Debug-only: it re-derives the set per launch, which is the fold's cost
+    /// again, and it proves a property of the code rather than guarding the
+    /// production path.
+    #[cfg(debug_assertions)]
+    fn debug_assert_desired(&self, state: &SessionState, key: &StepKey) {
+        let set = crate::desired::desired(&self.kind, state, self.shared.config.budget_floor);
+        assert!(
+            set.iter().any(|p| &p.key == key),
+            "launched {key:?} outside the desired set {:?}; the launch decision \
+             reads state outside the fold (workflow W1)",
+            set.iter().map(|p| &p.key).collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn debug_assert_desired(&self, _state: &SessionState, _key: &StepKey) {}
+
     // -- the dispatcher (§3.1) ----------------------------------------------
 
     /// What the fold calls for next, run after every committed batch. Reads the
@@ -928,7 +960,7 @@ impl<S: HarnessSystem> Agent<S> {
         act.run.orphans_resolved = true;
         let mut events = Vec::new();
         for (call, pending) in &live.pending {
-            if self.orphan_policy(pending, kind) == OnOrphan::Interrupt {
+            if crate::desired::orphan_policy(kind, &pending.name) == OnOrphan::Interrupt {
                 events.push(self.fail_call(act, ctx, turn, call, ToolError::Interrupted));
             }
         }
@@ -972,6 +1004,7 @@ impl<S: HarnessSystem> Agent<S> {
             return vec![self.rec(ctx, RecordBody::WorkspaceReset)];
         }
         act.env.reconciled = true;
+        self.debug_assert_desired(state, &StepKey::Model(step));
         act.run.launched.claim(StepKey::Model(step));
         let request = self.build_request(state, kind, live);
         let this = ctx.this();
@@ -1108,23 +1141,10 @@ impl<S: HarnessSystem> Agent<S> {
         // any synthesized outcome.
         let mut failed = Vec::new();
         for (call, pending) in ready {
+            self.debug_assert_desired(state, &StepKey::Call(call.clone()));
             failed.extend(self.launch_call(act, ctx, kind, turn, &root, call, pending));
         }
         failed
-    }
-
-    /// The recovery policy for an orphaned call (§5.5): `delegate` re-executes by
-    /// construction (its re-submission dedups, §8.1); a sandboxed tool follows
-    /// its declaration, defaulting to `Interrupt` if the declaration vanished.
-    fn orphan_policy(&self, pending: &PendingCall, kind: &Kind) -> OnOrphan {
-        if pending.name == DELEGATE {
-            OnOrphan::Reexecute
-        } else {
-            kind.tools
-                .get(&pending.name)
-                .map(|d| d.on_orphan)
-                .unwrap_or(OnOrphan::Interrupt)
-        }
     }
 
     /// Plan a fresh delegation (§8.1 step 1): validate the child kind against the
