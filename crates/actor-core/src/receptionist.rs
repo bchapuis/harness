@@ -8,8 +8,8 @@
 //!
 //! Registrations are an OR-set keyed by the registering node, so concurrent
 //! registrations merge. **Pruning rides on death watch** (spec §12, §13): the
-//! receptionist watches each registered actor, so when one stops — or its node
-//! is declared `down` (spec §8.1 step 5) — the corresponding registration is
+//! receptionist watches each registered actor, so when one stops, or its node
+//! is declared `down` (spec §8.1 step 5); the corresponding registration is
 //! removed and subscribers see a fresh listing.
 //!
 //! Only [`ActorId`]s travel and are stored; a typed [`ActorRef`] is
@@ -143,7 +143,7 @@ impl ReceptionistState {
     }
 
     /// Every `(key, origin, actor)` entry in the registry, in deterministic
-    /// order — the full local view, advertised to a peer for anti-entropy
+    /// order: the full local view, advertised to a peer for anti-entropy
     /// reconciliation (spec §13).
     pub fn digest(&self) -> Vec<(String, NodeId, ActorId)> {
         let registry = self.registry.lock().expect("registry mutex poisoned");
@@ -217,7 +217,7 @@ impl<S: ActorSystem> Receptionist<S> {
     }
 
     /// The current listing for `key` (spec §13). Actors on a node that is not
-    /// currently serving — drained for maintenance, or down (spec §9.4) — are
+    /// currently serving, drained for maintenance, or down (spec §9.4), are
     /// routed around: they stay registered but are omitted here, so a
     /// caller never discovers a cordoned node, and a later `resume` restores them.
     pub fn lookup<A: Actor<System = S>>(&self, key: Key<A>) -> Listing<A> {
@@ -258,7 +258,7 @@ impl<S: ActorSystem> Receptionist<S> {
     }
 }
 
-/// Build the listing for a set of registered ids — the one place the
+/// Build the listing for a set of registered ids: the one place the
 /// route-around-non-serving-nodes rule lives (spec §9.4), shared by `lookup`
 /// and `subscribe`.
 fn listing<A: Actor<System = S>, S: ActorSystem>(system: &S, ids: Vec<ActorId>) -> Listing<A> {

@@ -1,5 +1,5 @@
 //! §7.12 / E10-for-storage: `ctx.kv()` on an entity that does not declare the
-//! `Kv` facet must not compile — the accessor is gated by the compile-time
+//! `Kv` facet must not compile; the accessor is gated by the compile-time
 //! containment proof (`G::Facets: HasFacet<Kv, I>`).
 
 use actor_core::Manifest;

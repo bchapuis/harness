@@ -188,7 +188,7 @@ Per the V&V checklist: codec round-trips for the replica messages (including `De
 
 Invariants hold under the faults of §8 and are verified as the framework prescribes (actor §18.5/§18.6): continuous checkers over the event stream for safety properties, targeted simulation tests for the rest.
 
-The catalogue is machine-readable as `b_catalogue()` beside this crate's conformance suite, guarded by the drift test in `conformance_catalogue.rs`: a renamed or deleted suite fails the build rather than leaving the column below pointing at nothing. **B4** is checked there too, from the crate's manifest — the data path runs no consensus because no consensus engine is in its dependency graph to run, and a `entity` dependency appearing here would fail the test rather than quietly invalidating the claim.
+The catalogue is machine-readable as `b_catalogue()` beside this crate's conformance suite, guarded by the drift test in `conformance_catalogue.rs`: a renamed or deleted suite fails the build rather than leaving the column below pointing at nothing. **B4** is checked there too, from the crate's manifest: the data path runs no consensus because no consensus engine is in its dependency graph to run, and a `entity` dependency appearing here would fail the test rather than quietly invalidating the claim.
 
 | # | Invariant | Defined in | Verified by |
 |---|---|---|---|

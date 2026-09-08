@@ -1,13 +1,13 @@
 //! Invariants of the **production** transport under real concurrency (spec §6,
 //! §7, §9, §12). The deterministic simulator proves these about the protocol;
 //! these tests run the same properties over the real `TcpTransport` + tokio seam
-//! on loopback sockets — where races, hangs, and leaks the simulator can't see
+//! on loopback sockets, where races, hangs, and leaks the simulator can't see
 //! would surface. They use a multi-thread runtime and generous timeouts; they are
 //! not seed-reproducible, so they poll until converged rather than assuming
 //! timing.
 //!
-//! What no longer depends on this file's luck: the transport's *decisions* —
-//! the address book's rules, dial-race arbitration, ABA-safe eviction — live
+//! What no longer depends on this file's luck: the transport's *decisions*
+//! (the address book's rules, dial-race arbitration, ABA-safe eviction) live
 //! socket-free in `src/association.rs`, where unit tests spell each race out
 //! deterministically. What remains here is what only real sockets can show:
 //! the I/O ordering, teardown, and liveness around those decisions.
@@ -194,7 +194,7 @@ async fn remote_watch_fires_exactly_once_on_graceful_stop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn swim_marks_an_unreachable_peer_without_stalling() {
     // A single live node that knows one peer at a refused address. SWIM must
-    // probe it, fail, and mark it unreachable — proving the failure detector
+    // probe it, fail, and mark it unreachable, proving the failure detector
     // runs over the real transport and a dead dial never wedges it (spec §7,
     // §10). Conservative downing keeps it unreachable, not down (#16).
     let (la, addr_a) = support::bind_local().await;
@@ -255,7 +255,7 @@ async fn a_stopped_node_releases_its_port_and_is_seen_unreachable() {
     // Stop B gracefully.
     sys_b.shutdown();
 
-    // A's detector keeps probing and, finding B gone, marks it unreachable —
+    // A's detector keeps probing and, finding B gone, marks it unreachable,
     // not down (conservative, #16).
     let mut seen_unreachable = false;
     for _ in 0..100 {
@@ -295,7 +295,7 @@ async fn a_silent_peer_is_dropped_at_the_handshake_timeout() {
     let _sys = support::start_node(cfg, la);
 
     // Connect a raw socket and stay silent. The node must close it; the read
-    // then completes (EOF or reset) well inside the 2s bound — and would block
+    // then completes (EOF or reset) well inside the 2s bound, and would block
     // past it if the timeout were not honoured.
     let mut raw = TcpStream::connect(addr_a).await.unwrap();
     let mut buf = [0u8; 1];

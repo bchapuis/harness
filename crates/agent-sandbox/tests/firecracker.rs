@@ -1,7 +1,7 @@
 //! Native-tier conformance at the microVM grade (feature `firecracker`):
 //! S1 (the guest reaches the host filesystem through the synced workspace
 //! only, and no network device exists at all), S5 (the VM dies on release,
-//! idempotently), and the loss conduct of sandbox spec §4 — the firecracker
+//! idempotently), and the loss conduct of sandbox spec §4; the firecracker
 //! face of the docker suite in `native.rs`.
 //!
 //! Tests that boot a VM need Linux, `/dev/kvm`, and the assets
@@ -30,7 +30,7 @@ use agent_sandbox::TieredSandboxes;
 use serde_json::Value;
 use serde_json::json;
 
-/// Skip (`None`) on a missing prerequisite — or panic under `E2E_REQUIRE`
+/// Skip (`None`) on a missing prerequisite, or panic under `E2E_REQUIRE`
 /// (module docs).
 fn missing<T>(reason: String) -> Option<T> {
     assert!(
@@ -187,7 +187,7 @@ async fn confinement_smoke() {
     let (config, image) = require_assets!();
     let dir = tempfile::tempdir().expect("tempdir");
     // A sentinel beside the workspaces root: only the workspace is synced,
-    // so no path the guest can spell reaches it (S1, microVM grade — the
+    // so no path the guest can spell reaches it (S1, microVM grade; the
     // sentinel is not even on the guest's filesystem).
     let sentinel = dir.path().join("sentinel");
     std::fs::write(&sentinel, "outside").expect("sentinel");
@@ -378,7 +378,7 @@ async fn a_vanished_workspace_escalates_to_environment_lost() {
 }
 
 // ---------------------------------------------------------------------------
-// Configuration conduct — these run everywhere (no KVM, no assets)
+// Configuration conduct: these run everywhere (no KVM, no assets)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -396,7 +396,7 @@ async fn a_missing_binary_fails_the_call_as_a_sandbox_outcome() {
     )
     .await;
 
-    // Provisioning fails as a per-call outcome (agent spec §5.4) — and
+    // Provisioning fails as a per-call outcome (agent spec §5.4), and
     // lazily: the Workspace tier still works without firecracker anywhere.
     workspace(&sandbox, "write_file", json!({"path": "f", "content": "x"}))
         .await

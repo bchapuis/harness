@@ -1,6 +1,6 @@
 //! Client/delegation plumbing conformance (agent spec §7.4, §8.1): the
-//! ephemeral reply mailbox's lifetime is its caller's wait — no submit path
-//! leaks the actor — and a delegating parent's wait on a slow child scales
+//! ephemeral reply mailbox's lifetime is its caller's wait (no submit path
+//! leaks the actor), and a delegating parent's wait on a slow child scales
 //! with the child's carved budget rather than a flat attempt cap.
 
 mod support;
@@ -45,7 +45,7 @@ use support::tail_records;
 use support::tool_call;
 
 /// The live actors implied by a stream prefix: every `ActorReady` id without a
-/// matching `ResignId` (core §4.2) — the leak observable behind §7.4's mailbox
+/// matching `ResignId` (core §4.2); the leak observable behind §7.4's mailbox
 /// lifetime.
 fn live_actors(events: &[Event]) -> BTreeSet<ActorId> {
     let mut live = BTreeSet::new();
@@ -100,7 +100,7 @@ fn tree_kinds() -> Kinds {
 /// the parent's own steps stay prompt while the child crawls. The delay is a
 /// timer, never a forever-pending future: the simulation drains to quiescence
 /// through every armed timer, and a child that can never finish would keep its
-/// activation's idle check re-arming forever — the drain would never end.
+/// activation's idle check re-arming forever; the drain would never end.
 struct SlowChildModel {
     inner: Arc<dyn Model>,
     clock: SimClock,
@@ -175,7 +175,7 @@ fn a_rejected_resubmission_leaks_no_reply_mailbox() {
 /// One delegation to a child whose model stalls far past the wait: the parent
 /// gives up at the configured bound (`cycles` re-attach lapses of the 30s
 /// cadence), its own run completing with the delegation's failure journaled
-/// (§5.4, §8.1). Returns the count of live actors just after the give-up —
+/// (§5.4, §8.1). Returns the count of live actors just after the give-up,
 /// while the child is still mid-call, so a mailbox its lapsed attempts left
 /// subscribed is still visibly alive (the drain would eventually complete the
 /// child and notify even a leaked mailbox, hiding the leak at quiescence).
@@ -253,7 +253,7 @@ fn an_abandoned_child_wait_accumulates_no_mailboxes() {
     // The same scenario at 2 vs 8 lapse cycles: the live-actor set at
     // quiescence must not grow with the number of re-attach attempts (§7.4).
     // Differential: before the mailbox guard, every lapsed attempt left its
-    // mailbox subscribed forever on the stalled child — six more actors here.
+    // mailbox subscribed forever on the stalled child; six more actors here.
     assert_eq!(run_abandoned_child(2), run_abandoned_child(8));
 }
 
@@ -262,7 +262,7 @@ fn the_child_wait_scales_with_the_carved_steps() {
     // A child answering after 700s of virtual time, delegated twice: a 3-step
     // carve waits 60 + 3×300 = 960s ≥ 700 and collects the answer; a 1-step
     // carve waits 60 + 300 = 360s < 700 and resolves as the give-up failure.
-    // The wait is a function of the carve (§8.1), not a flat cap — under the
+    // The wait is a function of the carve (§8.1), not a flat cap, under the
     // old 32×30s cap both would have completed identically.
     let sim = Simulation::new(47);
     let sink = CollectingSink::default();

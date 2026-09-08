@@ -6,7 +6,7 @@
 //! ran.
 //!
 //! The desired set makes the recovery rule short. **The desired set computed by
-//! an activation's first tick is its orphan set** — by construction, since
+//! an activation's first tick is its orphan set**, by construction, since
 //! every member was put there by a record that committed before this activation
 //! drove anything, and no launch of this activation can yet have claimed it.
 //! Every member appearing for the first time in a *later* tick is fresh.
@@ -14,15 +14,15 @@
 //! The classification happens at the activation's **first sight of committed
 //! state**, which is not always the first tick. The engine ticks itself from
 //! `on_activate`, but a command already in the mailbox is handled first, and a
-//! handler sees the committed state *before* its own records — the rehydrated
+//! handler sees the committed state *before* its own records: the rehydrated
 //! state exactly, on a fresh activation. So the first handler that re-enters the
 //! cycle ([`Engine::tick`](crate::Engine::tick)) or delivers an outcome
 //! ([`Engine::settled`](crate::Engine::settled)) classifies from what it was given,
 //! and the work its own records create is fresh, never orphaned. A consumer
 //! handler that commits work without nudging leaves the classification to the
 //! first tick, which then reads that work as orphaned: conservative for
-//! [`Interrupt`] — settled `Interrupted` without having run, which is what the
-//! policy promises — and exactly right for [`Reexecute`].
+//! [`Interrupt`] (settled `Interrupted` without having run, which is what the
+//! policy promises), and exactly right for [`Reexecute`].
 //!
 //! [`Reexecute`]: crate::OnOrphan::Reexecute
 //! [`Interrupt`]: crate::OnOrphan::Interrupt
@@ -54,7 +54,7 @@ pub(crate) fn interrupted<K: Clone + Ord, E>(desired: &[Pending<K, E>]) -> BTree
 ///
 /// A panic inside [`Workflow::perform`](crate::Workflow::perform) is caught at the
 /// task boundary and settled as `Failed` (§4.3), so a consumer bug in one effect
-/// cannot take the activation with it — and, which matters more, cannot leave a
+/// cannot take the activation with it, and, which matters more, cannot leave a
 /// claimed key with no outcome, stranding the engine on a key it will never
 /// relaunch and never let rest.
 ///

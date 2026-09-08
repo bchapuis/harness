@@ -108,7 +108,7 @@ pub struct ClusterConfig {
     /// This **process** incarnation, stamped onto every actor id the node assigns
     /// (spec §3.6). It must differ from the value any predecessor process used
     /// under this `NodeId`, or a peer's ref from before a restart resolves against
-    /// whatever actor now holds that path — see
+    /// whatever actor now holds that path; see
     /// [`LocalHost::with_incarnation`](actor_core::LocalHost::with_incarnation).
     /// A deployment that never restarts a node in place can leave it `0`.
     pub incarnation: u64,
@@ -181,7 +181,7 @@ struct Inner<C, E, S, T> {
 enum VoterChange {
     /// Into the Raft quorum.
     Add,
-    /// Out of it — e.g. a voter declared `down` that must leave the quorum.
+    /// Out of it, e.g. a voter declared `down` that must leave the quorum.
     Remove,
 }
 
@@ -194,7 +194,7 @@ impl VoterChange {
         }
     }
 
-    /// Whether `node` is a voter once this change has taken — the local view the
+    /// Whether `node` is a voter once this change has taken: the local view the
     /// proposer polls for.
     fn leaves_node_voting(self) -> bool {
         matches!(self, VoterChange::Add)
@@ -223,7 +223,7 @@ where
     T: Transport,
 {
     /// Start a node: build the local host and membership, bind the transport,
-    /// launch the receive loop, and — if SWIM is configured — the detector.
+    /// launch the receive loop, and (if SWIM is configured) the detector.
     pub fn start(
         node: NodeId,
         clock: C,
@@ -325,7 +325,7 @@ where
     }
 
     /// Read access to this node's membership view. The mutators are
-    /// crate-private — the detector loops are the only writers — so this view
+    /// crate-private (the detector loops are the only writers), so this view
     /// cannot be used to bypass the control plane's authority rules.
     pub fn membership(&self) -> &Membership {
         &self.inner.membership
@@ -348,7 +348,7 @@ where
 
     /// **Admit** `node` into the member set as a full `Up` member, through the
     /// mode's authority (spec §9.3): a registry registration (registry-based,
-    /// spec §9.4.2) — admission is the entry itself — or a committed `Admit`
+    /// spec §9.4.2) (admission is the entry itself), or a committed `Admit`
     /// entry (leader-based, spec §9.4.3). In static and gossip-based mode there
     /// is no authority to command (joiners are admitted by the coordinator,
     /// spec §9.4.4), so this returns `false`. Returns whether the change took:
@@ -360,7 +360,7 @@ where
             .await
     }
 
-    /// **Drain** `node` for maintenance — the reversible cordon (spec §9.1,
+    /// **Drain** `node` for maintenance, the reversible cordon (spec §9.1,
     /// §9.4), through the mode's authority: a registry state change
     /// (registry-based) or a committed `Drain` entry (leader-based). The node
     /// stays a member (no `down`, no death watch, in-flight calls unaffected);
@@ -371,7 +371,7 @@ where
             .await
     }
 
-    /// **Resume** a drained `node` after maintenance (spec §9.1, §9.4) — the
+    /// **Resume** a drained `node` after maintenance (spec §9.1, §9.4): the
     /// reverse of [`drain`](Self::drain). `false` in modes without an
     /// authoritative control plane.
     pub async fn resume(&self, node: NodeId) -> bool {
@@ -380,10 +380,10 @@ where
     }
 
     /// **Decommission** `node`: terminally remove it from the cluster through
-    /// the mode's authority (spec §9.4) — a registry deregistration
+    /// the mode's authority (spec §9.4); a registry deregistration
     /// (registry-based), whose revision finalizes `down`, or a committed `Down`
     /// entry (leader-based). Irrevocable (invariant #15); each node runs the
-    /// node-down cascade (spec §8.1) as the decision reaches it — every
+    /// node-down cascade (spec §8.1) as the decision reaches it: every
     /// in-flight `ask` to `node` completes `Unreachable`, and watchers of its
     /// actors receive `Terminated { NodeDown }`. `false` in modes without an
     /// authoritative control plane.
@@ -434,13 +434,13 @@ where
     }
 
     /// **Add a voter** to the Raft quorum (leader-based mode, spec §9.4.3
-    /// item 2) — a committed single-server configuration change. Leader-only:
+    /// item 2), a committed single-server configuration change. Leader-only:
     /// `false` anywhere else (call it on [`leader`](Self::leader)).
     pub async fn add_voter(&self, node: NodeId) -> bool {
         self.voter_change(node, VoterChange::Add).await
     }
 
-    /// **Remove a voter** from the Raft quorum (spec §9.4.3 item 2) — e.g. a
+    /// **Remove a voter** from the Raft quorum (spec §9.4.3 item 2), e.g. a
     /// voter that was declared `down` and must leave the quorum. Leader-only.
     pub async fn remove_voter(&self, node: NodeId) -> bool {
         self.voter_change(node, VoterChange::Remove).await
@@ -471,8 +471,8 @@ where
         false
     }
 
-    /// Offer `command` to the Raft leader and wait — bounded by ten election
-    /// timeouts — for `done` to observe the committed effect in the local view.
+    /// Offer `command` to the Raft leader and wait (bounded by ten election
+    /// timeouts) for `done` to observe the committed effect in the local view.
     /// The proposal is re-submitted each poll, so a dropped frame or a leader
     /// change does not strand it (the leader dedups pending commands, and a
     /// re-application is idempotent under `apply_stamped`).
@@ -497,7 +497,7 @@ where
 
     /// One proposal submission to the **control group** (spec §9.4.3 item 1):
     /// append locally when leading; otherwise send `RaftPropose` to the known
-    /// leader, or — knowing none yet — to every configured voter, which forward
+    /// leader, or (knowing none yet) to every configured voter, which forward
     /// it to theirs. The membership command is encoded to the control group's
     /// opaque app payload.
     async fn submit_proposal(&self, leader: &LeaderMode, command: MembershipCommand) {
@@ -507,7 +507,7 @@ where
 
     /// Offer an encoded app command to `group`'s leader (spec §9.4.3 item 1):
     /// append locally when leading; otherwise forward one `RaftPropose` to the
-    /// known leader; otherwise — no leader known yet — fan the proposal out to
+    /// known leader; otherwise (no leader known yet) fan the proposal out to
     /// `voters`, which forward it to theirs. The inbound counterpart is
     /// [`handle_raft_propose`], which never fans out. `voters` is the caller's
     /// choice of quorum: the configured founding set for the control group, or a
@@ -596,7 +596,7 @@ where
         self.inner.spawner.launch(Box::pin(task));
     }
 
-    /// The resolved SWIM probe interval — the cadence background utility loops
+    /// The resolved SWIM probe interval: the cadence background utility loops
     /// reuse so they add no second tunable (utilities spec §4).
     pub(crate) fn probe_interval(&self) -> Duration {
         self.inner.swim.probe_interval
@@ -605,7 +605,7 @@ where
     /// Send one SWIM probe and await its ack (spec §10): register a waiter under
     /// a fresh seq, send the frames `build` derives from it, and wait out the
     /// configured RTT. The shared plumbing of the direct probe, the indirect
-    /// fan-out, and a helper's relayed probe — each call site states only who
+    /// fan-out, and a helper's relayed probe: each call site states only who
     /// gets which frame. Returns the acked incarnation (delivered by the receive
     /// loop's `Ack`/`IndirectAck` handler), or `None` when nothing answered in
     /// time; the waiter is cleaned up either way.
@@ -624,7 +624,7 @@ where
         acked
     }
 
-    /// Complete every in-flight `ask` to `node` with `err` — the node-down
+    /// Complete every in-flight `ask` to `node` with `err`: the node-down
     /// cascade for in-flight callers (spec §8.1 step 3).
     fn fail_pending_to(&self, node: NodeId, err: CallError) {
         for (_, waiter) in self
@@ -677,14 +677,14 @@ where
             // also travels in gossip, stamped with its commit index, so a peer that
             // applied the entry can still deliver the outcome here
             // (`Membership::merge`). That repair is what makes stopping cheap. It is
-            // also exactly what does not cover the case that gets here — a tag from
+            // also exactly what does not cover the case that gets here: a tag from
             // a later build is a transition this one cannot name, in gossip no more
             // than in the log.
             //
             // So the node stops applying, keeps gossiping (the repair path is
             // strictly better left running), keeps acknowledging the group's appends
-            // — quorum there is about the log being *durable*, not about this build
-            // having applied it — and hands the control-plane duties to a peer that
+            // (quorum there is about the log being *durable*, not about this build
+            // having applied it), and hands the control-plane duties to a peer that
             // can still perform them (`raft_driver`).
             //
             // `admit` rather than `decode`, so the reason an operator reads names a
@@ -694,8 +694,8 @@ where
             //
             // Two `admit`s meet here, one word from each spec's vocabulary:
             // *this* one admits a payload's revision (compatibility §2, bytes
-            // at rest), while `ClusterSystem::admit` — whose committed
-            // `MembershipCommand::Admit` this decodes — admits a *member*
+            // at rest), while `ClusterSystem::admit`, whose committed
+            // `MembershipCommand::Admit` this decodes, admits a *member*
             // (§9.3). Neither yields its name: each is the term of art in its
             // own spec.
             let command = match MembershipCommand::admit(&command) {
@@ -804,7 +804,7 @@ where
         // Route service discovery away from a node taken out of rotation: one the
         // operator drained for maintenance, or one that is down (spec §9.4, §13).
         // A drained node keeps its registrations and still answers
-        // direct calls — it is just not handed out to new callers.
+        // direct calls: it is just not handed out to new callers.
         !self.inner.membership.is_down(node)
             && self.inner.membership.status(node) != Some(MemberStatus::Draining)
     }
@@ -889,7 +889,7 @@ where
             .add_watch(target.clone(), watcher.clone(), deliver);
 
         // And register interest with the target's node so a graceful per-actor
-        // stop — not just a node-down — notifies us (spec §12).
+        // stop (not just a node-down) notifies us (spec §12).
         let frame = Frame::Watch {
             target: target.clone(),
             watcher,
@@ -973,7 +973,7 @@ async fn receive_loop<C, E, S, T>(
     while let Ok((from, frame)) = inbound.recv().await {
         // A stopped node processes nothing further (spec §9.3): frames already
         // queued when `shutdown` was called are dropped, not handled. This is
-        // what lets a restart hand the node's durable state to a successor —
+        // what lets a restart hand the node's durable state to a successor:
         // the old incarnation can no longer write to it.
         if system.is_shutting_down() {
             return;
@@ -1447,7 +1447,7 @@ where
 
 /// The target's node tells us a watched actor terminated. The frame is addressed
 /// to one specific `watcher` (the target's node sends one per remote watcher), so
-/// deliver it only there — fanning to every local watcher of `target` would hand
+/// deliver it only there, fanning to every local watcher of `target` would hand
 /// the others a spurious extra signal when one of them re-watches the dead actor
 /// (invariant #11).
 async fn handle_terminated<C, E, S, T>(
@@ -1507,7 +1507,7 @@ fn handle_receptionist_sync<C, E, S, T>(
 
 /// An application command offered to a group's leader (spec §9.4.3 item 1): append
 /// it when leading, forward it once when not. This is the deliberately partial
-/// form of [`ClusterSystem::propose_or_forward`] — an already-inbound proposal is
+/// form of [`ClusterSystem::propose_or_forward`]: an already-inbound proposal is
 /// never fanned out to voters, and a `forwarded` one landing on a non-leader is
 /// dropped (the proposer's bounded re-submission handles the stale-leader case).
 async fn handle_raft_propose<C, E, S, T>(
@@ -1689,7 +1689,7 @@ async fn apply_raft_output<C, E, S, T>(
 
 /// Publish an application group's committed entries (entity's sharded journal) to
 /// its subscribers, in commit order. The send is a synchronous `try_send` on an
-/// unbounded channel — no `.await` between draining `committed` and delivering — so
+/// unbounded channel, no `.await` between draining `committed` and delivering, so
 /// commit order is preserved and a slow consumer cannot interleave another group's
 /// batch.
 fn publish_commits<C, E, S, T>(
@@ -1721,12 +1721,12 @@ fn publish_commits<C, E, S, T>(
 }
 
 /// The Raft driver (leader-based mode, spec §9.4.3): each heartbeat interval,
-/// tick the consensus state machine — elections on a follower/candidate whose
-/// timer fired, replication and quorum commit on the leader — and, when this
+/// tick the consensus state machine (elections on a follower/candidate whose
+/// timer fired, replication and quorum commit on the leader), and, when this
 /// node leads, perform the leader's control-plane duties: propose `Admit` for
 /// reachable joiners, `Leave` for members announcing departure (committed at
 /// the departing node's request, spec §9.3), and `Down` for members the
-/// configured downing policy condemns (spec §9.4.3 item 4) — each a log entry,
+/// configured downing policy condemns (spec §9.4.3 item 4); each a log entry,
 /// so every transition stays quorum-gated (invariant #22).
 async fn raft_driver<C, E, S, T>(system: ClusterSystem<C, E, S, T>, mode: LeaderMode)
 where
@@ -1743,8 +1743,8 @@ where
         }
         let now = system.inner.clock.now();
         // Tick every group, then send. The two are separated so the tick's *pure
-        // heartbeats* — empty appends, which is what almost every group emits on
-        // almost every tick — can be batched per destination into one frame instead
+        // heartbeats* (empty appends, which is what almost every group emits on
+        // almost every tick) can be batched per destination into one frame instead
         // of one frame per group (spec §9.4.3; see `Frame::RaftHeartbeats`).
         let mut beats: BTreeMap<NodeId, Vec<RaftBeat>> = BTreeMap::new();
         let mut outputs = raft.tick_all(now, &system.inner.entropy);
@@ -1763,7 +1763,7 @@ where
         // Heartbeats go out BEFORE the outputs are applied. Applying is a per-group
         // await, so with many groups it is the slowest part of the tick, and a
         // heartbeat that waited behind all of it would arrive later the more groups
-        // this node hosts — precisely the direction that must not scale with `G`,
+        // this node hosts: precisely the direction that must not scale with `G`,
         // since a late heartbeat is what starts a spurious election.
         for (to, beats) in beats {
             let _ = system
@@ -1785,7 +1785,7 @@ where
                 // that must not hold this job: it would propose a `Down`, commit
                 // it, never observe it, and propose it again on the next tick,
                 // forever. So it invites a peer to take over instead. Best-effort
-                // and retried each tick — a target that has not replicated this
+                // and retried each tick: a target that has not replicated this
                 // leader's last entry refuses, and replication fixes that within a
                 // heartbeat or two.
                 hand_off_control(&system, &mode).await;
@@ -1854,7 +1854,7 @@ async fn gossip_merge<C, E, S, T>(
 }
 
 /// The SWIM failure detector (spec §10): probe a random member each interval,
-/// suspect it on a missed `Ack`, and apply suspicion/downing timeouts —
+/// suspect it on a missed `Ack`, and apply suspicion/downing timeouts,
 /// completing the in-flight calls of any node it downs (spec §8.1).
 async fn detector<C, E, S, T>(system: ClusterSystem<C, E, S, T>, config: SwimConfig)
 where
@@ -1900,7 +1900,7 @@ where
             .is_some();
 
         // On a missed direct probe, enlist `k` helpers to probe indirectly before
-        // suspecting — a single bad link should not cause a false suspicion
+        // suspecting: a single bad link should not cause a false suspicion
         // (spec §10 #2). Suspect only if both the direct and indirect probes fail.
         if !direct_ok && !indirect_probe(&system, target, &config).await {
             system
@@ -2000,7 +2000,7 @@ async fn relay_probe<C, E, S, T>(
 /// state regardless of sync order (spec §9.2).
 ///
 /// - A snapshot whose global revision is **lower** than the last applied one is
-///   a stale read and is skipped — application is monotonic, so a laggy or
+///   a stale read and is skipped: application is monotonic, so a laggy or
 ///   replayed read can never revert a drain or resurrect a pruned tombstone.
 /// - A member **absent** from the snapshot that a previous sync knew is
 ///   deregistered: it moves `down` at the snapshot's revision and the node-down

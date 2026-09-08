@@ -2,9 +2,9 @@
 
 A VS Code extension that surfaces a **agent session** as an agent in the
 **Agents window**, driven over the gateway's HTTP/SSE edge
-(`crates/agent-gateway`). Pick a session, send a prompt, and watch the run —
-model responses, tool calls, tier acquisitions, and the terminal outcome —
-stream in live. Cancel interrupts the turn.
+(`crates/agent-gateway`). Pick a session, send a prompt, and watch the run,
+with model responses, tool calls, tier acquisitions, and the terminal outcome
+streaming in live. Cancel interrupts the turn.
 
 It talks directly to the gateway's existing REST + Server-Sent-Events endpoints
 (the same protocol the Rust TUI in `crates/agent-tui` uses). There is no ACP
@@ -20,10 +20,10 @@ those semantics onto VS Code's chat model.
 | `src/sse.ts` | Streaming SSE frame parser (port of `client.rs`'s `parse_frame`) |
 | `src/types.ts` | TS mirrors of the gateway's serde types |
 | `src/mapping.ts` | Records / outcomes → neutral render parts (pure, unit-tested) |
-| `src/sessionProvider.ts` | `ChatSessionItemProvider` — lists sessions |
-| `src/contentProvider.ts` | `ChatSessionContentProvider` — history + live request handler |
+| `src/sessionProvider.ts` | `ChatSessionItemProvider`: lists sessions |
+| `src/contentProvider.ts` | `ChatSessionContentProvider`: history + live request handler |
 | `src/config.ts` | Gateway settings, preferring a SecretStorage token over the plaintext setting |
-| `src/extension.ts` | `activate()` — registers providers, commands, config |
+| `src/extension.ts` | `activate()`: registers providers, commands, config |
 | `vscode.proposed.chatSessionsProvider.d.ts` | Hand-pinned subset of the proposed API |
 
 ## Build
@@ -75,7 +75,7 @@ You should see `event: records` frames followed by a terminal `event: outcome`.
   `chatSessionsProvider` API. This runs in the Extension Development Host and can
   be packaged as a VSIX / published to Open VSX, but **cannot go to the public
   Marketplace** while it depends on a proposed API. The API is also mid-migration
-  from a provider model to a controller model — pin `engines.vscode` and replace
+  from a provider model to a controller model, so pin `engines.vscode` and replace
   the vendored `.d.ts` with the exact upstream file for your target build
   (`npx @vscode/dts dev`).
 - **History replay** depends on the proposed `ChatRequestTurn`/`ChatResponseTurn`

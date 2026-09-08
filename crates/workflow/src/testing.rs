@@ -2,8 +2,8 @@
 //!
 //! One checker, `workflow-cycle`, carrying four of the seven invariants: it is the
 //! grammar of a claim's life. A key is launched (or resolved as orphaned), and
-//! then exactly one of two things happens to it — it settles, or it is discarded
-//! as a straggler — and no activation hibernates or announces quiescence with a
+//! then exactly one of two things happens to it (it settles, or it is discarded
+//! as a straggler), and no activation hibernates or announces quiescence with a
 //! claim still open.
 //!
 //! Test support behind the `testing` feature, not part of the workflow's API, and
@@ -31,8 +31,8 @@ type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 /// - **W3, launch-once per claim.** A `Launched` for a key already open on this
 ///   activation is a second launch of an effect in flight, which no tick may
 ///   produce. A `Settled` closes an open claim; one with no claim open here must
-///   at least name a key some activation launched — an outcome of a previous
-///   activation's launch reaching the one that now holds the entity (§3.3) — or
+///   at least name a key some activation launched: an outcome of a previous
+///   activation's launch reaching the one that now holds the entity (§3.3), or
 ///   the workflow settled something nothing ever sent.
 /// - **W5, straggler rejection.** A `Discarded` names a key whose outcome was
 ///   dropped without a record; it must correspond to a launch on the stream, or
@@ -44,15 +44,15 @@ type Claims = BTreeMap<NodeId, BTreeSet<String>>;
 /// - **W2, launch coverage**, in the shape a stream can carry: the `Quiescent`
 ///   half of the rule above.
 ///
-/// What the stream cannot show — that a *backed-off* key is eventually relaunched
-/// — is a scenario assertion rather than a grammar rule, because the liveness is
+/// What the stream cannot show (that a *backed-off* key is eventually relaunched)
+/// is a scenario assertion rather than a grammar rule, because the liveness is
 /// conditional on the activation surviving (§9 W2). The checker does hold the
 /// half that is checkable: a `Settled { committed: false }` closes its claim, so
 /// a stranded key shows up as a `Deactivated` with nothing open and the work still
 /// in the fold, which the scenario suites assert against the journal.
 ///
-/// **Two tiers, one rule that differs.** A forced step-down — a leadership move,
-/// quorum loss — is involuntary, ignores `can_hibernate`, and legitimately
+/// **Two tiers, one rule that differs.** A forced step-down (a leadership move,
+/// quorum loss) is involuntary, ignores `can_hibernate`, and legitimately
 /// abandons its launches (§6); on the stream it is a `Deactivated` with claims open,
 /// exactly the shape of a W7 violation, and entity's event carries no reason that
 /// would tell the two apart. So the checker is built for the tier it watches:
@@ -145,7 +145,7 @@ impl WorkflowCycle {
             .or_default();
         if !open.insert(key.to_string()) {
             return Err(format!(
-                "{entity} on {node} {how} {key} twice with the first still in flight — a \
+                "{entity} on {node} {how} {key} twice with the first still in flight: a \
                  later tick relaunched a claimed effect (W3)"
             ));
         }
@@ -179,7 +179,7 @@ impl Invariant for WorkflowCycle {
                         && !open.is_empty()
                     {
                         return Err(format!(
-                            "{name} on {node} deactivated with {} claim(s) still open ({}) — \
+                            "{name} on {node} deactivated with {} claim(s) still open ({}): \
                              an activation with an effect in flight has not settled its \
                              work (W7)",
                             open.len(),
@@ -213,14 +213,14 @@ impl Invariant for WorkflowCycle {
             } => {
                 if !self.close(*node, entity, key) && !self.launched_somewhere(entity, key) {
                     return Err(format!(
-                        "{entity} on {node} settled {key}, which no activation launched — an \
+                        "{entity} on {node} settled {key}, which no activation launched: an \
                          outcome with no claim behind it (W3)"
                     ));
                 }
             }
             WorkflowEvent::Discarded { entity, key, node } => {
                 // A straggler may be an *earlier* activation's launch reaching a
-                // later one, so its claim need not be open here — but the workflow
+                // later one, so its claim need not be open here, but the workflow
                 // must never discard a key nothing ever launched.
                 self.close(*node, entity, key);
                 if !self.launched_somewhere(entity, key) {
@@ -235,7 +235,7 @@ impl Invariant for WorkflowCycle {
                     && !open.is_empty()
                 {
                     return Err(format!(
-                        "{entity} on {node} announced quiescence with {} claim(s) open — the \
+                        "{entity} on {node} announced quiescence with {} claim(s) open: the \
                          desired set is not at rest (W7)",
                         open.len()
                     ));
@@ -246,8 +246,8 @@ impl Invariant for WorkflowCycle {
     }
 }
 
-/// Which W-invariant each tick checker enforces, as `(checker name, W number)`
-/// — the pairing §9's "Verified by" column asserts, stated from the checker's
+/// Which W-invariant each tick checker enforces, as `(checker name, W number)`:
+/// the pairing §9's "Verified by" column asserts, stated from the checker's
 /// side, and held equal to the catalogue's per pair by `conformance_catalogue`.
 pub fn checker_coverage() -> &'static [(&'static str, u8)] {
     &[

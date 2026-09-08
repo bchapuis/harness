@@ -4,17 +4,17 @@
 #
 # The exclusions are measured, not guessed (2026-09, M-series laptop; the full
 # suite is ~1250s of serial test time, wall ~150s under nextest):
-#   binary(/swarm/)      — the seed-sweep regression suites,        ~350s serial
-#   native, quickjs      — agent-sandbox against real containers, ~375s
-#   disk_rounds          — entity's quorum-round cost suite,       ~155s
-#   store_oracle         — entity's seeded file-vs-memory oracle,   ~55s
+#   binary(/swarm/):       the seed-sweep regression suites,        ~350s serial
+#   native, quickjs:       agent-sandbox against real containers, ~375s
+#   disk_rounds:           entity's quorum-round cost suite,       ~155s
+#   store_oracle:          entity's seeded file-vs-memory oracle,   ~55s
 #
-# - `cargo nextest run` — the fast local suite: everything else.
-# - `cargo nextest run -p agent-sandbox --ignore-default-filter` — when the
+# - `cargo nextest run`, the fast local suite: everything else.
+# - `cargo nextest run -p agent-sandbox --ignore-default-filter`, when the
 #   excluded suite is the one you are editing.
-# - `cargo nextest run -E 'binary(/swarm/)'` — just the sweeps, locally
+# - `cargo nextest run -E 'binary(/swarm/)'`: just the sweeps, locally
 #   narrowed by sweep.rs unless SWARM_SEEDS says otherwise.
-# - `cargo nextest run --profile ci` — everything; what CI runs.
+# - `cargo nextest run --profile ci`, everything; what CI runs.
 
 [profile.default]
 default-filter = "not (binary(/swarm/) | binary(native) | binary(quickjs) | binary(disk_rounds) | binary(store_oracle))"

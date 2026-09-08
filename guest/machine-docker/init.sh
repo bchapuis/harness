@@ -4,8 +4,8 @@
 # disk facet's image (entity §7.15) exactly as they do under Firecracker.
 #
 # The container's own image is scaffolding the user never sees. What they get a
-# shell in is /machine/disk.img — the disk facet's materialization, bind-mounted
-# from the host — loop-mounted at /rootfs and chrooted into. So:
+# shell in is /machine/disk.img: the disk facet's materialization, bind-mounted
+# from the host, loop-mounted at /rootfs and chrooted into. So:
 #
 # - **The image is still the durable thing.** Every guest write goes through the
 #   loop device into that file, which is what a capture scans. `losetup
@@ -27,7 +27,7 @@ set -eu
 # to decide: `machine_host::container` passes both in, and the defaults below are
 # only for running this image by hand. The mechanism dials
 # <sock dir>/<port>.sock through `docker exec`, and expects that path to mean the
-# same thing inside this container and inside the chroot — which the bind mount
+# same thing inside this container and inside the chroot, which the bind mount
 # below arranges.
 IMAGE=${MACHINE_DISK:-/machine/disk.img}
 SOCK_DIR=${MACHINE_SOCK_DIR:-/run/guest}
@@ -48,7 +48,7 @@ ensure_node() {
 
 # An activation that was killed leaves its loop device attached to this image:
 # the container's death frees the mount, not the device. Detach it before
-# attaching our own — this mechanism's version of the control-directory sweep a
+# attaching our own: this mechanism's version of the control-directory sweep a
 # microVM launch does per boot.
 for stale in $(losetup -j "$IMAGE" -O NAME --noheadings 2>/dev/null); do
   ensure_node "$stale"
@@ -79,7 +79,7 @@ mkdir -p "$ROOT"
 mount -t ext4 "$DEV" "$ROOT"
 
 test -x "$ROOT/usr/sbin/machine-agent" || {
-  echo "machine runner: $IMAGE has no /usr/sbin/machine-agent — the guest agent is \
+  echo "machine runner: $IMAGE has no /usr/sbin/machine-agent: the guest agent is \
 part of the rootfs (machine §5.1); build it with guest/machine-rootfs/build.sh" >&2
   exit 1
 }
@@ -126,7 +126,7 @@ trap stop TERM INT
 # The agent is this container's main process (machine §5.1's broker, not pid 1
 # of a booted system). Its unix-socket mode speaks the same `CONNECT 62` muxer
 # handshake Firecracker performs host-side, so one agent binary serves either
-# mechanism unchanged — reached here through `docker exec` rather than vsock,
+# mechanism unchanged: reached here through `docker exec` rather than vsock,
 # because a socket created in this namespace is not one the host can dial.
 chroot "$ROOT" /usr/sbin/machine-agent --uds "$SOCK" &
 AGENT=$!

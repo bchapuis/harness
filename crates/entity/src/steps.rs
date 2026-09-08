@@ -5,7 +5,7 @@
 //! **The durable core is memoization.** A workflow is a re-entrant decision the
 //! entity re-drives after every commit (agent §3). Each **step** runs an external
 //! effect *once*; its result is journaled under the steps tag and folded into a
-//! `step id → bytes` map. On replay — a later drive, a re-activation, a failover —
+//! `step id → bytes` map. On replay (a later drive, a re-activation, a failover)
 //! a completed step resolves from the map instead of re-running, so effects are
 //! at-most-once across crashes. `sleep` is a step whose effect is a durable
 //! [`Alarm`](crate::Alarm); `retry` is a step that re-launches after an
@@ -50,7 +50,7 @@ pub struct Steps;
 impl Sealed for Steps {}
 
 /// One steps record (spec §7.17): a step's memoized result under the steps tag.
-/// `bytes` is the caller's `postcard`-encoded step output — opaque to the facet.
+/// `bytes` is the caller's `postcard`-encoded step output: opaque to the facet.
 #[derive(Serialize, Deserialize)]
 struct StepRecord {
     id: StepId,
@@ -211,7 +211,7 @@ impl Message for StepDone {
 /// Stages the memo record so the step resolves on the next drive, unless it is
 /// already recorded (a duplicate `StepDone` after a re-launch commits nothing, the
 /// idempotency §7.5 gives for free). Returns the empty event list the handler
-/// journals — the steps facet carries the durable change.
+/// journals: the steps facet carries the durable change.
 pub fn complete_step<G, I>(ctx: &EntityCtx<G>, msg: StepDone) -> Vec<G::Event>
 where
     G: Entity,
@@ -225,7 +225,7 @@ where
 
 /// An ephemeral, per-activation guard tracking which steps this activation has
 /// already launched (spec §7.17), the launch-once half of the workflow pattern.
-/// Never journaled — a re-activation rebuilds it and re-launches any step still
+/// Never journaled: a re-activation rebuilds it and re-launches any step still
 /// unresolved in the memo (at-most-once holds because the *result*, not the
 /// launch, is the durable fact).
 ///
@@ -248,20 +248,20 @@ impl<K: Ord> Default for LaunchGuard<K> {
 
 impl<K: Ord> LaunchGuard<K> {
     /// Claim the right to launch step `id` this activation. Returns `true` the first
-    /// time (the caller then spawns the effect), `false` if already launched — so an
+    /// time (the caller then spawns the effect), `false` if already launched, so an
     /// in-flight step is not launched twice while its `StepDone` is outstanding.
     pub fn claim(&mut self, id: K) -> bool {
         self.launched.insert(id)
     }
 
-    /// Whether step `id` is already claimed, without claiming it — for a drive that
+    /// Whether step `id` is already claimed, without claiming it, for a drive that
     /// scans its incomplete steps and must skip the in-flight ones.
     pub fn is_claimed(&self, id: &K) -> bool {
         self.launched.contains(id)
     }
 
     /// Whether no claim is outstanding: nothing launched since the last
-    /// [`reset`](LaunchGuard::reset). The deactivation veto reads this — an
+    /// [`reset`](LaunchGuard::reset). The deactivation veto reads this: an
     /// activation holding an unswept claim may still receive its effect's
     /// outcome and must not hibernate under it.
     pub fn is_idle(&self) -> bool {

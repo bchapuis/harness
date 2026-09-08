@@ -1,4 +1,4 @@
-//! Conformance: serialization & dispatch (spec §4.4, §5, §15) — the dispatch
+//! Conformance: serialization & dispatch (spec §4.4, §5, §15); the dispatch
 //! registry is the deserialization allowlist. Also exercises the single-node
 //! loopback wire dispatch path: encode → registry lookup → decode/enqueue →
 //! handler runs → reply encoded → decoded back.
@@ -134,7 +134,7 @@ fn an_authorized_message_is_delivered_a_denied_one_is_not() {
 
 // Codec agreement at the association handshake (spec §5 #2, §7.1) is a property
 // of the real transport's handshake, which the in-memory simulator does not have
-// (it routes frames directly, and only the payload exercises the wire codec —
+// (it routes frames directly, and only the payload exercises the wire codec:
 // spec §18.2). It is covered against the production TCP transport by
 // `actor-runtime`'s `a_codec_disagreement_is_rejected_at_the_handshake`.
 

@@ -13,8 +13,8 @@
 //! **The files are evidence, not output.** A fixture for a revision that has
 //! shipped records what those bytes meant; regenerating it destroys the only thing
 //! holding **V4**/**V5** up, and converts a caught format break into a green run.
-//! So [`golden`] writes only a file that is *absent* — the case of adding a
-//! revision — and never rewrites one that exists.
+//! So [`golden`] writes only a file that is *absent* (the case of adding a
+//! revision), and never rewrites one that exists.
 //!
 //! When a fixture stops decoding, the corpus has done its job. The fix is the
 //! compatibility spec's, not the fixture's: widen the window to keep reading the
@@ -24,7 +24,7 @@
 //! This is the fourth copy of the helper, one per crate that owns a boundary,
 //! because `corpus_dir` resolves against the *owning* crate's manifest. Hoisting it
 //! into `compat` would cost that crate the property its position below `wal` rests
-//! on — it owns no format, reads no file, and depends on nothing in the tree — and
+//! on (it owns no format, reads no file, and depends on nothing in the tree), and
 //! a feature flag would not keep the promise under cargo's feature unification. If
 //! a fifth owner appears, the move is a dev-only crate exporting a `macro_rules!`
 //! so `CARGO_MANIFEST_DIR` still expands at the call site, not a `compat` feature.
@@ -50,7 +50,7 @@ pub(crate) fn golden(boundary: &str, revision: u16, produce: impl FnOnce() -> Ve
         std::env::var_os("GOLDEN_UPDATE").is_some(),
         "no corpus fixture at {}. If this revision is new, create it with \
          GOLDEN_UPDATE=1 cargo test -p blob-store. If it is not, the file was \
-         deleted — restore it from git rather than regenerating it, or the corpus \
+         deleted; restore it from git rather than regenerating it, or the corpus \
          stops being evidence of what the old bytes meant.",
         path.display(),
     );

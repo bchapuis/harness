@@ -2,7 +2,7 @@
 //!
 //! This is the layer **above** the [`ActorSystem`](crate::ActorSystem)
 //! transport boundary where local and remote sends converge. A message becomes
-//! an erased *envelope* — a closure that, given `&mut A` and its [`Ctx`], runs
+//! an erased *envelope*: a closure that, given `&mut A` and its [`Ctx`], runs
 //! the matching `Handler<M>` to completion. The local fast path enqueues the
 //! envelope **by value, with no serialization** (spec §4.3); the remote path
 //! builds the same envelope after deserializing, routing the reply through a
@@ -137,7 +137,7 @@ impl<A: Actor> Mailbox<A> {
         };
         // The deadline is applied here, inside the event bracket, so a timed-out
         // ask still reaches its `AskOutcome` (invariant #1). It covers the whole
-        // call — waiting for mailbox space as much as the reply. A handler still
+        // call, waiting for mailbox space as much as the reply. A handler still
         // running when it elapses finishes on its own; its reply has no taker.
         let result = match clock.timeout(within, call).await {
             Ok(result) => result,
@@ -264,7 +264,7 @@ impl<A: Actor> Mailbox<A> {
     /// (invariant #11), so unlike a best-effort send this applies the §6 default
     /// backpressure policy: it **awaits** until the mailbox has room rather than
     /// dropping the signal when the queue is full. Only a *closed* mailbox lets
-    /// it give up — that means the watcher itself is already gone, so there is no
+    /// it give up: that means the watcher itself is already gone, so there is no
     /// one left to notify.
     pub(crate) async fn enqueue_signal(&self, signal: Terminated)
     where

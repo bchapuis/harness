@@ -2,7 +2,7 @@
 //!
 //! Several message types in this workspace carry their payload as
 //! `#[serde(with = "serde_bytes")] Vec<u8>` (or `serde_bytes::ByteBuf`) rather than a
-//! plain `Vec<u8>` — entity's `StoreBlob`, `StoreSnapshot` and `StoreRecord`,
+//! plain `Vec<u8>`: entity's `StoreBlob`, `StoreSnapshot` and `StoreRecord`,
 //! blob-store's `StoreBlob`. That is a **performance** change: it reaches
 //! `serialize_bytes`/`deserialize_bytes` instead of serde's default sequence path,
 //! which is worth ~160x on encode and ~670x on decode for a mebibyte under postcard
@@ -17,13 +17,13 @@
 //! one:
 //!
 //! - **postcard** has a byte-string form, and it is encoded exactly as its sequence
-//!   form — a varint length then the payload. Same bytes, different code path.
+//!   form: a varint length then the payload. Same bytes, different code path.
 //! - **`serde_json`** has *no* byte form, so `serialize_bytes` falls back to
 //!   `collect_seq` and emits the same array of decimal numbers. (It is still ~2.5x
 //!   faster, which is a surprise the bench records; the bytes are what matter here.)
 //!
 //! **This is a property of these two codecs, not of serde.** A codec with a distinct
-//! byte representation — CBOR, MessagePack, bincode's variable encodings — would make
+//! byte representation (CBOR, MessagePack, bincode's variable encodings) would make
 //! these fields encode differently, and adding one to the tree is a wire-format change
 //! whatever else it looks like. That is exactly the regression these tests exist to
 //! turn into a failure, so a new `Codec` impl belongs in `CODECS` below.
@@ -59,7 +59,7 @@ struct Tagged {
     trailing: String,
 }
 
-/// The `Vec<Vec<u8>>` shape, which `#[serde(with)]` cannot reach — entity's
+/// The `Vec<Vec<u8>>` shape, which `#[serde(with)]` cannot reach: entity's
 /// `StoreRecord::records` uses `Vec<ByteBuf>` instead, and it has to be neutral too.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 struct PlainMany {
@@ -109,7 +109,7 @@ fn tagging_a_byte_field_does_not_change_what_goes_on_the_wire() {
                 untagged,
                 bytes,
                 "{name} encodes a {}-byte payload differently once the field is \
-                 tagged as bytes — this is a wire-format change, and `actor.wire` \
+                 tagged as bytes: this is a wire-format change, and `actor.wire` \
                  has no way to run two revisions at once (compatibility spec §3.1)",
                 payload.len(),
             );
@@ -139,7 +139,7 @@ fn a_vector_of_byte_vectors_is_neutral_too() {
         .expect("encodes");
         assert_eq!(
             untagged, bytes,
-            "{name} encodes `Vec<Vec<u8>>` and `Vec<ByteBuf>` differently — \
+            "{name} encodes `Vec<Vec<u8>>` and `Vec<ByteBuf>` differently: \
              entity's `StoreRecord::records` relies on them agreeing",
         );
     }
@@ -179,7 +179,7 @@ fn each_form_decodes_what_the_other_wrote() {
 ///
 /// A variant is not a struct: postcard writes a variant index before the fields, and
 /// `serde_json` writes an outer object keyed by the variant name. Neither of those is
-/// exercised above, and the cluster wire protocol is entirely enums — so the neutrality
+/// exercised above, and the cluster wire protocol is entirely enums, so the neutrality
 /// that matters most for `actor.wire` is the one this pair checks. The leading variant
 /// is there so the tagged field does not sit at index 0, where an encoder that got the
 /// discriminant wrong could still coincidentally agree.
@@ -199,7 +199,7 @@ enum TaggedFrame {
     },
 }
 
-/// Bytes in a **newtype variant**, as `EntryPayload::App` is — the shape with no field
+/// Bytes in a **newtype variant**, as `EntryPayload::App` is: the shape with no field
 /// name at all.
 ///
 /// This one is also durable, not only wire: a Raft voter persists its log through
@@ -249,7 +249,7 @@ fn tagging_bytes_inside_an_enum_variant_is_neutral_too() {
             assert_eq!(
                 untagged,
                 tagged,
-                "{name} encodes a {}-byte newtype variant differently once tagged — \
+                "{name} encodes a {}-byte newtype variant differently once tagged: \
                  this shape is persisted in a Raft voter's log, so it is a durable \
                  format change as well as a wire one",
                 payload.len(),
@@ -303,14 +303,14 @@ enum Failure {
 }
 
 /// What `actor-cluster`'s `reply_bytes` module mirrors: serde's own representation of
-/// `Result<Vec<u8>, E>` — two newtype variants named `Ok` and `Err`, in that order,
+/// `Result<Vec<u8>, E>`; two newtype variants named `Ok` and `Err`, in that order,
 /// with the success payload told it is bytes.
 ///
 /// `Frame::Reply`'s outcome is `ReplyResult`, a `Result<Vec<u8>, CallError>` type
 /// alias, so there is no field to hang `#[serde(with = "serde_bytes")]` on and the
 /// representation is hand-written instead. That makes this the one byte field on the
 /// wire whose neutrality is not a property of serde's derive but of a mirror staying
-/// faithful — a renamed variant or a swapped order is a silent wire break. Hence the
+/// faithful: a renamed variant or a swapped order is a silent wire break. Hence the
 /// comparison below is against a real `Result`, not against another hand-written enum.
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 enum MirroredOutcome {
@@ -349,7 +349,7 @@ fn a_mirrored_result_encodes_exactly_as_serde_encodes_result() {
                 encode(*codec, &real).expect("encodes"),
                 encode(*codec, &mirrored).expect("encodes"),
                 "{name}: the mirrored Ok({} bytes) is not what serde writes for \
-                 Result::Ok — `Frame::Reply` would be a wire-format change",
+                 Result::Ok: `Frame::Reply` would be a wire-format change",
                 payload.len(),
             );
         }
@@ -392,7 +392,7 @@ fn each_result_form_decodes_what_the_other_wrote() {
 
 /// The negative control, and it is per-codec because the two codecs constrain
 /// *different halves* of the mirror. This is the reason the property is stated as two
-/// clauses — variant names and variant order — rather than one:
+/// clauses (variant names and variant order) rather than one:
 ///
 /// - **postcard** writes a variant index, so reordering is a wire change and renaming
 ///   is invisible to it;
@@ -401,7 +401,7 @@ fn each_result_form_decodes_what_the_other_wrote() {
 ///
 /// Neither codec alone would catch a mirror that drifted the other way, so a tree with
 /// only one of them would be asserting half of what it looks like it asserts. A third
-/// codec that is neither — one writing, say, a hash of the name — needs its own clause
+/// codec that is neither (one writing, say, a hash of the name) needs its own clause
 /// here rather than inheriting these.
 #[test]
 fn getting_the_mirror_wrong_is_visible_on_the_wire() {

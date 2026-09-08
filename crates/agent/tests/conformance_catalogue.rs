@@ -1,5 +1,5 @@
 //! Catalogue drift test (agent spec §11): the machine-readable A1–A8
-//! catalogue and the live checker set must agree — a checker added in code
+//! catalogue and the live checker set must agree; a checker added in code
 //! but not recorded in the catalogue (or vice versa) fails the build, the
 //! same pattern guarding the core and utilities catalogues.
 //!

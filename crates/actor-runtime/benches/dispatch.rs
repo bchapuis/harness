@@ -1,7 +1,7 @@
 //! What one local message costs.
 //!
-//! The agent loop is built from actor sends — a run step journals, dispatches tools, and
-//! collects outcomes by telling and asking — so the per-message floor here is the floor
+//! The agent loop is built from actor sends (a run step journals, dispatches tools, and
+//! collects outcomes by telling and asking), so the per-message floor here is the floor
 //! under everything above it. The benchmark lives in this crate rather than in
 //! `actor-core` because the numbers only mean something through the production runtime
 //! seam: `TokioClock`, `OsEntropy`, `TokioSpawner`. Those are what a deployed node runs.
@@ -9,8 +9,8 @@
 //! Three costs are separated:
 //!
 //! - `tell` / `ask` measure the whole path, `ActorRef` down to the handler.
-//! - `resolve` isolates what `ActorRef` adds over an already-resolved mailbox — the
-//!   registry lookup every send repeats — and sweeps the live-actor count, because that
+//! - `resolve` isolates what `ActorRef` adds over an already-resolved mailbox (the
+//!   registry lookup every send repeats), and sweeps the live-actor count, because that
 //!   lookup walks a map keyed by actor id.
 //! - `spawn` covers actor creation, which the agent runtime pays per delegation.
 //!
@@ -55,7 +55,7 @@ impl Actor for Counter {
     type System = Sys;
 }
 
-/// A fire-and-forget message — the `tell` path, where the reply is dropped.
+/// A fire-and-forget message: the `tell` path, where the reply is dropped.
 #[derive(Serialize, Deserialize)]
 struct Bump;
 
@@ -70,7 +70,7 @@ impl Handler<Bump> for Counter {
     }
 }
 
-/// A request/response message — the `ask` path, which adds a reply channel.
+/// A request/response message: the `ask` path, which adds a reply channel.
 #[derive(Serialize, Deserialize)]
 struct Read;
 
@@ -112,7 +112,7 @@ fn runtime() -> tokio::runtime::Runtime {
 ///
 /// `spawn` only queues the actor's task; on a current-thread runtime it does not start
 /// until something drives the runtime. Without this, a benchmark that spawns during
-/// setup pays for those startups inside its first measured iteration — at ten thousand
+/// setup pays for those startups inside its first measured iteration, at ten thousand
 /// actors that showed up as a single sample eighty thousand allocations heavier than its
 /// neighbours. Settling first is what makes the measurement steady-state.
 fn settle(rt: &tokio::runtime::Runtime, actor: &ActorRef<Counter>) {
@@ -123,7 +123,7 @@ fn settle(rt: &tokio::runtime::Runtime, actor: &ActorRef<Counter>) {
 /// How many messages one `tell` iteration sends.
 ///
 /// A `tell` returns once the message is queued, so a single one measures the sender's
-/// half and leaves the handler to run whenever the executor next gets the thread — which
+/// half and leaves the handler to run whenever the executor next gets the thread, which
 /// is what made a one-message loop swing between two and eight allocations depending on
 /// where the mailbox's bounded queue happened to be. Sending a batch and then draining it
 /// with one `ask` puts the whole cost, both halves, inside the iteration. The batch stays
@@ -132,7 +132,7 @@ const BATCH: usize = 32;
 
 /// The full per-message cost: enqueue, dispatch, and handler, amortized over a batch.
 ///
-/// Read the per-item counters rather than the iteration time — the trailing `ask` that
+/// Read the per-item counters rather than the iteration time: the trailing `ask` that
 /// drains the batch is one round trip spread across `BATCH` messages.
 #[divan::bench]
 fn tell(bencher: Bencher) {
@@ -177,7 +177,7 @@ fn resolve(bencher: Bencher, live: usize) {
     let rt = runtime();
     let sys = system(&rt);
     // Fill the registry, then measure against one target among them. The other actors are
-    // held to the end of the benchmark — dropping an `ActorRef` does not retire the actor,
+    // held to the end of the benchmark, dropping an `ActorRef` does not retire the actor,
     // but letting the vector fall out of scope early would still be misleading to read.
     let others: Vec<ActorRef<Counter>> = (0..live.saturating_sub(1))
         .map(|_| sys.spawn(Counter { count: 0 }))
@@ -196,7 +196,7 @@ fn resolve(bencher: Bencher, live: usize) {
 ///
 /// Each iteration gets a fresh system, built in `with_inputs` so its construction is
 /// outside the measurement. Spawning into one shared system instead would insert into a
-/// registry that grows for the whole run and is never swept — the id map's lookup cost
+/// registry that grows for the whole run and is never swept: the id map's lookup cost
 /// climbs with it, so the benchmark would measure a moving target and retain a mailbox
 /// and a queued task per iteration. That growth is `resolve`'s subject, deliberately, and
 /// does not belong in this one.

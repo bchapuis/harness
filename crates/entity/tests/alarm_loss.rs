@@ -1,15 +1,15 @@
 //! Alarm wiring costs an entity no commit progress under frame loss (§7.16).
 //!
 //! **What this settled.** A commit on this branch, `932ebca`, recorded that an
-//! alarm-wired entity does not commit *at all* under plain frame loss — no
-//! partition, no crash — the entity activating, never committing, being
+//! alarm-wired entity does not commit *at all* under plain frame loss (no
+//! partition, no crash) the entity activating, never committing, being
 //! hibernated, while the caller hangs to its own deadline. `557ad1a` reverted
 //! that prose with no reason written down, and the workload behind it was never
 //! committed, so the claim survived as an assertion nobody could check. This file
 //! is the check. **It does not reproduce**, under the conditions the commit named
 //! or under harsher ones: at one-in-six, one-in-three, and one-in-two frame loss,
 //! with hibernation on and off, and with the settle window removed entirely, the
-//! alarm-wired arm committed on every configuration — more often than the plain
+//! alarm-wired arm committed on every configuration; more often than the plain
 //! arm on four of the six, never categorically less.
 //!
 //! It stays as a regression guard rather than being deleted with the question,
@@ -19,14 +19,14 @@
 //! **The differential is controlled.** Both arms host the `AlarmIndex` entity,
 //! so the Raft group count is identical and neither carries a group the other
 //! lacks; both run the same `Timer`, the same seeds, and the same
-//! [`FaultPolicy`]. Only the timer's wiring differs — `entities_with_alarms`
+//! [`FaultPolicy`]. Only the timer's wiring differs: `entities_with_alarms`
 //! against plain `entity`, which is exactly `Some(index)` to the host plus the
 //! driver loop.
 //!
 //! **What is asserted is the relationship, not a rate.** Frame loss makes any
 //! given `ask` failable in both arms, so "the alarm arm committed less often" is
 //! not a defect and a threshold on it would be a flake. The defect described was
-//! categorical — the alarm arm commits nothing while the plain arm commits — so
+//! categorical (the alarm arm commits nothing while the plain arm commits), so
 //! that is what this checks.
 
 mod support;
@@ -63,7 +63,7 @@ const SHARDS: usize = 2;
 /// The loss rates swept. One-in-six needs a retry on most quorum round trips;
 /// one-in-three is where the plain arm starts failing most of its calls, which is
 /// the band where a wiring-induced stall would be easiest to mistake for the
-/// network — and so the band worth covering.
+/// network, and so the band worth covering.
 const LOSS_RATES: [u64; 2] = [6, 3];
 
 /// How many arms one run issues.
@@ -116,7 +116,7 @@ fn drive<T: Send + 'static>(
         .expect("future did not complete")
 }
 
-/// Whether this arm wires the timer to the alarm index — the one variable.
+/// Whether this arm wires the timer to the alarm index: the one variable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Wiring {
     /// `entities_with_alarms`: the host registers deadlines in the index and the
@@ -201,7 +201,7 @@ fn alarm_wiring_costs_no_commit_progress_under_frame_loss() {
     assert!(
         dry.is_empty(),
         "an alarm-wired entity committed nothing under frame loss at \
-         (loss, seed) {dry:?} while the plain arm committed — the finding recorded in \
+         (loss, seed) {dry:?} while the plain arm committed; the finding recorded in \
          932ebca. Replay one with `commits(<seed>, Wiring::Alarms, <loss>)`.\n{summary}",
     );
 

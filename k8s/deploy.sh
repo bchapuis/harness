@@ -13,7 +13,7 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   exit 1
 fi
 
-# A wrong-context apply lands in someone else's cluster — fail loud if kubectl
+# A wrong-context apply lands in someone else's cluster: fail loud if kubectl
 # can't reach one, and show which it is so the target is never a surprise.
 if ! kubectl version >/dev/null 2>&1 || ! kubectl get nodes >/dev/null 2>&1; then
   echo "kubectl can't reach a cluster. Point it at one (kind/minikube/OrbStack/Docker Desktop)" >&2
@@ -30,7 +30,7 @@ docker build -q -t "$IMAGE" . >/dev/null
 # just the host daemon's. kind and minikube keep separate stores and need an
 # explicit load; OrbStack and Docker Desktop share the daemon's, so the build
 # above is enough. Override the heuristic with AGENT_IMAGE_LOADER if needed
-# (one of: kind, minikube, none) — e.g. for a named kind cluster.
+# (one of: kind, minikube, none), e.g. for a named kind cluster.
 loader=${AGENT_IMAGE_LOADER:-}
 if [ -z "$loader" ]; then
   case "$CONTEXT" in
@@ -44,15 +44,15 @@ case "$loader" in
   kind)     echo "▸ loading image into kind";     kind load docker-image "$IMAGE" --name "${CONTEXT#kind-}" ;;
   minikube) echo "▸ loading image into minikube"; minikube image load "$IMAGE" ;;
   none)     echo "▸ image already visible to the cluster (shared daemon store)" ;;
-  *)        echo "▸ WARNING: unknown cluster type for '$CONTEXT' — assuming a shared store." >&2
+  *)        echo "▸ WARNING: unknown cluster type for '$CONTEXT'; assuming a shared store." >&2
             echo "  If pods report ErrImagePull, push $IMAGE to a registry, set image: in" >&2
             echo "  k8s/agent.yaml, and re-run; or set AGENT_IMAGE_LOADER=kind|minikube|none." >&2 ;;
 esac
 
 # Idempotent: the secret is kept out of the manifest on purpose (never commit
-# it), so create it here only if it is missing — re-runs leave it untouched.
+# it), so create it here only if it is missing; re-runs leave it untouched.
 if kubectl get secret agent-anthropic >/dev/null 2>&1; then
-  echo "▸ secret agent-anthropic already exists — leaving it as is"
+  echo "▸ secret agent-anthropic already exists; leaving it as is"
 else
   echo "▸ creating secret agent-anthropic"
   kubectl create secret generic agent-anthropic \
@@ -63,7 +63,7 @@ fi
 # pods all read it from this Secret, so they admit one another and reject anyone
 # else. Random and opaque; provisioned once, idempotently.
 if kubectl get secret agent-cluster >/dev/null 2>&1; then
-  echo "▸ secret agent-cluster already exists — leaving it as is"
+  echo "▸ secret agent-cluster already exists; leaving it as is"
 else
   echo "▸ creating secret agent-cluster (the transport cluster secret)"
   secret=$(head -c 30 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
@@ -72,7 +72,7 @@ else
 fi
 
 if kubectl get secret agent-auth >/dev/null 2>&1; then
-  echo "▸ secret agent-auth already exists — leaving it as is"
+  echo "▸ secret agent-auth already exists; leaving it as is"
 else
   echo "▸ creating secret agent-auth (one tenant: demo, with a random token)"
   # An opaque high-entropy token the gateway verifies. Pull it back from the
@@ -96,7 +96,7 @@ kubectl rollout status statefulset/agent-gw --timeout=120s
 
 cat <<'EOF'
 
-  cluster up — three node pods (agent-0/1/2) and two gateway pods (agent-gw-0/1)
+  cluster up. Three node pods (agent-0/1/2) and two gateway pods (agent-gw-0/1)
 
   Drive sessions over HTTP through the gateway (the only tenant-facing path). The
   bearer token is verified against the tenants Secret; pull the demo token:

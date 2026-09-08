@@ -1,6 +1,6 @@
 //! `agent-tui`: a terminal client for the agent runtime.
 //!
-//! It talks to an `agent-gateway` over its HTTP/SSE surface — nothing else. It
+//! It talks to an `agent-gateway` over its HTTP/SSE surface, nothing else. It
 //! authenticates as a tenant with a bearer token, lists that tenant's sessions,
 //! and drives one: submit a prompt and watch the run's records stream in as a
 //! chat transcript. The gateway does the cluster work; this is just the edge UI.

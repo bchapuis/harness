@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// A cluster node identity (spec §3.6): a bare uid. It carries no network
-/// endpoint — the transport's address book maps a node to where it is reached,
+/// endpoint: the transport's address book maps a node to where it is reached,
 /// so the same id routes over TCP in production and over the in-memory network
 /// under simulation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
@@ -34,13 +34,13 @@ impl std::fmt::Display for NodeId {
 /// A hierarchical actor name, e.g. `/user/greeter` (spec §3.6).
 ///
 /// The string is refcounted rather than owned because [`ActorId`] is cloned several times
-/// per message — once to resolve the target's mailbox, then once more for each event the
-/// send emits — and the path is the only part of an id that is not `Copy`. Sharing it
+/// per message (once to resolve the target's mailbox, then once more for each event the
+/// send emits), and the path is the only part of an id that is not `Copy`. Sharing it
 /// makes those clones an atomic increment instead of an allocation and a copy.
 ///
 /// `Arc<str>` and not `Arc<String>`: one pointer to one allocation, no second indirection.
 /// Every derived trait below forwards to `str`, so ordering and hashing are exactly what
-/// they were when this held a `String` — which matters, because ids are `BTreeMap` keys in
+/// they were when this held a `String`, which matters, because ids are `BTreeMap` keys in
 /// the host registry and the map's iteration order is observable in the event stream.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Path(std::sync::Arc<str>);
@@ -63,8 +63,8 @@ impl Path {
     }
 }
 
-// Written out rather than derived so the wire form stays a plain string — the same bytes
-// a `String` field produced — without enabling serde's `rc` feature, which would add
+// Written out rather than derived so the wire form stays a plain string (the same bytes
+// a `String` field produced) without enabling serde's `rc` feature, which would add
 // `Arc`/`Rc` impls across every crate in the tree for the sake of this one field.
 //
 // Deserializing shares nothing between ids: two that arrive with equal paths get separate
@@ -79,7 +79,7 @@ impl<'de> Deserialize<'de> for Path {
     // A visitor rather than `String::deserialize(..).map(Path::new)`: every remote envelope
     // carries an `ActorId`, so this is the one per-message path that builds a `Path`, and
     // going through `String` would allocate it only to copy it into the `Arc` and free it.
-    // Formats that can hand over a borrowed `&str` — postcard and serde_json both do —
+    // Formats that can hand over a borrowed `&str` (postcard and serde_json both do)
     // reach `visit_str` and allocate once.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Path, D::Error> {
         struct PathVisitor;
@@ -136,7 +136,7 @@ impl ActorId {
         }
     }
 
-    /// The node that owns this actor — the locality key (spec §3.6, §4.3).
+    /// The node that owns this actor: the locality key (spec §3.6, §4.3).
     pub fn node(&self) -> NodeId {
         self.node
     }
@@ -168,8 +168,8 @@ mod tests {
 
     #[test]
     fn a_path_serializes_as_the_plain_string_it_wraps() {
-        // How `Path` stores its bytes is an in-process decision — it is refcounted so
-        // that cloning an id is an atomic increment — and this is what keeps that
+        // How `Path` stores its bytes is an in-process decision (it is refcounted so
+        // that cloning an id is an atomic increment), and this is what keeps that
         // decision from reaching the wire. An id crosses nodes inside every remote
         // envelope, so a representation change that altered its encoding would be a
         // silent compatibility break between builds rather than a local optimization.
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn cloning_a_path_shares_its_bytes_rather_than_copying_them() {
         // The property the refcount buys, stated where it can regress: two clones of one
-        // path point at one allocation. A `Path` rebuilt from the same text does not —
+        // path point at one allocation. A `Path` rebuilt from the same text does not,
         // sharing comes from cloning, which is what the message path actually does.
         let path = Path::new("/user/greeter");
         let clone = path.clone();

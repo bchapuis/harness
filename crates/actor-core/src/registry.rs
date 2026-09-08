@@ -9,7 +9,7 @@
 //!
 //! The registry maps `manifest → dispatch entry` and is the **deserialization
 //! allowlist** (spec §5, §15): only listed message types are ever built from
-//! network bytes. A purely local actor overrides nothing — its default
+//! network bytes. A purely local actor overrides nothing: its default
 //! registration is empty and its messages flow by value (spec §4.3).
 
 use std::collections::BTreeMap;
@@ -26,7 +26,7 @@ use crate::reply::ReplyHandle;
 
 /// A monomorphized dispatch entry for one `(actor type, message type)`: decode a
 /// payload and enqueue the handler on `mailbox`, routing the reply through
-/// `reply`. A plain `fn` pointer — no codegen, no captured state (spec §4.4).
+/// `reply`. A plain `fn` pointer, no codegen, no captured state (spec §4.4).
 pub type DispatchFn<A> = fn(
     codec: &dyn Codec,
     payload: &[u8],
@@ -95,7 +95,7 @@ impl<A: Actor> HandlerRegistry<A> {
     }
 
     /// The dispatch entry for a *claimed* manifest, or `None` if `(A, manifest)`
-    /// is not registered — the receive loop turns `None` into
+    /// is not registered: the receive loop turns `None` into
     /// `CallError::Unhandled`. Takes `&str`, not [`Manifest`]: the claim is
     /// untrusted wire text, and this lookup is where it either matches a
     /// declared identity or is refused (spec §5, §15).

@@ -1,4 +1,4 @@
-//! Conformance: determinism harness (spec §18.1) — the *event stream* is
+//! Conformance: determinism harness (spec §18.1); the *event stream* is
 //! byte-identical for a fixed seed, and `run_for` stops cleanly at its bound
 //! even with perpetual work outstanding. Also covers the deterministic
 //! executor's seed-driven replay (timers firing in deadline order, virtual time
@@ -81,7 +81,7 @@ fn different_seeds_can_diverge_but_each_is_stable() {
 fn run_for_stops_at_the_time_bound_with_work_outstanding() {
     let sim = Simulation::new(1);
     let clock = sim.clock();
-    // A task that sleeps forever — never quiesces.
+    // A task that sleeps forever, never quiesces.
     sim.spawner().launch(Box::pin(async move {
         loop {
             clock.sleep(Duration::from_millis(100)).await;
@@ -98,7 +98,7 @@ fn run_for_stops_at_the_time_bound_with_work_outstanding() {
 // timers in deadline order, and advances virtual time for free.
 
 /// A workload whose interleaving depends on both scheduling and application
-/// randomness — every draw flows through the one seeded stream.
+/// randomness: every draw flows through the one seeded stream.
 fn run_workload(seed: u64) -> Vec<String> {
     let sim = Simulation::new(seed);
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -203,7 +203,7 @@ fn timeout_passes_through_fast_future() {
 // The foundational guarantee of deterministic simulation is that a seed
 // reproduces an entire run exactly. Here it is checked the strong way: a
 // workload is run twice under one seed and the two recorded *event streams*
-// (spec §16) must be byte-identical — swept across many seeds, for both a
+// (spec §16) must be byte-identical; swept across many seeds, for both a
 // single-node and a multi-node-under-faults workload. A `negative` test then
 // proves the check has teeth: a workload with a deliberate determinism leak
 // (ambient state outside the seed) is caught, with the first divergence
@@ -384,10 +384,10 @@ fn cluster_one_seed_replays_identically() {
 }
 
 /// A **registry**-mode workload whose operator churns a node `draining ⇄ up`
-/// every round — through the simulated external registry, with seeded sync
-/// latency and stale reads — while also discovering and calling. This exercises
-/// registry mode's *new* deterministic state — registry revisions, the sync
-/// loop, and the `MemberDraining`/`MemberResumed` event ordering — so the
+/// every round (through the simulated external registry, with seeded sync
+/// latency and stale reads) while also discovering and calling. This exercises
+/// registry mode's *new* deterministic state (registry revisions, the sync
+/// loop, and the `MemberDraining`/`MemberResumed` event ordering), so the
 /// reproducibility check has something mode-specific to pin (spec §9.4.2,
 /// §18.1).
 struct RegistryChurn {
@@ -437,7 +437,7 @@ impl ClusterWorkload for RegistryChurn {
             let clock = caller.clock().clone();
             for round in 0..rounds {
                 clock.sleep(Duration::from_millis(200)).await;
-                // Cordon and uncordon the victim on alternating rounds — registry
+                // Cordon and uncordon the victim on alternating rounds: registry
                 // mutations whose sync must reproduce byte-for-byte from the seed.
                 if round % 2 == 0 {
                     registry.drain(victim);
@@ -470,11 +470,11 @@ fn registry_mode_event_stream_is_byte_identical_across_seeds() {
 }
 
 /// A **leader**-mode workload whose operator churns a node `draining ⇄ up`
-/// every round — each a Raft proposal forwarded, committed, and applied — while
+/// every round (each a Raft proposal forwarded, committed, and applied) while
 /// the nemesis crashes and partitions nodes, forcing elections mid-transition.
 /// This pins leader mode's *new* deterministic state: election timers and
 /// jitter, log replication, commit-index stamps, and `LeaderElected` ordering
-/// (spec §9.4.3, §18.1) — the highest-risk determinism surface of the mode.
+/// (spec §9.4.3, §18.1); the highest-risk determinism surface of the mode.
 struct LeaderChurn {
     nodes: usize,
     rounds: u64,
@@ -516,7 +516,7 @@ impl ClusterWorkload for LeaderChurn {
             let clock = proposer.clock().clone();
             for round in 0..rounds {
                 clock.sleep(Duration::from_millis(200)).await;
-                // Cordon and uncordon the victim on alternating rounds — Raft
+                // Cordon and uncordon the victim on alternating rounds: Raft
                 // proposals whose elections, commits, and (under the nemesis)
                 // failures must reproduce byte-for-byte from the seed.
                 if round % 2 == 0 {
@@ -621,7 +621,7 @@ fn leader_mode_event_stream_is_byte_identical_across_seeds() {
 static RUNS: AtomicUsize = AtomicUsize::new(0);
 
 /// A workload that consults ambient state to decide how much traffic to drive,
-/// so two runs under the *same* seed diverge — exactly what the contract forbids.
+/// so two runs under the *same* seed diverge: exactly what the contract forbids.
 struct NonDeterministic;
 
 impl Workload for NonDeterministic {
@@ -720,7 +720,7 @@ impl ClusterWorkload for UtilitiesChurn {
                 clock.sleep(Duration::from_millis(200)).await;
                 for node in &nodes {
                     // A seeded-random pick, a rendezvous-hashed pick, and the
-                    // singleton instance — every utility selection path runs
+                    // singleton instance: every utility selection path runs
                     // every round, so a nondeterministic draw anywhere diverges
                     // the stream.
                     let random = Router::new(node, GREETERS, RouteStrategy::Random);

@@ -3,7 +3,7 @@
 //!
 //! **Hermeticity by construction.** The linker defines the `harness` host
 //! module and a fixed set of deterministic WASI stubs (seeded entropy, a
-//! frozen clock, discarded stdio — what wasi-libc needs to exist at all),
+//! frozen clock, discarded stdio, what wasi-libc needs to exist at all),
 //! and nothing else: instantiating a module that imports beyond that set
 //! fails as a `ToolError` outcome. The filesystem a guest can touch is the
 //! workspace capability handle of §3.1 and nothing else, and its outputs are
@@ -11,7 +11,7 @@
 //!
 //! **Determinism config.** Fuel metering is the REQUIRED CPU bound (§3.2):
 //! it is deterministic, so a fuel-exhausted guest traps at the same
-//! instruction on every run. Epoch interruption is deliberately absent — its
+//! instruction on every run. Epoch interruption is deliberately absent: its
 //! ticking needs an ambient timer thread, which the simulation determinism
 //! contract forbids (core spec §18.1). NaN canonicalization and
 //! deterministic relaxed-SIMD close the value-level holes; parallel
@@ -26,21 +26,21 @@
 //! **Guest ABI v1** (frozen once a tool description teaches it):
 //!
 //! - exports: `memory`, `alloc(len: i32) -> i32`, and
-//!   `run(ptr: i32, len: i32) -> i64` — the input JSON is written at
+//!   `run(ptr: i32, len: i32) -> i64`; the input JSON is written at
 //!   `alloc(len)`, and the return packs the output's location as
 //!   `(ptr << 32) | len`, UTF-8 JSON.
 //! - imports, module `harness`:
-//!   - `seed() -> i64` — the session's injected seed (S2);
-//!   - `ws_size(path_ptr, path_len) -> i64` — a file's byte length, or -1;
-//!   - `ws_read(path_ptr, path_len, dst_ptr, dst_cap) -> i64` — copies up to
+//!   - `seed() -> i64`: the session's injected seed (S2);
+//!   - `ws_size(path_ptr, path_len) -> i64`: a file's byte length, or -1;
+//!   - `ws_read(path_ptr, path_len, dst_ptr, dst_cap) -> i64`: copies up to
 //!     `dst_cap` bytes, returns the file's full length, or -1;
-//!   - `ws_write(path_ptr, path_len, src_ptr, src_len) -> i64` — writes the
+//!   - `ws_write(path_ptr, path_len, src_ptr, src_len) -> i64`: writes the
 //!     file (creating parents), returns `src_len`, or -1.
 //! - imports, module `wasi_snapshot_preview1` (for wasi-libc-linked guests
 //!   like the QuickJS runner): `random_get` (seeded xorshift),
 //!   `clock_time_get` (frozen epoch plus a per-call monotonic step),
 //!   `fd_write` (accepted and discarded), empty environ, and benign errno
-//!   stubs — each deterministic, never the OS.
+//!   stubs; each deterministic, never the OS.
 //!
 //! Filesystem failures return -1 to the guest rather than trapping: a guest
 //! probing for an absent file is normal control flow. Out-of-bounds memory
@@ -130,7 +130,7 @@ const MAX_TABLE_ELEMENTS: usize = 100_000;
 /// Cap on a `run_js` script read from a workspace file.
 const MAX_SCRIPT_BYTES: usize = 256 * 1024;
 /// Compiled-module cache entries per sandbox; eviction clears the whole
-/// cache — the one policy with no clock and no order sensitivity.
+/// cache: the one policy with no clock and no order sensitivity.
 const CACHE_ENTRIES: usize = 8;
 /// The frozen base the WASI clock stub reports (S2: time is injected, never
 /// ambient). Advances by a fixed step per read so naive elapsed-time code
@@ -358,7 +358,7 @@ impl ComputeTier {
 }
 
 /// The `run_js` script source: inline `code`, or a capped workspace `file`
-/// read through the handle — exactly one of the two.
+/// read through the handle; exactly one of the two.
 fn js_source(dir: &Arc<Dir>, input: &Value) -> Result<String, ToolError> {
     let code = input.get("code").and_then(Value::as_str);
     let file = input.get("file").and_then(Value::as_str);
@@ -554,7 +554,7 @@ fn wasi_stubs(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
          -> wasmtime::Result<i32> {
             // Accept and discard: the runner captures console output itself;
             // this only keeps libc's stdio from failing. The iovs count is
-            // capped first — host loops run outside the fuel meter, and no
+            // capped first: host loops run outside the fuel meter, and no
             // libc writev carries more than a handful of entries.
             if !(0..=1024).contains(&iovs_len) {
                 return Err(wasmtime::Error::msg(format!(
@@ -623,7 +623,7 @@ fn guest_memory(caller: &mut Caller<'_, HostState>) -> wasmtime::Result<Memory> 
 }
 
 /// The in-bounds range `ptr .. ptr + len` of a guest memory `data_len` bytes
-/// long, or an out-of-bounds trap — the one bounds check both slice accessors
+/// long, or an out-of-bounds trap: the one bounds check both slice accessors
 /// share. The guest controls `ptr` and `len`, so a range outside its own
 /// memory is an ABI violation (the `what` names the host function in the
 /// trap). `len` is clamped at zero first: a negative length is the guest's,

@@ -85,7 +85,7 @@ pub struct RunFailure {
 
 /// `Debug` is the report too (the anyhow convention), so `.unwrap()` and
 /// `assert!(…, "{failure:?}")` print the crafted account rather than a
-/// struct dump — no call site needs a `panic!("{failure}")` dance.
+/// struct dump, no call site needs a `panic!("{failure}")` dance.
 impl std::fmt::Debug for RunFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
@@ -260,7 +260,7 @@ pub fn run_seed<W: Workload>(workload: &W, seed: u64) -> Result<(), RunFailure> 
 }
 
 /// Sweep a workload across many seeds (swarm testing, spec §18.6), stopping at
-/// the first failing seed so it can be replayed — or, under
+/// the first failing seed so it can be replayed, or, under
 /// [`collect_all_failures`](crate::collect_all_failures), running to the end and
 /// reporting every one.
 ///

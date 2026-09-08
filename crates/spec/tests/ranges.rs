@@ -4,7 +4,7 @@
 //! `entity §N` (its invariants as **E1–E20**) is a citation: it points at entity's
 //! catalogue and says how far it runs. Nothing resolved it until now, and a
 //! catalogue that grows leaves every sibling stating its old extent describing a
-//! shorter document than the one on disk — each sentence still reading exactly
+//! shorter document than the one on disk: each sentence still reading exactly
 //! right. `spec::ranges` documents why the two checks below are the pair that
 //! holds, and why the two more obvious ones do not.
 
@@ -48,8 +48,8 @@ fn every_range_names_a_known_catalogue() {
 
 /// No citation names an invariant past the end of the catalogue it names.
 ///
-/// The span may skip a number — the agent runtime catalogue has no A2 and `A1–A8` is
-/// still how its extent is written — but it may not run off the end, whatever the
+/// The span may skip a number (the agent runtime catalogue has no A2 and `A1–A8` is
+/// still how its extent is written), but it may not run off the end, whatever the
 /// surrounding sentence meant by it.
 #[test]
 fn no_range_runs_past_its_catalogue() {
@@ -80,7 +80,7 @@ fn no_range_runs_past_its_catalogue() {
 /// Some document names each catalogue's last invariant.
 ///
 /// One spec's sub-span is another's full extent, so no single sentence can be held
-/// to state the whole range — but the union of them must reach the end, or the
+/// to state the whole range, but the union of them must reach the end, or the
 /// catalogue has grown past every description of it. This is the direction that
 /// catches a *new* invariant, and the one that catches a catalogue the index
 /// documents never mention at all.

@@ -43,7 +43,7 @@ fn every_catalogue_parses_into_rows() {
                 row.number,
             );
         }
-        // A row may legitimately name no suite — sandbox S3's `Network` tier does
+        // A row may legitimately name no suite: sandbox S3's `Network` tier does
         // not ship, so its cell says so. A whole catalogue naming none is instead
         // a parser that has stopped recognizing the column.
         if site.pointers != Pointers::Prose {

@@ -4,8 +4,8 @@
 //! either binding would host two *different* entity types. This enum keeps one
 //! `P` and dispatches inside it, so `--machine` is a flag rather than a build.
 //!
-//! Two arms, not three: the two real mechanisms — a Firecracker microVM and a
-//! container holding the same rootfs — are one binding over
+//! Two arms, not three: the two real mechanisms (a Firecracker microVM and a
+//! container holding the same rootfs) are one binding over
 //! `machine_host::MachineHost`, and which of them a node holds guests with is
 //! decided when that host is built (see `node::machine_host`).
 
@@ -21,7 +21,7 @@ use machine_entity::fake::FakeRuntimeProvider;
 
 /// Which binding `--machine` selected.
 pub enum NodeRuntimeProvider {
-    /// The simulation's guest (machine §7): no mechanism, no guest agent — a
+    /// The simulation's guest (machine §7): no mechanism, no guest agent; a
     /// deterministic stream of block writes into the image. Every durable
     /// property is exercised (provision, capture, hibernate, fail over), and
     /// nothing that needs a live guest is: an SSH channel has nothing to

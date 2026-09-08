@@ -110,7 +110,7 @@ async fn healthz() -> Response {
 }
 
 /// Readiness: `200` while serving, `503` once a shutdown signal has flipped the
-/// gateway to draining — so a load balancer stops routing new traffic before the
+/// gateway to draining, so a load balancer stops routing new traffic before the
 /// in-flight requests drain. Unauthenticated.
 async fn readyz<S: HarnessSystem>(State(gw): State<Arc<Gateway<S>>>) -> Response {
     if gw.is_ready() {
@@ -200,10 +200,10 @@ async fn prompt<S: HarnessSystem>(
     // axum's default plain-text rejection).
     let Json(mut body) = body.map_err(|e| GatewayError::bad_request(e.body_text()))?;
     // Clamp the caller's timeout to the edge ceiling once, before the
-    // buffered/streaming branch, so a client cannot park a run — and the
-    // resources behind it — indefinitely on either path.
+    // buffered/streaming branch, so a client cannot park a run (and the
+    // resources behind it) indefinitely on either path.
     body.within_secs = body.within_secs.min(gw.limits().max_within_secs);
-    // Record ownership before the run (best-effort and idempotent — see
+    // Record ownership before the run (best-effort and idempotent; see
     // `Gateway::record_ownership`); the run proceeds regardless.
     gw.record_ownership(&principal, &kind, &session).await;
     if wants_sse(&headers) {
@@ -235,7 +235,7 @@ async fn records<S: HarnessSystem>(
     let history = session_ref.tail(Seq::new(q.from), q.limit).await?;
     // `base` is the compaction floor (§10.2): a `from` below it asked for
     // records the session's snapshot has subsumed, so the page's history
-    // starts truncated — the client's one way to tell that from the journal
+    // starts truncated; the client's one way to tell that from the journal
     // slots the projection legally skips.
     Ok(Json(json!({ "records": history.events, "base": history.base })).into_response())
 }
@@ -393,7 +393,7 @@ async fn next_event<S: HarnessSystem>(
                 Ok(Ok(outcome)) => Event::default()
                     .event("outcome")
                     .data(serde_json::to_string(&outcome).unwrap_or_default()),
-                // Transport failure reaching/committing the run — the structured
+                // Transport failure reaching/committing the run: the structured
                 // error envelope, same code taxonomy as the HTTP body.
                 Ok(Err(e)) => error_event(e),
                 Err(e) => error_event(GatewayError::new(
@@ -417,7 +417,7 @@ fn ends_turn(records: &[(Seq, Record)], turn: &str) -> bool {
 
 /// A record batch as an SSE `records` event. The event `id:` is the last seq in
 /// the batch, so a client that drops mid-stream reconnects with `Last-Event-ID`
-/// (or `?from=`) and resumes exactly after it — the follower's cursor is
+/// (or `?from=`) and resumes exactly after it: the follower's cursor is
 /// exclusive, so no record is delivered twice.
 fn records_event(records: &[(Seq, Record)]) -> Event {
     let event = Event::default()

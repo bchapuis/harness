@@ -65,7 +65,7 @@ impl MachineAuthority for FakeAuthority {
     }
 
     async fn authorizes(&self, _machine: &EntityName, key: &PublicKey) -> bool {
-        // Compare key material, not the whole `PublicKey` — the wire key
+        // Compare key material, not the whole `PublicKey`: the wire key
         // carries no comment, so a `==` including the comment would never
         // match. A real authority compares fingerprints against the journaled
         // set (M4).
@@ -258,7 +258,7 @@ async fn an_authorized_key_attaches_and_bridges_an_exec_channel() {
 
 /// A guest that dies without reporting must not leave the client waiting. The
 /// exit status is the guest's to send, so when the guest is gone the door owes
-/// the client the close itself — otherwise an exec whose agent vanished hangs
+/// the client the close itself: otherwise an exec whose agent vanished hangs
 /// until some unrelated timeout severs the connection.
 #[tokio::test]
 async fn a_guest_that_dies_without_a_status_closes_the_channel() {

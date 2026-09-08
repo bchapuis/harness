@@ -1,4 +1,4 @@
-//! The node-local actor runtime — the implementor-facing seam (spec §4.2, §6, §12).
+//! The node-local actor runtime: the implementor-facing seam (spec §4.2, §6, §12).
 //!
 //! **This module is not application API.** Programs use [`Actor`], [`ActorRef`],
 //! [`Ctx`], and the [`ActorSystem`] trait; only code implementing a *new*
@@ -55,7 +55,7 @@ use crate::supervision::SupervisionDirective;
 use crate::system::ActorSystem;
 
 /// A source of fresh actor instances for (re)starts. Yields `Some` while the
-/// actor can be (re-)created and `None` once exhausted — a value-spawned actor
+/// actor can be (re-)created and `None` once exhausted: a value-spawned actor
 /// yields once, so a restart directive degrades to `Stop`; a factory-spawned one
 /// yields indefinitely (spec §11.2).
 pub type ActorFactory<A> = Box<dyn FnMut() -> Option<A> + Send>;
@@ -116,8 +116,8 @@ impl<A: Actor> ErasedActor for ActorEntry<A> {
 }
 
 /// A bounded record of how recently-resigned local actors terminated, so a
-/// watch placed *after* an actor is gone reports the true reason — `Failed`, not
-/// a blanket `Stopped` — to the watcher (spec §12, invariant #12).
+/// watch placed *after* an actor is gone reports the true reason (`Failed`, not
+/// a blanket `Stopped`) to the watcher (spec §12, invariant #12).
 ///
 /// Only the last [`CAP`](Terminations::CAP) terminations are kept; a death
 /// evicted from the FIFO falls back to the `Stopped` default. Keyed lookups and
@@ -166,12 +166,12 @@ struct HostState {
     /// nondeterminism.
     registry_cache: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
     next_path: AtomicU64,
-    /// This process incarnation's stamp on every actor id it assigns — see
+    /// This process incarnation's stamp on every actor id it assigns; see
     /// [`LocalHost::with_incarnation`].
     incarnation: u64,
 }
 
-/// Owns the actors on one node (spec §4.2). Cheap to clone — a shared handle to
+/// Owns the actors on one node (spec §4.2). Cheap to clone: a shared handle to
 /// the node's state.
 #[derive(Clone)]
 pub struct LocalHost {
@@ -184,13 +184,13 @@ impl LocalHost {
         LocalHost::with_incarnation(node, events, mailbox_capacity, 0)
     }
 
-    /// A host whose actor ids carry `incarnation` — the **process** incarnation,
+    /// A host whose actor ids carry `incarnation`: the **process** incarnation,
     /// not the per-actor one (spec §3.6).
     ///
     /// Paths are handed out by a counter that starts at zero, so a process that
     /// restarts under the same [`NodeId`] re-issues the very ids its predecessor
     /// used. Without the stamp, a peer holding a ref from before the restart
-    /// resolves it against whatever actor now occupies that path — a *different*
+    /// resolves it against whatever actor now occupies that path: a *different*
     /// actor, since spawn order does not survive a restart. Stamping the process
     /// incarnation makes such a ref fail to resolve instead, which is a
     /// `DeadLetter`, the one outcome that proves the command never ran (§8), so
@@ -383,11 +383,11 @@ impl LocalHost {
         }
     }
 
-    /// Register a death-watch subscription (spec §12) — or, when `target` has
+    /// Register a death-watch subscription (spec §12), or, when `target` has
     /// already terminated, hand back the immediate `Terminated` delivery
     /// (invariant #12) carrying the true recorded reason (`Failed` vs
     /// `Stopped`; the graceful default once evicted). Judging the already-dead
-    /// case is the host's job — it owns the termination record — so every
+    /// case is the host's job (it owns the termination record), so every
     /// system reports the same reason instead of each re-deriving it. The
     /// caller launches the returned future rather than awaiting it inline:
     /// delivery applies mailbox backpressure, and a watcher calling `watch`
@@ -410,7 +410,7 @@ impl LocalHost {
     }
 
     /// Register a death-watch subscription **without** the already-dead check
-    /// (spec §12) — for a *remote* target this host cannot judge, tracked
+    /// (spec §12), for a *remote* target this host cannot judge, tracked
     /// locally so a synthesized node-down or a forwarded `Terminated` frame
     /// reaches the watcher. For a local target use
     /// [`watch`](LocalHost::watch), which owns the watch-after-death case.
@@ -462,7 +462,7 @@ impl LocalHost {
     /// it is addressed to, removing only that subscription (spec §12). An
     /// inbound frame is addressed: fanning it to *every* local watcher would
     /// give the others a spurious extra signal (a second watcher's
-    /// watch-after-death re-watch must not re-notify the first — invariant #11).
+    /// watch-after-death re-watch must not re-notify the first; invariant #11).
     pub async fn deliver_terminated_to(
         &self,
         target: &ActorId,
@@ -493,7 +493,7 @@ impl LocalHost {
         }
     }
 
-    /// Deliver `Terminated` to every watcher of `target`, then forget them — so
+    /// Deliver `Terminated` to every watcher of `target`, then forget them, so
     /// each watcher is notified exactly once (invariant #11).
     async fn notify_terminated(&self, target: &ActorId, reason: TerminationReason) {
         // Drop the lock before awaiting delivery: the guard is released at the
@@ -582,8 +582,8 @@ enum Step<A> {
 }
 
 /// The serial executor + supervisor for one actor (spec §6, §11): the
-/// loop-invariant state of one actor's whole life — host, context, factory,
-/// supervision, clock — bundled once, so each step below reads as a method
+/// loop-invariant state of one actor's whole life (host, context, factory,
+/// supervision, clock) bundled once, so each step below reads as a method
 /// instead of a ten-parameter call.
 struct Executor<A: Actor, C: Clock> {
     host: LocalHost,
@@ -763,7 +763,7 @@ impl<A: Actor, C: Clock> Executor<A, C> {
         // Built once and polled across every iteration, rather than rebuilt per message.
         // Awaiting a channel registers a listener on it; a fresh future each time round
         // meant registering and deregistering on the escalation channel for every message
-        // an actor handled, to watch for something that arrives at most once — and when it
+        // an actor handled, to watch for something that arrives at most once, and when it
         // does arrive, this loop returns rather than coming back for another. Holding one
         // future keeps that registration in place instead of churning it.
         let escalated = escalation.recv();
@@ -800,8 +800,8 @@ impl<A: Actor, C: Clock> Executor<A, C> {
 }
 
 /// Run an actor's `stopped` hook with a panic contained (spec §11.1): the actor
-/// is already on its way out, so a panic there changes nothing about the stop —
-/// the id is still released and watchers still notified — and MUST NOT take the
+/// is already on its way out, so a panic there changes nothing about the stop
+/// (the id is still released and watchers still notified), and MUST NOT take the
 /// executor, and with it the node, down.
 async fn stop_contained<A: Actor>(actor: A, reason: StopReason) {
     let _ = AssertUnwindSafe(actor.stopped(reason)).catch_unwind().await;

@@ -1,4 +1,4 @@
-//! Conformance: membership / SWIM (spec §9, §10) — the observable reachability
+//! Conformance: membership / SWIM (spec §9, §10); the observable reachability
 //! transitions, and that a conservative policy never downs across a long
 //! partition. Also covers SWIM failure detection and the node-down cascade under
 //! fault injection (spec §8.1), plus incarnation-based gossip dissemination and
@@ -71,14 +71,14 @@ fn fast_swim() -> SwimConfig {
 
 /// SWIM timings for the gossip tests: these exercise gossip dissemination,
 /// refutation, and downing (invariants #14–#17), which need a *direct*-probe
-/// suspicion to actually form — so indirect probing is disabled here.
+/// suspicion to actually form, so indirect probing is disabled here.
 fn gossip_swim() -> SwimConfig {
     SwimConfig {
         probe_interval: Duration::from_millis(100),
         rtt: Duration::from_millis(50),
         // These tests exercise gossip dissemination, refutation, and downing
         // (invariants #14–#17), which need a *direct*-probe suspicion to actually
-        // form — so indirect probing is disabled here; it has its own test.
+        // form, so indirect probing is disabled here; it has its own test.
         suspect_timeout: Duration::from_millis(500),
         indirect_count: 0,
     }
@@ -196,7 +196,7 @@ fn indirect_probing_keeps_a_lossy_but_reachable_peer_up() {
 fn the_coordinator_role_falls_over_when_the_coordinator_leaves() {
     // Join/leave admission is covered in conformance_join.rs; here we pin the
     // coordinator rule (spec §9.4.4 item 3): a deterministic role, not an
-    // election — the lowest-address up, reachable member — that falls over when
+    // election (the lowest-address up, reachable member) that falls over when
     // that node gracefully leaves (spec §9.3).
     let sim = Simulation::new(7);
     let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);
@@ -243,12 +243,12 @@ fn the_coordinator_only_acts_on_a_stable_fully_reachable_view() {
     );
 
     let d = net.join_seeded(D, &[A]);
-    sim.run_for(Duration::from_secs(5)); // plenty of time — but the view is not stable
+    sim.run_for(Duration::from_secs(5)); // plenty of time, but the view is not stable
 
     assert_eq!(
         d.membership().self_status(),
         MemberStatus::Joining,
-        "no admission while a member is unreachable — the view is in flux",
+        "no admission while a member is unreachable: the view is in flux",
     );
 
     net.heal();
@@ -265,7 +265,7 @@ fn the_coordinator_only_acts_on_a_stable_fully_reachable_view() {
 #[test]
 fn downing_is_exempt_from_the_stability_gate() {
     // The carved-out exception (spec §9.4.4 items 3–4): applying the downing
-    // policy to an unreachable member cannot be gated on full reachability —
+    // policy to an unreachable member cannot be gated on full reachability;
     // the node being downed is unreachable by definition. The coordinator downs
     // it even though its view is not fully reachable.
     let sim = Simulation::new(9);

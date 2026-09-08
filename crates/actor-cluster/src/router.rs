@@ -10,7 +10,7 @@
 //! snapshot; the listing is replicated local state, so the read is synchronous
 //! and needs no background pump. The listing's order is deterministic (the
 //! registry is an ordered set), so round-robin is seed-reproducible, and the
-//! random strategy draws from the system's seeded entropy (core spec §18.1) —
+//! random strategy draws from the system's seeded entropy (core spec §18.1),
 //! never a host RNG.
 //!
 //! Keyed (rendezvous-hashed) routing is the `*_by` family, available regardless
@@ -20,7 +20,7 @@
 //! because a typed router serves many message types and so cannot express a
 //! stored extractor.
 //!
-//! An empty listing fails fast with [`CallError::DeadLetter`] — the router
+//! An empty listing fails fast with [`CallError::DeadLetter`]: the router
 //! never buffers, queues, or retries (core spec §1.2, §14.2). Callers that
 //! want to pre-check use [`Router::is_empty`].
 

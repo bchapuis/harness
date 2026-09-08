@@ -1,7 +1,7 @@
 //! Resume conformance (agent spec §6.2, §7.5; invariant A1): a session
 //! hibernates between turns and rehydrates from the journal on the next contact
 //! (entity §9, §10); the resumed journal matches an uninterrupted control run,
-//! record for record — the differential test behind A1. (Mid-run crash/migration
+//! record for record; the differential test behind A1. (Mid-run crash/migration
 //! resume of a *orphaned* call, §5.5, is a `Quorum`-tier leadership-move phenomenon,
 //! exercised under the clustered simulation; the `Local` tier is faultless by design.)
 
@@ -136,7 +136,7 @@ fn a_hibernated_session_resumes_to_the_control_transcript() {
     assert_eq!(starts, 2, "one RunStarted per turn, none for the resume");
 
     // No `WorkspaceReset` on resume: the workspace is the agent's own durable
-    // facet (entity §7.11), rematerialized on reactivation — a routine resume
+    // facet (entity §7.11), rematerialized on reactivation; a routine resume
     // is never a loss (§5.5). Only a mid-activation `EnvironmentLost` resets.
     assert!(
         !resumed

@@ -5,13 +5,13 @@
 #
 # The gateway is the single public edge: an Orleans-style cluster *client* that
 # joins the transport as a non-voting, non-hosting member and addresses session
-# entities directly. The nodes have no client-facing listener — they host entities
+# entities directly. The nodes have no client-facing listener: they host entities
 # and vote in Raft; each admits the gateway with `--client`.
 #
 # The gateway runs in INSECURE dev mode here (no --auth-tokens): the bearer token
 # is taken as the tenant, unverified. That keeps this a one-command demo, and is
 # allowed only because the public bind is loopback. For the authenticated,
-# network-facing edge — opaque tokens — see k8s/. Drive sessions with `curl`
+# network-facing edge, with opaque tokens, see k8s/. Drive sessions with `curl`
 # (below) or any HTTP client.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -41,7 +41,7 @@ IMAGE=${AGENT_SANDBOX_IMAGE:-python:3.12-slim}
 mkdir -p "$DATA"
 
 # A real model composes the shell commands this demo runs, so they execute
-# confined in a per-session container — never as your user. The container's
+# confined in a per-session container, never as your user. The container's
 # workspace is backed by a durable filesystem entity, so a session's files
 # survive hibernation and migration.
 if ! docker version >/dev/null 2>&1; then
@@ -54,12 +54,12 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 
 # A node from an earlier run would silently join this cluster (same ports,
-# same secret) and confuse the demo — refuse to start over one. 7401-7403 are
+# same secret) and confuse the demo: refuse to start over one. 7401-7403 are
 # the node transports, 7500 the gateway's (port_base + GATEWAY_ID - 1), 8080
 # the gateway's public HTTP.
 for p in 7401 7402 7403 7500 8080; do
   if (echo > "/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
-    echo "Port $p is busy — an old demo still running?  pkill -f 'agent-'" >&2
+    echo "Port $p is busy. An old demo still running?  pkill -f 'agent-'" >&2
     exit 1
   fi
 done
@@ -89,7 +89,7 @@ for i in 0 1 2; do
 done
 
 # The gateway joins the cluster as client id $GATEWAY_ID and serves HTTP/SSE on
-# 8080. No --auth-tokens, so it runs INSECURE (loopback only) — the bearer token
+# 8080. No --auth-tokens, so it runs INSECURE (loopback only): the bearer token
 # is the tenant.
 echo "▸ starting the HTTP gateway on 127.0.0.1:8080 (logs in $DATA/gateway.log)"
 "$GATEWAY_BIN" --bind 127.0.0.1:8080 --secret "$SECRET" \
@@ -100,7 +100,7 @@ until (echo > "/dev/tcp/127.0.0.1/8080") 2>/dev/null; do sleep 0.2; done
 
 cat <<EOF
 
-  cluster up — node 1: pid ${PIDS[0]}, node 2: pid ${PIDS[1]}, node 3: pid ${PIDS[2]}, gateway: pid ${PIDS[3]}
+  cluster up. Node 1: pid ${PIDS[0]}, node 2: pid ${PIDS[1]}, node 3: pid ${PIDS[2]}, gateway: pid ${PIDS[3]}
 
   Drive it over HTTP through the gateway. The bearer token is the tenant; stream
   the run as Server-Sent Events:
@@ -116,7 +116,7 @@ cat <<EOF
     GET  /v1/assistant/http-demo/stream?turn=t-1     observe a run live (SSE)
     POST /v1/assistant/http-demo/cancel?turn=t-1     cancel a run
 
-  A different bearer token is a wholly separate tenant — its sessions never mix:
+  A different bearer token is a wholly separate tenant, and its sessions never mix:
     curl ... -H 'Authorization: Bearer bob' ...
 
   Failure drill (a session outlives its node):

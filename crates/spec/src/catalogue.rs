@@ -1,21 +1,21 @@
 //! The invariant catalogues, read out of the specifications.
 //!
 //! Each spec carries an invariant catalogue, and each is *also* written down in
-//! Rust beside the suite that verifies it — `e_catalogue()`, `b_catalogue()`,
+//! Rust beside the suite that verifies it: `e_catalogue()`, `b_catalogue()`,
 //! `core_catalogue()`, and their siblings. The Rust table is what the per-crate
 //! `conformance_catalogue.rs` drift test already guards: it holds the numbering
 //! complete and every test file it points at real.
 //!
 //! What nothing guarded until now is that the *two tables agree*. They are two
 //! hand-maintained copies of one fact, and an invariant added to one, a section
-//! moved in one, or a suite renamed in one leaves the other quietly wrong — the
+//! moved in one, or a suite renamed in one leaves the other quietly wrong: the
 //! failure the Rust table was introduced to prevent, reappearing one level up.
 //!
 //! This module reads the specification's copy so a crate's drift test can compare
 //! the two. It reads rather than generates because the prose is not derivable: a
 //! spec row states the invariant in full, with its reasoning, where the Rust
 //! `property` field is a one-line summary. Only the load-bearing parts are
-//! compared — which invariants exist, which sections define them, and which
+//! compared, which invariants exist, which sections define them, and which
 //! suites verify them.
 //!
 //! # The two shapes, and four vocabularies
@@ -27,7 +27,7 @@
 //! trusting one: entity, utilities, sandbox, and harness name test **files**,
 //! wal names test **functions**, and blob and machine name functions where their
 //! Rust catalogues name files. Only matching vocabularies can be compared, and
-//! [`Pointers`] records which is which per site — so where the suite axis is
+//! [`Pointers`] records which is which per site, so where the suite axis is
 //! skipped, it is skipped by a declaration naming the reason rather than by a
 //! comparison that finds nothing.
 //!
@@ -36,7 +36,7 @@
 //! [`compare`] reports three kinds of disagreement: an invariant in one table and
 //! not the other, a different set of defining sections, and a different set of
 //! verifying suites. It deliberately does not compare the prose, and it does not
-//! see a `Verify::Checker` or a `Verify::CompileTime` — those name a checker or a
+//! see a `Verify::Checker` or a `Verify::CompileTime`: those name a checker or a
 //! trait bound rather than a file, and a spec row mentions them in prose where it
 //! mentions them at all. Continuous checkers have their own cross-check in
 //! `actor_simulation::checker_coverage`.
@@ -72,7 +72,7 @@ pub enum Pointers {
     /// catalogue writes, and the `compile_fail.rs` runner matches the
     /// `compile_fail` case directory beside it.
     Files,
-    /// Test functions, `` `a_torn_tail_is_discarded_and_appends_continue` `` —
+    /// Test functions, `` `a_torn_tail_is_discarded_and_appends_continue` ``:
     /// what the wal catalogue points at, its suite living in `src/lib.rs`.
     Functions,
     /// The two copies do not name the same kind of thing, so there is nothing to
@@ -195,7 +195,7 @@ impl Row {
     /// Build the implementation's side of a row from a Rust catalogue entry.
     ///
     /// `spec` is the entry's section list in any of the forms the tables use
-    /// (`§6, §8`, `entity §6, §8`, `wal §3.2-§3.4`) — only the numbers are kept.
+    /// (`§6, §8`, `entity §6, §8`, `wal §3.2-§3.4`), only the numbers are kept.
     ///
     /// `verify` is the text of the entry's `Verify` entries, passed whole. A
     /// caller need not sort them: several are prose with the file names embedded
@@ -513,7 +513,7 @@ fn section_numbers(text: &str) -> Vec<String> {
 
 /// The suite names a `Verified by` cell points at.
 ///
-/// A cell also carries prose — a checker's name, a `(trybuild)` aside, the
+/// A cell also carries prose: a checker's name, a `(trybuild)` aside, the
 /// specific test function inside a file. [`Pointers`] says which of its backticked
 /// tokens are the pointers, and the rest are left alone.
 fn suite_pointers(cell: &str, kind: Pointers) -> BTreeSet<String> {
@@ -541,7 +541,7 @@ fn pointer_tokens(text: &str, kind: Pointers) -> BTreeSet<String> {
     text.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '`'))
         .map(|token| token.trim_matches(|c: char| c == '.' || c == ':' || c == '*'))
         .filter(|token| match kind {
-            // A `.rs` file, or a path under a `tests/` directory —
+            // A `.rs` file, or a path under a `tests/` directory:
             // `entity/tests/compile_fail` is a trybuild case directory and
             // counts. A slash alone is not enough: the prose around these names
             // says things like "open/release accounting".

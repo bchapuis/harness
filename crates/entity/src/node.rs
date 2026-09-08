@@ -7,7 +7,7 @@
 //! once lived in [`EntityConfig`], which is per entity type, and that placement was
 //! wrong in a way that showed up at every call site: a node hosting three types wrote
 //! the same two handles into three configs, and a config that omitted one silently got
-//! a *second* pool — an inline one — rather than the node's. Neither mistake is
+//! a *second* pool (an inline one) rather than the node's. Neither mistake is
 //! visible in a type signature, and the second is invisible at runtime too, right up
 //! until a stalled device blocks the executor the pool was added to protect.
 //!
@@ -36,7 +36,7 @@ pub(crate) struct NodeCapabilities {
 impl Default for NodeCapabilities {
     /// The documented defaults: blocking store I/O runs inline on the calling async
     /// worker, and measurements are discarded. Correct, and what the deterministic
-    /// simulation requires (§14) — see [`crate::blocking`] for why the pool is a seam
+    /// simulation requires (§14); see [`crate::blocking`] for why the pool is a seam
     /// rather than a default.
     fn default() -> NodeCapabilities {
         NodeCapabilities {
@@ -84,7 +84,7 @@ impl std::fmt::Debug for NodeCapabilities {
 /// ```
 ///
 /// Hosting a type straight off the system (`system.entities(..)`) still works and takes
-/// the defaults — the shape every test and the `Local` tier want.
+/// the defaults; the shape every test and the `Local` tier want.
 #[derive(Clone)]
 pub struct EntityNode<S: EntitySystem> {
     system: S,
@@ -123,7 +123,7 @@ impl<S: EntitySystem> EntityNode<S> {
     }
 
     /// Host entities of type `G` under its own `G::ENTITY_TYPE`, building each
-    /// activation with `G::default` — this node's form of
+    /// activation with `G::default`: this node's form of
     /// [`EntityExt::entity`](crate::EntityExt::entity).
     pub fn entities<G>(&self, config: EntityConfig) -> Entities<G>
     where
@@ -133,7 +133,7 @@ impl<S: EntitySystem> EntityNode<S> {
     }
 
     /// Host entities of type `G` under an explicit runtime type name with a
-    /// caller-supplied activation factory — this node's form of
+    /// caller-supplied activation factory, this node's form of
     /// [`EntityExt::entities_named`](crate::EntityExt::entities_named).
     pub fn entities_named<G>(
         &self,
@@ -154,7 +154,7 @@ impl<S: EntitySystem> EntityNode<S> {
         )
     }
 
-    /// Host entities of type `G` with durable-alarm firing — this node's form of
+    /// Host entities of type `G` with durable-alarm firing: this node's form of
     /// [`EntityExt::entities_with_alarms`](crate::EntityExt::entities_with_alarms).
     pub fn entities_with_alarms<G>(
         &self,
@@ -168,7 +168,7 @@ impl<S: EntitySystem> EntityNode<S> {
     }
 
     /// Host entities of type `G` under an explicit runtime type name with durable-alarm
-    /// firing — this node's form of
+    /// firing: this node's form of
     /// [`EntityExt::entities_named_with_alarms`](crate::EntityExt::entities_named_with_alarms).
     pub fn entities_named_with_alarms<G>(
         &self,

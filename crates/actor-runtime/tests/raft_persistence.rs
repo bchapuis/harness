@@ -3,8 +3,8 @@
 //!
 //! A three-voter leader-mode cluster runs over real TCP on loopback, with each
 //! voter's Raft state in a [`FileRaftWAL`] directory. A committed
-//! transition must be on a stopped voter's disk; the voter must come back —
-//! same identity, same directory, same port — with that state, and the cluster
+//! transition must be on a stopped voter's disk; the voter must come back
+//! (same identity, same directory, same port) with that state, and the cluster
 //! must keep committing transitions with the restarted voter participating.
 //! This ties real cluster traffic → bytes on disk → reload, end to end; the
 //! storage format itself (recovery, truncation, torn tails) is covered by the
@@ -128,8 +128,8 @@ async fn a_restarted_voter_recovers_its_persisted_raft_state() {
     )
     .await;
 
-    // Stop voter B — whichever role it held; a leader restart just adds a
-    // failover to the scenario — and give its loops a beat to wind down.
+    // Stop voter B: whichever role it held; a leader restart just adds a
+    // failover to the scenario, and give its loops a beat to wind down.
     b.shutdown();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -187,7 +187,7 @@ async fn a_restarted_voter_recovers_its_persisted_raft_state() {
     .await;
 
     // New transitions still commit, proposed *by the restarted voter*: resume C
-    // and watch the whole cluster — B2 included — converge.
+    // and watch the whole cluster (B2 included) converge.
     let mut resumed = b2.resume(C).await;
     if !resumed {
         // One retry: a leader election may still be settling if B led before.

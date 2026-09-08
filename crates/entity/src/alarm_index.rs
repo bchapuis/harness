@@ -1,20 +1,20 @@
 //! The per-shard alarm index (spec §7.16): a durable directory of the pending
 //! [`Alarm`](crate::Alarm) deadlines of one entity type's entities, so a node that
 //! acquires a shard's leadership can re-activate the entities that owe a callerless
-//! wake — **without** scanning every entity or holding them all resident.
+//! wake; **without** scanning every entity or holding them all resident.
 //!
 //! # Why it exists
 //!
 //! An alarm fires from an in-activation timer, so a resident entity always fires on
 //! time. The gap is every **deactivation**: a failover deactivates a shard's entities
 //! (a forced step-down, §13), and idle hibernation would otherwise pin an alarmed
-//! entity resident forever — in either case an alarm with no caller would sleep
+//! entity resident forever, in either case an alarm with no caller would sleep
 //! until the entity is next touched. This index closes that gap. Each
 //! [`Host`](crate::Host) registers its entity's pending deadline here on every alarm
 //! change; the alarm **driver** reads the index for the shards its node leads and
 //! re-activates each pending entity, whose [`on_activate`](crate::Entity::on_activate)
-//! re-arms its own timer (**E3**). The index is a *hint* — the entity's own alarm
-//! facet is the source of truth — so a stale entry is reconciled on the next
+//! re-arms its own timer (**E3**). The index is a *hint* (the entity's own alarm
+//! facet is the source of truth), so a stale entry is reconciled on the next
 //! activation, never a lost or double fire. The one place a *missing* entry would
 //! be unrecoverable is a voluntarily hibernated entity, which is why the host
 //! hibernates an alarmed entity only after its registration is **acked** (host.rs).
@@ -22,7 +22,7 @@
 //! # Shape
 //!
 //! One index entity per **(target entity type, shard)**, keyed
-//! [`index_key`](index_key)-style, holding an `EntityName → due-nanos` map — a small
+//! [`index_key`](index_key)-style, holding an `EntityName → due-nanos` map: a small
 //! event-sourced map with a pure fold, mirroring
 //! [`tenancy::Directory`](../../tenancy/index.html). Reads
 //! (`due_before`) serve locally from the activation (§7.5); registration is
@@ -56,9 +56,9 @@ pub fn index_key(target_type: &str, shard: usize) -> String {
 /// One registered entity's state: its pending deadline and the **journal head** of
 /// the target entity at the commit that last changed it. The head totally orders a
 /// entity's own alarm changes (it advances by every commit and never regresses, even
-/// across activations), so the index resolves an out-of-order pair of updates — the
+/// across activations), so the index resolves an out-of-order pair of updates (the
 /// register and clear a single activation may emit as independently launched
-/// asks — by keeping the higher head.
+/// asks) by keeping the higher head.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct Slot {
     due: u64,
@@ -66,7 +66,7 @@ struct Slot {
 }
 
 /// The index's journal record: the unit of durable change (entity §4.1). The fold
-/// is pure — no clock, no I/O — so live commit and replay agree (**E2**).
+/// is pure (no clock, no I/O), so live commit and replay agree (**E2**).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Change {
     /// The entity's alarm is pending for this deadline (ns), as of this journal head.
@@ -83,7 +83,7 @@ pub struct Pending {
 
 impl Pending {
     /// The registered entities whose deadline is at or before `before` (nanoseconds),
-    /// in stable name order — the driver's due set for one sweep.
+    /// in stable name order: the driver's due set for one sweep.
     pub fn due_before(&self, before: u64) -> Vec<EntityName> {
         self.slots
             .iter()
@@ -110,7 +110,7 @@ impl Pending {
     }
 }
 
-/// A per-shard alarm index for one target entity type — a durable `EntityName → due`
+/// A per-shard alarm index for one target entity type: a durable `EntityName → due`
 /// directory (spec §7.16). Generic over the hosting system so it runs on either
 /// durability tier; the activation's state is the folded [`Pending`] map, rebuilt
 /// from the journal (entity §1).
@@ -197,7 +197,7 @@ impl<S: EntitySystem> EntityHandler<Sync> for AlarmIndex<S> {
     }
 }
 
-/// The registered entities due at or before `before` (nanoseconds) — the driver's
+/// The registered entities due at or before `before` (nanoseconds): the driver's
 /// sweep query. A read; emits no events (§7.5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DueBefore {
@@ -218,7 +218,7 @@ impl<S: EntitySystem> EntityHandler<DueBefore> for AlarmIndex<S> {
     }
 }
 
-/// Every registered entity and its deadline — for tests and diagnostics. A read.
+/// Every registered entity and its deadline, for tests and diagnostics. A read.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AllPending;
 impl Message for AllPending {

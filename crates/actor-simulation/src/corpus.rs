@@ -20,7 +20,7 @@ const CORPUS: &str = include_str!("../corpus.txt");
 /// The seeds recorded against a workload name, in the order written.
 ///
 /// The name is the workload's `name()`, so a failure report names its own
-/// corpus key. An unknown name has no seeds — a workload with no history yet.
+/// corpus key. An unknown name has no seeds: a workload with no history yet.
 pub fn regression_seeds(workload: &str) -> impl Iterator<Item = u64> {
     index()
         .get(workload)

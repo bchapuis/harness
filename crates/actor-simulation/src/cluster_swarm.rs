@@ -7,8 +7,8 @@
 //! virtual time (the failure detector never quiesces) and reproducible from its
 //! seed; a failure is reported with the seed for replay.
 //!
-//! The three actions that reach past the wire — a registry outage, a process
-//! replacement, a release change — need the workload's [`Consent`], so a run only
+//! The three actions that reach past the wire (a registry outage, a process
+//! replacement, a release change) need the workload's [`Consent`], so a run only
 //! does to a workload what that workload said it could survive.
 
 use std::sync::Arc;
@@ -109,7 +109,7 @@ pub type Rehost = Arc<dyn Fn(&SimNode) + Send + Sync>;
 /// compatibility §4).
 ///
 /// A [`ClusterWorkload`] returning `Some` consents to the nemesis moving its
-/// nodes between these windows mid-run — one step at a time, forward or back, so
+/// nodes between these windows mid-run: one step at a time, forward or back, so
 /// a run mixes releases the way a real rollout does and reaches a rollback the
 /// same way. Every node starts at stage 0.
 ///
@@ -130,8 +130,8 @@ impl Rollout {
     ///
     /// # Panics
     ///
-    /// If fewer than two stages are given — a rollout with one release upgrades
-    /// nothing — or if some adjacent pair is not a legal step (see above).
+    /// If fewer than two stages are given (a rollout with one release upgrades
+    /// nothing), or if some adjacent pair is not a legal step (see above).
     pub fn new(stages: Vec<compat::Window>) -> Rollout {
         assert!(
             stages.len() >= 2,
@@ -213,7 +213,7 @@ pub enum ClusterModeSpec {
 impl ClusterModeSpec {
     /// Leader mode at the tree's simulated Raft timings
     /// ([`ELECTION_TIMEOUT`](crate::config::ELECTION_TIMEOUT),
-    /// [`HEARTBEAT_INTERVAL`](crate::config::HEARTBEAT_INTERVAL)) — what every
+    /// [`HEARTBEAT_INTERVAL`](crate::config::HEARTBEAT_INTERVAL)): what every
     /// clustered swarm in the tree wants, so the two durations are named here
     /// rather than written out per workload.
     ///
@@ -261,7 +261,7 @@ pub trait ClusterWorkload {
         }
     }
 
-    /// What it takes to bring a **restarted** node back into service — and, by
+    /// What it takes to bring a **restarted** node back into service, and, by
     /// being `Some` at all, this workload's consent for the nemesis to restart
     /// one (spec §18.3).
     ///
@@ -282,7 +282,7 @@ pub trait ClusterWorkload {
         None
     }
 
-    /// The releases the nemesis may move this workload's nodes between — and, by
+    /// The releases the nemesis may move this workload's nodes between, and, by
     /// being `Some` at all, its consent to being run mixed-version (spec §18.3,
     /// compatibility §4).
     ///
@@ -322,7 +322,7 @@ enum Fault {
     /// flowing: the asymmetric case `Partition` cannot express, and the source
     /// of zombie leaders (§8.1).
     PartitionOneWay,
-    /// Isolate a node from every peer — a crash as the rest of the cluster sees
+    /// Isolate a node from every peer: a crash as the rest of the cluster sees
     /// it. The process keeps running; [`Fault::Restart`] is the one that kills it.
     Crash,
     /// Freeze a node's tasks for a bounded window, then thaw: a GC stall or VM
@@ -336,7 +336,7 @@ enum Fault {
     Heal,
     /// A quiet round.
     Quiet,
-    /// A bounded registry outage window — the "stalled, lagging, or unavailable
+    /// A bounded registry outage window: the "stalled, lagging, or unavailable
     /// registry sync" fault (spec §9.4.2 item 6).
     RegistryOutage,
     /// Move one node a single step along the workload's [`Rollout`], forward or
@@ -350,8 +350,8 @@ enum Fault {
 /// What a run may do to its nodes beyond dropping their frames (spec §18.3).
 ///
 /// Every field is an opt-in the workload granted, or a resource only the driver
-/// could build. They travel together because they are one question — how far past
-/// the wire this run is allowed to reach — and because a nemesis taking them
+/// could build. They travel together because they are one question (how far past
+/// the wire this run is allowed to reach), and because a nemesis taking them
 /// one-by-one grows an argument per fault.
 pub(crate) struct Consent {
     /// The simulated external registry, in registry-based mode (spec §9.4.2).
@@ -364,7 +364,7 @@ pub(crate) struct Consent {
 
 /// The actions available to one run. The network-only ones (both partitions,
 /// crash, freeze, heal, quiet) are always in it; the three that touch more than
-/// the wire — an external registry, a process replacement, a release change —
+/// the wire (an external registry, a process replacement, a release change)
 /// are gated on the run having consented to them.
 fn vocabulary(consent: &Consent) -> Vec<Fault> {
     let mut faults = vec![
@@ -501,7 +501,7 @@ async fn nemesis(
                 }
                 stages[i] = stage;
                 net.upgrade(nodes[i], rollout.window(stage));
-                // A release is a process replacement, not a live patch — but only
+                // A release is a process replacement, not a live patch, but only
                 // where the workload can put a fresh node back to work, and never
                 // the first node, for the reason `Fault::Restart` gives.
                 if i > 0
@@ -516,7 +516,7 @@ async fn nemesis(
 
 /// The outcome of driving one cluster run: whether the workload's traffic
 /// completed within the time budget, and the fault activity the run exercised
-/// (so a swarm can assert faults actually fired — spec §18.3).
+/// (so a swarm can assert faults actually fired; spec §18.3).
 pub(crate) struct ClusterRun {
     pub completed: bool,
     pub faults: FaultStats,
@@ -693,7 +693,7 @@ pub fn run_cluster_seed<W: ClusterWorkload>(workload: &W, seed: u64) -> Result<(
     eval_cluster(workload, seed).map(|_| ())
 }
 
-/// Sweep a cluster workload across many seeds, stopping at the first failure —
+/// Sweep a cluster workload across many seeds, stopping at the first failure,
 /// or, under [`collect_all_failures`](crate::collect_all_failures), running to
 /// the end and reporting every failing seed.
 ///

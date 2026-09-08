@@ -2,7 +2,7 @@
 //!
 //! Exercises the [`Steps`](entity::Steps) step memo + the
 //! [`Alarm`](entity::Alarm)-backed `sleep` through the self-driving
-//! [`Pipeline`](support::pipeline::Pipeline) entity — the reference shape a linear
+//! [`Pipeline`](support::pipeline::Pipeline) entity: the reference shape a linear
 //! DSL would generate. One seed each, hand-built: `sleep` resumes the workflow with
 //! no caller (the alarm), a `retry` step re-launches after a failed effect, and the
 //! memo carries completed steps across hibernation.
@@ -10,7 +10,7 @@
 //! The property these state and `steps_swarm.rs` sweeps is the memo's
 //! **write-once** rule: `complete_step` records only a step that is not already
 //! done, so the first committed result wins. Here it is asserted on a clean
-//! single-node run — the necessary counterpart to the sweep, which bounds what can
+//! single-node run: the necessary counterpart to the sweep, which bounds what can
 //! change and would be satisfied just as well by a fixture whose workflow never
 //! commits anything at all.
 
@@ -106,7 +106,7 @@ fn steps_run_sleep_and_finish() {
 #[test]
 fn steps_memoize_across_hibernation() {
     // Aggressive idle window: the entity hibernates in every gap the workflow allows
-    // (after Finished, and — because the alarm veto holds during the sleep — the
+    // (after Finished, and (because the alarm veto holds during the sleep) the
     // memo must still carry completed steps across the reactivations the drive
     // triggers). The witness is the terminal value: `finished` is twice whatever
     // `fetch` first committed, and a re-launch that overwrote the memo would carry
@@ -146,8 +146,8 @@ fn a_relaunched_step_does_not_overwrite_the_memo() {
     // the entity may hibernate under it, so the second touch below re-activates a
     // entity whose `fetch` is still outstanding: the drive that follows finds an
     // unresolved step and launches a *second* effect carrying a different ordinal.
-    // `complete_step` refuses the second result, so the memo — and the terminal
-    // value derived from it — stay at the first.
+    // `complete_step` refuses the second result, so the memo (and the terminal
+    // value derived from it) stay at the first.
     //
     // The second touch is what makes the window observable, and it has to be a
     // separate one: a `StepDone` re-activating the entity itself is already in the
@@ -156,7 +156,7 @@ fn a_relaunched_step_does_not_overwrite_the_memo() {
     //
     // The touches are **launched, not blocked on**: `block_on` drives the scheduler
     // to quiescence, so blocking on the first read would run the whole workflow to
-    // completion — deadline and all — before the second read was ever issued, and
+    // completion (deadline and all) before the second read was ever issued, and
     // there would be no in-flight window left to interrupt.
     //
     // This is the shape `steps_swarm.rs` sweeps under the nemesis; here it is

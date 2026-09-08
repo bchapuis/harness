@@ -18,7 +18,7 @@
 # block-for-block as the disk facet (entity §7.15), so a machine provisioned
 # from it diverges by dirty blocks as its guest writes.
 #
-# Docker is the only requirement, so this runs on macOS too — building needs
+# Docker is the only requirement, so this runs on macOS too, building needs
 # no KVM. *Running* the assets (tests/firecracker_e2e.rs) needs Linux + /dev/kvm.
 #
 # Knobs (env):
@@ -51,10 +51,10 @@ mkdir -p out
 
 echo "--- machine-agent: build + test (rust:alpine, static musl)"
 # An explicit --target keeps host artifacts (serde's proc-macro) off the
-# crt-static RUSTFLAGS — a proc-macro dylib cannot be built static-crt, and
+# crt-static RUSTFLAGS: a proc-macro dylib cannot be built static-crt, and
 # cargo only separates host from target flags when a target is named.
 # The whole repository is mounted (read-write for the agent's own target
-# dir), because the agent path-depends on crates/machine-proto — the one
+# dir), because the agent path-depends on crates/machine-proto: the one
 # definition of the channel protocol it shares with the host.
 docker run --rm --platform "$PLATFORM" \
   -v "$(cd ../.. && pwd)":/repo -w /repo/guest/machine-agent \
@@ -132,7 +132,7 @@ docker run --rm --platform "$PLATFORM" -v "$(pwd)/out":/out alpine:"$ALPINE" sh 
   tar -xzf /tmp/fc.tgz -C /tmp
   # Exact name: the release ships firecracker-<ver>-<arch> AND its .debug
   # sibling; a bare glob matches both and busybox install writes the last
-  # match — the dynamically linked debug artifact, which segfaults at exec.
+  # match; the dynamically linked debug artifact, which segfaults at exec.
   install -m 0755 /tmp/release-*/firecracker-'"$FC_VERSION"'-'"$ARCH"' /out/firecracker
 '
 

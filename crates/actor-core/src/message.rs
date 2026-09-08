@@ -11,7 +11,7 @@ use actor_serialization::SerializationRequirement;
 /// A `Manifest` value exists only for statically **declared** identities; text
 /// arriving off the wire stays `&str` until
 /// [`HandlerRegistry::dispatch`](crate::HandlerRegistry::dispatch) matches it
-/// against a declared one — the allowlist is the point where a claimed manifest
+/// against a declared one: the allowlist is the point where a claimed manifest
 /// becomes a recognized identity (spec §5, §15).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Manifest(&'static str);
@@ -22,7 +22,7 @@ impl Manifest {
         Manifest(id)
     }
 
-    /// The manifest's string form — what a transport frame carries on the wire.
+    /// The manifest's string form: what a transport frame carries on the wire.
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -47,7 +47,7 @@ impl std::fmt::Display for Manifest {
 ///
 /// Each message declares its [`Reply`](Message::Reply) type and its stable
 /// [`MANIFEST`](Message::MANIFEST). Both the message and its reply must satisfy
-/// [`SerializationRequirement`] — an ordinary trait bound checked at compile
+/// [`SerializationRequirement`]: an ordinary trait bound checked at compile
 /// time, so an unserializable message is a compile error, not a runtime fault.
 ///
 /// A handler that can fail uses `type Reply = Result<T, E>`: an application

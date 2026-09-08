@@ -4,8 +4,8 @@
 //! The checkpointing facets cut at fixed offsets and are right to (§7.14, §7.15):
 //! a SQLite page and a disk block live at a fixed address, so an unchanged page
 //! occupies the same offsets in the next image and hashes to a blob already
-//! stored. Facet 0's `State` has no such addressing. It is a re-encoded value —
-//! an agent's folded transcript, say — and appending one turn moves every byte
+//! stored. Facet 0's `State` has no such addressing. It is a re-encoded value
+//! (an agent's folded transcript, say), and appending one turn moves every byte
 //! after the insertion point, plus the length prefixes ahead of it. Cut at fixed
 //! offsets, every chunk past the first change is a new blob and the whole state
 //! is on the wire again.
@@ -33,8 +33,8 @@ const MIN_CHUNK: usize = 16 * 1024;
 
 /// The average chunk size the cut mask targets.
 ///
-/// Bounded from both sides. Smaller chunks localize an edit better — the whole
-/// point — but each is a separate quorum put with its own round trip and its own
+/// Bounded from both sides. Smaller chunks localize an edit better (the whole
+/// point), but each is a separate quorum put with its own round trip and its own
 /// 32 bytes of manifest, and past some width the per-chunk cost dominates the
 /// bytes saved. 64 KiB puts a megabyte of state in ~16 chunks: an append disturbs
 /// one or two of them, and the manifest costs half a kilobyte.
@@ -64,9 +64,9 @@ const MASK: u64 = ((1u64 << MASK_BITS) - 1) << (64 - MASK_BITS);
 ///
 /// Derived from a fixed SplitMix64 sequence rather than written out, so the table
 /// is reproducible from the seed below instead of from 256 literals nobody can
-/// check. **It must not change.** Correctness does not depend on it — a manifest
+/// check. **It must not change.** Correctness does not depend on it (a manifest
 /// records the ids and lengths a payload was actually cut into, so any table reads
-/// back — but a different table cuts different boundaries, and every chunk written
+/// back), but a different table cuts different boundaries, and every chunk written
 /// before the change would then dedup against nothing.
 const GEAR: [u64; 256] = {
     let mut table = [0u64; 256];
@@ -123,7 +123,7 @@ fn cut_point(bytes: &[u8]) -> usize {
 mod tests {
     use super::*;
 
-    /// Deterministic pseudo-random bytes — content with enough entropy for the
+    /// Deterministic pseudo-random bytes: content with enough entropy for the
     /// gear hash to find boundaries in, without depending on an RNG crate.
     fn content(len: usize, seed: u64) -> Vec<u8> {
         let mut out = Vec::with_capacity(len);

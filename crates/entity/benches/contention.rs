@@ -14,7 +14,7 @@
 //!
 //! 2. **[`FileEntityStore`]'s manifest and segment maps.** The manifest lock is the
 //!    interesting one, and reading the code says why: `segment_id` appends to the
-//!    manifest's log — an fsync — *while holding the mutex*, so every entity whose
+//!    manifest's log; an fsync; *while holding the mutex*, so every entity whose
 //!    segment is being created for the first time serializes behind every other one's
 //!    flush. On the host `benches/flush.rs` measured, that flush is ~9.4 ms. Whether
 //!    that matters depends on how often a node creates entities it has never seen, which
@@ -69,7 +69,7 @@ const NAMES: usize = 4096;
 
 /// Lookups each thread performs inside one timed iteration.
 ///
-/// Not a tuning knob — a correctness requirement for the measurement. Spawning a
+/// Not a tuning knob: a correctness requirement for the measurement. Spawning a
 /// thread costs ~20 µs on this host and a locked hash lookup costs tens of
 /// *nanoseconds*, so a bench that spawned a thread per operation would report thread
 /// creation under a lock's name and would show contention that is not there (and hide
@@ -99,7 +99,7 @@ impl Entity for Cached {
 /// Concurrent lookups through the real [`HostCache`] mutex.
 ///
 /// `is_cached` is the narrowest public path that takes it: a hash lookup under the
-/// lock and nothing else. That is deliberate — a wider call would fold the shard-map
+/// lock and nothing else. That is deliberate: a wider call would fold the shard-map
 /// read and the leader check into the number, and those sit behind *different* locks.
 /// What is wanted here is the cost of this one.
 #[divan::bench(args = THREADS)]
@@ -154,7 +154,7 @@ fn name(i: usize) -> EntityName {
     EntityName::new("bench.Stored", format!("entity-{i}"))
 }
 
-/// Concurrent **first** writes to entities the store has never seen — the path that
+/// Concurrent **first** writes to entities the store has never seen: the path that
 /// takes the manifest lock and fsyncs the manifest log while holding it.
 ///
 /// This is the create storm: a node bringing up many entities at once. If the manifest
@@ -193,7 +193,7 @@ fn store_first_write(bencher: Bencher, threads: usize) {
     });
 }
 
-/// Concurrent reads of entities the store already holds — the steady-state path, where
+/// Concurrent reads of entities the store already holds: the steady-state path, where
 /// the manifest lock is a hash hit and the per-segment locks are what serialize.
 ///
 /// The control for [`store_first_write`]: same store, same number of threads, but the

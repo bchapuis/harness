@@ -1,8 +1,8 @@
 //! An activation-scoped external resource (workflow spec §6).
 //!
-//! A consumer frequently holds something for the life of an activation — the
+//! A consumer frequently holds something for the life of an activation: the
 //! harness's sandbox (agent §5.3), the machine's runtime binding (machine
-//! §2.1) — with an open-once lifecycle, a release on every deactivation, and a
+//! §2.1), with an open-once lifecycle, a release on every deactivation, and a
 //! hibernation veto while the open is in flight.
 //!
 //! The workflow supplies this as a **component rather than a trait method**,
@@ -89,7 +89,7 @@ impl<T> Binding<T> {
         self.state = BindingState::Failed(why.into());
     }
 
-    /// The failure this binding is holding, if any — read by the workflow when it
+    /// The failure this binding is holding, if any; read by the workflow when it
     /// settles the effects that needed the resource.
     pub fn failure(&self) -> Option<&str> {
         match &self.state {
@@ -106,8 +106,8 @@ impl<T> Binding<T> {
     }
 
     /// Take the resource for release, leaving the binding closed. Called from
-    /// `on_deactivate` on **every** deactivation path — idle hibernation,
-    /// migration, or a forced step-down — so nothing is owed at deactivation.
+    /// `on_deactivate` on **every** deactivation path (idle hibernation,
+    /// migration, or a forced step-down), so nothing is owed at deactivation.
     pub fn take(&mut self) -> Option<T> {
         match std::mem::replace(&mut self.state, BindingState::Closed) {
             BindingState::Open(t) => Some(t),
@@ -117,7 +117,7 @@ impl<T> Binding<T> {
 
     /// Return to `Closed` from a failed open, so the next demand retries. The
     /// consumer calls this once it has settled the effects that failure
-    /// concerned — never before, or the failure spins invisibly.
+    /// concerned, never before, or the failure spins invisibly.
     pub fn clear_failure(&mut self) {
         if matches!(self.state, BindingState::Failed(_)) {
             self.state = BindingState::Closed;

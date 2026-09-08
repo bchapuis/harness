@@ -66,7 +66,7 @@ impl Message for StoreBlob {
 
 /// Fetch one blob's **whole** raw bytes from a replica (spec §6). The reply is
 /// `Some(bytes)` if the replica holds it, else `None` (absent or the namespace is
-/// tombstoned). The bytes are **not** verified by the replica — the caller
+/// tombstoned). The bytes are **not** verified by the replica: the caller
 /// re-hashes them after transfer (spec §4, §5.2, **B1**). `range` is reserved for
 /// range-verified streaming (spec §10); v1 returns the whole blob.
 #[derive(Serialize, Deserialize)]
@@ -78,13 +78,13 @@ pub struct FetchBlob {
 
 impl Message for FetchBlob {
     /// `ByteBuf` for the same reason [`StoreBlob::bytes`] is tagged: this is the read
-    /// half of the same payload. The transport's signature keeps `Vec<u8>` —
+    /// half of the same payload. The transport's signature keeps `Vec<u8>`,
     /// unwrapping the newtype is a move, not a copy.
     type Reply = Option<serde_bytes::ByteBuf>;
     const MANIFEST: Manifest = Manifest::new("blob.FetchBlob");
 }
 
-/// Whether a replica holds `(ns, id)` (spec §6) — the per-owner probe that gates
+/// Whether a replica holds `(ns, id)` (spec §6): the per-owner probe that gates
 /// a reconcile copy (spec §7). A tombstoned namespace reports `false`.
 #[derive(Serialize, Deserialize)]
 pub struct HasBlob {
@@ -112,12 +112,12 @@ impl Message for DeleteNamespace {
     const MANIFEST: Manifest = Manifest::new("blob.DeleteNamespace");
 }
 
-/// Ask a replica for its whole tombstone awareness set (spec §5.3) — the
+/// Ask a replica for its whole tombstone awareness set (spec §5.3): the
 /// **anti-entropy pull** the reconcile loop runs each pass so a node that was
 /// partitioned or down across a `delete_namespace` learns the tombstones it
 /// missed (**B7**). The pull runs after the pass's re-replication push, so it is
-/// not what stops a stale copy from being re-pushed — the receiving owner's
-/// `StoreAck::Deleted` is — but without it a healed holder never sweeps its copy
+/// not what stops a stale copy from being re-pushed: the receiving owner's
+/// `StoreAck::Deleted` is, but without it a healed holder never sweeps its copy
 /// and keeps serving the namespace the fan-out never reached it with.
 #[derive(Serialize, Deserialize)]
 pub struct SyncTombstones;
@@ -246,7 +246,7 @@ impl<S: BlobSystem> Handler<SyncTombstones> for BlobReplica<S> {
     }
 }
 
-/// The boxed result of a [`BlobTransport::store_blob`] — the future the
+/// The boxed result of a [`BlobTransport::store_blob`]: the future the
 /// `Clustered` tier collects for its `W`-of-`R` quorum (spec §5.2).
 pub type StoreAckFuture = BoxFuture<'static, Result<StoreAck, CallError>>;
 
@@ -277,7 +277,7 @@ pub trait BlobTransport: Send + Sync + 'static {
         within: Duration,
     ) -> BoxFuture<'static, Result<Option<Vec<u8>>, CallError>>;
 
-    /// `HasBlob` on `node`'s replica (spec §7) — gates a reconcile copy.
+    /// `HasBlob` on `node`'s replica (spec §7): gates a reconcile copy.
     fn has_blob(
         &self,
         node: NodeId,

@@ -2,7 +2,7 @@
 //!
 //! `Fanout` is the workflow spec's Appendix A worked example, made real: an entity
 //! that fans a job out to N workers, collects their results, and finishes. It
-//! journals its own records, holds no memo, and — this is the point — writes no
+//! journals its own records, holds no memo, and (this is the point) writes no
 //! dispatch loop, no in-flight table, no "did I already launch this", no
 //! recovery pass, no straggler check, and no `can_hibernate` body of its own.
 //!
@@ -123,7 +123,7 @@ impl Script {
         self.performed.len()
     }
 
-    /// How many keys ran more than once — across activations, since one
+    /// How many keys ran more than once, across activations, since one
     /// activation launches a key at most once per claim (W3).
     pub fn relaunched(&self) -> usize {
         let mut runs: BTreeMap<TaskId, usize> = BTreeMap::new();
@@ -218,7 +218,7 @@ impl<S: EntitySystem> Entity for Fanout<S> {
     fn apply(state: &mut FanoutState, record: &FanoutRecord) {
         match record {
             // Idempotent by task id (entity §2.2): a request re-asked after an
-            // ambiguous failure — a timeout, a leader move mid-append — may
+            // ambiguous failure (a timeout, a leader move mid-append) may
             // commit twice, and the second must not double the work.
             FanoutRecord::Requested { tasks, silent } => {
                 for task in tasks {
@@ -269,7 +269,7 @@ impl<S: EntitySystem> Workflow for Fanout<S> {
     type Effect = Task;
     type Outcome = Answer;
 
-    /// Pure (§3.1). Every task requested and not yet answered — at once the
+    /// Pure (§3.1). Every task requested and not yet answered, at once the
     /// dispatch list, the recovery set after a crash, and the straggler filter.
     fn pending(&self, state: &FanoutState) -> Vec<Pending<TaskId, Task>> {
         state
@@ -376,7 +376,7 @@ impl<S: EntitySystem> EntityHandler<Settled<Fanout<S>>> for Fanout<S> {
 // --- The consumer's own commands.
 
 /// Request `tasks`, journaling the intent. The effects launch from the workflow
-/// that follows the commit, never from this handler — intent before effect (§5)
+/// that follows the commit, never from this handler: intent before effect (§5)
 /// is the cycle's shape, not a check.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Request {
@@ -611,7 +611,7 @@ pub fn hibernated(events: &[Event]) -> bool {
 }
 
 /// Hold the workflow's grammar over a recorded stream at the end of a clustered
-/// scenario, through the same `Checker` the swarm runner uses — the failover
+/// scenario, through the same `Checker` the swarm runner uses: the failover
 /// checker, because every such scenario deposes a leader with claims open, which
 /// is legal (§6).
 pub fn assert_grammar(events: Vec<Event>) {

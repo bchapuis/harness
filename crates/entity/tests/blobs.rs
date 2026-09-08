@@ -9,7 +9,7 @@
 //! - the single-node `Local` tier covers the round-trip and verification (B1),
 //!   idempotent/dedup'd put (B2), survival across hibernation, the mark-from-roots
 //!   GC, and entity-scoped destroy;
-//! - the clustered `Quorum` tier covers the wire path — a W-of-R put and a verified
+//! - the clustered `Quorum` tier covers the wire path: a W-of-R put and a verified
 //!   read fanned over the shard's replicas, callable from any node, surviving the
 //!   loss of a minority of replicas.
 
@@ -49,7 +49,7 @@ use serde::Serialize;
 // --- An entity that stores bytes in its colocated blob area ---------------------
 //
 // Generic over the system (like `tenancy::Directory`), so the same entity hosts on
-// the `Local` and `Quorum` tiers. Its state is just the ids it has stored — the
+// the `Local` and `Quorum` tiers. Its state is just the ids it has stored: the
 // small foldable metadata that references the bulk bytes living in `ctx.blobs()`.
 
 struct BlobEntity<S>(std::marker::PhantomData<fn() -> S>);
@@ -329,7 +329,7 @@ fn blobs_survive_hibernation() {
     );
 
     // A fresh activation rehydrates the metadata from the snapshot and the bulk
-    // bytes are still in the colocated blob area — the acknowledged write survives.
+    // bytes are still in the colocated blob area: the acknowledged write survives.
     let reread = blobs.entity("ws/0");
     let got = sim.block_on(async move { reread.ask(Fetch { id, range: None }).await.unwrap() });
     assert_eq!(got, Ok(bytes), "hibernation must not lose a stored blob");
@@ -339,7 +339,7 @@ fn blobs_survive_hibernation() {
 
 fn config() -> EntityConfig {
     // R = 3 over the 3-node cluster; the write quorum is the majority (2), computed
-    // by the replicator — there is no separate knob.
+    // by the replicator: there is no separate knob.
     EntityConfig {
         shards: 2,
         replication_factor: 3,
@@ -394,7 +394,7 @@ fn cluster_cfg(
 }
 
 /// One node's store directory under a [`FileEntityStore::factory`] root: the hosted
-/// entity type, then the node (§8.2 — a store is per type, so its shard-keyed fence
+/// entity type, then the node (§8.2; a store is per type, so its shard-keyed fence
 /// belongs to exactly one leader-election group).
 fn store_dir(root: &std::path::Path, node: NodeId) -> std::path::PathBuf {
     root.join(BlobEntity::<SimSystem>::ENTITY_TYPE)
@@ -402,7 +402,7 @@ fn store_dir(root: &std::path::Path, node: NodeId) -> std::path::PathBuf {
 }
 
 /// Overwrite, with non-matching bytes, every on-disk blob file named `id` anywhere
-/// under `root` — the file-store names a blob file by its content hash (hex), so
+/// under `root`: the file-store names a blob file by its content hash (hex), so
 /// this tampers exactly the targeted blob's stored copies. Returns how many it hit.
 fn corrupt_blob_files(root: &std::path::Path, id: BlobId) -> usize {
     fn walk(dir: &std::path::Path, name: &str, hits: &mut usize) {
@@ -447,7 +447,7 @@ fn read_blob_file(root: &std::path::Path, id: BlobId) -> Option<Vec<u8>> {
 #[test]
 fn a_blob_round_trips_through_the_quorum_from_any_node() {
     // The bytes are stored on a write quorum of the shard's replicas and read back
-    // verified, with the call issued from a node that does not lead the shard — so
+    // verified, with the call issued from a node that does not lead the shard, so
     // the put fan-out and the verified read both cross the wire (B1, B3, E13).
     let sim = Simulation::new(1);
     let (_net, _systems, hosts) = cluster(&sim);
@@ -504,7 +504,7 @@ fn a_blob_survives_losing_a_minority_of_replicas() {
 #[test]
 fn a_corrupt_blob_is_detected_and_never_returned() {
     // The single store's only copy is tampered on disk: `get` re-hashes, sees the
-    // mismatch, and errors — it never hands back the wrong bytes (E17).
+    // mismatch, and errors; it never hands back the wrong bytes (E17).
     let sim = Simulation::new(7);
     let dir = tempfile::tempdir().unwrap();
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
@@ -581,7 +581,7 @@ fn a_tampered_local_copy_is_healed_in_place_from_a_peer() {
     // from the verifying peer, restoring this replica's durability margin (§7.10
     // self-heal). Without it, a content-addressed re-put of an id already on disk is
     // a no-op, so the bad copy would persist and every read would re-fetch over the
-    // wire — and a later loss of the good peers would lose a blob that looked present.
+    // wire, and a later loss of the good peers would lose a blob that looked present.
     let sim = Simulation::new(1);
     let dir = tempfile::tempdir().unwrap();
     let cfg = EntityConfig {
@@ -632,7 +632,7 @@ fn a_tampered_local_copy_is_healed_in_place_from_a_peer() {
         "the corrupt local copy must be repaired from the verifying replica (§7.10)",
     );
 
-    // And a subsequent read is served locally from the healed copy — still correct.
+    // And a subsequent read is served locally from the healed copy: still correct.
     let again = drive(&sim, Duration::from_secs(8), async move {
         entities
             .entity(key)

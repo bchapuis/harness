@@ -2,7 +2,7 @@
 //!
 //! The agent runtime core depends only on the [`Model`] trait: `agent-anthropic`
 //! implements it over the Anthropic Messages API in production, and the
-//! simulator supplies a scripted model — a deterministic function of the request
+//! simulator supplies a scripted model; a deterministic function of the request
 //! and the run's seed (§12.2). A completion request is side-effect-free, so an
 //! implementation MAY retry internally with backoff from `Clock`/`Entropy`
 //! without violating the core no-transparent-retry rule (core spec §1.2); a
@@ -37,7 +37,7 @@ impl Default for ModelParams {
     /// The default `model` is deliberately **not a real model id**: this crate
     /// is provider-neutral, and a kind that reaches a real API without a
     /// stated model should fail with the provider's clear "unknown model"
-    /// error — not silently call whichever vendor a default here happened to
+    /// error, not silently call whichever vendor a default here happened to
     /// name. Deployments state their id where they wire their adapter (e.g.
     /// `agent-standalone`'s `--model` default); scripted test models ignore
     /// it.
@@ -50,7 +50,7 @@ impl Default for ModelParams {
 }
 
 /// One declared tool as the model sees it (agent spec §4.1): name,
-/// description, input schema — the interface half of a [`ToolDecl`]
+/// description, input schema; the interface half of a [`ToolDecl`]
 /// (§5.2), without the agent runtime-side recovery policy.
 ///
 /// [`ToolDecl`]: crate::tool::ToolDecl
@@ -107,7 +107,7 @@ pub enum ModelError {
     RateLimited,
     Overloaded,
     /// The transcript exceeds the model's context window; fails the run
-    /// explicitly — compaction is future work (§1.1, §13).
+    /// explicitly: compaction is future work (§1.1, §13).
     ContextOverflow,
     InvalidRequest(String),
     Api(String),

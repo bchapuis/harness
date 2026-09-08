@@ -45,7 +45,7 @@ impl Actor for DoorStub {
 }
 
 /// **M1: single disk, never forked.** Committed seq is strictly monotonic per
-/// machine — a deposed activation that kept committing (the forbidden
+/// machine; a deposed activation that kept committing (the forbidden
 /// alternative to M1/M5) would regress or duplicate a seq.
 #[derive(Default)]
 struct NeverForks {

@@ -1,7 +1,7 @@
 //! The handler/lifecycle context (spec §3.4).
 //!
-//! A `Ctx<A>` grants an actor controlled capabilities — its identity, a
-//! self-reference, the system handle, child spawning, and self-stop — without
+//! A `Ctx<A>` grants an actor controlled capabilities (its identity, a
+//! self-reference, the system handle, child spawning, and self-stop) without
 //! ever exposing actor state, preserving isolation (spec §3.5).
 
 use std::sync::Arc;
@@ -76,8 +76,8 @@ impl<A: Actor> Ctx<A> {
         self.stopping.store(true, Ordering::Relaxed);
     }
 
-    /// Begin watching `target` (spec §12): when it terminates for any reason —
-    /// including its node going `down` — this actor receives exactly one
+    /// Begin watching `target` (spec §12): when it terminates for any reason
+    /// (including its node going `down`) this actor receives exactly one
     /// [`Terminated`] in its mailbox. Requires `Self: Handler<Terminated>`, the
     /// way a watcher observes the signal. Watching an already-terminated target
     /// yields `Terminated` immediately (invariant #12).
@@ -89,7 +89,7 @@ impl<A: Actor> Ctx<A> {
     }
 
     /// Begin watching the actor identified by `target` (spec §12), when only
-    /// its id is known — an identity carried in a message or folded from
+    /// its id is known: an identity carried in a message or folded from
     /// durable state rather than held as a typed ref. Identical to
     /// [`watch`](Ctx::watch) otherwise.
     pub fn watch_id(&self, target: ActorId)

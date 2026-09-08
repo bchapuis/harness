@@ -2,8 +2,8 @@
 //!
 //! A register actor is hammered by several concurrent client processes issuing
 //! reads, writes, and compare-and-sets. Each client records its operations into a
-//! shared [`History`] through the public API only (spec §18.4) — `invoke` just
-//! before the `ask`, `ok`/`info` just after — so the recorded order is the real
+//! shared [`History`] through the public API only (spec §18.4) (`invoke` just
+//! before the `ask`, `ok`/`info` just after), so the recorded order is the real
 //! (virtual) time interleaving. At quiescence the history is checked for
 //! linearizability against the [`Register`] reference model.
 //!
@@ -107,7 +107,7 @@ impl Workload for RegisterWorkload {
 // --- A deliberately broken register, to prove the check has teeth ------------
 
 /// A register whose `Read` returns a value that was never written. Any history
-/// it produces is non-linearizable, so the checker MUST reject it — the live
+/// it produces is non-linearizable, so the checker MUST reject it: the live
 /// analogue of the unit tests, proving the record-and-check pipeline catches a
 /// real violation rather than passing everything (cf. the determinism leak test).
 struct BuggyRegister;

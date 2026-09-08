@@ -3,7 +3,7 @@
 //!
 //! A node hosts machine entities, votes in Raft, and runs an **in-process SSH
 //! front door** (machine §5.1). The front door is in-process rather than a
-//! separate tier — the shape `agent-gateway` takes for sessions — for one
+//! separate tier (the shape `agent-gateway` takes for sessions) for one
 //! reason: a bridged channel ends at a node-local vsock socket, and the
 //! cross-node relay that would let a detached door reach another node's guest
 //! is machine §8's deferred work. So each node's door serves the machines that
@@ -100,7 +100,7 @@ pub struct NodeOptions {
     pub docker_image: String,
     /// SSH front doors to open: `port → machine name`, from `--door
     /// <port>=<machine>`. One machine per port, because SSH fixes the host key
-    /// at KEX — before a username exists to name a machine with.
+    /// at KEX: before a username exists to name a machine with.
     pub doors: BTreeMap<u16, String>,
 }
 
@@ -134,7 +134,7 @@ const DOOR_TIMEOUT: Duration = Duration::from_secs(30);
 /// This was 20 s, and the reason was not network latency: the disk facet's capture and
 /// import scanned a whole image *on the async worker*, so a node served no heartbeat
 /// for the 7-14 s that took. A 4 s timeout sailed past that, and the resulting election
-/// deposed the activation owning the guest — killing a live SSH session by way of a
+/// deposed the activation owning the guest, killing a live SSH session by way of a
 /// checkpoint. The timeout was covering for that stall.
 ///
 /// The stall is gone: both scans now run on the node's blocking-I/O pool (entity
@@ -144,8 +144,8 @@ const DOOR_TIMEOUT: Duration = Duration::from_secs(30);
 /// (`RaftEngine::create_group`), shard groups included.
 const RAFT_ELECTION_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// How often a leader heartbeats, and — because the driver checks election deadlines on
-/// the same tick — the granularity of every election decision on this node.
+/// How often a leader heartbeats, and (because the driver checks election deadlines on
+/// the same tick) the granularity of every election decision on this node.
 ///
 /// Well under the election timeout, so a healthy leader is never mistaken for a stopped
 /// one, and small enough that a cold start is not quantized into multi-second steps.
@@ -195,14 +195,14 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     let machine_kind = opts.machine.ok_or(
         "--machine is required: `firecracker` (a real microVM per machine; Linux + /dev/kvm), \
          `docker` (the rootfs in a privileged container; any host with docker, shared-kernel \
-         isolation), or `fake` (no guest — durability only, machine §7)",
+         isolation), or `fake` (no guest: durability only, machine §7)",
     )?;
     let node = NodeId::new(opts.id);
     // One codec value for the three places that must agree: the transport's
     // framing, the message layer entity encodes records and snapshots with, and
     // the entity store's stamp naming that codec (entity §7.4). Binary, not the
     // library's JSON default: a machine's disk moves as 1 MiB blocks through the
-    // blob path, and a payload is encoded twice — once as the message, again as
+    // blob path, and a payload is encoded twice; once as the message, again as
     // the frame field carrying it. Under JSON that pair costs ~10.7 MiB and over
     // a second of CPU per copy, so a block's replication misses the quorum
     // timeout on an unremarkable host and provisioning fails as `Unavailable`.
@@ -221,7 +221,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         codec: Arc::clone(&codec),
         events: Arc::new(StderrEvents { node }),
         // Plaintext, guarded by the cluster secret: fine on loopback or a
-        // trusted cluster network. Note what this is *not* protecting — the SSH
+        // trusted cluster network. Note what this is *not* protecting: the SSH
         // connection is terminated at the door and bridged over a node-local
         // socket, so no session bytes cross this transport. See the note in
         // `agent-standalone`: plaintext is a stated choice, valid only on a
@@ -233,7 +233,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
                 // *spurious* election is not free here the way it is for a
                 // stateless service: it resigns the activation that owns the
                 // guest. That is why the SWIM side below stays more patient
-                // than the library defaults (3 s suspect) — three debug builds
+                // than the library defaults (3 s suspect): three debug builds
                 // sharing one host's CPU miss the tighter ones often enough to
                 // churn membership.
                 //
@@ -274,7 +274,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // This node's shared capabilities, set once and used to host every type below
     // (entity §7.4, §13). The I/O pool matters most in this deployment: a machine's
     // disk facet writes whole 1 MiB image blocks, so an inline fsync would stall the
-    // executor hardest here — and the node is also running Raft heartbeats on it.
+    // executor hardest here, and the node is also running Raft heartbeats on it.
     let entity_node = system
         .entity_node()
         .blocking_io(Arc::new(entity::ThreadPoolIo::sized_for_host()))
@@ -283,7 +283,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
         shards: opts.shards,
         entity_store: Some(entity_store.clone()),
         // Where the disk facet materializes each machine's image and the
-        // workspace facet its files (entity §7.11, §7.15) — under --data, so a
+        // workspace facet its files (entity §7.11, §7.15), under --data, so a
         // restarted node finds its own.
         data_dir: Some(opts.data.join("facets")),
         ..EntityConfig::default()
@@ -306,7 +306,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
 
     // The grade, not just the flag: what confinement a machine actually gets is
     // the one thing about the mechanism an operator should read at startup
-    // (sandbox §3.4 — the two grades are not interchangeable).
+    // (sandbox §3.4; the two grades are not interchangeable).
     let grade = match &host {
         None => " (no guest: durability only)".to_string(),
         Some(mechanism) => format!(" ({} grade)", mechanism.isolation()),
@@ -357,7 +357,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // every led shard while this node is still a full member, so the transfers
     // are accepted, then announce the departure and release the transport in the
     // order `leave`/`shutdown` document. Skipping the handoff is safe but turns a
-    // rolling restart into one failover per led shard — and here a failover
+    // rolling restart into one failover per led shard, and here a failover
     // deposes the activation owning a guest.
     eprintln!("[{node}] stop signal received; handing off shard leadership");
     let outstanding = tokio::time::timeout(HANDOFF_TIMEOUT, async {

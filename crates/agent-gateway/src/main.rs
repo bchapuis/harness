@@ -43,7 +43,7 @@ options (defaults in parentheses):
                         --bind-host); must match the nodes' --client <host>
   --port-base <p>       node/client i's transport port = p+i-1     (7401)
   --kind <name[:shards]> a kind the nodes host, with its EntityConfig.shards;
-                        repeat per kind. MUST match the nodes' deployment — an
+                        repeat per kind. MUST match the nodes' deployment: an
                         unknown name fails discovery, a wrong shard count
                         misroutes sessions.  (assistant:4 worker:4, matching
                         agent-standalone's default kinds)
@@ -144,7 +144,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                 ));
             }
             eprintln!(
-                "WARNING: no --auth-tokens: the gateway is INSECURE — the bearer token is taken \
+                "WARNING: no --auth-tokens: the gateway is INSECURE; the bearer token is taken \
                  as the tenant, unverified. Loopback only; provide --auth-tokens to authenticate."
             );
             Arc::new(InsecureTokens)
@@ -200,7 +200,7 @@ async fn run(args: &[String]) -> Result<(), String> {
 /// gateway to *not ready* and pause briefly so a load balancer deregisters the
 /// pod (via `/readyz`) before axum drains the in-flight requests. In-flight
 /// prompts are durable in the journal, so dropping their background tasks is
-/// safe — a client reconnects and folds the session back out of the journal.
+/// safe: a client reconnects and folds the session back out of the journal.
 async fn shutdown_signal<S: HarnessSystem>(gateway: Arc<Gateway<S>>) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;

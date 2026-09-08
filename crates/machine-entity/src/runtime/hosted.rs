@@ -4,17 +4,17 @@
 //! A machine's durability does not depend on how its guest is held. The disk
 //! facet's image is the durable thing (entity §7.15), the capture command's
 //! quiescent point is a pause, and `/workspace` travels as a tar over a channel
-//! to the guest agent — and all three read the same whether the guest is a
+//! to the guest agent, and all three read the same whether the guest is a
 //! Firecracker microVM or a container holding the same rootfs. So this file
 //! states them once, and `machine-host` states the two mechanisms:
 //!
 //! - **The drive is the disk facet's materialized image** (entity §7.15), used in
-//!   place — no per-guest copy, because the guest writing that file between
+//!   place, no per-guest copy, because the guest writing that file between
 //!   captures *is* the machine's persistence model, and a non-committed outcome
 //!   discards it (E20).
 //! - **The guest boots its own init** (machine §5.1): the agent is an ordinary
 //!   service the rootfs ships, not pid 1. Under the container mechanism there is
-//!   no init at all and the agent is the container's only process — that grade's
+//!   no init at all and the agent is the container's only process: that grade's
 //!   one visible departure.
 //! - **Readiness is the guest agent answering a channel** on
 //!   [`machine_proto::AGENT_PORT`], with a boot budget sized for a full distro.
@@ -24,7 +24,7 @@
 //!   this layer's contribution either way (machine §2.2, M3).
 //! - **Egress is the microVM grade's alone** (machine §5.2, M6): the tap and
 //!   ruleset are realized here, from journaled policy, and skipped where the
-//!   mechanism cannot take a NIC — the same degradation as a node without
+//!   mechanism cannot take a NIC; the same degradation as a node without
 //!   `CAP_NET_ADMIN`, never a boot failed over egress.
 
 use std::path::PathBuf;
@@ -52,7 +52,7 @@ use super::ws_proto;
 use super::ws_proto::SyncError;
 
 /// The kernel command line a machine's guest boots with under the microVM
-/// mechanism: the rootfs's **own init** on `/dev/vda` (machine §5.1) — no
+/// mechanism: the rootfs's **own init** on `/dev/vda` (machine §5.1), no
 /// `init=` override, unlike the agent sandbox's agent-as-init image.
 const BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off quiet root=/dev/vda rw";
 
@@ -104,7 +104,7 @@ pub fn guest_key(node: &str, machine: &EntityName) -> GuestKey {
 /// Open one channel to `machine`'s guest agent on this node, from the machine's
 /// name alone: what a front door needs, holding no guest object (machine §5.1).
 ///
-/// Node-local by construction — [`MachineHost::connect_by_key`] answers
+/// Node-local by construction: [`MachineHost::connect_by_key`] answers
 /// [`GuestError::Gone`] for a machine whose activation is on another node, which
 /// is the ordinary case a door must report rather than treat as a fault.
 pub async fn open_channel(
@@ -130,7 +130,7 @@ async fn send_header(channel: &mut Box<dyn Duplex>, kind: &ChannelKind) -> std::
 /// Deployment-level configuration for the machine binding: how long a boot may
 /// take, and this node's egress. The mechanism itself (VMM assets, or container
 /// CLI and runner image) is configured on the [`MachineHost`]; the per-machine
-/// half — sizing, the image — arrives in each [`BootSpec`] from journaled state
+/// half (sizing, the image) arrives in each [`BootSpec`] from journaled state
 /// (machine §3).
 #[derive(Clone, Debug)]
 pub struct HostedRuntimeConfig {
@@ -140,8 +140,8 @@ pub struct HostedRuntimeConfig {
     /// distro boots slower than an agent-as-init image, so the default is a
     /// minute; a container needs a fraction of it.
     pub ready_timeout: Duration,
-    /// The node's egress configuration (machine §5.2, M6). `None` — the default
-    /// — boots machines with no NIC; set it to wire the per-machine tap, node
+    /// The node's egress configuration (machine §5.2, M6). `None` (the default)
+    /// boots machines with no NIC; set it to wire the per-machine tap, node
     /// NAT, and guest addressing. Realized only behind `feature = "net"` on
     /// Linux and only at [`MachineIsolation::MicroVm`]; anything else degrades to no NIC.
     pub egress: Option<crate::net::EgressConfig>,
@@ -193,7 +193,7 @@ impl HostedRuntimeProvider {
     /// allocate a guest /30, install the tap and policy ruleset, and return the
     /// NIC to boot with plus its teardown. `None` when egress is unconfigured,
     /// the mechanism cannot take a NIC, the pool is full, or the plumbing could
-    /// not be installed — in which case the machine boots with no NIC rather
+    /// not be installed, in which case the machine boots with no NIC rather
     /// than failing the boot over egress.
     #[cfg(all(feature = "net", target_os = "linux"))]
     fn wire_egress(&self, spec: &BootSpec) -> (Network, Option<EgressHandle>) {
@@ -308,7 +308,7 @@ struct EgressHandle {
     pool: Arc<std::sync::Mutex<crate::net::GuestPool>>,
     index: u32,
     /// Set the first time [`teardown`](EgressHandle::teardown) runs, so
-    /// kill-then-drop tears down exactly once — a second `free` could otherwise
+    /// kill-then-drop tears down exactly once: a second `free` could otherwise
     /// return a slot already reallocated to another machine.
     done: std::sync::atomic::AtomicBool,
 }

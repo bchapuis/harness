@@ -69,7 +69,7 @@ impl std::fmt::Debug for Divergence {
     }
 }
 
-/// Diff two event streams, returning the first index at which they differ —
+/// Diff two event streams, returning the first index at which they differ:
 /// past the shorter stream's end when one is a prefix of the other, so a `get`
 /// there is the `None` the report shows for the run that ended early.
 fn first_divergence(
@@ -109,7 +109,7 @@ fn check_twice(
 }
 
 /// Sweep a per-seed determinism check across many seeds, stopping at the first
-/// divergence — or, under
+/// divergence, or, under
 /// [`collect_all_failures`](crate::collect_all_failures), running to the end and
 /// reporting every seed that diverged. The standing reproducibility corpus
 /// (spec §18.6).
@@ -126,7 +126,7 @@ fn sweep(
         crate::corpus::regression_seeds(workload).chain(seeds),
         crate::sweep::collect_all_failures(),
         |divergence| divergence.seed,
-        // Swept boxed — the per-seed result stays thin — and unboxed only on
+        // Swept boxed (the per-seed result stays thin), and unboxed only on
         // the cold path below, where divergence is already the whole story.
         &mut check,
     );
@@ -190,13 +190,13 @@ pub fn record_seed<W: Workload>(workload: &W, seed: u64) -> Vec<Event> {
 
 /// Verify the determinism contract for a single-node workload at `seed`: two runs
 /// must emit byte-identical event streams (spec §18.1 #1). Returns the first
-/// [`Divergence`] otherwise (boxed — it carries two full events, so it dwarfs the
+/// [`Divergence`] otherwise (boxed: it carries two full events, so it dwarfs the
 /// `Ok` path).
 pub fn check_reproducible<W: Workload>(workload: &W, seed: u64) -> Result<(), Box<Divergence>> {
     check_twice(workload.name(), seed, |s| record_seed(workload, s))
 }
 
-/// Sweep the determinism contract across seeds for a single-node workload — the
+/// Sweep the determinism contract across seeds for a single-node workload: the
 /// standing reproducibility corpus (spec §18.6). Stops at the first divergence
 /// unless the run asks for every one.
 pub fn replay_swarm<W: Workload>(

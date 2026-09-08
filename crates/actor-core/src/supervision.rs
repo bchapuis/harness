@@ -1,6 +1,6 @@
 //! Supervision (spec §11).
 //!
-//! Supervision governs what happens when a **local** actor faults — a handler
+//! Supervision governs what happens when a **local** actor faults: a handler
 //! panics, or [`started`](crate::Actor::started) fails. An actor declares its
 //! strategy by overriding [`Actor::supervision`](crate::Actor::supervision); the
 //! executor catches the fault and applies the resulting

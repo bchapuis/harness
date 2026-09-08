@@ -136,7 +136,7 @@ impl<A: MachineAuthority, B: ChannelBackend> FrontDoorHandler<A, B> {
                 let body = match recv_frame(&mut reader, MAX_FRAME).await {
                     Ok(body) => body,
                     Err(_) => {
-                        // The guest end went away without reporting an exit —
+                        // The guest end went away without reporting an exit:
                         // a killed guest, a crashed agent, a severed vsock. The
                         // client is waiting on `exit-status` and would hang
                         // until some unrelated timeout, so say what happened:
@@ -338,7 +338,7 @@ impl<A: MachineAuthority, B: ChannelBackend> Handler for FrontDoorHandler<A, B> 
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         // The client closed stdin: forward it so the guest closes the child's
-        // stdin pipe — `echo x | ssh m wc -c` cannot finish without this.
+        // stdin pipe; `echo x | ssh m wc -c` cannot finish without this.
         self.push(channel, Frame::Eof).await;
         Ok(())
     }

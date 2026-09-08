@@ -5,14 +5,14 @@
 //! crash, one partition, then repair). This file sweeps a [`ClusterWorkload`] of
 //! write/read/overwrite traffic across many seeds while a seeded nemesis injects
 //! partitions, crashes, heals, loss, duplication, and delay (core spec §18.3),
-//! so the end-to-end product path — captured delta records on the record quorum,
-//! checkpoint chunks on the blob quorum (§7.10) — is exercised together under
+//! so the end-to-end product path: captured delta records on the record quorum,
+//! checkpoint chunks on the blob quorum (§7.10); is exercised together under
 //! the full fault matrix. A [`Checker`] watches the §13 event stream live.
 //!
 //! - **Read integrity under faults (#4, the safety property).** Each client owns
 //!   a private path subtree, so there are no cross-client overwrite races; a
 //!   read of a path this client wrote returns the *exact* bytes of its last
-//!   committed write to that path, or an error — never stale, partial, or
+//!   committed write to that path, or an error, never stale, partial, or
 //!   another path's bytes. This asserts capture/replay byte-determinism (F1) and
 //!   lossless failover (E14): an acknowledged capture is never lost or shadowed
 //!   across a leadership change. Asserted in-workload over a shared flag.
@@ -96,7 +96,7 @@ impl<S: EntitySystem> Entity for Studio<S> {
         ctx: &EntityCtx<Self>,
     ) -> impl Future<Output = Result<(), BoxError>> + Send {
         // Root-driven blob repair off the activation path (§7.10 B6), the
-        // harness agent's conduct — so the swarm exercises the repair path
+        // harness agent's conduct, so the swarm exercises the repair path
         // under faults too.
         let blobs = ctx.blobs();
         let system = ctx.system().clone();
@@ -185,11 +185,11 @@ fn content(n: u64) -> Vec<u8> {
 ///
 /// A committed `Put` pins the value. A `Put` whose outcome was **ambiguous** does
 /// not: `Unavailable` means the quorum was not observed, not that the record was
-/// refused (entity §7.2, §11) — a replica minority may hold it, and the next
+/// refused (entity §7.2, §11); a replica minority may hold it, and the next
 /// activation's quorum recovery can find it on a majority and adopt it. So the
 /// bytes of an ambiguous write are admissible from then on, and the check is
 /// that a read returns *some value this client actually wrote and that nothing
-/// has superseded* — which is still what F1/E14 claim, stated over the outcomes
+/// has superseded*, which is still what F1/E14 claim, stated over the outcomes
 /// the spec actually gives.
 ///
 /// Reads never narrow the set: the read path is read-your-leader, not
@@ -231,7 +231,7 @@ impl PathState {
 ///
 /// `stale` is shared across every seeded run: a client sets it if a read of one
 /// of its own paths ever returns bytes it cannot account for (an F1/E14
-/// violation — a lost or stale-shadowed acknowledged capture).
+/// violation; a lost or stale-shadowed acknowledged capture).
 struct WsSwarm {
     nodes: usize,
     clients: usize,
@@ -267,7 +267,7 @@ impl WsSwarm {
     }
 
     /// Short activation lifetime, clients that idle past it, and a nemesis that
-    /// kills processes — so a read has to come from a directory the next
+    /// kills processes, so a read has to come from a directory the next
     /// activation rebuilt, byte-deterministically, from the committed records.
     fn hibernating(nodes: usize, clients: usize, ops: u64) -> WsSwarm {
         WsSwarm {
@@ -302,7 +302,7 @@ impl WsSwarm {
 const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
-/// How long a hibernating client idles when it idles — comfortably past
+/// How long a hibernating client idles when it idles: comfortably past
 /// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
@@ -328,7 +328,7 @@ impl ClusterWorkload for WsSwarm {
             return None;
         }
         // A restarted node comes up empty and would otherwise stop hosting
-        // `Studio` — no gateway, no shard leadership, no replica for the write
+        // `Studio`, no gateway, no shard leadership, no replica for the write
         // quorum. Re-host it, or the run shrinks the cluster rather than faulting
         // it. The config carries the same scratch root, which is right: the
         // facet's restore discards stale local files, they are a cache and never
@@ -365,7 +365,7 @@ impl ClusterWorkload for WsSwarm {
                 // Under restarts every client goes through node 1's gateway, the
                 // one node the nemesis leaves alone: a handle for a restarted node
                 // points at a system that has been shut down. Location
-                // transparency (E13) keeps the coverage — the call still lands on
+                // transparency (E13) keeps the coverage: the call still lands on
                 // whichever node leads the entity's shard.
                 let entities = if restarting {
                     hosts[0].clone()
@@ -402,7 +402,7 @@ impl ClusterWorkload for WsSwarm {
                             let state = paths.entry((key, path)).or_default();
                             match outcome {
                                 // Committed: this is the value, and it supersedes
-                                // every earlier attempt — a late-landing ambiguous
+                                // every earlier attempt; a late-landing ambiguous
                                 // record occupies an *earlier* `Seq` slot, so it can
                                 // never shadow a commit that came after it.
                                 Ok(Ok(_)) => state.committed(bytes),
@@ -428,7 +428,7 @@ impl ClusterWorkload for WsSwarm {
                         } else if let Some(state) = paths.get(&(key.clone(), path.clone())) {
                             // READ a path this client has written: the bytes must be
                             // one this client is entitled to see there, or the call
-                            // must fail (under a fault) — never another path's bytes,
+                            // must fail (under a fault), never another path's bytes,
                             // never a value it never wrote, never one a later commit
                             // superseded.
                             if let Ok(Ok(got)) = entity
@@ -465,7 +465,7 @@ impl ClusterWorkload for WsSwarm {
 fn workspace_reads_never_go_stale_under_the_cluster_swarm() {
     // #4: a read of an acknowledged capture returns exactly those bytes (or
     // errors), and the safety core holds, on every seeded run under partitions,
-    // crashes, loss, duplication, and delay — F1 and E14 together.
+    // crashes, loss, duplication, and delay; F1 and E14 together.
     let workload = WsSwarm::new(3, 3, 8);
     if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{failure}");
@@ -476,14 +476,14 @@ fn workspace_reads_never_go_stale_under_the_cluster_swarm() {
     );
     assert!(
         workload.reads_verified.load(Ordering::SeqCst) > 0,
-        "no read ever returned bytes — the integrity check never ran",
+        "no read ever returned bytes: the integrity check never ran",
     );
 }
 
 // --- The same claim across hibernation and process death ---------------------
 //
 // The sweep above holds every activation resident, so a read is served from the
-// live directory the write landed in — the materialization is never rebuilt. This
+// live directory the write landed in, the materialization is never rebuilt. This
 // one tears it down: the entity hibernates, its directory goes, and the next read
 // is served from a tree the new activation reconstructed by applying the captured
 // bytes over a composite snapshot (F1 holds on the bytes, never on re-execution),
@@ -501,7 +501,7 @@ fn workspace_reads_never_go_stale_across_hibernation_and_restarts() {
     );
     assert!(
         workload.reads_verified.load(Ordering::SeqCst) > 0,
-        "no read ever returned bytes — the integrity check never ran",
+        "no read ever returned bytes: the integrity check never ran",
     );
     workload.exercised.assert_hibernated();
 }

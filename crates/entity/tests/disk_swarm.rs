@@ -8,7 +8,7 @@
 //!
 //! - **Failover rematerialization.** A leader crash moves the activation to
 //!   another node, whose image is rebuilt from the composite-snapshot manifest
-//!   (blob blocks, E17) plus the committed capture records — [`Facet::fold`]'s
+//!   (blob blocks, E17) plus the committed capture records: [`Facet::fold`]'s
 //!   pending queue drained by [`Facet::rehydrate`]'s blob fetches, the one path
 //!   the `Local` tier's always-snapshotting hibernation cannot reach.
 //! - **Checkpoints under faults.** `snapshot_every` forces the index-manifest
@@ -60,7 +60,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use support::Exercised;
 
-/// 1 MiB — the facet's fixed block size (spec §7.15).
+/// 1 MiB: the facet's fixed block size (spec §7.15).
 const BLOCK: u64 = 1 << 20;
 /// The base image: two blocks, the second partial.
 const IMAGE_BYTES: u64 = BLOCK + BLOCK / 2;
@@ -88,7 +88,7 @@ impl Entity for DiskBox {
 }
 
 /// Provision on first touch, then write a deterministic stamp into the live
-/// image and run the capture command (§7.15) — one command, one manifest
+/// image and run the capture command (§7.15): one command, one manifest
 /// record, committing through the quorum path (E19).
 #[derive(Clone, Serialize, Deserialize)]
 struct Stamp {
@@ -131,7 +131,7 @@ impl EntityHandler<Stamp> for DiskBox {
     }
 }
 
-/// Read eight bytes at `offset` from the live image — a pure read (§7.5).
+/// Read eight bytes at `offset` from the live image: a pure read (§7.5).
 #[derive(Clone, Serialize, Deserialize)]
 struct ReadStamp {
     offset: u64,
@@ -171,7 +171,7 @@ impl EntityHandler<ReadStamp> for DiskBox {
 /// is recorded as nothing and the client moves on.
 ///
 /// One scratch directory serves every run and every simulated node (the facet
-/// keys materializations by node and entity, and restore discards stale files —
+/// keys materializations by node and entity, and restore discards stale files:
 /// they are a cache, never truth, §1). The shared base image lives beside them.
 struct DiskBoxSwarm {
     nodes: usize,
@@ -202,7 +202,7 @@ impl DiskBoxSwarm {
     }
 
     /// Short activation lifetime, clients that idle past it, and a nemesis that
-    /// kills processes — so a read has to come from an image the next activation
+    /// kills processes, so a read has to come from an image the next activation
     /// rebuilt: checkpoint manifest, blocks re-fetched and verified by content
     /// (E17), capture manifests folded and applied on top.
     fn hibernating(nodes: usize, clients: usize, ops: u64, dir: PathBuf) -> DiskBoxSwarm {
@@ -226,7 +226,7 @@ impl DiskBoxSwarm {
             // faults, and failover rematerializes from it plus the later
             // capture records (fold + rehydrate). Oftener still when
             // hibernating, so an entity has a checkpoint to come back from before
-            // it first hibernates — otherwise every rehydration replays from an
+            // it first hibernates: otherwise every rehydration replays from an
             // empty base and the manifest restore path goes untested, which is
             // what `Exercised::from_snapshot` refuses to let pass silently.
             snapshot_every: if self.hibernating { 2 } else { 4 },
@@ -244,7 +244,7 @@ impl DiskBoxSwarm {
 const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
-/// How long a hibernating client idles when it idles — comfortably past
+/// How long a hibernating client idles when it idles: comfortably past
 /// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
@@ -278,7 +278,7 @@ impl ClusterWorkload for DiskBoxSwarm {
         }
         // A restarted node comes up empty and would otherwise stop hosting
         // `DiskBox`. The config carries the same scratch root: the facet's
-        // restore discards stale local files (a cache, never truth — §1), so a
+        // restore discards stale local files (a cache, never truth; §1), so a
         // fresh process rebuilding over its predecessor's leftover image is
         // exactly the case worth covering.
         let config = self.config();
@@ -386,7 +386,7 @@ fn disk_entity_invariants_hold_under_the_cluster_swarm() {
 // --- The same claims across hibernation and process death --------------------
 //
 // The sweep above holds every activation resident, so a read is served from the
-// image the write landed in — the block image is never rebuilt. This one tears it
+// image the write landed in, the block image is never rebuilt. This one tears it
 // down: the entity hibernates, its image goes, and the next read is served from
 // one the new activation rehydrated block by block out of content-addressed
 // blobs, possibly in a process that did not exist when the write committed. That
@@ -416,7 +416,7 @@ fn disk_hibernation_actually_deactivates_and_restores_from_a_snapshot() {
     // entity has to commit past `snapshot_every`, then idle out, then be called
     // again, and the nemesis spends stretches of most seeds unable to reach a
     // write quorum, so on the declared range it happens on some seeds and not
-    // others — seeds 2 and 3 never hibernate at all. Asserted on a narrowed
+    // others; seeds 2 and 3 never hibernate at all. Asserted on a narrowed
     // sweep it was a claim about which seed a local run happened to draw, and it
     // held only because seed 0 was one of the ones that covered. Any change that
     // shifted the schedule could turn it red without breaking anything, and one
@@ -424,7 +424,7 @@ fn disk_hibernation_actually_deactivates_and_restores_from_a_snapshot() {
     // which shortened the run and took hibernations with it.
     //
     // So state it where it is true, on a sweep sized by `coverage_seeds`, which
-    // never narrows — the same treatment `restarted` gets in
+    // never narrows: the same treatment `restarted` gets in
     // `entity_swarm.rs::the_nemesis_actually_restarts_a_node`, and the same one
     // `disk_cluster_swarm_actually_fires_each_fault_type` gets below. The whole
     // declared sixteen, because that is the range the claim is an aggregate
@@ -451,8 +451,8 @@ fn disk_hibernating_swarm_is_reproducible() {
 fn disk_cluster_swarm_actually_fires_each_fault_type() {
     // #8, sized for a workload whose seeds cost seconds apiece: `coverage_seeds`
     // never narrows, so the declared range *is* the cost. Four seeds is enough
-    // to carry "each fault type fired at least once" — the transport draws its
-    // fault rates per seed and the nemesis runs six rounds within each — and
+    // to carry "each fault type fired at least once" (the transport draws its
+    // fault rates per seed and the nemesis runs six rounds within each), and
     // small enough not to dominate the suite.
     let dir = tempfile::tempdir().expect("tempdir");
     let workload = DiskBoxSwarm::new(3, 3, 5, dir.path().to_path_buf());
@@ -480,8 +480,8 @@ fn disk_cluster_swarm_actually_fires_each_fault_type() {
 
 #[test]
 fn disk_cluster_swarm_is_reproducible() {
-    // #7: the same seed replays to a byte-identical event stream — entity events
-    // included — even under cluster nemesis and transport faults, with real
+    // #7: the same seed replays to a byte-identical event stream (entity events
+    // included) even under cluster nemesis and transport faults, with real
     // image files materialized on every node.
     let dir = tempfile::tempdir().expect("tempdir");
     let workload = DiskBoxSwarm::new(3, 2, 4, dir.path().to_path_buf());

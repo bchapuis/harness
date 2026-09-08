@@ -1,7 +1,7 @@
 //! Deterministic placement by rendezvous hashing (utilities spec §2).
 //!
 //! Answers one question identically on every node: *given a key, which member
-//! owns it?* Each candidate is scored independently — `weight(tag, key)` — and
+//! owns it?* Each candidate is scored independently; `weight(tag, key)`, and
 //! the highest weight wins, so removing a member reassigns only the keys it
 //! owned and adding one moves only the keys it now owns (utilities spec §2.2
 //! item 5, invariant U1). Everything here is a pure function of its arguments:
@@ -25,7 +25,7 @@ use actor_core::NodeId;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// FNV-1a 64 over the concatenation of `chunks` (no per-chunk framing — the
+/// FNV-1a 64 over the concatenation of `chunks` (no per-chunk framing: the
 /// caller's tag/key split is positional, not self-describing).
 fn fnv1a64(chunks: &[&[u8]]) -> u64 {
     let mut hash = FNV_OFFSET;
@@ -40,7 +40,7 @@ fn fnv1a64(chunks: &[&[u8]]) -> u64 {
 
 /// The splitmix64 finalizer: full-avalanche mixing of a 64-bit value. Shared
 /// with the Raft campaign stagger (`raft.rs`), whose output must stay
-/// bit-identical across builds — the known-answer tests here pin the rounds.
+/// bit-identical across builds: the known-answer tests here pin the rounds.
 pub(crate) fn mix64(mut x: u64) -> u64 {
     x ^= x >> 30;
     x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -84,7 +84,7 @@ pub fn owner(nodes: &[NodeId], key: &[u8]) -> Option<NodeId> {
 }
 
 /// The `n` highest-weight nodes for `key`, in descending weight order with the
-/// same tie rule as [`owner`] — `top(nodes, key, 1)` equals `owner(nodes, key)`.
+/// same tie rule as [`owner`]: `top(nodes, key, 1)` equals `owner(nodes, key)`.
 /// Provided for replica/shard placement (utilities spec §7); returns fewer than
 /// `n` entries when the candidate set is smaller.
 pub fn top(nodes: &[NodeId], key: &[u8], n: usize) -> Vec<NodeId> {

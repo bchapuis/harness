@@ -20,7 +20,7 @@ use crate::mailbox::Mailbox;
 use crate::message::Message;
 use crate::system::ActorSystem;
 
-/// The default deadline applied to `ask` when the caller gives none — every
+/// The default deadline applied to `ask` when the caller gives none: every
 /// request carries an effective deadline (spec §14.2).
 const DEFAULT_ASK_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -85,7 +85,7 @@ impl<'de, A: Actor> serde::Deserialize<'de> for ActorRef<A> {
 /// the id alone (spec §4.3).
 enum Target<A: Actor> {
     Local(Mailbox<A>),
-    /// The id is local but no live actor owns it — it has resigned.
+    /// The id is local but no live actor owns it: it has resigned.
     DeadLetter,
     Remote,
 }
@@ -172,7 +172,7 @@ impl<A: Actor> ActorRef<A> {
 
     /// Run `f` directly against the actor's state, **only if it is local** (spec
     /// §3.5.1). Returns `Some(result)` when the target lives on this node and is
-    /// alive — `f` runs on its serial executor, so isolation is preserved — and
+    /// alive (`f` runs on its serial executor, so isolation is preserved), and
     /// `None` when the target is remote or already gone. This is the one
     /// sanctioned exception to location transparency; it SHOULD be used only in
     /// tests and local optimizations.
@@ -208,7 +208,7 @@ impl<A: Actor> ActorRef<A> {
     }
 
     /// Non-blocking local fire-and-forget: returns [`CallError::MailboxFull`]
-    /// rather than awaiting when the mailbox is full (spec §6). Local-only — a
+    /// rather than awaiting when the mailbox is full (spec §6). Local-only: a
     /// remote target yields [`CallError::Unreachable`]; use [`tell`] for remote.
     ///
     /// [`tell`]: ActorRef::tell

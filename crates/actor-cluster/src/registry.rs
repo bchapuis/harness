@@ -1,7 +1,7 @@
 //! The external-registry seam of the registry-based control plane (spec §9.4.2).
 //!
 //! In registry-based mode the authoritative member set lives in an **external
-//! registry** — a platform API, a database, a coordination service — that the
+//! registry** (a platform API, a database, a coordination service) that the
 //! cluster reads but does not operate. [`RegistryClient`] is the trait the sync
 //! loop speaks (spec §9.4.2 item 7): production implements it against the real
 //! platform; the simulator supplies an in-memory registry with seeded latency,
@@ -11,13 +11,13 @@ use actor_core::BoxFuture;
 use actor_core::NodeId;
 
 /// The desired state of a registered member (spec §9.4.2). Absence from the
-/// registry is the third state: not a member — admission *is* the entry, and
+/// registry is the third state: not a member; admission *is* the entry, and
 /// removing it finalizes `down`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RegistryState {
     /// A full member, in service.
     Up,
-    /// Cordoned for maintenance — the reversible `draining` state (spec §9.1).
+    /// Cordoned for maintenance: the reversible `draining` state (spec §9.1).
     Draining,
 }
 
@@ -33,8 +33,8 @@ pub struct RegistryEntry {
 
 /// One consistent read of the registry: the full desired member set as of
 /// `revision`, the registry's global monotonic revision at read time (spec
-/// §9.4.2 item 1). The global revision also stamps *removals* — a member absent
-/// from a snapshot is `down` at that revision — and orders snapshots, so a
+/// §9.4.2 item 1). The global revision also stamps *removals* (a member absent
+/// from a snapshot is `down` at that revision), and orders snapshots, so a
 /// stale read is detected and skipped.
 #[derive(Clone, Debug)]
 pub struct RegistrySnapshot {
@@ -51,7 +51,7 @@ pub enum RegistryError {
     Unavailable,
 }
 
-/// The registry client (spec §9.4.2 item 7) — the seam between the cluster and
+/// The registry client (spec §9.4.2 item 7): the seam between the cluster and
 /// the external registry. The sync loop polls [`fetch`](RegistryClient::fetch);
 /// the mutation methods are the operator/platform side (who calls them is
 /// deployment policy, spec §9.4.2 item 2), each returning the new revision.
@@ -68,7 +68,7 @@ pub trait RegistryClient: Send + Sync + 'static {
     /// itself (spec §9.4.2 item 2).
     fn register(&self, node: NodeId) -> BoxFuture<'static, Result<u64, RegistryError>>;
 
-    /// Set a registered member's desired state — the `drain`/`resume` cordon
+    /// Set a registered member's desired state: the `drain`/`resume` cordon
     /// (spec §9.4.2 item 5).
     fn set_state(
         &self,
@@ -76,7 +76,7 @@ pub trait RegistryClient: Send + Sync + 'static {
         state: RegistryState,
     ) -> BoxFuture<'static, Result<u64, RegistryError>>;
 
-    /// Remove `node` from the registry — the removal's revision finalizes
+    /// Remove `node` from the registry: the removal's revision finalizes
     /// `down`/`removed` and runs the node-down cascade (spec §9.4.2 items 3–4).
     fn deregister(&self, node: NodeId) -> BoxFuture<'static, Result<u64, RegistryError>>;
 }

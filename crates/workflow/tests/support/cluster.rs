@@ -70,8 +70,8 @@ pub fn host(node: &SimNode, seam: &Seam) -> Entities<Fanout<SimNode>> {
 /// `Entities` handle per node, with every node's events on the recorder.
 ///
 /// The first node is the anchor: every call is issued through its handle and it
-/// is never restarted — the rule the swarm runner applies to its own nemesis
-/// (`ClusterWorkload::rehost`) — so a scenario crashes a leader elsewhere
+/// is never restarted; the rule the swarm runner applies to its own nemesis
+/// (`ClusterWorkload::rehost`), so a scenario crashes a leader elsewhere
 /// ([`key_led_elsewhere`](Cluster::key_led_elsewhere)).
 pub struct Cluster {
     pub net: SimNetwork,
@@ -119,8 +119,8 @@ impl Cluster {
             .expect("two shards across three nodes: some key is led off the first node")
     }
 
-    /// Kill the process leading `key`'s shard — volatile state, tasks in flight,
-    /// and all — and bring the node back empty, re-hosting `Fanout` on it. The
+    /// Kill the process leading `key`'s shard (volatile state, tasks in flight,
+    /// and all), and bring the node back empty, re-hosting `Fanout` on it. The
     /// returned handles replace the dead node's; every earlier clone of them is
     /// dead with the old process.
     pub fn crash_leader_of(&mut self, key: &str, seam: &Seam) -> NodeId {

@@ -180,7 +180,7 @@ pub fn agent_invariants() -> Vec<Box<dyn Invariant>> {
 }
 
 /// Which A-invariant each agent checker enforces, as `(checker name, H
-/// number)` — the pairing §11's "Verified by" column asserts, stated from the
+/// number)`: the pairing §11's "Verified by" column asserts, stated from the
 /// checker's side.
 ///
 /// Declared here, beside the checkers, because this is the claim an edit to an

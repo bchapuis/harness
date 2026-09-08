@@ -13,7 +13,7 @@ use crate::supervision::Fault;
 
 /// The decision supervision applied to a faulted actor (spec §11.2), as seen on
 /// the event stream (spec §16). This is the *effective* decision after the
-/// restart window and backoff are applied — e.g. exceeding `max` restarts
+/// restart window and backoff are applied, e.g. exceeding `max` restarts
 /// surfaces as [`Stop`](SupervisionDecision::Stop), not `Restart`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SupervisionDecision {
@@ -32,12 +32,12 @@ pub enum SupervisionDecision {
 /// **Where a new event belongs.** The named variants are the framework's own
 /// vocabulary: every event the actor spec (§16) and the cluster-utilities
 /// catalogue name, because the simulator's checkers prove framework
-/// invariants against them by variant — lifecycle, ask pairing, membership,
+/// invariants against them by variant; lifecycle, ask pairing, membership,
 /// Raft, and the singleton activation discipline (which is why the singleton
 /// pair sits here even though a proxy emits it: its discipline is a
 /// framework-catalogued invariant, not application vocabulary). Everything a
-/// *layered* spec defines — entity's entity events, the agent runtime's §10.4
-/// stream — rides [`Event::App`] instead, so core is never edited for a layer
+/// *layered* spec defines: entity's entity events, the agent runtime's §10.4
+/// stream; rides [`Event::App`] instead, so core is never edited for a layer
 /// above it. If a new event's invariant is checked by the framework
 /// catalogue, it earns a variant; otherwise it is an [`AppEvent`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,7 +60,7 @@ pub enum Event {
     /// manifest, an undecodable payload, or a full mailbox. An `ask` also sees
     /// the error as its reply; a one-way `tell` has no reply, so this event is
     /// the only trace that its message was not accepted. `manifest` is the
-    /// claim the frame carried — untrusted wire text, so not a [`Manifest`].
+    /// claim the frame carried: untrusted wire text, so not a [`Manifest`].
     Undelivered {
         actor: ActorId,
         manifest: String,
@@ -102,16 +102,16 @@ pub enum Event {
     Unreachable { observer: NodeId, node: NodeId },
     /// `observer` saw `node` become reachable again (a probe succeeded, spec §10).
     Reachable { observer: NodeId, node: NodeId },
-    /// `observer` declared `node` down — terminal for that observer (spec §9.1,
+    /// `observer` declared `node` down: terminal for that observer (spec §9.1,
     /// §8.1).
     NodeDown { observer: NodeId, node: NodeId },
-    /// `observer` first saw `node` as `joining` — handshake done, not yet a full
+    /// `observer` first saw `node` as `joining`: handshake done, not yet a full
     /// member (spec §9.1, §9.3).
     MemberJoining { observer: NodeId, node: NodeId },
-    /// `observer` saw `node` become a full `up` member — admitted by the mode's
+    /// `observer` saw `node` become a full `up` member: admitted by the mode's
     /// authority (spec §9.1, §9.3, §9.4).
     MemberUp { observer: NodeId, node: NodeId },
-    /// `observer` saw `node` enter the reversible `draining` state — the mode's
+    /// `observer` saw `node` enter the reversible `draining` state: the mode's
     /// authority (a registry entry or a committed log entry, spec §9.4) cordoned
     /// it for maintenance. Unlike `down`, this is not terminal: the node stays a
     /// member and a later `resume` returns it to `up`.
@@ -124,7 +124,7 @@ pub enum Event {
     RegistrySynced { observer: NodeId, revision: u64 },
     /// `node` won the leader election for `term` in Raft `group` (leader-based
     /// mode, spec §9.4.3). At most one node may ever announce a given
-    /// `(group, term)` — the election-safety half of invariant #22 a continuous
+    /// `(group, term)`: the election-safety half of invariant #22 a continuous
     /// checker enforces. Terms are **per group**, so the group is part of the
     /// identity; it is the `GroupId` value as a plain `u64`. The membership
     /// control plane is group `0`.
@@ -137,7 +137,7 @@ pub enum Event {
     },
     /// A singleton manager activated `actor` as its node's instance of the
     /// singleton `name` (utilities spec §4). At most one activation per name may
-    /// be live on a node at a time — the per-node half of invariant U2 a
+    /// be live on a node at a time: the per-node half of invariant U2 a
     /// continuous checker enforces; cross-node overlap during view divergence is
     /// legal until convergence.
     SingletonStarted { name: &'static str, actor: ActorId },
@@ -149,7 +149,7 @@ pub enum Event {
     /// when the signal is enqueued onto the watcher's mailbox, on the watcher's
     /// own node. Forwarding a signal to a remote watcher's node is not a delivery
     /// (it is emitted there when the frame lands), so this fires once per actual
-    /// delivery — including a watch-after-death (invariant #12).
+    /// delivery, including a watch-after-death (invariant #12).
     TerminatedDelivered {
         target: ActorId,
         watcher: ActorId,
@@ -166,8 +166,8 @@ pub enum Event {
 }
 
 impl Event {
-    /// Whether this is a membership or reachability transition (spec §9, §10)
-    /// — the block an operator-facing stderr sink prints while swallowing
+    /// Whether this is a membership or reachability transition (spec §9, §10):
+    /// the block an operator-facing stderr sink prints while swallowing
     /// dispatch-level noise. Named here, beside the enum, so a new membership
     /// variant extends every such sink in one place.
     pub fn is_membership(&self) -> bool {
@@ -203,7 +203,7 @@ impl Event {
 }
 
 /// An application-defined event (spec §16): anything `Debug + Clone +
-/// PartialEq + Send + Sync` qualifies via the blanket impl — applications never
+/// PartialEq + Send + Sync` qualifies via the blanket impl; applications never
 /// implement this by hand. Those bounds are what let [`Event`] stay `Clone` and
 /// `Eq` for the reproducibility recorder's comparison (spec §18.1 #1).
 pub trait AppEvent: std::fmt::Debug + Send + Sync + 'static {
@@ -234,8 +234,8 @@ where
 
 // Both impls dispatch through the inner `dyn AppEvent` explicitly. Calling
 // `self.clone_app()` / `self.eq_app(..)` on the box receiver would resolve
-// to the blanket impl on `Box<dyn AppEvent>` itself — these very impls make
-// the box satisfy its bounds — turning clone into infinite recursion and eq
+// to the blanket impl on `Box<dyn AppEvent>` itself (these very impls make
+// the box satisfy its bounds) turning clone into infinite recursion and eq
 // into a constant `false`.
 impl Clone for Box<dyn AppEvent> {
     fn clone(&self) -> Self {

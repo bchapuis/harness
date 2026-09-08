@@ -23,7 +23,7 @@ use crate::blob::Namespace;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlobEvent {
     /// A `put` reached its `W` durability target and returned the id (spec §5.2,
-    /// **B3**) — emitted by the coordinating node.
+    /// **B3**): emitted by the coordinating node.
     PutAcked { ns: Namespace, id: BlobId },
     /// A replica durably stored a blob (a `put` fan-out or a reconcile copy),
     /// or re-acknowledged one already present (**B2**). Never emitted for a store
@@ -35,7 +35,7 @@ pub enum BlobEvent {
     },
     /// A `get` returned bytes that verified against the id (spec §4, **B1**).
     GetVerified { ns: Namespace, id: BlobId },
-    /// A `get` found a copy but none verified — the data is corrupt, not merely
+    /// A `get` found a copy but none verified: the data is corrupt, not merely
     /// absent (spec §4, §5.2, **B1**).
     GetCorrupt { ns: Namespace, id: BlobId },
     /// A node recorded a namespace tombstone and swept its local bytes (spec §5.3,

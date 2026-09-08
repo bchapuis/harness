@@ -3,15 +3,15 @@
 //!
 //! Two shapes of call:
 //!
-//! - **Request-response** (`list_sessions`, `fetch_records`, `cancel`) — send,
+//! - **Request-response** (`list_sessions`, `fetch_records`, `cancel`): send,
 //!   read the whole reply, parse the JSON. One connection per request,
 //!   `connection: close`.
-//! - **Streaming** (`open_prompt`) — submit a turn with `Accept: text/event-stream`
+//! - **Streaming** (`open_prompt`): submit a turn with `Accept: text/event-stream`
 //!   and hand back an [`Events`] iterator that yields the run's records live off
 //!   the chunked SSE body, so the TUI renders as the agent works.
 //!
-//! The socket plumbing — origin parsing, TCP/TLS connect, request framing,
-//! and the incremental response [`Reader`] — is the shared [`agent_http`]
+//! The socket plumbing (origin parsing, TCP/TLS connect, request framing,
+//! and the incremental response [`Reader`]) is the shared [`agent_http`]
 //! substrate; this module owns only the gateway protocol: the REST paths, the
 //! bearer token, and the SSE frame vocabulary.
 
@@ -36,7 +36,7 @@ pub struct SessionEntry {
 }
 
 /// A parsed SSE frame from a streamed run: a `records` batch, a `truncated`
-/// notice (compaction outran the stream's cursor — records up to the base are
+/// notice (compaction outran the stream's cursor; records up to the base are
 /// gone, §10.2), the terminal `outcome`, an `error`, or the stream's `end`
 /// marker.
 #[derive(Debug)]
@@ -49,7 +49,7 @@ pub enum Event {
 }
 
 /// Bound on a whole request-response exchange. The streaming prompt is *not*
-/// bound by this — a run can take minutes — only the unary calls are.
+/// bound by this (a run can take minutes) only the unary calls are.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An HTTP/1.1 client pinned to one gateway base URL, carrying the tenant token
@@ -121,7 +121,7 @@ impl GatewayClient {
     }
 
     /// Submit a turn and stream the run as SSE. `from` is where the live watch
-    /// starts — pass the session's current head so the stream carries only the
+    /// starts: pass the session's current head so the stream carries only the
     /// new records, not the whole history again.
     pub async fn open_prompt(
         &self,
@@ -166,7 +166,7 @@ impl GatewayClient {
     }
 
     /// A request-response call: connect, send, read the whole reply, return the
-    /// body bytes on a 2xx — or a descriptive error otherwise.
+    /// body bytes on a 2xx, or a descriptive error otherwise.
     async fn unary(
         &self,
         method: &str,
@@ -278,7 +278,7 @@ fn parse_frame(frame: &[u8]) -> Option<Event> {
     }
 }
 
-/// The first index of `needle` in `haystack`, or `None` — for splitting SSE
+/// The first index of `needle` in `haystack`, or `None`, for splitting SSE
 /// frames out of the decoded stream.
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
@@ -317,7 +317,7 @@ mod tests {
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
-    /// Frame `pieces` as an HTTP/1.1 chunked response — one chunk per piece, so a
+    /// Frame `pieces` as an HTTP/1.1 chunked response: one chunk per piece, so a
     /// caller can split an SSE event across a chunk boundary on purpose.
     fn chunked_response(pieces: &[&str]) -> Vec<u8> {
         let mut out =

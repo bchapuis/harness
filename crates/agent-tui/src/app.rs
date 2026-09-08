@@ -3,7 +3,7 @@
 //! The view is two panes plus a prompt: the tenant's sessions on the left, the
 //! selected session's transcript on the right, and an input line below. The
 //! committed [`Record`]s the gateway streams are the state's source of truth;
-//! the view projects them into styled lines each frame — as a chat transcript,
+//! the view projects them into styled lines each frame, as a chat transcript,
 //! or (with the raw toggle) as the journal JSON the records API actually returns.
 //!
 //! Network work never runs on the UI task. Every call (list, load, prompt) is
@@ -93,7 +93,7 @@ pub struct App {
     pub records: Vec<(Seq, Record)>,
     pub streaming: bool,
     /// A per-process nonce and an in-run counter together mint turn ids that are
-    /// unique by construction — see [`App::turn_id`].
+    /// unique by construction; see [`App::turn_id`].
     nonce: u64,
     turn_counter: u64,
 
@@ -181,7 +181,7 @@ impl App {
 
     /// The current turn's id: the client-chosen idempotency key (§7.4). A
     /// per-process `nonce` makes it unique across restarts, so a fresh prompt is
-    /// never the persisted id of a finished run — which the entity would dedup,
+    /// never the persisted id of a finished run, which the entity would dedup,
     /// committing no new records and leaving the stream (and the UI) hung.
     fn turn_id(&self) -> String {
         format!("t-{}-{}", self.nonce, self.turn_counter)
@@ -459,7 +459,7 @@ impl App {
             }
             Update::Outcome(outcome) => {
                 self.status = match &outcome {
-                    Ok(c) => format!("done — {} tokens", c.tokens()),
+                    Ok(c) => format!("done: {} tokens", c.tokens()),
                     Err(RunError::BudgetExhausted) => "budget exhausted".to_string(),
                     Err(RunError::Cancelled) => "cancelled".to_string(),
                     Err(RunError::Model(e)) => format!("model error: {e}"),
@@ -484,7 +484,7 @@ impl App {
         )
     }
 
-    /// The highest record sequence applied — just the last record's, since records
+    /// The highest record sequence applied: just the last record's, since records
     /// are appended in order. The watermark a live batch dedups against.
     fn last_seq(&self) -> u64 {
         self.records.last().map(|(s, _)| s.value()).unwrap_or(0)
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn a_restart_cannot_reuse_a_prior_runs_turn_id() {
-        // Same counter, different process nonce — the ids never collide, so a
+        // Same counter, different process nonce: the ids never collide, so a
         // fresh prompt after a restart is never dedup'd against the journal.
         let (mut first, mut second) = (app(1), app(2));
         first.turn_counter += 1;

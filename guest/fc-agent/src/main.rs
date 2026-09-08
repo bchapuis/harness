@@ -8,13 +8,13 @@
 //! (replace `/workspace` with a tar stream), `exec` (`/bin/sh -c`, cwd
 //! `/workspace`), `pull` (tar `/workspace` back). An op the agent cannot
 //! honor answers `{"error":…}` over the working transport; transport
-//! failures just drop the connection — the host treats those as single-tier
+//! failures just drop the connection: the host treats those as single-tier
 //! loss and re-provisions.
 //!
 //! Connections are served on threads, one each: the host enforces tool
 //! timeouts by dropping its client, and a command that runs on regardless
 //! must wedge only its own connection, never the next call's. The pull walks
-//! the workspace manually — files, directories, and symlinks only — because
+//! the workspace manually (files, directories, and symlinks only) because
 //! a blanket archive would `open` whatever it finds, and opening a fifo a
 //! guest command left behind blocks forever.
 //!
@@ -37,7 +37,7 @@ use serde_json::Value;
 /// orphan, but a bare `waitpid(-1)` from one thread could steal the exit
 /// status `Command::output` is waiting on in another. `exec` holds the read
 /// side across spawn-to-wait; the reaper runs only when it can take the
-/// write side without blocking — a stuck command starves reaping (zombies
+/// write side without blocking: a stuck command starves reaping (zombies
 /// accumulate, bounded by the guest's own pid space), never the other way.
 static EXEC_GATE: RwLock<()> = RwLock::new(());
 
@@ -102,7 +102,7 @@ fn mount(_source: &str, _target: &str, _fstype: &str) {}
 
 /// Orphans reparent to pid 1 and zombify on exit; reap them between
 /// requests. (`Command::output` waits for its own child, so blanket
-/// `SIGCHLD` ignoring would break it — explicit reaping instead, and only
+/// `SIGCHLD` ignoring would break it: explicit reaping instead, and only
 /// when no `exec` is mid-wait; see [`EXEC_GATE`].)
 fn reap_zombies() {
     #[cfg(target_os = "linux")]
@@ -255,8 +255,8 @@ fn push(workspace: &Path, tar: &[u8]) -> std::io::Result<()> {
 }
 
 /// Tar the workspace back: a manual walk over files, directories, and
-/// symlinks, mirroring the host side. Symlinks are archived as symlinks —
-/// following them would copy whatever they point at *into* the stream — and
+/// symlinks, mirroring the host side. Symlinks are archived as symlinks
+/// (following them would copy whatever they point at *into* the stream), and
 /// everything else (fifos, sockets, devices) is skipped *before* any open:
 /// opening a fifo with no writer blocks forever, and one `mkfifo` must not
 /// wedge every later pull. The host drops what it cannot represent anyway.
@@ -283,7 +283,7 @@ fn append_dir(
     for entry in entries {
         let path = prefix.join(entry.file_name());
         let full = entry.path();
-        // symlink_metadata: classify without following — or opening.
+        // symlink_metadata: classify without following, or opening.
         let meta = std::fs::symlink_metadata(&full)?;
         let kind = meta.file_type();
         if kind.is_dir() {

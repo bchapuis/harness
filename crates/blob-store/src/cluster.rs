@@ -78,7 +78,7 @@ pub(crate) struct Inner<S: BlobSystem> {
     pub(crate) tombstones: TombstoneSet,
     /// Sweep tracking for namespaces this node anchors (spec §5.3, B7).
     pub(crate) anchors: AnchorTracker,
-    /// How the tier reaches peers' replicas — a seam, for deterministic simulation
+    /// How the tier reaches peers' replicas: a seam, for deterministic simulation
     /// (spec §6, §8).
     pub(crate) transport: Arc<dyn BlobTransport>,
     pub(crate) self_node: NodeId,
@@ -205,7 +205,7 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
                 // An owner that holds the tombstone refuses the store (spec §5.2):
                 // the namespace is gone, so the put cannot succeed.
                 Ok(StoreAck::Deleted) => return Err(BlobError::Deleted(ns.clone())),
-                Err(_) => {} // unreachable/timeout owner — keep counting the rest
+                Err(_) => {} // unreachable/timeout owner; keep counting the rest
             }
         }
         Err(BlobError::Unavailable(format!(
@@ -257,8 +257,8 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
                     }
                     Err(_) => saw_non_verifying = true, // try the next owner
                 },
-                Ok(None) => {} // absent (or tombstoned) here — keep trying
-                Err(_) => {}   // unreachable owner — keep trying
+                Ok(None) => {} // absent (or tombstoned) here; keep trying
+                Err(_) => {}   // unreachable owner; keep trying
             }
         }
 
@@ -283,7 +283,7 @@ impl<S: BlobSystem> ClusteredBlobStore<S> {
         }
         let members = self.inner.system.serving_members();
         let owners = placement::owners(&members, ns, id, self.r());
-        // §3 / B3: "durably present" means the durability target is met — at
+        // §3 / B3: "durably present" means the durability target is met, at
         // least W confirmed copies, the same floor `put` refuses to ack below.
         // With fewer than W candidate owners the answer is `false`, not a quorum
         // of whatever is left, which would report a one-copy blob as durable.

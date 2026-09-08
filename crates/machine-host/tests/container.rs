@@ -1,10 +1,10 @@
 //! The container mechanism against a real daemon: the lifecycle both consumers
-//! drive it through, and the one distinction their loss conduct rests on —
+//! drive it through, and the one distinction their loss conduct rests on;
 //! `GuestError::Gone` (the container is gone; re-provision) versus a command
 //! that merely failed (an outcome to report).
 //!
 //! Probes for docker first and skips (eprintln + return) when it is absent, so a
-//! machine without it stays green — the convention of
+//! machine without it stays green: the convention of
 //! `agent-sandbox/tests/native.rs`. The pinned image is pulled on the first run
 //! (`docker pull alpine:3.20` to pre-warm). A test that panics mid-flight can
 //! strand a container: `docker ps -a --filter name=isolation-test-` lists them.
@@ -115,7 +115,7 @@ async fn connecting_to_an_absent_agent_is_gone() {
         .await
         .expect("start a container");
     // A bare image ships no guest agent, so nothing binds the port's socket.
-    // The consumer must hear "gone" — its re-provision signal — rather than a
+    // The consumer must hear "gone" (its re-provision signal) rather than a
     // host-side fault it would retry in place.
     let Err(error) = guest.connect(62).await else {
         panic!("no agent listens in a bare image, so a channel cannot open")
@@ -127,7 +127,7 @@ async fn connecting_to_an_absent_agent_is_gone() {
     guest.stop().await;
 }
 
-/// A guest this host is not running answers `Gone` — what a front door reports
+/// A guest this host is not running answers `Gone`: what a front door reports
 /// for a machine whose activation is on another node (machine §5.1).
 #[tokio::test]
 async fn connect_by_key_reports_an_absent_guest() {

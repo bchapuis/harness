@@ -36,7 +36,7 @@ struct SimRegistryState {
     revision: u64,
     /// Each member's desired state and the revision that last changed it.
     entries: BTreeMap<NodeId, (RegistryState, u64)>,
-    /// Recent snapshots, oldest first — what a stale read is served from.
+    /// Recent snapshots, oldest first: what a stale read is served from.
     history: Vec<RegistrySnapshot>,
     /// While `false`, every client call fails `Unavailable` (spec §9.4.2 item 6).
     available: bool,
@@ -117,7 +117,7 @@ impl SimRegistry {
 
     /// Toggle availability (spec §9.4.2 item 6): while unavailable, every
     /// client call fails `Unavailable`. Mutations through this operator handle
-    /// still apply — the registry exists; only the cluster's path to it is out.
+    /// still apply: the registry exists; only the cluster's path to it is out.
     pub fn set_available(&self, available: bool) {
         let mut state = self.state.lock().expect("registry mutex poisoned");
         if state.available && !available {
@@ -146,7 +146,7 @@ impl SimRegistry {
         state.revision
     }
 
-    /// Register `node` as a member (`Up`) — the operator/platform admission
+    /// Register `node` as a member (`Up`): the operator/platform admission
     /// (spec §9.4.2 item 2). Returns the mutation's revision.
     pub fn register(&self, node: NodeId) -> u64 {
         self.mutate(|state| {
@@ -175,7 +175,7 @@ impl SimRegistry {
         })
     }
 
-    /// Remove `node` from the registry — the removal finalizes `down` at this
+    /// Remove `node` from the registry: the removal finalizes `down` at this
     /// revision (spec §9.4.2 items 3–4).
     pub fn deregister(&self, node: NodeId) -> u64 {
         self.mutate(|state| {
@@ -242,7 +242,7 @@ impl SimRegistry {
             .available
     }
 
-    /// Run one mutating client call behind the availability gate — the one
+    /// Run one mutating client call behind the availability gate: the one
     /// place the gate lives, shared by `register`/`set_state`/`deregister`.
     fn gated(
         &self,

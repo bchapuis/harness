@@ -58,7 +58,7 @@ async fn read_to_status(
     let mut stderr = Vec::new();
     loop {
         let body = vsock::recv_frame(stream, MAX_FRAME).await?;
-        // Bulk `Data` appends straight from the frame body — no decode copy.
+        // Bulk `Data` appends straight from the frame body, no decode copy.
         if let Some(bytes) = Frame::data_payload(&body) {
             if let Some(tar) = tar.as_deref_mut() {
                 if tar.len() + bytes.len() > MAX_TAR {

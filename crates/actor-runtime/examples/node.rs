@@ -17,7 +17,7 @@
 //!
 //! # 3. In another terminal, a node (id 2) *joins* knowing only the seed (node
 //! #    1), is admitted to the cluster by the leader, then looks the greeter up
-//! #    and asks it — all over the wire.
+//! #    and asks it: all over the wire.
 //! cargo run -p actor-runtime --example node -- run \
 //!     --id 2 --bind 127.0.0.1:9002 --certs ./certs \
 //!     --peer 1=127.0.0.1:9001 --peer 2=127.0.0.1:9002 \
@@ -26,7 +26,7 @@
 //!
 //! The joiner prints that it is `joining`, then that it was `admitted … as Up`
 //! (the leader, node 1, admitted it on convergence, spec §9.3), then
-//! `Hello, world!` — obtained from the greeter in the other process over a
+//! `Hello, world!`; obtained from the greeter in the other process over a
 //! TLS-encrypted TCP association. Drop `--join` to start as a founding member
 //! instead.
 
@@ -238,7 +238,7 @@ async fn serve(system: TcpCluster, greeting: String) -> ! {
     let greeter = system.spawn(Greeter::<TcpCluster>::new(greeting));
     system.receptionist().register(GREETERS, &greeter);
     println!(
-        "node {} serving greeter {} — registered under {:?}",
+        "node {} serving greeter {}, registered under {:?}",
         system.node(),
         greeter.id(),
         "greeters"

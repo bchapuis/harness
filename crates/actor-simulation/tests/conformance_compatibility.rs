@@ -4,14 +4,14 @@
 //! The negotiated wire revision is what a send-side gate reads before composing a
 //! frame: a build whose window spans two revisions must write the higher one only
 //! to a peer that settled on it. These tests pin the two halves that makes
-//! possible — that a simulated node can be told what its *own* build accepts, and
+//! possible: that a simulated node can be told what its *own* build accepts, and
 //! that `Transport::peer_version` answers with what the two ends would settle on.
 //!
 //! With every node on the shipped window there is one revision in the cluster and
 //! nothing to settle, so the mixed cases here run against widened windows standing
 //! in for the releases that will widen the real one (**V4**: read-new first,
 //! write-new later). That is the point of routing every boundary through one
-//! `Window` type — the policy can be exercised before a bump is taken.
+//! `Window` type: the policy can be exercised before a bump is taken.
 
 use actor_cluster::Transport;
 use actor_cluster::WIRE;
@@ -25,7 +25,7 @@ use compat::Window;
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 
-/// A window that reads up to `hi` and writes `writes` — the shape of a release
+/// A window that reads up to `hi` and writes `writes`: the shape of a release
 /// mid-bump. `Window::new` refuses `writes` outside the range at compile time
 /// (**V3**), which is the invariant this helper must not be able to dodge.
 fn window(lo: u16, hi: u16, writes: u16) -> Window {
@@ -52,7 +52,7 @@ fn a_uniform_cluster_settles_on_the_revision_it_ships() {
 fn a_peer_that_reads_further_does_not_pull_the_association_up() {
     // The rolling-upgrade middle: A has been upgraded to read v1..=v2, B has not
     // been touched. The association must stay at v1, because that is all B can
-    // read — this is the case the gate exists for, and the one an equality check
+    // read: this is the case the gate exists for, and the one an equality check
     // would have turned into a refusal instead.
     let sim = Simulation::new(1);
     let net = SimNetwork::new(&sim);
@@ -100,7 +100,7 @@ fn the_association_rises_only_once_both_ends_have_moved() {
 #[test]
 fn a_peer_with_no_shared_revision_reports_no_association() {
     // Disjoint ranges are a refused association (**V2**). To a caller that is not
-    // a lower revision to fall back to — it is no association at all, the same
+    // a lower revision to fall back to: it is no association at all, the same
     // answer an unreachable peer gives.
     let sim = Simulation::new(1);
     let net = SimNetwork::new(&sim);

@@ -2,14 +2,14 @@
 
 A terminal client for the agent runtime: a two-pane chat UI over the gateway's
 HTTP/SSE edge (`crates/agent-gateway`). It authenticates as a tenant with a
-bearer token, lists that tenant's sessions, and drives one — submit a prompt and
+bearer token, lists that tenant's sessions, and drives one: submit a prompt and
 watch the run's records stream in live as a transcript.
 
 It talks to the gateway and nothing else. There is no cluster membership here, no
 actor transport, and no durable state: the gateway does the cluster work and this
 is the edge UI in front of it. That is the same boundary the VS Code extension in
 `clients/agent-vscode` sits on, over the same REST + Server-Sent-Events
-protocol — one client in the terminal, one in an editor.
+protocol, one client in the terminal, one in an editor.
 
 The one shared dependency is `agent` itself, for the record and outcome types
 the gateway serializes onto the wire. Sharing them keeps the client in lockstep
@@ -52,7 +52,7 @@ agent works.
 The HTTP client is hand-rolled rather than `reqwest`, the same choice the
 standalone deployment's model seam makes, but it reads the response as a live
 stream for SSE instead of to EOF. An `https://` base reuses rustls with webpki
-trust anchors; a plain `http://` base — the loopback demo — skips TLS.
+trust anchors; a plain `http://` base, the loopback demo, skips TLS.
 
 ## Run
 
@@ -75,7 +75,7 @@ cargo run -p agent-tui
 
 The defaults match the loopback demo, so the default `--token anonymous` simply
 acts as tenant "anonymous". Against an authenticated gateway, pass the opaque API
-token instead — it is the tenant identity, and the gateway is where auth
+token instead; it is the tenant identity, and the gateway is where auth
 terminates (`docs/multi-tenant-edge.md`).
 
 ## Caveats

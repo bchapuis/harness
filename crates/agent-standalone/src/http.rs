@@ -72,7 +72,7 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     /// A local fake serving one canned response per connection, over plain
-    /// `http://` — the same path a scripted Messages API fake would use.
+    /// `http://`: the same path a scripted Messages API fake would use.
     #[tokio::test]
     async fn posts_to_a_local_server_and_reads_the_reply() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

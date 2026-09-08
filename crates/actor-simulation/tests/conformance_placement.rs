@@ -1,7 +1,7 @@
 //! Conformance: deterministic placement (utilities spec §2, invariant U1).
 //!
 //! The placement function is pure, so most of U1 is pinned by direct property
-//! tests — determinism, permutation invariance, minimal movement, distribution
+//! tests: determinism, permutation invariance, minimal movement, distribution
 //! sanity, and the `top`/`owner` relation. The cluster tests then pin the
 //! *serving set* (utilities spec §2.1): converged nodes derive equal sets and
 //! therefore equal owners, and a drained or unreachable member leaves the set
@@ -33,7 +33,7 @@ fn keys() -> Vec<Vec<u8>> {
 
 #[test]
 fn owner_is_deterministic_and_permutation_invariant() {
-    // U1: a pure function of (set, key) — repeated calls agree, and the order
+    // U1: a pure function of (set, key); repeated calls agree, and the order
     // the candidate set is presented in is irrelevant.
     let nodes = five_nodes();
     let mut reversed = nodes.clone();
@@ -102,7 +102,7 @@ fn every_member_owns_a_share() {
         let share = counts.get(&node).copied().unwrap_or(0);
         assert!(
             share > 100,
-            "{node} owns {share}/1000 keys — far below a fair share"
+            "{node} owns {share}/1000 keys: far below a fair share"
         );
     }
 }
@@ -181,7 +181,7 @@ fn a_drained_member_leaves_the_serving_set_until_resumed() {
 
 #[test]
 fn an_unreachable_member_leaves_the_serving_set_until_healed() {
-    // Utilities spec §2.1: placement is stricter than the receptionist filter —
+    // Utilities spec §2.1: placement is stricter than the receptionist filter;
     // a confirmed-unreachable member owns nothing until reachability recovers.
     let sim = Simulation::new(13);
     let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);

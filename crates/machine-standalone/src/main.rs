@@ -30,7 +30,7 @@ use crate::node::MachineKind;
 use crate::node::NodeOptions;
 
 const USAGE: &str = "\
-machine-standalone — persistent lightweight VMs as entities (machine spec)
+machine-standalone: persistent lightweight VMs as entities (machine spec)
 
   node    --id <n> --machine <firecracker|docker|fake> [--nodes 3] [--data DIR]
           [--fc-binary PATH] [--fc-kernel PATH]
@@ -211,7 +211,7 @@ async fn run_create(args: &[String]) -> Result<(), String> {
         // exists is asking for the one that exists.
         AdminReply::AlreadyProvisioned => {
             println!(
-                "machine `{}` already exists — leaving it as it is",
+                "machine `{}` already exists, leaving it as it is",
                 common.machine
             );
         }
@@ -302,7 +302,7 @@ async fn run_key(args: &[String]) -> Result<(), String> {
         changed += 1;
     }
     if changed == 0 {
-        return Err("key: nothing to do — pass --add PUBKEY or --revoke FINGERPRINT".to_string());
+        return Err("key: nothing to do; pass --add PUBKEY or --revoke FINGERPRINT".to_string());
     }
     Ok(())
 }

@@ -1,6 +1,6 @@
 //! The workflow's observability events (workflow spec §8): checker-facing, ephemeral,
 //! describing the *machinery around* effects and carrying nothing about their
-//! content — the payload is the consumer's and belongs in the consumer's records
+//! content; the payload is the consumer's and belongs in the consumer's records
 //! (agent §10.1).
 //!
 //! Each event rides the core stream as [`Event::App`] (core §16), alongside the
@@ -12,7 +12,7 @@
 //! entity's own events: activation, deactivation, leadership, and commit are read
 //! from `Activated`, `Deactivated`, `LeaderChanged`, and `Committed`, and the
 //! workflow mints no duplicates of them. [`Discarded`](WorkflowEvent::Discarded) is
-//! present because a discarded outcome leaves no record anywhere — the one thing
+//! present because a discarded outcome leaves no record anywhere: the one thing
 //! the workflow does that the journal cannot show, and W5 would be uncheckable
 //! without it.
 
@@ -29,8 +29,8 @@ use entity::EntityName;
 ///
 /// Every variant carries the `node` hosting the activation, as the entity's own
 /// events do (entity §13) and for the same reason: a claim's life is
-/// per-activation, and under failover two activations of one entity — a deposed
-/// leader still running down its launches and its successor — are distinguishable
+/// per-activation, and under failover two activations of one entity (a deposed
+/// leader still running down its launches and its successor) are distinguishable
 /// on the stream only by the node that emits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowEvent {
@@ -54,7 +54,7 @@ pub enum WorkflowEvent {
     ///
     /// Fires on **every** settle that runs, not only on one that writes. A
     /// settle may legitimately return no records (§4.2), and that is exactly the
-    /// path whose key stays in the desired set to be relaunched under backoff —
+    /// path whose key stays in the desired set to be relaunched under backoff,
     /// so an event that fired only on a commit would leave a `Launched` with no
     /// terminator on the stream, and W3's and W7's windows could not be closed.
     /// `committed: false` is also the only signal a checker gets that an outcome
@@ -62,7 +62,7 @@ pub enum WorkflowEvent {
     ///
     /// Emitted **after** the records commit when there are records to commit
     /// (§8): the workflow stages it and releases it from the workflow that follows the
-    /// commit, so a settle whose append fails — the activation stepping down —
+    /// commit, so a settle whose append fails (the activation stepping down)
     /// leaves no `Settled` claiming records that never became durable. A settle
     /// that decided no records has nothing to wait for and emits at once.
     Settled {

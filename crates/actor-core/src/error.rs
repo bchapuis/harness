@@ -1,6 +1,6 @@
 //! The error model (spec §14).
 //!
-//! [`CallError`] covers **transport and system** failures only — the failure to
+//! [`CallError`] covers **transport and system** failures only: the failure to
 //! *complete* a call. Application failures a handler deliberately produces live
 //! inside `M::Reply` (spec §3.2), never here. The variants are exhaustive (no
 //! `#[non_exhaustive]`): callers MUST handle every kind of partial failure
@@ -53,13 +53,13 @@ impl From<actor_serialization::CodecError> for CallError {
     }
 }
 
-/// Await **every** future, then report the first error — the non-abandoning
+/// Await **every** future, then report the first error: the non-abandoning
 /// counterpart to `futures::future::try_join_all`.
 ///
 /// `try_join_all` returns the moment one future fails and **drops** the rest.
 /// That is fine for pure computation and wrong for anything that has issued an
 /// [`ask`](crate::ActorRef::ask): dropping the future abandons the call, which then
-/// never reaches a reply or a definite [`CallError`] — exactly what no-silent-
+/// never reaches a reply or a definite [`CallError`]; exactly what no-silent-
 /// loss forbids (spec §7.2, §18.5 #1).
 ///
 /// ```ignore

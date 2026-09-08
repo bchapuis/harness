@@ -1,5 +1,5 @@
 //! The workspace file commands (machine §3): read and mutate the machine's
-//! `/workspace` **without booting it** — the last committed state while
+//! `/workspace` **without booting it**; the last committed state while
 //! hibernated. These commands touch the activation only through
 //! [`Machine::ws_command_guard`].
 
@@ -72,7 +72,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> Machine<S, P> {
 
     /// Stage a mutating file command's delta into its own batch: the write
     /// and its durability record are one commit. A capture failure fails the
-    /// command — the caller must not believe an unstaged write durable; the
+    /// command: the caller must not believe an unstaged write durable; the
     /// materialized file is picked up by the next successful capture (the
     /// facet diffs against the committed index, self-healing).
     fn ws_stage(&self, ctx: &EntityCtx<Self>) -> Result<(), MachineError> {

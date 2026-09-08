@@ -254,7 +254,7 @@ impl SimSpawner {
 
     /// End a process incarnation: drop every task it owns, so none is ever polled
     /// again (spec §18.3). The futures are dropped after the scheduler lock is
-    /// released — see [`Inner::retire_domain`].
+    /// released; see [`Inner::retire_domain`].
     pub(crate) fn retire_domain(&self, domain: u64) {
         let retired = {
             let mut inner = self.shared.lock().expect("scheduler mutex poisoned");
@@ -321,13 +321,13 @@ impl Simulation {
     /// nothing is ready and no timers remain.
     pub fn run(&self) {
         loop {
-            // Phase 1 — drain all ready work. Polling may ready more tasks, so
+            // Phase 1: drain all ready work. Polling may ready more tasks, so
             // loop until the ready set is empty.
             while let Some(id) = self.take_ready() {
                 self.poll_task(id);
             }
 
-            // Phase 2 — quiescent. Advance virtual time to the earliest timer
+            // Phase 2: quiescent. Advance virtual time to the earliest timer
             // and fire every timer now due. If there are none, the run is over.
             if !self.advance_time() {
                 break;
@@ -376,12 +376,12 @@ impl Simulation {
     /// Returns at the poll that completes the future: whatever else is ready or
     /// timed at that point stays in the scheduler for the next [`run`],
     /// [`run_for`], or `block_on`. Draining the world is a separate operation,
-    /// and deliberately so — a workload that never quiesces (an entity whose idle
+    /// and deliberately so: a workload that never quiesces (an entity whose idle
     /// check re-arms while it vetoes hibernation, a failure detector) would
     /// otherwise turn an awaited reply into a loop that never returns and
     /// records events without bound.
     ///
-    /// Panics if the runtime quiesces — nothing ready, no timer left — before
+    /// Panics if the runtime quiesces (nothing ready, no timer left) before
     /// the future completes: the future was waiting on something nobody will
     /// ever send.
     ///

@@ -6,7 +6,7 @@
 //! with [`default_invariants`](crate::default_invariants), so a checker added in
 //! code but not recorded here, or the reverse, fails the build.
 
-/// How a §18.5 invariant is verified — the machine-readable form of the §17
+/// How a §18.5 invariant is verified: the machine-readable form of the §17
 /// conformance table's "Verified by" column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verify {
@@ -16,7 +16,7 @@ pub enum Verify {
     /// live checker set.
     Checker(&'static str),
     /// One or more example/conformance tests, named as comma-separated files
-    /// under this crate's `tests/` directory — or, where the suite that decides an
+    /// under this crate's `tests/` directory, or, where the suite that decides an
     /// invariant lives in another crate, as a path relative to `crates/`. The
     /// `conformance_catalogue` test machine-verifies each named file exists, so a
     /// renamed or deleted test fails the build.
@@ -29,7 +29,7 @@ pub enum Verify {
     /// owning crate.
     ///
     /// The alternative to [`SimTest`](Verify::SimTest) for a catalogue whose spec
-    /// names its verification the same way — blob §9 and machine §7 both do, and
+    /// names its verification the same way: blob §9 and machine §7 both do, and
     /// so does wal §7, which pointed at functions before this variant existed. A
     /// function name states the property; a file name says where to look. Where a
     /// suite is a whole file the file is the better pointer, and where it is one
@@ -42,7 +42,7 @@ pub enum Verify {
     CompileFail(&'static str),
     /// A local-vs-remote differential test (#21).
     Differential(&'static str),
-    /// Enforced at compile time by a trait bound or exhaustive enum — no runtime
+    /// Enforced at compile time by a trait bound or exhaustive enum, no runtime
     /// test is possible or needed.
     CompileTime(&'static str),
     /// Nothing verifies this yet, and the string says why not.
@@ -50,7 +50,7 @@ pub enum Verify {
     /// Distinct from the others because it is the one entry that names no test,
     /// no checker, and no guarantee. It was a `SimTest` whose payload was a
     /// sentence beginning "future:", which reads as verification to anything that
-    /// does not parse the prose — including the drift tests, which found a file
+    /// does not parse the prose, including the drift tests, which found a file
     /// list with no files in it and had nothing to say. A deferral is a real state
     /// for an invariant to be in (sandbox §7 keeps a list of them); it just has to
     /// be able to announce itself.
@@ -60,7 +60,7 @@ pub enum Verify {
 impl Verify {
     /// The text this entry carries, whatever it names.
     ///
-    /// Every variant wraps one string — a checker's name, a comma-separated file
+    /// Every variant wraps one string: a checker's name, a comma-separated file
     /// list, a trybuild path, a sentence explaining a compile-time guarantee or a
     /// deferral. The spec↔catalogue comparison
     /// ([`spec::catalogue`](https://docs.rs/spec)) takes them all and
@@ -90,7 +90,7 @@ pub struct CatalogueEntry {
 }
 
 /// Which table an invariant number belongs to. The two are numbered
-/// independently — core #2 and utilities U2 are unrelated claims — so a
+/// independently (core #2 and utilities U2 are unrelated claims), so a
 /// coverage row naming a bare number has to say which.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Catalogue {
@@ -100,7 +100,7 @@ pub enum Catalogue {
     Utilities,
 }
 
-/// One catalogued invariant that one continuous checker enforces — the pairing
+/// One catalogued invariant that one continuous checker enforces: the pairing
 /// a `Verify::Checker` row asserts, stated from the checker's side.
 ///
 /// Both sides are needed because neither is derivable from the other: the
@@ -254,7 +254,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 14,
         spec: "§9.2, §9.4",
-        property: "Membership convergence once faults cease and partitions heal — by anti-entropy (gossip-based), registry sync (registry-based), or log replication (leader-based)",
+        property: "Membership convergence once faults cease and partitions heal, by anti-entropy (gossip-based), registry sync (registry-based), or log replication (leader-based)",
         verify: &[Verify::SimTest(
             "conformance_membership.rs, conformance_registry.rs, conformance_leader.rs",
         )],
@@ -271,7 +271,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 16,
         spec: "§9.4",
-        property: "Partition tolerance: under the default policy a partition alone never downs a member — unconditionally in registry-based mode (observe-only detector), and on any quorum-less side in leader-based mode (#22)",
+        property: "Partition tolerance: under the default policy a partition alone never downs a member; unconditionally in registry-based mode (observe-only detector), and on any quorum-less side in leader-based mode (#22)",
         verify: &[Verify::SimTest(
             "conformance_membership.rs, conformance_registry.rs, conformance_leader.rs",
         )],
@@ -321,7 +321,7 @@ const UTILITIES_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 1, // U1
         spec: "utilities §2",
-        property: "Deterministic placement: a pure, version-stable function of the serving set and key — identical serving sets compute identical owners, and a single-member change reassigns only the keys that member owned or now owns",
+        property: "Deterministic placement: a pure, version-stable function of the serving set and key; identical serving sets compute identical owners, and a single-member change reassigns only the keys that member owned or now owns",
         // No continuous checker: placement is a pure function off the event stream;
         // per-decision events would flood the stream without enabling any check the
         // property tests do not already perform (utilities spec §5).

@@ -5,9 +5,9 @@
 //! set an activation's first tick computes after a crash is the very function
 //! its predecessor was computing on the live path, over the same committed
 //! prefix. That is decidable by difference. Three views of one entity are held
-//! equal here — the live activation before the crash, the successor after it, and
+//! equal here: the live activation before the crash, the successor after it, and
 //! an **offline fold** of the journal the test reads back and folds itself with
-//! the consumer's own `apply` and `pending` — and any ephemeral state leaking into
+//! the consumer's own `apply` and `pending`, and any ephemeral state leaking into
 //! `pending` (a claim, a backoff count, a binding) would show as a disagreement.
 
 mod support;
@@ -131,7 +131,7 @@ fn the_successors_first_drive_is_the_desired_set_its_predecessor_was_computing()
 #[test]
 fn a_second_crash_re_derives_what_the_first_resume_had_already_settled() {
     // Resume composes: the successor's own settles join the journal, and a
-    // further crash re-derives from that longer prefix — no memory of either
+    // further crash re-derives from that longer prefix, no memory of either
     // activation carries across.
     let sim = Simulation::new(223);
     let recorder = Recorder::new();

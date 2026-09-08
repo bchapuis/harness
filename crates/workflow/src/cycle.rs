@@ -1,8 +1,8 @@
 //! The workflow cycle (workflow spec §3.2, §3.3, §6): reconciling the desired set
 //! against what this activation has launched.
 //!
-//! One entry, one exit. The cycle is entered by a commit — of a command's
-//! records or of a settled outcome's — by rehydration, by a backoff elapsing, or
+//! One entry, one exit. The cycle is entered by a commit (of a command's
+//! records or of a settled outcome's) by rehydration, by a backoff elapsing, or
 //! by an explicit tick; and it exits when the desired set has come to rest and
 //! nothing is in flight, which is **quiescence** (§6): the entity has become an
 //! ordinary waiting entity again and MAY hibernate.
@@ -49,7 +49,7 @@ enum Phase<K> {
 ///
 /// An ordinary self-addressed command, and the way back into the cycle after
 /// anything that commits nothing: a consumer's own event, or a backoff elapsing.
-/// Like [`Settled`], a **local-only** self-tell — a consumer MUST NOT `accept`
+/// Like [`Settled`], a **local-only** self-tell: a consumer MUST NOT `accept`
 /// it in its `EntityRegistry`, which is the deserialization allowlist for
 /// *network* commands (entity §5.5). Nothing outside the entity has any business
 /// injecting an effect outcome or driving another node's activation.
@@ -65,7 +65,7 @@ impl Message for Tick {
 struct Scope<K: Ord> {
     /// Which keys this activation has launched: entity's launch-once posture
     /// (entity §7.17) with the engine's own lifetime rule. It is deliberately
-    /// not entity's `LaunchGuard`, because the two release differently — the
+    /// not entity's `LaunchGuard`, because the two release differently: the
     /// steps facet's guard is reset wholesale when a run ends, where a claim
     /// here is dropped exactly when its key leaves the desired set (§3.2 step 2),
     /// which is what keeps the straggler filter exact.
@@ -73,20 +73,20 @@ struct Scope<K: Ord> {
     /// Per-key consecutive unproductive settles and the delay they earn (§3.4).
     backoff: Backoff<K>,
     /// The orphan set's classification (§4.4), made at the activation's
-    /// **first sight of committed state** — the first tick, or the first handler
+    /// **first sight of committed state**: the first tick, or the first handler
     /// that re-enters the cycle, whichever the mailbox delivers first.
     /// Classifying from the earliest state seen is what keeps a command that
     /// arrived ahead of the rehydration tick from having its own, fresh work
     /// re-derived as orphaned.
     phase: Phase<K>,
-    /// What the last cycle concluded about quiescence, so `can_hibernate` — which
-    /// takes no seams and so cannot read the clock — answers from a decision
+    /// What the last cycle concluded about quiescence, so `can_hibernate` (which
+    /// takes no seams and so cannot read the clock) answers from a decision
     /// rather than recomputing one (§6). `false` until the first tick has run:
     /// an activation that has not resolved its orphan set may not hibernate.
     quiescent: bool,
     /// `Settled` events awaiting the commit they describe (§8). A settle that
-    /// decided records is emitted from the engine that follows their commit — the
-    /// tick `settled` launches — so an append that fails and steps the
+    /// decided records is emitted from the engine that follows their commit (the
+    /// tick `settled` launches), so an append that fails and steps the
     /// activation down takes the staged event with it, and the stream never
     /// shows a `Settled { committed: true }` for records that were lost.
     staged: Vec<WorkflowEvent>,
@@ -108,7 +108,7 @@ impl<K: Ord> Scope<K> {
 /// (spec §2.1).
 ///
 /// Internally synchronized, so a consumer holds it as a plain field and reaches
-/// it through `&self` from its handlers, `can_hibernate`, and `on_deactivate` —
+/// it through `&self` from its handlers, `can_hibernate`, and `on_deactivate`:
 /// the shape entity's own per-activation state already takes.
 pub struct Engine<D: Workflow> {
     scope: Mutex<Scope<D::Key>>,
@@ -144,7 +144,7 @@ impl<D: Workflow> Engine<D> {
     /// A consumer calls this from `Entity::on_activate`. A re-activation starts
     /// clean by specification: the claims are ephemeral (§3.3) and the counts
     /// start at zero (§3.4). The tick is what makes the first tick happen at
-    /// all on an entity nobody is about to command — a resumed one with work still
+    /// all on an entity nobody is about to command: a resumed one with work still
     /// outstanding, which is the whole of resume (§4.4).
     pub fn on_activate(&self, ctx: &EntityCtx<D>) {
         *self.lock() = Scope::new(self.policy);
@@ -155,7 +155,7 @@ impl<D: Workflow> Engine<D> {
     }
 
     /// Whether this activation is **quiescent** and MAY hibernate (§6, W7):
-    /// nothing in flight and every member of the desired set at rest — the set
+    /// nothing in flight and every member of the desired set at rest; the set
     /// empty, or its remaining members backed off to the cap.
     ///
     /// A consumer calls this from `Entity::can_hibernate` and MAY narrow it
@@ -169,7 +169,7 @@ impl<D: Workflow> Engine<D> {
     /// is the same answer and a cheaper one: a cycle runs on every commit and on
     /// every backoff expiry, so the conclusion is never staler than the last
     /// thing that happened to this entity. Before the first tick has run it is
-    /// `false` — an activation that has not yet resolved its orphan set has no
+    /// `false`: an activation that has not yet resolved its orphan set has no
     /// business hibernating.
     pub fn quiescent(&self) -> bool {
         self.lock().quiescent
@@ -181,7 +181,7 @@ impl<D: Workflow> Engine<D> {
     ///
     /// A consumer calls this from every handler whose records it wants workflow,
     /// with the `state` the handler was given. The tell is launched, not awaited,
-    /// so it runs after the current handler's records commit — which is what makes
+    /// so it runs after the current handler's records commit, which is what makes
     /// launching effects from the resulting cycle honor the write-ahead discipline
     /// (§5) rather than race it.
     ///
@@ -209,7 +209,7 @@ impl<D: Workflow> Engine<D> {
 
     /// Classify the orphan set (§4.4) if this activation has not yet: the
     /// `Interrupt` members of `desired`, the desired set at the first sight of
-    /// committed state. `Reexecute` members need no record — the first tick
+    /// committed state. `Reexecute` members need no record: the first tick
     /// launches them as it launches anything unclaimed.
     fn classify(scope: &mut Scope<D::Key>, desired: &[Pending<D::Key, D::Effect>]) {
         if matches!(scope.phase, Phase::Fresh) {
@@ -232,8 +232,8 @@ impl<D: Workflow> Engine<D> {
     /// activation has launched, and return the records the engine itself decided.
     ///
     /// The body of a consumer's `EntityHandler<Tick>`. The engine decides no
-    /// records of its own — every outcome, including an orphaned `Interrupt`,
-    /// reaches the journal as a [`Settled`] command — so this always returns
+    /// records of its own (every outcome, including an orphaned `Interrupt`,
+    /// reaches the journal as a [`Settled`] command), so this always returns
     /// empty. It returns `Vec<D::Event>` anyway so the handler reads like every
     /// other decision and so a later revision can journal without changing every
     /// consumer.
@@ -246,7 +246,7 @@ impl<D: Workflow> Engine<D> {
         Self::classify(&mut scope, &desired);
 
         // Step 2: release every claim and count whose key has left the desired
-        // set. Not bookkeeping — it bounds both tables by the work outstanding
+        // set. Not bookkeeping: it bounds both tables by the work outstanding
         // rather than by the work ever done, and it is what lets a consumer
         // re-request the same call site later (§3.2).
         let live: BTreeSet<D::Key> = desired.iter().map(|p| p.key.clone()).collect();
@@ -254,8 +254,8 @@ impl<D: Workflow> Engine<D> {
         scope.backoff.retain_keys(|k| live.contains(k));
 
         // The orphaned `Interrupt` members still wanted are resolved without a
-        // launch (§4.4): each takes a claim — so no later tick launches it while
-        // its synthesized outcome is in the mailbox — and is settled below. This
+        // launch (§4.4): each takes a claim (so no later tick launches it while
+        // its synthesized outcome is in the mailbox), and is settled below. This
         // tick spends the classification: every later member is fresh.
         let mut interrupted = Vec::new();
         if let Phase::Classified(orphaned) = std::mem::replace(&mut scope.phase, Phase::Ticked) {
@@ -277,8 +277,8 @@ impl<D: Workflow> Engine<D> {
             launch.push(p);
         }
 
-        // Step 4: quiescence. Nothing in flight — an orphaned resolution holds a
-        // claim like a launch — and everything left at rest.
+        // Step 4: quiescence. Nothing in flight (an orphaned resolution holds a
+        // claim like a launch), and everything left at rest.
         let quiescent = scope.claims.is_empty() && live.iter().all(|k| scope.backoff.at_rest(k));
         let announce = quiescent && !scope.quiescent;
         scope.quiescent = quiescent;
@@ -323,7 +323,7 @@ impl<D: Workflow> Engine<D> {
     /// Fold one settled outcome (spec §4.2, §4.5): the body of a consumer's
     /// `EntityHandler<Settled<Self>>`.
     ///
-    /// Discards a straggler — an outcome whose key has left the desired set —
+    /// Discards a straggler (an outcome whose key has left the desired set)
     /// without calling [`Workflow::settle`] and without writing any record (W5).
     /// Otherwise it hands the outcome to the consumer and returns the records the
     /// consumer decided.
@@ -340,8 +340,8 @@ impl<D: Workflow> Engine<D> {
         // consumer's `settle` below.
         let straggler = {
             let mut scope = self.lock();
-            // An outcome may be the first thing an activation handles — a
-            // previous activation's launch reaching this one (§3.3) — and it sees
+            // An outcome may be the first thing an activation handles: a
+            // previous activation's launch reaching this one (§3.3), and it sees
             // the rehydrated state, so it classifies the orphan set like any
             // first handler (§4.4).
             Self::classify(&mut scope, &desired);
@@ -349,7 +349,7 @@ impl<D: Workflow> Engine<D> {
             // The straggler test is the desired set itself, which is why it is
             // exact and needs no separate bookkeeping: a key is in the set
             // exactly while its outcome is not yet journaled. Exactness rests on
-            // keys being unique over the entity's whole journal (§3.1) — with a
+            // keys being unique over the entity's whole journal (§3.1), with a
             // key reused across occurrences the test would decide presence, not
             // identity.
             let straggler = !desired.iter().any(|p| p.key == key);
@@ -422,9 +422,9 @@ impl<D: Workflow> Engine<D> {
             }));
         } else {
             // Either the records commit and every commit re-enters the cycle
-            // (§3.2 item 1) — the tell is launched, so it runs after this
+            // (§3.2 item 1) (the tell is launched, so it runs after this
             // handler's records commit, and a consumer wires nothing beyond
-            // forwarding the two commands — or the key just came to rest, which
+            // forwarding the two commands), or the key just came to rest, which
             // may have been the last thing holding the activation resident, and
             // nothing else would re-enter the cycle to conclude quiescence.
             self.tick_only(ctx);

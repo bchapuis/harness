@@ -1,22 +1,22 @@
 //! Split-brain safety: entities under a *heal-able* network partition (entity §11,
 //! §8, §7.5), under deterministic simulation (entity §14).
 //!
-//! Every other cluster test fences the single writer with `crash()` — which kills
+//! Every other cluster test fences the single writer with `crash()`, which kills
 //! the followers outright, so they fall silent and can never form a competing
 //! quorum. That proves the *easy* half of CP. The dangerous half is a partition
 //! that **heals**: the isolated old leader stays *alive*, still believes it leads
-//! (there is no check-quorum lease today — entity-vv-findings), and the majority
+//! (there is no check-quorum lease today; entity-vv-findings), and the majority
 //! side elects a *second* leader that commits in parallel. A naive system forks
 //! here. These tests partition the shard leader into a minority, drive committed
 //! writes on the majority side and rejected writes on the minority side, then
 //! `heal()` and prove the log neither forked nor lost an acknowledged write.
 //!
 //! - **E11/E1 (no fork).** A minority leader's writes never commit; after heal the
-//!   reconciled balance is *exactly* the sum of acknowledged writes — the minority
+//!   reconciled balance is *exactly* the sum of acknowledged writes: the minority
 //!   attempts left no trace (`split_brain_partition_neither_forks_nor_loses`).
 //! - **E14 (no loss).** Every write the majority acknowledged survives the heal.
 //! - **§7.5 (relaxed reads).** The minority leader MAY serve a stale read but MUST
-//!   NOT commit — the documented read/write asymmetry, pinned as an executable
+//!   NOT commit: the documented read/write asymmetry, pinned as an executable
 //!   contract (`minority_leader_serves_stale_reads_but_never_commits`).
 //! - **Linearizability across partition+heal.** Concurrent clients on both sides,
 //!   decided against the `Counter` model
@@ -147,7 +147,7 @@ fn leader_net(sim: &Simulation) -> SimNetwork {
     )
 }
 
-/// One shard, replicated on all three nodes — so partitioning one node away always
+/// One shard, replicated on all three nodes, so partitioning one node away always
 /// leaves a 2-of-3 quorum that can elect, and isolates exactly one (deposed)
 /// leader. A single shard makes "the leader of *this* key" unambiguous.
 fn config() -> EntityConfig {
@@ -215,7 +215,7 @@ fn split_brain_partition_neither_forks_nor_loses() {
     // in-flight ambiguity at a transition), so the arithmetic is exact:
     //
     //   * a write the MAJORITY acknowledged MUST appear in the final balance (E14);
-    //   * a write the MINORITY leader attempted MUST NOT (E11/E1 — it can never
+    //   * a write the MINORITY leader attempted MUST NOT (E11/E1: it can never
     //     reach a quorum, so it commits nothing and leaves no trace after heal).
     //
     // A fork would surface the minority deposit in the reconciled total; a lost
@@ -261,7 +261,7 @@ fn split_brain_partition_neither_forks_nor_loses() {
 
         // Phase B, minority side: a deposit on the deposed leader L MUST be fenced.
         // L still believes it leads (no check-quorum), accepts the command, proposes
-        // it, and the wait times out with no quorum — `Unavailable`, never a commit.
+        // it, and the wait times out with no quorum: `Unavailable`, never a commit.
         let minority_write = {
             let g = hosts[leader_idx].clone();
             drive(&sim, Duration::from_secs(13), async move {
@@ -293,7 +293,7 @@ fn split_brain_partition_neither_forks_nor_loses() {
             assert_eq!(
                 balance,
                 Ok(130),
-                "seed {seed}: node index {idx} sees exactly the acknowledged writes — \
+                "seed {seed}: node index {idx} sees exactly the acknowledged writes, \
                  no fork (the 9000 minority write left no trace) and no loss (the 30 survived)",
             );
         }
@@ -306,7 +306,7 @@ fn split_brain_partition_neither_forks_nor_loses() {
 fn minority_leader_serves_stale_reads_but_never_commits() {
     // §7.5 is explicit that reads are read-your-leader (relaxed), not linearizable:
     // an isolated minority leader, lacking a check-quorum lease today, MAY serve a
-    // stale read until its activation stops — but it can commit NOTHING. This test
+    // stale read until its activation stops, but it can commit NOTHING. This test
     // pins both halves as an executable contract, so the day a leader lease lands
     // (§16) the read assertion is the regression that must flip.
     //
@@ -318,7 +318,7 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
     let key = "account/asym";
     let (leader_idx, majority) = leader_and_majority(&systems, &hosts, key);
 
-    // Commit 100 while healthy — the value the minority leader will keep serving.
+    // Commit 100 while healthy: the value the minority leader will keep serving.
     let baseline = {
         let g = hosts[majority[0]].clone();
         drive(&sim, Duration::from_secs(8), async move {
@@ -347,7 +347,7 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
         "the majority advanced the committed value to 150"
     );
 
-    // A WRITE on the deposed leader is fenced — it can never reach a quorum.
+    // A WRITE on the deposed leader is fenced: it can never reach a quorum.
     let minority_write = {
         let g = hosts[leader_idx].clone();
         drive(&sim, Duration::from_secs(13), async move {
@@ -364,7 +364,7 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
     // A READ on the deposed leader, served from its in-memory activation, returns
     // the STALE pre-partition value (100), not the new committed 150. This is the
     // documented §7.5 gap: reads can be stale on the minority side. It is NEVER the
-    // linearized-current value while partitioned — that is the property to assert.
+    // linearized-current value while partitioned: that is the property to assert.
     let minority_read = {
         let g = hosts[leader_idx].clone();
         drive(&sim, Duration::from_secs(4), async move {
@@ -377,7 +377,7 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
         minority_read,
         Ok(150),
         "a minority-side read must NOT observe the new committed value (reads are not \
-         linearizable on the minority side — §7.5); a leader lease (§16) would make this error",
+         linearizable on the minority side: §7.5); a leader lease (§16) would make this error",
     );
     assert!(
         matches!(minority_read, Ok(100) | Err(_)),
@@ -409,8 +409,8 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
 fn cluster_reconverges_after_a_partition_heals() {
     // CP buys safety at the cost of minority availability *during* the partition;
     // the contract is that availability returns once it heals. Partition, let the
-    // majority serve, heal, then prove every node — the formerly isolated one
-    // included — serves the durable value and accepts a fresh write that all see.
+    // majority serve, heal, then prove every node (the formerly isolated one
+    // included) serves the durable value and accepts a fresh write that all see.
     let sim = Simulation::new(2);
     let (net, systems, hosts) = cluster(&sim);
     let key = "account/live";
@@ -439,7 +439,7 @@ fn cluster_reconverges_after_a_partition_heals() {
     sim.run_for(Duration::from_secs(6));
 
     // A fresh write after heal commits and is visible from every node, including the
-    // one that was isolated — no permanent wedge.
+    // one that was isolated, no permanent wedge.
     let after_heal = {
         let g = hosts[leader_idx].clone();
         drive(&sim, Duration::from_secs(12), async move {
@@ -480,7 +480,7 @@ fn tell_under_quorum_loss_never_surfaces_unavailable() {
     // NEVER `Unavailable`. Under quorum loss the host still accepts and proposes,
     // but the commit can never land; the caller is not notified (at-most-once,
     // §2.2). This is asserted single-node elsewhere; here it must hold on a cluster
-    // whose shard has lost its quorum — the exact case where the equivalent `ask`
+    // whose shard has lost its quorum: the exact case where the equivalent `ask`
     // returns `Unavailable`. A `tell` that surfaced `Unavailable` (or blocked on the
     // commit) would violate the fire-and-forget contract.
     let sim = Simulation::new(6);
@@ -491,7 +491,7 @@ fn tell_under_quorum_loss_never_surfaces_unavailable() {
     // Activate the entity while healthy so its host is live and cached on the leader.
     // The §6 property is about an *accepted enqueue*; a fresh entity would instead
     // spin in activation (the map group has no quorum either, so leadership cannot
-    // be confirmed) — that is the resolve path, not the tell contract.
+    // be confirmed): that is the resolve path, not the tell contract.
     let warmup = {
         let g = hosts[leader_idx].clone();
         drive(&sim, Duration::from_secs(8), async move {
@@ -512,11 +512,11 @@ fn tell_under_quorum_loss_never_surfaces_unavailable() {
     }
     sim.run_for(Duration::from_secs(1));
 
-    // The `tell` hits the cached host and is accepted at enqueue — Ok(()), never
-    // Unavailable — even though the deposit can never commit.
-    // The `tell` is accepted and returns Ok(()) — never Unavailable. (It is not
+    // The `tell` hits the cached host and is accepted at enqueue: Ok(()), never
+    // Unavailable; even though the deposit can never commit.
+    // The `tell` is accepted and returns Ok(()), never Unavailable. (It is not
     // instant under quorum loss: with the map group also lacking a quorum, host
-    // resolution is slow — but the *result* is the contract, and it never reports
+    // resolution is slow, but the *result* is the contract, and it never reports
     // the durability outcome.)
     let told = {
         let g = hosts[leader_idx].clone();
@@ -636,7 +636,7 @@ fn counter_entity_is_linearizable_across_a_partition_and_heal() {
     //
     // The minority-side client only ADDS (writes), deliberately: a minority WRITE
     // that committed would fork the log and surface as a value with no valid serial
-    // placement — caught here. (A minority *read* would return a stale value the
+    // placement; caught here. (A minority *read* would return a stale value the
     // checker would flag as a non-linearizable `ok`, but that is the documented
     // §7.5 read gap, not a fork; the dedicated test above pins it, so the minority
     // client here writes only.) A fenced write returns an error -> recorded `info`

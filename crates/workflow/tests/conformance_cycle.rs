@@ -3,7 +3,7 @@
 //! Every test here runs the **real entity host, gateway, and journal** under one
 //! seed (§10): the workflow cycle is the only new code on the simulated path. What
 //! the assertions are about is not the plumbing but the four claims the cycle
-//! makes — that the desired set is a pure function of committed state, that
+//! makes: that the desired set is a pure function of committed state, that
 //! everything in it eventually launches, that nothing launches before the record
 //! that wanted it committed, and that the activation hibernates exactly when its
 //! work has come to rest.
@@ -119,7 +119,7 @@ fn nothing_launches_before_the_record_that_wanted_it_commits() {
 fn the_desired_set_is_a_pure_function_of_committed_state() {
     // W1. Two activations that fold the same journal prefix compute the same
     // desired set: the entity hibernates, re-activates, and its outstanding work
-    // is the same set — re-derived, never carried across in memory.
+    // is the same set; re-derived, never carried across in memory.
     let sim = Simulation::new(13);
     let recorder = Recorder::new();
     let system = sim_system(&sim, &recorder);
@@ -188,8 +188,8 @@ fn a_hibernated_entity_re_derives_and_re_drives_its_outstanding_work() {
 
 #[test]
 fn an_activation_with_an_effect_in_flight_does_not_hibernate() {
-    // W7's veto half. A hung effect holds its claim, so `can_hibernate` — which
-    // is the workflow's derived quiescence and nothing hand-written — must refuse
+    // W7's veto half. A hung effect holds its claim, so `can_hibernate` (which
+    // is the workflow's derived quiescence and nothing hand-written) must refuse
     // eviction for as long as the outcome could still arrive.
     let sim = Simulation::new(19);
     let recorder = Recorder::new();
@@ -308,7 +308,7 @@ fn a_settle_that_commits_nothing_is_relaunched_by_the_backoff_timer() {
 fn a_key_backed_off_to_the_cap_stops_holding_the_activation_resident() {
     // §6's at-rest clause. §3.4 imposes no attempt bound, so without it one
     // permanently unproductive effect would veto eviction forever and pin an
-    // activation whose only remaining work is a timer — strictly worse than what
+    // activation whose only remaining work is a timer: strictly worse than what
     // the agent runtime does today (agent §9.2 item 3).
     let sim = Simulation::new(31);
     let recorder = Recorder::new();

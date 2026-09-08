@@ -13,7 +13,7 @@ workspace = true
 
 [features]
 # The production binding (machine §2.1): a real guest, held through
-# `machine_host::MachineHost` — a Firecracker microVM (Linux + /dev/kvm) or a
+# `machine_host::MachineHost`; a Firecracker microVM (Linux + /dev/kvm) or a
 # container holding the same rootfs (anywhere docker runs). The machine's drive
 # is the disk facet's image (entity §7.15) and its /workspace syncs through
 # `machine-host`'s shared tar codec (machine §4). Which mechanism is the node's

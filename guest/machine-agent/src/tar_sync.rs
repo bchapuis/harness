@@ -22,7 +22,7 @@ use machine_proto::send_frame;
 ///
 /// Unlike the host codec, the unpack applies no escape filtering: the only
 /// peer that can reach this vsock port is the host (main.rs docs), whose
-/// codec never emits absolute or `..`-bearing entries — and an attacker who
+/// codec never emits absolute or `..`-bearing entries, and an attacker who
 /// could forge the stream is already on the host side of the trust boundary,
 /// where the workspace lives unprotected anyway.
 pub fn unpack(workspace: &Path, tar: &[u8]) -> std::io::Result<()> {
@@ -41,8 +41,8 @@ pub fn unpack(workspace: &Path, tar: &[u8]) -> std::io::Result<()> {
 /// padding), mirroring the host codec's `TAR_ENTRY_OVERHEAD`.
 const TAR_ENTRY_OVERHEAD: usize = 1024;
 
-/// Tar the workspace, budgeted against [`MAX_TAR`] *before* bytes accumulate
-/// — the host codec's discipline, mirrored: an over-cap workspace refuses
+/// Tar the workspace, budgeted against [`MAX_TAR`] *before* bytes accumulate,
+/// the host codec's discipline, mirrored: an over-cap workspace refuses
 /// mid-walk rather than after materializing the whole stream.
 pub fn pack(workspace: &Path) -> std::io::Result<Vec<u8>> {
     let mut builder = tar::Builder::new(Vec::new());
@@ -72,7 +72,7 @@ fn append_dir(
     for entry in entries {
         let path = prefix.join(entry.file_name());
         let full = entry.path();
-        // symlink_metadata: classify without following — or opening.
+        // symlink_metadata: classify without following, or opening.
         let meta = std::fs::symlink_metadata(&full)?;
         let kind = meta.file_type();
         charge(budget, TAR_ENTRY_OVERHEAD)?;

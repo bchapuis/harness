@@ -6,7 +6,7 @@
 //! Its siblings share `actor_simulation::{CatalogueEntry, Verify}`. This crate
 //! cannot: `wal` "sits below its callers and depends on none of them" (spec §1),
 //! and `actor-simulation` depends on `actor-cluster`, which depends on `wal` for
-//! its Raft log. A dev-dependency on the shared types would close that loop —
+//! its Raft log. A dev-dependency on the shared types would close that loop:
 //! Cargo tolerates a dev-dependency cycle, but the layering claim in §1 is load
 //! bearing, and a crate that quietly depends on its own consumers is exactly what
 //! it exists to rule out. So the shape is mirrored here in a dozen lines rather
@@ -16,7 +16,7 @@
 //!
 //! The other catalogues point at test *files*, because their suites are files.
 //! Nearly all of wal's verification is `#[test]` functions inside `src/lib.rs`, so
-//! a file-existence check would assert only that `lib.rs` still exists — true, and
+//! a file-existence check would assert only that `lib.rs` still exists: true, and
 //! worth nothing. This scans for each named function instead, which is the check
 //! that actually catches the blob-store failure mode: a renamed test leaving the
 //! spec's "Verified by" column pointing at nothing.
@@ -73,7 +73,7 @@ const L_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 4,
         spec: "wal §4",
-        property: "Write/recovery bound agreement: max_record bounds a frame's payload identically at both ends, so a payload recovery would reject for size cannot be written — the write panics instead of acknowledging a record the next open would silently drop",
+        property: "Write/recovery bound agreement: max_record bounds a frame's payload identically at both ends, so a payload recovery would reject for size cannot be written; the write panics instead of acknowledging a record the next open would silently drop",
         tests: &["appending_a_record_past_the_limit_panics_instead_of_losing_it"],
     },
     CatalogueEntry {
@@ -138,7 +138,7 @@ fn every_named_test_exists() {
         for name in e.tests {
             assert!(
                 sources.contains(&format!("fn {name}(")),
-                "L{} names test {name:?}, which is not defined in this crate — \
+                "L{} names test {name:?}, which is not defined in this crate; \
                  a rename left the spec's \"Verified by\" column pointing at nothing",
                 e.invariant,
             );
@@ -150,8 +150,8 @@ fn every_named_test_exists() {
 /// is claimed by some invariant.
 ///
 /// Only `crash_points.rs` is held to this. `src/lib.rs` legitimately carries tests
-/// that pin no numbered invariant — the frozen sidecar digest, the header
-/// re-stamping rule, the `max_record`/magic aliasing assert — and requiring a
+/// that pin no numbered invariant (the frozen sidecar digest, the header
+/// re-stamping rule, the `max_record`/magic aliasing assert), and requiring a
 /// W-number for each would push those numbers into the spec to satisfy a test,
 /// which is backwards. The crash-point suite has no such cases: it exists solely
 /// to decide L1 and L2.
@@ -180,7 +180,7 @@ fn every_crash_point_test_is_claimed_by_an_invariant() {
         }
         assert!(
             claimed.contains(&name),
-            "crash_points.rs defines test {name:?}, which no W-invariant claims — \
+            "crash_points.rs defines test {name:?}, which no W-invariant claims; \
              either record it in the catalogue or say why it verifies nothing",
         );
     }

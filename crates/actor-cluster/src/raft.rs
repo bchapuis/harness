@@ -1,4 +1,4 @@
-//! Minimal deterministic Raft — a reusable **multi-group** consensus engine
+//! Minimal deterministic Raft: a reusable **multi-group** consensus engine
 //! (spec §9.4.3).
 //!
 //! The cluster self-hosts its membership authority as a **replicated log**: an
@@ -6,7 +6,7 @@
 //! **voters** commits it, and the **commit index** is the authority stamp the
 //! membership merge orders decisions by (spec §9.2). The scope is elections,
 //! heartbeats, log replication, quorum commit, single-server voter changes, and
-//! snapshot/compaction (§9) — enough for every observable guarantee the spec
+//! snapshot/compaction (§9): enough for every observable guarantee the spec
 //! requires (election safety, log matching, leader completeness) and invariant
 //! #22.
 //!
@@ -42,7 +42,7 @@ use crate::protocol::Frame;
 pub struct GroupId(pub u64);
 
 impl GroupId {
-    /// The membership control plane's group (spec §9.4.3) — the one group every
+    /// The membership control plane's group (spec §9.4.3): the one group every
     /// leader-mode cluster always runs.
     pub const CONTROL: GroupId = GroupId(0);
 
@@ -64,8 +64,8 @@ impl std::fmt::Display for GroupId {
 /// `Noop`, `AddVoter`, and `RemoveVoter` are **engine-internal**: the group
 /// applies them itself (a term-opening no-op, and single-server configuration
 /// changes, spec §9.4.3 item 2) and never hands them to the caller. `App`
-/// carries the opaque application command — the membership control plane encodes
-/// a `MembershipCommand`, an entity shard encodes its entity-journal record — and
+/// carries the opaque application command (the membership control plane encodes
+/// a `MembershipCommand`, an entity shard encodes its entity-journal record), and
 /// only `App` entries drain to the caller on commit.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum EntryPayload {
@@ -78,7 +78,7 @@ pub enum EntryPayload {
     /// An opaque application command, committed and drained to the caller.
     ///
     /// `serde_bytes` because these bytes are already encoded and would otherwise go
-    /// through serde's default sequence path in both directions — the cost that
+    /// through serde's default sequence path in both directions: the cost that
     /// dominated blob replication (`actor-serialization/benches/codec.rs` prices the
     /// pass; `scripts/bench-machine-cost.sh` priced it end to end). This one is also
     /// **durable**: a voter persists its log, so the attribute has to leave the encoding
@@ -97,8 +97,8 @@ pub struct RaftEntry {
 }
 
 /// The durable Raft state a voter must persist (spec §9.4.3 item 2): the
-/// current term, the vote cast in it, the log, and — once the prefix has been
-/// compacted (§9) — the state-machine snapshot that subsumes it. `log` holds the
+/// current term, the vote cast in it, the log, and; once the prefix has been
+/// compacted (§9); the state-machine snapshot that subsumes it. `log` holds the
 /// entries *after* `snapshot_index`, so entry `i` (1-based) lives at
 /// `log[i - snapshot_index - 1]`; with no snapshot `snapshot_index == 0` and the
 /// log is absolute as before.
@@ -115,7 +115,7 @@ pub struct PersistedRaft {
 }
 
 /// The one implementation of each [`RaftWAL`] write's fold over the in-memory
-/// state — the compacted-log offset arithmetic in particular. Every WAL applies
+/// state: the compacted-log offset arithmetic in particular. Every WAL applies
 /// these; a durable WAL persists first, then folds, so what `load` reports is
 /// always what the disk can reconstruct.
 impl PersistedRaft {
@@ -152,7 +152,7 @@ impl PersistedRaft {
 ///
 /// The distinction is not advisory. Every write through this seam happens *before* the
 /// state it records takes effect, because the caller announces that state immediately
-/// after — a vote, an accepted append, a snapshot. A write that did not land and is
+/// after: a vote, an accepted append, a snapshot. A write that did not land and is
 /// reported as if it had is precisely how a voter votes twice in one term across a
 /// restart, or acknowledges an entry it cannot replay.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -174,7 +174,7 @@ impl WalAck {
 
 /// The durability seam for a voter's Raft state (spec §9.4.3 item 2):
 /// persisted before the state takes effect, reloaded on restart. The methods
-/// are synchronous on purpose: when one returns, the data MUST be durable —
+/// are synchronous on purpose: when one returns, the data MUST be durable;
 /// the caller sends the messages announcing the state right after. In-memory
 /// for simulation ([`InMemoryRaftWAL`]); `actor-runtime` supplies the
 /// production `FileRaftWAL`. One instance backs one `(group, node)`.
@@ -183,7 +183,7 @@ impl WalAck {
 /// voting, and the way to stop is not to panic: an unwind here is caught by actor
 /// supervision or kills one task, either of which can leave the node alive, gossiping,
 /// and counted in quorums while its durability guarantee is gone. So a write answers
-/// [`WalAck::Failed`] and the engine steps down and refuses to vote or append — the
+/// [`WalAck::Failed`] and the engine steps down and refuses to vote or append: the
 /// node stays up, visibly unhealthy, and an operator replaces it.
 pub trait RaftWAL: Send + Sync + 'static {
     /// Load the persisted state (empty/default on first start).
@@ -193,7 +193,7 @@ pub trait RaftWAL: Send + Sync + 'static {
     fn save_term_and_vote(&self, term: u64, voted_for: Option<NodeId>) -> WalAck;
 
     /// Truncate the log at `from_index` (absolute, 0-based) and append `entries`
-    /// there — Raft's conflict-resolution write. With a compacted prefix
+    /// there: Raft's conflict-resolution write. With a compacted prefix
     /// (`snapshot_index > 0`) `from_index` is still absolute; the storage maps it
     /// onto its retained suffix.
     fn append(&self, from_index: u64, entries: &[RaftEntry]) -> WalAck;
@@ -208,7 +208,7 @@ pub trait RaftWAL: Send + Sync + 'static {
         WalAck::Persisted
     }
 
-    /// Why this WAL stopped accepting writes, or `None` while healthy — the
+    /// Why this WAL stopped accepting writes, or `None` while healthy, the
     /// operator-facing half of the policy above. One-way: a WAL that has answered
     /// [`WalAck::Failed`] never reports healthy again, because nothing here can
     /// establish that the volume recovered.
@@ -323,7 +323,7 @@ impl RaftConfig {
 pub(crate) struct MultiRaft {
     node: NodeId,
     election_timeout: Duration,
-    /// Needed only to bound a pristine group's first campaign — see
+    /// Needed only to bound a pristine group's first campaign; see
     /// [`first_election_delay`].
     heartbeat_interval: Duration,
     storage: Arc<dyn Fn(GroupId, NodeId) -> Arc<dyn RaftWAL> + Send + Sync>,
@@ -331,7 +331,7 @@ pub(crate) struct MultiRaft {
 }
 
 impl MultiRaft {
-    /// Build an empty engine — a group registry with the engine-wide timing and
+    /// Build an empty engine: a group registry with the engine-wide timing and
     /// storage factory, and no groups yet. The caller creates the groups it wants
     /// (the cluster layer's control group at startup, an entity shard's group on
     /// demand). Election timers arm from the `now` passed to each `create_group`.
@@ -445,7 +445,7 @@ pub enum Committed {
 
 /// What one Raft step produced, for the caller to act on: frames to send over
 /// the transport (each already tagged with its group), observations newly
-/// committed in log order ([`Committed`] — the opaque app bytes the caller
+/// committed in log order ([`Committed`]; the opaque app bytes the caller
 /// decodes and applies, or a snapshot to install), and the term won if this step
 /// made the node leader (the caller emits `LeaderElected`, spec §16).
 #[derive(Default)]
@@ -510,14 +510,14 @@ const FIRST_ELECTION_SLOTS: u32 = 10;
 /// (spec §9.4.3 item 10).
 ///
 /// The election timeout exists to detect a leader that has *stopped*. A group that has
-/// never had one is not detecting anything — it is waiting out a timer for a failure
+/// never had one is not detecting anything: it is waiting out a timer for a failure
 /// that has not occurred, and on a cold cluster that wait is the whole of the startup
 /// cost. It compounds, too: a shard group is only created once the shard map commits,
 /// so a deployment pays the timeout once for the control plane and again for the groups
 /// created after it, serially.
 ///
-/// So a group whose persisted state is `pristine` — term 0, no log, no snapshot, which
-/// is to say it has never voted, replicated, or been led — campaigns after a small
+/// So a group whose persisted state is `pristine` (term 0, no log, no snapshot, which
+/// is to say it has never voted, replicated, or been led) campaigns after a small
 /// fraction of the timeout instead. Two properties make that safe:
 ///
 /// - **It cannot depose a live leader.** A pristine group campaigns at term 1. A leader
@@ -564,7 +564,7 @@ fn first_election_delay(
     // created on each node as the shard map reaches it, which is not simultaneous: a
     // node that builds its copy late is pristine while the group already has a leader
     // elsewhere, and if it campaigns before the first heartbeat arrives it spends a
-    // whole heartbeat interval as a candidate with no known leader — during which every
+    // whole heartbeat interval as a candidate with no known leader, during which every
     // request routed to it stalls. That cost is real and was measured: it turned a
     // 0.3 s warm create into a 3.5 s one until this floor was added.
     //
@@ -636,7 +636,7 @@ impl RaftState {
         self.voters.len() / 2 + 1
     }
 
-    /// Every other group member the leader replicates to — voters and learners
+    /// Every other group member the leader replicates to: voters and learners
     /// alike, excluding `self_node`. Learners receive the log but are absent from
     /// the quorum count ([`quorum`](Self::quorum), [`advance_commit`]).
     fn replication_targets(&self, self_node: NodeId) -> Vec<NodeId> {
@@ -661,7 +661,7 @@ pub(crate) struct RaftGroup {
 
 impl RaftGroup {
     /// Build the group instance, reloading any persisted state (spec §9.4.3
-    /// item 2). The election timer arms from `now` (base timeout, no jitter —
+    /// item 2). The election timer arms from `now` (base timeout, no jitter:
     /// the first tick draws no entropy, keeping the draw order deterministic).
     #[allow(clippy::too_many_arguments)] // one call site, `MultiRaft::create_group`
     pub(crate) fn new(
@@ -706,7 +706,7 @@ impl RaftGroup {
             next: BTreeMap::new(),
             matched: BTreeMap::new(),
             election_deadline: now + first_election,
-            // A WAL that reloaded poisoned — the volume is still failing at startup —
+            // A WAL that reloaded poisoned (the volume is still failing at startup)
             // brings the group up refusing rather than letting it vote once and find
             // out on the first write.
             wal_poisoned: storage.poisoned().is_some(),
@@ -725,7 +725,7 @@ impl RaftGroup {
         self.lock().voters.contains(&node)
     }
 
-    /// This group's current voter set — used to fan a proposal out to the voters
+    /// This group's current voter set: used to fan a proposal out to the voters
     /// when the leader is not yet known (the app-level analogue of the control
     /// plane's `RaftConfig.voters` broadcast).
     pub(crate) fn voters(&self) -> Vec<NodeId> {
@@ -795,7 +795,7 @@ impl RaftGroup {
         self.state.lock().expect("raft mutex poisoned")
     }
 
-    /// Persist term and vote — before any message that announces them
+    /// Persist term and vote: before any message that announces them
     /// (spec §9.4.3 item 2). A caller that gets [`WalAck::Failed`] MUST NOT send the
     /// message it was about to send.
     fn persist_term(&self, state: &mut RaftState) -> WalAck {
@@ -811,7 +811,7 @@ impl RaftGroup {
     /// A voter that cannot persist its term must stop voting. It cannot simply crash:
     /// an unwind is caught by actor supervision or takes down one task, and either way
     /// the node can stay up, gossiping, and counted in quorums with no durability
-    /// behind it — the failure mode this exists to prevent. So the group steps down to
+    /// behind it; the failure mode this exists to prevent. So the group steps down to
     /// a follower that never elects, never grants a vote, and never acknowledges an
     /// append. The node remains visible and answers with its term, so peers elect
     /// around it promptly instead of waiting out a silence, and an operator sees a
@@ -858,7 +858,7 @@ impl RaftGroup {
     /// the handoff was actually initiated.
     ///
     /// `false` means "not yet, try again": this node is not the leader, `target` is
-    /// not a voter, or — the interesting case — `target`'s log is not yet caught up
+    /// not a voter, or (the interesting case) `target`'s log is not yet caught up
     /// to ours. A node that has not replicated our last entry cannot win an election
     /// against the rest of the group (its log is not up to date, so voters refuse
     /// it), so sending it `TimeoutNow` would cost a disrupted term and change
@@ -867,7 +867,7 @@ impl RaftGroup {
     /// This does **not** step down. It cannot: leadership is a quorum fact, and the
     /// only thing that legitimately ends our term is someone else winning a higher
     /// one. All this does is invite a caught-up peer to try immediately instead of
-    /// after its election timeout. If that peer fails, nothing is lost — we are
+    /// after its election timeout. If that peer fails, nothing is lost: we are
     /// still the leader and the caller can pick another target.
     pub(crate) fn transfer_leadership(&self, target: NodeId) -> (bool, RaftOutput) {
         let mut out = RaftOutput::default();
@@ -898,7 +898,7 @@ impl RaftGroup {
     /// invitation cannot make us disrupt a healthy leader. Beyond that no new trust
     /// is extended: this starts an ordinary election, which still has to win a
     /// quorum, so the worst a wrongly-accepted invitation costs is one disrupted
-    /// term — never a split leadership.
+    /// term, never a split leadership.
     pub(crate) fn handle_timeout_now<E: Entropy>(
         &self,
         from: NodeId,
@@ -991,7 +991,7 @@ impl RaftGroup {
         state.role = Role::Leader;
         state.leader = Some(self.node);
         out.elected = Some(state.term);
-        // Track replication progress for every member — voters and learners — so
+        // Track replication progress for every member (voters and learners), so
         // the leader sends each the right log suffix.
         let next = state.last_index() + 1;
         let members: Vec<NodeId> = state
@@ -1043,7 +1043,7 @@ impl RaftGroup {
     }
 
     /// Append `payload` if this node leads and no identical payload is already
-    /// pending (uncommitted) — the dedup that keeps the leader's per-tick duties
+    /// pending (uncommitted): the dedup that keeps the leader's per-tick duties
     /// and forwarded proposals from piling up duplicates. Returns whether the
     /// payload is now in the log (newly or already). Byte-equality of an
     /// [`EntryPayload::App`] makes a re-proposed application command idempotent.
@@ -1072,7 +1072,7 @@ impl RaftGroup {
 
     /// Compact the log up to `index` against the application's state-machine
     /// `snapshot` (§9): discard every entry `≤ index` and remember the snapshot so
-    /// this node can ship it to a lagging peer. Purely local and deterministic —
+    /// this node can ship it to a lagging peer. Purely local and deterministic:
     /// the caller supplies a snapshot of its applied prefix, so every replica
     /// produces an equivalent one without coordination. Ignores a stale or
     /// not-yet-applied `index` (only applied state is safe to compact).
@@ -1088,8 +1088,8 @@ impl RaftGroup {
             return;
         }
         let term = state.term_at(index);
-        // Persist before the prefix leaves memory — the ordering this seam promises,
-        // and the one that makes a refusal harmless: the entries compaction would have
+        // Persist before the prefix leaves memory: the ordering this seam promises,
+        // and the one that makes a refusal harmless, since the entries compaction would have
         // shed are still in memory and still on disk, so the group stops with its log
         // whole rather than with a hole where its base should be.
         if self.storage.save_snapshot(index, term, &snapshot) == WalAck::Failed {
@@ -1104,7 +1104,7 @@ impl RaftGroup {
         state.snapshot = Some(snapshot);
     }
 
-    /// The `RaftInstallSnapshot` frame carrying this node's current snapshot — sent
+    /// The `RaftInstallSnapshot` frame carrying this node's current snapshot: sent
     /// to a peer whose `next` has fallen below the compacted prefix.
     fn install_snapshot_frame(&self, state: &RaftState) -> Frame {
         Frame::RaftInstallSnapshot {
@@ -1129,7 +1129,7 @@ impl RaftGroup {
             let next = *state.next.get(&peer).unwrap_or(&(state.last_index() + 1));
             let prev_index = next - 1;
             // A peer behind the compacted prefix cannot be caught up with log
-            // entries — its `prev_index` names a term we no longer hold. Ship the
+            // entries: its `prev_index` names a term we no longer hold. Ship the
             // snapshot instead; one accepted install moves its `next` past the base.
             if prev_index < state.snapshot_index {
                 out.frames.push((peer, self.install_snapshot_frame(state)));
@@ -1157,7 +1157,7 @@ impl RaftGroup {
     /// toward the quorum **only while it is still a voter**: once a leader has
     /// committed its own `RemoveVoter` it must not vote itself over the commit
     /// line, or a non-voter leader could advance commit on a phantom self-vote
-    /// with sub-quorum real replication — a minority evicting the majority (spec
+    /// with sub-quorum real replication, a minority evicting the majority (spec
     /// §18.5 #22: a side lacking a quorum of voters commits none). Defense in
     /// depth: the `tick` non-voter early-return already keeps such a leader dormant.
     fn advance_commit(&self, state: &mut RaftState) {
@@ -1242,10 +1242,10 @@ impl RaftGroup {
     /// removes itself and goes silent, the followers may still hold the old
     /// N-voter config while a just-added voter has not yet applied its own
     /// `AddVoter`. If receivers refused to vote whenever their own view excluded
-    /// them, that state deadlocks — the stale-view followers cannot assemble the
+    /// them, that state deadlocks: the stale-view followers cannot assemble the
     /// old quorum without the departed leader (which would refuse, its view
-    /// excluding itself) or the new voter (which would refuse, its view lagging)
-    /// — and the group never elects again. Granting is safe: one vote per term
+    /// excluding itself) or the new voter (which would refuse, its view lagging),
+    /// and the group never elects again. Granting is safe: one vote per term
     /// per server still holds (`voted_for` persistence), and a candidate only
     /// counts votes it solicited from its own voter view, so quorums are never
     /// inflated by non-voters.
@@ -1274,7 +1274,7 @@ impl RaftGroup {
         let granted = if eligible {
             state.voted_for = Some(from);
             // Durable before it is announced, and reported as refused if it did not
-            // land — the candidate must not count a vote this node cannot honour.
+            // land: the candidate must not count a vote this node cannot honour.
             let persisted = self.persist_term(&mut state) == WalAck::Persisted;
             if persisted {
                 self.rearm_election(&mut state, now, entropy);
@@ -1295,7 +1295,7 @@ impl RaftGroup {
     }
 
     /// Handle a vote reply: a quorum of grants in the current term wins the
-    /// election (at most one leader per term — invariant #22's election-safety
+    /// election (at most one leader per term; invariant #22's election-safety
     /// half, by single-vote-per-term persistence).
     pub(crate) fn handle_vote_reply<E: Entropy>(
         &self,
@@ -1323,7 +1323,7 @@ impl RaftGroup {
 
     /// Handle an append/heartbeat (spec §9.4.3): adopt the leader, resolve log
     /// conflicts by truncate-then-append, and advance the commit index to the
-    /// leader's. Any leader-mode node accepts appends — a non-voter is a
+    /// leader's. Any leader-mode node accepts appends: a non-voter is a
     /// learner replicating committed state.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_append<E: Entropy>(
@@ -1439,7 +1439,7 @@ impl RaftGroup {
 
     /// Handle an install-snapshot from the leader (spec §9): adopt the leader,
     /// and if the snapshot advances us past our commit point, replace our state
-    /// with it — set the log base to `(snapshot_index, snapshot_term)`, discard any
+    /// with it; set the log base to `(snapshot_index, snapshot_term)`, discard any
     /// log we held (a follower this far behind has no committed entries past the
     /// base; uncommitted ones are safely dropped), adopt the membership, hand the
     /// snapshot to the application via `Committed::Snapshot`, and reply with an
@@ -1494,8 +1494,8 @@ impl RaftGroup {
             // Durable before it is adopted or handed to the application. This node is
             // about to jump its commit and applied points to the snapshot's index; if
             // the bytes are not on disk, a restart comes back below that point with no
-            // log able to reach it, having already told the leader — and the
-            // application — that it got there. Persist the snapshot, then clear the
+            // log able to reach it, having already told the leader (and the
+            // application) that it got there. Persist the snapshot, then clear the
             // stored log tail so a reload reconstructs from the base alone.
             let stored = self
                 .storage
@@ -1582,7 +1582,7 @@ mod tests {
     use super::*;
 
     /// A [`RaftWAL`] that persists normally until it is broken, then refuses every
-    /// write — a volume going read-only under a running voter, which is the failure
+    /// write: a volume going read-only under a running voter, which is the failure
     /// the poison policy exists for.
     struct BreakingWAL {
         inner: InMemoryRaftWAL,
@@ -1852,13 +1852,13 @@ mod tests {
             let mut steps = 0;
             while let Some((from, to, frame)) = queue.pop_front() {
                 steps += 1;
-                assert!(steps < 100_000, "frame storm — consensus did not settle");
+                assert!(steps < 100_000, "frame storm: consensus did not settle");
                 let group = frame_group(&frame);
                 let out = deliver(&groups[&(group, to)], from, frame, now, &entropy[&to]);
                 record(group, to, out, &mut queue, &mut committed, &mut winners);
             }
 
-            // Once both groups have a leader, propose disjoint commands — each to
+            // Once both groups have a leader, propose disjoint commands: each to
             // its own group's leader, exactly once.
             if !proposed
                 && let (Some(l1), Some(l2)) = (
@@ -1876,7 +1876,7 @@ mod tests {
         assert!(proposed, "both groups elected a leader");
 
         // Every node committed its own group's log, in order, and never the
-        // other group's bytes — the logs are fully independent.
+        // other group's bytes: the logs are fully independent.
         for &node in &nodes {
             assert_eq!(
                 committed.get(&(g1, node)).cloned().unwrap_or_default(),
@@ -1895,7 +1895,7 @@ mod tests {
     /// emits one heartbeat *per group per follower*, which is what
     /// [`Frame::RaftHeartbeats`] exists to collapse.
     ///
-    /// Asserted at the source — what a tick produces — because that is what the
+    /// Asserted at the source (what a tick produces) because that is what the
     /// coalescing in the system tick loop consumes. The count is the ceiling the
     /// batching removes: at `G` groups and `R` replicas it is `G × (R-1)` frames per
     /// interval, all of them empty.
@@ -1983,10 +1983,10 @@ mod tests {
         assert_eq!(
             empty_appends,
             groups_n as usize * (nodes.len() - 1),
-            "one empty append per group per follower — the G x (R-1) the batching collapses"
+            "one empty append per group per follower: the G x (R-1) the batching collapses"
         );
         // Each of those frames is one *beat*; batching turns every pair's whole set
-        // into a single frame, so the saving is the count per pair — which is the
+        // into a single frame, so the saving is the count per pair, which is the
         // number of groups that node leads, and grows with the shard count.
         for ((leader, _), beats) in &per_pair {
             assert_eq!(
@@ -2091,7 +2091,7 @@ mod tests {
         let (started, out) = groups[&(group, leader)].transfer_leadership(target);
         assert!(started, "a caught-up voter is a valid handoff target");
 
-        // Deliver the handoff and its consequences at the SAME instant — no tick, so
+        // Deliver the handoff and its consequences at the SAME instant, no tick, so
         // no election timer can have fired.
         let frozen = now;
         settle(
@@ -2245,7 +2245,7 @@ mod tests {
             let mut steps = 0;
             while let Some((from, to, frame)) = queue.pop_front() {
                 steps += 1;
-                assert!(steps < 100_000, "frame storm — consensus did not settle");
+                assert!(steps < 100_000, "frame storm: consensus did not settle");
                 let g = frame_group(&frame);
                 let out = deliver(&groups[&(g, to)], from, frame, now, &entropy[&to]);
                 record(g, to, out, &mut queue, &mut committed, &mut winners);
@@ -2262,10 +2262,10 @@ mod tests {
         for (&(g, term), &winner) in &winners {
             assert_ne!(
                 winner, learner,
-                "the learner led {g} term {term} — learners must not lead"
+                "the learner led {g} term {term}: learners must not lead"
             );
         }
-        // The learner replicated the committed log, identical to a voter's — so it
+        // The learner replicated the committed log, identical to a voter's, so it
         // can route and serve reads without being part of the quorum.
         let expected = vec![b"x".to_vec(), b"y".to_vec()];
         assert_eq!(
@@ -2287,7 +2287,7 @@ mod tests {
     }
 
     /// Guard for spec §18.5 #22: once a leader commits its own `RemoveVoter` it is
-    /// no longer a voter and MUST NOT count itself toward the commit quorum —
+    /// no longer a voter and MUST NOT count itself toward the commit quorum;
     /// otherwise a non-voter leader could advance commit on a phantom self-vote
     /// with only sub-quorum real replication, a minority evicting the majority.
     /// In the full engine the `tick` non-voter early-return keeps such a leader
@@ -2315,7 +2315,7 @@ mod tests {
         // (quorum 2) and node 1 is no longer among them.
         state.voters = vec![v2, v3];
         // A fresh current-term entry sits uncommitted at index 1, replicated to
-        // exactly one real voter (node 2) — one short of the 2-voter quorum.
+        // exactly one real voter (node 2): one short of the 2-voter quorum.
         state.log = vec![RaftEntry {
             term: 5,
             payload: EntryPayload::App(b"evict".to_vec()),
@@ -2332,7 +2332,7 @@ mod tests {
         // Restore node 1 to the voter set (quorum 2 of {1, 2, 3}); now the same
         // single follower plus the leader's own legitimate vote reaches quorum, so
         // the entry commits. Proves the guard blocks only the phantom vote, not a
-        // real one — it is not a blanket refusal to commit.
+        // real one: it is not a blanket refusal to commit.
         state.voters = vec![node, v2, v3];
         group.advance_commit(&mut state);
         assert_eq!(
@@ -2342,7 +2342,7 @@ mod tests {
     }
 
     /// A leader that commits its own `RemoveVoter` steps down to follower (Raft
-    /// dissertation §4.2.2) rather than lingering as a `Role::Leader` non-voter —
+    /// dissertation §4.2.2) rather than lingering as a `Role::Leader` non-voter:
     /// the cleaner counterpart to the commit-quorum guard above.
     #[test]
     fn a_leader_steps_down_when_it_commits_its_own_removal() {
@@ -2390,7 +2390,7 @@ mod tests {
     /// partitioned, then the leader compacts its log against a snapshot. When the
     /// learner heals, its `next` has fallen below the compacted prefix, so the
     /// leader catches it up with one `RaftInstallSnapshot` instead of replaying the
-    /// log — and the learner ends at the leader's commit index with the snapshot
+    /// log, and the learner ends at the leader's commit index with the snapshot
     /// installed. The leader's retained log stays bounded well under the number of
     /// committed entries.
     #[test]
@@ -2457,7 +2457,7 @@ mod tests {
             let mut steps = 0;
             while let Some((from, to, frame)) = queue.pop_front() {
                 steps += 1;
-                assert!(steps < 100_000, "frame storm — consensus did not settle");
+                assert!(steps < 100_000, "frame storm: consensus did not settle");
                 // Partition the learner until it is healed: drop frames to/from it.
                 if !healed && (from == learner || to == learner) {
                     continue;
@@ -2506,7 +2506,7 @@ mod tests {
             leader_group.retained_len(),
         );
 
-        // The healed learner caught up via InstallSnapshot — it installed exactly
+        // The healed learner caught up via InstallSnapshot: it installed exactly
         // the leader's snapshot and reached the leader's commit index, without ever
         // replaying the compacted entries.
         let (snap_index, snap_data) = learner_snapshot.expect("the learner installed a snapshot");
@@ -2551,9 +2551,9 @@ mod tests {
 
     /// A group that has never had a leader does not wait out a timeout built to detect
     /// one that stopped. This is the whole of the cold-start cost: measured on
-    /// `machine-standalone` (20 s timeout), a create paid it twice serially — once for
+    /// `machine-standalone` (20 s timeout), a create paid it twice serially (once for
     /// the control plane and again for the shard groups created after the map
-    /// committed — for ~33 s before anything touched a disk.
+    /// committed) for ~33 s before anything touched a disk.
     #[test]
     fn a_pristine_group_campaigns_without_waiting_out_the_election_timeout() {
         let node = NodeId::new(1);
@@ -2572,7 +2572,7 @@ mod tests {
         );
         // It does not campaign inside the first heartbeat: a group created into a
         // cluster that already has a leader must hear from it before it decides there
-        // is none. This is not a detail — skipping it cost a measured 0.3 s warm create
+        // is none. This is not a detail, skipping it cost a measured 0.3 s warm create
         // 3.5 s, the whole time the group spent a candidate with no leader to route to.
         let out = group.tick(Instant::ZERO + heartbeat, &entropy);
         assert!(
@@ -2625,7 +2625,7 @@ mod tests {
     ///
     /// This is what keeps the eager first campaign from simply moving the cost: three
     /// voters all campaigning at once tie, rearm with jitter, and pay a *second* full
-    /// timeout — which is precisely what the 3-node baseline showed before this
+    /// timeout, which is precisely what the 3-node baseline showed before this
     /// existed (a first election reaching term 2).
     #[test]
     fn the_first_campaign_stagger_gives_every_voter_its_own_slot() {
@@ -2653,7 +2653,7 @@ mod tests {
     }
 
     /// Different groups put different voters first, so a node hosting many shards does
-    /// not end up leading all of them — the stagger is keyed on `(group, node)`, not on
+    /// not end up leading all of them: the stagger is keyed on `(group, node)`, not on
     /// node id alone.
     #[test]
     fn different_groups_put_different_voters_first() {
@@ -2706,8 +2706,8 @@ mod tests {
             "a healthy voter grants an up-to-date candidate's first request",
         );
 
-        // The volume goes read-only. A different candidate at a higher term — which a
-        // healthy voter would grant — must now be refused.
+        // The volume goes read-only. A different candidate at a higher term (which a
+        // healthy voter would grant) must now be refused.
         wal.break_now();
         let out = voter.handle_vote(nodes[2], 2, 0, 0, Instant::ZERO, &entropy);
         assert!(
@@ -2771,7 +2771,7 @@ mod tests {
     /// The window is narrow and worth a test of its own: `become_leader` sets the role
     /// and the `elected` term *before* it appends, so a failure at the append leaves a
     /// node that has already told its caller it leads. It must retract that, not just
-    /// step down quietly — the caller emits `LeaderElected` from it, and downstream a
+    /// step down quietly: the caller emits `LeaderElected` from it, and downstream a
     /// shard would start routing writes at a leader whose log does not reach disk.
     #[test]
     fn a_wal_that_fails_on_the_opening_entry_retracts_the_election() {
@@ -2837,7 +2837,7 @@ mod tests {
         }
         assert!(!voter.is_leader(), "and must never win an election");
         // The first tick bumps the term in memory and only then discovers the WAL is
-        // gone, which is safe — nothing was announced, and a restart reloads the
+        // gone, which is safe, nothing was announced, and a restart reloads the
         // durable term. What must not happen is the *next* twenty timeouts each
         // bumping it again: a node spinning the term upward while unable to persist
         // would force a real election on every peer it later spoke to.

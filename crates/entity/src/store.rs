@@ -1,4 +1,4 @@
-//! Per-node durable entity storage — the `EntityStore` seam (spec §7.2, §7.4).
+//! Per-node durable entity storage: the `EntityStore` seam (spec §7.2, §7.4).
 //!
 //! In the per-entity quorum substrate (§7.2) the entities' records live **off** the
 //! leader-election group's Raft log: each replica persists, on its own, the records
@@ -8,14 +8,14 @@
 //! entity from a quorum of the replicas' reloaded stores (§8, **E14**).
 //!
 //! It keys records by `(shard index, EntityName)` and stamps each with the **shard
-//! term** under which it was written — the fencing token (§8) and the key to
+//! term** under which it was written: the fencing token (§8) and the key to
 //! highest-term-per-slot read-repair on recovery. [`MemoryEntityStore`] is the
 //! reference implementation, used by the `Local` journal directly and by the
 //! `Quorum` replica store on each node; a deployment that must survive total power
 //! loss supplies a file-backed `EntityStore` through the same seam (§7.4).
 //!
-//! **Per-entity segmentation.** An entity's records are an independent **segment** —
-//! its own [`EntityRecords`] behind its own lock — so concurrent entities never
+//! **Per-entity segmentation.** An entity's records are an independent **segment**
+//! (its own [`EntityRecords`] behind its own lock), so concurrent entities never
 //! serialize on a single store-wide lock, and one entity's snapshot compaction
 //! touches only its own segment (§9). The one piece shared across a shard's entities
 //! is the **fence**: the highest shard term the store has acknowledged (§8). It sits
@@ -56,7 +56,7 @@ pub enum StoreAck {
     /// Refused: this replica has acknowledged a higher shard term (the fence, §8).
     /// Carries that higher term so the stale leader learns it has been deposed.
     Fenced(Term),
-    /// Refused: a normal append landed on a stale head — this replica already holds a
+    /// Refused: a normal append landed on a stale head; this replica already holds a
     /// different committed record at the first target slot, so the leader's head is
     /// behind (it recovered from local state without a quorum, §7.5). Carries the
     /// replica's actual head so the leader steps down and re-recovers. Optimistic
@@ -64,13 +64,13 @@ pub enum StoreAck {
     /// record even though its term is current (§8).
     Stale(Seq),
     /// Refused: the append targets a key at or above the shard's **append bound**
-    /// (spec §7.7) — a range this shard no longer owns because a split moved it to
+    /// (spec §7.7); a range this shard no longer owns because a split moved it to
     /// a child (or a merge is retiring the whole shard). Refused at ANY term: the
     /// bound is what stops a leader that has not yet applied the split from
     /// assembling a majority for a moved key. The caller surfaces `NotLeader`, so
     /// the client re-resolves against the committed map (E15).
     Sealed,
-    /// Refused: this replica's storage is **unusable** — an I/O error (a full or
+    /// Refused: this replica's storage is **unusable**; an I/O error (a full or
     /// failing disk, a lost mount) means it cannot make the write durable, so it
     /// cannot honestly acknowledge it.
     ///
@@ -91,7 +91,7 @@ pub enum StoreAck {
 /// head to refuse on: the only refusal is a store that cannot write at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlobAck {
-    /// Durable in this store (or already present — a blob put is idempotent by
+    /// Durable in this store (or already present: a blob put is idempotent by
     /// content, B2).
     Stored,
     /// Refused: this replica's storage is unusable, as [`StoreAck::Failed`].
@@ -131,7 +131,7 @@ pub(crate) fn fold_head(base: u64, occupied: impl IntoIterator<Item = u64>) -> S
 
 impl ReadReply {
     /// The head this reply describes: the snapshot's seq (or zero) plus the leading
-    /// gap-free run of records above it — [`fold_head`], read off the wire shape,
+    /// gap-free run of records above it; [`fold_head`], read off the wire shape,
     /// so the local tier and a recovering leader read a reply the same way.
     pub fn head(&self) -> Seq {
         fold_head(
@@ -152,7 +152,7 @@ pub enum ReadOutcome {
     /// Refused: the replica has acknowledged a higher shard term (the fence, §8).
     Fenced(Term),
     /// Refused: this replica's storage is unusable, so neither the promise nor the
-    /// view can be trusted — the [`StoreAck::Failed`] of the read path.
+    /// view can be trusted; the [`StoreAck::Failed`] of the read path.
     ///
     /// It must not count toward a recovery read quorum. Note the promise is the
     /// load-bearing half: a replica that cannot durably record the term it just
@@ -161,7 +161,7 @@ pub enum ReadOutcome {
     Failed,
 }
 
-/// Whether a record store is a normal append or a recovery write-back (§8) — the
+/// Whether a record store is a normal append or a recovery write-back (§8): the
 /// one bit that decides whether the optimistic head check applies.
 ///
 /// The variant order is load-bearing: `Append` is the zero discriminant, so an
@@ -174,7 +174,7 @@ pub enum WriteKind {
     /// and never reports `Stale`.
     Repair,
     /// A split/merge transfer copy (spec §7.7): the driver landing a moved entity's
-    /// committed prefix under the **destination** shard's keys. Skips the fence —
+    /// committed prefix under the **destination** shard's keys. Skips the fence:
     /// the copy is stamped `Term::ZERO` and its destination keys belong to a range
     /// no leader serves yet (a split's child) or to entities the destination cannot
     /// hold (a merge's disjoint moved range), so there is no term to contest, and
@@ -198,7 +198,7 @@ pub trait EntityBlobStore: Send + Sync + 'static {
     ///
     /// The acknowledgement *is* the durability (**E18**): a `Stored` means the bytes
     /// are on this node's storage, and the only other answer is
-    /// [`BlobAck::Failed`] — there is no fence and no ordering to refuse against.
+    /// [`BlobAck::Failed`]; there is no fence and no ordering to refuse against.
     #[must_use = "a blob store can fail to persist (BlobAck::Failed); read the outcome (E18)"]
     fn put_blob(&self, shard: u32, entity: &EntityName, id: BlobId, bytes: Vec<u8>) -> BlobAck;
 
@@ -218,16 +218,16 @@ pub trait EntityBlobStore: Send + Sync + 'static {
     /// a corrupt copy must be removed before its replacement can be stored.
     fn delete_blob(&self, shard: u32, entity: &EntityName, id: BlobId);
 
-    /// Drop **every** blob of an entity — entity-scoped reclamation on destroy, with no
+    /// Drop **every** blob of an entity: entity-scoped reclamation on destroy, with no
     /// namespace tombstone or membership gating (the area lives only on the entity's
     /// known replicas).
     fn delete_blobs(&self, shard: u32, entity: &EntityName);
 
-    /// Drop every blob of an entity **not** in `retain` — the entity's mark-from-roots
+    /// Drop every blob of an entity **not** in `retain`: the entity's mark-from-roots
     /// sweep, reclaiming blocks orphaned by overwrites. Idempotent.
     fn retain_blobs(&self, shard: u32, entity: &EntityName, retain: &BTreeSet<BlobId>);
 
-    /// Every blob id this store holds for one entity — the migration driver's
+    /// Every blob id this store holds for one entity: the migration driver's
     /// source list when copying an entity's blob area to a new replica.
     #[must_use = "the answer is the whole point of the call"]
     fn blob_ids(&self, shard: u32, entity: &EntityName) -> Vec<BlobId>;
@@ -244,26 +244,26 @@ pub trait EntityBlobStore: Send + Sync + 'static {
 ///
 /// Extends [`EntityBlobStore`]: an entity's content-addressed blob area lives in the
 /// same per-node store but off the fenced record path (see that trait). The
-/// enumeration and reclamation methods here — `entities`, `remove_entity`,
-/// `remove_range`, `drop_shard`, `shard_bytes` — span both areas.
+/// enumeration and reclamation methods here (`entities`, `remove_entity`,
+/// `remove_range`, `drop_shard`, `shard_bytes`) span both areas.
 ///
 /// **A store call's effect has already happened when it returns**, durably: the guard,
 /// the in-memory apply, and the fsync all run before the call comes back, under the
 /// entity's segment lock. That is what serializes a write against the same entity's
-/// recovery `prepare` — the only fencing-critical race (§8) — and it comes from these
+/// recovery `prepare`: the only fencing-critical race (§8), and it comes from these
 /// methods being *synchronous*. An `async fn` store would run its body at first poll,
 /// and a caller that never polled would silently not write.
 ///
 /// **Every method that can refuse is `#[must_use]`.** A mutating call answers `Fenced`,
-/// `Stale`, `Sealed`, or `Failed` — each a *refusal to have written* — and silently
+/// `Stale`, `Sealed`, or `Failed` (each a *refusal to have written*), and silently
 /// dropping one is how a deposed leader convinces itself it committed (**E14**). The
 /// methods that report nothing return `()` and carry no such obligation.
 pub trait EntityStore: EntityBlobStore {
     /// Store `records` for an entity beginning at the slot after `after`, fenced by
     /// `term`. Idempotent per slot: a slot already holding an equal-or-higher term
     /// is kept (a re-delivered or late append does not regress it). Returns
-    /// `Stored(head)` with the replica's contiguous head, `Fenced(higher)`, or — for
-    /// a [`WriteKind::Append`] onto a stale head — `Stale(head)`. A
+    /// `Stored(head)` with the replica's contiguous head, `Fenced(higher)`, or, for
+    /// a [`WriteKind::Append`] onto a stale head: `Stale(head)`. A
     /// [`WriteKind::Repair`] fills/repairs slots by highest term and never reports
     /// `Stale`.
     #[must_use = "a store call can refuse to write (Fenced/Stale/Sealed/Failed); read the outcome (E14)"]
@@ -277,7 +277,7 @@ pub trait EntityStore: EntityBlobStore {
         kind: WriteKind,
     ) -> StoreAck;
 
-    /// Every occupied slot (with its term) and the latest snapshot for an entity —
+    /// Every occupied slot (with its term) and the latest snapshot for an entity:
     /// a non-fencing local read, used for recovery merge and replay (§9). Empty for a
     /// entity this store has never seen. The reply may name records this store has
     /// applied but not yet made stable, which a caller must not count toward a quorum
@@ -285,7 +285,7 @@ pub trait EntityStore: EntityBlobStore {
     #[must_use = "the answer is the whole point of the call"]
     fn read(&self, shard: u32, entity: &EntityName) -> ReadReply;
 
-    /// An entity's head alone (§7.3) — what activation needs before it can serve.
+    /// An entity's head alone (§7.3): what activation needs before it can serve.
     ///
     /// Separate from [`read`](EntityStore::read) because the two differ by everything the
     /// entity holds: `read` clones every occupied slot's bytes, and a caller after the head
@@ -294,7 +294,7 @@ pub trait EntityStore: EntityBlobStore {
     ///
     /// The default answers through `read` and is always correct; a store that can reach
     /// its head without materializing the records overrides it. Defaulted rather than
-    /// required so a store with nothing to gain — an immutable test double — need not
+    /// required so a store with nothing to gain (an immutable test double) need not
     /// restate it.
     #[must_use = "the answer is the whole point of the call"]
     fn head(&self, shard: u32, entity: &EntityName) -> Seq {
@@ -314,7 +314,7 @@ pub trait EntityStore: EntityBlobStore {
     }
 
     /// Up to `limit` records for an entity after `from` (exclusive), ascending by
-    /// `Seq`, with the entity's compaction base — the `load` seam (§7.3), as one
+    /// `Seq`, with the entity's compaction base: the `load` seam (§7.3), as one
     /// consistent [`RecordPage`] read under the segment's lock. Only the returned
     /// window's bytes are cloned, so paging an entity's tail on replay costs
     /// `O(limit)`. Records the snapshot already subsumes (`Seq <= base`) are
@@ -351,7 +351,7 @@ pub trait EntityStore: EntityBlobStore {
         kind: WriteKind,
     ) -> StoreAck;
 
-    /// Drop records past slot `after` whose term is at most `term` — the leader
+    /// Drop records past slot `after` whose term is at most `term`: the leader
     /// rolling back the tentative local write of an append that failed to reach a
     /// quorum (§7.2), so an uncommitted record never becomes visible to a later
     /// stale-local recovery (§7.5, E5). The record survives on any peers that stored
@@ -367,7 +367,7 @@ pub trait EntityStore: EntityBlobStore {
 
     // --- Enumeration (replica-set migration, §7.7) ---------------------------
 
-    /// Every entity this store holds anything for under `shard` — records, a
+    /// Every entity this store holds anything for under `shard`: records, a
     /// snapshot, or blobs. The migration driver enumerates a shard's entities from a
     /// read quorum of its replicas with this, so an entity committed while this node
     /// was down is still found on the others. Spans both areas (records and blobs),
@@ -380,27 +380,27 @@ pub trait EntityStore: EntityBlobStore {
     /// [`WriteKind::Append`] whose entity's name hash is `>= from` (`Sealed`),
     /// monotonically (`min` with any existing bound) and durably. This is the
     /// store half of E15: once a majority of the shard's replicas are bounded, no
-    /// append to the moved range can assemble a write quorum at ANY term — even
-    /// from a leader that has not yet applied the split — by the same
+    /// append to the moved range can assemble a write quorum at ANY term (even
+    /// from a leader that has not yet applied the split) by the same
     /// intersection argument as the term fence. The bound is permanent for the
     /// shard (the moved range never returns to it) except through
     /// [`unseal`](EntityStore::unseal) on a committed merge. Recovery reads,
-    /// repairs, and transfers are not bounded — the split driver itself must
+    /// repairs, and transfers are not bounded: the split driver itself must
     /// recover and copy the moved entities after sealing.
     fn seal_range(&self, shard: u32, from: u64);
 
-    /// Clear the shard's append bound — only on applying a committed merge
+    /// Clear the shard's append bound, only on applying a committed merge
     /// (§7.7), where the shard re-absorbs the very range its earlier split moved
     /// out and the merged data is already durable under this shard's keys.
     fn unseal(&self, shard: u32);
 
-    /// Drop every trace of one entity under `shard` — records, snapshot, and
+    /// Drop every trace of one entity under `shard`: records, snapshot, and
     /// blobs. The split driver's local GC of a moved entity's parent-keyed data
     /// after the child's copy is quorum-durable and the mapping has committed.
     /// Idempotent; never touches other shards' keys for the same entity.
     fn remove_entity(&self, shard: u32, entity: &EntityName);
 
-    /// Drop every trace of every entity under `shard` whose name hash is `>= from` —
+    /// Drop every trace of every entity under `shard` whose name hash is `>= from`:
     /// the same half-open range [`seal_range`](EntityStore::seal_range) bounds, and the
     /// split driver's GC of the parent-keyed data a committed split moved away.
     ///
@@ -408,14 +408,14 @@ pub trait EntityStore: EntityBlobStore {
     /// that keys by name hash can honour it by discarding whole files. Idempotent.
     fn remove_range(&self, shard: u32, from: u64);
 
-    /// Drop everything this store holds under `shard` — every entity's records,
+    /// Drop everything this store holds under `shard`: every entity's records,
     /// snapshot, and blobs, and the shard's fence and append bound.
     ///
     /// The reclamation a committed merge performs on the retired shard, whose entities
     /// now live under the surviving shard's keys (§7.7). Idempotent.
     fn drop_shard(&self, shard: u32);
 
-    /// An estimate of the bytes this store holds under `shard` — records,
+    /// An estimate of the bytes this store holds under `shard`: records,
     /// snapshots, and blobs. The split trigger's size signal (§7.7,
     /// `shard_target_bytes`); an estimate is enough, so implementations may
     /// ignore framing overhead.
@@ -429,8 +429,8 @@ pub trait EntityStore: EntityBlobStore {
 /// ephemeral [`MemoryEntityStore`] per store (lost on restart).
 ///
 /// The `entity_type` is not decoration: a store's fence and append bound are keyed by
-/// shard *index*, while a shard's identity — and the leader-election group whose term
-/// the fence holds — is `(entity_type, index)` (§8.2). Two types are two independent
+/// shard *index*, while a shard's identity (and the leader-election group whose term
+/// the fence holds) is `(entity_type, index)` (§8.2). Two types are two independent
 /// groups whose terms advance independently, so one store shared across types would
 /// let the type electing more often raise the fence past the other's term, and every
 /// append and recovery read of the quieter type is then refused forever: `NotLeader`
@@ -440,12 +440,12 @@ pub trait EntityStore: EntityBlobStore {
 /// keys its cache by both cannot do otherwise.
 pub type EntityStoreFactory = Arc<dyn Fn(&str, NodeId) -> Arc<dyn EntityStore> + Send + Sync>;
 
-/// One entity's stored records and its latest snapshot — the per-entity **segment**
+/// One entity's stored records and its latest snapshot: the per-entity **segment**
 /// (§7.2). Shared by [`MemoryEntityStore`] and the file-backed store, which each wrap
 /// it in their own per-entity lock and add durability; the fence lives in the store,
 /// not here (it is per *shard*, §8).
 ///
-/// Records with `Seq <= base` have been compacted away — subsumed by `snapshot`
+/// Records with `Seq <= base` have been compacted away: subsumed by `snapshot`
 /// (§9), so `base` always equals the snapshot's seq whenever a snapshot is present.
 /// `slots` is the sparse vector of records *after* `base`: slot `i` is `Seq`
 /// `base + i + 1`. The head is `base` plus the leading gap-free run of `slots`.
@@ -495,7 +495,7 @@ impl EntityRecords {
         }
     }
 
-    /// The committed head: `base` plus the leading gap-free run of `slots` —
+    /// The committed head: `base` plus the leading gap-free run of `slots`;
     /// [`fold_head`], with a vacant slot yielding a non-successor seq that ends
     /// the run.
     pub(crate) fn head(&self) -> Seq {
@@ -510,14 +510,14 @@ impl EntityRecords {
     }
 
     /// The latest snapshot as `(seq, state)`, cloning the snapshot's bytes and nothing
-    /// else — the records stay where they are.
+    /// else: the records stay where they are.
     pub(crate) fn snapshot(&self) -> Option<(Seq, Vec<u8>)> {
         self.snapshot
             .as_ref()
             .map(|(seq, _term, state)| (*seq, state.clone()))
     }
 
-    /// `(seq, term, bytes)` for each occupied slot, ascending — `seq = base + i + 1`.
+    /// `(seq, term, bytes)` for each occupied slot, ascending: `seq = base + i + 1`.
     /// The compacted prefix is absent (covered by the snapshot).
     fn occupied(&self) -> Vec<(Seq, Term, Vec<u8>)> {
         self.slots
@@ -544,8 +544,8 @@ impl EntityRecords {
     }
 
     /// Up to `limit` occupied records after `from` (exclusive), ascending, with
-    /// this segment's compaction base — one consistent view under the segment's
-    /// lock ([`RecordPage`]). Clones only the returned window — the ranged
+    /// this segment's compaction base: one consistent view under the segment's
+    /// lock ([`RecordPage`]). Clones only the returned window: the ranged
     /// `load` read (§7.3).
     pub(crate) fn read_from(&self, from: Seq, limit: usize) -> RecordPage {
         let base = self.base.value();
@@ -578,7 +578,7 @@ impl EntityRecords {
     ) -> StoreAck {
         let base = self.base.value();
         // Optimistic head check (§8): a normal append landing on a slot this replica
-        // has already filled means the leader's head is stale — reject so it steps
+        // has already filled means the leader's head is stale; reject so it steps
         // down and re-recovers rather than overwriting a committed record. An append
         // whose `after` is below our compacted base is stale by the same logic (the
         // leader recovered without seeing our snapshot).
@@ -586,8 +586,8 @@ impl EntityRecords {
         // The one occupied slot an append may proceed onto is a **re-delivery of the
         // very append that filled it** (§7.2: the wire may duplicate, and a drained
         // straggler can arrive late), identified by the shard `term` as well as the
-        // bytes. Bytes alone are not an identity — two clients issuing the same command
-        // encode identically — so a byte-only check would read a *different* append
+        // bytes. Bytes alone are not an identity (two clients issuing the same command
+        // encode identically), so a byte-only check would read a *different* append
         // onto a stale head as a duplicate, store it over the record that slot already
         // committed, and ack: two leaders report their write durable while one record
         // exists, an acknowledged write lost (**E14**). A genuine re-delivery carries
@@ -631,8 +631,8 @@ impl EntityRecords {
     }
 
     /// Apply a fenced snapshot store (§9); the guard has already run, so it cannot
-    /// refuse. Returns whether the snapshot **advanced the base** — i.e. just
-    /// compacted records — so a file store knows to rewrite the entity's segment.
+    /// refuse. Returns whether the snapshot **advanced the base**, i.e. just
+    /// compacted records, so a file store knows to rewrite the entity's segment.
     pub(crate) fn store_snapshot(&mut self, at: Seq, term: Term, state: Vec<u8>) -> bool {
         // A snapshot only ever advances (§9, E4). When it does it subsumes every
         // record up to `at`, so compact them: advance the base and drop the covered
@@ -651,7 +651,7 @@ impl EntityRecords {
         false
     }
 
-    /// An estimate of this segment's stored bytes — record payloads plus the
+    /// An estimate of this segment's stored bytes: record payloads plus the
     /// snapshot state, ignoring framing. Feeds the shard-size split signal (§7.7).
     pub(crate) fn approximate_bytes(&self) -> u64 {
         let records: usize = self
@@ -703,7 +703,7 @@ struct Inner {
     /// own leaf lock so cross-entity bumps never block an entity's data ops.
     fences: Mutex<HashMap<u32, Term>>,
     /// The per-shard **append bound** (§7.7): refuse appends at or above this name
-    /// hash — the store half of split/merge safety (E15). A leaf lock like the
+    /// hash; the store half of split/merge safety (E15). A leaf lock like the
     /// fence, checked inside the entity's segment lock.
     seals: Mutex<HashMap<u32, u64>>,
     /// One independent segment per `(shard, entity)`, each behind its own lock.
@@ -742,7 +742,7 @@ impl MemoryEntityStore {
         )
     }
 
-    /// The segment for `(shard, entity)` if it exists — no allocation for an entity
+    /// The segment for `(shard, entity)` if it exists, no allocation for an entity
     /// this store has never seen (the read path).
     fn existing(&self, shard: u32, entity: &EntityName) -> Option<Segment> {
         let segments = self
@@ -754,7 +754,7 @@ impl MemoryEntityStore {
     }
 
     /// Project a known entity's records under its segment lock, or `None` if the entity is
-    /// unknown — the shared body of every read this store answers, so the lookup, the
+    /// unknown: the shared body of every read this store answers, so the lookup, the
     /// lock, and its poison message are written once rather than per accessor.
     fn with_records<R>(
         &self,
@@ -774,13 +774,13 @@ impl MemoryEntityStore {
 /// which-write-kinds-bypass rules live here, in one place, so they cannot diverge
 /// between the stores.
 ///
-/// Every method is called *inside the entity's held segment lock* — the caller locks
-/// the segment, guards, then applies — so a write and that entity's recovery
+/// Every method is called *inside the entity's held segment lock* (the caller locks
+/// the segment, guards, then applies), so a write and that entity's recovery
 /// `prepare` serialize on the segment lock (the only fencing-critical race, §8). The
 /// `sealed`/`bump_fence` leaf locks are short critical sections taken beneath it.
 pub(crate) trait WriteGuard {
-    /// The shard's current seal bound — the name-hash floor appends are refused
-    /// from — or `None` while unsealed (§7.7). The store supplies only this
+    /// The shard's current seal bound (the name-hash floor appends are refused
+    /// from), or `None` while unsealed (§7.7). The store supplies only this
     /// lookup; which entities a bound refuses is [`sealed`](WriteGuard::sealed)'s,
     /// one interpretation for every store.
     fn seal_bound(&self, shard: u32) -> Option<u64>;
@@ -796,7 +796,7 @@ pub(crate) trait WriteGuard {
     /// Check the shard fence against `term`, bumping it durably to `term` on a strict
     /// advance. Returns the blocking (higher, already-acknowledged) fence on refusal,
     /// so a deposed leader learns it has been fenced (§8). A same-term append does not
-    /// rewrite the fence — only a strict advance changes it.
+    /// rewrite the fence, only a strict advance changes it.
     fn bump_fence(&self, shard: u32, term: Term) -> Result<(), BumpRefusal>;
 
     /// Guard a fenced **record** store; `Err` is the refusal ack the store returns.
@@ -805,7 +805,7 @@ pub(crate) trait WriteGuard {
     /// range accepts no new [`WriteKind::Append`] at any term, and a refused append
     /// must not advance the fence as a side effect (that would fence the legitimate
     /// leader's own writes to the range it still owns). Repairs and transfers are not
-    /// bounded — the split driver itself recovers and copies the moved entities after
+    /// bounded: the split driver itself recovers and copies the moved entities after
     /// sealing. The fence then applies as in [`guard_snapshot`](WriteGuard::guard_snapshot).
     fn guard_record(
         &self,
@@ -820,7 +820,7 @@ pub(crate) trait WriteGuard {
         self.guard_snapshot(shard, term, kind)
     }
 
-    /// Guard a fenced store that the append bound does **not** cover — a snapshot
+    /// Guard a fenced store that the append bound does **not** cover: a snapshot
     /// (§9) is not an append to the moved range, so only the fence guards it. A
     /// [`WriteKind::Transfer`] skips the fence, for the reason stated on that variant.
     fn guard_snapshot(&self, shard: u32, term: Term, kind: WriteKind) -> Result<(), StoreAck> {
@@ -981,7 +981,7 @@ impl EntityStore for MemoryEntityStore {
     // `head` and `snapshot` read the segment directly rather than through `read`, whose
     // reply would clone every record the entity holds only for the caller to drop them.
     // `EntityRecords::head` counts the same leading gap-free run over the snapshot's seq
-    // that `ReadReply::head` folds — `base` equals that seq whenever a snapshot exists —
+    // that `ReadReply::head` folds (`base` equals that seq whenever a snapshot exists),
     // so the answer is unchanged and nothing is copied to reach it.
 
     fn head(&self, shard: u32, entity: &EntityName) -> Seq {
@@ -1003,7 +1003,7 @@ impl EntityStore for MemoryEntityStore {
         let segment = self.segment(shard, entity);
         let records_guard = segment.lock().expect("entity segment poisoned");
         // The promise, under the entity's segment lock (§8). An in-memory fence cannot
-        // fail to persist, so `Failed` is unreachable here — mapped rather than
+        // fail to persist, so `Failed` is unreachable here: mapped rather than
         // asserted, since the arm costs a line and an assertion costs a panic.
         match self.bump_fence(shard, term) {
             Ok(()) => ReadOutcome::Prepared(records_guard.read()),
@@ -1179,13 +1179,13 @@ mod tests {
     /// The property the synchronous seam exists to enforce: the write happens at
     /// **call** time, under the entity's segment lock, not when the caller gets around
     /// to reading the outcome. An `async fn` store would run its body at first poll,
-    /// and a caller that never polled would silently not write — which is why the seam
+    /// and a caller that never polled would silently not write, which is why the seam
     /// returns a settled value rather than a future (§8, §18.1).
     #[test]
     fn the_write_happens_when_the_call_is_made_not_when_its_outcome_is_read() {
         let store = MemoryEntityStore::new();
         let n = name("eager");
-        // The outcome is deliberately discarded — no read of any kind. `drop` is what
+        // The outcome is deliberately discarded, no read of any kind. `drop` is what
         // discharges the `#[must_use]`, and doing so is the point of the test.
         drop(store.store_record(
             0,
@@ -1460,7 +1460,7 @@ mod tests {
             }
         );
         // A read past a compacted base returns the live tail only, and the page
-        // reports the base — the reader's one way to tell the drained prefix
+        // reports the base: the reader's one way to tell the drained prefix
         // from slots that were never occupied.
         let _ = store.store_snapshot(
             0,
@@ -1725,7 +1725,7 @@ mod tests {
             reply.snapshot,
             Some((Seq::new(2), Term::new(1), b"snap@2".to_vec()))
         );
-        // The head still reads 3 (base 2 + the one retained record) — compaction
+        // The head still reads 3 (base 2 + the one retained record): compaction
         // never regresses it. The next append lands contiguously at seq 4.
         assert_eq!(
             store.store_record(
@@ -1791,7 +1791,7 @@ mod tests {
             WriteKind::Append,
         );
         // A recovery write-back from base 1 re-offers seqs 2..=4; seqs 2,3 are already
-        // subsumed by the snapshot, so only seq 4 is stored — no gap, no regression.
+        // subsumed by the snapshot, so only seq 4 is stored, no gap, no regression.
         let _ = store.store_record(
             0,
             &n,

@@ -1,7 +1,7 @@
 //! What committing an entity's events costs.
 //!
 //! Every state change an entity makes is journaled through a store, so `store_record` is
-//! the write path under the whole system — an agent session's transcript reaches disk one
+//! the write path under the whole system: an agent session's transcript reaches disk one
 //! of these per commit. Two stores implement it, and running both is what separates the
 //! costs:
 //!
@@ -54,7 +54,7 @@ fn name() -> EntityName {
 ///
 /// `store_record` takes its events by value, so a loop that reuses one batch has to clone
 /// it. That clone is the benchmark's cost, not the store's, and leaving it inside the
-/// timed closure would roughly double the reported allocation count of the memory store —
+/// timed closure would roughly double the reported allocation count of the memory store:
 /// the very number this file exists to report. `with_inputs` hands each iteration its own
 /// batch and excludes building it from the measurement.
 ///
@@ -84,7 +84,7 @@ fn commit(bencher: Bencher, store: impl EntityStore, records: usize) {
 
 /// The in-memory store: slot map, name lookup, and the ack. No disk.
 ///
-/// This is the floor `file` is measured against — everything here is cost the store layer
+/// This is the floor `file` is measured against, everything here is cost the store layer
 /// adds regardless of durability.
 #[divan::bench(args = [1, 8, 64])]
 fn memory(bencher: Bencher, records: usize) {
@@ -136,7 +136,7 @@ fn head(bencher: Bencher, history: usize) {
     bencher.bench_local(|| black_box(store.head(SHARD, black_box(&entity))));
 }
 
-/// The same entity read in full — every occupied slot's bytes plus the snapshot.
+/// The same entity read in full, every occupied slot's bytes plus the snapshot.
 ///
 /// Not a straw man: a recovering leader genuinely needs all of it to merge a write quorum
 /// by highest-term-per-slot (**E14**), so this cost is real and stays. It is here as the

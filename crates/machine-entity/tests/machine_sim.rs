@@ -53,7 +53,7 @@ impl Actor for DoorStub {
     }
 }
 
-/// Stop the stub — simulating the front-door member dying without detaching.
+/// Stop the stub, simulating the front-door member dying without detaching.
 #[derive(Clone, Serialize, Deserialize)]
 struct Die;
 impl Message for Die {
@@ -191,7 +191,7 @@ fn attach_capture_detach_hibernate_reattach_round_trips() {
         );
 
         // Detach: the final capture runs immediately (machine §4, quiescent
-        // point 1) — guest stopped, image settled, entity clean.
+        // point 1); guest stopped, image settled, entity clean.
         entity
             .ask(Detach {
                 attachment: reply.attachment,
@@ -321,7 +321,7 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
 
         // Checkpoint intervals pass: the cadence pulls the guest's workspace
         // writes (the fake guest dirties `guest.log`) and stages them with
-        // the disk manifest — the ws capture counter advances.
+        // the disk manifest; the ws capture counter advances.
         sys.sleep(Duration::from_millis(350)).await;
         let status = entity.ask(Status).await.expect("status");
         assert!(
@@ -363,7 +363,7 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
         );
     });
 
-    // Idle: clean disk, no attachment — the machine hibernates.
+    // Idle: clean disk, no attachment; the machine hibernates.
     sim.run();
     assert!(
         recorder.events().iter().any(|e| matches!(
@@ -417,8 +417,8 @@ fn workspace_files_survive_boot_capture_and_hibernation() {
 }
 
 /// The host key is born at provisioning (machine §3): each machine draws its
-/// own 32-byte ed25519 seed from the system's entropy stream — so no two
-/// machines share an SSH identity — and the seed is folded state, so
+/// own 32-byte ed25519 seed from the system's entropy stream (so no two
+/// machines share an SSH identity), and the seed is folded state, so
 /// rehydration returns the same identity and the client's `known_hosts` pin
 /// survives hibernation (machine §5.1). Read through [`DoorPolicy`], the
 /// command the front door itself presents the key from.
@@ -474,7 +474,7 @@ fn each_machine_draws_its_own_host_key_and_keeps_it_across_hibernation() {
         "the idle machines must hibernate",
     );
 
-    // Reactivate: the host key is folded state, not activation state — the
+    // Reactivate: the host key is folded state, not activation state; the
     // rehydrated machine presents the identity it was provisioned with.
     let reread = machines.entity("box-a");
     sim.block_on(async move {

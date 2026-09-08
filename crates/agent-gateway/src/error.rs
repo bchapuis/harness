@@ -2,7 +2,7 @@
 //!
 //! Two failure layers stay distinct on the wire, exactly as the agent runtime keeps
 //! them apart (spec §12/§14): a *transport or durability* failure of reaching or
-//! committing a command — an [`EntityError`] — becomes an HTTP status here; an
+//! committing a command (an [`EntityError`]) becomes an HTTP status here; an
 //! *application outcome* the run itself produced ([`RunOutcome`]'s `RunError`) is
 //! **not** an error at this layer, it is a `200` whose body carries the outcome.
 //!
@@ -23,7 +23,7 @@ use serde_json::json;
 
 /// A client-facing gateway error: a stable machine `code`, an HTTP `status`, and
 /// a human `message`. Built from the edge's own validation ([`bad_request`],
-/// [`unauthorized`]) and from an [`EntityError`] — never from a run's own
+/// [`unauthorized`]) and from an [`EntityError`], never from a run's own
 /// `RunError` (see the module docs).
 ///
 /// [`bad_request`]: GatewayError::bad_request
@@ -45,19 +45,19 @@ impl GatewayError {
         }
     }
 
-    /// `401 Unauthorized` — a missing or unverifiable bearer token. The response
+    /// `401 Unauthorized`: a missing or unverifiable bearer token. The response
     /// carries a `WWW-Authenticate: Bearer` challenge.
     pub fn unauthorized(message: impl Into<String>) -> GatewayError {
         GatewayError::new(StatusCode::UNAUTHORIZED, "unauthorized", message)
     }
 
-    /// `400 Bad Request` — a malformed request the edge itself rejects (e.g. a
+    /// `400 Bad Request`: a malformed request the edge itself rejects (e.g. a
     /// body that does not parse).
     pub fn bad_request(message: impl Into<String>) -> GatewayError {
         GatewayError::new(StatusCode::BAD_REQUEST, "bad_request", message)
     }
 
-    /// `404 Not Found` — the request path names a kind this deployment does not
+    /// `404 Not Found`: the request path names a kind this deployment does not
     /// serve (neither hosted nor routed by the gateway's harness).
     pub fn unknown_kind(message: impl Into<String>) -> GatewayError {
         GatewayError::new(StatusCode::NOT_FOUND, "unknown_kind", message)
@@ -78,11 +78,11 @@ impl GatewayError {
 impl From<EntityError> for GatewayError {
     /// Map a transport/durability failure to an HTTP status (spec §12/§14):
     ///
-    /// - `Call(Timeout)` → `504` — the deadline lapsed reaching/committing.
-    /// - `Call(Unreachable | MailboxFull)`, `Unavailable`, `NotLeader` → `503` —
+    /// - `Call(Timeout)` → `504`: the deadline lapsed reaching/committing.
+    /// - `Call(Unreachable | MailboxFull)`, `Unavailable`, `NotLeader` → `503`,
     ///   transient: no quorum, backpressure, or a leadership move; retryable.
     /// - anything else (`DeadLetter`, `Unhandled`, `Serialization`, `System`) →
-    ///   `502` — an upstream failure the client cannot fix by retrying.
+    ///   `502`: an upstream failure the client cannot fix by retrying.
     fn from(e: EntityError) -> GatewayError {
         let (status, code) = match &e {
             EntityError::Call(CallError::Timeout) => (StatusCode::GATEWAY_TIMEOUT, "timeout"),

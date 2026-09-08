@@ -11,14 +11,14 @@
 //! `entity_swarm.rs`:
 //!
 //! - **Address integrity, E17 (#2, the safety property).** Every `get` that
-//!   returns bytes returns bytes whose BLAKE3 hash equals the requested id —
+//!   returns bytes returns bytes whose BLAKE3 hash equals the requested id,
 //!   never wrong or stale-other bytes, under any fault. Asserted in-workload over
 //!   a shared flag, because the blob path is off the event stream (it carries no
 //!   `Seq`/term, so it emits no `EntityEvent`), so an event-stream invariant
 //!   cannot observe it. Also covers idempotent/duplicate-tolerant put: a
 //!   duplication fault re-delivering a `StoreBlob` must not change the id (B2).
-//! - **Safety core under faults (#4).** [`default_invariants`] — no-silent-loss,
-//!   serial execution, lifecycle exactly-once — hold on every run, so the new
+//! - **Safety core under faults (#4).** [`default_invariants`] (no-silent-loss,
+//!   serial execution, lifecycle exactly-once) hold on every run, so the new
 //!   blob RPCs integrate with §14 no-silent-loss: each fanned `StoreBlob`/
 //!   `FetchBlob` ask closes its `AskIssued`/`AskOutcome` bracket even when it is
 //!   the drained straggler of a committed quorum.
@@ -68,7 +68,7 @@ use support::Exercised;
 
 // --- An entity that stores bytes in its colocated blob area ----------------------
 //
-// Its folded state is just the ids it has stored — the small metadata that
+// Its folded state is just the ids it has stored: the small metadata that
 // references the bulk bytes living in `ctx.blobs()`. Fixed to `SimNode` so it
 // hosts on the leader-based clustered system the shard map requires (§7.6).
 
@@ -211,7 +211,7 @@ fn config(hibernating: bool) -> EntityConfig {
 const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
-/// How long a hibernating client idles when it idles — comfortably past
+/// How long a hibernating client idles when it idles: comfortably past
 /// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
@@ -268,7 +268,7 @@ impl BlobSwarm {
     }
 
     /// Short activation lifetime, clients that idle past it, and a nemesis that
-    /// kills processes — so a `get` has to serve bytes whose activation was torn
+    /// kills processes, so a `get` has to serve bytes whose activation was torn
     /// down and rebuilt from a quorum since the `put`.
     fn hibernating(nodes: usize, clients: usize, ops: u64) -> BlobSwarm {
         BlobSwarm {
@@ -303,7 +303,7 @@ impl ClusterWorkload for BlobSwarm {
             return None;
         }
         // A restarted node comes up empty and would otherwise stop hosting
-        // `BlobEntity` — no gateway, no shard leadership, no replica for the blob
+        // `BlobEntity`, no gateway, no shard leadership, no replica for the blob
         // write quorum. Re-host it, or the run shrinks the cluster rather than
         // faulting it.
         let hibernating = self.hibernating;
@@ -338,7 +338,7 @@ impl ClusterWorkload for BlobSwarm {
                 // Under restarts every client goes through node 1's gateway, the
                 // one node the nemesis leaves alone: a handle for a restarted node
                 // points at a system that has been shut down. Location
-                // transparency (E13) means this costs no coverage — the call still
+                // transparency (E13) means this costs no coverage: the call still
                 // lands on whichever node leads the entity's shard.
                 let entities = if restarting {
                     hosts[0].clone()
@@ -382,7 +382,7 @@ impl ClusterWorkload for BlobSwarm {
                                 entity.ask_timeout(Fetch(*id), Duration::from_secs(2)).await
                             {
                                 // E17: returned bytes hash to the requested id, and
-                                // are the exact bytes stored under it — never wrong,
+                                // are the exact bytes stored under it, never wrong,
                                 // stale-other, or another entity's blob.
                                 if BlobId::of(&got) != *id || &got != bytes {
                                     corrupt.store(true, Ordering::SeqCst);
@@ -443,11 +443,11 @@ fn blob_integrity_holds_under_the_cluster_swarm() {
         !workload.wrong_id.load(Ordering::SeqCst),
         "a put minted an id that was not the content hash (B2/E18)",
     );
-    // The integrity assertions are vacuous unless gets actually returned bytes —
+    // The integrity assertions are vacuous unless gets actually returned bytes:
     // prove the sweep exercised the verified read path at least once.
     assert!(
         workload.gets_verified.load(Ordering::SeqCst) > 0,
-        "no get ever returned bytes — the integrity check never ran",
+        "no get ever returned bytes: the integrity check never ran",
     );
 }
 
@@ -456,7 +456,7 @@ fn blob_integrity_holds_under_the_cluster_swarm() {
 // The sweep above holds every activation resident, so a `get` is always served by
 // the activation that took the `put`. This one tears that down: the entity
 // deactivates, its blob area goes with it, and the next `get` must rebuild from a
-// composite snapshot and re-fan the root set from a write quorum — on a node that
+// composite snapshot and re-fan the root set from a write quorum, on a node that
 // may have been a different process entirely a moment ago. E17 (returned bytes
 // hash to the requested id) and B2/E18 (the id is the content hash) are the same
 // claims, now against a rebuilt blob area.
@@ -477,7 +477,7 @@ fn blob_integrity_holds_across_hibernation_and_restarts() {
     );
     assert!(
         workload.gets_verified.load(Ordering::SeqCst) > 0,
-        "no get ever returned bytes — the integrity check never ran",
+        "no get ever returned bytes: the integrity check never ran",
     );
     workload.exercised.assert_hibernated();
 }

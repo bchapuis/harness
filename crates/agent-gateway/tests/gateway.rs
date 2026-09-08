@@ -4,7 +4,7 @@
 //! analogue of the production split (nodes host; the gateway is a client over the
 //! same transport): it proves the gateway terminates tenant auth, scopes each
 //! session under its principal, drives a prompt to the entity **directly** (no
-//! control protocol), and isolates tenants — alice never sees bob's sessions.
+//! control protocol), and isolates tenants; alice never sees bob's sessions.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,7 +43,7 @@ use tower::ServiceExt;
 
 type Sys = LocalSystem<TokioClock, OsEntropy, TokioSpawner>;
 
-/// A model that immediately ends the run with a final message — no tool calls, so
+/// A model that immediately ends the run with a final message, no tool calls, so
 /// the sandbox is never opened.
 struct DoneModel;
 impl Model for DoneModel {
@@ -221,7 +221,7 @@ async fn prompt_runs_the_entity_and_isolates_tenants() {
         "alice should see her own session: {listing}"
     );
 
-    // Bob, a different tenant, sees none of alice's sessions — the principal scope
+    // Bob, a different tenant, sees none of alice's sessions: the principal scope
     // keeps her entities unreachable.
     let resp = agent_gateway::http::router(gw.clone())
         .oneshot(list_req("bob"))

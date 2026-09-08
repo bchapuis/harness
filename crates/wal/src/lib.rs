@@ -10,22 +10,22 @@
 //! `[u32 little-endian length][postcard payload][u64 little-endian checksum]`
 //! and fsynced before the call that wrote it returns. It exposes four operations:
 //!
-//! - [`append`](Wal::append) / [`append_batch`](Wal::append_batch) — frame and fsync
+//! - [`append`](Wal::append) / [`append_batch`](Wal::append_batch): frame and fsync
 //!   one record, or many in a single write and a single fsync.
-//! - [`truncate`](Wal::truncate) — drop a conflicting suffix back to the first `keep`
+//! - [`truncate`](Wal::truncate): drop a conflicting suffix back to the first `keep`
 //!   records, a `set_len` at the record's recorded offset.
-//! - [`rewrite`](Wal::rewrite) — atomically replace the whole file with exactly the
+//! - [`rewrite`](Wal::rewrite): atomically replace the whole file with exactly the
 //!   given records (compaction to a retained suffix, or to a single record that
 //!   subsumes the prior history).
 //!
 //! [`open`](Wal::open) scans the file into its records, **truncating any torn tail to
-//! disk** before returning — a record whose write never completed was never
+//! disk** before returning: a record whose write never completed was never
 //! acknowledged, so dropping it is correct. Whatever higher-level recovery runs on top
 //! operates on the returned records.
 //!
 //! The scan reads the whole file and verifies every frame, rather than trusting a
 //! stored checkpoint offset and starting from there. That is a deliberate purchase of
-//! CPU and sequential I/O — both abundant — to delete a piece of state that could be
+//! CPU and sequential I/O (both abundant) to delete a piece of state that could be
 //! wrong: at contemporary read and digest throughput a gigabyte of log opens in a
 //! fraction of a second, and a checkpoint pointer is one more thing a crash can leave
 //! lying (`docs/hardware-envelope.md` §3.3).
@@ -33,7 +33,7 @@
 //! # The header
 //!
 //! The header carries a magic, the **frame layout's** revision and the **checksum
-//! kind** — this crate's own secrets — and a **record-schema** revision that belongs
+//! kind** (this crate's own secrets), and a **record-schema** revision that belongs
 //! to the caller and that this crate admits against the caller's window and never
 //! interprets. That last field is the load-bearing one: a `Wal<T>`'s records are
 //! postcard, which is positional and has no field names, so `T` cannot gain a field
@@ -53,7 +53,7 @@
 //! # Failure policy
 //!
 //! Every method returns [`io::Result`]: this crate does not decide what an I/O
-//! failure *means*. The caller does — code that cannot persist a record it must not
+//! failure *means*. The caller does: code that cannot persist a record it must not
 //! lose may have no safe way to continue, so it panics with a domain-specific message.
 //!
 //! [`open`](Wal::open) is the exception, returning [`OpenError`], because it has a
@@ -79,8 +79,8 @@ use serde::de::DeserializeOwned;
 /// file). Detects torn and partial writes, not adversarial tampering.
 ///
 /// **This function's output is frozen for any sidecar that still has no header.** A bare
-/// `[value][checksum]` gives a reader no way to ask which digest wrote it — it can only
-/// recompute and compare — so changing what this returns would make every such sidecar
+/// `[value][checksum]` gives a reader no way to ask which digest wrote it (it can only
+/// recompute and compare), so changing what this returns would make every such sidecar
 /// silently read as missing, and a durable fence coming back as *no fence* is a safety
 /// property lost, not a compatibility inconvenience.
 ///
@@ -88,12 +88,12 @@ use serde::de::DeserializeOwned;
 /// taken it: `entity.store.fence` and `entity.store.seal` carry a magic and a revision
 /// (compatibility §3), so a digest change there becomes an ordinary revision bump, and a
 /// mismatch is a *refusal naming the file* rather than an absence. What remains frozen is
-/// the case this paragraph describes — and the reason to reach for a header before
+/// the case this paragraph describes, and the reason to reach for a header before
 /// reaching for a faster digest.
 ///
 /// The log's own frames do not use this. They carry a checksum-kind field in the header
 /// naming which digest closed them, so they are free to move to a faster one and still be
-/// read — and that field is exactly what a sidecar lacks. A digest behind a version field
+/// read, and that field is exactly what a sidecar lacks. A digest behind a version field
 /// may change; a digest without one may not.
 pub fn checksum(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -104,12 +104,12 @@ pub fn checksum(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// The digest closing a log's frames — the value the header's checksum-kind field names.
+/// The digest closing a log's frames: the value the header's checksum-kind field names.
 ///
 /// A file records which digest wrote it, so a build that computes a different one can
 /// still read it: the scan uses the digest the header names, never the one this build
 /// prefers. That is the whole point of reserving the field, and it is what makes moving to
-/// a faster digest an upgrade rather than a migration — a log written before the move
+/// a faster digest an upgrade rather than a migration: a log written before the move
 /// opens and replays untouched, and appends to it stay in its own digest so a file is
 /// never a mix of two.
 ///
@@ -121,7 +121,7 @@ enum Digest {
     /// Kind 1. What this crate wrote before [`Xxh3`](Digest::Xxh3); read-only in the sense
     /// that no new log is stamped with it, though a log already stamped keeps using it.
     Fnv1a,
-    /// Kind 2. ~17.5 GB/s on a 4 KiB frame against FNV-1a's ~0.6 GB/s — FNV is a serial
+    /// Kind 2. ~17.5 GB/s on a 4 KiB frame against FNV-1a's ~0.6 GB/s: FNV is a serial
     /// multiply chain, one byte per multiply, which made a large log's recovery
     /// digest-bound. Not the weaker check for the change: both are 64 bits wide, and XXH3
     /// has the better avalanche.
@@ -140,7 +140,7 @@ impl Digest {
         }
     }
 
-    /// The digest a header names, or `None` for one this build cannot compute — which is
+    /// The digest a header names, or `None` for one this build cannot compute, which is
     /// refused by name rather than left to fail every frame as if the log were corrupt.
     const fn from_kind(kind: u16) -> Option<Digest> {
         match kind {
@@ -171,7 +171,7 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Distinguishes one in-flight [`atomic_replace`] from every other one — see
+/// Distinguishes one in-flight [`atomic_replace`] from every other one; see
 /// [`temp_name`]. Process-wide rather than per-directory: a counter is cheaper than a
 /// map keyed by path, and it only has to be unique, not dense.
 static REPLACE_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -182,12 +182,12 @@ static REPLACE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// while one caller at a time replaces a given name, and that is not a property this
 /// crate can promise on the caller's behalf: entity's blob store puts concurrently
 /// through a thread pool, and content addressing means two puts landing on *the same*
-/// name is the normal case, not a rare one — an image full of identical blocks hashes
+/// name is the normal case, not a rare one; an image full of identical blocks hashes
 /// every one of them to a single id. Two calls sharing a scratch path corrupt each
 /// other in both directions: the second `File::create` truncates the first's
 /// half-written bytes, and whichever renames second finds the path already gone and
-/// fails with `ENOENT`. Callers that treat an I/O error as unrecoverable — the entity
-/// store poisons itself — turn that into a node that has stopped accepting writes.
+/// fails with `ENOENT`. Callers that treat an I/O error as unrecoverable (the entity
+/// store poisons itself) turn that into a node that has stopped accepting writes.
 ///
 /// The pid is in the name because uniqueness has to hold across processes too: two
 /// nodes sharing a data directory is a misconfiguration, but it should not be one that
@@ -195,7 +195,7 @@ static REPLACE_SEQ: AtomicU64 = AtomicU64::new(0);
 ///
 /// A crash between create and rename leaves the scratch file behind, where the old
 /// fixed name would have been reused by the next call. Every directory this crate's
-/// callers scan already skips names it cannot decode — a blob id, a shard number — so
+/// callers scan already skips names it cannot decode (a blob id, a shard number), so
 /// a stray is inert, and entity's blob sweep removes anything not retained.
 fn temp_name(name: &str) -> String {
     let seq = REPLACE_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -210,7 +210,7 @@ fn temp_name(name: &str) -> String {
 /// Safe to call concurrently on one `name`, including from several threads and
 /// processes: each call writes its own scratch file ([`temp_name`]) and the rename
 /// decides the winner. Concurrent callers writing *different* bytes still race for
-/// which content survives — this replaces atomically, it does not serialize — but the
+/// which content survives (this replaces atomically, it does not serialize), but the
 /// file that lands is always exactly one caller's whole bytes.
 pub fn atomic_replace(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let tmp_path = dir.join(temp_name(name));
@@ -239,14 +239,14 @@ fn parent_dir(path: &Path) -> &Path {
 /// The framing capacity a log keeps between appends, when its last batch wanted less.
 ///
 /// Reusing one buffer is what makes an append allocation-free, but the capacity it reaches
-/// is the largest batch that log has ever written. A caller holding one log per object —
-/// entity keeps one per entity — would otherwise pay for every log's worst batch, forever.
+/// is the largest batch that log has ever written. A caller holding one log per object
+/// (entity keeps one per entity) would otherwise pay for every log's worst batch, forever.
 /// A floor rather than a ceiling: [`append_batch`](Wal::append_batch) keeps whichever is
 /// larger of this and the batch it just wrote, so a steady large writer is not punished
 /// and a one-off spike is still handed back.
 const SCRATCH_KEEP: usize = 16 * 1024;
 
-/// The offset capacity a log keeps between appends, in offsets — the [`SCRATCH_KEEP`]
+/// The offset capacity a log keeps between appends, in offsets: the [`SCRATCH_KEEP`]
 /// rule applied to the other buffer.
 ///
 /// Sized on its own rather than derived from the byte floor: offsets scale with the
@@ -260,7 +260,7 @@ const SCRATCH_OFFSETS: usize = 256;
 const LEN_BYTES: usize = size_of::<u32>();
 /// Width of the little-endian checksum that closes every frame. One width for every
 /// [`Digest`]: they are all 64 bits, so which one a file uses is a header question, not a
-/// layout one — the reason moving between them leaves the frame revision alone.
+/// layout one; the reason moving between them leaves the frame revision alone.
 const CHECKSUM_BYTES: usize = size_of::<u64>();
 
 /// The magic that opens every log file, in the PNG convention: a high-bit byte, the
@@ -268,8 +268,8 @@ const CHECKSUM_BYTES: usize = size_of::<u64>();
 ///
 /// Its first four bytes read as a little-endian `u32` are `0x4C41_5789`, which
 /// exceeds every `max_record` this crate permits ([`Wal::open`] asserts it). A
-/// headerless file therefore can never begin with this magic — its first bytes are a
-/// frame length at or below `max_record` — so an unstamped file is refused by name
+/// headerless file therefore can never begin with this magic (its first bytes are a
+/// frame length at or below `max_record`), so an unstamped file is refused by name
 /// instead of scanned for frames that happen to parse.
 const MAGIC: &[u8] = b"\x89WAL\r\n\x1a\n";
 
@@ -287,13 +287,13 @@ const FRAME: compat::Stamp =
 /// Reserving the field is what made adding [`Digest::Xxh3`] beside [`Digest::Fnv1a`] a
 /// header change rather than a layout one: both are 64 bits wide, so the frame layout
 /// never had to mention which filled the field. And because a file says which digest wrote
-/// it, both are *read* — a log stamped kind 1 opens and replays on a build that prefers
+/// it, both are *read*: a log stamped kind 1 opens and replays on a build that prefers
 /// kind 2. The alternative, refusing it, would have made a routine upgrade unreadable for
 /// every Raft log, entity segment, and blob log at once.
 const ACCEPTED_CHECKSUMS: compat::Accepted =
     compat::Accepted::new(Digest::Fnv1a.kind(), Digest::Xxh3.kind());
 
-/// Width of the header **at frame revision 1** — the overhead a log written by this
+/// Width of the header **at frame revision 1**: the overhead a log written by this
 /// build carries before its first frame. Public so a caller sizing a store, or
 /// reaching past the header in a test, can account for it.
 ///
@@ -314,7 +314,7 @@ const ACCEPTED_CHECKSUMS: compat::Accepted =
 pub const HEADER_LEN: usize = 16;
 
 /// Build the header a new log opens with. `records` is the caller's schema
-/// revision — this crate stores and returns it without interpreting it (§2).
+/// revision: this crate stores and returns it without interpreting it (§2).
 fn header(records: compat::Version, digest: Digest) -> Vec<u8> {
     let mut tail = Vec::with_capacity(6);
     tail.extend_from_slice(&digest.kind().to_le_bytes());
@@ -389,8 +389,8 @@ pub enum OpenError {
 
 impl OpenError {
     /// Collapse into an [`io::Error`], for a caller whose own signature is
-    /// `io::Result`. An incompatible file becomes `InvalidData` — the bytes are not
-    /// what this build reads — with the refusal's own message carrying which
+    /// `io::Result`. An incompatible file becomes `InvalidData` (the bytes are not
+    /// what this build reads) with the refusal's own message carrying which
     /// boundary and which revision.
     pub fn into_io(self) -> io::Error {
         match self {
@@ -423,7 +423,7 @@ impl std::fmt::Display for OpenError {
 
 impl std::error::Error for OpenError {}
 
-/// Frame one record — `[u32 len][postcard payload][u64 checksum]`, all little-endian —
+/// Frame one record (`[u32 len][postcard payload][u64 checksum]`, all little-endian)
 /// onto the tail of `buf`, returning the buffer.
 ///
 /// The payload is serialized straight onto `buf` rather than into a `Vec` of its own
@@ -464,7 +464,7 @@ fn frame_onto<T: Serialize>(
 
 /// Scan a framed log's frame bytes into `(records, per-record start offsets, valid
 /// length)`. The scan stops at the first incomplete, oversized, checksum-failing, or
-/// unparsable record — the recovery rule: the valid prefix is the log; the tail was
+/// unparsable record, the recovery rule: the valid prefix is the log; the tail was
 /// never acknowledged.
 ///
 /// `bytes` is the frame region alone (the header is already admitted); `base` is
@@ -480,7 +480,7 @@ fn scan<T: DeserializeOwned>(
     // Size both vectors from the first frame's width. A log holds one record type, so
     // that width estimates the rest well, and recovery is where it matters: growing from
     // zero across a file of millions of frames recopies the vector on every doubling.
-    // Capped because the width is only a guess — a first record narrower than the rest
+    // Capped because the width is only a guess: a first record narrower than the rest
     // would otherwise reserve for more records than the file can hold. Past the cap they
     // grow as before, from a base that is already close.
     let estimate = match bytes.get(..LEN_BYTES) {
@@ -528,11 +528,11 @@ pub struct Wal<T> {
     /// right after a truncating `set_len`.
     file: File,
     /// The byte offset where each record's frame starts, parallel to the records the
-    /// caller holds — what makes [`truncate`](Wal::truncate) a single `set_len`.
+    /// caller holds: what makes [`truncate`](Wal::truncate) a single `set_len`.
     offsets: Vec<u64>,
-    /// The file's current (valid) length — where the next frame lands.
+    /// The file's current (valid) length, where the next frame lands.
     end: u64,
-    /// The digest closing *this file's* frames, as its header names it — not necessarily
+    /// The digest closing *this file's* frames, as its header names it, not necessarily
     /// the one this build prefers.
     ///
     /// Held per log rather than taken from a constant so a file opened at an older kind
@@ -543,14 +543,14 @@ pub struct Wal<T> {
     digest: Digest,
     /// The buffer [`append_batch`](Wal::append_batch) frames into, kept across calls so a
     /// steady-state append allocates nothing: it reaches the high-water mark of the
-    /// batches this log sees and stays there. Empty between calls — it holds no state,
+    /// batches this log sees and stays there. Empty between calls: it holds no state,
     /// only capacity.
     scratch: Vec<u8>,
     /// The offsets of the batch being framed, staged here until the write succeeds and
     /// they can join `offsets`. Reused like `scratch`, and for the same reason.
     ///
-    /// Staged rather than pushed straight onto `offsets` because framing can panic — a
-    /// record above `max_record` is refused that way — and an unwind must not leave
+    /// Staged rather than pushed straight onto `offsets` because framing can panic (a
+    /// record above `max_record` is refused that way), and an unwind must not leave
     /// `offsets` naming frames that were never written. Both buffers are locals for the
     /// duration of a call, so a panic drops them and leaves the log's own state untouched.
     staged: Vec<u64>,
@@ -566,7 +566,7 @@ pub struct Wal<T> {
     /// caller's window spans more than one revision: [`append`](Wal::append) adds
     /// frames at *this* revision to a file whose header still records the older one,
     /// so the stamp understates until a [`rewrite`](Wal::rewrite) restamps it. The
-    /// consequence is fail-closed — a later build whose window starts above the stale
+    /// consequence is fail-closed: a later build whose window starts above the stale
     /// stamp refuses the file by name rather than misreading it. A caller widening its
     /// window should compact affected logs. Not implemented: raising the stamp in
     /// place on the first append after a bump.
@@ -582,7 +582,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
     /// rather than write something recovery would silently discard.
     ///
     /// When this creates the file, it fsyncs the parent directory so the new log's entry
-    /// survives a crash — the caller need not (and should not) repeat it. The caller is
+    /// survives a crash: the caller need not (and should not) repeat it. The caller is
     /// still responsible for any directory *it* created to hold the log.
     ///
     /// # Errors
@@ -610,7 +610,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         // A file whose bytes are a *prefix* of the header we would write holds no
-        // frames — the header is written and fsynced before any append can follow it —
+        // frames (the header is written and fsynced before any append can follow it),
         // so stamping it in place is lossless. This covers a missing file, an empty
         // one, and a header torn by a crash between creating the file and syncing it,
         // which would otherwise turn a benign crash into a log that can never be
@@ -700,7 +700,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         self.offsets.is_empty()
     }
 
-    /// Frame `record`, append it, and fsync — durable before the call returns. The
+    /// Frame `record`, append it, and fsync: durable before the call returns. The
     /// single-record case of [`append_batch`](Wal::append_batch).
     ///
     /// # Errors
@@ -710,14 +710,14 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         self.append_batch(std::slice::from_ref(record))
     }
 
-    /// Frame `records` into one buffer, append them, and fsync once — the batch append
+    /// Frame `records` into one buffer, append them, and fsync once: the batch append
     /// (its latency is one fsync, not one per record). A no-op for an empty slice.
     ///
     /// The fsync is `sync_all`, not `sync_data`. On Linux the two are fsync and fdatasync
     /// and the latter is the tighter fit, but they do not mean the same thing everywhere:
     /// on macOS only `sync_all` is `F_FULLFSYNC`, which flushes the drive's own write
     /// cache. Taking the cheaper one would make "durable before the call returns" weaker
-    /// on the platform the crash tests run on, and it measured no faster — which is what
+    /// on the platform the crash tests run on, and it measured no faster, which is what
     /// a device with power-loss protection predicts, since there the cache flush the
     /// stronger call adds is close to free (`docs/hardware-envelope.md` §2).
     ///
@@ -742,7 +742,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
             .file
             .write_all(&buf)
             .and_then(|()| self.file.sync_all());
-        // Both buffers go back whether or not the write succeeded — they are capacity,
+        // Both buffers go back whether or not the write succeeded: they are capacity,
         // not state, and a failed append should not cost the next one its allocation. The
         // offsets they staged are published only on success, so a failed write leaves the
         // log describing exactly the frames that were already there.
@@ -752,7 +752,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         }
         // Release capacity an outlier left behind, but never below what this call itself
         // needed. A flat cap would shrink and regrow on every append for any log whose
-        // *steady* batch is larger than it — measured at 1024 records, that was one
+        // *steady* batch is larger than it: measured at 1024 records, that was one
         // 508 KB shrink plus five grows back, per append, on the path this buffer exists
         // to keep allocation-free. Holding the high-water mark of the most recent batch
         // keeps a large steady writer stable and still hands back a one-off spike on the
@@ -769,7 +769,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
         result
     }
 
-    /// Drop everything past the first `keep` records — a `set_len` at record `keep`'s
+    /// Drop everything past the first `keep` records: a `set_len` at record `keep`'s
     /// recorded offset, made durable before any conflicting record can be appended
     /// after it. A no-op when `keep` is already the length.
     ///
@@ -801,7 +801,7 @@ impl<T: Serialize + DeserializeOwned> Wal<T> {
     ///
     /// Any filesystem error writing, renaming, or reopening.
     pub fn rewrite(&mut self, records: &[T]) -> io::Result<()> {
-        // The replacement is a whole file, so it carries a header like any other — and
+        // The replacement is a whole file, so it carries a header like any other, and
         // the frames are built directly onto it, so the offsets are absolute as they are
         // produced and the frames are never staged in a second buffer.
         //
@@ -1017,7 +1017,7 @@ mod tests {
     /// through a thread pool: identical content is identical id is one name, so an
     /// image whose blocks repeat sends a wave of concurrent replaces at a single
     /// path. With one shared scratch name they truncated each other's bytes and all
-    /// but the first rename failed with `ENOENT` — and a store that treats a failed
+    /// but the first rename failed with `ENOENT`, and a store that treats a failed
     /// write as unrecoverable poisons itself on the spot, which is a live node
     /// refusing writes for the rest of its life over an image full of zeros.
     ///
@@ -1110,7 +1110,7 @@ mod tests {
     #[test]
     fn the_sidecar_checksum_is_frozen() {
         // Pinned against literals, not against a second implementation, because the point
-        // is the *value* — a sidecar carries no header, so a reader can only recompute and
+        // is the *value*: a sidecar carries no header, so a reader can only recompute and
         // compare, and a caller reads a mismatch as "torn or absent". If this ever changes,
         // entity's durable fence silently reads back as *no fence* (E15). The log's frames
         // are free to move digests precisely because their header names which one wrote
@@ -1123,7 +1123,7 @@ mod tests {
     #[test]
     fn an_unstamped_file_is_refused_rather_than_scanned() {
         // A headerless log, as a build predating the header would have written: one
-        // valid-looking frame. It must be refused, not scanned — the frames may parse
+        // valid-looking frame. It must be refused, not scanned: the frames may parse
         // and still mean something else.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log");
@@ -1188,7 +1188,7 @@ mod tests {
     #[test]
     fn a_header_lost_to_a_crash_before_the_first_append_is_reinitialized() {
         // A crash between creating the file and stamping it. The file holds no frames,
-        // so re-stamping is lossless — and the alternative would turn a benign crash
+        // so re-stamping is lossless, and the alternative would turn a benign crash
         // into a log that can never be opened again.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log");
@@ -1221,7 +1221,7 @@ mod tests {
 
     #[test]
     fn rewrite_restamps_the_replacement() {
-        // `rewrite` replaces the whole file, so it must write a header too — otherwise
+        // `rewrite` replaces the whole file, so it must write a header too: otherwise
         // compaction would produce a log nothing can reopen.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log");

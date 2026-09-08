@@ -2,7 +2,7 @@
 //!
 //! The per-node half of U2 (activations on one node never overlap) is checked
 //! continuously by the `singleton-at-most-one-per-node` checker on every swarm
-//! run; these scenario tests pin the rest of §4 — exactly-one on a converged
+//! run; these scenario tests pin the rest of §4: exactly-one on a converged
 //! cluster, handoff on drain, re-activation after an anchor crash or an
 //! instance death, dual activation across a partition being *resolved* on heal,
 //! and the proxy's fail-fast behavior during gaps.
@@ -73,7 +73,7 @@ fn started(recorder: &Recorder) -> Vec<ActorId> {
         .collect()
 }
 
-/// The activations started but not yet observed stopped — the live instances.
+/// The activations started but not yet observed stopped: the live instances.
 fn open_activations(recorder: &Recorder) -> Vec<ActorId> {
     let mut open = Vec::new();
     for event in recorder.events().iter() {

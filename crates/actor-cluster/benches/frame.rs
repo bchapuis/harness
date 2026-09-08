@@ -4,7 +4,7 @@
 //! message with the codec, and the result is carried as bytes inside a [`Frame`] that
 //! is *itself* codec-encoded onto the socket. The inner encode is
 //! `actor-serialization/benches/codec.rs`'s subject. This file is the outer one, which
-//! is the layer that was missed — entity's blob messages were told they held bytes
+//! is the layer that was missed: entity's blob messages were told they held bytes
 //! long before the frame wrapping them was, so a replicated mebibyte still went
 //! through serde's element-at-a-time sequence path once in each direction and it cost
 //! ~11 ms a block on real nodes.
@@ -12,10 +12,10 @@
 //! Two variants carry bulk bytes and they are measured separately because they are
 //! fixed differently and were fixed at different times:
 //!
-//! - [`Frame::Envelope`] is the **request** direction — a blob being replicated to a
+//! - [`Frame::Envelope`] is the **request** direction: a blob being replicated to a
 //!   peer, an entity record being appended. Its `payload` takes
 //!   `#[serde(with = "serde_bytes")]` directly.
-//! - [`Frame::Reply`] is the **answer** — a `fetch_blob` returning a block to a leader
+//! - [`Frame::Reply`] is the **answer**: a `fetch_blob` returning a block to a leader
 //!   that lacks it, an entity read returning its records. Its outcome is `ReplyResult`,
 //!   a `Result<Vec<u8>, CallError>` *type alias* with no field to hang an attribute
 //!   on, so `protocol::reply_bytes` mirrors serde's `Result` representation instead.
@@ -23,7 +23,7 @@
 //!   `protocol`'s own tests keep it honest about bytes.
 //!
 //! The two should read the same. If `Reply` is slower than `Envelope` at the same
-//! payload, the mirror has stopped reaching `serialize_bytes` — which is a performance
+//! payload, the mirror has stopped reaching `serialize_bytes`, which is a performance
 //! regression the byte-identity tests cannot see, because the bytes would still be
 //! right.
 //!
@@ -100,7 +100,7 @@ fn envelope_decode<const N: usize>(bencher: Bencher) {
     decode_frame(bencher, envelope(vec![0x5a; N]), N);
 }
 
-/// The answer direction, on the node that holds the bytes — through the mirror.
+/// The answer direction, on the node that holds the bytes: through the mirror.
 #[divan::bench(consts = [1024, 65_536, 1_048_576])]
 fn reply_encode<const N: usize>(bencher: Bencher) {
     encode_frame(bencher, reply(vec![0x5a; N]), N);

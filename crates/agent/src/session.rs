@@ -2,7 +2,7 @@
 //!
 //! A session *is* an entity (§2.1): its [`SessionId`] is the key half of a
 //! `EntityName` (`(KindId, SessionId)`, §2.2), each [`Record`] is the entity's
-//! `Event`, and [`SessionState`] is the entity's `State` — the pure,
+//! `Event`, and [`SessionState`] is the entity's `State`; the pure,
 //! deterministic fold of the journal that entity rehydrates on activation
 //! (invariant A1). Anything not journaled is lost on deactivation.
 //!
@@ -62,7 +62,7 @@ id_string! {
     SessionId
 }
 id_string! {
-    /// One submitted turn — and the run it triggers (agent spec §2.2). The
+    /// One submitted turn, and the run it triggers (agent spec §2.2). The
     /// client-chosen idempotency key (§7.4): re-submitting it never starts a
     /// second run (invariant A7).
     TurnId
@@ -108,7 +108,7 @@ impl Turn {
 }
 
 /// The lineage of a delegated session (agent spec §8.1, §10.3): the
-/// delegating session and turn, and the tree's `root` — the transitive
+/// delegating session and turn, and the tree's `root`; the transitive
 /// closure of the parent links, denormalized so any record can name its
 /// logical request in O(1). Correlation metadata only; nothing routes or
 /// folds on it.
@@ -120,8 +120,8 @@ pub struct Lineage {
 }
 
 /// A run's successful terminal outcome (agent spec §3.1): the final
-/// assistant message, with the run's journaled token spend — own usage plus
-/// carve-outs (§9.1) — for the caller's accounting.
+/// assistant message, with the run's journaled token spend; own usage plus
+/// carve-outs (§9.1), for the caller's accounting.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Completion {
     content: String,
@@ -141,16 +141,16 @@ impl Completion {
         &self.content
     }
 
-    /// The run's journaled token spend — own usage plus carve-outs (§9.1).
+    /// The run's journaled token spend: own usage plus carve-outs (§9.1).
     pub fn tokens(&self) -> u64 {
         self.tokens
     }
 }
 
-/// A run's abnormal terminal outcome (agent spec §3.1) — an application
+/// A run's abnormal terminal outcome (agent spec §3.1): an application
 /// error living **inside the reply**, distinct from transport/durability
 /// `EntityError`. Exactly these three: "a tool misbehaved" is not a run failure
-/// (§5.4), and durability failure is not a run outcome at all — it is the
+/// (§5.4), and durability failure is not a run outcome at all; it is the
 /// entity's outer `EntityError::Unavailable`, which *pauses* the run rather than
 /// ending it (§3.1, §6.4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,7 +188,7 @@ pub(crate) fn outcome_label(outcome: &RunOutcome) -> &'static str {
 
 /// One journal entry (agent spec §6). The `at_nanos` timestamp is the
 /// writing node's `Clock` reading: observational metadata the fold MUST NOT
-/// let influence behavior (§10.1) — under simulation it is virtual, so
+/// let influence behavior (§10.1), under simulation it is virtual, so
 /// timestamped journals still reproduce byte-identically.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Record {
@@ -197,7 +197,7 @@ pub struct Record {
 }
 
 /// What a record says (agent spec §6.4, §10.1): records are durable and
-/// user-facing — the transcript, the calls and outcomes, the costs, the tree
+/// user-facing; the transcript, the calls and outcomes, the costs, the tree
 /// links.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum RecordBody {
@@ -212,7 +212,7 @@ pub enum RecordBody {
     /// A turn was accepted into the session's queue (§7.3): the committing
     /// append is what releases the `Submit` ack, so an acked turn is durable
     /// before any caller learns of it. `budget` is the run's effective budget
-    /// (the turn's explicit one, else the kind's default — resolved here so
+    /// (the turn's explicit one, else the kind's default: resolved here so
     /// replay never depends on the kind's current default, A1); `explicit`
     /// records which, so the fold can rebuild the literal `Option<Budget>` the
     /// caller sent for the §7.4 equality check (`None` ≠ `Some(default)`).
@@ -224,9 +224,9 @@ pub enum RecordBody {
     },
     /// The queue's head turn left the queue and its run began (§3.1): the
     /// committing append is what makes `RunStarted` fire exactly once per turn
-    /// (§10.4). Journaled only by the dispatcher — the one place a run starts.
+    /// (§10.4). Journaled only by the dispatcher: the one place a run starts.
     TurnStarted { turn: TurnId },
-    /// One model response — journaled before any of its tool calls execute
+    /// One model response: journaled before any of its tool calls execute
     /// (intent before effect, §6.4), each requested call identified by its
     /// `CallId`.
     ModelResponse {
@@ -244,8 +244,8 @@ pub enum RecordBody {
     },
     /// A delegation's intent (§8.1): the child kind (its entity type, needed to
     /// address the child for cancel propagation, §9.2), the child session and
-    /// turn — both derived deterministically from this session, this turn, and
-    /// the call, so a re-executed delegation re-derives the same pair — plus the
+    /// turn (both derived deterministically from this session, this turn, and
+    /// the call, so a re-executed delegation re-derives the same pair) plus the
     /// carved budget (§9.1). Cancel propagation reads children from here (§9.2).
     ChildRun {
         turn: TurnId,
@@ -260,7 +260,7 @@ pub enum RecordBody {
     /// surfaced to the model with that request.
     ///
     /// The workspace's durable subtree is the agent's own facet (entity §7.11)
-    /// and always survives — a routine reactivation never resets. What this
+    /// and always survives: a routine reactivation never resets. What this
     /// record narrows to is the activation's working state: regenerable excluded
     /// trees (`target/`, `node_modules/`), running processes, and held tiers.
     WorkspaceReset,
@@ -276,7 +276,7 @@ pub enum RecordBody {
     /// A cancelled run's propagated `Cancel` reached the child of `(turn,
     /// call)` (§9.2): journaled when the child's ack releases, clearing the
     /// owed fact the `RunEnded { Cancelled }` fold captured. Until this record
-    /// commits, every activation re-owes the propagation — that is what makes
+    /// commits, every activation re-owes the propagation: that is what makes
     /// A5 survive a crash between the terminal commit and the send.
     CancelDelivered { turn: TurnId, call: CallId },
 }
@@ -299,7 +299,7 @@ pub enum Entry {
         outcome: Result<Value, ToolError>,
     },
     /// The workspace-loss notice (§5.5): input content the agent runtime authors,
-    /// the encoding's analogue of a user message — it answers no `CallId`,
+    /// the encoding's analogue of a user message; it answers no `CallId`,
     /// so it cannot ride a tool result.
     WorkspaceReset,
 }
@@ -333,7 +333,7 @@ pub(crate) mod arc_transcript {
 /// FNV-1a 64 over a string. Used by the turn-equality dedup (§7.4, via
 /// [`turn_digest`]) and by [`Kind::digest`](crate::Kind::digest), which **is**
 /// journaled and compared cluster-wide. Because of that second use the
-/// algorithm must stay stable across versions — do not swap it for a different
+/// algorithm must stay stable across versions; do not swap it for a different
 /// hash without re-versioning kind digests. Fast, not collision-resistant:
 /// both uses treat digest equality as content equality as a guard against
 /// *accident* (a reused `TurnId`, a drifted kind), never as a security
@@ -352,8 +352,8 @@ pub fn content_digest(content: &str) -> u64 {
 /// Append one length-prefixed (netstring-style) field to a canonical form:
 /// `len:field`, so no juxtaposition of two fields collides ("fo"+"obar" reads
 /// as "foo"+"bar" under bare concatenation). The one framing primitive behind
-/// every canonical encoding in this crate — [`turn_digest`], [`derive_child`],
-/// and [`Kind::digest`](crate::Kind::digest) — so the encodings cannot drift.
+/// every canonical encoding in this crate, [`turn_digest`], [`derive_child`],
+/// and [`Kind::digest`](crate::Kind::digest), so the encodings cannot drift.
 /// The digests it feeds are journaled or compared cluster-wide, so the framing
 /// must stay stable across versions.
 pub(crate) fn frame_field(canon: &mut String, field: &str) {
@@ -416,7 +416,7 @@ pub(crate) struct PendingCall {
 }
 
 /// A recorded delegation target (§8.1, §9.2): the child's kind (entity type),
-/// session, turn, and carved budget — enough to address it and cancel it.
+/// session, turn, and carved budget; enough to address it and cancel it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ChildRef {
     pub kind: KindId,
@@ -472,19 +472,19 @@ pub struct SessionState {
     /// `(turn, call)`: captured by the fold when a `RunEnded { Cancelled }`
     /// clears a run whose `ChildRun` intents lack outcomes, cleared per child
     /// by `CancelDelivered`. Journal-derived, so a crash between the terminal
-    /// commit and the propagating send loses nothing — the next activation's
+    /// commit and the propagating send loses nothing: the next activation's
     /// `advance` finds the debt here and re-sends (A5).
     pub(crate) cancels_owed: BTreeMap<TurnId, BTreeMap<CallId, ChildRef>>,
     /// Whether the journal records sandboxed activity since the last
-    /// `WorkspaceReset` — the §5.5 trigger for journaling the next one.
+    /// `WorkspaceReset`: the §5.5 trigger for journaling the next one.
     pub(crate) sandbox_activity: bool,
 }
 
 impl SessionState {
-    /// Fold one committed record — the entity's `apply` (entity §4.1), pure and
+    /// Fold one committed record: the entity's `apply` (entity §4.1), pure and
     /// deterministic, run on the live commit path and on every replay. Total: a
     /// record that fits no transition (a malformed journal) is ignored rather
-    /// than panicking. The fold keeps projections only — the raw records stay
+    /// than panicking. The fold keeps projections only: the raw records stay
     /// in the entity's journal, which serves `tail` directly (§10.2).
     pub(crate) fn apply(&mut self, record: &Record) {
         match &record.body {
@@ -521,7 +521,7 @@ impl SessionState {
                 });
             }
             RecordBody::TurnStarted { turn } => {
-                // Start the queue's head turn — the dispatcher only ever starts
+                // Start the queue's head turn: the dispatcher only ever starts
                 // the head while no run is live, so anything else is a
                 // malformed journal, ignored (the fold is total).
                 if self.live.is_none() && self.queue.front().is_some_and(|q| &q.turn == turn) {
@@ -556,7 +556,7 @@ impl SessionState {
                     }
                     if calls.iter().any(|c| c.name != DELEGATE) {
                         // Sandboxed intent: effects may land from here on
-                        // (§5.5 — intent precedes effect).
+                        // (§5.5; intent precedes effect).
                         self.sandbox_activity = true;
                     }
                     Arc::make_mut(&mut self.transcript).push(Entry::Assistant {
@@ -631,7 +631,7 @@ impl SessionState {
                 }
                 // A turn cancelled while still queued (§9.2) ends without ever
                 // starting: it leaves the queue with no run, no transcript
-                // entry, and no event pair — only the recorded outcome below.
+                // entry, and no event pair, only the recorded outcome below.
                 self.queue.retain(|q| &q.turn != turn);
                 if let Some(facts) = self.turns.get_mut(turn) {
                     facts.outcome = Some(outcome.clone());
@@ -651,7 +651,7 @@ impl SessionState {
 
 /// Derive a delegation's child identifiers (agent spec §8.1):
 /// deterministic in the parent session, the parent's turn, and the
-/// delegation's `CallId` — one run may delegate many times, so the call, not
+/// delegation's `CallId`; one run may delegate many times, so the call, not
 /// the turn, is the unit of derivation. A re-executed delegation re-derives
 /// the same pair, which is what lets the child's journaled `TurnId` dedup the
 /// re-submission into an attach (§7.4).
@@ -691,7 +691,7 @@ mod tests {
     }
 
     /// Accept and start a turn: the two-record shape every run begins with
-    /// (§7.3) — `TurnSubmitted` enqueues, `TurnStarted` dequeues to live.
+    /// (§7.3); `TurnSubmitted` enqueues, `TurnStarted` dequeues to live.
     fn start_turn(state: &mut SessionState, turn: &str, content: &str, budget: Budget) {
         state.apply(&rec(RecordBody::TurnSubmitted {
             turn: TurnId::new(turn),
@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn a_cancelled_run_folds_its_unresolved_children_into_owed_cancels() {
         // The crash-window prefix (§9.2): a delegation intent committed, then
-        // `RunEnded { Cancelled }` — and nothing after. The fold alone must
+        // `RunEnded { Cancelled }`, and nothing after. The fold alone must
         // carry the propagation debt (A5).
         let turn = TurnId::new("t1");
         let call = CallId::new("d1");
@@ -882,7 +882,7 @@ mod tests {
     #[test]
     fn a_run_ended_on_a_queued_turn_removes_it_without_starting() {
         // Cancel-of-queued (§9.2): the terminal record alone clears the queue
-        // entry and records the outcome — no live run, no transcript entry.
+        // entry and records the outcome, no live run, no transcript entry.
         let mut state = SessionState::default();
         start_turn(&mut state, "t1", "first", Budget::new(100, 5));
         state.apply(&rec(RecordBody::TurnSubmitted {
@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn the_turn_digest_covers_the_literal_budget() {
-        // §7.4: the budget joins the equality check as the literal option —
+        // §7.4: the budget joins the equality check as the literal option;
         // `None` is not `Some(default)`, and framing prevents content/budget
         // juxtaposition collisions.
         let d = |content: &str, budget: Option<Budget>| turn_digest(content, budget);

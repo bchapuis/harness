@@ -1,10 +1,10 @@
 //! The alarm facet (spec §7.16): a stored timer that
 //! re-activates an entity to run its [`on_alarm`](crate::Entity::on_alarm) handler
-//! with no caller present — the basis for retries, timeouts, batch flushes, and
+//! with no caller present; the basis for retries, timeouts, batch flushes, and
 //! the durable-step [`steps`](crate::steps) API.
 //!
 //! **Storage is a logical facet (§7.12).** An entity holds at most one pending
-//! alarm — the Durable Objects model (DO §5). Its due time is durable in the
+//! alarm: the Durable Objects model (DO §5). Its due time is durable in the
 //! entity's own journal under the alarm tag, folded into a single `Option<Instant>`;
 //! that folded form is the **source of truth** for whether and when the entity
 //! fires. A handler arms or cancels it through [`EntityCtx::alarm`](crate::EntityCtx::alarm),
@@ -18,7 +18,7 @@
 //! per-shard alarm index ([`AlarmIndex`](crate::AlarmIndex)).
 //!
 //! The due time is stored as raw nanoseconds since the clock epoch
-//! ([`Instant::as_nanos`]) — [`actor_core::Instant`] is deliberately not
+//! ([`Instant::as_nanos`]): [`actor_core::Instant`] is deliberately not
 //! serializable (a virtual clock manufactures instants freely), so the facet form
 //! carries the wire-friendly `u64` and converts at the accessor boundary.
 
@@ -141,7 +141,7 @@ where
 
 impl<G: Entity> EntityCtx<G> {
     /// The entity's durable alarm (spec §7.16). Compiles exactly when the entity
-    /// declares the [`Alarm`] facet (`type Facets = (Alarm, …)`) — the E10
+    /// declares the [`Alarm`] facet (`type Facets = (Alarm, …)`): the E10
     /// discipline applied to the timer. Arming is valid only inside a command or
     /// [`on_alarm`](crate::Entity::on_alarm) handler (§7.12); reads are valid
     /// anywhere the form is folded.

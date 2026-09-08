@@ -7,7 +7,7 @@
 //!
 //! A sandbox is **working state, not session state** (§5.5): the fold never
 //! reads it, no record depends on its contents, and losing it never loses the
-//! session — the loss surfaces to the model as a journaled `WorkspaceReset`,
+//! session; the loss surfaces to the model as a journaled `WorkspaceReset`,
 //! never as silent corruption (invariant A8).
 
 use std::collections::BTreeSet;
@@ -74,11 +74,11 @@ impl Default for ComputeLimits {
 pub struct SandboxProfile {
     pub image: String,
     /// The kind's tier cap: the *set* of tiers its sessions may hold (§5.6;
-    /// sandbox §2.2). `None` derives the spec default at registration —
+    /// sandbox §2.2). `None` derives the spec default at registration:
     /// exactly the tiers the kind's declared tools require (§5.3 item 4).
     #[serde(default)]
     pub tier_cap: Option<BTreeSet<Tier>>,
-    /// The egress allowlist the `Network` tier grants — by reference from a
+    /// The egress allowlist the `Network` tier grants, by reference from a
     /// `TierAcquired` record, never an inline list (sandbox §3.3). Digest-
     /// covered (§7.1); meaningful only when the cap includes `Network`.
     #[serde(default)]
@@ -124,8 +124,8 @@ impl std::fmt::Display for SandboxError {
 pub trait Sandbox: Send + Sync + 'static {
     /// Execute one declared, sandboxed tool call to completion inside the
     /// environment, at the call's declared tier (§5.2, §5.6). The agent runtime
-    /// passes the tier — the provider holds no registry and cannot derive it
-    /// (§5.3 item 1) — and passes only declared, cap-checked tiers, so a
+    /// passes the tier: the provider holds no registry and cannot derive it
+    /// (§5.3 item 1), and passes only declared, cap-checked tiers, so a
     /// conforming pair grants nothing the journal does not show (sandbox
     /// spec §2.3, S4).
     fn call(
@@ -142,11 +142,11 @@ pub trait Sandbox: Send + Sync + 'static {
 /// Provisioning of isolated execution environments (agent spec §5.3). One
 /// sandbox per session activation, opened lazily on the first sandboxed call.
 pub trait SandboxProvider: Send + Sync + 'static {
-    /// Open the session's environment over `workspace` — the session's durable
+    /// Open the session's environment over `workspace`: the session's durable
     /// workspace directory, owned by the caller (the agent's workspace facet,
     /// entity §7.11). The caller normally materializes it (durable content
     /// and all) before this call; a provider creates a missing directory
-    /// rather than failing, and MUST NOT delete it on `release` — durability
+    /// rather than failing, and MUST NOT delete it on `release`: durability
     /// is the caller's property, captured after each tool call, never the
     /// provider's.
     fn open(

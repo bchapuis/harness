@@ -19,13 +19,13 @@ This is the same shape as an actor in `distributed-actor-spec.md`, plus: virtual
 
 1. **Globally-unique single instance per name.** A `DurableObjectId` (random, or derived from a string) names the object. At most one live activation exists network-wide. This is the single point of coordination, with no lock service or leader election in the application.
 2. **Implicit lifecycle.** Created on first access, migrated among healthy servers by the platform, evicted when idle. The application never provisions or destroys one. This is Orleans's *virtual actor* / activation model.
-3. **Storage colocated with compute, private to the instance.** Each object has its own SQLite database on the local disk of the machine where it runs (up to 10 GB), reachable only from inside that object. Reads and writes are effectively local — "zero-latency."
+3. **Storage colocated with compute, private to the instance.** Each object has its own SQLite database on the local disk of the machine where it runs (up to 10 GB), reachable only from inside that object. Reads and writes are effectively local, "zero-latency."
 4. **Single-threaded, cooperatively scheduled.** One event at a time, browser-style. `&mut self`-equivalent safety by construction; no in-object data races.
 5. **Input/output gates** give the appearance of atomic, synchronously-durable execution over an asynchronous, write-coalescing storage engine (Section 3).
-6. **Durability by per-object quorum replication of the WAL** (Section 4) — the heart of this note.
+6. **Durability by per-object quorum replication of the WAL** (Section 4): the heart of this note.
 7. **Wake-ups beyond requests:** durable **Alarms** (`storage.setAlarm()` → `alarm()` handler) for scheduled work with no client connected.
 8. **Hibernation:** evicts from memory when idle; in-memory state is lost, persisted storage survives, rehydrates on next request. **Hibernatable WebSockets** keep many connections open without billing for idle time.
-9. **RPC + fetch** as the two entrypoints — the analogue of `ask`/`tell` over an `ActorRef`.
+9. **RPC + fetch** as the two entrypoints: the analogue of `ask`/`tell` over an `ActorRef`.
 
 ---
 
@@ -42,7 +42,7 @@ Net effect: the developer writes ordinary sequential code; the gates supply atom
 
 ---
 
-## 4. Durability and replication — why it is **not** a Raft bottleneck
+## 4. Durability and replication, and why it is **not** a Raft bottleneck
 
 This section answers the core concern: if every write needs a quorum, why doesn't the consensus layer become a global throughput ceiling the way a single Raft cluster would?
 
@@ -52,60 +52,60 @@ A single Raft (or Paxos) group serializes *all* writes through *one* elected lea
 
 ### 4.2 What DO actually does: consensus sharded to one object
 
-DO never builds one global log. The unit of replication is **one object**. The storage engine (the **Storage Relay Service**, SRS — the same engine that backs D1) works like this per object:
+DO never builds one global log. The unit of replication is **one object**. The storage engine (the **Storage Relay Service**, SRS, the same engine that backs D1) works like this per object:
 
-1. SQLite runs in **WAL mode**. Every write appends *frames* to a write-ahead log. A frame is just "write these bytes at this offset in the database file." The WAL is an already-totally-ordered sequence — ordering is decided by the single writer, before replication.
+1. SQLite runs in **WAL mode**. Every write appends *frames* to a write-ahead log. A frame is just "write these bytes at this offset in the database file." The WAL is an already-totally-ordered sequence: ordering is decided by the single writer, before replication.
 2. As frames are appended, an **SRS leader synchronously replicates them to 5 durability followers** on servers in different nearby datacenters.
 3. When a **quorum (3 of 5)** of followers acknowledge they have safely stored the frames, the leader lets SQLite's write **commit**. The output gate (Section 3) holds the client response until this point.
 4. Separately and asynchronously, the WAL is **streamed to object storage**, batched every **16 MB or 10 seconds**, whichever first. That archive gives **point-in-time recovery for up to 30 days** by replaying transactions.
 
-Every object has **its own** leader and **its own** set of followers **(inferred** from "each Durable Object constantly streams its own WAL" and the single-owner model**)**. Object Y's writes never touch object X's quorum. There are millions of these tiny, independent replication domains. Aggregate write throughput scales horizontally with the number of objects; there is no shared serialization point. The bottleneck of "one global log" simply does not exist, because there is no global log — there are millions of per-object logs.
+Every object has **its own** leader and **its own** set of followers **(inferred** from "each Durable Object constantly streams its own WAL" and the single-owner model**)**. Object Y's writes never touch object X's quorum. There are millions of these tiny, independent replication domains. Aggregate write throughput scales horizontally with the number of objects; there is no shared serialization point. The bottleneck of "one global log" simply does not exist, because there is no global log; there are millions of per-object logs.
 
 ### 4.3 The deeper move: separate *ordering* from *durability*
 
 Classic Raft does two jobs at once: it **elects a leader and agrees on an order** for entries, *and* it **replicates them durably**. DO splits these:
 
-- **Ordering is free.** Because the object has exactly one live activation that is single-threaded (Sections 2, 4.4), there is exactly one writer. The WAL it produces is already a total order. No agreement-on-order round is needed — nobody else is proposing entries to disagree about.
+- **Ordering is free.** Because the object has exactly one live activation that is single-threaded (Sections 2, 4.4), there is exactly one writer. The WAL it produces is already a total order. No agreement-on-order round is needed: nobody else is proposing entries to disagree about.
 - **Durability is a quorum append.** What remains is "is this already-ordered frame stored on enough machines yet?" That is a single round-trip, write-once quorum append (leader → 5 followers, wait for 3). It is the *log-replication* half of Raft without the *leader-election-per-write* half, and without multi-round agreement, because there is nothing to agree about except "stored: yes/no."
 
-So the steady-state write path is one fan-out to nearby datacenters and a wait for a 3-of-5 ack — not a consensus protocol's multiple message rounds. This is closer to **primary-backup with quorum acknowledgment** (or Kafka's ISR model, or chain replication) than to multi-Paxos on the hot path.
+So the steady-state write path is one fan-out to nearby datacenters and a wait for a 3-of-5 ack, not a consensus protocol's multiple message rounds. This is closer to **primary-backup with quorum acknowledgment** (or Kafka's ISR model, or chain replication) than to multi-Paxos on the hot path.
 
 ### 4.4 Single-instance is a *routing/ownership* problem, off the write path
 
 The "only one live instance" guarantee is not enforced by per-write consensus. It is a **placement and routing** decision: each object ID is owned by exactly one machine, and Cloudflare's routing layer directs every request for that ID to that machine. The lease/ownership lookup happens off the hot path; once you are talking to the owner, ordering is trivially serial because there is one owner.
 
 This is the clean separation:
-- **Who owns the object** (single-instance) — a control-plane lease/placement decision, rare, off the write path.
-- **In what order operations apply** — free, because the one owner is single-threaded.
-- **Whether a write is durable** — a per-object quorum append, the only thing on the write hot path that touches other machines.
+- **Who owns the object** (single-instance): a control-plane lease/placement decision, rare, off the write path.
+- **In what order operations apply**: free, because the one owner is single-threaded.
+- **Whether a write is durable**: a per-object quorum append, the only thing on the write hot path that touches other machines.
 
-A leader election *does* happen for an object — but only on **migration, eviction, region failover, or deploy**, not per write. The "leader" of the durability group is pinned to the object's current activation, so elections are infrequent reconfiguration events, not a per-request cost.
+A leader election *does* happen for an object, but only on **migration, eviction, region failover, or deploy**, not per write. The "leader" of the durability group is pinned to the object's current activation, so elections are infrequent reconfiguration events, not a per-request cost.
 
 ### 4.5 The takeaway for this repo
 
 The lesson for the replicated-journal / "Raft journal groups" idea is exactly this decomposition:
 
-- **Do not put all entities on one Raft group.** Use **one journal group per entity** (or per small shard of entities). The memory note "replicated Journal (Raft journal groups)" is already plural — keep it that way and resist any temptation to collapse to a single cluster-wide log.
-- **Within a single-activation entity you do not need consensus to order writes** — only to make them durable. The entity's single activation is the stable leader of its own journal; ordering comes free from the serial executor (`docs/distributed-actor-spec.md` §6). You only need the *log-replication* half: append the already-ordered journal entry to a quorum.
+- **Do not put all entities on one Raft group.** Use **one journal group per entity** (or per small shard of entities). The memory note "replicated Journal (Raft journal groups)" is already plural; keep it that way and resist any temptation to collapse to a single cluster-wide log.
+- **Within a single-activation entity you do not need consensus to order writes**, only to make them durable. The entity's single activation is the stable leader of its own journal; ordering comes free from the serial executor (`docs/distributed-actor-spec.md` §6). You only need the *log-replication* half: append the already-ordered journal entry to a quorum.
 - **Keep placement off the write path.** Single-activation is a control-plane lease (your leader-based or registry-based modes, §9.4.2/§9.4.3), consulted on activation and migration, not on every message. Leader election for a journal group should be a rare reconfiguration, triggered by failure/migration, never by ordinary traffic.
 - **A durability barrier on the reply, not a consensus round.** Map the output gate onto `ReplyHandle::send` (§4.5): hold the reply until the journal entry is quorum-acked. The handler stays naive and sequential.
 
-In short: Raft is a bottleneck only when it is one big shared log doing ordering-and-durability for everything. DO avoids both halves of that — it shards to per-object groups, and it deletes the ordering-agreement cost by having a single writer. Adopt both moves and the journal stops being a global chokepoint.
+In short: Raft is a bottleneck only when it is one big shared log doing ordering-and-durability for everything. DO avoids both halves of that: it shards to per-object groups, and it deletes the ordering-agreement cost by having a single writer. Adopt both moves and the journal stops being a global chokepoint.
 
 ---
 
 ## 5. Lifecycle: activation, migration, hibernation, alarms
 
 - **Activation.** The identity always exists conceptually; the runtime materializes the object on first access near the caller.
-- **Migration / eviction.** The platform may evict or move an object at any time — for capacity, region failover, or deploy. From the object's view this is "a long pause between cycles"; it rehydrates from durable storage. **In-memory state is not preserved** across eviction or crash, so in-memory state is a cache, never the source of truth.
+- **Migration / eviction.** The platform may evict or move an object at any time, for capacity, region failover, or deploy. From the object's view this is "a long pause between cycles"; it rehydrates from durable storage. **In-memory state is not preserved** across eviction or crash, so in-memory state is a cache, never the source of truth.
 - **Hibernation.** After idle time the object leaves memory; persisted storage survives. Hibernatable WebSockets park connections so the object can sleep without dropping them or being billed for idle time, re-delivering messages via callbacks (`webSocketMessage`, `webSocketClose`, `webSocketError`).
-- **Alarms.** `storage.setAlarm()` durably schedules a future `alarm()` invocation with no client connected — the basis for queues, retries, timeouts, and batch flushes. This maps onto the agent runtime's ticket/waiter and perpetual-loop patterns.
+- **Alarms.** `storage.setAlarm()` durably schedules a future `alarm()` invocation with no client connected: the basis for queues, retries, timeouts, and batch flushes. This maps onto the agent runtime's ticket/waiter and perpetual-loop patterns.
 
 ---
 
 ## 6. The two example applications
 
-**Artifacts ("git for agents").** One Git repository = one Durable Object. The single-instance property gives each repo a consistent serialization point, which matters when many agents fork and push concurrently. A Git protocol engine in Zig compiled to WASM (~100 KB) runs *inside* the object; Git objects are stored in the object's SQLite, chunked across rows because of the 2 MB max row size; R2 holds snapshots and KV holds auth tokens. Pattern: **"the object is the repo"** — coordination, storage, and protocol logic colocated.
+**Artifacts ("git for agents").** One Git repository = one Durable Object. The single-instance property gives each repo a consistent serialization point, which matters when many agents fork and push concurrently. A Git protocol engine in Zig compiled to WASM (~100 KB) runs *inside* the object; Git objects are stored in the object's SQLite, chunked across rows because of the 2 MB max row size; R2 holds snapshots and KV holds auth tokens. Pattern: **"the object is the repo"**: coordination, storage, and protocol logic colocated.
 
 **KV-from-Durable-Objects.** A DO holds a binding to Workers KV (or R2, D1, another DO) and calls out to it. The DO is the strongly-consistent coordinator/cache at one key; KV is the cheap, eventually-consistent global store for cold or bulk data. Pattern: **strong consistency at one object, fronting an eventually-consistent global store.**
 
@@ -127,7 +127,7 @@ In short: Raft is a bottleneck only when it is one big shared log doing ordering
 
 Framing: **an entity is your actor plus a name-based virtual identity, a per-actor journal seam, and a durability barrier on the reply path.** Everything else you already have.
 
-One placement caveat: a DO is a *singleton activation* (one live copy, platform-placed), which trades availability for the single-coordinator guarantee — during migration or partition the object can be briefly unreachable. The gossip-based mode (§9.4.4) chooses the opposite (AP). So "entity" belongs to the **leader-based** or **registry-based** modes, where authoritative placement exists, not the gossip mode.
+One placement caveat: a DO is a *singleton activation* (one live copy, platform-placed), which trades availability for the single-coordinator guarantee: during migration or partition the object can be briefly unreachable. The gossip-based mode (§9.4.4) chooses the opposite (AP). So "entity" belongs to the **leader-based** or **registry-based** modes, where authoritative placement exists, not the gossip mode.
 
 ---
 

@@ -43,7 +43,7 @@ impl Entity for Studio {
 }
 
 /// Write a file into the workspace directory (as a tool would, out of band) and
-/// capture — the delta record joins this command's batch (E19).
+/// capture: the delta record joins this command's batch (E19).
 #[derive(Clone, Serialize, Deserialize)]
 struct Put {
     path: String,
@@ -103,7 +103,7 @@ impl EntityHandler<Drop_> for Studio {
     }
 }
 
-/// Read a file straight off the materialized directory — a pure read: no
+/// Read a file straight off the materialized directory, a pure read: no
 /// capture, no record, no commit (§7.5).
 #[derive(Clone, Serialize, Deserialize)]
 struct Get {

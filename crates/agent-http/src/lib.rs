@@ -1,16 +1,16 @@
 //! The hand-rolled HTTP/1.1 client substrate shared by the tree's deployment
-//! binaries — the TUI's gateway client and the standalone node's model-seam
+//! binaries: the TUI's gateway client and the standalone node's model-seam
 //! socket. Deliberately minimal (no `reqwest`/`hyper`): one connection per
 //! request with `connection: close`, TLS from rustls with webpki trust
-//! anchors, and one opening — [`Origin::exchange`] connects, sends, and
+//! anchors, and one opening; [`Origin::exchange`] connects, sends, and
 //! parses the response head, handing back an incremental [`Reader`] that
-//! serves both shapes of call — read the whole reply (unary), or pull a
+//! serves both shapes of call; read the whole reply (unary), or pull a
 //! live chunked stream (SSE).
 //!
 //! This is plumbing, not a seam: the model adapters' seam is
 //! `agent::http::HttpPost`, and one implementation of it (the standalone's)
-//! is built on this crate. Protocol decisions — retry taxonomies, SSE frame
-//! vocabulary, auth headers — belong to the callers.
+//! is built on this crate. Protocol decisions (retry taxonomies, SSE frame
+//! vocabulary, auth headers) belong to the callers.
 
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-/// Any byte stream the client talks HTTP over — a bare `TcpStream` or a
+/// Any byte stream the client talks HTTP over: a bare `TcpStream` or a
 /// rustls `TlsStream` on top of one.
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
@@ -74,7 +74,7 @@ impl Origin {
         Ok(Origin { host, port, tls })
     }
 
-    /// Connect, send one framed request, and parse the response head — the
+    /// Connect, send one framed request, and parse the response head: the
     /// shared opening of both call shapes. Returns the status and the
     /// [`Reader`] positioned at the body: pull it whole ([`Reader::read_body`])
     /// or chunk by chunk ([`Reader::next_chunk`]). Auth and content headers

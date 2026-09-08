@@ -7,7 +7,7 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, 
 
 Throughout, `wal` is the crate and namespace name. Sections of this document are cited as plain **§N**. Invariants defined here are numbered **L1, L2, …** (L for the log).
 
-> **Design stance.** A file-backed durable store needs the same small machinery every time: frame a record, checksum it, fsync it, recover by scanning the valid prefix and discarding a torn tail, and rewrite the file atomically to compact. That logic is safety-critical, because the write path and the recovery path are one contract read from two ends: if they disagree about what a valid record is, a node mis-recovers — silently dropping a record it acknowledged, or replaying one it never finished writing, while each path looks correct alone. So the machinery lives in one place, with the write path and the scan path enforcing the *same* bound (§4) and built from the *same* framing (§2). This crate decides only the bytes-and-durability contract; it takes no position on what the records mean or what a failure to persist them implies (§6).
+> **Design stance.** A file-backed durable store needs the same small machinery every time: frame a record, checksum it, fsync it, recover by scanning the valid prefix and discarding a torn tail, and rewrite the file atomically to compact. That logic is safety-critical, because the write path and the recovery path are one contract read from two ends: if they disagree about what a valid record is, a node mis-recovers, silently dropping a record it acknowledged, or replaying one it never finished writing, while each path looks correct alone. So the machinery lives in one place, with the write path and the scan path enforcing the *same* bound (§4) and built from the *same* framing (§2). This crate decides only the bytes-and-durability contract; it takes no position on what the records mean or what a failure to persist them implies (§6).
 
 ---
 
@@ -15,8 +15,8 @@ Throughout, `wal` is the crate and namespace name. Sections of this document are
 
 The crate sits **below** its callers and depends on none of them. It provides:
 
-- **`Wal<T>`** — an append-only log of `postcard`-encoded `T` records (§2, §3).
-- **Sidecar helpers** — `atomic_replace`, `checksum`, `sync_dir` — for durable state that is a single small file rather than a log (§5).
+- **`Wal<T>`**: an append-only log of `postcard`-encoded `T` records (§2, §3).
+- **Sidecar helpers** (`atomic_replace`, `checksum`, `sync_dir`): for durable state that is a single small file rather than a log (§5).
 
 It is **not** a database, an index, or a replication layer. It does no caching, holds no in-memory copy of the records after `open` returns them, and imposes no schema on `T` beyond `serde::Serialize + serde::de::DeserializeOwned`. Ordering, indexing, snapshotting, replication, and compaction *policy* all belong above the crate; the crate only frames, persists, and recovers the bytes.
 
@@ -34,7 +34,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
    where `payload` is the `postcard` encoding of the record and `length` is the payload's byte length.
 
-2. The checksum MUST be 64 bits over the payload bytes only, computed with the digest the file's header names (§2.1): kind `1` is **FNV-1a** (offset basis `0xcbf29ce484222325`, prime `0x100000001b3`), kind `2` is **XXH3-64**. A build MUST scan a file with the digest that file records, never with the one it prefers, and MUST NOT append to a file in a digest other than its own header's — a file is one digest throughout, and a log moves to another only through `rewrite`, which replaces the header with the frames. New logs are stamped kind `2`; kind `1` is read but not stamped. Either digest detects torn and partial writes, **not** adversarial tampering — all a local log needs. Each MUST be stable: a given kind MUST NOT vary across platforms, crate versions, or process runs, so a file written by one build recovers identically under another. (`std::hash` and other unstable hashers are therefore ruled out.)
+2. The checksum MUST be 64 bits over the payload bytes only, computed with the digest the file's header names (§2.1): kind `1` is **FNV-1a** (offset basis `0xcbf29ce484222325`, prime `0x100000001b3`), kind `2` is **XXH3-64**. A build MUST scan a file with the digest that file records, never with the one it prefers, and MUST NOT append to a file in a digest other than its own header's: a file is one digest throughout, and a log moves to another only through `rewrite`, which replaces the header with the frames. New logs are stamped kind `2`; kind `1` is read but not stamped. Either digest detects torn and partial writes, **not** adversarial tampering, which is all a local log needs. Each MUST be stable: a given kind MUST NOT vary across platforms, crate versions, or process runs, so a file written by one build recovers identically under another. (`std::hash` and other unstable hashers are therefore ruled out.)
 
 3. The log file is a **header** (§2.1) followed by the concatenation of zero or more such frames in append order. There is no trailer and no global checksum: past the header, the file's meaning is the maximal sequence of valid frames (§3.1).
 
@@ -48,9 +48,9 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
    all little-endian. The magic is `89 57 41 4C 0D 0A 1A 0A` (`\x89WAL\r\n\x1a\n`), the PNG convention: a high-bit byte, the name, then a CRLF/EOF trap that catches a text-mode transfer.
 
-2. `open` MUST admit the whole header — magic, then frame revision, then checksum kind, then record schema — **before scanning a single frame** ([compatibility](compatibility-spec.md) **V2**). A file this build cannot read is never partially interpreted.
+2. `open` MUST admit the whole header (magic, then frame revision, then checksum kind, then record schema) **before scanning a single frame** ([compatibility](compatibility-spec.md) **V2**). A file this build cannot read is never partially interpreted.
 
-3. The header's **length and layout belong to the frame revision**, not to the format for all time. Revision 1 is the sixteen bytes above; a later revision may define a different header entirely, because a revision-1 reader refuses a revision-2 file outright rather than parsing its header. Only the magic and the `u16` immediately after it are fixed across revisions — they are what a reader consults *before* it knows which layout applies. Nothing else in this crate may assume the header is sixteen bytes.
+3. The header's **length and layout belong to the frame revision**, not to the format for all time. Revision 1 is the sixteen bytes above; a later revision may define a different header entirely, because a revision-1 reader refuses a revision-2 file outright rather than parsing its header. Only the magic and the `u16` immediately after it are fixed across revisions: they are what a reader consults *before* it knows which layout applies. Nothing else in this crate may assume the header is sixteen bytes.
 
 4. **Frame revision** versions §2's framing; revision 1 is the layout above. **Checksum kind** identifies the digest (§2 rule 2); it is matched, not compared, being an identity rather than an ordering, and a kind this build cannot compute is refused by name rather than left to fail every frame as though the file were corrupt. Every 64-bit digest shares the frame layout, which is what let kind `2` join kind `1` as a header change rather than a layout one, and what lets both be read. **Reserved** MUST be zero at frame revision 1, so every header byte is validated and no detectable damage passes silently. The header carries no checksum of its own; the reserved field is where one would go.
 
@@ -58,9 +58,9 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
 6. The check is part of `open` rather than an accessor a caller may consult, because an optional check is one a caller forgets, and the forgotten case is the misparse the header exists to prevent. `open` therefore returns `OpenError`, keeping a policy refusal distinct from the I/O failures §6 leaves to the caller.
 
-   `append` does **not** update the record-schema field; `rewrite` stamps the revision this build writes. The two matter only once a caller's window spans more than one revision: appends then add frames at the newer revision to a file whose header still names the older one, so the stamp understates until a `rewrite` restamps it. This is fail-closed — every frame in such a file *is* readable at the higher revision, so a later build whose window starts above the stale stamp refuses the file by name rather than misreading it. A caller widening its window SHOULD compact affected logs.
+   `append` does **not** update the record-schema field; `rewrite` stamps the revision this build writes. The two matter only once a caller's window spans more than one revision: appends then add frames at the newer revision to a file whose header still names the older one, so the stamp understates until a `rewrite` restamps it. This is fail-closed: every frame in such a file *is* readable at the higher revision, so a later build whose window starts above the stale stamp refuses the file by name rather than misreading it. A caller widening its window SHOULD compact affected logs.
 
-7. A file whose bytes are a **prefix** of the header `open` would write MUST be stamped in place rather than refused: the header is written and fsynced before any frame can follow it, so such a file holds no records and stamping it loses nothing. This covers a missing file, an empty one, and a header torn by a crash between creating the file and syncing it — which would otherwise make a benign crash a log that can never be opened. Any other file too short to hold a header MUST be refused, so the rule is not a licence to overwrite a foreign file.
+7. A file whose bytes are a **prefix** of the header `open` would write MUST be stamped in place rather than refused: the header is written and fsynced before any frame can follow it, so such a file holds no records and stamping it loses nothing. This covers a missing file, an empty one, and a header torn by a crash between creating the file and syncing it, which would otherwise make a benign crash a log that can never be opened. Any other file too short to hold a header MUST be refused, so the rule is not a licence to overwrite a foreign file.
 
 8. `max_record` MUST stay below `0x4C41_5789`, the magic's first four bytes read as a little-endian `u32` (`open` asserts it). A headerless file begins with a frame length at or below `max_record` and therefore can never begin with the magic, which is what makes rule 2's refusal sound rather than merely probable.
 
@@ -72,7 +72,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
 1. `open(path, max_record, records)` MUST read the file (treating a missing file as empty), admit its header (§2.1), **scan its maximal valid prefix** into records, and return them alongside the live `Wal<T>`. The scan MUST stop at the first frame that is any of: **incomplete** (fewer bytes remain than the frame claims), **oversized** (`length > max_record`, §4), **checksum-failing**, or **unparsable** as `T`. Everything from that frame onward is the torn tail.
 
-2. The valid prefix is the log; the torn tail was never acknowledged (§3.2), so dropping it is correct. When the torn tail is non-empty, `open` MUST **truncate the file to the valid length and fsync it** before returning — the recovery decision is made durable immediately, so no later append can land after un-acknowledged bytes.
+2. The valid prefix is the log; the torn tail was never acknowledged (§3.2), so dropping it is correct. When the torn tail is non-empty, `open` MUST **truncate the file to the valid length and fsync it** before returning: the recovery decision is made durable immediately, so no later append can land after un-acknowledged bytes.
 
 3. When `open` *creates* the file, it MUST fsync the parent directory so the new file's directory entry survives a crash; a caller need not repeat this for the log file itself. A caller remains responsible for fsyncing any directory *it* created to hold the log (via `sync_dir`, §5).
 
@@ -80,7 +80,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
 ### 3.2 Append
 
-5. `append(record)` and `append_batch(records)` MUST frame the record(s) into a single buffer, write it at the current end (the file is opened `O_APPEND`, so writes land at the end even right after a truncating `set_len`), and **fsync before returning**. A returned append is durable and acknowledged. `append_batch` MUST perform **one write and one fsync** for the whole batch — its latency is one fsync, not one per record. `append` is the single-record case of `append_batch`. An empty batch MUST be a no-op.
+5. `append(record)` and `append_batch(records)` MUST frame the record(s) into a single buffer, write it at the current end (the file is opened `O_APPEND`, so writes land at the end even right after a truncating `set_len`), and **fsync before returning**. A returned append is durable and acknowledged. `append_batch` MUST perform **one write and one fsync** for the whole batch: its latency is one fsync, not one per record. `append` is the single-record case of `append_batch`. An empty batch MUST be a no-op.
 
 ### 3.3 Truncate
 
@@ -88,7 +88,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
 
 ### 3.4 Rewrite (compaction)
 
-7. `rewrite(records)` MUST atomically replace the entire file with exactly `records` (framed per §2) and reopen the append handle. It MUST use the §5 atomic-replace discipline, so a crash during `rewrite` leaves either the whole old file or the whole new file, never a mix. It is the compaction primitive: replace a log with a shorter equivalent — a retained suffix, or a single record that subsumes the prior history.
+7. `rewrite(records)` MUST atomically replace the entire file with exactly `records` (framed per §2) and reopen the append handle. It MUST use the §5 atomic-replace discipline, so a crash during `rewrite` leaves either the whole old file or the whole new file, never a mix. It is the compaction primitive: replace a log with a shorter equivalent: a retained suffix, or a single record that subsumes the prior history.
 
 ### 3.5 Accessors
 
@@ -102,7 +102,7 @@ The crate is **synchronous and single-handle**: one `Wal<T>` owns one open appen
    - On **recovery** (§3.1 req 1), a scanned `length > max_record` is treated as corruption and ends the valid prefix.
    - On **write**, framing a payload larger than `max_record` MUST **panic** rather than write it.
 
-2. A record that recovery would reject for size MUST NOT be writable (**L4**): otherwise `append` would acknowledge it and the next `open` would silently discard it — the write-path/recovery-path divergence the crate exists to prevent. The panic is correct because an over-bound record is a caller bug (a mis-sized `max_record` or an unexpectedly large `T`), not a runtime condition to recover from.
+2. A record that recovery would reject for size MUST NOT be writable (**L4**): otherwise `append` would acknowledge it and the next `open` would silently discard it, the write-path/recovery-path divergence the crate exists to prevent. The panic is correct because an over-bound record is a caller bug (a mis-sized `max_record` or an unexpectedly large `T`), not a runtime condition to recover from.
 
 ---
 
@@ -112,11 +112,11 @@ Some durable state is not a log but a single small file rewritten in place: a ge
 
 1. `atomic_replace(dir, name, bytes)` MUST write a scratch file in `dir`, fsync it, rename it onto `dir/<name>`, then fsync `dir`. A reader MUST therefore see either the old file or the whole new one, never a torn mix. The caller supplies already-serialized bytes, so the encoding (JSON, postcard, fixed-width) stays the caller's choice. This is the same discipline `rewrite` (§3.4) builds on.
 
-   The scratch name MUST be unique per call, and MUST NOT be a name a caller could read back as content — `<name>.<pid>.<counter>.tmp` satisfies both. Uniqueness is a correctness requirement, not hygiene: callers replace one name concurrently and this crate cannot prevent them. A content-addressed store makes it the normal case, since identical bytes are one name by construction. Two calls sharing a scratch path corrupt each other in both directions — the second create truncates the first's half-written bytes, and the second rename finds the path gone and fails — and a caller that reads an I/O error as unrecoverable turns that into a node that has stopped accepting writes.
+   The scratch name MUST be unique per call, and MUST NOT be a name a caller could read back as content; `<name>.<pid>.<counter>.tmp` satisfies both. Uniqueness is a correctness requirement, not hygiene: callers replace one name concurrently and this crate cannot prevent them. A content-addressed store makes it the normal case, since identical bytes are one name by construction. Two calls sharing a scratch path corrupt each other in both directions (the second create truncates the first's half-written bytes, and the second rename finds the path gone and fails), and a caller that reads an I/O error as unrecoverable turns that into a node that has stopped accepting writes.
 
    Concurrent calls on one `name` MUST therefore all succeed, and the file that lands MUST be exactly one caller's whole bytes. Which one is unspecified: this replaces atomically, it does not serialize. A crash between create and rename MAY leave a scratch file behind, so a caller that enumerates such a directory MUST skip names it cannot decode.
 
-2. `checksum(bytes)` MUST be FNV-1a, 64-bit, exposed so a caller can frame its own sidecar bytes (e.g. a fixed-width `[u64 value][u64 checksum]` record). **Its output is frozen**, and unlike a frame's digest (§2 rule 2) it MUST NOT change: a sidecar carries no header, so a reader cannot ask which digest wrote it and can only recompute and compare, and callers read a mismatch as *torn or absent* rather than as a refusal. Changing it would make every existing sidecar read as missing — a durable fence would come back as no fence — which is a safety failure, not a compatibility one. A digest behind a version field may change; a digest without one may not.
+2. `checksum(bytes)` MUST be FNV-1a, 64-bit, exposed so a caller can frame its own sidecar bytes (e.g. a fixed-width `[u64 value][u64 checksum]` record). **Its output is frozen**, and unlike a frame's digest (§2 rule 2) it MUST NOT change: a sidecar carries no header, so a reader cannot ask which digest wrote it and can only recompute and compare, and callers read a mismatch as *torn or absent* rather than as a refusal. Changing it would make every existing sidecar read as missing, so a durable fence would come back as no fence: a safety failure, not a compatibility one. A digest behind a version field may change; a digest without one may not.
 
 3. `sync_dir(dir)` MUST make a directory entry durable: on unix, fsync the directory; elsewhere (where directories cannot be opened for sync) the rename is itself the durability point and the call is a no-op. Exposed for a caller that creates its own subdirectories to hold logs.
 
@@ -124,7 +124,7 @@ Some durable state is not a log but a single small file rewritten in place: a ge
 
 ## 6. Failure policy
 
-1. Every fallible method MUST return `std::io::Result`, except `open`, which returns `OpenError` so that a policy refusal (`Incompatible`) stays distinct from an I/O failure (`Io`) — §2.1 rule 6. The crate **MUST NOT decide what an I/O failure means** — it neither retries, nor masks, nor panics on an I/O error (the §4 over-bound panic is a caller bug, not an I/O failure). The decision belongs to the caller: one that cannot persist a record it must not lose may have no safe way to continue and so panics with a domain-specific message; another might degrade or report. `path()` is exposed (§3.5) for the caller's own failure message.
+1. Every fallible method MUST return `std::io::Result`, except `open`, which returns `OpenError` so that a policy refusal (`Incompatible`) stays distinct from an I/O failure (`Io`), §2.1 rule 6. The crate **MUST NOT decide what an I/O failure means**: it neither retries, nor masks, nor panics on an I/O error (the §4 over-bound panic is a caller bug, not an I/O failure). The decision belongs to the caller: one that cannot persist a record it must not lose may have no safe way to continue and so panics with a domain-specific message; another might degrade or report. `path()` is exposed (§3.5) for the caller's own failure message.
 
 2. The crate masks no corruption: a checksum failure, a torn tail, and a parse failure all surface as a shortened valid prefix (§3.1), never as an error and never as a silently patched record.
 
@@ -140,8 +140,8 @@ The catalogue is machine-readable beside those suites, guarded by the drift test
 |---|---|---|---|
 | L1 | **Prefix recovery.** `open` returns exactly the maximal prefix of valid frames; the first incomplete, oversized, checksum-failing, or unparsable frame and everything after it is discarded, and the file is truncated to the valid length before any append. | §3.1 | `a_torn_tail_is_discarded_and_appends_continue`, `a_record_cut_mid_payload_is_discarded`, `a_corrupted_checksum_ends_the_valid_prefix`; exhaustively, `every_truncation_recovers_a_prefix_and_stays_recovered`, `every_single_byte_corruption_drops_that_record_and_the_rest`, `a_length_header_claiming_more_than_the_file_holds_is_refused` |
 | L2 | **Acknowledged-record durability.** A record acknowledged by a returned `append`/`append_batch`/`rewrite` is recovered byte-identically across a reopen, unless a later `truncate` or `rewrite` removes it; each such call fsyncs its effect (and the directory entry on file creation) before returning. | §3.2–§3.4 | `records_round_trip_across_a_reopen`, `truncate_drops_a_conflicting_suffix`, `rewrite_replaces_the_whole_file_and_reopens`; across crash points, `every_truncation_recovers_a_prefix_and_stays_recovered` (the recovered prefix is rewritten to disk and still appends) |
-| L3 | **Atomic whole-file replacement.** `rewrite` and `atomic_replace` leave, after any crash, either the whole prior file or the whole new file — never a torn intermediate. Concurrent `atomic_replace` calls on one name all succeed, and the file that lands is one caller's whole bytes. | §3.4, §5 | `rewrite_replaces_the_whole_file_and_reopens`, `atomic_replace_round_trips_a_sidecar`, `concurrent_replaces_of_one_name_all_succeed_and_none_tears`, `rewrite_restamps_the_replacement` |
-| L4 | **Write/recovery bound agreement.** `max_record` bounds a frame's payload identically at both ends: a payload recovery would reject for size cannot be written — the write panics instead of acknowledging a record the next `open` would silently drop. | §4 | `appending_a_record_past_the_limit_panics_instead_of_losing_it` |
+| L3 | **Atomic whole-file replacement.** `rewrite` and `atomic_replace` leave, after any crash, either the whole prior file or the whole new file, never a torn intermediate. Concurrent `atomic_replace` calls on one name all succeed, and the file that lands is one caller's whole bytes. | §3.4, §5 | `rewrite_replaces_the_whole_file_and_reopens`, `atomic_replace_round_trips_a_sidecar`, `concurrent_replaces_of_one_name_all_succeed_and_none_tears`, `rewrite_restamps_the_replacement` |
+| L4 | **Write/recovery bound agreement.** `max_record` bounds a frame's payload identically at both ends: a payload recovery would reject for size cannot be written: the write panics instead of acknowledging a record the next `open` would silently drop. | §4 | `appending_a_record_past_the_limit_panics_instead_of_losing_it` |
 | L5 | **A file is read at the digest it records.** A log opens, scans, and continues to be appended with the checksum kind its own header names, whichever kind this build prefers; a kind the build cannot compute is refused by name. A file is never a mix of two digests, and only `rewrite` restamps one. | §2 rule 2, §2.1 rule 4 | `a_log_at_an_older_digest_still_opens_and_keeps_its_digest`, `a_foreign_checksum_kind_is_refused_by_name` |
 
 ---
@@ -156,4 +156,4 @@ Non-goals (today and by design):
 
 Possible future work, only if a caller needs it:
 
-- **Group commit across handles** — batching fsyncs for many small logs sharing a disk, trading a bounded latency for throughput.
+- **Group commit across handles**: batching fsyncs for many small logs sharing a disk, trading a bounded latency for throughput.

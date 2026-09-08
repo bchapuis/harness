@@ -49,7 +49,7 @@ use crate::store::WriteKind;
 
 /// Per-entity-type interned key strings for the replica store. The receptionist keys
 /// purely by string, so the replica store MUST register under a string distinct from
-/// the gateway's (which is the bare `entity_type`, §5.3) — otherwise a `lookup` would
+/// the gateway's (which is the bare `entity_type`, §5.3): otherwise a `lookup` would
 /// mix the two actor types. We derive `entity.replica/<entity_type>` and intern it
 /// (one bounded leak per distinct type, as a runtime type name already permits, §A).
 static REPLICA_KEY_IDS: LazyLock<Mutex<HashMap<&'static str, &'static str>>> =
@@ -66,7 +66,7 @@ fn replica_store_key_id(entity_type: &'static str) -> &'static str {
 }
 
 /// The receptionist key the replica store for an entity type registers under: one
-/// well-known key per type (distinct from the gateway's), one entry per node — the
+/// well-known key per type (distinct from the gateway's), one entry per node; the
 /// replicator looks a replica node's store up here, the way routing looks a gateway
 /// up (spec §5.3).
 pub(crate) fn replica_store_key<G: Entity>(entity_type: &'static str) -> Key<ReplicaStore<G>> {
@@ -112,7 +112,7 @@ impl Message for ReadEntity {
 
 /// Quorum-store an entity snapshot to one replica, fenced by the shard `term`
 /// (spec §9). The reply is the replica's [`StoreAck`]. A
-/// [`WriteKind::Transfer`] skips the fence — the split/merge driver landing a
+/// [`WriteKind::Transfer`] skips the fence: the split/merge driver landing a
 /// moved entity's snapshot under the destination shard's keys (§7.7).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct StoreSnapshot {
@@ -133,7 +133,7 @@ impl Message for StoreSnapshot {
 /// Tighten one replica's per-shard **append bound** (spec §7.7): durably refuse
 /// every future append whose entity hash is `>= from`, at any term. The split
 /// (or merge) driver fans this to the shard's replicas and proceeds only once a
-/// majority has acked — from then on no append to the moved range can assemble
+/// majority has acked, from then on no append to the moved range can assemble
 /// a write quorum, the store half of E15. Idempotent and monotone (the bound
 /// only tightens). The ask resolving is the durable acknowledgement.
 #[derive(Serialize, Deserialize)]
@@ -179,7 +179,7 @@ pub(crate) struct FetchBlob {
 }
 
 impl Message for FetchBlob {
-    /// `ByteBuf` for the same reason `StoreBlob::bytes` uses it — this is the read
+    /// `ByteBuf` for the same reason `StoreBlob::bytes` uses it: this is the read
     /// half of the same mebibyte, and a restore fetches every block of an image, so
     /// the decode is paid per block there too. The transport's own signature keeps
     /// `Vec<u8>`: unwrapping the newtype is a move, not a copy.
@@ -216,7 +216,7 @@ impl Message for SweepBlobs {
     const MANIFEST: Manifest = Manifest::new("entity.SweepBlobs");
 }
 
-/// Enumerate every entity a replica holds anything for under one shard — the
+/// Enumerate every entity a replica holds anything for under one shard: the
 /// migration driver's entity discovery (replica-set migration, §7.7). Read from a
 /// quorum of the shard's replicas so no committed entity is missed.
 #[derive(Serialize, Deserialize)]
@@ -229,7 +229,7 @@ impl Message for ListEntities {
     const MANIFEST: Manifest = Manifest::new("entity.ListEntities");
 }
 
-/// Enumerate one entity's blob ids on a replica — the migration driver's source
+/// Enumerate one entity's blob ids on a replica: the migration driver's source
 /// list when copying an entity's blob area to a new replica (§7.7).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ListBlobs {
@@ -288,7 +288,7 @@ impl<G: Entity> Actor for ReplicaStore<G> {
 // store has already made durable: a reply released early would let the leader count
 // this replica toward a quorum for something this node has not stored (**E14**). The
 // store settles the write before it returns, so the durability is the offloaded call's
-// own — there is nothing further to await here.
+// own: there is nothing further to await here.
 impl<G: Entity> Handler<StoreRecord> for ReplicaStore<G> {
     async fn handle(&mut self, msg: StoreRecord, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
         on_store(&self.io, &self.store, move |store| {
@@ -443,7 +443,7 @@ pub trait ReplicaTransport: Send + Sync + 'static {
     ) -> BoxFuture<'static, Result<(), CallError>>;
 
     /// Store one immutable blob on a replica (durable-workspace design): unfenced,
-    /// unordered — the immutable subset of [`store_record`](ReplicaTransport::store_record).
+    /// unordered; the immutable subset of [`store_record`](ReplicaTransport::store_record).
     /// The [`BlobAck`] distinguishes a stored copy from a replica that could not
     /// store it, so only real copies count toward the quorum (**E18**).
     fn store_blob(
@@ -507,7 +507,7 @@ pub trait ReplicaTransport: Send + Sync + 'static {
     /// Launch a detached background task (spec §7.2). The replicator uses it to drain
     /// the straggler peer asks of an append that already committed on a quorum, so the
     /// commit returns at quorum latency while every issued ask still runs to
-    /// completion — its `AskIssued`/`AskOutcome` bracket closes, preserving
+    /// completion: its `AskIssued`/`AskOutcome` bracket closes, preserving
     /// no-silent-loss (§14). Backed by the system's `launch` (actor §4.6).
     fn launch(&self, task: BoxFuture<'static, ()>);
 }
@@ -542,7 +542,7 @@ impl<G: Entity> ActorReplicaTransport<G> {
     }
 
     /// Resolve `node`'s replica store and `ask` it, or `Unreachable` if it is not
-    /// discovered — the one shape every [`ReplicaTransport`] method shares (§7.2).
+    /// discovered: the one shape every [`ReplicaTransport`] method shares (§7.2).
     fn ask<M>(
         &self,
         node: NodeId,

@@ -1,15 +1,15 @@
 //! The transport's protocol decisions, socket-free (spec §9.3): the runtime
 //! **address book** and the per-peer **association slots**.
 //!
-//! `TcpTransport` interleaves two very different things: sockets — dial,
-//! handshake, read, write, all asynchronous and timing-dependent — and
+//! `TcpTransport` interleaves two very different things: sockets (dial,
+//! handshake, read, write, all asynchronous and timing-dependent), and
 //! *decisions* about them: whose address is believed, which live association
 //! serves a peer, who wins a concurrent dial, when an entry is evicted, who
 //! gossip goes to. The simulator exercises none of this file's caller (it
 //! routes by `NodeId` with no addresses), so the decisions used to be testable
 //! only through non-deterministic loopback runs. Here they are synchronous
-//! functions over plain data: every race the transport can experience — two
-//! dials completing in either order, an eviction against a replaced entry —
+//! functions over plain data: every race the transport can experience (two
+//! dials completing in either order, an eviction against a replaced entry)
 //! is a deterministic sequence of calls a unit test can spell out.
 //!
 //! The split of duties: this module decides, the transport executes. Nothing
@@ -25,7 +25,7 @@ use actor_core::NodeId;
 /// The runtime address book (spec §9.3): who this node believes lives where.
 /// Seeded from the configured dial map, then grown as handshakes and endpoint
 /// gossip reveal more peers. One rule guards it: claims about **this node**
-/// are ignored — our own advertised address is authoritative, and neither a
+/// are ignored; our own advertised address is authoritative, and neither a
 /// peer's handshake nor third-hand gossip may move us.
 pub(crate) struct Book {
     node: NodeId,
@@ -79,7 +79,7 @@ impl Book {
     }
 
     /// Who a gossip round pushes the table to: every known peer (never
-    /// ourselves). Gossip is the bootstrap, so the set is the book itself —
+    /// ourselves). Gossip is the bootstrap, so the set is the book itself:
     /// a peer we can name is a peer we push to, connected or not.
     pub(crate) fn gossip_targets(&self) -> Vec<NodeId> {
         self.endpoints.keys().copied().collect()
@@ -93,7 +93,7 @@ pub(crate) trait Association: Clone {
     /// A dead association (its queue closed) is replaced rather than reused.
     fn is_live(&self) -> bool;
 
-    /// Whether `other` is this very association — identity, not equality.
+    /// Whether `other` is this very association, identity, not equality.
     /// What makes eviction ABA-safe: an eviction carries the association it
     /// means to evict, and a slot re-taken by a successor no longer matches.
     fn is_same(&self, other: &Self) -> bool;
@@ -101,7 +101,7 @@ pub(crate) trait Association: Clone {
 
 /// What [`Slots::admit`] decided about a freshly created association.
 pub(crate) enum Admitted<A> {
-    /// The candidate now serves the peer — start its I/O.
+    /// The candidate now serves the peer: start its I/O.
     Won(A),
     /// A live association already serves the peer (a concurrent dial won the
     /// race); the returned handle is the winner's, and the candidate's
@@ -141,7 +141,7 @@ impl<A: Association> Slots<A> {
     }
 
     /// Offer a freshly created association for `peer`. If a live one already
-    /// holds the slot — a concurrent dial won — it is kept whole (its
+    /// holds the slot (a concurrent dial won) it is kept whole (its
     /// negotiated revision is the one whose frames will travel) and the
     /// candidate loses; otherwise the candidate takes the slot.
     pub(crate) fn admit(&mut self, peer: NodeId, candidate: A) -> Admitted<A> {
@@ -152,7 +152,7 @@ impl<A: Association> Slots<A> {
         Admitted::Won(candidate)
     }
 
-    /// Evict `peer`'s slot **iff** it still holds `association` — the dead or
+    /// Evict `peer`'s slot **iff** it still holds `association`: the dead or
     /// saturated one the caller failed on, or the one whose I/O just ended.
     /// A slot already re-taken by a successor is left alone, so a stale
     /// failure can never tear down its replacement. Returns whether it
@@ -231,7 +231,7 @@ mod tests {
             book.table(),
             vec![(SELF, addr(7400)), (B, addr(7401)), (C, addr(7403))]
         );
-        // The push set is the book minus us: reachability is not required —
+        // The push set is the book minus us: reachability is not required;
         // gossip is the bootstrap, so it dials.
         assert_eq!(book.gossip_targets(), vec![B, C]);
     }
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn a_concurrent_dial_race_keeps_the_first_winner_whole() {
-        // Two dials to the same peer complete back to back — the interleaving
+        // Two dials to the same peer complete back to back: the interleaving
         // the loopback tests could only hope to hit, spelled out. The second
         // loses and is told the winner's handle; the slot never flaps.
         let mut slots = Slots::new();

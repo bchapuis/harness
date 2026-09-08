@@ -3,24 +3,24 @@
 //!
 //! `conformance_leader.rs` pins the leader-based control plane through *scripted,
 //! single-shot* faults: one election, one failover, one minority partition. That
-//! proves each mechanism in isolation. This file is the adversarial complement —
+//! proves each mechanism in isolation. This file is the adversarial complement:
 //! a Jepsen-style nemesis that repeatedly isolates **whichever node is currently
 //! leader**, forcing term after term of re-election while committed membership
 //! entries flow on the majority side, then heals and proves the deep Raft
 //! properties held *throughout*:
 //!
 //! - **State Machine Safety / log matching (#22, "applied in log order").** No two
-//!   voters ever apply a different `(status, stamp)` for any member — the stamp is
+//!   voters ever apply a different `(status, stamp)` for any member: the stamp is
 //!   the commit index (the authority stamp, §9.2), so disagreement would mean the
 //!   committed logs forked. Asserted at convergence after the storm.
 //! - **Election safety (#22).** Across every term the storm induces, at most one
 //!   leader is ever elected per term (checked over the §16 `LeaderElected` stream).
 //! - **Convergence (#14).** Once the partitions heal, every `up` member converges
-//!   on one membership view — voters by log replication, the non-voter by gossip.
+//!   on one membership view: voters by log replication, the non-voter by gossip.
 //! - **`down` is terminal / no spurious down (#15, #16).** Under the conservative
 //!   policy a partition alone downs nobody; every node survives the storm.
 //!
-//! The nemesis uses `SimNetwork::partition()`/`heal()` (heal-able, symmetric — the
+//! The nemesis uses `SimNetwork::partition()`/`heal()` (heal-able, symmetric: the
 //! sim has no asymmetric-partition or clock-skew primitive). The downing policy is
 //! `Conservative` deliberately: leadership must churn via Raft's *own* election
 //! timeout while every member stays alive, so any final disagreement is a true log
@@ -110,7 +110,7 @@ fn agreed_leader(systems: &[SimNode]) -> Option<NodeId> {
 fn rolling_partitions_never_fork_the_committed_membership_log() {
     // The crown jewel for the control plane. Repeatedly isolate the current leader
     // into a minority, commit a membership change (drain/resume F) on the majority
-    // side, then heal — round after round. The storm forces many terms and many
+    // side, then heal: round after round. The storm forces many terms and many
     // leaders. At the end, every voter must agree on the exact `(status, stamp)` of
     // every member: identical commit indices mean identical committed logs. A stale
     // leader that committed on a minority side, or a lost/duplicated entry, would
@@ -172,7 +172,7 @@ fn rolling_partitions_never_fork_the_committed_membership_log() {
             // (status, stamp). The stamp is the commit index, so agreement here is
             // log-matching: the committed logs never diverged. A node tracks its own
             // status via `self_status()`, not the peer map (`status(self)` is `None`),
-            // so the self-entry is checked separately below — comparing it here would
+            // so the self-entry is checked separately below, comparing it here would
             // flag a measurement artifact, not a fork.
             let members = [A, B, C, D, E, F];
             for &m in &members {
@@ -184,11 +184,11 @@ fn rolling_partitions_never_fork_the_committed_membership_log() {
                 let first = (views[0].1, views[0].2);
                 assert!(
                     views.iter().all(|v| (v.1, v.2) == first),
-                    "seed {seed}: voters disagree on member {m:?} — committed log forked \
+                    "seed {seed}: voters disagree on member {m:?}; committed log forked \
                  (#22). views = {views:?}",
                 );
                 // The member's own self-view must match its peers' committed view of it
-                // (#14 convergence) — a node never disagrees with the cluster about its
+                // (#14 convergence): a node never disagrees with the cluster about its
                 // own committed status.
                 if let Some(self_sys) = systems.iter().find(|s| s.node() == m) {
                     assert_eq!(
@@ -199,7 +199,7 @@ fn rolling_partitions_never_fork_the_committed_membership_log() {
                 }
             }
 
-            // (#15 / #16) No node was ever downed — a partition alone evicts nobody
+            // (#15 / #16) No node was ever downed: a partition alone evicts nobody
             // under the conservative policy, and there were no crashes.
             for &m in &members {
                 assert!(
@@ -209,7 +209,7 @@ fn rolling_partitions_never_fork_the_committed_membership_log() {
             }
 
             // Teeth: the storm must have genuinely churned leadership AND committed
-            // entries through that churn — otherwise the agreement check above compared
+            // entries through that churn; otherwise the agreement check above compared
             // a static, never-contested log and proved nothing. Confirm from the §16
             // stream that several terms elected leaders and that leadership actually
             // moved between distinct nodes (a real, repeated split-brain).
@@ -223,11 +223,11 @@ fn rolling_partitions_never_fork_the_committed_membership_log() {
             }
             assert!(
                 committed_proposals > 0,
-                "seed {seed}: no membership change committed — the storm proved nothing",
+                "seed {seed}: no membership change committed; the storm proved nothing",
             );
             assert!(
                 distinct_leaders.len() >= 2 && elected_terms.len() >= 3,
-                "seed {seed}: weak storm (leaders={distinct_leaders:?}, terms={}) — the log was \
+                "seed {seed}: weak storm (leaders={distinct_leaders:?}, terms={}); the log was \
              never genuinely contested, so non-divergence is not meaningfully tested",
                 elected_terms.len(),
             );
@@ -289,7 +289,7 @@ fn one_leader_per_term_survives_an_election_storm() {
         // Teeth: the storm really churned leadership through many terms.
         assert!(
             max_term >= ROUNDS as u64,
-            "seed {seed}: only reached term {max_term} after {ROUNDS} partitions — \
+            "seed {seed}: only reached term {max_term} after {ROUNDS} partitions; \
              the storm did not actually force re-elections",
         );
         assert!(
@@ -307,7 +307,7 @@ fn the_cluster_keeps_committing_and_reconverges_after_the_storm() {
     // partition storm must, once healed, return to committing membership changes
     // and present a single converged view from every node. Run the storm, heal,
     // then prove a fresh proposal commits and every voter sees its effect at the
-    // same stamp — the control plane is neither wedged nor split.
+    // same stamp: the control plane is neither wedged nor split.
     let sim = Simulation::new(3);
     let (net, systems, _f, _recorder) = storm_cluster(&sim);
 

@@ -2,7 +2,7 @@
 //! (entity §16): the end-to-end proof that an alarm fires with no caller present
 //! after the leader that armed it has crashed.
 //!
-//! The Local-tier tests (`alarm_index.rs`) prove each mechanism — the index entity,
+//! The Local-tier tests (`alarm_index.rs`) prove each mechanism: the index entity,
 //! the host registering as it arms, the driver re-activating an indexed entity. This
 //! test composes them under an actual shard-leader crash: arm an alarm, crash the
 //! entity's leader before the deadline, then advance time **without touching the
@@ -161,12 +161,12 @@ fn run_failover(seed: u64) {
         .expect("a survivor");
     net.crash(leader);
 
-    // Advance well past re-election AND past the 30s deadline — with NO caller ever
+    // Advance well past re-election AND past the 30s deadline, with NO caller ever
     // touching the timer entity. Its only path back to life is the driver.
     sim.run_for(Duration::from_secs(45));
 
     // Proof, observed through the index (never re-activating the timer): the entry is
-    // gone, which only a fire-and-consume clears — so the entity fired callerlessly on
+    // gone, which only a fire-and-consume clears, so the entity fired callerlessly on
     // the new leader.
     let after = drive(&sim, Duration::from_secs(3), {
         let idx = index_for(&indexes, survivor, key);
@@ -202,9 +202,9 @@ fn run_failover(seed: u64) {
 fn an_alarm_fires_after_a_split_moves_its_entity() {
     // §7.16 across §7.7: arm alarms on many entities of one shard, split it so
     // roughly half move to a fresh child, then advance past the deadline with NO
-    // caller touching any timer. Each moved entity's alarm must still fire — the
+    // caller touching any timer. Each moved entity's alarm must still fire: the
     // child's driver picks it up from the child's index (the entity re-registered
-    // there on the split's re-activation) — and the parent's driver must clear
+    // there on the split's re-activation), and the parent's driver must clear
     // the stale entries it inherited rather than churn on them forever. A
     // recorder observes the committed `ShardSplit` so the test proves the split
     // actually happened (else the alarms would fire trivially from shard 0).
@@ -278,7 +278,7 @@ fn an_alarm_fires_after_a_split_moves_its_entity() {
     // the drivers (parent and child) can re-activate them.
     sim.run_for(Duration::from_secs(45));
 
-    // Every entity fired exactly once, callerlessly — whichever shard owns it now.
+    // Every entity fired exactly once, callerlessly: whichever shard owns it now.
     for key in &keys {
         let fired = drive(&sim, Duration::from_secs(8), {
             let g = timers[1].entity(key.clone());

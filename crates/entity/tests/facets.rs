@@ -56,7 +56,7 @@ impl Entity for Prefs {
 
 /// Stage `key = value` in the kv facet AND emit a facet-0 event, then read the
 /// staged value back within the same handler (read-your-staged-writes, §7.12).
-/// Replies with the echoed value and the post-command write count — one command,
+/// Replies with the echoed value and the post-command write count: one command,
 /// two facets, one atomic batch (E19).
 #[derive(Clone, Serialize, Deserialize)]
 struct Set {
@@ -85,7 +85,7 @@ impl EntityHandler<Set> for Prefs {
     }
 }
 
-/// Read a key — no events, no staged ops, commits nothing (§7.5).
+/// Read a key, no events, no staged ops, commits nothing (§7.5).
 #[derive(Clone, Serialize, Deserialize)]
 struct GetKey(String);
 impl Message for GetKey {
@@ -140,7 +140,7 @@ impl EntityHandler<Keys> for Prefs {
     }
 }
 
-/// The facet-0 write count — proves events folded beside the kv records.
+/// The facet-0 write count: proves events folded beside the kv records.
 #[derive(Clone, Serialize, Deserialize)]
 struct Writes;
 impl Message for Writes {
@@ -158,7 +158,7 @@ impl EntityHandler<Writes> for Prefs {
     }
 }
 
-/// Whether the entity's blob area still holds `id` on any reachable replica —
+/// Whether the entity's blob area still holds `id` on any reachable replica:
 /// probes spill storage and sweep reclamation from outside.
 #[derive(Clone, Serialize, Deserialize)]
 struct HasBlob(BlobId);
@@ -178,7 +178,7 @@ impl EntityHandler<HasBlob> for Prefs {
 }
 
 /// Sweep with an empty application root set: everything the sweep retains comes
-/// from the host-unioned facet roots (§7.12) — a live spilled value must
+/// from the host-unioned facet roots (§7.12); a live spilled value must
 /// survive, a deleted one must not.
 #[derive(Clone, Serialize, Deserialize)]
 struct SweepNow;
@@ -219,7 +219,7 @@ impl Entity for Project {
 
 /// One command, three facets, one atomic batch (E19): write the document into
 /// the workspace directory and capture it, point `last` at it in the kv facet,
-/// and count the save as a facet-0 event — one entity, one consistency
+/// and count the save as a facet-0 event; one entity, one consistency
 /// boundary (§7.11).
 #[derive(Clone, Serialize, Deserialize)]
 struct SaveDoc {

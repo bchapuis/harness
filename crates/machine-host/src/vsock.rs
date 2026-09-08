@@ -23,7 +23,7 @@ pub async fn connect(uds: &Path, port: u32) -> Result<UnixStream, std::io::Error
 
 /// The muxer handshake alone, over an already-connected stream: `CONNECT
 /// <port>` out, one `OK <port>` line back. Generic over the stream because the
-/// muxer's grammar is what a guest agent answers, not what carries it — the
+/// muxer's grammar is what a guest agent answers, not what carries it: the
 /// docker binding (machine §2.1) reaches the same agent through a relayed pipe
 /// rather than a vsock socket, and must not fork the handshake to do it.
 pub async fn handshake<S>(stream: &mut S, port: u32) -> Result<(), std::io::Error>
@@ -34,7 +34,7 @@ where
         .write_all(format!("CONNECT {port}\n").as_bytes())
         .await?;
     // The muxer answers one line, `OK <port>\n`; read to the newline and no
-    // further — the bytes after it are frames.
+    // further: the bytes after it are frames.
     let mut line = Vec::with_capacity(16);
     loop {
         let byte = stream.read_u8().await?;

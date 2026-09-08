@@ -1,7 +1,7 @@
 # Standalone deployment: a three-node agent runtime
 
-This guide installs `agent-standalone` — the runnable deployment of the
-agent runtime — and walks through a three-node cluster: one OS process per
+This guide installs `agent-standalone`, the runnable deployment of the
+agent runtime, and walks through a three-node cluster: one OS process per
 node, each with its own data directory, agentic sessions backed by the
 Anthropic API, and the failure drill (kill a node, watch its sessions resume on
 a survivor). It starts on one host and spans machines with two flags ("Across
@@ -29,18 +29,18 @@ machines").
 
 Each `node` process is a full cluster member: a TCP transport on loopback, a
 static three-node roster with the SWIM failure detector running observe-only,
-and one node's agent runtime — host actor, session actors, and the three seams:
+and one node's agent runtime, its host actor, its session actors, and the three seams:
 
-- **Model** — the Anthropic Messages API (`agent-anthropic`), over a small
+- **Model**: the Anthropic Messages API (`agent-anthropic`), over a small
   tokio/rustls HTTP client.
-- **EntityJournal** — a file-backed store in each node's own `--data` directory.
+- **EntityJournal**: a file-backed store in each node's own `--data` directory.
   The journal is one logical store for the whole cluster (spec §6.1), but it is
   *replicated*, not shared: a session's record is appended to a quorum of the
   shard's replicas over the transport, fenced by the shard's term (spec §7.2,
   §8). A node writes only its own directory, so nodes share neither a directory
   nor a filesystem. It is durable: a new owner recovers an entity's head from a
   quorum on activation (§8, E14).
-- **Sandbox** — one private workspace directory per session under
+- **Sandbox**: one private workspace directory per session under
   `--data/workspaces/<node-id>/`, keyed by the entity, where the `shell` tool
   runs.
 
@@ -54,17 +54,17 @@ Two agent kinds are registered on every node:
 | kind        | tools                                    | delegates to | budget             |
 |-------------|------------------------------------------|--------------|--------------------|
 | `assistant` | the file tools, `shell`, `run_js`, `delegate` | `worker` | 200k tokens, 50 steps |
-| `worker`    | the file tools, `shell`, `run_js`        | —            | 100k tokens, 25 steps |
+| `worker`    | the file tools, `shell`, `run_js`        | none            | 100k tokens, 25 steps |
 
-Every `--sandbox` mode carries the typed file tools —
-`read_file`, `write_file`, `edit_file`, `list_dir`, `remove` — over a workspace
+Every `--sandbox` mode carries the typed file tools
+(`read_file`, `write_file`, `edit_file`, `list_dir`, `remove`) over a workspace
 backed by a durable filesystem entity (entity §7.10), so a session's files
 survive hibernation, migration, and node loss. The shell-capable modes add two
 tools on top of the same workspace: `shell`, the Native tier (the container or
 microVM `--sandbox` selected), and `run_js`, the hermetic QuickJS Compute tier
 (sandbox spec §3.2), so the model runs JavaScript without any language runtime
 in the shell image. The runtime-free `--sandbox durable` mode has the file
-tools alone — no `shell`, no `run_js` — so the rows above lose their last two
+tools alone, with no `shell` and no `run_js`, so the rows above lose their last two
 entries.
 
 ## Prerequisites
@@ -115,8 +115,8 @@ The roster spans hosts once each node binds a reachable interface and learns
 its peers by name instead of loopback. Two flags do it, the same on every
 node except `--id`:
 
-- `--bind-host 0.0.0.0` — bind every interface, not just loopback.
-- `--peer <id>=<host>` — the reachable host of each node in the roster; repeat
+- `--bind-host 0.0.0.0`: bind every interface, not just loopback.
+- `--peer <id>=<host>`: the reachable host of each node in the roster; repeat
   for the whole roster. A node advertises its own entry to the others and
   dials them at theirs.
 
@@ -134,12 +134,12 @@ plaintext, guarded by `--secret`; keep the roster on a trusted network, or
 provision TLS, before crossing untrusted links (see Limitations).
 
 Any image works; the choice is just what `shell` finds on its `PATH`.
-`python:3.12-slim` carries python3, bash, and coreutils — enough for the
+`python:3.12-slim` carries python3, bash, and coreutils, enough for the
 model to actually run things. `alpine:3.20` is leaner (sh + awk only) if you
 only need file and text tasks.
 
 Without docker (or `/dev/kvm` for firecracker), run `--sandbox durable`: a
-entity-backed durable workspace with the typed file tools and no shell — no
+entity-backed durable workspace with the typed file tools and no shell, and no
 container runtime required.
 
 Each node logs its bootstrap and then the cluster's life on stderr:
@@ -163,7 +163,7 @@ agent-gateway --bind 127.0.0.1:8080 --node-id 100 --nodes 3
 
 It logs `joined the cluster (client of nodes 1..=3)` once it discovers a host
 gateway through the receptionist gossip. With no `--auth-tokens`, the bearer
-token is taken as the tenant, unverified — loopback dev mode.
+token is taken as the tenant, unverified: loopback dev mode.
 
 ## Talk to it
 
@@ -198,7 +198,7 @@ returns its recorded outcome, a live run re-attaches, never run twice (A7).
 
 The records *are* the session: each is a line in that session's own segment under
 `./agent-data/entities/<entity_type>/<node>/segments/`, and folding them back is how
-any node reconstructs the session — there is no other session state. The entity type
+any node reconstructs the session; there is no other session state. The entity type
 comes first because a store is per hosted type: its fence is keyed by shard index,
 and the same index is a different leader-election group under each type (entity
 §8.2).
@@ -207,8 +207,8 @@ Sessions are durable and named: prompt `demo` again days later (any gateway
 replica, any node) and it resumes the same transcript.
 
 Ask the assistant to farm something out and it calls the `delegate` tool; the
-child runs as its own session of the `worker` kind — possibly on a different
-node — with a budget carved from the parent's, and the records show the
+child runs as its own session of the `worker` kind, possibly on a different
+node, with a budget carved from the parent's, and the records show the
 `delegated to …` entry.
 
 ## The failure drill
@@ -224,7 +224,7 @@ A session survives the machine that was running it.
 4. Watch the survivors: within a few seconds (SWIM defaults: 1s probes, 3s
    suspicion) they log `Suspected { … }` then `Unreachable { … }`, and
    placement stops routing to the dead node.
-5. Re-issue the **same** prompt through the gateway (same `turn` id) — its
+5. Re-issue the **same** prompt through the gateway (same `turn` id); its
    `EntityRef` re-resolves to a live owner automatically:
    ```sh
    curl -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
@@ -236,7 +236,7 @@ A session survives the machine that was running it.
    if nothing happened. A tool call that was in flight when the node died is
    resolved per its declared policy (the `shell` tool interrupts: the model is
    told and decides whether to re-run it).
-7. Restart the node (the same `node --id N …` command, same flags — the
+7. Restart the node (the same `node --id N …` command, same flags, since the
    sandbox mode shapes the kind digest existing sessions have pinned):
    survivors log `Reachable`, and new sessions place onto it again.
 
@@ -248,7 +248,7 @@ and hibernates. Re-submitting a turn id is always safe (invariant A7).
 
 The defaults across the tree are set against one machine, described in
 [hardware-envelope](hardware-envelope.md): a dedicated server with directly
-attached NVMe, tens of cores, 128–256 GB, and — the binding constraint — a
+attached NVMe, tens of cores, 128–256 GB, and the binding constraint, a
 **1 Gbps uplink** that cluster replication and public serving share. Read that
 document before changing a number here; this section is only the operator's end
 of it.
@@ -258,7 +258,7 @@ break first if you undershoot: the store holds its manifest whole in memory and
 caches segment handles and resolved host handles by the thousand, so memory is
 consumed by entity *count* rather than by concurrency; and the replication path
 is the uplink, so a node's sustainable ingest of new data is roughly
-`link ÷ (replication_factor − 1)` — about 60 MB/s at 1 Gbps and R=3, against a
+`link ÷ (replication_factor − 1)`, about 60 MB/s at 1 Gbps and R=3, against a
 device that would take gigabytes per second. If replication throughput is the
 constraint you hit, the 10 Gbps uplink upgrade buys more than any tuning here.
 
@@ -273,8 +273,8 @@ before the store's cache ever evicts anything:
 LimitNOFILE=131072
 ```
 
-Ready-made units carrying this and the rest of the operational shape — the shutdown
-timeout the leadership handoff needs, the restart backoff, and the sandbox caveat —
+Ready-made units carrying this and the rest of the operational shape (the shutdown
+timeout the leadership handoff needs, the restart backoff, and the sandbox caveat)
 are in [`deploy/systemd/`](../deploy/systemd/README.md), alongside the on-disk layout
 and which parts of it are rebuildable.
 
@@ -288,7 +288,7 @@ expects.
 
 `quorum_timeout` and `recover_timeout` (`EntityConfig`) default to 2 s, which
 is safe everywhere and derived for nowhere. Set them from the p99.9 commit
-latency you measure, never from a median — the tail is what they exist for. As
+latency you measure, never from a median; the tail is what they exist for. As
 starting points, against the round trips in hardware-envelope §2:
 
 | topology | round trip | commit p99.9 (expect) | timeouts |
@@ -305,18 +305,18 @@ turning transient slowness into activation churn.
 ### Failure domains
 
 `EntityConfig::failure_domains` defaults to `None`, which treats every node as
-its own domain — replicas spread across the cluster, but nothing stops all *R*
+its own domain: replicas spread across the cluster, but nothing stops all *R*
 of a shard landing in one rack. Since every durability claim rests on quorum
 intersection over those *R*, a concentrated shard turns one rack loss into an
 unavailable shard on a cluster that still looks healthy.
 
 There are no availability zones on dedicated hardware: the domains are racks
 and datacenter sites. Supply the mapping from whatever static metadata you
-already have per host — the site, or the rack if your provider exposes it:
+already have per host: the site, or the rack if your provider exposes it:
 
 ```rust
 // `FailureDomains` is `Arc<dyn Fn(NodeId) -> u64>`, and the mapping MUST be a
-// pure function every node evaluates identically — static deployment metadata,
+// pure function every node evaluates identically: static deployment metadata,
 // never anything read from the local host.
 let racks: entity::FailureDomains = std::sync::Arc::new(|node: NodeId| match node.uid() {
     1 | 2 => 0, // site A, rack 1
@@ -331,7 +331,7 @@ let config = EntityConfig {
 
 The allocator then takes at most `ceil(R / domains)` replicas per domain,
 falling back to the remaining rendezvous order when a lopsided layout cannot
-meet the cap — an imperfectly spread shard is strictly better than an
+meet the cap; an imperfectly spread shard is strictly better than an
 under-replicated one.
 
 ## Configuration
@@ -348,17 +348,17 @@ agent-gateway [options]                  # the public HTTP edge
 | `--data <dir>`   | `./agent-data`            | this node's own journal + workspaces |
 | `--bind-host <addr>` | `127.0.0.1`             | interface the transport binds; `0.0.0.0` in a container |
 | `--peer <id>=<host>` | all `127.0.0.1`         | each node's reachable host; repeat for the roster |
-| `--client <id>=<host>` | —                     | admit a non-voting cluster client (the gateway); id outside `1..=--nodes`. Repeatable |
+| `--client <id>=<host>` | none                     | admit a non-voting cluster client (the gateway); id outside `1..=--nodes`. Repeatable |
 | `--port-base <p>`| `7401`                      | node/client *i*'s transport = p+i−1 |
 | `--model <id>`   | `claude-sonnet-4-6`         | agree everywhere (kind digests are pinned per session) |
 | `--secret <s>`   | `agent-standalone`        | cluster association secret |
 | `--api-url <url>`| `https://api.anthropic.com` | `http://…` points at a fake for offline testing |
-| `--sandbox <mode>` | — (required)              | `docker` or `firecracker` (confined shell, durable workspace), or `durable` (typed file tools, no shell); agree everywhere (the choice shapes the kind digest) |
-| `--sandbox-image <r>` | —                       | container image for `--sandbox docker` (required there); agree everywhere |
+| `--sandbox <mode>` | none (required)              | `docker` or `firecracker` (confined shell, durable workspace), or `durable` (typed file tools, no shell); agree everywhere (the choice shapes the kind digest) |
+| `--sandbox-image <r>` | none                       | container image for `--sandbox docker` (required there); agree everywhere |
 | `--container-cli <c>` | `docker`                | the container CLI binary (podman's compatible CLI works) |
 | `--fc-binary <path>` | `firecracker`            | the VMM executable for `--sandbox firecracker` |
-| `--fc-kernel <path>` | —                        | vmlinux for `--sandbox firecracker` (required there); agree everywhere |
-| `--fc-rootfs <path>` | —                        | base rootfs with `/sbin/fc-agent` (required there); agree everywhere |
+| `--fc-kernel <path>` | none                        | vmlinux for `--sandbox firecracker` (required there); agree everywhere |
+| `--fc-rootfs <path>` | none                        | base rootfs with `/sbin/fc-agent` (required there); agree everywhere |
 
 Environment: `ANTHROPIC_API_KEY` (required by `node`).
 
@@ -377,16 +377,16 @@ The **gateway** (`agent-gateway`) takes its own set:
 | `--bind-host <addr>`    | `127.0.0.1`        | interface the *transport* binds; `0.0.0.0` in a container |
 | `--advertise-host <a>`  | `--bind-host`      | the host the nodes dial it back at; must match their `--client <host>` |
 | `--port-base <p>`       | `7401`             | node/client *i*'s transport = p+i−1 |
-| `--kind <name[:shards]>` | `assistant:4 worker:4` | a kind the nodes host, with its `EntityConfig.shards`; repeat per kind. Must match the nodes' deployment — an unknown name fails discovery, a wrong shard count misroutes sessions. The default mirrors `agent-standalone`'s default kinds |
-| `--auth-tokens <path>`  | —                  | tenants file (`<principal> <token>` per line), reloaded on SIGHUP. **Required** unless `--bind` is loopback; without it the bearer token *is* the tenant |
+| `--kind <name[:shards]>` | `assistant:4 worker:4` | a kind the nodes host, with its `EntityConfig.shards`; repeat per kind. Must match the nodes' deployment: an unknown name fails discovery, a wrong shard count misroutes sessions. The default mirrors `agent-standalone`'s default kinds |
+| `--auth-tokens <path>`  | none                  | tenants file (`<principal> <token>` per line), reloaded on SIGHUP. **Required** unless `--bind` is loopback; without it the bearer token *is* the tenant |
 | `--max-within-secs <n>` | `3600`             | ceiling on a prompt's `within_secs` |
 | `--max-body-bytes <n>`  | `1048576`          | max request body size |
 
 SIGTERM and SIGINT drain it gracefully.
 
-`scripts/smoke-agent.sh` scripts the whole walkthrough — three
+`scripts/smoke-agent.sh` scripts the whole walkthrough (three
 nodes plus the gateway against a canned fake API, prompt, records, kill, resume
-over HTTP — and needs no API key.
+over HTTP) and needs no API key.
 
 ## How it maps to the spec
 
@@ -409,7 +409,7 @@ over HTTP — and needs no API key.
 - **`--sandbox` must be chosen explicitly; there is no unconfined mode.** Pass
   `--sandbox docker --sandbox-image <ref>` (e.g. `alpine:3.20`) to run `shell`
   inside a per-session OCI container, via `agent-sandbox`'s `Native` tier:
-  the workspace bind-mounted, no network — shared-kernel confinement (sandbox
+  the workspace bind-mounted, no network: shared-kernel confinement (sandbox
   spec §3.4's SHOULD grade), still not the microVM grade. Pre-pull the image:
   the first call otherwise pulls it inside the 120s tool timeout. On Linux with
   `/dev/kvm`, pass `--sandbox firecracker --fc-kernel <vmlinux> --fc-rootfs
@@ -417,8 +417,8 @@ over HTTP — and needs no API key.
   instead: one Firecracker VM per activation, the workspace synced over vsock,
   no network device (sandbox spec §3.5's reference choice).
 - **Each node keeps its own `--data` directory**; the journal replicates over
-  the transport (a quorum append per entity, §7.2), so the roster spans machines
-  — set `--bind-host` and `--peer` (see "Across machines").
+  the transport (a quorum append per entity, §7.2), so the roster spans machines.
+  Set `--bind-host` and `--peer` (see "Across machines").
 - **The fake-friendly `--api-url`** speaks HTTP/1.1 without retry-relevant
   streaming; long completions are bounded by a 300s per-request timeout
   under the model client's retry policy.

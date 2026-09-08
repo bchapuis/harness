@@ -119,7 +119,7 @@ fn the_coordinator_defers_admission_until_the_cluster_converges() {
     sim.run_for(Duration::from_millis(500)); // a, b converge
 
     // Isolate B from everyone (so even indirect probing can't reach it): A sees B
-    // suspect/unreachable — the cluster is not converged.
+    // suspect/unreachable; the cluster is not converged.
     net.partition(&[NodeId::new(2)], &[NodeId::new(1), NodeId::new(3)]);
     sim.run_for(Duration::from_secs(1));
 

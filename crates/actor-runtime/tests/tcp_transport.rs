@@ -73,7 +73,7 @@ async fn ask_to_an_unknown_peer_is_unreachable_not_a_hang() {
 #[tokio::test]
 async fn a_codec_disagreement_is_rejected_at_the_handshake() {
     // Two ends that name different codecs must not associate (spec §5 #2, §7.1),
-    // even though both happen to encode JSON — the handshake compares codec names
+    // even though both happen to encode JSON: the handshake compares codec names
     // before any traffic, so the call fails fast with Unreachable.
     let make = |name: &'static str| {
         move |node, peers: BTreeMap<NodeId, SocketAddr>| {
@@ -98,7 +98,7 @@ async fn a_codec_disagreement_is_rejected_at_the_handshake() {
 #[tokio::test]
 async fn a_node_reaches_a_peer_it_learns_only_via_gossip() {
     // Three nodes. The hub (1) is seeded with everyone; B (2) and C (3) are
-    // seeded only with the hub — they do not know each other's address.
+    // seeded only with the hub: they do not know each other's address.
     let (la, addr_a) = support::bind_local().await;
     let (lb, addr_b) = support::bind_local().await;
     let (lc, addr_c) = support::bind_local().await;

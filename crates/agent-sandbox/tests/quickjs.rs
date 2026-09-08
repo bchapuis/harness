@@ -3,7 +3,7 @@
 //! differential, and the JS surface (workspace, console, exceptions, fuel).
 //!
 //! This suite builds only with the `quickjs` feature, which embeds
-//! `modules/qjs.wasm` — build it with `guest/qjs-runner/build.sh` first.
+//! `modules/qjs.wasm`: build it with `guest/qjs-runner/build.sh` first.
 
 #![cfg(feature = "quickjs")]
 

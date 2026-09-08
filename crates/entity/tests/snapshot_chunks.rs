@@ -1,7 +1,7 @@
 //! Facet 0's state through the blob area (entity §7.12).
 //!
 //! A composite snapshot used to carry the entity's whole encoded `State` inline, so
-//! a snapshot cost what the entity had *accumulated* — on the `Quorum` tier, that
+//! a snapshot cost what the entity had *accumulated*, on the `Quorum` tier, that
 //! whole payload broadcast to every replica each time the threshold came round
 //! (`docs/hardware-envelope.md` §3.9). Past a threshold the state now goes through
 //! the same content-addressed chunking the checkpointing facets use, and the record
@@ -265,7 +265,7 @@ fn the_snapshot_record_stops_growing_with_the_state() {
     );
     assert!(
         record * 50 < state,
-        "the snapshot record is {record} bytes for {state} bytes of state — \
+        "the snapshot record is {record} bytes for {state} bytes of state: \
          it should be a manifest, not the state"
     );
 }
@@ -274,7 +274,7 @@ fn the_snapshot_record_stops_growing_with_the_state() {
 fn a_small_append_stores_only_the_chunks_it_disturbed() {
     // The bandwidth claim, measured where it lands: a snapshot after one more entry
     // must add a couple of blobs, not re-store the whole transcript. Content-defined
-    // boundaries are what make this true — cut at fixed offsets, the length prefix
+    // boundaries are what make this true: cut at fixed offsets, the length prefix
     // ahead of the appended entry would shift every chunk after it.
     let f = fixture(1);
     for nth in 0..48 {

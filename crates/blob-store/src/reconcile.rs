@@ -9,7 +9,7 @@
 //!
 //! The loop is **decentralized**: each node, periodically, ensures every blob it
 //! holds is present on that blob's *current* top-`R` owners, `StoreBlob`-ing to any
-//! owner that lacks it (a `HasBlob` gates the copy). It is **additive** — it only
+//! owner that lacks it (a `HasBlob` gates the copy). It is **additive**: it only
 //! restores copies, never drops them; bytes are removed on exactly one path,
 //! `delete_namespace` (spec §5.3), never by an inference here, which cannot know
 //! whether a misplaced copy is still wanted. A blob whose namespace is tombstoned
@@ -50,7 +50,7 @@ const SYNC_TIMEOUT: Duration = Duration::from_millis(500);
 pub(crate) async fn reconcile_loop<S: BlobSystem>(inner: Weak<Inner<S>>) {
     loop {
         let Some(inner) = inner.upgrade() else {
-            return; // the store was dropped — stop reconciling.
+            return; // the store was dropped; stop reconciling.
         };
         reconcile_pass(&inner).await;
         // Drop the strong reference before sleeping so the store can be dropped
@@ -70,7 +70,7 @@ async fn reconcile_pass<S: BlobSystem>(inner: &Inner<S>) {
 
     // --- Re-replication: push every local blob to its current owners (B6) -------
     for (ns, id) in inner.local.blobs() {
-        // Never copy a blob of a tombstoned namespace — that is the move that could
+        // Never copy a blob of a tombstoned namespace: that is the move that could
         // resurrect a deleted namespace (spec §5.3, §7, B7 safety).
         if inner.tombstones.contains(&ns) {
             continue;
@@ -81,7 +81,7 @@ async fn reconcile_pass<S: BlobSystem>(inner: &Inner<S>) {
             }
             // Only copy to an owner that lacks it (the `HasBlob` gate). An owner we
             // cannot reach (`Err`) or that already holds it (`Ok(true)`) is left
-            // alone — an unreachable owner is retried next pass, so rebalancing is
+            // alone: an unreachable owner is retried next pass, so rebalancing is
             // eventually consistent and never blocks.
             if let Ok(false) = inner
                 .transport
@@ -121,7 +121,7 @@ async fn reconcile_pass<S: BlobSystem>(inner: &Inner<S>) {
 
 /// Pull every serving peer's tombstone set and apply the ones this node lacks
 /// (spec §5.3, **B7**). A newly-learned tombstone is recorded durably and its
-/// bytes swept — the same effect a `DeleteNamespace` would have — then added to the
+/// bytes swept (the same effect a `DeleteNamespace` would have) then added to the
 /// in-memory awareness set, and finally emitted so the simulator's checkers observe
 /// the node becoming aware. Peers are visited in a stable (sorted) order, and only
 /// genuinely new tombstones mutate state, so the pass is idempotent and
@@ -149,7 +149,7 @@ async fn sync_tombstones<S: BlobSystem>(inner: &Inner<S>, members: &[actor_core:
         };
         for tombstone in tombstones {
             if inner.tombstones.contains(&tombstone.ns) {
-                continue; // already known — do not re-sweep or re-emit
+                continue; // already known; do not re-sweep or re-emit
             }
             // Learn it exactly as a DeleteNamespace would: durable tombstone + sweep
             // first (refuses later stores, survives restart), then awareness. If the

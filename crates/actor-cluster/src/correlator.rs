@@ -1,7 +1,7 @@
 //! Request/reply correlation on an association (spec §7.1, §10).
 //!
-//! Outbound requests that expect a reply — an `ask` awaiting its `Reply`, a SWIM
-//! probe awaiting its `Ack` — register a waiter under a fresh id and park until
+//! Outbound requests that expect a reply (an `ask` awaiting its `Reply`, a SWIM
+//! probe awaiting its `Ack`) register a waiter under a fresh id and park until
 //! the reply arrives or a deadline fires. A [`Correlator`] is that id-source plus
 //! waiter registry, shared by the `ask` and SWIM probe paths.
 

@@ -2,7 +2,7 @@
 //! invariant **E16**).
 //!
 //! `tests/subscription_faults.rs` scripts the §14 subscription cases one at a
-//! time — a leader crash mid-stream, a burst that overflows the sink's buffer —
+//! time (a leader crash mid-stream, a burst that overflows the sink's buffer)
 //! each as a narrative you can read. This file makes the same claim the other
 //! way round: sweep seeds while the nemesis partitions, freezes, crashes, and
 //! restarts nodes underneath a live subscription, and check E16 on whatever
@@ -23,7 +23,7 @@
 //!   attached and the next append re-activates it.
 //! - **A timed-out append that commits late.** Every append carries a deadline
 //!   shorter than a faulted quorum round, so some return `Unavailable` and land
-//!   afterwards — delivered or backfilled once, at their slot.
+//!   afterwards: delivered or backfilled once, at their slot.
 //!
 //! The claim is the spec's own wording: the sink's seq-reconciled sequence equals
 //! what `load` to the head returns. It is checked against the journal at the end
@@ -67,7 +67,7 @@ use support::log::collect_until;
 /// Short enough that the pauses below cross it, so the entity deactivates with a
 /// subscriber attached (§14's hibernation case).
 const IDLE_AFTER: Duration = Duration::from_millis(200);
-/// A writer's pause between bursts — past [`IDLE_AFTER`] on purpose.
+/// A writer's pause between bursts: past [`IDLE_AFTER`] on purpose.
 const IDLE_FOR: Duration = Duration::from_millis(400);
 /// Shorter than a faulted quorum round, so some appends time out and commit
 /// afterwards (§14's late-commit case).
@@ -88,7 +88,7 @@ fn config() -> EntityConfig {
 
 /// Writers append to one log entity while a subscriber reconciles it, all under
 /// the nemesis. The subscriber is judged against the journal, never against what
-/// the writers believe they wrote — an append that returned `Unavailable` may or
+/// the writers believe they wrote: an append that returned `Unavailable` may or
 /// may not have committed, and only the entity knows which.
 struct SubscriptionSwarm {
     nodes: usize,
@@ -98,7 +98,7 @@ struct SubscriptionSwarm {
     /// hatches below would otherwise let a green run mean nothing: a seed whose
     /// shard never became readable returns without comparing, and a seed whose
     /// sink reconstructed nothing compares two empty slices. Neither is wrong on
-    /// its own — but a sweep where *every* seed took one of them has asserted
+    /// its own, but a sweep where *every* seed took one of them has asserted
     /// E16 against no evidence.
     compared: Arc<AtomicUsize>,
     records: Arc<AtomicUsize>,
@@ -146,7 +146,7 @@ impl ClusterWorkload for SubscriptionSwarm {
             // Everything goes through node 1's gateway: the nemesis may restart
             // any other node, and a handle for a restarted one points at a system
             // that has been shut down. Location transparency (E13) keeps the
-            // coverage — calls still land on whichever node leads the shard.
+            // coverage: calls still land on whichever node leads the shard.
             let entities = hosts[0].clone();
             let entity = entities.entity("log/subscribed");
 
@@ -198,7 +198,7 @@ impl ClusterWorkload for SubscriptionSwarm {
             let (reconstructed, ()) = futures::future::join(collector, writes).await;
 
             // E16, in the spec's own words: what the sink reconstructed equals
-            // what `load` to the head returns. Read the journal until it answers —
+            // what `load` to the head returns. Read the journal until it answers:
             // a read that fails mid-election says nothing about the subscription.
             let mut journal = None;
             for _ in 0..40 {
@@ -227,17 +227,17 @@ impl ClusterWorkload for SubscriptionSwarm {
             let contiguous: Vec<u64> = (1..=journal.len() as u64).collect();
             assert_eq!(
                 seqs, contiguous,
-                "the journal itself is not a contiguous seq run — E3/E5, before \
+                "the journal itself is not a contiguous seq run: E3/E5, before \
                  E16 gets a say",
             );
 
             // The sink may legitimately trail the head: it stopped on a deadline
             // while writes were still landing. What it did reconstruct must be an
-            // exact prefix — every record it produced is the committed record at
+            // exact prefix: every record it produced is the committed record at
             // that slot, in order, with no gap or duplicate (§7.9, E16).
             assert!(
                 reconstructed.len() <= committed.len(),
-                "the sink reconstructed {} records but only {} ever committed — \
+                "the sink reconstructed {} records but only {} ever committed: \
                  a duplicate or an invention (E16)",
                 reconstructed.len(),
                 committed.len(),
@@ -281,12 +281,12 @@ fn a_subscription_reconstructs_the_committed_prefix_under_the_swarm() {
     }
     assert!(
         workload.compared.load(Ordering::Relaxed) > 0,
-        "no seed ever got a readable journal to compare against — E16 was \
+        "no seed ever got a readable journal to compare against: E16 was \
          asserted against nothing",
     );
     assert!(
         workload.records.load(Ordering::Relaxed) > 0,
-        "the sink reconstructed no records on any seed — the comparison held \
+        "the sink reconstructed no records on any seed: the comparison held \
          two empty sequences and proved nothing",
     );
 }
@@ -314,7 +314,7 @@ fn the_subscription_swarm_actually_fires_each_fault_type() {
     );
     assert!(
         stats.duplicated > 0,
-        "the sweep never duplicated a frame — a re-delivered batch is the case \
+        "the sweep never duplicated a frame: a re-delivered batch is the case \
          seq reconciliation exists for: {stats:?}"
     );
     assert!(

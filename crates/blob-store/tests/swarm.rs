@@ -47,8 +47,8 @@ use blob_store::Namespace;
 
 /// A continuous checker for **B7 monotonic deletion** (spec §4, §5.3): once a node
 /// has recorded a namespace tombstone, it must never store a blob into that
-/// namespace again. This is the resurrection hazard — a partitioned holder
-/// re-pushing a blob of a deleted namespace, or a node accepting one — expressed
+/// namespace again. This is the resurrection hazard (a partitioned holder
+/// re-pushing a blob of a deleted namespace, or a node accepting one) expressed
 /// as a *per-node* ordering over the event stream, which is the only level at
 /// which it is sound (a lagging node that has not yet learned the tombstone may
 /// legitimately still serve, B7 liveness; what it must never do is store *after*
@@ -75,8 +75,8 @@ impl Invariant for NoResurrection {
                 if self.tombstoned.contains(&(*node, ns.clone())) =>
             {
                 return Err(format!(
-                    "node {node} stored blob {id} into namespace {ns} it had already tombstoned \
-                     — a deleted namespace was resurrected (B7)"
+                    "node {node} stored blob {id} into namespace {ns} it had already tombstoned; \
+                     a deleted namespace was resurrected (B7)"
                 ));
             }
             _ => {}
@@ -97,7 +97,7 @@ fn config() -> BlobConfig {
 
 /// Concurrent put/get/delete traffic across the cluster, through the public API
 /// only (spec §8 / V&V §18.4). Clients share a small pool of namespaces, so puts,
-/// reads, and deletes interleave and race — exercising put-racing-delete and
+/// reads, and deletes interleave and race, exercising put-racing-delete and
 /// reconcile-against-tombstone under the injected faults.
 /// Acknowledged blobs, keyed by `(namespace bytes, id)`, valued by the index of
 /// the node whose store took the `put`.
@@ -109,7 +109,7 @@ struct BlobSwarm {
     ops: u64,
     /// How many acknowledged blobs were re-read after a heal, tallied across the
     /// whole sweep so a green run is not one where every put failed. Cumulative on
-    /// purpose, unlike the per-run expectations — which live in [`drive`] and must
+    /// purpose, unlike the per-run expectations, which live in [`drive`] and must
     /// not be workload state.
     ///
     /// [`drive`]: ClusterWorkload::drive
@@ -217,7 +217,7 @@ impl ClusterWorkload for BlobSwarm {
                             }
                             _ => {
                                 // Whatever the outcome, this namespace is now
-                                // undecidable — record that before the call, since
+                                // undecidable: record that before the call, since
                                 // a timed-out delete can still land afterwards.
                                 touched_by_delete
                                     .lock()
@@ -236,7 +236,7 @@ impl ClusterWorkload for BlobSwarm {
             // the drive read each blob back immediately after its put, while every
             // replica still held it. Heal and quiesce, give reconcile time to
             // restore the copies the crashes and partitions cost, then read every
-            // still-live blob again. `quiesce` matters as much as `heal` here — a
+            // still-live blob again. `quiesce` matters as much as `heal` here: a
             // wire still dropping frames keeps the owner set churning, and a `get`
             // that fails then says nothing about re-replication
             // (docs/simulation-testing.md, "Asserting at quiescence").
@@ -268,8 +268,8 @@ impl ClusterWorkload for BlobSwarm {
 
             // Stop the per-node reconcile loops (dropping the last store handle lets
             // each loop's `Weak` upgrade fail), then settle past the tier's internal
-            // timeout so every in-flight background ask — a straggler drain, a final
-            // reconcile probe — reaches its outcome before the run ends. Otherwise
+            // timeout so every in-flight background ask (a straggler drain, a final
+            // reconcile probe) reaches its outcome before the run ends. Otherwise
             // one could be pending at the invariant check (NoSilentLoss).
             drop(stores);
             nodes[0].clock().sleep(Duration::from_secs(4)).await;
@@ -280,12 +280,12 @@ impl ClusterWorkload for BlobSwarm {
     fn invariants(&self) -> Vec<Box<dyn Invariant>> {
         // The framework safety checkers, plus B7 (no resurrection). `no-silent-loss`
         // is dropped: it asserts no ask is outstanding at quiescence, but the tier
-        // legitimately keeps background asks in flight — a W-of-R put drains its
+        // legitimately keeps background asks in flight; a W-of-R put drains its
         // straggler stores off the latency path (spec §5.2), and the reconcile loop
         // probes owners continuously (spec §7). A node the nemesis crashes at the
         // run's end has such an ask frozen (a paused caller's timeout timer is
         // paused too); it would resolve on heal, so it is not a silent loss. The
-        // data path's no-loss is covered anyway — clients await every op to an
+        // data path's no-loss is covered anyway: clients await every op to an
         // outcome. (Entities's swarm keeps the checker because it issues no
         // continuous background asks.)
         let mut invariants: Vec<Box<dyn Invariant>> = default_invariants()
@@ -312,7 +312,7 @@ fn blob_invariants_hold_under_the_cluster_swarm() {
 
 /// **B6.** A blob whose `put` was acknowledged, in a namespace no client ever
 /// tried to delete, must read back through *another* node once the cluster has
-/// healed — the reconcile loop's whole job. Kept as its own test because the end
+/// healed: the reconcile loop's whole job. Kept as its own test because the end
 /// check needs a healed, quiesced cluster and a settle, which the other sweeps
 /// have no reason to pay for.
 #[test]
@@ -323,7 +323,7 @@ fn acknowledged_blobs_are_re_replicated_after_a_heal() {
     }
     assert!(
         workload.reread.load(Ordering::Relaxed) > 0,
-        "no acknowledged blob was ever re-read on a healed cluster — the B6 \
+        "no acknowledged blob was ever re-read on a healed cluster: the B6 \
          re-replication claim was asserted against nothing",
     );
 }
@@ -331,7 +331,7 @@ fn acknowledged_blobs_are_re_replicated_after_a_heal() {
 #[test]
 fn the_swarm_is_seed_reproducible() {
     // The determinism contract (spec §8): the same seed replays to a byte-identical
-    // event stream, even with real on-disk stores — reconcile enumerates blobs in a
+    // event stream, even with real on-disk stores; reconcile enumerates blobs in a
     // sorted, OS-independent order, so nothing path-dependent leaks into the stream.
     let workload = BlobSwarm::new(3, 2, 5);
     if let Err(divergence) = replay_cluster_swarm(&workload, slow_seeds(0..8)) {

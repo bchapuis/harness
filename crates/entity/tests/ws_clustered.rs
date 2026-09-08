@@ -4,7 +4,7 @@
 //! handle is readable from any node (E13), the workspace survives losing a
 //! minority of replicas (delta records ride the record quorum, E14), and
 //! **root-driven blob repair** (§7.10 B6) re-replicates a checkpoint chunk to a
-//! replica that missed its write — the consumer-level restoration of the
+//! replica that missed its write; the consumer-level restoration of the
 //! durability margin.
 
 use actor_serialization::JsonCodec;
@@ -78,7 +78,7 @@ impl<S: EntitySystem> Entity for Studio<S> {
     ) -> impl Future<Output = Result<(), BoxError>> + Send {
         // Off the activation latency path: sweep chunks a prior activation
         // orphaned and re-fan the live checkpoint chunks to the current
-        // replicas (§7.10 B6) — the same conduct as the agent runtime agent.
+        // replicas (§7.10 B6); the same conduct as the agent runtime agent.
         let blobs = ctx.blobs();
         let system = ctx.system().clone();
         async move {
@@ -128,7 +128,7 @@ impl<S: EntitySystem> EntityHandler<Put> for Studio<S> {
     }
 }
 
-/// Read a file straight off the materialized directory — a pure read (§7.5).
+/// Read a file straight off the materialized directory: a pure read (§7.5).
 #[derive(Clone, Serialize, Deserialize)]
 struct Get {
     path: String,
@@ -250,7 +250,7 @@ fn a_file_round_trips_through_the_cluster_from_any_node() {
                 })
                 .await
                 .unwrap();
-            // Read the same workspace from a different node — routes to the
+            // Read the same workspace from a different node: routes to the
             // leader's materialization (E13).
             let read = reader
                 .entity("ws/42")
@@ -310,7 +310,7 @@ fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
     // A replica partitioned during a checkpoint misses the chunk blobs; after
     // the partition heals, the entity's re-activation runs root-driven repair
     // (§7.10 B6), which re-fans the live checkpoint chunks to the current
-    // replicas — restoring the copy on the node that missed them. Verified by
+    // replicas, restoring the copy on the node that missed them. Verified by
     // the chunk's on-disk presence per node.
     let sim = Simulation::new(3);
     let dir = tempfile::tempdir().unwrap();
@@ -349,7 +349,7 @@ fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
 
     // The write goes to the majority side and acks at W=2 there; retries absorb
     // any routing churn the partition caused. The snapshot after the commit
-    // checkpoints the file into chunk blobs, also at W=2 — the victim has none.
+    // checkpoints the file into chunk blobs, also at W=2: the victim has none.
     drive(&sim, Duration::from_secs(30), {
         let g = hosts[0].clone();
         let sys = systems[0].clone();
@@ -380,7 +380,7 @@ fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
         "the partitioned victim must have missed the checkpoint chunk",
     );
 
-    // Heal; the idle entity hibernates, and the next access re-activates it —
+    // Heal; the idle entity hibernates, and the next access re-activates it,
     // whose on_activate repair re-fans the live chunk set (§7.10 B6).
     net.heal();
     sim.run_for(Duration::from_secs(5));

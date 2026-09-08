@@ -10,8 +10,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 /// A seeded PRNG implementing [`Entropy`]. Cloning yields another handle to the
-/// *same* stream, so every draw in a run — application randomness and the
-/// scheduler's own tie-breaks alike — comes from one deterministic sequence.
+/// *same* stream, so every draw in a run (application randomness and the
+/// scheduler's own tie-breaks alike) comes from one deterministic sequence.
 #[derive(Clone)]
 pub struct SimEntropy {
     rng: Arc<Mutex<ChaCha8Rng>>,

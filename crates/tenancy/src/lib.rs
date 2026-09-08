@@ -2,7 +2,7 @@
 //!
 //! The entity layer is deliberately **tenant-blind** (entity spec; `research/durable-objects.md`):
 //! its storage core knows only opaque entity names. Multi-tenancy is assembled *above*
-//! it — a naming convention (the principal id rides in an entity's key), a capability
+//! it: a naming convention (the principal id rides in an entity's key), a capability
 //! boundary at each consumer's authenticating edge, and an application-level
 //! **directory** that records which entities a principal owns. This crate is that
 //! directory.
@@ -15,14 +15,14 @@
 //!
 //! # Metadata is about the *relation*, not the entity
 //!
-//! [`Meta`] holds facts the directory itself owns — the display label the principal
+//! [`Meta`] holds facts the directory itself owns: the display label the principal
 //! chose, when it recorded the entity, caller-defined attributes. It MUST NOT mirror
 //! the target entity's live state (its balance, its status): that would be a second
 //! source of truth that drifts the moment the entity changes, reintroducing the
 //! cross-entity consistency entity keeps out (each entity is its own boundary, §2.2).
 //!
 //! Every field is **caller-supplied**, because the fold ([`Entity::apply`]) must be
-//! pure and deterministic — no clock, no entropy (entity §4.1). So `created_at` is
+//! pure and deterministic, no clock, no entropy (entity §4.1). So `created_at` is
 //! whatever epoch the caller passes at [`Record`] time; the directory never reads
 //! the clock.
 //!
@@ -30,10 +30,10 @@
 //!
 //! - **Not in entity.** This crate depends on entity's public API and never the
 //!   reverse; the storage core stays tenant-blind. The directory is an ordinary
-//!   entity — it introduces no new transport, journal, or consensus.
+//!   entity: it introduces no new transport, journal, or consensus.
 //! - **Not the auth boundary.** *Who* may read or mutate a principal's directory is
 //!   decided at each consumer's authenticating edge, where the principal is actually
-//!   known — never here. An `EntityRef<Directory>` is an in-cluster capability among
+//!   known, never here. An `EntityRef<Directory>` is an in-cluster capability among
 //!   trusted peers, not a tenant-safe token.
 //! - **Not a deleter of what it indexes.** The directory *forgets* names; it cannot
 //!   reach into another entity. Tearing a principal's entities down is driven by the
@@ -62,14 +62,14 @@ use entity::EntitySystem;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// The listing metadata of one owned entity — the attributes a listing page renders.
+/// The listing metadata of one owned entity: the attributes a listing page renders.
 ///
 /// Every field describes the *ownership entry*, is caller-supplied (the fold reads
-/// no clock, entity §4.1), and is the directory's own data — never a copy of the
+/// no clock, entity §4.1), and is the directory's own data, never a copy of the
 /// target entity's live state (see the crate docs).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meta {
-    /// A human display name for the entry — the listing's title column. Distinct
+    /// A human display name for the entry: the listing's title column. Distinct
     /// from the [`EntityName`] key, which is the durable address.
     pub label: Option<String>,
     /// When the principal recorded the entity, as a caller-supplied epoch (the unit
@@ -80,7 +80,7 @@ pub struct Meta {
     pub attrs: BTreeMap<String, String>,
 }
 
-/// One owned entity and its listing metadata — the unit a [`List`] returns.
+/// One owned entity and its listing metadata: the unit a [`List`] returns.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub name: EntityName,
@@ -104,7 +104,7 @@ pub enum Recorded {
 ///
 /// A `BTreeMap` keyed by [`EntityName`] keeps the fold deterministic (entity
 /// invariant E2) and, because a name sorts by `(entity_type, key)`, keeps each
-/// entity type's entries contiguous — so by-type queries are range scans (§
+/// entity type's entries contiguous, so by-type queries are range scans (§
 /// [`Ownership::entries_of_type`]).
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Ownership {
@@ -117,7 +117,7 @@ impl Ownership {
         self.entries.keys()
     }
 
-    /// The entries this principal owns — name and metadata — in stable order.
+    /// The entries this principal owns (name and metadata) in stable order.
     pub fn entries(&self) -> impl Iterator<Item = (&EntityName, &Meta)> {
         self.entries.iter()
     }
@@ -136,7 +136,7 @@ impl Ownership {
         self.entries_of_type(entity_type).map(|(n, _)| n)
     }
 
-    /// The entries this principal owns of one entity type — name and metadata — in
+    /// The entries this principal owns of one entity type (name and metadata) in
     /// stable key order. The same range scan as [`names_of_type`](Self::names_of_type).
     pub fn entries_of_type<'a>(
         &'a self,
@@ -189,7 +189,7 @@ pub enum Change {
     Cleared,
 }
 
-/// A principal's ownership index — one entity per principal, keyed by principal id.
+/// A principal's ownership index: one entity per principal, keyed by principal id.
 ///
 /// Generic over the hosting system so it runs on either durability tier (the
 /// single-node `Local` tier and the clustered `Quorum` tier, entity §7.4) and on
@@ -255,7 +255,7 @@ impl Message for Record {
 /// Drop `name` from the principal's index. Idempotent: forgetting an absent name
 /// commits nothing and replies `false`. Replies `true` when a name was removed.
 ///
-/// This forgets the *index entry* only — it does not delete the entity `name`
+/// This forgets the *index entry* only, it does not delete the entity `name`
 /// addresses (see the crate docs: physical teardown is the consumer's job).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Forget {
@@ -286,7 +286,7 @@ impl Message for Get {
     const MANIFEST: Manifest = Manifest::new("tenancy.Get");
 }
 
-/// Enumerate the entries the principal owns — name and metadata, enough to render a
+/// Enumerate the entries the principal owns: name and metadata, enough to render a
 /// listing without touching each entity. Emits no events; served locally from the
 /// activation (entity §7.5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -296,7 +296,7 @@ impl Message for List {
     const MANIFEST: Manifest = Manifest::new("tenancy.List");
 }
 
-/// Enumerate the entries the principal owns of one entity type — the query for "all
+/// Enumerate the entries the principal owns of one entity type: the query for "all
 /// my sessions" when a principal holds several entities per type. A range scan, not a
 /// full scan. Emits no events.
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -2,8 +2,8 @@
 //!
 //! The three benchmarks here split the log's work along the line that matters when
 //! reading a result: [`checksum`](wal::checksum) and the replay are pure CPU, while an
-//! append is dominated by the fsync it ends with. That fsync is the point of the call —
-//! it is not overhead to be benchmarked away — so `append` is measured *with* it, and the
+//! append is dominated by the fsync it ends with. That fsync is the point of the call
+//! (it is not overhead to be benchmarked away), so `append` is measured *with* it, and the
 //! framing work underneath is watched through the allocation counter instead, which the
 //! fsync cannot drown out. A framing change that removes allocations shows up in
 //! `alloc` even on a machine whose fsync costs a millisecond.
@@ -54,7 +54,7 @@ const RECORDS: compat::Window = compat::Window::at("bench.records", 1);
 
 /// The sidecar digest, at the width sidecars actually are.
 ///
-/// [`wal::checksum`](wal::checksum) is frozen — a sidecar has no header naming which
+/// [`wal::checksum`](wal::checksum) is frozen: a sidecar has no header naming which
 /// digest wrote it, so its value cannot change without every existing one reading back as
 /// missing. It is benchmarked at eight bytes because that is the only size anything calls
 /// it with (a fence term, a seal bound, a tombstone timestamp), and at that width a
@@ -71,7 +71,7 @@ fn sidecar_checksum(bencher: Bencher) {
         .bench(|| wal::checksum(black_box(&bytes)));
 }
 
-/// One `append_batch` — framing plus one write plus one fsync — against a real file.
+/// One `append_batch` (framing plus one write plus one fsync) against a real file.
 ///
 /// The fsync is included because it is what the call promises; the timing is therefore a
 /// property of the filesystem as much as of this crate, and the number to watch across a
@@ -90,7 +90,7 @@ fn append(bencher: Bencher, records: usize) {
 
 /// Recovery: read the file, verify every frame's checksum, and decode every record.
 ///
-/// No fsync is on this path, so the timing is the checksum and postcard decode directly —
+/// No fsync is on this path, so the timing is the checksum and postcard decode directly,
 /// and it is the latency a node pays before its first entity can serve a request.
 #[divan::bench(args = [1_000, 10_000, 100_000])]
 fn replay(bencher: Bencher, records: usize) {

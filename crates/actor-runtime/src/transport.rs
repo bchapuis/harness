@@ -71,13 +71,13 @@ pub use actor_cluster::WIRE;
 ///
 /// The one place a node id becomes a port. A deployment configures its roster as
 /// hosts plus a single port base rather than as a list of addresses, so every
-/// process that stands up a [`TcpTransport`] — a voter, a non-voting client
-/// gateway — has to derive the same port from the same id. A second copy of this
+/// process that stands up a [`TcpTransport`] (a voter, a non-voting client
+/// gateway) has to derive the same port from the same id. A second copy of this
 /// arithmetic is how one of them ends up dialing a port nobody is listening on,
 /// with a plain `Unreachable` as the only symptom.
 ///
-/// `host` may be an IP literal, used as-is, or a name — a container or pod DNS
-/// name like `agent-0.agent` — resolved through the system resolver, which is
+/// `host` may be an IP literal, used as-is, or a name: a container or pod DNS
+/// name like `agent-0.agent`; resolved through the system resolver, which is
 /// what lets a roster span machines instead of loopback.
 ///
 /// An id whose port would not fit is an error, not a panic: ids reach here from an
@@ -121,7 +121,7 @@ pub struct TlsConfig {
 
 impl TlsConfig {
     /// Assemble the mutual-TLS material from one CA, this node's leaf `cert`
-    /// and `key`, and the cluster's shared `server_name` — the one rustls
+    /// and `key`, and the cluster's shared `server_name`, the one rustls
     /// ritual every deployment would otherwise copy: the CA becomes both the
     /// client-auth verifier and the dial-side root store, and the leaf serves
     /// both directions.
@@ -150,7 +150,7 @@ impl TlsConfig {
     }
 }
 
-/// The erased connection stream — TCP, or TLS over it — so the dial and accept
+/// The erased connection stream (TCP, or TLS over it), so the dial and accept
 /// sequences are written once per side rather than once per encryption mode.
 trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
@@ -201,11 +201,11 @@ pub struct TcpConfig {
 
 impl TcpConfig {
     /// A config over a deployment's genuine choices, with everything that has a
-    /// sane default — the timeouts, the queue capacity, the gossip cadence, no
-    /// allowlist — filled in. The required arguments are the ones no default may
+    /// sane default (the timeouts, the queue capacity, the gossip cadence, no
+    /// allowlist) filled in. The required arguments are the ones no default may
     /// choose: identity and addressing, the codec both ends must agree on, and
     /// the two security decisions (the secret, and [`Encryption`], which
-    /// deliberately has no default — see the field's docs). The fields stay
+    /// deliberately has no default; see the field's docs). The fields stay
     /// public, so a caller that needs a different timing overrides the one field
     /// it means to change.
     pub fn new(
@@ -244,7 +244,7 @@ pub enum Encryption {
     /// Mutual TLS: both ends present certificates and the association runs
     /// encrypted. The production choice for any link that leaves a trusted network.
     MutualTls(Box<TlsConfig>),
-    /// Plaintext, on a network the operator asserts is trusted — loopback, a private
+    /// Plaintext, on a network the operator asserts is trusted: loopback, a private
     /// cluster network, or a test. The cluster secret is exposed to anyone who can
     /// see the traffic.
     PlaintextTrusted,
@@ -273,7 +273,7 @@ struct Shared {
 ///
 /// The two travel together because they have one lifetime. A revision is what
 /// two ends agreed on over *this* connection, so when the connection is
-/// deregistered — peer restarted, socket died, queue saturated — the revision
+/// deregistered (peer restarted, socket died, queue saturated) the revision
 /// goes with it and [`peer_version`](Transport::peer_version) falls back to
 /// `None` rather than answering from a peer that may since have come back on a
 /// narrower window.
@@ -305,7 +305,7 @@ impl Shared {
     }
 
     /// Record `node`'s address in the [`Book`] (which ignores claims about
-    /// ourselves — our advertised address is authoritative).
+    /// ourselves: our advertised address is authoritative).
     fn learn(&self, node: NodeId, addr: SocketAddr) {
         self.book
             .lock()
@@ -517,7 +517,7 @@ impl Transport for TcpTransport {
     /// (spec §7.1, compatibility spec §3.1).
     ///
     /// `None` until that connection exists, which for a peer never yet sent to
-    /// means the first [`send`](Transport::send) — the dial *is* the handshake.
+    /// means the first [`send`](Transport::send): the dial *is* the handshake.
     /// Deliberately not answered from the peer's *accepted* connection: that is a
     /// separate, receive-only association (§7), and its revision governs what the
     /// peer may write to us, not what we may write to it.
@@ -626,7 +626,7 @@ async fn dialed_connection<S>(
         _ = shutdown.changed() => {} // node stopping (spec §9.3)
     }
 
-    // Deregister so the next send re-dials — and so the revision this
+    // Deregister so the next send re-dials, and so the revision this
     // association settled on stops being served as the peer's, since the
     // re-dial negotiates its own. `evict_if_same` leaves a successor alone.
     shared
@@ -671,7 +671,7 @@ async fn deliver(shared: &Arc<Shared>, peer: NodeId, msg: Wire) -> bool {
 }
 
 /// Dialer side of the handshake: announce ourselves, then read and validate the
-/// peer's `Hello`, confirming it is the node we meant to reach — and learn its
+/// peer's `Hello`, confirming it is the node we meant to reach, and learn its
 /// advertised address (spec §9.3). Returns the stream and the revision the two
 /// ends settled on, which becomes this association's for as long as it lives.
 async fn client_handshake<S>(
@@ -696,8 +696,8 @@ where
 /// advertised address (spec §9.3).
 ///
 /// The negotiated revision is dropped here, and only here. An accepted connection
-/// is receive-only (§7) — replies and gossip go back over this node's own dialed
-/// connection — so there is nothing on it to gate, and the revision that governs
+/// is receive-only (§7) (replies and gossip go back over this node's own dialed
+/// connection), so there is nothing on it to gate, and the revision that governs
 /// what we write to this peer is the one that connection settles for itself.
 async fn server_handshake<S>(mut stream: S, shared: &Arc<Shared>) -> io::Result<(S, NodeId)>
 where
@@ -752,7 +752,7 @@ mod tests {
     use super::*;
     use compat::Accepted;
 
-    /// A `Shared` with no listener and no tasks — enough to exercise
+    /// A `Shared` with no listener and no tasks: enough to exercise
     /// [`Shared::accept_hello`]'s policy, which reads only the config.
     fn shared(secret: &str) -> Shared {
         Shared {
@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn a_peer_sharing_a_wire_revision_associates() {
         let shared = shared("secret");
-        // Our own range, and a peer whose range is strictly wider on both sides —
+        // Our own range, and a peer whose range is strictly wider on both sides:
         // the rolling-upgrade case (spec §7.1).
         for accepts in [WIRE.accepted(), Accepted::new(1, 9)] {
             assert_eq!(

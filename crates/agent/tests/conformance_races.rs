@@ -4,9 +4,9 @@
 //! stay correct under any interleaving (§3.2). Two races regress here:
 //!
 //! 1. A `Submit` processed between a run's terminal commit and its post-end
-//!    `Advance` starts the next run directly — it must not inherit the ended
+//!    `Advance` starts the next run directly: it must not inherit the ended
 //!    run's per-run flags (stale `launched`/`resolved` call ids suppress the
-//!    new run's calls: synthesized ids repeat across runs).
+//!    new run's calls, because synthesized ids repeat across runs).
 //! 2. A straggler `ModelDone` of an ended run must not release the successor
 //!    run's model-call launch claim, and a superseded call's response must
 //!    never journal a second `ModelResponse` for a step (§3.1 step 2, §9.1 item 4).
@@ -59,7 +59,7 @@ fn probing_kind() -> Kinds {
 
 /// One id-less tool call per turn, then a final message: the agent runtime
 /// synthesizes `call-{step}-{i}` ids, so every run's first call is
-/// `call-1-0` — consecutive runs collide exactly when stale per-run state
+/// `call-1-0`; consecutive runs collide exactly when stale per-run state
 /// leaks across the run boundary.
 fn probing_script() -> ScriptedModel {
     ScriptedModel::new(|req| match req.transcript.last() {
@@ -70,15 +70,15 @@ fn probing_script() -> ScriptedModel {
 
 #[test]
 fn a_submit_racing_the_post_end_advance_starts_clean() {
-    // Run A takes two 10s model calls, so its final `ModelDone` — the message
-    // whose processing commits `RunEnded` and launches the post-end `Advance`
-    // — lands at exactly t=20. Submitting B at t=20 puts three enqueues at one
+    // Run A takes two 10s model calls, so its final `ModelDone` (the message
+    // whose processing commits `RunEnded` and launches the post-end `Advance`)
+    // lands at exactly t=20. Submitting B at t=20 puts three enqueues at one
     // virtual instant (A's `ModelDone`, B's `Submit`, the `Advance`), and the
     // executor's seed-randomized scheduling explores their orderings. On the
     // interleaving where B's `Submit` is processed after the terminal commit
     // but before the `Advance`, the turn starts directly and must not inherit
     // the ended run's per-run flags: B's synthesized `call-1-0` collides with
-    // A's resolved `call-1-0`, and an unswept loop skips the call forever —
+    // A's resolved `call-1-0`, and an unswept loop skips the call forever;
     // the run hangs and the prompt times out.
     scenario_sweep(
         "agent-races/submit-post-end",
@@ -131,7 +131,7 @@ fn a_straggler_model_done_never_unlocks_a_second_call() {
     //   t=1   run A is cancelled; the call keeps flying (§9.2 item 4).
     //   t=2   run B starts; its own model call flies until t=12.
     //   t=9   the first wait on B lapses (7s deadline).
-    //   t=10  run A's straggler `ModelDone` lands — after B's call launched,
+    //   t=10  run A's straggler `ModelDone` lands, after B's call launched,
     //         before B's response: it must not release B's launch claim.
     //   t=11  the re-attach nudges an `Advance`: a loop that let the straggler
     //         release the claim issues a second concurrent call for B here, and

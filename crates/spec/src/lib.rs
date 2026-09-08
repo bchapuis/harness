@@ -2,23 +2,23 @@
 //!
 //! `docs/` describes a tree that keeps changing under it. Prose does not fail on
 //! its own, so a description that has come loose reads exactly like one that has
-//! not — the edit that broke it was local and the sentences it broke were not.
+//! not: the edit that broke it was local and the sentences it broke were not.
 //! This crate reads the specifications the way a compiler reads a source file and
 //! reports the places they no longer describe anything, one module per way the
 //! prose comes loose:
 //!
-//! - [`citations`] — a `§` reference resolves to a section that exists. `entity
+//! - [`citations`]: a `§` reference resolves to a section that exists. `entity
 //!   §7.12` after §7 is renumbered is the ordinary break, and the specs are
 //!   layered so that each cites the ones beneath it, which makes the citation the
 //!   load-bearing part of the layering rather than a convenience.
-//! - [`identifiers`] — a backticked `EntityHandler` or `load_snapshot()` still
+//! - [`identifiers`]: a backticked `EntityHandler` or `load_snapshot()` still
 //!   names something the tree declares. The same failure one level down: a rename
 //!   moves the code and leaves the prose behind.
-//! - [`catalogue`] — a spec's invariant table and the Rust copy beside the suite
+//! - [`catalogue`]: a spec's invariant table and the Rust copy beside the suite
 //!   that verifies it agree on which invariants exist, where they are defined, and
 //!   what verifies them. Two hand-maintained copies of one fact, previously
 //!   compared by nothing.
-//! - [`ranges`] — a spec naming a sibling's catalogue by its extent, `E1–E20`,
+//! - [`ranges`]: a spec naming a sibling's catalogue by its extent, `E1–E20`,
 //!   still names the whole of it. The third way one document falls behind another:
 //!   the citation resolves, the identifiers resolve, and the extent is a release
 //!   out of date because the catalogue it names grew a row.
@@ -98,7 +98,7 @@ pub struct DocSpec {
 /// of the prose, and the specs the catalogues live in.
 ///
 /// A spec absent from this table is checked by nothing, so `tests/citations.rs`
-/// asserts the table covers all of `docs/` — adding a spec without registering it
+/// asserts the table covers all of `docs/`, adding a spec without registering it
 /// fails the build, the way adding an invariant without cataloguing it does.
 pub const DOCUMENTS: &[DocSpec] = &[
     DocSpec {
@@ -172,7 +172,7 @@ pub const DOCUMENTS: &[DocSpec] = &[
     },
     // Numbers nothing of its own, and is written against the actor spec's §16–§18
     // (see its opening paragraph): every bare `§N` in it is an actor citation. It
-    // cites entity as well, and says so with a prefix each time — this list stays
+    // cites entity as well, and says so with a prefix each time: this list stays
     // one document long so that remains true rather than becoming a convention a
     // reader has to infer per sentence.
     DocSpec {

@@ -2,7 +2,7 @@
 //! entity hosted on a real 3-node `ClusterSystem`, sessions placed by entity's
 //! shard map and driven from several nodes. A session activates on its shard's
 //! leader (§7.2); a re-submitted `TurnId` never starts a second run (A7); the
-//! entity's single-writer fence (E1) keeps each transcript one total order — the
+//! entity's single-writer fence (E1) keeps each transcript one total order: the
 //! harness builds no fence of its own (§6.2). Failover after a leader crash is
 //! the entity's rehydration (§7.5), exercised here by crashing a node and
 //! re-submitting until the run completes on the new leader.
@@ -155,7 +155,7 @@ fn sessions_run_once_across_a_converged_cluster() {
         assert_eq!(completed, "done");
     }
 
-    // Each session ran exactly once — one submitted turn, one terminal outcome —
+    // Each session ran exactly once (one submitted turn, one terminal outcome)
     // on the entity's fence (A7, A3, E1).
     for i in 0..SESSIONS {
         let harness = harnesses[i % harnesses.len()].clone();
@@ -191,7 +191,7 @@ fn a_run_resumes_on_a_new_leader_after_a_crash() {
 
     // Run a session to completion, then crash the node that led its shard. A
     // re-submission of the same TurnId reactivates the session on the new leader
-    // (rehydrate + fold, §7.5) and returns the recorded outcome (A7) — the run
+    // (rehydrate + fold, §7.5) and returns the recorded outcome (A7): the run
     // is not re-executed.
     let first = drive(&sim, Duration::from_secs(30), {
         let session = harnesses[0]
@@ -352,8 +352,8 @@ fn await_journal(
 
 /// The R1 crash window (§9.2, A5): `RunEnded { Cancelled }` commits, and the
 /// leader crashes before the propagating send reaches the recorded child. The
-/// owed propagation is a fold fact (`cancels_owed`), so the next contact —
-/// a re-sent `Cancel`, the §7.5 resume trigger — re-derives it on the new
+/// owed propagation is a fold fact (`cancels_owed`), so the next contact:
+/// a re-sent `Cancel`, the §7.5 resume trigger; re-derives it on the new
 /// leader and drives it to the child, which ends `Cancelled`; the delivery
 /// then journals `CancelDelivered`, retiring the debt.
 #[test]
@@ -428,11 +428,11 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
 
     // Hold the propagation window open: isolate the child's leader so the
     // propagating send cannot land, cancel the parent (its `RunEnded {
-    // Cancelled }` commits on the majority side — the ack is the output
+    // Cancelled }` commits on the majority side; the ack is the output
     // gate's release), and crash the parent's leader before the child shard
     // could re-elect a reachable leader (the ack arrives well inside the
     // 500ms election timeout). The crash therefore destroys the send after
-    // the terminal record committed — exactly the R1 window.
+    // the terminal record committed: exactly the R1 window.
     let leader = last_activation(&sink, "root-p").expect("parent activated");
     let child_leader = last_activation(&sink, child_session.as_str()).expect("child activated");
     assert_ne!(
@@ -474,7 +474,7 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
     net.heal();
 
     // Let the shard groups re-elect, then check the window is real: the
-    // child's run must still be live — the crash destroyed the send, and with
+    // child's run must still be live; the crash destroyed the send, and with
     // it the old design's only copy of the propagation.
     sim.run_for(Duration::from_secs(3));
     let child_before = await_journal(
@@ -549,7 +549,7 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
 /// (`TurnSubmitted` enqueues, §7.3), so a leader crash between the ack and the
 /// run start loses nothing. The sharpest form is asserted here: after the
 /// crash, only the *first* turn's caller ever re-contacts the session, yet the
-/// queued second turn still runs to completion — any contact drives the
+/// queued second turn still runs to completion; any contact drives the
 /// dispatcher, which starts the queue head once no run is live (§7.5).
 #[test]
 fn an_acked_queued_turn_survives_a_leader_crash_and_runs_on_resume() {
@@ -585,7 +585,7 @@ fn an_acked_queued_turn_survives_a_leader_crash_and_runs_on_resume() {
     sim.run_for(Duration::from_secs(3)); // elect each shard group's leader
 
     // t-1 starts its 600s model call; t-2 is then accepted behind it. Both
-    // submitters fire and forget — neither returns after the crash.
+    // submitters fire and forget: neither returns after the crash.
     for turn in ["t-1", "t-2"] {
         let session = harnesses[0]
             .session("worker", SessionId::new("s-queued"))
@@ -702,8 +702,8 @@ fn assert_invariants(events: &[Event]) {
 /// Regression (the standalone-harness `NotLeader` livelock): a kind carries a
 /// `EntityConfig`, so each kind becomes a `Quorum`-tier entity type that needs the
 /// system's Raft engine to elect a shard leader. Building the agent runtime on a
-/// cluster left in the default `Static` membership mode — no `.with_leader(...)`,
-/// hence no engine — must panic at construction (entity's guard), not hand back
+/// cluster left in the default `Static` membership mode, no `.with_leader(...)`,
+/// hence no engine: must panic at construction (entity's guard), not hand back
 /// a harness whose every turn would loop on `NotLeader`. This is the deployment
 /// layer inheriting the guard `tests/requires_consensus.rs` checks in entity.
 #[test]

@@ -4,7 +4,7 @@
 //! require that the two agree on **every return value** at every step.
 //!
 //! `MemoryEntityStore` is the reference implementation, so this is the check that the
-//! durable store means the same thing the reference does — including across a
+//! durable store means the same thing the reference does, including across a
 //! restart, which is the half no in-process test reaches. It exists to make a
 //! storage-engine replacement reviewable: a rewrite that preserves the seam's meaning
 //! passes unchanged, and one that does not fails here rather than in a swarm suite
@@ -16,7 +16,7 @@
 //! divergence there is a divergence in whether a write committed. Comparing reads
 //! alone cannot see it.
 //!
-//! This drives the store directly and synchronously — no simulation, no `run_swarm`,
+//! This drives the store directly and synchronously, no simulation, no `run_swarm`,
 //! so no `*swarm.rs` naming obligation and no corpus key (simulation-testing §4).
 
 use actor_serialization::Codec;
@@ -47,7 +47,7 @@ const STEPS: usize = 80;
 /// suspected divergence, at roughly half a second per seed.
 const SEEDS: u64 = 100;
 
-/// splitmix64 — a seeded stream in twenty lines, so this suite needs no `rand`
+/// splitmix64: a seeded stream in twenty lines, so this suite needs no `rand`
 /// dependency and replays identically from a seed.
 struct Rng(u64);
 
@@ -142,7 +142,7 @@ enum Op {
 }
 
 /// Draw an operation. `head` and `base` come from the mirror, so `after` can be aimed
-/// at the boundaries where the two stores could plausibly disagree — the current
+/// at the boundaries where the two stores could plausibly disagree: the current
 /// head (the ordinary append), one below it (a re-delivery, which must be idempotent
 /// per slot), one above (a gap), zero, and just under the compacted base (a write the
 /// snapshot already subsumes).
@@ -381,7 +381,7 @@ fn compare_all(
         // `shard_bytes` is an estimate by contract (`EntityStore::shard_bytes`), and
         // the two stores measure different things: the mirror sums payload lengths,
         // the file store sums file sizes, which carry framing and a log header. So
-        // the assertion is the relation that must hold rather than equality — the
+        // the assertion is the relation that must hold rather than equality: the
         // durable footprint is never below the bytes it stores. Do not strengthen
         // this to `assert_eq!`; it would fail on the header alone.
         assert!(
@@ -441,7 +441,7 @@ fn file_store_matches_memory_store_under_a_seeded_op_stream() {
 /// Named regression for the first divergence the seeded stream found.
 ///
 /// The manifest is append-only, so `remove_entity` leaves the entity's segment id
-/// assigned — and `segment_id` kept answering with it, so opening the segment to
+/// assigned, and `segment_id` kept answering with it, so opening the segment to
 /// serve a *read* re-created the file that removal had just deleted. Nothing looked
 /// wrong at the read (the reply was still empty), but the entity came back in
 /// `entities`, and the split driver's GC enumerates that list.
@@ -483,7 +483,7 @@ fn a_read_of_a_removed_entity_does_not_resurrect_it() {
 /// Named regression for the second divergence.
 ///
 /// `truncate` created the entity's segment before dropping a tail it did not have, so
-/// rolling back an append that never landed locally *created* the entity — which then
+/// rolling back an append that never landed locally *created* the entity, which then
 /// enumerated and migrated as if it held data.
 #[test]
 fn truncating_an_unseen_entity_does_not_create_it() {
@@ -503,13 +503,13 @@ fn truncating_an_unseen_entity_does_not_create_it() {
 /// two.
 ///
 /// A blob is named by its content, so two puts of the same bytes are two puts at one
-/// path — and once the disk facet started pipelining its block puts, that stopped
+/// path, and once the disk facet started pipelining its block puts, that stopped
 /// being rare. An image of identical blocks (an all-zero base image is the ordinary
 /// case, not a contrived one) hashes every block to a single id and issues a wave of
 /// them at once. They collided on a shared scratch file: one truncated another's
 /// half-written bytes, and every rename after the first found the path already gone.
 /// `put_blob` reports that as `Failed`, which poisons the store store-wide and
-/// one-way — so a create of a zero-filled image left a live node refusing every
+/// one-way, so a create of a zero-filled image left a live node refusing every
 /// subsequent write, for the rest of its life.
 ///
 /// Asserting on `failure()` and not just the acks is the point: a store that answered
@@ -521,7 +521,7 @@ fn concurrent_puts_of_one_blob_neither_fail_nor_poison_the_store() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = FileEntityStore::open(dir.path(), JsonCodec.name()).expect("open");
     let g = entity(1);
-    // A block's worth of one repeated byte — the zero-filled image, in miniature.
+    // A block's worth of one repeated byte: the zero-filled image, in miniature.
     let bytes = vec![0u8; 256 * 1024];
     let id = BlobId::of(&bytes);
 
@@ -543,7 +543,7 @@ fn concurrent_puts_of_one_blob_neither_fail_nor_poison_the_store() {
         Some(bytes),
         "the blob that landed is not the bytes every putter wrote"
     );
-    // The store still takes writes — what poisoning would have taken away.
+    // The store still takes writes: what poisoning would have taken away.
     assert_eq!(
         store.put_blob(0, &g, BlobId::of(b"after"), b"after".to_vec()),
         entity::BlobAck::Stored,

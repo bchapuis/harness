@@ -8,7 +8,7 @@
 //!
 //! **What is scripted.** Every effect is a deterministic function of its key
 //! (§10): a seeded latency, a failure on every fourth key, and a recovery policy
-//! that alternates `Reexecute` and `Interrupt` — so the sweep drives both
+//! that alternates `Reexecute` and `Interrupt`, so the sweep drives both
 //! orphaned resolutions whenever the nemesis kills a leader mid-effect.
 //!
 //! **What re-activates an entity.** Resumption is caller-driven: an entity whose
@@ -19,8 +19,8 @@
 //! and an observation. A poll the faults refuse is simply not an observation.
 //!
 //! **What it cannot promise per seed.** Whether a leader dies with an effect in
-//! flight is the nemesis's to decide, so the coverage claims — some entity finished,
-//! some effect was relaunched across activations, every fault type fired — sit on
+//! flight is the nemesis's to decide, so the coverage claims (some entity finished,
+//! some effect was relaunched across activations, every fault type fired) sit on
 //! their own `coverage_seeds` sweep, which never narrows, rather than on the
 //! invariant sweep (docs/simulation-testing.md, *Adding a sweep*).
 
@@ -93,7 +93,7 @@ fn outcome(key: TaskId) -> Outcome {
 struct Reached {
     /// Entities observed `finished` by a poll, across the sweep.
     finished: Arc<AtomicUsize>,
-    /// Keys whose effect ran on more than one activation, across the sweep — the
+    /// Keys whose effect ran on more than one activation, across the sweep: the
     /// orphaned chain (§4.4) the nemesis has to produce for W6 to be tested at all.
     relaunched: Arc<AtomicUsize>,
 }
@@ -272,7 +272,7 @@ fn the_workflow_swarm_reaches_a_finish_a_relaunch_and_every_fault() {
 }
 
 /// The determinism contract over this workload (actor §18.1): the same seed
-/// twice, byte-identical event streams — workflow events included (§9).
+/// twice, byte-identical event streams; workflow events included (§9).
 #[test]
 fn the_workflow_swarm_replays_identically() {
     if let Err(divergence) = replay_cluster_swarm(&workload(), sweep_seeds(0..8)) {

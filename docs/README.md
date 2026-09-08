@@ -35,42 +35,42 @@ from the activation rather than the fold and so must move ahead of the tick befo
 
 One layer has a design note rather than a spec:
 
-- [multi-tenant-edge](multi-tenant-edge.md) — the gateway as a cluster client:
+- [multi-tenant-edge](multi-tenant-edge.md), the gateway as a cluster client:
   bearer-token identity, principal-scoped session keys, the tenancy directory,
   and the trust boundary.
 
 ## Assumptions
 
-- [hardware-envelope](hardware-envelope.md) — the machine the specs are written
+- [hardware-envelope](hardware-envelope.md), the machine the specs are written
   against: a rented dedicated server, local NVMe, 128–256 GB, and a **1 Gbps
   uplink** that is the binding constraint on everything. Carries a 2026 latency
   table (LLM rows included, since the session's clock is the model's), the four
   inversions that follow from it, and the rules a review applies with them.
   Cited as `hw §N` wherever a performance choice rests on it. Read it before
-  arguing that a technique from the slow-disk era belongs here — or that a
+  arguing that a technique from the slow-disk era belongs here, or that a
   bound does not.
 
 ## Guides
 
-- [standalone-deployment](standalone-deployment.md) — install
+- [standalone-deployment](standalone-deployment.md): install
   `agent-standalone`, run a three-node cluster with the gateway in front,
   walk the failure drill, and read the full flag reference.
-- [k8s/README](../k8s/README.md) — the same cluster as a Kubernetes
+- [k8s/README](../k8s/README.md): the same cluster as a Kubernetes
   StatefulSet.
-- [deploy/systemd/README](../deploy/systemd/README.md) — the same cluster on bare
+- [deploy/systemd/README](../deploy/systemd/README.md), the same cluster on bare
   metal: systemd units, the on-disk layout and which parts of it are rebuildable,
   the rolling restart, and how to replace a node.
 
 ## Testing
 
-- [`../crates/spec/`](../crates/spec/) — the drift gate for this directory.
+- [`../crates/spec/`](../crates/spec/): the drift gate for this directory.
   The layering above is made of citations, two thousand-odd of them, and
   `cargo test -p spec` resolves every one against a section that exists. It is
   the `docs/` analogue of a crate's `conformance_catalogue.rs`, and it is there
   for the same reason: renumbering a section is a local edit whose citations are
   not local, so prose that points at nothing fails nothing. A document missing
   from its `DOCUMENTS` table is checked by nothing, so a new spec is registered
-  there — with the convention its own unprefixed `§N` follows — as part of
+  there (with the convention its own unprefixed `§N` follows) as part of
   adding it.
 
   It also reads each spec's **invariant catalogue**, so the table a reader trusts
@@ -78,18 +78,18 @@ One layer has a design note rather than a spec:
   maintained twice. Each crate's `conformance_catalogue.rs` runs the comparison,
   because a Rust catalogue lives in a `tests/` module only its own crate can
   import. All nine are compared on which invariants exist and which sections
-  define them, and eight on their "Verified by" column as well — by file for
+  define them, and eight on their "Verified by" column as well: by file for
   entity, utilities, workflow, agent, and sandbox, by test function for wal, blob,
   and machine, whichever the spec itself names. The one that is not says why at
   the site: the core catalogue is a numbered list and names no suites at all
   (actor §18.6 carries that).
 
   Its third gate is the **ranges**. A spec names a sibling's catalogue by its
-  extent — `entity §N` (its invariants as `E1–E21`) — and that is a citation like
+  extent, as in `entity §N` (its invariants as `E1–E21`), and that is a citation like
   any other, pointing at a catalogue and saying how far it runs. Two checks pin
   it from both sides: no range reaches past the catalogue it names, and across
   the whole set some range reaches its last invariant. Neither is the obvious
-  rule, and the module says why both obvious ones are wrong — `A1–A8` spans an A2
+  rule, and the module says why both obvious ones are wrong: `A1–A8` spans an A2
   that agent §11 deliberately retires, and `M1–M3` is a true claim about three
   of six. The pair is what catches a catalogue that *grows*: `E21` was added at
   entity §7.16 and six citations across four documents went on describing
@@ -97,34 +97,34 @@ One layer has a design note rather than a spec:
   other gate.
 
   Its fourth gate is the **identifiers**. These documents are written in the
-  code's vocabulary — `EntityHandler`, `ReadReply::head`, `load_snapshot()` — and
+  code's vocabulary (`EntityHandler`, `ReadReply::head`, `load_snapshot()`), and
   a rename moves the code while the prose keeps the old word. Every backticked
   token of a shape the tree would own is checked against an index of every name
   declared under `crates/`. The index is a scan rather than rustdoc, because
   rustdoc's JSON needs nightly and the toolchain is pinned; it knows a name
   exists somewhere, not where or what it is, which is the whole of what the
-  check claims. Names that are right and absent — std's, another system's, a
-  table column, and the ones a spec writes to say the tree has no such thing —
+  check claims. Names that are right and absent (std's, another system's, a
+  table column, and the ones a spec writes to say the tree has no such thing)
   are listed with their reasons, and the list is checked in that direction too:
   an exemption the tree starts defining fails the build, so it cannot outlive
   its reason.
-- [simulation-testing](simulation-testing.md) — the whole verification story:
+- [simulation-testing](simulation-testing.md), the whole verification story:
   why the simulator is owned rather than imported, the primitives, the
   strategies, the four shapes a test can take, seed sizing, the regression
   corpus, and the gaps the sweeps do not yet reach.
-- [`../scripts/bench-machine-cost.sh`](../scripts/bench-machine-cost.sh) — the wall-clock counterpart, where the
+- [`../scripts/bench-machine-cost.sh`](../scripts/bench-machine-cost.sh), the wall-clock counterpart, where the
   simulator's virtual time cannot price anything: it boots a real cluster and times
   two machine creates against it, the first paying every cold-start cost and the
   second pricing the path. Its header carries the figures it last produced, and
   several code comments cite it as the source of an end-to-end number. Read cold and
   warm as two different measurements, and read per-block cost as the *slope* between
-  two image sizes — a total divided by its block count measures the intercept.
+  two image sizes; a total divided by its block count measures the intercept.
 
 ## Unfinished work
 
 The tree carries no TODO backlog: a sweep of `crates/` finds zero `todo!()` and
 zero `unimplemented!()`, and every hit for `#[ignore]` or `TODO`/`FIXME`/`HACK`
-is in the `spec` crate, where the word is the subject rather than the marker —
+is in the `spec` crate, where the word is the subject rather than the marker:
 two `#[ignore = "diagnostic"]` dumps that print what a parser saw when one is
 being changed, and the identifier gate's own list of words that look like names
 the tree would own and are not. That is deliberate. Unfinished work is
@@ -133,7 +133,7 @@ blast radius, rather than dropped as a comment beside the code that would have
 to change. The consequence is that "what is left here?" cannot be answered by
 grepping the code, and is answered by reading these sections instead:
 
-- [compatibility §5](compatibility-spec.md) — the format machinery that waits on
+- [compatibility §5](compatibility-spec.md), the format machinery that waits on
   a boundary having a second revision. Every format in the tree is stamped, and
   no boundary is mid-flight; §4 records what was built and pulled back, and what
   would reopen it.
@@ -142,11 +142,11 @@ grepping the code, and is answered by reading these sections instead:
   §13](agent-spec.md), [sandbox §7](sandbox-spec.md),
   [cluster-utilities §7](cluster-utilities-spec.md), [wal §8](wal-spec.md).
 - [simulation-testing](simulation-testing.md), *Where the sweeps do not yet
-  reach* — what the specs mandate that no sweep asserts.
+  reach*: what the specs mandate that no sweep asserts.
 
 ## Elsewhere in the tree
 
-- **The clients** — the two front ends on the gateway's HTTP/SSE edge, neither
+- **The clients**, the two front ends on the gateway's HTTP/SSE edge, neither
   of them part of the cluster:
   [`../crates/agent-tui/`](../crates/agent-tui/), a terminal chat UI, and
   [`../clients/agent-vscode/`](../clients/agent-vscode/), a VS Code
@@ -154,8 +154,8 @@ grepping the code, and is answered by reading these sections instead:
   carries its own README. Neither has a spec: they hold no durable state and
   define no invariant, so what binds them is the gateway's surface, described in
   [multi-tenant-edge](multi-tenant-edge.md).
-- [../design-principles.md](../design-principles.md) — the design rubric the
+- [../design-principles.md](../design-principles.md), the design rubric the
   specs were written against; defaults for writing and reviewing code here.
-- [../research/](../research/) — background notes the specs cite as `DO §N`:
+- [../research/](../research/), background notes the specs cite as `DO §N`:
   [durable-objects](../research/durable-objects.md) and
   [durable-sqlite-and-filesystem](../research/durable-sqlite-and-filesystem.md).

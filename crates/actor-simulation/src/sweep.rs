@@ -25,12 +25,12 @@
 //!
 //! # Environment
 //!
-//! - `SWARM_SEEDS=<n>` — take exactly `n` seeds, whatever the class. May exceed
+//! - `SWARM_SEEDS=<n>`: take exactly `n` seeds, whatever the class. May exceed
 //!   the declared width, which is how a soak asks for more than the corpus holds.
-//! - `SWARM_SEEDS=full` (or `0`) — the declared width, the corpus as written.
-//! - `SWARM_SEED_BASE=<n>` — offset every sweep by `n`. A soak sets this fresh
+//! - `SWARM_SEEDS=full` (or `0`): the declared width, the corpus as written.
+//! - `SWARM_SEED_BASE=<n>`: offset every sweep by `n`. A soak sets this fresh
 //!   per run so it explores seeds the corpus has never covered.
-//! - `SWARM_CONTINUE=1` — do not stop at the first failing seed; run the whole
+//! - `SWARM_CONTINUE=1`; do not stop at the first failing seed; run the whole
 //!   sweep and report every seed that failed. See [`collect_all_failures`].
 //!
 //! Unset, a run under `CI` takes the declared width and a local run takes its
@@ -153,8 +153,8 @@ pub fn collect_all_failures() -> bool {
 /// seed, dedupe failures by seed (a seed the corpus replay and the sweep range
 /// both reach runs twice and reports once), and either stop at the first
 /// failure or collect them all. Returns how many seeds ran and the failures in
-/// sweep order; an empty list is success. What "failure" means — an invariant
-/// violation, a determinism divergence, a caught panic — stays the runner's,
+/// sweep order; an empty list is success. What "failure" means (an invariant
+/// violation, a determinism divergence, a caught panic) stays the runner's,
 /// as does its report.
 pub(crate) fn sweep_generic<F>(
     seeds: impl IntoIterator<Item = u64>,

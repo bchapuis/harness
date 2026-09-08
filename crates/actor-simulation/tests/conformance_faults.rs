@@ -1,11 +1,11 @@
 //! Conformance: transport fault injection (spec §7.2, §18.3). Per-pair FIFO
 //! survives latency jitter (#3); total loss surfaces as `Timeout` rather than a
-//! hang (#1); and duplication is tolerated — the framework gives at-most-once
+//! hang (#1); and duplication is tolerated: the framework gives at-most-once
 //! *at the caller*, not exactly-once delivery (§7.2).
 //!
 //! These are scenarios: each proves a fault behaves correctly *when it fires*.
-//! That every fault type fires at all across a seed sweep — drops, duplication,
-//! delay/reorder, partition/crash, and registry outage/staleness — is the
+//! That every fault type fires at all across a seed sweep (drops, duplication,
+//! delay/reorder, partition/crash, and registry outage/staleness) is the
 //! companion claim, and it lives in `conformance_faults_swarm.rs`.
 
 mod support;
@@ -128,7 +128,7 @@ fn per_pair_fifo_holds_across_interleaved_tell_and_ask() {
         // Issue `tell` and `ask` from one sender to one recipient *concurrently*
         // (`join!` initiates all six in argument order), so jittered frames race
         // in flight. Spec §6 #3: `tell` and `ask` from the same sender share one
-        // FIFO order — the recipient must still observe 0,1,2,3,4,5.
+        // FIFO order; the recipient must still observe 0,1,2,3,4,5.
         let (t0, a1, t2, a3, t4, a5) = futures::join!(
             remote.tell(Seq(0)),
             remote.ask(SeqAsk(1)),
@@ -197,7 +197,7 @@ fn total_loss_yields_timeout_not_a_hang() {
 // second, and a caller that loses the first reply learns that its successful
 // swap failed. `tests/support/`'s register carries the key that makes it come
 // out right, and `conformance_linearizability_swarm.rs` sweeps it under the
-// nemesis to prove it — so the two contracts here fit together rather than
+// nemesis to prove it, so the two contracts here fit together rather than
 // contradicting.
 
 #[test]
@@ -228,7 +228,7 @@ fn duplication_is_tolerated_with_one_outcome_at_the_caller() {
 fn quiescing_the_network_stops_injecting_faults() {
     // The counterpart to `heal`. `heal` clears partitions but leaves the wire's
     // seeded loss running, which is right for a nemesis that heals between
-    // rounds — and wrong for the tail of a run that means to assert something
+    // rounds, and wrong for the tail of a run that means to assert something
     // about a *converged* cluster, because a detector fed lossy probes keeps
     // flipping peers in and out of every serving set and the views never settle.
     // `quiesce` is what makes that tail quiet.

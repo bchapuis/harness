@@ -90,7 +90,7 @@ impl EntityHandler<ReadCount> for BuggyCounter {
         _msg: ReadCount,
         _ctx: &EntityCtx<Self>,
     ) -> (Vec<CounterEvent>, i64) {
-        (vec![], 999) // a value never written — any history with it is illegal
+        (vec![], 999) // a value never written: any history with it is illegal
     }
 }
 
@@ -388,7 +388,7 @@ fn can_hibernate_vetoes_idle_hibernation() {
     });
 
     // Drive with `run_for`, not `block_on`: a vetoing entity reschedules its idle
-    // check forever, so the sim never quiesces — a bounded run drives the
+    // check forever, so the sim never quiesces; a bounded run drives the
     // activation and then well past many idle windows.
     sim.spawner().launch(Box::pin(async move {
         let _ = pinned.entity("p/0").ask(Add(1)).await;
@@ -428,7 +428,7 @@ enum Ledger {
     Withdrew(u64),
 }
 
-/// An application error — lives inside `M::Reply`, never in `EntityError` (§4.2).
+/// An application error: lives inside `M::Reply`, never in `EntityError` (§4.2).
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Overdraft;
 
@@ -531,7 +531,7 @@ fn account_entity_end_to_end() {
         // Committed + durable: the reply reflects post-command state.
         assert_eq!(acct.ask(Deposit { cents: 1000 }).await.unwrap(), 1000);
         assert_eq!(acct.ask(Withdraw { cents: 500 }).await.unwrap(), Ok(500));
-        // Application outcome — an error value inside the reply, not an EntityError.
+        // Application outcome: an error value inside the reply, not an EntityError.
         assert_eq!(
             acct.ask(Withdraw { cents: 9999 }).await.unwrap(),
             Err(Overdraft)
@@ -564,10 +564,10 @@ fn tell_commits_fire_and_forget() {
 fn cached_host_is_reused_and_self_heals_after_hibernation() {
     // §5.4 host-ref caching: the first call resolves through the gateway and caches
     // the host; a later call hits the cache and skips the gateway. When the cached
-    // host hibernates (§10) the cached handle goes stale — the next call's `ask`
+    // host hibernates (§10) the cached handle goes stale: the next call's `ask`
     // dead-letters, the cache is invalidated, and the command is re-issued through a
     // fresh activation, transparently (the command did not run, so the re-issue is
-    // safe — at-most-once is preserved).
+    // safe, at-most-once is preserved).
     let sim = Simulation::new(21);
     let system = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner()).build();
     let accounts = system.entities::<Account>(EntityConfig {
@@ -596,7 +596,7 @@ fn cached_host_is_reused_and_self_heals_after_hibernation() {
     sim.run();
 
     // A call through the same (now-stale) cache transparently re-activates and reads
-    // the durable balance — the stale entry is invalidated and the command re-issued.
+    // the durable balance: the stale entry is invalidated and the command re-issued.
     let balance = sim.block_on({
         let accounts = accounts.clone();
         async move { accounts.entity("account/1").ask(ReadBalance).await.unwrap() }
@@ -633,7 +633,7 @@ fn account_balance_survives_reactivation() {
 #[test]
 fn entity_named_hosts_one_entity_under_many_type_names() {
     // The extension point the agent runtime rides (§5.1): one Rust entity (its
-    // run loop) hosted under many runtime type names — one per kind. Each name is
+    // run loop) hosted under many runtime type names; one per kind. Each name is
     // its own entity type (its own gateway key, shard map, and namespace), so the
     // same key under two names addresses two **independent** entities. The factory
     // also replaces `G::default`, the seam the agent runtime uses to inject per-node
@@ -676,23 +676,23 @@ fn entity_named_hosts_one_entity_under_many_type_names() {
 // E4 has two halves, and they are upheld in different places.
 //
 // The load-bearing half is **structural**: a head is *defined* as the best
-// snapshot's seq plus the contiguous run of records above it — `ReadReply::head`
+// snapshot's seq plus the contiguous run of records above it; `ReadReply::head`
 // on the `Local` tier, `merge`'s `base` during a `Quorum` recovery. A snapshot can
 // therefore never outrun the head it is measured against, on either tier. That is
 // what actually keeps a snapshot from shortening a log, and it is what the first
 // test below pins.
 //
 // The second half is the `s_seq <= head` guard in the host's rehydrate. Given the
-// identity above it is **unreachable through any real code path** — defence in
+// identity above it is **unreachable through any real code path**: defence in
 // depth against a future store whose head and snapshot could disagree. It is still
 // worth pinning the direction it fails in, which the second test does with a store
 // double that reports an impossible seq: the host must take the journal's
 // authority rather than fold a state no committed prefix supports.
 //
 // Note what the guard cannot do, and why the structural half carries the
-// invariant. Once a snapshot is taken the records it subsumes are compacted away —
+// invariant. Once a snapshot is taken the records it subsumes are compacted away:
 // "a compacted entity's prefix exists only in the snapshot" (`replicator.rs`,
-// `migrate_entity`) — so replaying from `ZERO` after discarding the snapshot yields
+// `migrate_entity`), so replaying from `ZERO` after discarding the snapshot yields
 // a *truncated* state, not the true head. Ignoring a snapshot is the safe
 // direction (a short state that no longer claims to be complete) but it is not a
 // recovery. E4 holds because the head always covers the snapshot, never because
@@ -713,7 +713,7 @@ fn a_snapshot_never_outruns_the_head_it_is_measured_against() {
         |store: &entity::MemoryEntityStore| store.snapshot(shard, &name).map(|(seq, _)| seq);
 
     // Interleave appends and snapshots the way a live entity does, checking the
-    // identity after every step — including right after a snapshot, which is the
+    // identity after every step, including right after a snapshot, which is the
     // moment a seq could outrun the head if the base were computed any other way.
     for round in 0..6u64 {
         let after = entity::Seq::new(round * 2);
@@ -757,12 +757,12 @@ fn a_snapshot_never_outruns_the_head_it_is_measured_against() {
     }
 }
 
-/// The guard's half of **E4**: given a snapshot seq the head does not cover — a
-/// state the identity above makes unreachable — the host takes the journal's
+/// The guard's half of **E4**: given a snapshot seq the head does not cover (a
+/// state the identity above makes unreachable) the host takes the journal's
 /// authority (**E3**) and never folds a state no committed prefix supports.
 /// With an untruncated journal that means replaying whole from `ZERO`; here the
 /// real snapshot's compaction has already drained the prefix, so no committed
-/// prefix exists to replay — the base guard (§9) fails the activation loudly
+/// prefix exists to replay: the base guard (§9) fails the activation loudly
 /// rather than fold the 2 surviving records of 10 and serve the wrong count.
 #[test]
 fn a_snapshot_beyond_the_committed_head_is_refused_in_favour_of_the_journal() {
@@ -809,8 +809,8 @@ fn a_snapshot_beyond_the_committed_head_is_refused_in_favour_of_the_journal() {
             .collect()
     }
 
-    // Control: an honest seq. The reactivation seeds from the snapshot — so the
-    // refusal below is a real refusal, not an absent snapshot — and reads back
+    // Control: an honest seq. The reactivation seeds from the snapshot (so the
+    // refusal below is a real refusal, not an absent snapshot), and reads back
     // the true count.
     let control = Recorder::new();
     let count = run(0, &control, &Simulation::new(23));
@@ -825,7 +825,7 @@ fn a_snapshot_beyond_the_committed_head_is_refused_in_favour_of_the_journal() {
         "with an honest snapshot seq, reactivation seeds from the snapshot",
     );
 
-    // A seq 100 slots past a ten-record head: refused — and because the real
+    // A seq 100 slots past a ten-record head: refused, and because the real
     // snapshot's compaction already drained the journal's prefix, no committed
     // prefix remains to replay. The base guard fails the activation (E3):
     // unavailability, never the truncated fold (a count of 2) the old

@@ -1,6 +1,6 @@
 //! The agent binary over `--uds`: the same protocol bytes a Firecracker
 //! host-side connection would carry (the agent fakes the muxer's handshake
-//! in this mode), against a real `/bin/sh`. Runs on any unix — this is the
+//! in this mode), against a real `/bin/sh`. Runs on any unix: this is the
 //! test docker executes for the Linux build during `fc-rootfs/build.sh`.
 
 use std::io::Read;

@@ -7,7 +7,7 @@
 #   vmlinux       a firecracker-ci kernel (vsock-enabled)
 #   firecracker   the VMM release binary
 #
-# Docker is the only requirement, so this runs on macOS too — building needs
+# Docker is the only requirement, so this runs on macOS too, building needs
 # no KVM. *Running* the assets (tests/firecracker.rs, --sandbox firecracker)
 # needs Linux with /dev/kvm.
 #
@@ -74,7 +74,7 @@ docker run --rm --platform "$PLATFORM" -v "$(pwd)/out":/out alpine:"$ALPINE" sh 
   tar -xzf /tmp/fc.tgz -C /tmp
   # Exact name: the release ships firecracker-<ver>-<arch> AND its .debug
   # sibling; a bare glob matches both and busybox install writes the last
-  # match — the dynamically linked debug artifact, which segfaults at exec.
+  # match; the dynamically linked debug artifact, which segfaults at exec.
   install -m 0755 /tmp/release-*/firecracker-'"$FC_VERSION"'-'"$ARCH"' /out/firecracker
 '
 

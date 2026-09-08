@@ -1,20 +1,20 @@
 //! The persistent machine's SSH front door (machine spec §5.1).
 //!
-//! A front door is a cluster member — the ingress analogue of the agent runtime
-//! gateway (agent §7.3) — that **terminates SSH in-process** (`russh`) and
+//! A front door is a cluster member: the ingress analogue of the agent runtime
+//! gateway (agent §7.3); that **terminates SSH in-process** (`russh`) and
 //! bridges each authenticated channel to the machine's guest agent.
 //! It authenticates the client by public key against the machine's journaled
 //! authorized-key set, presents the machine's own journaled host key so one SSH
 //! identity survives hibernation/migration/failover, and never lets guest-side
-//! material govern what it bridges — possession of the channel *is* the host's
+//! material govern what it bridges: possession of the channel *is* the host's
 //! authority (M4).
 //!
 //! Two seams keep the cluster and the transport out of the SSH code:
 //!
-//! - [`MachineAuthority`] — the entity-cluster half: the host key, the
+//! - [`MachineAuthority`], the entity-cluster half: the host key, the
 //!   authorized-key check, and the journaled `Attach`/`Detach`. Production
 //!   wires it to an `EntityRef` over the machine's leader.
-//! - [`ChannelBackend`] — the transport half: one byte stream per channel to
+//! - [`ChannelBackend`], the transport half: one byte stream per channel to
 //!   the guest agent. Production supplies the node's `machine_host::MachineHost`,
 //!   which reaches the guest however that node holds it.
 //!
@@ -49,9 +49,9 @@ impl std::fmt::Display for FrontDoorError {
 impl std::error::Error for FrontDoorError {}
 
 /// Expand the machine's journaled host-key material into the SSH host key
-/// presented at KEX (machine §3, §5.1). The material — `MachineState::
+/// presented at KEX (machine §3, §5.1). The material: `MachineState::
 /// host_key`, read through the machine's `DoorPolicy` command before any
-/// principal exists to attach ([`MachineAuthority::host_key`]) — is the raw
+/// principal exists to attach ([`MachineAuthority::host_key`]); is the raw
 /// 32-byte ed25519 seed the machine drew from system entropy at provisioning;
 /// expanding it here
 /// keeps russh out of the machine crate. Pure: the same seed always yields the

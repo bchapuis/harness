@@ -3,8 +3,8 @@
 //! still holds.
 //!
 //! The gate this crate did not have. Its §9 "Verified by" column had drifted to
-//! name seven tests that no longer existed — each property still real, each
-//! pointer dead — and nothing failed. A renamed or deleted suite now fails here.
+//! name seven tests that no longer existed (each property still real, each
+//! pointer dead), and nothing failed. A renamed or deleted suite now fails here.
 
 mod support;
 
@@ -42,8 +42,8 @@ fn every_entry_has_spec_property_and_a_verification_method() {
     }
 }
 
-/// A pointer containing a `/` is a path relative to `crates/` — several B-invariants
-/// are local properties verified by unit tests beside the code — and a bare filename
+/// A pointer containing a `/` is a path relative to `crates/` (several B-invariants
+/// are local properties verified by unit tests beside the code), and a bare filename
 /// is relative to this crate's `tests/`.
 #[test]
 fn every_file_pointer_references_a_real_file() {
@@ -61,7 +61,7 @@ fn every_file_pointer_references_a_real_file() {
                     for name in names.split(',').map(str::trim) {
                         assert!(
                             sources.contains(&format!("fn {name}(")),
-                            "B{} names test {name:?}, which is not defined in this crate — \
+                            "B{} names test {name:?}, which is not defined in this crate; \
                              a rename left the spec's \"Verified by\" column pointing at nothing",
                             e.invariant,
                         );
@@ -129,7 +129,7 @@ fn crate_sources() -> String {
 /// term fence). The blob store deliberately sits beside it on `actor-cluster`
 /// alone: content addressing makes concurrent writers of equal content converge
 /// without ordering, so nothing needs a term. If a `entity` dependency ever
-/// appears here, B4 stops being free and has to be re-argued — this test is where
+/// appears here, B4 stops being free and has to be re-argued: this test is where
 /// that conversation starts.
 #[test]
 fn the_data_path_has_no_consensus_engine_to_run() {
@@ -151,7 +151,7 @@ fn the_data_path_has_no_consensus_engine_to_run() {
     assert!(
         !runtime.contains("entity"),
         "blob-store gained a `entity` dependency, so B4's \"no consensus on the data path\" \
-         is no longer structural — re-verify it or restate the invariant:\n{runtime}",
+         is no longer structural; re-verify it or restate the invariant:\n{runtime}",
     );
 }
 
@@ -161,7 +161,7 @@ fn no_entry_claims_a_continuous_checker() {
     // and assembled per-workload, so there is no crate-level named checker set for
     // this table to cross-check against, the way `default_invariants()` gives the
     // core catalogue one. B7 therefore cites the suite that runs it. Anyone adding
-    // a `Verify::Checker` here must first expose a discoverable checker set — and
+    // a `Verify::Checker` here must first expose a discoverable checker set, and
     // then this assertion becomes the drift test between the two.
     for e in b_catalogue() {
         assert!(

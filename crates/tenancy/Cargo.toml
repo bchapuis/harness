@@ -17,7 +17,7 @@ serde.workspace = true
 actor-cluster.workspace = true
 actor-simulation.workspace = true
 futures.workspace = true
-# `testing` for the shared E3/E5 and E6 checkers the swarm attaches — test
+# `testing` for the shared E3/E5 and E6 checkers the swarm attaches: test
 # support, never shipped in a production build (docs/simulation-testing.md).
 entity = { workspace = true, features = ["testing"] }
 serde.workspace = true

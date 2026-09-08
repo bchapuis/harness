@@ -3,12 +3,12 @@
 //!
 //! The activation *is* a running guest (machine §1), but that guest is one of
 //! the machine's two disposable things: stopping it loses no committed disk
-//! block. The entity drives it through this seam — boot against the rehydrated
+//! block. The entity drives it through this seam: boot against the rehydrated
 //! disk-facet image, pause for a capture's quiescent point (machine §4),
-//! resume, kill — and never owns the mechanism's internals. The deterministic
+//! resume, kill, and never owns the mechanism's internals. The deterministic
 //! simulation binds [`fake::FakeRuntimeProvider`]; production binds
 //! [`hosted::HostedRuntimeProvider`], which holds its guest through
-//! `machine_host::MachineHost` — a Firecracker microVM, or a container holding
+//! `machine_host::MachineHost`: a Firecracker microVM, or a container holding
 //! the same rootfs on a host with no KVM (machine §2.1). Which mechanism is the
 //! node's configuration, not this seam's concern.
 //!
@@ -32,8 +32,8 @@ pub mod ws_proto;
 /// A runtime operation failed. An application-level outcome (the entity maps it
 /// into replies or retries), never a durability failure. One message, not a
 /// refused-vs-transport split: the entity's policy for every failure here is
-/// the same — end the activation and let the next boot rehydrate (machine §4)
-/// — so the distinction lives in the message, never as a second code path.
+/// the same; end the activation and let the next boot rehydrate (machine §4),
+/// so the distinction lives in the message, never as a second code path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeError(pub String);
 
@@ -62,7 +62,7 @@ pub struct BootSpec {
     pub image: PathBuf,
     pub vcpus: u8,
     pub mem_mib: u32,
-    /// The machine this guest belongs to — the attribution key (machine §5.2).
+    /// The machine this guest belongs to: the attribution key (machine §5.2).
     pub machine: EntityName,
     /// The machine's journaled egress policy (machine §5.2, M6): what the guest
     /// may reach out to. The provider realizes exactly what it grants; the fake

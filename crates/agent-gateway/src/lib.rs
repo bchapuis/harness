@@ -4,13 +4,13 @@
 //! It is the public multi-tenant edge (design: `docs/multi-tenant-edge.md`).
 //! A caller presents a bearer token; the gateway verifies it to a [`PrincipalId`]
 //! (it **terminates** tenant auth), scopes the caller's session key under that
-//! principal, and drives the session by addressing its entity **directly** — no
+//! principal, and drives the session by addressing its entity **directly**, no
 //! control protocol, no per-node listener, no forwarding hop.
 //!
 //! The gateway joins the actor transport as a non-voting, routing-only **member**
 //! (`Harness::client(system, roster)` /
 //! [`entities_client`](entity::EntityExt::entities_client)): a full local actor
-//! system that hosts no entities but is still a member — it holds `EntityRef`s
+//! system that hosts no entities but is still a member; it holds `EntityRef`s
 //! discovered through the receptionist gossip, routes `ask`/`subscribe` to the
 //! shard leader, and spawns the ephemeral reply mailbox the host calls back. It is
 //! therefore **inside** the cluster's trust boundary (it holds the cluster secret
@@ -51,8 +51,8 @@ use crate::error::GatewayError;
 /// `--max-body-bytes`) tightens them for a deployment.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    /// Ceiling on a prompt's `within_secs`: a client cannot park a run — and the
-    /// resources behind it — indefinitely. A larger request is clamped to this.
+    /// Ceiling on a prompt's `within_secs`: a client cannot park a run (and the
+    /// resources behind it) indefinitely. A larger request is clamped to this.
     pub max_within_secs: u64,
     /// Max request-body bytes (the prompt JSON). Enforced as an axum
     /// `DefaultBodyLimit` layer.
@@ -140,7 +140,7 @@ impl<S: HarnessSystem> Gateway<S> {
     /// The session entity for `(principal, kind, session)`: the caller's session key
     /// scoped under its principal for tenant isolation, resolved to a routing
     /// `SessionRef`. The principal-scoping of a session name is the gateway's
-    /// secret — a handler addresses a session by the tenant-facing triple and never
+    /// secret: a handler addresses a session by the tenant-facing triple and never
     /// mints a scoped id itself. The kind comes off the request path, so a name
     /// this deployment does not serve is the client's `404`, not a panic.
     pub fn session(
@@ -158,7 +158,7 @@ impl<S: HarnessSystem> Gateway<S> {
     /// the principal. Best-effort and idempotent: re-recorded on every prompt, so a
     /// transient index failure self-heals next turn; the run proceeds regardless, so
     /// the failure is logged, not returned. Owns the directory entry's `EntityName`
-    /// shape — `(kind, scoped session)` — so no handler re-derives it.
+    /// shape: `(kind, scoped session)`, so no handler re-derives it.
     pub async fn record_ownership(&self, principal: &PrincipalId, kind: &str, session: &str) {
         let scoped = scoped_session(principal, session);
         let recorded = self

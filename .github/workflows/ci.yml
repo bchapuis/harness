@@ -3,13 +3,13 @@ name: CI
 # Build + lint + the full conformance suite on every change. The workspace test
 # run includes the deterministic conformance tests, the catalogue drift gate
 # (tests/conformance_catalogue.rs), and every fixed-seed swarm sweep at its
-# declared width from seed 0 — the regression corpus (spec §18.6). Each sweep
+# declared width from seed 0: the regression corpus (spec §18.6). Each sweep
 # declares its seed range and cost class in the test (actor-simulation's
 # sweep.rs); this job runs the declared range whole.
 #
 # This job runs the corpus and only the corpus: the same seeds every time, so a
 # fixed bug cannot come back unnoticed. Its value comes from *not* varying.
-# Discovery — the fresh seeds of §18.6's "many seeds per change" — is soak.yml's
+# Discovery, the fresh seeds of §18.6's "many seeds per change", is soak.yml's
 # job, which sweeps from a per-run SWARM_SEED_BASE. A failure there reproduces
 # from its (base, seed) pair and is then committed here as a regression case.
 
@@ -21,10 +21,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  # Swarm sweeps run at their declared width from seed 0 — the pinned §18.6
+  # Swarm sweeps run at their declared width from seed 0: the pinned §18.6
   # corpus. Unset, a local run takes its cost class's width instead (a few
   # seeds for an ordinary sweep, one for a sweep whose seeds cost seconds;
-  # coverage sweeps run their declared width everywhere — see
+  # coverage sweeps run their declared width everywhere; see
   # actor-simulation/src/sweep.rs, which bans sizing by wall clock). `full`
   # states this job's contract in the workflow rather than leaving it to the
   # runner's own `CI` variable.
@@ -40,7 +40,7 @@ jobs:
       # No toolchain action: `rust-toolchain.toml` pins the version and its
       # components, and rustup installs it on the first cargo invocation. Naming
       # a version here too would give the pin a second source of truth to drift
-      # from — and the compile-fail snapshots only hold on the pinned rustc.
+      # from, and the compile-fail snapshots only hold on the pinned rustc.
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -57,7 +57,7 @@ jobs:
       # Nextest rather than `cargo test`: one process per test with live
       # per-test status and timings, so a hung sweep names itself instead of
       # stalling a silent binary. The `ci` profile (.config/nextest.toml) runs
-      # everything — the default profile's swarm exclusion is a local-edit-loop
+      # everything: the default profile's swarm exclusion is a local-edit-loop
       # concern, and this job's value comes from the full corpus.
       - name: Install nextest
         uses: taiki-e/install-action@nextest
@@ -70,16 +70,16 @@ jobs:
         run: cargo test --locked --workspace --doc
 
   # The guest-backed suites (sandbox spec §3.5, machine spec §2.1): boot real
-  # guests. The microVM mechanism needs /dev/kvm — available on GitHub's
+  # guests. The microVM mechanism needs /dev/kvm: available on GitHub's
   # x86_64 Linux runners once the udev rule below widens the device's
-  # permissions — and the container mechanism needs the runner image.
+  # permissions, and the container mechanism needs the runner image.
   # The assets (kernel, rootfs with each guest agent, VMM binary) are built by
   # the guest build scripts, which also run each agent's own test suite inside
   # rust:alpine; asset builds are cached on the script plus agent sources, so
   # an agent change rebuilds (and re-tests) while everything else reuses.
   # E2E_REQUIRE turns the e2e tests' skip-on-missing-prerequisite conduct into
   # a failure here: this job exists to run them, so a broken environment must
-  # not read as green — which is also why every prerequisite they name has to
+  # not read as green, which is also why every prerequisite they name has to
   # be built below, and not just the KVM-gated ones.
   firecracker:
     name: firecracker microVM conformance
@@ -129,7 +129,7 @@ jobs:
 
       # The container mechanism's half of the machine e2e: the runner image
       # that loop-mounts the machine's disk. Built unconditionally rather than
-      # cached — it is alpine plus two packages, and the runner's docker daemon
+      # cached: it is alpine plus two packages, and the runner's docker daemon
       # starts empty every run anyway. The rootfs it chroots into is the
       # machine.ext4 built above, so this step follows that one.
       - name: Build the container mechanism's runner image

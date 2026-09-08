@@ -30,7 +30,7 @@ use entity::NoEvent;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// 1 MiB — the facet's fixed block size (spec §7.15), mirrored here so the
+/// 1 MiB: the facet's fixed block size (spec §7.15), mirrored here so the
 /// tests place writes on and across block boundaries.
 const BLOCK: u64 = 1 << 20;
 
@@ -51,7 +51,7 @@ impl Entity for DiskBox {
     }
 }
 
-/// Import the image at `src` — the provisioning path (§7.15: the base image
+/// Import the image at `src`, the provisioning path (§7.15: the base image
 /// *is* a capture).
 #[derive(Clone, Serialize, Deserialize)]
 struct ImportFrom(String);
@@ -73,8 +73,8 @@ impl EntityHandler<ImportFrom> for DiskBox {
     }
 }
 
-/// Write `bytes` into the live image at `offset` — a stand-in for the guest's
-/// out-of-band block writes (§7.15's one departure) — without capturing.
+/// Write `bytes` into the live image at `offset`: a stand-in for the guest's
+/// out-of-band block writes (§7.15's one departure), without capturing.
 #[derive(Clone, Serialize, Deserialize)]
 struct Scribble {
     offset: u64,
@@ -124,7 +124,7 @@ impl EntityHandler<CaptureNow> for DiskBox {
     }
 }
 
-/// Capture twice in one command — the second MUST be refused (§7.15: one
+/// Capture twice in one command, the second MUST be refused (§7.15: one
 /// capture, one record).
 #[derive(Clone, Serialize, Deserialize)]
 struct DoubleCapture;
@@ -144,7 +144,7 @@ impl EntityHandler<DoubleCapture> for DiskBox {
     }
 }
 
-/// Read `len` bytes at `offset` from the live image — a pure read (§7.5).
+/// Read `len` bytes at `offset` from the live image: a pure read (§7.5).
 #[derive(Clone, Serialize, Deserialize)]
 struct ReadBack {
     offset: u64,
@@ -173,7 +173,7 @@ impl EntityHandler<ReadBack> for DiskBox {
     }
 }
 
-/// The committed image size — a pure read.
+/// The committed image size: a pure read.
 #[derive(Clone, Serialize, Deserialize)]
 struct ImageBytes;
 impl Message for ImageBytes {
@@ -288,7 +288,7 @@ fn import_capture_and_hibernation_round_trip_byte_identically() {
     );
 
     // Reactivate: restore fetches the checkpoint blocks (E17) and the image
-    // reads back byte-identically — captured writes included (F2/F4/E12).
+    // reads back byte-identically; captured writes included (F2/F4/E12).
     let reread = boxes.entity("box/0");
     sim.block_on(async move {
         assert_eq!(reread.ask(ImageBytes).await.expect("size"), image_len);
@@ -322,10 +322,10 @@ fn import_capture_and_hibernation_round_trip_byte_identically() {
         );
 
         // An uncaptured scribble made before this hibernation would have been
-        // lost — prove the inverse: a fresh scribble reads back live but is
+        // lost, prove the inverse: a fresh scribble reads back live but is
         // absent from durable state until captured. (The crash-rewind variant
         // is the swarm's job; here hibernation refuses no capture because the
-        // consumer — this test entity — declares no `can_hibernate` guard.)
+        // consumer (this test entity) declares no `can_hibernate` guard.)
         let second = reread.ask(CaptureNow).await.expect("ask").expect("capture");
         assert_eq!(
             second,

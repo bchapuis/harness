@@ -1,14 +1,14 @@
 //! Conformance: node **restart** under deterministic simulation (spec §9.1,
-//! §9.4, §18.3) — the crash-and-recover scenario the isolation-style `crash`
+//! §9.4, §18.3); the crash-and-recover scenario the isolation-style `crash`
 //! cannot model.
 //!
 //! [`SimNetwork::restart`] stops a node abruptly (no graceful leave) and brings
 //! up a successor under the same identity. What must survive is exactly the
 //! durable state each mode defines: a voter's Raft term, vote, and log (spec
-//! §9.4.3 item 2 — the double-vote hazard), and the node's *identity* in the
+//! §9.4.3 item 2; the double-vote hazard), and the node's *identity* in the
 //! modes that require it stable across restarts (static §9.4.1, registry-based
-//! §9.4.2 item 5). Everything else — actors, the membership view, Raft's
-//! volatile role — is correctly lost and rebuilt.
+//! §9.4.2 item 5). Everything else (actors, the membership view, Raft's
+//! volatile role) is correctly lost and rebuilt.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -90,8 +90,8 @@ impl Handler<Ping> for Echo {
 #[test]
 fn a_restarted_voter_recovers_its_persisted_raft_state() {
     // Spec §9.4.3 item 2: a voter's term, vote, and log survive a restart.
-    // Commit a drain, restart a voter, and the restarted instance — whose
-    // volatile membership view started empty — reconverges on the committed
+    // Commit a drain, restart a voter, and the restarted instance (whose
+    // volatile membership view started empty) reconverges on the committed
     // state from its persisted log and the leader's replication, then takes
     // part in committing the next transition.
     let sim = Simulation::new(1);
@@ -124,7 +124,7 @@ fn a_restarted_voter_recovers_its_persisted_raft_state() {
     assert_eq!(
         b2.membership().stamp(C),
         Some(stamp),
-        "at the same commit index — one log order, before and after the restart",
+        "at the same commit index: one log order, before and after the restart",
     );
 
     // The restarted voter participates in new commits, proposing one itself.
@@ -181,7 +181,7 @@ fn restarting_a_majority_does_not_lose_committed_state() {
 #[test]
 fn a_restarted_registry_member_keeps_its_membership() {
     // Spec §9.4.2 item 5: node identity is stable across restarts in
-    // registry-based mode — a draining member that restarts is still the same
+    // registry-based mode; a draining member that restarts is still the same
     // draining member, resynced from the registry, never evicted.
     let sim = Simulation::new(3);
     let registry = SimRegistry::new(&sim);
@@ -211,7 +211,7 @@ fn a_restarted_registry_member_keeps_its_membership() {
     assert_eq!(
         a.membership().status(B),
         Some(MemberStatus::Draining),
-        "B is the same member throughout — a restart never evicts (spec §9.4.2 item 5)",
+        "B is the same member throughout: a restart never evicts (spec §9.4.2 item 5)",
     );
     assert_eq!(
         a.membership().reachability(B),
@@ -243,7 +243,7 @@ fn a_restarted_static_member_resumes_its_place_in_the_roster() {
     assert_eq!(
         a.membership().status(B),
         Some(MemberStatus::Up),
-        "the roster is exactly as configured — a restart changes nothing (spec §9.4.1)",
+        "the roster is exactly as configured: a restart changes nothing (spec §9.4.1)",
     );
     // The previous run's ActorId still resolves to B and dead-letters there.
     let stale: ActorRef<Echo> = a.resolve(old_id);
@@ -264,7 +264,7 @@ fn a_restarted_static_member_resumes_its_place_in_the_roster() {
 fn a_restarted_gossip_member_recovers_reachability() {
     // Gossip mode has no durable state; what a restart must not break is the
     // detector axis: the node comes back at incarnation 0 while peers may hold
-    // a higher one for it, and direct probes — not the gossip merge — restore
+    // a higher one for it, and direct probes (not the gossip merge) restore
     // it to reachable. Conservative downing keeps it a member throughout.
     let sim = Simulation::new(5);
     let net = SimNetwork::new(&sim).with_gossip(swim_config(), DowningPolicy::Conservative);

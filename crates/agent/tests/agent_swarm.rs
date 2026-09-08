@@ -1,8 +1,8 @@
 //! The agent runtime's swarm sweeps (agent spec §12; core spec §18.1).
 //!
 //! Two claims over the same faulted workload. **Determinism:** the same
-//! `(workload, seed)` reproduces the full event stream byte-for-byte —
-//! agent *and* entity events — with model and sandbox faults firing under seed
+//! `(workload, seed)` reproduces the full event stream byte-for-byte
+//! (agent *and* entity events) with model and sandbox faults firing under seed
 //! control. **Invariants:** the A-invariant hold across a seed sweep while
 //! those faults flow. The journal, the fence, and resume are the entity's, so
 //! simulating the agent runtime runs entity's real consensus/rehydration code.
@@ -47,8 +47,8 @@ use support::agent_invariants;
 use support::tool_call;
 
 /// A workload that runs several sessions through the tool loop with seeded model
-/// failures (§12.2). Callers tolerate honest failures — a model error that
-/// survives the policy is a journaled terminal outcome, not a hang — and
+/// failures (§12.2). Callers tolerate honest failures (a model error that
+/// survives the policy is a journaled terminal outcome, not a hang), and
 /// re-submit on transport errors, the A3 contact discipline.
 struct FaultyWorkload {
     name: &'static str,
@@ -142,8 +142,8 @@ impl Workload for FaultyWorkload {
 #[test]
 fn the_event_stream_reproduces_byte_for_byte_per_seed() {
     // The determinism contract over the real stream (core spec §18.1 #1), harness
-    // and entity events included: one leak — a wall clock, an OS thread, an
-    // unseeded draw — breaks this, which is the point.
+    // and entity events included: one leak (a wall clock, an OS thread, an
+    // unseeded draw) breaks this, which is the point.
     for seed in [3, 17, 5151] {
         let faultless = FaultyWorkload::new("repro-faultless", 3, 0);
         check_reproducible(&faultless, seed).expect("faultless run reproduces");

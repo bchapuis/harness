@@ -1,20 +1,20 @@
 //! Tool declarations and the registry-as-allowlist (agent spec §5.2).
 //!
 //! Every tool is **declared**: the model and the loop need its interface
-//! regardless of where it executes. A kind's [`ToolRegistry`] is the allowlist —
+//! regardless of where it executes. A kind's [`ToolRegistry`] is the allowlist:
 //! a model's tool call dispatches by name against it and nothing else, so no
 //! path leads from model output to code outside the declared set. An unknown
 //! name or malformed input is a synthesized [`ToolError`] outcome (§5.4),
 //! not a protocol failure: nothing was executed. Malformed is structural, not
 //! schematic: the loop rejects a non-object input (and a `delegate` input
 //! that does not deserialize, §8.1) before dispatch, but does not validate
-//! arguments against the declared `input_schema` — the schema is interface
+//! arguments against the declared `input_schema`; the schema is interface
 //! metadata for the model (§4.1) and digest-covered agreement (§7.1), and
 //! validation beyond shape is the executing tool's own.
 //!
 //! Every declared tool is sandboxed (§5.3). The single built-in exception is
-//! [`DELEGATE`] (§8): a delegation is control flow — a child `Submit`, confined
-//! to the seams — not an effect, so it executes in the loop. There is no
+//! [`DELEGATE`] (§8): a delegation is control flow (a child `Submit`, confined
+//! to the seams) not an effect, so it executes in the loop. There is no
 //! extension point for further loop-executing tools (§13).
 
 use std::time::Duration;
@@ -74,7 +74,7 @@ impl ToolDecl {
     }
 }
 
-/// A kind's hand-built tool list — the allowlist (agent spec §5.2).
+/// A kind's hand-built tool list: the allowlist (agent spec §5.2).
 #[derive(Clone, Debug, Default)]
 pub struct ToolRegistry {
     decls: Vec<ToolDecl>,
@@ -96,7 +96,7 @@ impl ToolRegistry {
         self.decls.push(decl);
     }
 
-    /// The declaration for `name`, or `None` — the allowlist check (§5.2).
+    /// The declaration for `name`, or `None`: the allowlist check (§5.2).
     pub fn get(&self, name: &str) -> Option<&ToolDecl> {
         self.decls.iter().find(|d| d.name == name)
     }
@@ -113,8 +113,8 @@ impl ToolRegistry {
 }
 
 /// The input of the built-in `delegate` tool (agent spec §8.1): a child
-/// kind — which must belong to the parent kind's delegation allowlist (§7.1)
-/// — a prompt, and optionally a budget request carved from the parent's
+/// kind, which must belong to the parent kind's delegation allowlist (§7.1);
+/// a prompt, and optionally a budget request carved from the parent's
 /// remainder (§9.1).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DelegateInput {
@@ -149,7 +149,7 @@ impl DelegateInput {
 
 /// A tool call's failure, journaled as the call's outcome and returned to the
 /// model as the tool result (agent spec §5.4): a failing tool never fails
-/// the run — the only abnormal run endings are the four of §3.1.
+/// the run; the only abnormal run endings are the four of §3.1.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ToolError {
     /// The per-tool timeout elapsed (§5.3 item 3). The call's effects may
@@ -158,11 +158,11 @@ pub enum ToolError {
     /// An orphaned call declared [`OnOrphan::Interrupt`] was resolved on
     /// resume (§5.5); the model decides whether to retry the side effect.
     Interrupted,
-    /// The model named a tool outside the registry — synthesized, nothing was
+    /// The model named a tool outside the registry: synthesized, nothing was
     /// executed (§5.4).
     UnknownTool { name: String },
-    /// The model's arguments were structurally malformed — not a JSON object,
-    /// or a `delegate` input that does not deserialize (§8.1) — synthesized
+    /// The model's arguments were structurally malformed, not a JSON object,
+    /// or a `delegate` input that does not deserialize (§8.1): synthesized
     /// before dispatch, nothing was executed (§5.4). Conformance to the
     /// declared `input_schema` beyond shape is the executing tool's check.
     InvalidArguments(String),
@@ -174,7 +174,7 @@ pub enum ToolError {
     EnvironmentLost(String),
     /// A delegation failed: the child run's terminal `RunError`, the
     /// budget-scaled wait lapsing on a slow child (§8.1), or the child staying
-    /// consecutively unreachable past the retry bound — formatted for the
+    /// consecutively unreachable past the retry bound; formatted for the
     /// parent's model to react to (§8.2).
     Delegation(String),
 }

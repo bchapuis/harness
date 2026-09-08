@@ -27,12 +27,12 @@ What is missing lives entirely at the network edge:
 Only one of them is security-critical.
 
 - **Isolation comes from edge-side key prefixing.** If the gateway prepends the
-  *authenticated* principal to the session key —
-  `SessionId::new(format!("{principal}/{session}"))`, via `auth::scoped_session`
-  — a client can only ever name entities inside its own namespace, because it never
+  *authenticated* principal to the session key
+  (`SessionId::new(format!("{principal}/{session}"))`, via `auth::scoped_session`),
+  a client can only ever name entities inside its own namespace, because it never
   supplies the prefix; the gateway does. This is the load-bearing isolation.
 - **Enumeration and lifecycle come from the `Directory`.** "List my sessions",
-  "drop my whole index when I leave" — the parts a client cannot derive from a
+  "drop my whole index when I leave": the parts a client cannot derive from a
   key.
 
 ## Identity model
@@ -59,14 +59,14 @@ over HTTP with a bearer token; the nodes have no client-facing listener.
 |------|------|
 | `agent-gateway/src/auth.rs` | The `TokenVerifier` seam: `verify(token) -> Option<PrincipalId>`, with `StaticTokens` (opaque secrets from `--auth-tokens`) and `InsecureTokens` (the token is the principal, loopback-only). Plus `scoped_session`/`unscope_session`. Runs at the edge, never in an entity (the determinism guard-rail). |
 | `agent-gateway/src/http.rs` | Each handler verifies the bearer token to a principal, scopes the `SessionId`, and calls the entity directly (`SessionRef::prompt_within`/`tail`/`follow`/`cancel`). `Record`/`List` go through the client `Entity<Directory>`. SSE carries the live record stream. |
-| `agent-gateway/src/cluster.rs` | Joins the transport in `MembershipMode::Static` with the cluster secret, dials the nodes, and `add_member`s them — so the receptionist gossip (the host gateway refs) reaches this non-voting client. |
+| `agent-gateway/src/cluster.rs` | Joins the transport in `MembershipMode::Static` with the cluster secret, dials the nodes, and `add_member`s them, so the receptionist gossip (the host gateway refs) reaches this non-voting client. |
 | `agent-gateway/src/lib.rs` | `Harness::client` (routing-only, no model/sandbox seams) + a client `Entity<Directory>`; `connect` polls until discovery, then assembles the `Gateway`. |
 | `agent-standalone/src/node.rs` | The node hosts the Agent kinds and the `Directory` entity and admits the gateway with `--client <id>=<host>` (a non-voting id outside the Raft roster). No client-facing listener. |
 
 ## Delegation falls out for free
 
 Delegated children get ids like `parent/t-1/tu_42`. Because the parent session is
-already `P/session`, a child becomes `P/session/t-1/tu_42` — the principal prefix
+already `P/session`, a child becomes `P/session/t-1/tu_42`: the principal prefix
 is inherited with no extra logic, so worker entities stay in-tenant. Only **root**
 sessions (the ones the client names) get a `Directory` `Record`; children are
 addressed internally by the agent, never by the client, so they never reach the
@@ -74,16 +74,16 @@ authorization gate.
 
 ## Directory enforcement (the feature layer)
 
-- **Prompt** — `Record(P, name, meta)` then proceed. `Record` is idempotent, so
+- **Prompt**: `Record(P, name, meta)` then proceed. `Record` is idempotent, so
   every prompt re-asserts ownership and a transient index failure self-heals on
-  the next turn (the run proceeds regardless — the index is best-effort).
-- **List** — `GET /v1/sessions?kind=…` -> `Directory(P).ListByType(kind)`, with
+  the next turn (the run proceeds regardless; the index is best-effort).
+- **List**: `GET /v1/sessions?kind=…` -> `Directory(P).ListByType(kind)`, with
   the principal prefix stripped back off each entry's key so the client sees the
   session ids it supplied.
 - **Reads are not gated on `Contains`.** The principal prefix already isolates
   reads (a client cannot name a key outside its own principal), so a gate adds no
   security.
-- **Later** — `session/delete` -> forget the entry and retire the entity.
+- **Later**: `session/delete` -> forget the entry and retire the entity.
 
 ## Security properties to bake in, not bolt on
 
@@ -101,21 +101,21 @@ authorization gate.
 
 ## How it stands
 
-- **Isolation core** — an authenticated bearer token binds a request's principal;
+- **Isolation core**: an authenticated bearer token binds a request's principal;
   session keys are prefixed with it (`auth::scoped_session`); a `TokenVerifier`
   seam ships `StaticTokens` (opaque secrets from `--auth-tokens`, the secure mode)
   and `InsecureTokens` (the token is the principal, loopback-only).
-- **Directory wiring** — the node hosts the `tenancy::Directory` entity (one per
+- **Directory wiring**: the node hosts the `tenancy::Directory` entity (one per
   principal, sharing the kinds' durable store); the gateway records ownership on
   each prompt and answers `GET /v1/sessions` from it.
-- **Gateway-as-cluster-client edge** — `agent-gateway` joins the transport as a
+- **Gateway-as-cluster-client edge**: `agent-gateway` joins the transport as a
   non-voting member (`Harness::client` + `entities_client`), terminates tenant
   auth, and addresses session entities directly. SSE carries the live record stream.
-- **Clients of the edge** — two, both HTTP/SSE clients of the gateway and
+- **Clients of the edge**: two, both HTTP/SSE clients of the gateway and
   nothing else: `agent-tui` (`crates/agent-tui`), a terminal chat UI that
   authenticates as a tenant, lists its sessions, and streams a run's records; and
   the VS Code extension in `clients/agent-vscode`, on the same endpoints.
-- **Not implemented** — per-tenant budgets and quotas, `session/delete` (forget
+- **Not implemented**: per-tenant budgets and quotas, `session/delete` (forget
   plus entity retire), token introspection, signed (HMAC/JWT) tokens, and a
   WebSocket transport.
 
@@ -124,7 +124,7 @@ authorization gate.
 - Unit: `TokenVerifier`; scoped-key construction (`agent-gateway/src/auth.rs`).
 - Integration: `agent-gateway/tests/gateway.rs` drives the axum router against
   an in-process cluster, runs a prompt to a hosted entity, and asserts principal A
-  cannot see principal B's sessions — the core isolation invariant.
+  cannot see principal B's sessions, the core isolation invariant.
 
 ## Token format
 

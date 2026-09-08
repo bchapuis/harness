@@ -5,9 +5,9 @@
 //! guarded by the drift test in `conformance_catalogue.rs`. `invariant: n` reads
 //! as "Mn".
 //!
-//! The machine's verification is spread across three sites in two crates — the
+//! The machine's verification is spread across three sites in two crates: the
 //! entity's own suites here, the SSH front door's in `machine-frontdoor`, and the
-//! egress rule generator's unit tests in this crate's `src/net.rs` — so each entry
+//! egress rule generator's unit tests in this crate's `src/net.rs`, so each entry
 //! names test functions, and the drift test resolves a name to its file by
 //! searching for the function's definition across `machine-entity`,
 //! `machine-frontdoor`, and `machine-host`. Without that, M4 and M6 would have to

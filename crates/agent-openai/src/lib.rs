@@ -5,8 +5,8 @@
 //! request and response JSON, the transcript encoding, and the error
 //! taxonomy (OpenAI's `context_length_exceeded` and friends). It is the
 //! sibling of `agent-anthropic`: same seam, a different wire protocol.
-//! Everything that is not protocol — the socket, the key, the
-//! `Clock`/`Entropy` seams, the bounded retry engine (§4.2 rule 1) — is the
+//! Everything that is not protocol: the socket, the key, the
+//! `Clock`/`Entropy` seams, the bounded retry engine (§4.2 rule 1); is the
 //! shared [`ProtocolModel`] shell from `agent::http`, held there once for
 //! every sibling adapter.
 //!
@@ -31,7 +31,7 @@ use serde_json::Value;
 use serde_json::json;
 
 /// The API path every completion posts to. It carries the `/v1` prefix, so a
-/// host's [`HttpPost`] points at a base URL *without* one — see [`base_url`].
+/// host's [`HttpPost`] points at a base URL *without* one; see [`base_url`].
 pub const COMPLETIONS_PATH: &str = "/v1/chat/completions";
 
 /// Base URLs of well-known OpenAI-compatible endpoints, for a host to point its
@@ -53,7 +53,7 @@ pub mod base_url {
 }
 
 /// The Chat Completions protocol: the wire-specific four this crate owns. The
-/// shell around it — socket, key, seams, retry — is the shared
+/// shell around it (socket, key, seams, retry) is the shared
 /// [`ProtocolModel`].
 pub struct ChatCompletions;
 
@@ -280,7 +280,7 @@ fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
         // An over-long prompt is reported as an invalid request; the agent runtime
         // distinguishes it because the run must fail explicitly on it
         // (§1.1, §4.3). Detection is by code, or by message across the servers
-        // that omit it — the leakiest part of "compatible".
+        // that omit it: the leakiest part of "compatible".
         400 | 413 if code == "context_length_exceeded" || is_context_message(&detail.message) => {
             ModelError::ContextOverflow
         }

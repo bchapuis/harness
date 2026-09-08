@@ -8,8 +8,8 @@
 //! representable escape, and the symlink/TOCTOU class survives filtering.
 //!
 //! The tools are pure functions of the call and the filesystem: no ambient
-//! clock or entropy reaches an output — no mtimes, and `list_dir` is
-//! name-sorted — so they run unmodified under the deterministic simulator
+//! clock or entropy reaches an output (no mtimes, and `list_dir` is
+//! name-sorted), so they run unmodified under the deterministic simulator
 //! (core spec §18.1).
 
 use std::path::Path;
@@ -136,7 +136,7 @@ fn read_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
 }
 
 /// Apply an `edit_file` string replacement (`old_string` → `new_string`,
-/// optional `replace_all`). An absent or — without `replace_all` — non-unique
+/// optional `replace_all`). An absent or (without `replace_all`) non-unique
 /// `old_string` is an `InvalidArguments` error, so an ambiguous edit fails
 /// loudly rather than touching the wrong site.
 fn edit_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
@@ -185,7 +185,7 @@ fn edit_file(dir: &Dir, input: &Value) -> Result<Value, ToolError> {
 }
 
 /// Decode `bytes` as UTF-8, optionally to a 1-based line window (`offset`/`limit`,
-/// for paging past the cap), then apply the 256 KiB cap with clean truncation —
+/// for paging past the cap), then apply the 256 KiB cap with clean truncation:
 /// the tier's `{content, truncated}` shape.
 fn cap_and_decode(bytes: &[u8], offset: Option<u64>, limit: Option<u64>) -> Value {
     let text = String::from_utf8_lossy(bytes);

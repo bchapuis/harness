@@ -8,7 +8,7 @@
 //!
 //! - **Failover rematerialization.** A leader crash moves the activation to
 //!   another node, whose materialization is rebuilt from the composite-snapshot
-//!   manifest (blob chunks) plus the committed WAL-frame records —
+//!   manifest (blob chunks) plus the committed WAL-frame records:
 //!   [`Facet::fold`]/`apply_delta`, the replay path the `Local` tier's
 //!   hibernation only partially covers (node-crash cascade, checklist #5).
 //! - **Checkpoints under faults.** `snapshot_every` forces checkpoint → blob
@@ -99,7 +99,7 @@ fn ensure_schema(ctx: &EntityCtx<SqlAccount>) {
         .expect("ddl");
 }
 
-/// Insert one deposit row; reply with the running total — a WAL-frame record
+/// Insert one deposit row; reply with the running total: a WAL-frame record
 /// committing through the quorum path (§7.14, E19).
 #[derive(Clone, Serialize, Deserialize)]
 struct Deposit {
@@ -133,7 +133,7 @@ impl EntityHandler<Deposit> for SqlAccount {
     }
 }
 
-/// The running total — a pure read: no frames, no record (§7.5).
+/// The running total, a pure read: no frames, no record (§7.5).
 #[derive(Clone, Serialize, Deserialize)]
 struct ReadTotal;
 impl Message for ReadTotal {
@@ -169,7 +169,7 @@ impl EntityHandler<ReadTotal> for SqlAccount {
 /// completes and the invariants are checked over whatever the run produced.
 ///
 /// One scratch directory serves every run and every simulated node (the facet
-/// keys materializations by node and entity, and restore discards stale files —
+/// keys materializations by node and entity, and restore discards stale files:
 /// they are a cache, never truth, §1).
 struct SqlAccountSwarm {
     nodes: usize,
@@ -200,7 +200,7 @@ impl SqlAccountSwarm {
     }
 
     /// Short activation lifetime, clients that idle past it, and a nemesis that
-    /// kills processes — so a read has to come from a database the next
+    /// kills processes, so a read has to come from a database the next
     /// activation rebuilt: composite snapshot, pages fetched and verified by
     /// content (E17), frame records after the snapshot seq replayed on top
     /// (byte-deterministic, F1).
@@ -240,7 +240,7 @@ impl SqlAccountSwarm {
 const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
-/// How long a hibernating client idles when it idles — comfortably past
+/// How long a hibernating client idles when it idles: comfortably past
 /// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
@@ -269,7 +269,7 @@ impl ClusterWorkload for SqlAccountSwarm {
         }
         // A restarted node comes up empty and would otherwise stop hosting
         // `SqlAccount`. The config carries the same scratch root: restore
-        // discards stale local files (a cache, never truth — §1), so a fresh
+        // discards stale local files (a cache, never truth; §1), so a fresh
         // process rebuilding over its predecessor's leftover database file is
         // exactly the case worth covering.
         let config = self.config();
@@ -368,7 +368,7 @@ fn sql_entity_invariants_hold_under_the_cluster_swarm() {
 fn sql_entity_invariants_hold_across_hibernation_and_restarts() {
     // The clustered restore path: the entity hibernates, its database file goes,
     // and the next call rebuilds it from the composite snapshot's pages plus the
-    // frame records above it — in a process that may not have existed when the
+    // frame records above it, in a process that may not have existed when the
     // write committed.
     let dir = tempfile::tempdir().expect("tempdir");
     let workload = SqlAccountSwarm::hibernating(3, 3, 6, dir.path().to_path_buf());
@@ -390,7 +390,7 @@ fn sql_hibernating_cluster_swarm_is_reproducible() {
 #[test]
 fn sql_cluster_swarm_actually_fires_each_fault_type() {
     // #8: the SQL facet's clustered sweeps configure faults, so something must
-    // prove they fire. A narrow declared range keeps the cost honest — the claim
+    // prove they fire. A narrow declared range keeps the cost honest: the claim
     // is "each fault type fired somewhere across these seeds", and 8 of them
     // carry it as well as 32 would while a seed here materializes real SQLite
     // files on three nodes.
@@ -420,8 +420,8 @@ fn sql_cluster_swarm_actually_fires_each_fault_type() {
 
 #[test]
 fn sql_cluster_swarm_is_reproducible() {
-    // #7: the same seed replays to a byte-identical event stream — entity events
-    // included — even under cluster nemesis and transport faults, with real
+    // #7: the same seed replays to a byte-identical event stream (entity events
+    // included) even under cluster nemesis and transport faults, with real
     // SQLite files materialized on every node.
     let dir = tempfile::tempdir().expect("tempdir");
     let workload = SqlAccountSwarm::new(3, 2, 5, dir.path().to_path_buf());
@@ -434,12 +434,12 @@ fn sql_cluster_swarm_is_reproducible() {
 /// across a small key space, with sleeps past `idle_after` so activations
 /// hibernate, checkpoint into blobs, and rematerialize mid-run. One scratch
 /// directory serves every run: the facet's restore discards stale local files
-/// (they are a cache, never truth — §1), which this sharing exercises for free.
+/// (they are a cache, never truth; §1), which this sharing exercises for free.
 ///
 /// `random` gates the `AddRandom` traffic (SQLite's own `random()`, OS-seeded).
 /// It is off for reproducibility sweeps: physical replication makes the value
 /// safe for durability (asserted elsewhere), but the §18.1 repro contract is
-/// kept strict — no unseeded randomness anywhere in a replayed run.
+/// kept strict, no unseeded randomness anywhere in a replayed run.
 struct SqlSwarm {
     clients: usize,
     ops: u64,
@@ -529,8 +529,8 @@ fn sql_swarm_invariants_hold_across_seeds() {
 }
 #[test]
 fn sql_swarm_is_reproducible() {
-    // #7: the same seed yields a byte-identical event stream — entity events
-    // included — even though the workload materializes real SQLite files,
+    // #7: the same seed yields a byte-identical event stream (entity events
+    // included) even though the workload materializes real SQLite files,
     // checkpoints them into blobs, and rematerializes mid-run. A wall-clock
     // read, an OS thread, or an unseeded RNG anywhere in the facet breaks this.
     let dir = tempfile::tempdir().expect("tempdir");

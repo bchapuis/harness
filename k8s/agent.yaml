@@ -6,7 +6,7 @@
 # disk.
 #
 # Why the gateway is a StatefulSet (not a Deployment): as a cluster client it
-# needs a stable transport identity — a fixed non-voting node id and a DNS name
+# needs a stable transport identity; a fixed non-voting node id and a DNS name
 # the nodes admit with `--client <id>=<host>`. Ordinals give both: gateway pod N
 # is node id 100+N at agent-gw-N.agent-gw.
 #
@@ -22,8 +22,8 @@
 #          --from-literal=api-key="$ANTHROPIC_API_KEY"
 #   3. Create the cluster-secret and tenants secrets (deploy.sh does this for you;
 #      see k8s/README.md to do it by hand):
-#        agent-cluster  — the cluster secret guarding the transport handshake
-#        agent-auth     — a tenants file (`<principal> <token>` per line)
+#        agent-cluster; the cluster secret guarding the transport handshake
+#        agent-auth; a tenants file (`<principal> <token>` per line)
 #   4. kubectl apply -f k8s/agent.yaml
 #
 # Drive sessions over HTTP through the gateway Service (the only tenant-facing
@@ -43,7 +43,7 @@ metadata:
   labels:
     app: agent
 spec:
-  # Headless: no proxy, no cluster IP — just an A record per pod
+  # Headless: no proxy, no cluster IP; just an A record per pod
   # (agent-0.agent, agent-1.agent, …), which is what `--peer` dials.
   clusterIP: None
   # Publish pod DNS before the pods report Ready, so a node can resolve its
@@ -134,9 +134,9 @@ spec:
           # DEMO SIZING. These limits fit a laptop kind/minikube cluster and are
           # roughly three orders of magnitude below the machine the design assumes
           # (docs/hardware-envelope.md §1: local NVMe, tens of cores, 128-256 GB).
-          # Several defaults are set on the assumption that memory is abundant —
+          # Several defaults are set on the assumption that memory is abundant:
           # the manifest is held whole, segments and host handles are cached by the
-          # thousand — so a node run at 512Mi will OOM under any real entity count.
+          # thousand, so a node run at 512Mi will OOM under any real entity count.
           #
           # For production, size a node to the envelope and give it a real
           # descriptor budget; the store's segment cache alone wants ~65k
@@ -148,7 +148,7 @@ spec:
           #
           # and raise LimitNOFILE on the node, or set it here per-container via a
           # securityContext/initContainer, to at least 70000. Note that the target
-          # deployment is bare metal rather than Kubernetes — see
+          # deployment is bare metal rather than Kubernetes; see
           # docs/standalone-deployment.md for the sizing this manifest does not do.
           resources:
             requests:
@@ -196,7 +196,7 @@ spec:
 # The gateway tier: the public HTTP/SSE edge, joined to the cluster as a
 # non-voting CLIENT. It verifies a caller's bearer token to a tenant (it
 # terminates auth, with the agent-auth tenants file) and addresses the
-# session's entity directly over the transport — no control protocol. Holds no
+# session's entity directly over the transport, no control protocol. Holds no
 # durable state, so scale `replicas` freely (each gets its own non-voting id;
 # admit more by extending the nodes' --client flags). Public TLS is expected to
 # terminate at an Ingress/LoadBalancer; the transport link is plaintext, guarded
@@ -259,7 +259,7 @@ spec:
           ports:
             - name: http
               containerPort: 8080
-          # Liveness: the process is up. Readiness: serving and not draining — on
+          # Liveness: the process is up. Readiness: serving and not draining, on
           # SIGTERM the gateway flips /readyz to 503 so this pod leaves the Service
           # endpoints before axum drains the in-flight requests.
           livenessProbe:

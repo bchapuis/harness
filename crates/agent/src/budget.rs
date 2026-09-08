@@ -3,7 +3,7 @@
 //! Every run has a [`Budget`]; spend is the model-**reported** usage summed
 //! over the run's journaled calls, plus the carve-outs of its delegations.
 //! Enforcement is pre-call: a model call is issued only while spend is below
-//! the budget, with `max_tokens` clamped to the remainder — so output
+//! the budget, with `max_tokens` clamped to the remainder, so output
 //! overshoot is zero and total overshoot is bounded by one call's input
 //! (invariant A4). The bound is compositional with **no cross-node accounting
 //! protocol**: a delegation reserves an explicit slice of the parent's
@@ -44,7 +44,7 @@ impl Usage {
 }
 
 /// A run's journaled spend so far (agent spec §9.1): own model usage plus
-/// the slices carved out for children. Folded from the journal — the fold is
+/// the slices carved out for children. Folded from the journal: the fold is
 /// the accountant, so a resumed run resumes its accounting too (A1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Spend {

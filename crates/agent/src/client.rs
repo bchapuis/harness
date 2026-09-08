@@ -8,7 +8,7 @@
 //! §2.2), injecting the node's model and sandbox seams into every activation
 //! through the factory.
 //!
-//! [`HarnessSystem`] is the agent runtime's name for the system it runs on — exactly
+//! [`HarnessSystem`] is the agent runtime's name for the system it runs on: exactly
 //! an [`EntitySystem`]; its §10.4 events ride the core `emit` seam onto the
 //! same observability stream the entity's events use.
 
@@ -78,7 +78,7 @@ fn leak_entity_type(kind_id: &KindId) -> &'static str {
     id
 }
 
-/// The system a harness runs on — exactly an [`EntitySystem`] (the agent is a
+/// The system a harness runs on: exactly an [`EntitySystem`] (the agent is a
 /// entity, §2.1; its events ride [`ActorSystem::emit`]). The name is the
 /// harness's own vocabulary for the requirement, so a consumer writes
 /// `S: HarnessSystem` without naming the storage layer; the blanket impl makes
@@ -94,7 +94,7 @@ impl<S: EntitySystem> HarnessSystem for S {}
 /// not here; durability retries are the entity's.
 #[derive(Clone, Debug)]
 pub struct HarnessConfig {
-    /// Default deadline bounding a caller's wait on `prompt` (§7.3) — never the
+    /// Default deadline bounding a caller's wait on `prompt` (§7.3), never the
     /// run, which continues unaffected when the caller times out.
     pub submit_deadline: Duration,
     /// Default per-tool execution bound (§5.3 item 3), overridable per
@@ -146,13 +146,13 @@ impl Default for HarnessConfig {
 /// The node-global addressing context shared by a [`Harness`] and every `Agent`
 /// activation it hosts (§7.4): the per-kind entity directory (for routing and
 /// delegation), the cluster-wide kind registry, and the agent runtime tuning. It holds
-/// **no** activation seams — those live on the hosted kind's [`Seams`].
+/// **no** activation seams: those live on the hosted kind's [`Seams`].
 pub(crate) struct Shared<S: HarnessSystem> {
     pub(crate) kinds: Kinds,
     pub(crate) config: HarnessConfig,
     /// One `Entities` handle per kind, set once after every kind is built, so a
     /// entity can address children of any kind for delegation (§8.1) and cancel
-    /// propagation (§9.2). Filled after construction — the factories that produce
+    /// propagation (§9.2). Filled after construction: the factories that produce
     /// activations are captured before the handles exist.
     pub(crate) hosts: OnceLock<BTreeMap<KindId, Entities<Agent<S>>>>,
 }
@@ -168,7 +168,7 @@ impl<S: HarnessSystem> Shared<S> {
 
 /// A hosted kind's activation seams (§4, §5.3): the node's model and sandbox,
 /// injected into each activation of that kind. An `Agent` exists only for a
-/// **hosted** kind, so the seams are always present — no `Option`. A
+/// **hosted** kind, so the seams are always present, no `Option`. A
 /// routing-only kind has no `Seams`: it never activates.
 #[derive(Clone)]
 pub(crate) struct Seams {
@@ -207,7 +207,7 @@ impl<S: HarnessSystem> Harness<S> {
     /// ```
     ///
     /// A routing-only gateway tier (the Orleans cluster-client) states its
-    /// `(name, shards)` roster instead — see [`Harness::client`].
+    /// `(name, shards)` roster instead; see [`Harness::client`].
     pub fn builder(system: S, kinds: &Kinds) -> HarnessBuilder<S, NoRoutes> {
         HarnessBuilder {
             entity_node: system.entity_node(),
@@ -220,7 +220,7 @@ impl<S: HarnessSystem> Harness<S> {
         }
     }
 
-    /// Build a harness that **hosts every** registered kind on this node — a full
+    /// Build a harness that **hosts every** registered kind on this node: a full
     /// cluster member (the common case). Shorthand for
     /// `Harness::builder(system, kinds).host_all(model, sandbox).build()`; reach for
     /// the builder directly for a custom [`HarnessConfig`], or to host some kinds
@@ -239,11 +239,11 @@ impl<S: HarnessSystem> Harness<S> {
     /// Build a routing-only **client** harness (the Orleans cluster-client): it
     /// hosts no entities, it only *addresses* sessions hosted elsewhere on the
     /// cluster. `roster` pairs each kind's name with its `EntityConfig.shards`
-    /// on the hosting nodes — the two facts a router needs (a session name must
-    /// hash to the same shard here as there), and the only two it may know:
+    /// on the hosting nodes: the two facts a router needs (a session name must
+    /// hash to the same shard here as there), and the only two it may know;
     /// prompts, tools, and model params stay the hosts' concern. Both MUST
     /// match the hosts' deployment. Returns `None` until every kind's host
-    /// gateway has gossiped into this node's receptionist — the caller polls,
+    /// gateway has gossiped into this node's receptionist: the caller polls,
     /// as a node waits for its peers.
     pub fn client(system: S, roster: &[(String, usize)]) -> Option<Harness<S>> {
         let mut builder = Harness::builder(system, &Kinds::new()).into_has_routes();
@@ -254,7 +254,7 @@ impl<S: HarnessSystem> Harness<S> {
     }
 
     /// A client view of `session` under `kind` (agent spec §7.4). Pure:
-    /// name→shard is a local hash, no I/O — the one failure is a directory
+    /// name→shard is a local hash, no I/O; the one failure is a directory
     /// miss, a kind this node neither hosts nor routes ([`UnknownKind`]).
     /// Kind names reach clients from outside (a URL path at the gateway), so
     /// the miss is an error value, not a panic. Creation is implicit in the
@@ -276,8 +276,8 @@ impl<S: HarnessSystem> Harness<S> {
     /// Hand every shard this node leads, across every kind it hosts, to another
     /// replica before the node departs (entity spec §8.3): the sum of each kind's
     /// [`Entities::hand_off_leadership`], so `0` means every led shard moved. Same
-    /// terms as the per-kind call — best-effort and bounded, a non-zero return is
-    /// information for the operator rather than an error — and a no-op for a
+    /// terms as the per-kind call (best-effort and bounded, a non-zero return is
+    /// information for the operator rather than an error), and a no-op for a
     /// routing-only client, which leads nothing.
     pub async fn hand_off_leadership(&self) -> usize {
         let mut outstanding = 0;
@@ -290,7 +290,7 @@ impl<S: HarnessSystem> Harness<S> {
 
 /// The error of [`Harness::session`]: the named kind is in neither this node's
 /// hosted nor its routed set, so there is no entity to address the session
-/// through. Permanent for this node's directory — a retry cannot clear it; the
+/// through. Permanent for this node's directory: a retry cannot clear it; the
 /// fix is configuration (host or route the kind) or the caller's spelling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownKind {
@@ -310,24 +310,24 @@ impl std::fmt::Display for UnknownKind {
 
 impl std::error::Error for UnknownKind {}
 
-/// [`HarnessBuilder`] type-state: no routed kinds yet, so `build` is infallible —
+/// [`HarnessBuilder`] type-state: no routed kinds yet, so `build` is infallible,
 /// hosting starts no discovery.
 pub struct NoRoutes;
 
 /// [`HarnessBuilder`] type-state: at least one routed kind, so `build` returns
-/// `Option` — `None` until every routed kind's host gateway has gossiped into this
+/// `Option`; `None` until every routed kind's host gateway has gossiped into this
 /// node's receptionist.
 pub struct HasRoutes;
 
 /// Builds a [`Harness`], choosing **per kind** whether this node hosts the entity
-/// type — starting its gateway, replica store, and shard-map group and injecting
-/// the model/sandbox [`Seams`] into each activation — or only routes to a host of
+/// type (starting its gateway, replica store, and shard-map group and injecting
+/// the model/sandbox [`Seams`] into each activation), or only routes to a host of
 /// it (the Orleans cluster-client path: no hosting, the gateway discovered through
 /// the receptionist). See [`Harness::builder`].
 pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
     system: S,
     /// The node-scoped entity capabilities every hosted kind's entity type shares
-    /// (entity §7.4, §13). One per node, not per kind — a node hosting five kinds
+    /// (entity §7.4, §13). One per node, not per kind: a node hosting five kinds
     /// wants one I/O pool and one metrics registry, not five.
     entity_node: EntityNode<S>,
     kinds: Kinds,
@@ -340,7 +340,7 @@ pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
 impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
     /// The node-scoped entity capabilities every hosted kind shares (entity §7.4,
     /// §13): the blocking-I/O pool and the metrics registry. Defaults to the system's
-    /// own — inline I/O and discarded metrics — which is what the simulation wants.
+    /// own (inline I/O and discarded metrics) which is what the simulation wants.
     ///
     /// A deployment on real storage sets it once here rather than per kind, since a
     /// pool exists to bound *the node's* concurrent device work.
@@ -374,7 +374,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
         self
     }
 
-    /// Host every registered kind on this node with the same seams — the common
+    /// Host every registered kind on this node with the same seams: the common
     /// case for a full node.
     pub fn host_all(mut self, model: Arc<dyn Model>, sandbox: Arc<dyn SandboxProvider>) -> Self {
         for (id, def) in self.kinds.iter() {
@@ -393,7 +393,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
     /// Route to a host of the kind named `kind` instead of hosting it (the
     /// Orleans cluster-client path). `shards` is the kind's `EntityConfig.shards`
     /// on the hosting nodes, so a session name hashes to the same shard here as
-    /// there. A routing tier addresses sessions — it never activates an entity — so
+    /// there. A routing tier addresses sessions (it never activates an entity), so
     /// a kind's name and shard count are the only two facts it takes, and the
     /// only two it may know: prompts, tools, and model params stay the hosts'
     /// concern. Moves the builder to the `HasRoutes` type-state, so `build`
@@ -458,7 +458,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
         });
         // Host one entity type per hosted kind. The factory captures the node's
         // directory (via `shared`), this kind's definition, and its seams, and
-        // builds a fresh activation per (re)activation — so the entity needs no
+        // builds a fresh activation per (re)activation, so the entity needs no
         // `Default` and no process-global; multi-node-in-one-process simulations
         // each get their own (§12.1).
         for (id, def, seams) in &self.hosted {
@@ -493,7 +493,7 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
 impl<S: HarnessSystem> HarnessBuilder<S, NoRoutes> {
     /// Build the agent runtime. Infallible: there is nothing to discover. Panics if a
     /// hosted kind's delegation allowlist names a kind this node neither hosts
-    /// nor routes (§7.1) — a deployment configuration error.
+    /// nor routes (§7.1): a deployment configuration error.
     pub fn build(self) -> Harness<S> {
         self.assemble()
             .expect("a host-only build has no routed kinds to discover")
@@ -504,7 +504,7 @@ impl<S: HarnessSystem> HarnessBuilder<S, HasRoutes> {
     /// Build the agent runtime, or `None` until every routed kind's host gateway has
     /// gossiped into this node's receptionist (poll). Hosting side effects run
     /// only once all routed kinds resolve. Panics if a hosted kind's delegation
-    /// allowlist names a kind this node neither hosts nor routes (§7.1) — a
+    /// allowlist names a kind this node neither hosts nor routes (§7.1): a
     /// deployment configuration error.
     pub fn build(self) -> Option<Harness<S>> {
         self.assemble()
@@ -584,21 +584,21 @@ impl<S: HarnessSystem> SessionRef<S> {
     }
 
     /// Read committed records (agent spec §10.2): at most `limit` records
-    /// after `from` (`limit` clamped to [`TAIL_PAGE`](crate::TAIL_PAGE)) — an
+    /// after `from` (`limit` clamped to [`TAIL_PAGE`](crate::TAIL_PAGE)); an
     /// idempotent, replication-free read of the leader's journal, riding
     /// entity's gateway-level event read (entity §7.5). It never
     /// get-or-activates the session, so **polling a hibernated session leaves
-    /// it asleep** — observation costs a journal read, not a rehydration. The
+    /// it asleep**: observation costs a journal read, not a rehydration. The
     /// returned `Seq`s are the journal's real slots (facet records occupy
     /// interleaved ones); fewer than `limit` records come back only at the
     /// head, so page by re-asking from the last `Seq` returned. A leader-side
-    /// read failure surfaces as the entity's `Unavailable`: transient, and — a
-    /// read commits nothing — always safe to retry.
+    /// read failure surfaces as the entity's `Unavailable`: transient, and
+    /// always safe to retry, since a read commits nothing.
     ///
     /// The returned [`EventHistory`]'s `base` reports how far snapshot
     /// compaction has truncated the journal (entity §9): a `from` below it
     /// asked for records the session's snapshot has subsumed, and the records
-    /// in `(from, base]` are not — and can no longer be — served. `base <=
+    /// in `(from, base]` are not (and can no longer be) served. `base <=
     /// from` means the page is complete history from `from`; without the base,
     /// truncation would be indistinguishable from the facet slots the
     /// projection legally skips.
@@ -629,20 +629,20 @@ pub const TAIL_PAGE: u32 = 1024;
 const FOLLOW_PAGE: usize = 256;
 
 /// How long a caught-up follower waits for a live record before re-checking the
-/// journal. A silent leader move or crash leaves the old sink alive but idle —
-/// the stream never closes and the new leader has no sink — so a periodic
+/// journal. A silent leader move or crash leaves the old sink alive but idle
+/// (the stream never closes and the new leader has no sink), so a periodic
 /// backfill is the liveness net that detects the move and re-subscribes (entity §7.9).
 const FOLLOW_RESYNC: Duration = Duration::from_secs(2);
 
 /// What one [`Follower::next`] yields: the next records, or the one thing that
-/// breaks the exact-sequence contract — snapshot compaction truncating the
+/// breaks the exact-sequence contract; snapshot compaction truncating the
 /// journal past the follower's cursor (entity §9).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Followed {
     /// The next in-order records after the cursor, at least one.
     Batch(Vec<(Seq, Record)>),
     /// The journal compacted past the cursor: the records in `(cursor, base]`
-    /// are subsumed by the session's snapshot and can no longer be read — by
+    /// are subsumed by the session's snapshot and can no longer be read, by
     /// this follower or anyone. The stream resumes after `base`; the signal is
     /// surfaced (rather than silently jumped) so an observer never mistakes
     /// truncated history for a complete transcript.
@@ -653,7 +653,7 @@ pub enum Followed {
 /// record subscription and reconciles by `Seq`: it backfills from the journal on
 /// first attach, on any gap, and after the stream closes (a leader move, a
 /// lag-drop, or hibernation), so [`next`](Self::next) yields the exact committed
-/// sequence — in order, with no gap or duplicate (entity E16) — except where
+/// sequence, in order, with no gap or duplicate (entity E16); except where
 /// compaction has truncated it, which it reports as [`Followed::Truncated`]
 /// rather than papering over. Push is the fast path; the journal is the
 /// authority.
@@ -715,7 +715,7 @@ impl<S: HarnessSystem> Follower<S> {
                 // The timer won: a silent move/crash leaves the stream open but
                 // dead. If the head advanced anyway, re-subscribe to the current
                 // leader (the old sink is orphaned) and return the backfill; else
-                // we are simply idle — keep the subscription, no churn.
+                // we are simply idle; keep the subscription, no churn.
                 Either::Right(_) => {
                     if let Some(step) = self.backfill().await? {
                         self.sub = None;
@@ -730,7 +730,7 @@ impl<S: HarnessSystem> Follower<S> {
     /// non-activating gateway read, entity §7.5), advancing the cursor. `None`
     /// when already at the head. A compaction base above the cursor is the
     /// truncation signal: the cursor jumps to the base and the fetched records
-    /// are dropped — the next call re-reads from the base, so the one-page
+    /// are dropped; the next call re-reads from the base, so the one-page
     /// waste buys a caller that always hears about the gap *before* any record
     /// past it.
     async fn backfill(&mut self) -> Result<Option<Followed>, EntityError> {
@@ -754,8 +754,8 @@ impl<S: HarnessSystem> Follower<S> {
 /// and stops. Its `ActorRef` is what rides in `Submit { reply_to }`; the run's
 /// outcome is delivered to it whether the run is still live or already ended.
 /// Its lifetime is its caller's wait, not the delivery: an attempt that ends
-/// without an outcome stops it through [`MailboxGuard`], so no path — a lapse,
-/// a rejection, a transport failure, an abandoned caller — leaks the actor.
+/// without an outcome stops it through [`MailboxGuard`], so no path (a lapse,
+/// a rejection, a transport failure, an abandoned caller) leaks the actor.
 pub struct ReplyMailbox<S: HarnessSystem> {
     tx: Option<oneshot::Sender<RunOutcome>>,
     _marker: std::marker::PhantomData<S>,
@@ -774,7 +774,7 @@ impl<S: HarnessSystem> Actor for ReplyMailbox<S> {
     type System = S;
 
     fn register(registry: &mut HandlerRegistry<Self>) {
-        // `RunCompleted` only: `Discard` stays local-only (§7.4) — the caller's
+        // `RunCompleted` only: `Discard` stays local-only (§7.4); the caller's
         // own guard stops the mailbox, never a peer.
         registry.accept::<RunCompleted>();
     }
@@ -806,9 +806,9 @@ impl<S: HarnessSystem> Handler<Discard> for ReplyMailbox<S> {
     }
 }
 
-/// Ties a [`ReplyMailbox`] to its caller's wait (§7.4): dropping the guard —
-/// every exit from a submit-and-attach attempt, including the caller dropping
-/// the future mid-await — launches a [`Discard`] at the mailbox. Disarmed on
+/// Ties a [`ReplyMailbox`] to its caller's wait (§7.4): dropping the guard
+/// (every exit from a submit-and-attach attempt, including the caller dropping
+/// the future mid-await) launches a [`Discard`] at the mailbox. Disarmed on
 /// the one path where the mailbox has already delivered and stopped itself; a
 /// discard racing a late delivery is harmless either way (a `tell` to a
 /// stopped actor fails quietly, and a lost notification is recovered by

@@ -2,7 +2,7 @@
 //!
 //! Defines reusable actors and messages that work on *both* the single-node
 //! `SimSystem` and the multi-node `SimNode` (the actors are generic over the
-//! system type — generic actors are allowed by the spec, §1.2), plus builders
+//! system type: generic actors are allowed by the spec, §1.2), plus builders
 //! for the common system topologies. Each conformance test file pulls this in
 //! with `mod support;`.
 
@@ -268,8 +268,8 @@ pub fn cluster(seed: u64, swim: Option<SwimConfig>) -> (Simulation, SimNetwork) 
 // The framework's delivery guarantee is at-most-once *at the caller* (spec
 // §7.2): a frame the wire duplicates is handled twice by the recipient, and the
 // caller resolves against whichever reply survives. For a `Cas` the two
-// handlings answer differently — the first flips the value and returns `true`,
-// the second finds it already flipped and returns `false` — so a caller whose
+// handlings answer differently (the first flips the value and returns `true`,
+// the second finds it already flipped and returns `false`), so a caller whose
 // first reply was dropped learns that its successful `Cas` failed. The spec
 // names the remedy in the same section: higher guarantees are out of scope for
 // the transport and are "built atop this layer with explicit idempotency keys".
@@ -280,7 +280,7 @@ pub fn cluster(seed: u64, swim: Option<SwimConfig>) -> (Simulation, SimNetwork) 
 // A system-generic register so the same actor runs on `SimSystem` and
 // `SimNode` (generic actors are allowed by the spec, §1.2).
 
-/// A caller's name for one mutating call *attempt* — the idempotency key of
+/// A caller's name for one mutating call *attempt*: the idempotency key of
 /// spec §7.2. Unique per (client, operation), and identical across every copy
 /// of the same request the wire may deliver.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
@@ -432,7 +432,7 @@ pub async fn client<R>(
 
 /// A uniform calling surface over the register, so the same client code drives it
 /// both locally and across the network. `Err(())` means the outcome is unknown
-/// (any `CallError`) — recorded as a pending operation.
+/// (any `CallError`): recorded as a pending operation.
 pub trait RegisterRef: Clone {
     fn read(&self) -> BoxFuture<'static, Result<i64, ()>>;
     fn write(&self, req: ReqId, v: i64) -> BoxFuture<'static, Result<(), ()>>;

@@ -11,7 +11,7 @@ needs at runtime, into `out/` (gitignored):
 | `firecracker` | the VMM | GitHub releases |
 
 Docker is the only requirement: **building runs fine on macOS**. *Running*
-the assets requires Linux with `/dev/kvm` — Firecracker has no emulation
+the assets requires Linux with `/dev/kvm`: Firecracker has no emulation
 fallback, and Docker Desktop's VM does not expose KVM (Apple Silicon nested
 virtualization needs M3+). The split is deliberate:
 
@@ -24,7 +24,7 @@ virtualization needs M3+). The split is deliberate:
   the assets from `out/` (override with `AGENT_FC_ASSETS=<dir>`).
 
 Knobs, all env: `ARCH` (`x86_64`/`aarch64`, defaults to the docker engine's),
-`ALPINE`, `FC_VERSION`, `CI_VERSION`, `KERNEL` — see the script header.
+`ALPINE`, `FC_VERSION`, `CI_VERSION`, `KERNEL`; see the script header.
 Cross-arch builds work through docker's `--platform` emulation.
 
 The agent and `crates/agent-sandbox/src/firecracker.rs` are the two ends

@@ -1,4 +1,4 @@
-//! Conformance: **static** membership (spec §9.4) — the fixed-roster control
+//! Conformance: **static** membership (spec §9.4); the fixed-roster control
 //! plane.
 //!
 //! In static mode the member set is fixed at startup and no failure detector
@@ -86,7 +86,7 @@ fn static_mode_runs_no_failure_detector() {
         .count();
     assert_eq!(detector_events, 0, "static mode runs no failure detector");
 
-    // B's membership is exactly what startup wired — never suspected, never downed.
+    // B's membership is exactly what startup wired, never suspected, never downed.
     assert_eq!(a.membership().status(B), Some(MemberStatus::Up));
     assert_eq!(
         a.membership().reachability(B),
@@ -98,7 +98,7 @@ fn static_mode_runs_no_failure_detector() {
 #[test]
 fn a_send_to_a_crashed_node_fails_without_changing_membership() {
     // Failure surfaces to the caller as a `CallError`, and the call still
-    // completes (never hangs) — but membership is untouched: nothing downs B
+    // completes (never hangs), but membership is untouched: nothing downs B
     // (spec §8, §9.4).
     let sim = Simulation::new(2);
     let net = SimNetwork::new(&sim);
@@ -162,7 +162,7 @@ fn operator_commands_are_noops_without_a_control_plane() {
 fn the_observe_only_detector_reports_reachability_but_never_downs() {
     // Spec §9.4.1: a static deployment MAY enable the detector observe-only,
     // trading probe traffic for reachability events and discovery routing.
-    // Nothing else changes: there is still no down authority — no `down`, no
+    // Nothing else changes: there is still no down authority, no `down`, no
     // membership transition; the member set stays exactly the configured roster.
     let sim = Simulation::new(4);
     let recorder = Recorder::new();
@@ -198,7 +198,7 @@ fn the_observe_only_detector_reports_reachability_but_never_downs() {
     assert_eq!(
         a.membership().status(B),
         Some(MemberStatus::Up),
-        "no membership transition occurs — the roster is fixed",
+        "no membership transition occurs: the roster is fixed",
     );
     assert!(
         !recorder
@@ -213,6 +213,6 @@ fn the_observe_only_detector_reports_reachability_but_never_downs() {
     assert_eq!(
         a.membership().reachability(B),
         Some(Reachability::Reachable),
-        "reachability is reversible — B recovers as the same member",
+        "reachability is reversible: B recovers as the same member",
     );
 }

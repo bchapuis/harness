@@ -9,11 +9,11 @@
 //! The contract is **reconcile by `Seq`** (§7.9, **E16**): a batch carries the
 //! `from` it begins after; a subscriber closes any gap with `load` and ignores
 //! anything at or below what it has seen. At-most-once delivery (actor §7.2) may
-//! drop, duplicate, or — across a re-subscribe — reorder; seq reconciliation
+//! drop, duplicate, or (across a re-subscribe) reorder; seq reconciliation
 //! absorbs all three, so correctness rests on the journal, not on delivery.
 //!
-//! The wire batch ([`RecordBatch`]) carries opaque **tagged** record bytes —
-//! exactly what the host appended (§7.12) — so the always-on subscribe path
+//! The wire batch ([`RecordBatch`]) carries opaque **tagged** record bytes:
+//! exactly what the host appended (§7.12), so the always-on subscribe path
 //! imposes no `Clone` bound on an entity's `Event`. The sink ([`RecordSink`]) is
 //! the entity's **event projection**: it decodes facet-0 records to the typed
 //! `Event` and skips other facets' records, whose seqs appear as gaps the
@@ -65,7 +65,7 @@ pub struct Subscribed {
 
 /// Register a record sink with an entity (spec §7.9). A framework built-in
 /// dispatched to the host for *any* entity type (it never appears in the entity's
-/// `register` allowlist, §5.5) — the push analogue of `head`/`load`.
+/// `register` allowlist, §5.5): the push analogue of `head`/`load`.
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Subscribe<G: Entity> {
@@ -94,8 +94,8 @@ impl<G: Entity> Message for Subscribe<G> {
 /// Stop a [`RecordSink`] (spec §7.9), closing the subscriber's stream. Two
 /// senders: the `subscribe` error path, for a sink spawned but never registered
 /// (so the actor does not linger until system shutdown), and the host's
-/// forwarder, once the host has dropped the sink — a lag-drop, hibernation, a
-/// move, or a forced step-down — so the subscriber observes its stream close
+/// forwarder, once the host has dropped the sink (a lag-drop, hibernation, a
+/// move, or a forced step-down), so the subscriber observes its stream close
 /// and re-subscribes rather than waiting on a push that will never come. The
 /// host may lead the entity's shard from another node, so this crosses the wire.
 #[derive(Serialize, Deserialize)]
@@ -167,7 +167,7 @@ impl<G: Entity> Handler<RecordBatch> for RecordSink<G> {
             match actor_serialization::decode::<G::Event>(&*codec, payload) {
                 Ok(event) => records.push((Seq::new(*seq), event)),
                 // A record that will not decode: drop the whole batch. The
-                // subscriber sees a gap and backfills by `load` (§7.9) — the
+                // subscriber sees a gap and backfills by `load` (§7.9): the
                 // journal is the authority (**E3**), not this delivery.
                 Err(_) => return,
             }

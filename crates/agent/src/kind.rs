@@ -1,14 +1,14 @@
 //! Kinds: the agent-type definitions (agent spec §7.1).
 //!
-//! A [`Kind`] is a named agent definition — system prompt, toolset, sandbox
-//! profile, model parameters, default budget, delegation allowlist — plus the
+//! A [`Kind`] is a named agent definition (system prompt, toolset, sandbox
+//! profile, model parameters, default budget, delegation allowlist) plus the
 //! [`EntityConfig`] for the entity type it hosts. Every node MUST register every
 //! kind (§7.1).
 //!
 //! A `KindId` **is** an entity type (§2.2). The agent runtime hosts one `Agent` entity
 //! ([`crate::agent`]) under each kind's name via `entities_named`
-//! ([`crate::client::Harness::builder`]), so each kind is its own entity type —
-//! its own gateway, shard map, namespace, and `EntityConfig` — while sharing
+//! ([`crate::client::Harness::builder`]), so each kind is its own entity type
+//! (its own gateway, shard map, namespace, and `EntityConfig`) while sharing
 //! one run loop. A session of a kind is one entity of that type.
 
 use std::collections::BTreeMap;
@@ -50,7 +50,7 @@ pub struct Kind {
 impl Kind {
     /// Start a kind from its system prompt, with conservative defaults. The entity
     /// config defaults to entity's, whose idle window is minutes rather than seconds
-    /// (§7.2) — which suits a session, since the gap between turns is the user's
+    /// (§7.2), which suits a session, since the gap between turns is the user's
     /// reading time and a model call is itself seconds long.
     pub fn new(system_prompt: impl Into<String>) -> Kind {
         Kind {
@@ -127,7 +127,7 @@ impl Kind {
     }
 
     /// The effective tier cap (§5.3 item 4): the profile's explicit set, or the
-    /// spec default — exactly the tiers the declared tools require.
+    /// spec default; exactly the tiers the declared tools require.
     pub fn tier_cap(&self) -> BTreeSet<Tier> {
         self.profile
             .tier_cap
@@ -210,7 +210,7 @@ impl Kinds {
     ///
     /// Panics when a declared tool's tier falls outside the kind's tier cap
     /// (§5.3 item 4): a deployment configuration error, never discovered at
-    /// dispatch. The loop performs no runtime cap check — the cap is unreachable
+    /// dispatch. The loop performs no runtime cap check: the cap is unreachable
     /// by construction (§5.6, sandbox spec S4).
     pub fn register(mut self, name: &str, kind: Kind) -> Kinds {
         let cap = kind.tier_cap();

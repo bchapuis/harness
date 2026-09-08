@@ -77,7 +77,7 @@ impl EntityHandler<Probe> for Ledger {
     }
 }
 
-/// A command that never touches SQL — the lazy-transaction probe (spec §7.14):
+/// A command that never touches SQL, the lazy-transaction probe (spec §7.14):
 /// it must open neither a connection nor a transaction and commit no record.
 #[derive(Clone, Serialize, Deserialize)]
 struct Noop;
@@ -91,8 +91,8 @@ impl EntityHandler<Noop> for Ledger {
     }
 }
 
-/// Run the full authorizer denial matrix on a handler statement (spec §7.14) —
-/// every file-write, pragma, and transaction-control verb — then write again.
+/// Run the full authorizer denial matrix on a handler statement (spec §7.14)
+/// (every file-write, pragma, and transaction-control verb) then write again.
 /// Replies with the misbehaviors (a verb that ran, or failed for a reason other
 /// than authorization); empty means every verb was denied *by the authorizer*
 /// and the transaction stayed usable afterwards.
@@ -144,7 +144,7 @@ impl EntityHandler<DenyVerbs> for Ledger {
     }
 }
 
-/// Count the rows a prior command committed under a name — the read-back probe.
+/// Count the rows a prior command committed under a name: the read-back probe.
 #[derive(Clone, Serialize, Deserialize)]
 struct CountNamed(String);
 impl Message for CountNamed {
@@ -175,7 +175,7 @@ impl EntityHandler<CountNamed> for Ledger {
 
 /// Probe the [`MAX_QUERY_ROWS`] cap (spec §7.14): bulk-insert one row past the
 /// cap, then reply with (the over-cap `select` error, the row count `select`
-/// returns at exactly the cap, the over-cap `query` error — `query` enforces
+/// returns at exactly the cap, the over-cap `query` error; `query` enforces
 /// the same cap).
 #[derive(Clone, Serialize, Deserialize)]
 struct BulkSelect;
@@ -257,7 +257,7 @@ impl EntityHandler<QueryOneProbe> for Ledger {
 /// An event that refuses to encode, forcing the host's step-2 serialization
 /// failure: the command is abandoned *after* the handler ran its SQL, leaving
 /// the facet's transaction open for the next command's clean-slate rollback
-/// (spec §7.14 — an abandoned command never reaches `seal`).
+/// (spec §7.14; an abandoned command never reaches `seal`).
 #[derive(Clone, Debug)]
 struct Unencodable;
 
@@ -315,7 +315,7 @@ impl EntityHandler<FlakyInsert> for Flaky {
     }
 }
 
-/// Count the committed rows — the visibility probe for the rolled-back insert.
+/// Count the committed rows: the visibility probe for the rolled-back insert.
 #[derive(Clone, Serialize, Deserialize)]
 struct FlakyCount;
 impl Message for FlakyCount {
@@ -353,7 +353,7 @@ fn committed_count(recorder: &Recorder) -> usize {
         .count()
 }
 
-/// Count the `*.db` materialization files under a scratch tree — the on-disk
+/// Count the `*.db` materialization files under a scratch tree: the on-disk
 /// witness of whether the facet ever opened a connection.
 fn db_file_count(dir: &std::path::Path) -> usize {
     let mut count = 0;
@@ -377,7 +377,7 @@ fn db_file_count(dir: &std::path::Path) -> usize {
 #[test]
 fn a_command_that_runs_no_sql_opens_no_connection_and_commits_nothing() {
     // The lazy-transaction contract (spec §7.14): an entity that carries the facet
-    // but whose command never touches SQL pays nothing — no connection (so no
+    // but whose command never touches SQL pays nothing, no connection (so no
     // database file materializes), no BEGIN, no record, no `Committed`.
     let dir = tempfile::tempdir().expect("tempdir");
     let sim = Simulation::new(7);
@@ -450,7 +450,7 @@ fn the_authorizer_denies_every_escape_verb_and_the_transaction_survives() {
             "every escape verb must be denied by the authorizer:\n{}",
             misbehaviors.join("\n")
         );
-        // Both writes — before and after the denials — committed with the batch:
+        // Both writes (before and after the denials) committed with the batch:
         // the denials neither rolled back nor poisoned the transaction, and the
         // `Restricted` guard restored the authorizer for the facet's own COMMIT.
         assert_eq!(
@@ -493,7 +493,7 @@ fn an_abandoned_command_rolls_back_its_transaction_before_the_next_one() {
     // The clean-slate guard (spec §7.14): a command abandoned after its SQL ran
     // (here: its event fails to encode, so the host abandons the stage without
     // sealing) leaves an open transaction; the next command's `begin` must roll
-    // it back — the un-journaled insert is invisible — and the facet must be
+    // it back (the un-journaled insert is invisible), and the facet must be
     // fully usable afterwards.
     let dir = tempfile::tempdir().expect("tempdir");
     let sim = Simulation::new(17);
@@ -653,7 +653,7 @@ fn sql_writes_survive_hibernation_and_reads_commit_nothing() {
     );
 
     // Reactivate: the database rematerializes from the checkpoint manifest plus
-    // replayed frame records — including the row SQLite drew with random(),
+    // replayed frame records, including the row SQLite drew with random(),
     // byte-identical (F1 on frames, not on SQL).
     let reread = ledgers.entity("ledger/0");
     sim.block_on(async move {

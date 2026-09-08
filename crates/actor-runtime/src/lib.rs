@@ -7,12 +7,12 @@
 //! across processes and hosts with nothing else in the framework changed
 //! (spec §4.6):
 //!
-//! - [`TokioClock`] — wall-clock time on a tokio runtime.
-//! - [`OsEntropy`] — an OS-seeded PRNG.
-//! - [`TokioSpawner`] — tasks on a tokio runtime.
-//! - [`TcpTransport`] — length-delimited frames over TCP, behind a mutual-TLS
+//! - [`TokioClock`]: wall-clock time on a tokio runtime.
+//! - [`OsEntropy`]: an OS-seeded PRNG.
+//! - [`TokioSpawner`]: tasks on a tokio runtime.
+//! - [`TcpTransport`]: length-delimited frames over TCP, behind a mutual-TLS
 //!   association handshake with a cluster secret and a node allowlist (§7, §15).
-//! - [`FileRaftWAL`] — a voter's durable Raft state on the local
+//! - [`FileRaftWAL`]: a voter's durable Raft state on the local
 //!   filesystem, for the leader-based control plane (§9.4.3).
 //!
 //! tokio and rustls live here and only here, so the core and cluster crates stay

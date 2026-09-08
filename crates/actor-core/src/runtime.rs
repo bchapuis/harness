@@ -8,7 +8,7 @@
 //!
 //! The trait methods return `impl Future + Send` rather than using `async fn`
 //! so that code generic over a [`Clock`] can rely on the returned futures being
-//! `Send` — required because executors are spawned through [`Spawner`] as
+//! `Send`: required because executors are spawned through [`Spawner`] as
 //! `Send` futures.
 
 use std::future::Future;

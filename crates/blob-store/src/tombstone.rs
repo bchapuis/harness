@@ -2,8 +2,8 @@
 //! (spec §5.3, §4, **B7**).
 //!
 //! `delete_namespace` reclaims a whole namespace without reference tracking. The
-//! mechanism is a **tombstone** — a tiny `(ns, deleted_at)` record meaning "no
-//! blob of `ns` may exist or be (re-)created" — not a sweep of known-live roots.
+//! mechanism is a **tombstone**: a tiny `(ns, deleted_at)` record meaning "no
+//! blob of `ns` may exist or be (re-)created", not a sweep of known-live roots.
 //! Because a namespace's blobs scatter across the whole cluster (owner selection
 //! hashes `(ns, id)`, spec §5.2), a tombstone has two homes:
 //!
@@ -43,7 +43,7 @@ pub struct Tombstone {
 
 /// The set of tombstoned namespaces a node is aware of (spec §5.3): the
 /// **cluster-wide awareness** home of the tombstone. Shared (cloning shares the
-/// handle), interior-mutable, and monotonic — a namespace, once tombstoned, stays
+/// handle), interior-mutable, and monotonic: a namespace, once tombstoned, stays
 /// tombstoned until it is *reclaimed* ([`AnchorTracker`]).
 ///
 /// It is a grow-only set keyed by namespace; the associated `deleted_at` converges
@@ -77,7 +77,7 @@ impl TombstoneSet {
         }
     }
 
-    /// Whether `ns` is tombstoned — the check `put`/`get`/reconcile consult.
+    /// Whether `ns` is tombstoned: the check `put`/`get`/reconcile consult.
     pub fn contains(&self, ns: &Namespace) -> bool {
         self.lock().contains_key(ns)
     }
@@ -95,7 +95,7 @@ impl TombstoneSet {
     }
 
     /// Absorb a peer's tombstones (gossip / rejoin re-sync). Monotonic and
-    /// commutative — merging the same set twice, or in either direction, converges.
+    /// commutative, merging the same set twice, or in either direction, converges.
     pub fn merge(&self, tombstones: impl IntoIterator<Item = Tombstone>) {
         for tombstone in tombstones {
             self.insert(&tombstone.ns, tombstone.deleted_at);
@@ -127,7 +127,7 @@ pub struct AnchorTracker {
 }
 
 struct AnchorState {
-    /// The serving set when the tombstone was anchored — the exact nodes that
+    /// The serving set when the tombstone was anchored: the exact nodes that
     /// could hold a stale copy (spec §5.3).
     members_at_anchor: BTreeSet<NodeId>,
     /// Members that have acked their sweep.
@@ -195,7 +195,7 @@ impl AnchorTracker {
 
     /// Stop tracking `ns` (it has been reclaimed). Returns whether it was
     /// tracked. The namespace's awareness entry in the [`TombstoneSet`] is
-    /// retained — cluster-wide set GC is not implemented (spec §5.3).
+    /// retained: cluster-wide set GC is not implemented (spec §5.3).
     pub fn reclaim(&self, ns: &Namespace) -> bool {
         self.lock().remove(ns).is_some()
     }
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn merge_converges_regardless_of_order_or_repetition() {
         // The set is a grow-only CRDT keyed by namespace, with the stamp resolved
-        // by min — so two nodes that gossip in either order converge identically.
+        // by min, so two nodes that gossip in either order converge identically.
         let left = TombstoneSet::new();
         let right = TombstoneSet::new();
         left.insert(&ns("a"), 10);
@@ -304,8 +304,8 @@ mod tests {
     fn a_downed_member_releases_the_tombstone_but_an_unreachable_one_does_not() {
         // The load-bearing B7 case (spec §5.3, §8): a node partitioned through the
         // delete keeps the tombstone alive while it is merely `unreachable`
-        // (reversible — it could return with its disk), and only releases it once
-        // downed (irrevocable — it can rejoin only as a fresh, empty identity).
+        // (reversible; it could return with its disk), and only releases it once
+        // downed (irrevocable; it can rejoin only as a fresh, empty identity).
         let tracker = AnchorTracker::new();
         let a = ns("a");
         tracker.anchor(&a, [node(1), node(2), node(3)]);
@@ -313,7 +313,7 @@ mod tests {
         // node(2) is partitioned and never sweeps; node(3) swept.
         tracker.record_sweep(&a, node(3));
 
-        // While node(2) is only unreachable (not terminal), the tombstone is held —
+        // While node(2) is only unreachable (not terminal), the tombstone is held,
         // forgetting it now is the one move that could resurrect a blob.
         let unreachable_2 = |_n: NodeId| false; // nobody terminal
         assert_eq!(tracker.pending(&a, unreachable_2), vec![node(2)]);

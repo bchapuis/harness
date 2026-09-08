@@ -1,7 +1,7 @@
 //! The control-plane timings a simulated cluster runs under (spec §18.2).
 //!
-//! [`SwimConfig`] and [`RaftConfig`] default to production cadences — seconds of
-//! probe interval, a one-second election timeout — chosen for a real network where
+//! [`SwimConfig`] and [`RaftConfig`] default to production cadences (seconds of
+//! probe interval, a one-second election timeout) chosen for a real network where
 //! a false suspicion costs a rehost. A simulated run wants the opposite trade: the
 //! scenarios are failovers and partitions, virtual time only advances when the
 //! clock is asked to, and a test that waits three seconds of virtual time for a
@@ -9,7 +9,7 @@
 //! property it is checking.
 //!
 //! So every clustered suite in the tree runs the same tightened numbers. They were
-//! written out once per suite — forty-odd copies of two struct literals — until one
+//! written out once per suite (forty-odd copies of two struct literals) until one
 //! of them silently lost its `heartbeat_interval` and nothing noticed, which is the
 //! failure mode of a constant kept in forty places. They live here now, beside the
 //! seams they configure, so tuning them is one edit and a suite that needs its own
@@ -55,8 +55,8 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
 /// and [`HEARTBEAT_INTERVAL`], over the in-memory storage [`RaftConfig::new`]
 /// installs.
 ///
-/// The ratio is what matters — heartbeats an order of magnitude under the election
-/// timeout, so an idle leader is never mistaken for a lost one — and 500 ms leaves
+/// The ratio is what matters (heartbeats an order of magnitude under the election
+/// timeout, so an idle leader is never mistaken for a lost one), and 500 ms leaves
 /// room for the jitter each election round draws on top of it.
 pub fn raft_config(voters: Vec<NodeId>) -> RaftConfig {
     let mut config = RaftConfig::new(voters);

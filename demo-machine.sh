@@ -19,7 +19,7 @@
 #                          whole rootfs really does persist. Shared-kernel
 #                          isolation, not the microVM boundary, and the
 #                          rootfs's own init never runs.
-#   --machine fake         no docker either. No guest, so no shell — but every
+#   --machine fake         no docker either. No guest, so no shell, but every
 #                          durable property is real: provisioning, the journal,
 #                          captures, hibernation, failover.
 set -euo pipefail
@@ -149,7 +149,7 @@ esac
 mkdir -p "$DATA"
 if [ "$KIND" = "fake" ]; then
   # The fake binding has no guest, so the base image is only ever imported and
-  # dirtied — any file of the right shape does. 64 MiB of zeros, made once.
+  # dirtied: any file of the right shape does. 64 MiB of zeros, made once.
   # `bs=1048576` rather than `bs=1m`/`bs=1M`: BSD and GNU dd disagree on the
   # suffix, and this script has to run on both.
   BASE_IMAGE="$DATA/base.img"
@@ -167,12 +167,12 @@ if [ ! -f "$KEY" ]; then
 fi
 
 # A node from an earlier run would silently join this cluster (same ports, same
-# secret) and confuse the demo — refuse to start over one.
+# secret) and confuse the demo: refuse to start over one.
 for p in $((PORT_BASE)) $((PORT_BASE + 1)) $((PORT_BASE + 2)) \
          $((ADMIN_BASE)) $((ADMIN_BASE + 1)) $((ADMIN_BASE + 2)) \
          $((DOOR_BASE)) $((DOOR_BASE + 1)) $((DOOR_BASE + 2)); do
   if (echo > "/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
-    echo "Port $p is busy — an old demo still running?  pkill -f machine-standalone" >&2
+    echo "Port $p is busy. An old demo still running?  pkill -f machine-standalone" >&2
     exit 1
   fi
 done
@@ -186,7 +186,7 @@ trap cleanup EXIT INT TERM
 # --- The cluster -----------------------------------------------------------------
 # Every node is identical: it hosts machine entities, votes in Raft, and opens an
 # SSH front door for this machine on its own port. Three doors, not one, because
-# a door dies with its node — and reconnecting through a survivor is the whole
+# a door dies with its node, and reconnecting through a survivor is the whole
 # point of the failure drill below.
 echo "▸ booting three nodes (logs in $DATA/node*.log)"
 for i in 1 2 3; do
@@ -219,7 +219,7 @@ SSH_OPTS="-i $KEY -o UserKnownHostsFile=$DATA/known_hosts -o StrictHostKeyChecki
 
 cat <<EOF
 
-  cluster up — node 1: pid ${PIDS[0]}, node 2: pid ${PIDS[1]}, node 3: pid ${PIDS[2]}
+  cluster up. Node 1: pid ${PIDS[0]}, node 2: pid ${PIDS[1]}, node 3: pid ${PIDS[2]}
   machine \`$MACHINE\` provisioned, machine binding: $KIND
 
   Inspect it (the journal is the machine):
@@ -237,7 +237,7 @@ cat <<EOF
 
     ssh $SSH_OPTS -p $DOOR_BASE alice@127.0.0.1
 
-  Write something into the rootfs — a file in /root, a user, a config. Then
+  Write something into the rootfs: a file in /root, a user, a config. Then
   disconnect and reconnect: it is still there. That is the disk facet, not a
   container layer. Note the guest has NO network in this demo: egress needs the
   \`net\` feature and CAP_NET_ADMIN (machine §5.2), which this script does not
@@ -250,10 +250,10 @@ cat <<EOF
 
   The survivors detect the death, placement moves the machine, and the next
   attach boots a fresh microVM against the last *captured* disk. Your files are
-  there, rewound at most to the last capture — 30s here (--checkpoint-secs), and
+  there, rewound at most to the last capture, 30s here (--checkpoint-secs), and
   the same host key, so ssh does not warn. Nothing forks and nothing corrupts.
 
-  If a boot fails, the VMM's own console is the place to look — the guest's
+  If a boot fails, the VMM's own console is the place to look: the guest's
   kernel and init write there, and nothing else in this stack sees them:
 
     cat \${TMPDIR:-/tmp}/harness-machine-*/console.log
@@ -267,7 +267,7 @@ cat <<EOF
 
     ssh $SSH_OPTS -p $DOOR_BASE alice@127.0.0.1
 
-  Write something into the rootfs — a file in /root, a user, a config. Then
+  Write something into the rootfs: a file in /root, a user, a config. Then
   disconnect and reconnect: it is still there. That is the disk facet, not a
   container layer; nothing in the container's own image survives, and everything
   in the machine's does.
@@ -289,10 +289,10 @@ cat <<EOF
 
   The survivors detect the death, placement moves the machine, and the next
   attach mounts the last *captured* disk on another node. Your files are there,
-  rewound at most to the last capture — 30s here (--checkpoint-secs), and the
+  rewound at most to the last capture, 30s here (--checkpoint-secs), and the
   same host key, so ssh does not warn. Nothing forks and nothing corrupts.
 
-  If a boot fails, the runner's own output is the place to look — the loop mount
+  If a boot fails, the runner's own output is the place to look: the loop mount
   and the chroot report there, and nothing else in this stack sees them:
 
     docker ps -a --filter name=harness-machine
@@ -300,17 +300,17 @@ cat <<EOF
 EOF
 else
 cat <<EOF
-  What you can drive here (--machine fake — no guest, so no shell):
+  What you can drive here (--machine fake: no guest, so no shell):
 
   Hold a session open. SSH authenticates against the machine's journaled key,
   pins its host key, and journals the attachment with your username as the
-  principal (M4) — all of that is real. \`-N\` opens no channel, so nothing has
+  principal (M4). All of that is real. \`-N\` opens no channel, so nothing has
   to bridge to a guest that is not there:
 
     ssh $SSH_OPTS -N -p $DOOR_BASE alice@127.0.0.1 &
 
   Then watch it, in another shell. \`attachments\` shows who is on, and
-  \`captures\` climbs once per checkpoint interval while attached — each one a
+  \`captures\` climbs once per checkpoint interval while attached, each one a
   durable point a crash would rewind to (M3):
 
     $STATUS_CMD
@@ -320,7 +320,7 @@ cat <<EOF
     kill ${PIDS[0]}                       then run status again
 
   The survivors detect the death, placement moves the machine to another node,
-  and its disk comes back from the last committed capture — same image digest,
+  and its disk comes back from the last committed capture: same image digest,
   no fork. That is the property SSH would be riding on.
 
   For the SSH half you need a guest, which means one of:

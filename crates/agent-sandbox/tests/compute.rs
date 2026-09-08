@@ -1,5 +1,5 @@
 //! Compute-tier conformance (feature `compute`): S2 (hermeticity and
-//! determinism — same call + workspace + seed → byte-identical results) of
+//! determinism; same call + workspace + seed → byte-identical results) of
 //! sandbox spec §6, plus the guest ABI and the lazy build/release
 //! accounting.
 
@@ -181,7 +181,7 @@ fn run(bench: &Bench, input: Value) -> Result<Value, ToolError> {
 }
 
 // ---------------------------------------------------------------------------
-// S2: determinism — a function of the call, the workspace, and the seed
+// S2: determinism; a function of the call, the workspace, and the seed
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -250,7 +250,7 @@ fn a_runaway_guest_is_stopped_by_fuel_deterministically() {
         matches!(&a, Err(ToolError::Sandbox(e)) if e.contains("fuel")),
         "fuel is the bound (§3.2), got {a:?}"
     );
-    assert_eq!(a, b, "the trap reproduces — fuel metering is deterministic");
+    assert_eq!(a, b, "the trap reproduces: fuel metering is deterministic");
 }
 
 #[test]
@@ -338,7 +338,7 @@ fn a_table_bomb_fails_at_instantiation_within_limits() {
 #[test]
 fn an_oversized_module_is_refused_before_compilation() {
     let (_provider, bench) = bench(7, &SandboxProfile::default());
-    // 16 MiB + 1 of garbage: refused by size before the compiler sees it —
+    // 16 MiB + 1 of garbage: refused by size before the compiler sees it;
     // compilation runs before fuel exists to meter it (§3.2).
     std::fs::write(bench.dir.join("big.wasm"), vec![0u8; 16 * 1024 * 1024 + 1]).expect("plant");
     let out = run(&bench, json!({"module": "big.wasm"}));
@@ -359,7 +359,7 @@ fn registered_modules_win_over_workspace_paths() {
         p.with_module("mod.wasm", echo)
     });
     // A guest plants a different module under the same name: the registered
-    // one still runs — a guest write can never shadow deployment code.
+    // one still runs; a guest write can never shadow deployment code.
     plant(&bench, "mod.wasm", SEED_WRITER);
     let out = run(&bench, json!({"module": "mod.wasm", "input": {"x": 1}})).expect("run");
     assert_eq!(

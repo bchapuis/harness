@@ -11,7 +11,7 @@
 //! happy-path-plus-delete proof that the tier composes over the actor framework.
 //!
 //! The agent runtime mirrors entity's `tests/clustered_entities.rs`, swapping the
-//! leader/raft network for SWIM gossip membership — a blob store needs the serving
+//! leader/raft network for SWIM gossip membership: a blob store needs the serving
 //! set, not consensus (spec §1, §4).
 
 use std::fs;
@@ -48,7 +48,7 @@ fn config() -> BlobConfig {
 }
 
 /// Drive an async call to completion under the perpetually-running cluster loops
-/// (the pattern from entity's cluster harness — SWIM never quiesces, so the run
+/// (the pattern from entity's cluster harness: SWIM never quiesces, so the run
 /// is time-bounded rather than quiescence-driven).
 fn drive<T: Send + 'static>(
     sim: &Simulation,
@@ -98,7 +98,7 @@ fn cluster(
 #[test]
 fn a_blob_put_on_one_node_is_gettable_from_every_node() {
     // B1/B3/B5: a put replicates to its R owners and acks at W; the blob is then
-    // readable, verified, from any node — owner or not — because every node
+    // readable, verified, from any node (owner or not) because every node
     // computes the same owners and a get widens to find it.
     let sim = Simulation::new(1);
     let (_net, stores, _dirs) = cluster(&sim);
@@ -164,7 +164,7 @@ fn equal_content_converges_to_one_id_across_nodes() {
 fn a_tampered_copy_falls_through_to_a_good_owner() {
     // B1: a get verifies after transfer. If the highest-ranked owner serves
     // corrupt bytes (here, on-disk bit-rot), the get falls through to the next
-    // owner and returns the verified blob — corruption is never returned as valid.
+    // owner and returns the verified blob: corruption is never returned as valid.
     let sim = Simulation::new(4);
     let nodes = [A, B, C];
     let (_net, stores, dirs) = cluster(&sim);
@@ -193,7 +193,7 @@ fn a_tampered_copy_falls_through_to_a_good_owner() {
         .join(id.to_string());
     fs::write(&path, b"corrupted on disk, a different length").expect("tamper");
 
-    // Every node still reads the verified blob — the get fell through the bad owner.
+    // Every node still reads the verified blob: the get fell through the bad owner.
     for store in &stores {
         let got = drive(&sim, Duration::from_secs(5), {
             let (s, ns) = (store.clone(), ns.clone());
@@ -211,7 +211,7 @@ fn a_tampered_copy_falls_through_to_a_good_owner() {
 fn a_put_below_write_quorum_is_refused() {
     // B3 / §5.2: a put acks only once at least W copies are stored, so the blob
     // survives losing any R − W owners. Partition A away from {B, C} so A's serving
-    // set shrinks to just itself — fewer than W=2 nodes could ever hold a copy. The
+    // set shrinks to just itself: fewer than W=2 nodes could ever hold a copy. The
     // put must fail with Unavailable rather than ack at one copy, which would
     // silently weaken the durability target when the cluster is under-provisioned.
     let sim = Simulation::new(9);
@@ -233,7 +233,7 @@ fn a_put_below_write_quorum_is_refused() {
 
 #[test]
 fn has_reports_false_below_write_quorum() {
-    // §3 / B3: `has` answers "durably present" — at least W confirmed copies, the
+    // §3 / B3: `has` answers "durably present", at least W confirmed copies, the
     // same floor `put` refuses below. Store a blob on all R=3 owners, then
     // partition A alone: its serving set shrinks to itself, so only one owner can
     // confirm a copy. A's own copy is real, but one copy is not W=2 of them, so

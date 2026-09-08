@@ -4,7 +4,7 @@
 //! One durable deadline, one callerless `on_alarm` that journals a `Fired` event
 //! and stops. Its whole job is to make a fire *countable*: `fired` is folded from
 //! committed events, so a caller asking [`ReadFired`] learns how many times the
-//! alarm's effect actually committed — not how many times the host invoked the
+//! alarm's effect actually committed, not how many times the host invoked the
 //! handler, which under faults is a different and much larger number (§7.16).
 //!
 //! Generic over the hosting system, like [`entity::AlarmIndex`] itself, so the
@@ -43,7 +43,7 @@ impl<S> Default for Timer<S> {
 #[derive(Default, Serialize, Deserialize)]
 pub struct TimerState {
     /// Committed fires. Incremented by folding [`TimerEvent::Fired`], so it counts
-    /// what reached the journal through the output gate — an `on_alarm` whose
+    /// what reached the journal through the output gate: an `on_alarm` whose
     /// commit failed leaves this untouched and the deadline still pending, which
     /// is at-most-once behaving correctly rather than a miss.
     pub fired: u64,

@@ -2,8 +2,8 @@
 //!
 //! Drives a principal's [`Directory`] through the public `EntityRef` API only:
 //! record ownership with listing metadata, enumerate it, query by type, forget
-//! one, clear the rest. Asserts the ownership-index contract — idempotent
-//! record/forget, metadata round-trips, stable enumeration — and that the index
+//! one, clear the rest. Asserts the ownership-index contract (idempotent
+//! record/forget, metadata round-trips, stable enumeration), and that the index
 //! survives hibernation because it is journaled, not in-memory.
 
 use std::collections::BTreeMap;

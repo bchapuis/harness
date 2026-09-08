@@ -1,8 +1,8 @@
 //! Codec round-trip conformance for entity's wire types (V&V checklist #1).
 //!
-//! Every value entity puts on the wire — the entity identity `EntityName`, the
+//! Every value entity puts on the wire: the entity identity `EntityName`, the
 //! sequence position `Seq`, and the durability/transport error `EntityError` that
-//! rides inside a command's reply (§6, §12) — must survive an encode/decode
+//! rides inside a command's reply (§6, §12); must survive an encode/decode
 //! round trip unchanged. The framework codec is `serde`-based (the same one the
 //! shard log uses), so these decode exactly what they encoded; a silent change to
 //! any of these representations would corrupt cross-node routing or replies.
@@ -97,7 +97,7 @@ mod sql {
 #[test]
 fn entity_error_round_trips_every_variant() {
     // EntityError rides inside the host's reply on the wire, so every variant must
-    // decode to itself (§6, §12) — the two failure layers stay distinct only if
+    // decode to itself (§6, §12): the two failure layers stay distinct only if
     // the durability/transport layer survives transport.
     let cases = [
         EntityError::Call(CallError::Unreachable),

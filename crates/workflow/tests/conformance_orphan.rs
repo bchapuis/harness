@@ -5,8 +5,8 @@
 //! (§5). A crash or a migration between the two leaves it **orphaned**: the
 //! journal says it was wanted, and nothing says whether it ran. The desired set
 //! computed by the next activation's first tick is the orphan set, and the
-//! workflow resolves each member by its declared policy — `Reexecute` launches it
-//! again, `Interrupt` settles it `Interrupted` without a launch — dropping none
+//! workflow resolves each member by its declared policy (`Reexecute` launches it
+//! again, `Interrupt` settles it `Interrupted` without a launch) dropping none
 //! and resolving none twice.
 //!
 //! Every scenario here runs the real entity host, gateway, shard groups, and
@@ -48,18 +48,18 @@ const CALL: Duration = Duration::from_secs(8);
 const SLOW: Duration = Duration::from_secs(20);
 
 /// The workflow's grammar, held over the whole recorded stream at the end of a
-/// scenario — the clustered checker, because every scenario here deposes a
+/// scenario: the clustered checker, because every scenario here deposes a
 /// leader with claims open, which is legal (§6).
 
 #[test]
 fn a_crash_between_launch_and_settle_relaunches_a_reexecute_effect_once() {
     // W6 for `Reexecute`, and W3's admission: across activations an effect MAY run
-    // twice, and the settled record — not the launch — is the durable fact.
+    // twice, and the settled record (not the launch) is the durable fact.
     //
     // Seed 109 restarts node 3. Under seed 101 the leader is node 2, and after
     // its restart the two survivors disagree about who leads the shard for the
-    // rest of the scenario — node 1's map names node 2, node 2 redirects to node
-    // 1 — so no call routes. That is a question for the cluster's leader
+    // rest of the scenario (node 1's map names node 2, node 2 redirects to node
+    // 1), so no call routes. That is a question for the cluster's leader
     // re-discovery after a restart, not for the workflow; it wants a reproduction in
     // entity's clustered suite, where no test yet restarts a shard leader and
     // then routes to it.
@@ -184,8 +184,8 @@ fn a_migration_under_an_effect_in_flight_resolves_it_at_the_new_leader() {
     // activation: it abandons its launch to whatever it was doing. The successor
     // re-derives the key and relaunches it (Reexecute). The abandoned effect keeps
     // running on the old node and its outcome, routed to whoever now leads,
-    // settles the key first — an effect of a previous activation reaching a
-    // leader that has since re-derived the world — and the relaunch's own outcome
+    // settles the key first (an effect of a previous activation reaching a
+    // leader that has since re-derived the world), and the relaunch's own outcome
     // then finds its key absent and is discarded (W5).
     let sim = Simulation::new(107);
     let recorder = Recorder::new();

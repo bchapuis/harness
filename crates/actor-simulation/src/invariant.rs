@@ -34,7 +34,7 @@ pub trait Invariant: Send {
     fn observe(&mut self, event: &Event) -> Result<(), String>;
 
     /// Forget everything known about `node`'s process, because that process has
-    /// **ended** — a [`NodeRestarted`](crate::NodeRestarted), which the
+    /// **ended**: a [`NodeRestarted`](crate::NodeRestarted), which the
     /// [`Checker`](crate::Checker) dispatches here before passing the event on.
     ///
     /// Process death leaves brackets open (a dispatch without its end, an `ask`
@@ -74,7 +74,7 @@ pub fn default_invariants() -> Vec<Box<dyn Invariant>> {
 ///
 /// Comparing the pairs rather than the two sets of checker *names* is the
 /// point. A name set cannot see one entry dropping its `Verify::Checker` while
-/// a sibling entry still names the same checker — which is exactly how a
+/// a sibling entry still names the same checker, which is exactly how a
 /// "Verified by" column drifts: quietly, one row at a time, with the totals
 /// still matching.
 pub fn checker_coverage() -> &'static [CheckerCoverage] {
@@ -291,7 +291,7 @@ impl Invariant for DownIsTerminal {
 }
 
 /// **Signal ordering / in-band delivery** (spec §18.5 #13, §12): a `Terminated`
-/// is delivered through the watcher's mailbox like any other message — never out
+/// is delivered through the watcher's mailbox like any other message, never out
 /// of band, straight into a running handler.
 ///
 /// Signals enter through [`enqueue_signal`](actor_core::Mailbox), so "in band"
@@ -328,7 +328,7 @@ impl Invariant for SignalInBand {
                 if *credit < 0 {
                     return Err(format!(
                         "{actor} dispatched a Terminated signal never enqueued on its \
-                         mailbox — delivered out of band (spec §12)"
+                         mailbox: delivered out of band (spec §12)"
                     ));
                 }
             }
@@ -342,7 +342,7 @@ impl Invariant for SignalInBand {
     }
 }
 
-/// **Quorum-gated control plane — election safety** (spec §18.5 #22, §9.4.3):
+/// **Quorum-gated control plane, election safety** (spec §18.5 #22, §9.4.3):
 /// at most one node ever announces leadership for a given term. The quorum-gating
 /// and minority-cannot-evict halves of #22 are scenario properties, verified by
 /// `conformance_leader.rs`. Vacuously green outside leader-based mode (no
@@ -378,9 +378,9 @@ impl Invariant for OneLeaderPerTerm {
     }
 }
 
-/// **Singleton activation discipline — the per-node half** (utilities spec §4,
+/// **Singleton activation discipline, the per-node half** (utilities spec §4,
 /// invariant U2): a node never has two live activations of one singleton name
-/// at once — every `SingletonStarted` for a `(name, node)` must follow the
+/// at once; every `SingletonStarted` for a `(name, node)` must follow the
 /// `SingletonStopped` of its predecessor. Overlap *across* nodes during
 /// divergence is legal (cross-node "exactly one" holds only at view convergence)
 /// and not flagged here; `conformance_singleton.rs` and the singleton swarm
@@ -536,10 +536,10 @@ mod tests {
             actor: id(n),
             manifest: term,
         };
-        // Enqueue then dispatch is in band — fine.
+        // Enqueue then dispatch is in band: fine.
         inv.observe(&enqueue(0)).unwrap();
         assert!(inv.observe(&dispatch(0)).is_ok());
-        // A second dispatch with no matching enqueue is out of band — flagged.
+        // A second dispatch with no matching enqueue is out of band: flagged.
         assert!(inv.observe(&dispatch(0)).is_err());
     }
 
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn one_leader_per_term_is_keyed_per_group() {
         // Two groups legitimately reaching the same term number with different
-        // leaders is not a double election — terms are per group.
+        // leaders is not a double election: terms are per group.
         let mut inv = OneLeaderPerTerm::default();
         let a = NodeId::new(1);
         let b = NodeId::new(2);

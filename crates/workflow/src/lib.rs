@@ -30,8 +30,8 @@
 //! Everything beneath is entity's and is not re-implemented here: this crate
 //! defines **no journal, no fence, no placement function, and no resume
 //! protocol**, and names no durable type of its own. Every record a workflow
-//! entity writes is the consumer's [`Entity::Event`]; the workflow's own state —
-//! claims, backoff, subscribers — is ephemeral by specification (§3.3, §3.4,
+//! entity writes is the consumer's [`Entity::Event`]; the workflow's own state
+//! (claims, backoff, subscribers) is ephemeral by specification (§3.3, §3.4,
 //! §7.1).
 //!
 //! # Wiring a workflow entity
@@ -64,7 +64,7 @@
 //! ```
 //!
 //! and every handler of the consumer's own whose records call for work calls
-//! [`Engine::tick`] with the state it was given — the cycle's entry point after a
+//! [`Engine::tick`] with the state it was given; the cycle's entry point after a
 //! commit (§3.2 item 1), and, on the activation's first handler, what classifies
 //! the orphan set (§4.4). The workflow re-enters after its own settles by itself,
 //! and arms the backoff timer after one that committed nothing (§3.2 item 3).
@@ -199,8 +199,8 @@ impl std::error::Error for EffectError {}
 ///
 /// It carries **no** access to the entity's state, journal, or facets, which is
 /// how "`perform` touches none of them" is enforced rather than asked for.
-/// Everything else an effect needs — the consumer's own model, sandbox, or
-/// network seams — the consumer clones out of `&self` before returning the
+/// Everything else an effect needs (the consumer's own model, sandbox, or
+/// network seams) the consumer clones out of `&self` before returning the
 /// future.
 ///
 /// Owned rather than borrowed, because the future `perform` returns is launched
@@ -246,7 +246,7 @@ impl<S> Perform<S> {
 /// rather than a documented one: a workflow entity that has not routed [`Tick`] to
 /// [`Engine::advance`] and [`Settled`] to [`Engine::settled`] does not compile,
 /// which is the posture entity takes for its own calls (E10). There is
-/// deliberately no blanket impl supplying them — the orphan rule forbids one, and
+/// deliberately no blanket impl supplying them: the orphan rule forbids one, and
 /// entity's stance is that the hand-written form is normative.
 pub trait Workflow:
     Entity + entity::EntityHandler<Tick> + entity::EntityHandler<Settled<Self>>
@@ -277,12 +277,12 @@ pub trait Workflow:
 
     /// The effects this entity's **committed** state calls for (§3.1).
     ///
-    /// MUST be pure and deterministic — the same obligation [`Entity::apply`]
+    /// MUST be pure and deterministic: the same obligation [`Entity::apply`]
     /// carries (entity §4.1, E2), for the same reason: a resumed activation
     /// that disagreed with the one it replaced about what work is outstanding
     /// would either abandon work or duplicate it. It MUST NOT perform I/O, read
     /// the clock, or use entropy, and it MUST NOT read the activation's
-    /// ephemeral state — the claims, the backoff table, and any binding are
+    /// ephemeral state: the claims, the backoff table, and any binding are
     /// invisible to it by construction, because a function that saw them would
     /// no longer be a function of the journal (W1).
     fn pending(&self, state: &Self::State) -> Vec<Pending<Self::Key, Self::Effect>>;
@@ -291,7 +291,7 @@ pub trait Workflow:
     /// I/O.
     ///
     /// It runs outside the activation, in a task the workflow launched, holding no
-    /// lock on the entity and no claim on its mailbox — which is why the returned
+    /// lock on the entity and no claim on its mailbox, which is why the returned
     /// future is `'static` and cannot borrow `&self`. An implementation clones
     /// the seams it needs out of `&self` first, then returns a future owning
     /// them.
@@ -309,8 +309,8 @@ pub trait Workflow:
     /// make the outcome durable; the entity's output gate commits them; the
     /// commit re-enters the workflow.
     ///
-    /// Returning no records is legal and commits nothing (entity §7.5) — the
-    /// way a consumer says "this outcome changed nothing" — which then leaves
+    /// Returning no records is legal and commits nothing (entity §7.5) (the
+    /// way a consumer says "this outcome changed nothing") which then leaves
     /// the key in the desired set for the backoff timer to relaunch (§3.2 item
     /// 3), since this settle committed nothing to bring the next tick.
     ///

@@ -2,7 +2,7 @@
 //!
 //! The specs are written in terms of the code: `EntityHandler`, `ReadReply::head`,
 //! `load_snapshot()`. Three hundred-odd such names across the set, and a rename
-//! moves the code while the prose keeps the old one — the same failure the
+//! moves the code while the prose keeps the old one: the same failure the
 //! citation gate catches for sections, one level down.
 //!
 //! This module indexes every item name the tree declares and reports the names a
@@ -10,13 +10,13 @@
 //!
 //! # Why the index is a scan and not rustdoc
 //!
-//! `cargo rustdoc --output-format json` would resolve names properly — with
-//! types, paths, and visibility — but it needs nightly, and `rust-toolchain.toml`
+//! `cargo rustdoc --output-format json` would resolve names properly (with
+//! types, paths, and visibility), but it needs nightly, and `rust-toolchain.toml`
 //! pins a stable release on purpose (the trybuild snapshots are byte-compared
 //! against one rustc). So the index is a scan, in the manner the wal catalogue's
 //! `every_named_test_exists` already uses: it knows a name exists somewhere, not
-//! where it lives or what it is. That is enough for the failure being guarded —
-//! a name that no longer exists at all — and no more.
+//! where it lives or what it is. That is enough for the failure being guarded
+//! (a name that no longer exists at all), and no more.
 //!
 //! # What is checked
 //!
@@ -27,7 +27,7 @@
 //! - `some_crate::Foo`, checked on the type;
 //! - `foo_bar()`, checked on the name.
 //!
-//! Everything else in backticks — flags, paths, shell, JSON, prose in code voice —
+//! Everything else in backticks (flags, paths, shell, JSON, prose in code voice)
 //! is left alone.
 //!
 //! # Why there is an exemption list, and why it cannot rot
@@ -35,10 +35,10 @@
 //! Some names a spec uses are correct and will never be in the index. They come in
 //! three kinds, and [`EXEMPT`] records each with its reason:
 //!
-//! - **Not this tree's** — `Option`, `HashMap`, `Serialize`, Akka's `ClusterClient`.
-//! - **Not an identifier** — the `Rev` column of a table, the `TODO` the docs
+//! - **Not this tree's**: `Option`, `HashMap`, `Serialize`, Akka's `ClusterClient`.
+//! - **Not an identifier**: the `Rev` column of a table, the `TODO` the docs
 //!   promise you will not find, SQL's `TRUNCATE`.
-//! - **Named to say it does not exist** — the agent runtime "mints no `RunResumed` event
+//! - **Named to say it does not exist**: the agent runtime "mints no `RunResumed` event
 //!   of its own"; `Transport::local_window` is a seam compatibility §4 records as
 //!   built and pulled back. This kind is the reason a plain "every name must
 //!   resolve" rule would be wrong: a specification says what a system does *not*
@@ -207,7 +207,7 @@ impl fmt::Display for Unknown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}:{}: `{}` — nothing named `{}` is declared in crates/\n    {}",
+            "{}:{}: `{}`, nothing named `{}` is declared in crates/\n    {}",
             self.from, self.line, self.token, self.looked_up, self.quote,
         )
     }
@@ -230,7 +230,7 @@ impl Index {
     ///
     /// This crate is skipped. It is the tooling that reads the specifications
     /// rather than anything they describe, and its fixtures name things precisely
-    /// because the tree does *not* have them — indexing itself would answer its
+    /// because the tree does *not* have them, indexing itself would answer its
     /// own questions.
     pub fn build(root: &Path) -> io::Result<Self> {
         let mut names = BTreeSet::new();
@@ -324,7 +324,7 @@ fn harvest(text: &str, names: &mut BTreeSet<String>) {
     }
 
     // A format magic lives in the bytes, not in a declaration: `b"GRSNAP"`. Only
-    // byte strings count — an ordinary `"TRUNCATE"` is SQL a statement happens to
+    // byte strings count: an ordinary `"TRUNCATE"` is SQL a statement happens to
     // contain, and indexing it would answer for a name the tree does not define.
     let mut rest = text;
     while let Some(open) = rest.find("b\"") {
@@ -380,9 +380,9 @@ pub fn claimed(token: &str) -> Option<(&str, &str)> {
             left.starts_with(|c: char| c.is_ascii_uppercase()),
             right.starts_with(|c: char| c.is_ascii_uppercase()),
         ) {
-            // `ReadReply::head` — the member is the part that moves.
+            // `ReadReply::head`: the member is the part that moves.
             (true, false) => is_ident(right).then_some((token, right)),
-            // `compat::Window` — a crate path; the type is the part that moves.
+            // `compat::Window`: a crate path; the type is the part that moves.
             (false, true) => Some((token, right)),
             _ => None,
         };

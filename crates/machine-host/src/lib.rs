@@ -2,10 +2,10 @@
 //!
 //! Three words, one job each, across this crate and its consumers:
 //!
-//! - **host** — the node side: what boots and holds the box. Never the box.
-//! - **guest** — the box itself, a microVM or a container, and everything on
+//! - **host**, the node side: what boots and holds the box. Never the box.
+//! - **guest**: the box itself, a microVM or a container, and everything on
 //!   its side of the boundary. Never the code inside it.
-//! - **agent** — the process inside the guest that answers the protocol. Never
+//! - **agent**: the process inside the guest that answers the protocol. Never
 //!   the box.
 //!
 //! Two consumers run untrusted code inside a guest: the agent sandbox's
@@ -15,22 +15,22 @@
 //! ([`container`]). This crate owns both mechanisms and the seam between them,
 //! so a consumer states *what* it wants held and never *how*:
 //!
-//! - [`MachineHost`] — the node's mechanism, one per node, chosen by an
+//! - [`MachineHost`]: the node's mechanism, one per node, chosen by an
 //!   operator's flag. Never probed: which mechanism a node runs is deployment
 //!   configuration, because the two [grades](MachineIsolation) of confinement
 //!   are not interchangeable (§3.4) and a host must not silently pick the
 //!   weaker one.
-//! - [`MachineGuest`] — one live guest: a byte stream to an agent inside it, the
+//! - [`MachineGuest`], one live guest: a byte stream to an agent inside it, the
 //!   quiescent point a capture needs (machine §4), and a stop that cannot leak.
-//! - [`GuestError`] — a mechanism failure, split by what the caller must do
+//! - [`GuestError`], a mechanism failure, split by what the caller must do
 //!   next: re-provision ([`Gone`](GuestError::Gone)), or keep the guest and
 //!   report ([`Host`](GuestError::Host)).
 //!
 //! Only the two seam traits carry the `Machine` prefix, because only they name
 //! the abstraction. The data they carry ([`GuestSpec`], [`GuestKey`],
 //! [`GuestError`]) is unambiguous inside a crate called `machine-host`, and a
-//! type belonging to *one* mechanism keeps its own name — [`microvm::MicroVm`],
-//! [`container::ContainerGuest`] — because the contrast is the point:
+//! type belonging to *one* mechanism keeps its own name: [`microvm::MicroVm`],
+//! [`container::ContainerGuest`], because the contrast is the point:
 //! `Machine…` is the abstraction, `MicroVm…`/`Container…` is one realization.
 //!
 //! What is *not* here is anything protocol-shaped. Each consumer ships its own
@@ -40,7 +40,7 @@
 //! ([`vsock`]) and the workspace tar codec ([`ws_sync`], feature `ws`).
 //!
 //! Running a command is likewise absent from [`MachineGuest`]: a microVM has no
-//! host-side exec — it is reachable only through its agent — so
+//! host-side exec (it is reachable only through its agent), so
 //! [`container::ContainerGuest::exec`] lives on the mechanism that can honor
 //! it, and the one consumer that needs it holds that type directly. A trait
 //! whose implementations must fake half their methods hides nothing.
@@ -70,7 +70,7 @@ pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a
 pub enum MachineIsolation {
     /// Hardware virtualization: the guest speaks to a VMM, not the host kernel.
     MicroVm,
-    /// Shared kernel: the guest is a container. §3.4's SHOULD grade — a
+    /// Shared kernel: the guest is a container. §3.4's SHOULD grade: a
     /// development mechanism, priced by kernel privilege-escalation bugs.
     Container,
 }
@@ -115,7 +115,7 @@ impl std::error::Error for GuestError {}
 ///
 /// Scoped by node as well as by guest, because a container namespace is
 /// per-*host* while a guest belongs to the node running it: two nodes on one
-/// host — what the standalone deployments do — would otherwise derive one name,
+/// host (what the standalone deployments do) would otherwise derive one name,
 /// and one node's sweep would tear down the other's live guest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestKey {
@@ -201,7 +201,7 @@ pub trait MachineHost: Send + Sync + 'static {
         spec: GuestSpec,
     ) -> BoxFuture<'static, Result<Arc<dyn MachineGuest>, GuestError>>;
 
-    /// Open a stream to a guest this node may be running, from its key alone —
+    /// Open a stream to a guest this node may be running, from its key alone:
     /// what a front door needs when it does not hold the guest object (machine
     /// §5.1). [`GuestError::Gone`] when no such guest is here, which is the
     /// ordinary case for a machine whose activation is on another node.
@@ -217,7 +217,7 @@ pub trait MachineHost: Send + Sync + 'static {
 pub trait MachineGuest: Send + Sync + 'static {
     /// Whether the guest is still there at all: a VMM that has not exited, a
     /// container still running. Cheap, and never a substitute for
-    /// [`connect`](MachineGuest::connect) — a guest can be alive with its agent not yet
+    /// [`connect`](MachineGuest::connect): a guest can be alive with its agent not yet
     /// serving, which is exactly the state [`wait_ready`] waits out.
     fn alive(&self) -> BoxFuture<'_, bool>;
 
@@ -242,16 +242,16 @@ pub trait MachineGuest: Send + Sync + 'static {
 
     fn resume(&self) -> BoxFuture<'_, Result<(), GuestError>>;
 
-    /// Stop the guest. Idempotent — a forced step-down and an ordinary
-    /// deactivation both call it, possibly for a guest already gone — and an
+    /// Stop the guest. Idempotent (a forced step-down and an ordinary
+    /// deactivation both call it, possibly for a guest already gone), and an
     /// implementation whose handle outlives the call must also stop on drop, so
     /// a dropped activation can never leak a running guest.
     fn stop(&self) -> BoxFuture<'_, ()>;
 
     /// The guest's own last words, for a diagnostic nothing else in the stack
     /// sees: the VMM's serial console under [`microvm`], the container's log
-    /// tail under [`container`]. Where a boot fails inside the guest — an init
-    /// that panicked, a rootfs that would not mount — this is the only place it
+    /// tail under [`container`]. Where a boot fails inside the guest (an init
+    /// that panicked, a rootfs that would not mount) this is the only place it
     /// said so. Empty when the mechanism has nothing to report.
     fn console_tail(&self) -> BoxFuture<'_, String>;
 }
@@ -260,8 +260,8 @@ pub trait MachineGuest: Send + Sync + 'static {
 ///
 /// One implementation for both mechanisms, because "the guest is up but its
 /// agent is not serving yet" is the same state under either. A successful open
-/// is a real exchange — both mechanisms perform the muxer handshake, which only
-/// a serving agent answers — so this needs no protocol of its own.
+/// is a real exchange (both mechanisms perform the muxer handshake, which only
+/// a serving agent answers), so this needs no protocol of its own.
 ///
 /// Two things keep a doomed boot from costing the whole budget: a guest that has
 /// died is reported as [`GuestError::Gone`] at once ([`MachineGuest::alive`]), and the

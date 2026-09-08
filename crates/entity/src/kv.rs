@@ -8,7 +8,7 @@
 //!
 //! **Staging (§7.12).** Writes stage in a per-command overlay: reads through the
 //! handle see committed-plus-staged (read-your-staged-writes), and the staged
-//! operations become the command's tagged records — committed atomically with
+//! operations become the command's tagged records; committed atomically with
 //! the entity's events and every other facet's records (E19), or dropped for
 //! free.
 //!
@@ -78,8 +78,8 @@ pub struct KvForm {
     map: BTreeMap<String, KvValue>,
 }
 
-/// The per-command stage (spec §7.12): the staged writes as an overlay —
-/// `Some` = staged put, `None` = staged delete — giving the handler
+/// The per-command stage (spec §7.12): the staged writes as an overlay
+/// (`Some` = staged put, `None` = staged delete) giving the handler
 /// read-your-staged-writes. It drains into one record per touched key (last
 /// write to a key wins, exactly as the fold would resolve the sequence).
 #[derive(Default)]
@@ -155,7 +155,7 @@ where
 
 impl<G: Entity> EntityCtx<G> {
     /// The entity's KV map (spec §7.13). Compiles exactly when the entity declares
-    /// the [`Kv`] facet (`type Facets = (Kv, …)`) — the E10 discipline applied
+    /// the [`Kv`] facet (`type Facets = (Kv, …)`): the E10 discipline applied
     /// to storage. Writes are valid only inside a command handler (§7.12).
     pub fn kv<I>(&self) -> KvHandle<'_, G, I>
     where
@@ -173,8 +173,8 @@ impl<G: Entity, I> KvHandle<'_, G, I>
 where
     G::Facets: HasFacet<Kv, I>,
 {
-    /// Resolve `key`'s current value through the overlay — a staged put or
-    /// delete wins over the committed map (read-your-staged-writes, §7.12) —
+    /// Resolve `key`'s current value through the overlay: a staged put or
+    /// delete wins over the committed map (read-your-staged-writes, §7.12),
     /// and reduce it with `read`, without cloning the stored bytes.
     fn resolve<R>(&self, key: &str, read: impl FnOnce(Option<&KvValue>) -> R) -> R {
         self.cell.with_overlay::<Kv, I, _>(|form, stage| {
@@ -196,7 +196,7 @@ where
     }
 
     /// Stage `key = value` into the current command's batch (§7.12). A value
-    /// above [`INLINE_MAX`] spills to the entity's blob area first — durable on a
+    /// above [`INLINE_MAX`] spills to the entity's blob area first: durable on a
     /// write quorum before the map references it (§7.10); if the command later
     /// fails, the spilled bytes are an orphan the next sweep reclaims.
     pub async fn put(&self, key: impl Into<String>, value: Vec<u8>) -> Result<(), EntityError> {
@@ -224,10 +224,10 @@ where
     }
 
     /// The committed keys with `prefix` overlaid with this command's staged
-    /// puts and deletes, in key order, each projected through `project` — the
-    /// one implementation of the prefix walk (read-your-staged-writes, §7.12):
+    /// puts and deletes, in key order, each projected through `project`: the
+    /// one implementation of the prefix walk (read-your-staged-writes, §7.12);
     /// a staged `Some` wins over the committed value, a staged `None` deletes.
-    /// `project` decides what a hit costs — the value itself, or nothing.
+    /// `project` decides what a hit costs: the value itself, or nothing.
     fn merged<V>(&self, prefix: &str, project: impl Fn(&KvValue) -> V) -> BTreeMap<String, V> {
         self.cell.with_overlay::<Kv, I, _>(|form, stage| {
             let mut entries: BTreeMap<String, V> = form
@@ -256,7 +256,7 @@ where
     }
 
     /// The keys with `prefix`, in order, through the overlay (§7.13). Projects
-    /// to `()` — it never touches the values, so a large inline payload under
+    /// to `()`: it never touches the values, so a large inline payload under
     /// the prefix costs nothing here (unlike [`list`](Self::list)).
     pub fn keys(&self, prefix: &str) -> Vec<String> {
         self.merged(prefix, |_| ()).into_keys().collect()

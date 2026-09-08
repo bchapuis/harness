@@ -7,7 +7,7 @@
 //! rising?" from it means reconstructing a distribution from a firehose.
 //!
 //! This is the operator's interface: a fixed, small set of aggregates that cost O(1)
-//! per operation and answer the questions an on-call engineer actually has — are
+//! per operation and answer the questions an on-call engineer actually has; are
 //! commits landing, how long are they taking, what does a cold access cost, how much
 //! is resident. The two are complementary and neither replaces the other.
 //!
@@ -27,7 +27,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-/// How a commit ended (§6 steps 4–6) — the label on every commit measurement.
+/// How a commit ended (§6 steps 4–6): the label on every commit measurement.
 ///
 /// A latency number without this is misleading: a fast `Unavailable` and a fast
 /// `Committed` mean opposite things, and averaging them hides both.
@@ -37,12 +37,12 @@ pub enum CommitOutcome {
     Committed,
     /// Leadership moved off this node mid-append (§6 step 5).
     NotLeader,
-    /// No quorum, or the commit timed out — the ambiguous outcome (§6 step 6, §11).
+    /// No quorum, or the commit timed out: the ambiguous outcome (§6 step 6, §11).
     Unavailable,
 }
 
 impl CommitOutcome {
-    /// Every outcome, in slot order — the one place the outcome→slot mapping
+    /// Every outcome, in slot order: the one place the outcome→slot mapping
     /// lives, so a recorder and both render loops cannot disagree on which
     /// counter an outcome owns.
     const ALL: [CommitOutcome; 3] = [
@@ -85,7 +85,7 @@ pub trait EntityMetrics: Send + Sync + 'static {
     /// is what hibernation tuning (§10) trades against memory.
     fn rehydrated(&self, entity_type: &'static str, took: Duration, replayed: u64);
 
-    /// An entity activated (`+1`) or deactivated (`-1`) on this node — the resident
+    /// An entity activated (`+1`) or deactivated (`-1`) on this node: the resident
     /// working set (§7.8), the thing hibernation is meant to bound.
     fn activation_delta(&self, entity_type: &'static str, delta: i64);
 }
@@ -117,7 +117,7 @@ const BUCKETS_US: [u64; 11] = [
     u64::MAX,  // beyond it
 ];
 
-/// A cumulative histogram plus its sum and count — the three things a rate/quantile
+/// A cumulative histogram plus its sum and count: the three things a rate/quantile
 /// query needs, in the shape Prometheus expects.
 #[derive(Default)]
 struct Histogram {
@@ -159,7 +159,7 @@ impl Histogram {
 /// `_sum` and `_count` lines.
 ///
 /// One copy, because the exposition format is a contract with the scraper and the
-/// microsecond-to-second conversion is easy to get subtly wrong — two copies means a
+/// microsecond-to-second conversion is easy to get subtly wrong: two copies means a
 /// fix that lands on one of them. `labels` is the label set every line carries, already
 /// formatted and without braces (`entity_type="x",outcome="y"`); `le` is appended last,
 /// so the caller's labels and the bucket label compose in the order they always had.
@@ -200,7 +200,7 @@ struct TypeMetrics {
 ///
 /// **Getting that entry is the part worth being careful about.** Every commit,
 /// rehydrate and activation on the node looks its entity type up here, and there is one
-/// of these per *node*, shared across every type it hosts — so this lookup is on the
+/// of these per *node*, shared across every type it hosts, so this lookup is on the
 /// hot path of the whole process, taken from as many threads as the box has cores. The
 /// map it looks in is effectively fixed: a type's entry is created by its first metric
 /// and then never changes, so after the first commit of each type every subsequent
@@ -224,7 +224,7 @@ impl AtomicEntityMetrics {
     /// type for the life of the node. The miss path re-checks under the write lock
     /// rather than assuming the entry is still absent: two threads can both miss the
     /// read and both take the write, and `or_default` on the second must find the
-    /// first's entry rather than replace it — a replaced entry would silently reset
+    /// first's entry rather than replace it; a replaced entry would silently reset
     /// counters and drop whatever the other thread had already recorded into its `Arc`.
     fn entry(&self, entity_type: &'static str) -> Arc<TypeMetrics> {
         if let Some(metrics) = self
@@ -415,7 +415,7 @@ mod tests {
         // miss, so several threads reporting an entity type's *first* metric can all
         // miss the read and all reach the write. If the miss path replaced the entry
         // instead of re-checking, every thread but the last would increment an `Arc`
-        // no longer in the map and its commits would vanish — a race that only shows
+        // no longer in the map and its commits would vanish: a race that only shows
         // on the first touch of a type, which is exactly when a node is starting and
         // nobody is looking at the numbers.
         //
@@ -423,7 +423,7 @@ mod tests {
         // otherwise the first thread spawned wins the write and installs the entry
         // before the others start, leaving every later lookup an uncontended read hit
         // and the miss path never raced. And the repetition, because even barriered
-        // the threads only collide inside the miss window some of the time — against a
+        // the threads only collide inside the miss window some of the time, against a
         // deliberately broken `entry` a single round catches it only a few percent of
         // the time, which is a detector nobody should rely on. Measured against that
         // broken version, 64 rounds caught it in five runs out of six and 512 in every

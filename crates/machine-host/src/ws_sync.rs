@@ -17,7 +17,7 @@
 //! masked to `0o777` in both directions). Regular files, directories,
 //! relative symlinks, and the executable bit round-trip. The pack walk is
 //! deterministic (sorted entries, zero mtimes) and budgeted against
-//! [`MAX_TAR`] *before* bytes accumulate — headers and all — so a workspace
+//! [`MAX_TAR`] *before* bytes accumulate (headers and all), so a workspace
 //! beyond the cap fails the pack rather than sizing an unmetered host
 //! allocation (the sandbox spec §3.2 stance).
 
@@ -35,7 +35,7 @@ pub const MAX_TAR: usize = 64 * 1024 * 1024;
 const TAR_ENTRY_OVERHEAD: usize = 1024;
 
 /// Pack the workspace. Deterministic walk (sorted entries, zero mtimes);
-/// budgeted against [`MAX_TAR`] *before* bytes accumulate — headers and all.
+/// budgeted against [`MAX_TAR`] *before* bytes accumulate: headers and all.
 pub fn tar_workspace(dir: &Dir) -> Result<Vec<u8>, std::io::Error> {
     let mut builder = tar::Builder::new(Vec::new());
     let mut budget = MAX_TAR;
@@ -103,9 +103,9 @@ fn append_dir(
 }
 
 /// Restore the workspace at `ws` from a guest-produced tar, **two-phase**:
-/// unpack into a sibling `<ws>.incoming` staging directory — the same
+/// unpack into a sibling `<ws>.incoming` staging directory (the same
 /// filesystem as the workspace, so the swap's renames never fail with
-/// `EXDEV` — then swap whole trees. A corrupt or truncated tar leaves the
+/// `EXDEV`) then swap whole trees. A corrupt or truncated tar leaves the
 /// workspace untouched; that matters because both consumers durably capture
 /// the workspace (the sandbox after every tool call, the machine at every
 /// quiescent point), and a partial directory would be captured as deletions.
@@ -138,7 +138,7 @@ fn clear_workspace(dir: &Dir) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-/// Replace `ws`'s contents with `staged`'s, by rename — the commit half of
+/// Replace `ws`'s contents with `staged`'s, by rename: the commit half of
 /// [`restore_workspace`]'s two-phase unpack.
 fn replace_workspace(ws: &Dir, staged: &Dir) -> Result<(), std::io::Error> {
     clear_workspace(ws)?;
@@ -176,7 +176,7 @@ fn untar_workspace(dir: &Dir, bytes: &[u8]) -> Result<(), std::io::Error> {
                 }
                 let mut file = dir.create(&path)?;
                 std::io::copy(&mut entry, &mut file)?;
-                // rwx bits only — a guest must not mint a suid host file.
+                // rwx bits only: a guest must not mint a suid host file.
                 #[cfg(unix)]
                 if let Ok(mode) = entry.header().mode() {
                     let _ = dir.set_permissions(
@@ -191,8 +191,8 @@ fn untar_workspace(dir: &Dir, bytes: &[u8]) -> Result<(), std::io::Error> {
                 if let Some(target) = entry.link_name()?
                     && !target.is_absolute()
                 {
-                    // An absolute target names a path outside the workspace
-                    // — dropped (module docs). A relative one is created;
+                    // An absolute target names a path outside the workspace:
+                    // dropped (module docs). A relative one is created;
                     // whether it may be *followed* is decided at every open,
                     // by the handle (S1).
                     let _ = dir.symlink(&target, &path);
@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(dst.read("link").expect("follow link"), b"contents");
     }
 
-    /// A workspace past the budget fails the pack — driven through the real
+    /// A workspace past the budget fails the pack: driven through the real
     /// walk with a small starting budget rather than a multi-GiB tree.
     #[test]
     fn pack_charges_the_budget() {
@@ -295,7 +295,7 @@ mod tests {
         let mut builder = tar::Builder::new(Vec::new());
         let add_file = |builder: &mut tar::Builder<Vec<u8>>, path: &str| {
             // The tar crate refuses to *build* escape-shaped paths, so write
-            // the GNU header's name bytes directly — as an attacker would.
+            // the GNU header's name bytes directly, as an attacker would.
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(tar::EntryType::Regular);
             header.set_mode(0o644);

@@ -6,7 +6,7 @@
 //!
 //! - **Input gate** (§6): the executor runs each handler future to completion
 //!   before pulling the next message, and the protocol mutates state only *after*
-//!   the commit with no `.await` between the fold and the reply — so no second
+//!   the commit with no `.await` between the fold and the reply, so no second
 //!   command ever observes half-committed state.
 //! - **Output gate** (§6): the reply is simply the value the handler returns
 //!   *after* the commit await; a failed commit returns an `EntityError` instead, so
@@ -99,7 +99,7 @@ impl Message for CheckIdle {
 /// An internal self-tick that fires a durable alarm (spec §7.16): the host runs the
 /// entity's [`on_alarm`](crate::Entity::on_alarm) with no caller present. `epoch` is
 /// the arm generation this timer was launched for; a re-arm bumps it, so a
-/// superseded timer's tick is ignored — a cancellation without a channel. Local
+/// superseded timer's tick is ignored: a cancellation without a channel. Local
 /// self-`tell` only, never the network `register` list.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AlarmDue {
@@ -113,7 +113,7 @@ impl Message for AlarmDue {
 
 /// The outcome of one alarm-index registration attempt (spec §7.16): the task
 /// [`sync_alarm_index`](Host::sync_alarm_index) launches posts this back, so the
-/// host learns — on its own executor, off the command path — whether the index
+/// host learns (on its own executor, off the command path) whether the index
 /// durably holds its deadline. `epoch` is the attempt generation, guarding a
 /// superseded attempt's late outcome as [`AlarmDue`]'s does.
 #[derive(Serialize, Deserialize)]
@@ -139,7 +139,7 @@ enum IndexSync {
     Unsynced,
     /// A registration `ask` for `due` is in flight.
     Pending { due: Option<u64> },
-    /// The index committed `due` and replied — as durable as the index's own
+    /// The index committed `due` and replied, as durable as the index's own
     /// journal tier makes it (a quorum on the `Quorum` tier, §8).
     Acked { due: Option<u64> },
 }
@@ -150,8 +150,8 @@ enum IndexSync {
 pub(crate) const HEAD_UNPUBLISHED: u64 = u64::MAX;
 
 /// The committed head a resident activation publishes for its gateway (spec
-/// §7.5): the floor of the non-activating read. Written by the host — at the
-/// end of head recovery and after each commit — and read by the serial gateway
+/// §7.5): the floor of the non-activating read. Written by the host (at the
+/// end of head recovery and after each commit), and read by the serial gateway
 /// without touching the host's mailbox, so a read never queues behind the
 /// input gate. It only ever holds *committed* heads (it is set from journal
 /// returns, never from an in-flight append), so a value read even from a
@@ -159,7 +159,7 @@ pub(crate) const HEAD_UNPUBLISHED: u64 = u64::MAX;
 pub(crate) type CommittedCell = std::sync::Arc<std::sync::atomic::AtomicU64>;
 
 /// An entity's live activation (spec §10): state folded from the journal, plus the
-/// machinery of the §6 durability protocol. Disposable — rebuilt from the journal
+/// machinery of the §6 durability protocol. Disposable: rebuilt from the journal
 /// on the next activation (invariant **E3**).
 pub struct Host<G: Entity> {
     entity: G,
@@ -178,7 +178,7 @@ pub struct Host<G: Entity> {
     /// self-reference resolves under the right type.
     entity_type: &'static str,
     name: EntityName,
-    /// The shard this activation serves under — resolved by the gateway from the
+    /// The shard this activation serves under: resolved by the gateway from the
     /// committed partition (§5.1) at activation, fixed for the activation's
     /// lifetime. Keys the per-shard alarm index (§7.16); after a split/merge moves
     /// the name, the next activation carries the new shard.
@@ -203,18 +203,18 @@ pub struct Host<G: Entity> {
     /// composite snapshot plus tagged records on rehydration (**E3**).
     facets: Arc<FacetCell<G::Facets>>,
     /// The durable-alarm arm generation (spec §7.16). Bumped on every (re)arm so a
-    /// stale timer task's [`AlarmDue`] is ignored — a cancellation without a
+    /// stale timer task's [`AlarmDue`] is ignored: a cancellation without a
     /// channel. Ephemeral activation state, reset per activation (**E3**).
     alarm_epoch: u64,
     /// The per-shard alarm index this host registers its pending deadline with
     /// (spec §7.16), so a new leader can re-activate this entity after a failover.
-    /// `None` when alarm-index wiring is off — alarms then fire only while
+    /// `None` when alarm-index wiring is off: alarms then fire only while
     /// resident.
     alarm_index: Option<Entities<AlarmIndex<G::System>>>,
     /// Where the current deadline stands with that index. Drives the [`CheckIdle`]
     /// hibernation veto and the retry-until-acked loop
     /// ([`sync_alarm_index`](Host::sync_alarm_index)). `Unsynced` at activation, so
-    /// the first arm after rehydration always re-registers — the reconciliation
+    /// the first arm after rehydration always re-registers: the reconciliation
     /// that self-heals a lost register (§7.16). Ephemeral.
     index_sync: IndexSync,
     /// The registration attempt generation: bumped on every launched sync, so a
@@ -357,11 +357,11 @@ impl<G: Entity> Host<G> {
             // The second case is defence in depth, not a live path: a head *is* the
             // best snapshot's seq plus the contiguous run above it (`ReadReply::head`
             // on `Local`, the recovery merge's base on `Quorum`), so `s_seq > head`
-            // cannot arise from either tier. It is also not a recovery — a compacted
+            // cannot arise from either tier. It is also not a recovery: a compacted
             // prefix exists only in the snapshot, so replaying from `ZERO` after
             // discarding one yields a truncated state. It is simply the safe direction
             // to fail in, and `entities.rs` pins that direction with a store double.
-            // Restore still runs — a physical facet materializes its empty form
+            // Restore still runs: a physical facet materializes its empty form
             // here (§7.14).
             _ => {
                 self.state = G::State::default();
@@ -384,7 +384,7 @@ impl<G: Entity> Host<G> {
             // Defence in depth for the fold (E3): the replay cursor starts at the
             // loaded snapshot's seq, and compaction never passes the newest
             // snapshot (§9), so a base above the cursor means the store and the
-            // snapshot disagree about where history begins — folding on would
+            // snapshot disagree about where history begins, folding on would
             // silently skip the gap, so abort the activation instead.
             if batch.base > seq {
                 return Err(boxed(EntityJournalError::Unavailable(format!(
@@ -419,15 +419,15 @@ impl<G: Entity> Host<G> {
         self.last_active = ctx.system().now();
 
         // Resolve blob-referencing facet records into their materializations (spec
-        // §7.15): replay folded them into a pending set — F1 holds on the recorded
-        // bytes — and the fetch-and-apply runs here, once, before `on_activate`.
+        // §7.15): replay folded them into a pending set (F1 holds on the recorded
+        // bytes), and the fetch-and-apply runs here, once, before `on_activate`.
         self.facets
             .rehydrate(&self.facet_env(ctx))
             .await
             .map_err(boxed)?;
 
         // Run `on_activate` BEFORE announcing the activation: if it fails, the
-        // activation aborts (§10) and must leave no `Activated` on the stream — a
+        // activation aborts (§10) and must leave no `Activated` on the stream; a
         // phantom `Activated` with no matching `Deactivated` would both misreport
         // the lifecycle (§13) and corrupt a E6 activation checker.
         let ectx = self.entity_ctx(ctx);
@@ -473,7 +473,7 @@ impl<G: Entity> Host<G> {
     /// one atomic batch.
     ///
     /// `decide` MUST build its future synchronously from the borrows it is
-    /// handed — never inside an `async` block — so the future is `Send` by the
+    /// handed (never inside an `async` block), so the future is `Send` by the
     /// entity hooks' own contract without demanding `G::State: Sync`. `with`
     /// gives a decision's input a home that outlives that future (the
     /// death-watch path borrows the peer id from it); a decision whose input is
@@ -537,8 +537,8 @@ impl<G: Entity> Host<G> {
     }
 
     /// The commit half of the §6 protocol (steps 2–7): encode the decided events
-    /// and drained facet records into one atomic batch, append, and — on a durable
-    /// quorum commit — fold, deliver, snapshot, and re-arm the alarm. The facet
+    /// and drained facet records into one atomic batch, append, and (on a durable
+    /// quorum commit) fold, deliver, snapshot, and re-arm the alarm. The facet
     /// stage MUST already be armed ([`FacetCell::begin`]).
     async fn commit(
         &mut self,
@@ -612,8 +612,8 @@ impl<G: Entity> Host<G> {
             AppendOutcome::Committed(new_head) => {
                 // The entity is its shard's single writer (§8), so its head MUST
                 // advance by exactly this batch. A jump past that means the head we
-                // appended from was stale — e.g. a prior timed-out append that
-                // committed late (§7.2) — so the intervening committed events were
+                // appended from was stale, e.g. a prior timed-out append that
+                // committed late (§7.2), so the intervening committed events were
                 // never folded into our state. The journal is the authority (E3):
                 // step down rather than fold onto a state that is missing them.
                 let expected = Seq::new(self.head.value() + batch_len);
@@ -644,7 +644,7 @@ impl<G: Entity> Host<G> {
                     shard: self.shard,
                     seq: new_head.value(),
                 });
-                // Push the batch to subscribers (§7.9) after the output gate —
+                // Push the batch to subscribers (§7.9) after the output gate:
                 // observational, so it never gates the commit (**E5**).
                 if let Some(bytes) = to_deliver {
                     self.deliver_records(from, new_head, bytes);
@@ -675,7 +675,7 @@ impl<G: Entity> Host<G> {
         }
     }
 
-    /// Emit `Deactivated` and stop — the one deactivation seam (§13). Every
+    /// Emit `Deactivated` and stop: the one deactivation seam (§13). Every
     /// `Activated` gets a matching `Deactivated`/`NodeDown`, the basis of the
     /// **E6** singleton checker.
     fn step_down(&self, ctx: &Ctx<Host<G>>) {
@@ -687,7 +687,7 @@ impl<G: Entity> Host<G> {
         ctx.stop();
     }
 
-    /// Deactivate on an involuntary stop — leadership moved (§8), the shard went
+    /// Deactivate on an involuntary stop: leadership moved (§8), the shard went
     /// unavailable (§11), or the head desynced. The in-memory forms can no longer
     /// be trusted, so every physical facet materialization is discarded (**E20**,
     /// §7.14); the next activation rebuilds from the composite snapshot plus
@@ -703,7 +703,7 @@ impl<G: Entity> Host<G> {
 
     /// Persist a snapshot once enough events have accumulated past the last one
     /// (spec §9). The trigger is configuration, not part of the model, and it is the
-    /// *only* trigger — the idle path comes through here too
+    /// *only* trigger: the idle path comes through here too
     /// ([`hibernate`](Host::hibernate)).
     async fn maybe_snapshot(&mut self, ctx: &Ctx<Host<G>>) {
         if self.config.snapshot_every == 0 {
@@ -777,7 +777,7 @@ impl<G: Entity> Host<G> {
     /// idle window, billed R−1 times to the uplink (`docs/hardware-envelope.md`
     /// §3.9, I2). Chunking facet 0's state (§7.12) makes that *something*
     /// proportional to what changed rather than to the whole state, which lowers the
-    /// cost without removing it — an idle window still buys a round of puts and a
+    /// cost without removing it: an idle window still buys a round of puts and a
     /// record. Skipping it costs a longer replay on the next activation, and replay
     /// reads come from the *local* store (§9), so that cost stays on the side of the
     /// machine with capacity to spare (hw §3.1).
@@ -805,7 +805,7 @@ impl<G: Entity> Host<G> {
 
     /// Arm the durable-alarm timer (spec §7.16) from the folded [`Alarm`](crate::Alarm)
     /// form. Every call supersedes any prior timer: it bumps [`alarm_epoch`], so a
-    /// still-sleeping earlier timer's [`AlarmDue`] is ignored — a cancellation
+    /// still-sleeping earlier timer's [`AlarmDue`] is ignored; a cancellation
     /// without a channel, and the sole disarm when the form carries no deadline.
     /// Called after every commit and at the end of rehydration, so the timer always
     /// reflects the durable form (**E3**).
@@ -828,8 +828,8 @@ impl<G: Entity> Host<G> {
     }
 
     /// Register (or clear) this entity's pending deadline in its shard's alarm index
-    /// (spec §7.16), so a node that later leads the shard — or this node's own
-    /// driver, once the entity hibernates — can re-activate it with no caller. A
+    /// (spec §7.16), so a node that later leads the shard (or this node's own
+    /// driver, once the entity hibernates) can re-activate it with no caller. A
     /// no-op unless `entities_with_alarms` wired an index; the entity's own alarm
     /// facet, not the index, is the source of truth.
     ///
@@ -871,8 +871,8 @@ impl<G: Entity> Host<G> {
     }
 
     /// Push one committed batch to every live sink (spec §7.9). `try_send`, never
-    /// `send`: a sink whose buffer is full is dropped — the subscriber re-subscribes
-    /// and backfills by `load` — so a slow subscriber never blocks a write. Only
+    /// `send`: a sink whose buffer is full is dropped (the subscriber re-subscribes
+    /// and backfills by `load`), so a slow subscriber never blocks a write. Only
     /// enqueues to in-process channels; the cross-node push is in each forwarder.
     fn deliver_records(&mut self, from: Seq, to: Seq, bytes: Vec<Vec<u8>>) {
         let records: Vec<(u64, Vec<u8>)> = (from.value() + 1..=to.value()).zip(bytes).collect();

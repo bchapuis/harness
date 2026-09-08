@@ -5,14 +5,14 @@
 //! because the names live in test binaries the library never sees:
 //!
 //! 1. **Names are unique tree-wide.** Two workloads sharing a name would make
-//!    one replay the other's regressions — silently, and in the direction of
+//!    one replay the other's regressions: silently, and in the direction of
 //!    less testing on whichever one did not need them.
 //! 2. **Every corpus key names a real workload.** A typo in `corpus.txt` is
 //!    otherwise invisible: the key matches nothing, its seed never runs, and the
 //!    ratchet quietly stops holding for that regression.
 //!
 //! This test scans the workspace's test sources for the two ways a sweep gets a
-//! name — a `Workload`/`ClusterWorkload` impl, and `scenario_sweep`'s literal —
+//! name (a `Workload`/`ClusterWorkload` impl, and `scenario_sweep`'s literal),
 //! and checks both properties. It is the same shape as the catalogue drift gate:
 //! a cheap source-level assertion standing in for a check the compiler cannot
 //! make across binary boundaries.
@@ -69,8 +69,8 @@ fn literal_after(src: &str, from: usize) -> Option<(String, usize)> {
 }
 
 /// Every string literal inside the block that starts at the first `{` after
-/// `from`. A `name()` is often a `match` over modes rather than one literal —
-/// `singleton-chaos/leader` is a fourth arm — so taking only the first would
+/// `from`. A `name()` is often a `match` over modes rather than one literal
+/// (`singleton-chaos/leader` is a fourth arm), so taking only the first would
 /// leave most of a workload's names unknown to the corpus check.
 fn literals_in_block(src: &str, from: usize) -> Vec<String> {
     let Some(open) = src[from..].find('{').map(|i| from + i) else {
@@ -170,7 +170,7 @@ fn sweep_names_are_unique_across_the_workspace() {
     let collisions: Vec<_> = index.iter().filter(|(_, at)| at.len() > 1).collect();
     assert!(
         collisions.is_empty(),
-        "sweep names must be unique — a shared name makes one workload replay \
+        "sweep names must be unique: a shared name makes one workload replay \
          another's corpus seeds:\n{}",
         collisions
             .iter()
@@ -202,7 +202,7 @@ const DETERMINISM_RUNNERS: &[&str] = &[
     "check_cluster_reproducible(",
 ];
 
-/// Whether `src` calls any of `runners` — as a call, not as an import, so a
+/// Whether `src` calls any of `runners`, as a call, not as an import, so a
 /// `use actor_simulation::run_swarm;` line does not count as hosting a sweep.
 fn calls_any(src: &str, runners: &[&str]) -> bool {
     src.lines()
@@ -218,7 +218,7 @@ fn sweeps_live_in_swarm_files() {
     //
     // A source-level assertion, like the two name gates below: the compiler
     // cannot see across test-binary boundaries, and a convention nothing checks
-    // is one the tree drifts away from — which is exactly what happened before
+    // is one the tree drifts away from, which is exactly what happened before
     // this test existed.
     let mut misplaced = Vec::new();
     let (mut invariant_files, mut determinism_files) = (0usize, 0usize);
@@ -254,14 +254,14 @@ fn sweeps_live_in_swarm_files() {
 
     assert!(
         misplaced.is_empty(),
-        "sweeps must live in sweep files — a sweep failure names a seed to \
+        "sweeps must live in sweep files: a sweep failure names a seed to \
          replay, not a sequence to read, and mixing the two makes a slow sweep \
          sit between you and a fast scenario suite \
          (docs/simulation-testing.md):\n{}",
         misplaced.join("\n"),
     );
     // Floors, so a scanner that silently stops matching fails here rather than
-    // passing vacuously — the same guard as the name gate below.
+    // passing vacuously: the same guard as the name gate below.
     assert!(
         invariant_files >= 8 && determinism_files >= 4,
         "only found {invariant_files} invariant-sweep and {determinism_files} \
@@ -288,7 +288,7 @@ fn every_corpus_key_names_a_real_workload() {
     }
     assert!(
         unknown.is_empty(),
-        "corpus.txt names workloads that do not exist — these seeds never run, \
+        "corpus.txt names workloads that do not exist: these seeds never run, \
          so the regression they record is not actually guarded:\n{}",
         unknown.join("\n"),
     );

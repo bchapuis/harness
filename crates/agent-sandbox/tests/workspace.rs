@@ -1,4 +1,4 @@
-//! Workspace-tier conformance: S1 (confinement by capability handle —
+//! Workspace-tier conformance: S1 (confinement by capability handle;
 //! adversarial traversal) and S5 (per-tier release) of sandbox spec §6. The
 //! workspace directory is supplied by the caller (the agent's workspace facet,
 //! entity §7.11); the provider opens over it and never deletes it.
@@ -33,7 +33,7 @@ fn call(sandbox: &Arc<dyn Sandbox>, name: &str, input: Value) -> Result<Value, T
 }
 
 // ---------------------------------------------------------------------------
-// S1: adversarial traversal — escapes are unrepresentable, not filtered
+// S1: adversarial traversal; escapes are unrepresentable, not filtered
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -193,7 +193,7 @@ fn tiers_not_offered_fail_as_outcomes() {
 }
 
 // ---------------------------------------------------------------------------
-// S5: per-tier release, idempotent — and the workspace is not the provider's
+// S5: per-tier release, idempotent, and the workspace is not the provider's
 // to delete (its durable content is the caller's, entity §7.11)
 // ---------------------------------------------------------------------------
 
@@ -252,7 +252,7 @@ fn a_vanished_workspace_surfaces_as_environment_loss() {
     std::fs::remove_dir_all(&workspace).expect("external loss");
 
     // Not an ordinary tool failure: only EnvironmentLost engages the
-    // harness's reset protocol (§5.5) — a Sandbox error here would leave the
+    // harness's reset protocol (§5.5); a Sandbox error here would leave the
     // model retrying against state that no longer exists.
     let lost = call(&sandbox, "read_file", json!({"path": "f"}));
     assert!(

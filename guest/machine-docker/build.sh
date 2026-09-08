@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the container mechanism's runner image (machine spec §2.1). Docker is the
-# only requirement — the image carries no repository artifact, because the guest
+# only requirement: the image carries no repository artifact, because the guest
 # agent ships inside the machine's own rootfs (guest/machine-rootfs/build.sh).
 #
 # Knobs (env):

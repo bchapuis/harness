@@ -1,7 +1,7 @@
 //! Conformance: group routers (utilities spec §3).
 //!
 //! Routers are node-local functions over the serving listing, so there is no
-//! numbered invariant — these tests pin the §3 requirements directly:
+//! numbered invariant, these tests pin the §3 requirements directly:
 //! deterministic round-robin in listing order, seeded (reproducible) random,
 //! cross-node agreement of rendezvous-hashed routing with minimal movement,
 //! fail-fast `DeadLetter` on an empty group, and the serving filter routing
@@ -131,7 +131,7 @@ fn random_routing_is_seed_reproducible() {
 #[test]
 fn hashed_routing_agrees_across_nodes() {
     // §3 item 3: the same key over the same listing selects the same routee on
-    // every node — this is what makes `route_by` usable for affinity.
+    // every node; this is what makes `route_by` usable for affinity.
     let (sim, net) = support::cluster(23, Some(brisk_swim()));
     let node_a = net.join(A);
     let node_b = net.join(B);
@@ -196,7 +196,7 @@ fn removing_an_unrelated_routee_leaves_other_keys_mapping_unchanged() {
 
 #[test]
 fn an_empty_group_fails_fast_with_dead_letter() {
-    // §3 item 4: no routee, no buffering — the call returns immediately.
+    // §3 item 4: no routee, no buffering; the call returns immediately.
     let (sim, net) = support::cluster(31, None);
     let node = net.join(A);
     let (ask, tell, keyed) = sim.block_on(async move {
@@ -216,7 +216,7 @@ fn an_empty_group_fails_fast_with_dead_letter() {
 #[test]
 fn a_drained_routee_is_routed_around_until_resumed() {
     // §3 item 2: decisions draw from the serving listing, so an operator drain
-    // removes a routee from rotation and a resume restores it — without any
+    // removes a routee from rotation and a resume restores it, without any
     // re-registration.
     let sim = Simulation::new(37);
     let registry = SimRegistry::new(&sim);

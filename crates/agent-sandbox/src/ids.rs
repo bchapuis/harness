@@ -1,7 +1,7 @@
 //! Filesystem-safe names for session ids.
 //!
-//! Session ids are arbitrary strings — delegation derives child ids like
-//! `parent/turn/call` — and two distinct ids must never map to one
+//! Session ids are arbitrary strings (delegation derives child ids like
+//! `parent/turn/call`), and two distinct ids must never map to one
 //! directory: merged workspaces would leak state across sessions (harness
 //! spec A8). The digest suffix makes the mapping injective; the sanitized
 //! prefix keeps the directory listing readable.

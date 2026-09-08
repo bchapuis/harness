@@ -50,7 +50,7 @@ pub struct Hello {
 
 /// A transport-level message on an established association. Actor traffic is a
 /// [`Frame`]; [`Endpoints`](Wire::Endpoints) carries a `(node, address)` table
-/// for dynamic address discovery — the transport consumes it and never hands it
+/// for dynamic address discovery: the transport consumes it and never hands it
 /// up to the cluster (spec §9.3).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Wire {
@@ -206,7 +206,7 @@ mod tests {
     #[tokio::test]
     async fn an_oversized_length_prefix_is_rejected_without_allocating() {
         // A length prefix beyond the cap must error on read, not attempt a huge
-        // allocation — a hostile peer cannot wedge the node (spec §7, §15).
+        // allocation: a hostile peer cannot wedge the node (spec §7, §15).
         let (mut a, mut b) = tokio::io::duplex(64);
         a.write_all(&(MAX_FRAME_LEN + 1).to_be_bytes())
             .await

@@ -8,7 +8,7 @@
 //! `idle_after` but whose entities all stay resident, or one whose vocabulary
 //! includes a restart it never draws, is a green run that proves nothing.
 //!
-//! [`Exercised`] is an [`Invariant`] that never fails — it only counts, off the
+//! [`Exercised`] is an [`Invariant`] that never fails: it only counts, off the
 //! same event stream the real checkers read. A workload holds one, hands clones
 //! to each run through `invariants()`, and the test asserts on the totals after
 //! the sweep.
@@ -25,7 +25,7 @@
 //! A workload that cannot drive them has to say so, and one cannot: the disk
 //! swarm's entities must import a multi-megabyte image before they can commit
 //! anything, and under a nemesis that kills processes there are seeds where the
-//! cluster never gives them a window — seeds on which nothing hibernates at all.
+//! cluster never gives them a window; seeds on which nothing hibernates at all.
 //! Its totals are therefore an aggregate over the seed range rather than a
 //! per-seed property, so they are asserted on a sweep sized by `coverage_seeds`,
 //! which never narrows. See
@@ -68,7 +68,7 @@ impl Exercised {
         self.restarted.load(Ordering::Relaxed)
     }
 
-    /// Assert this sweep really hibernated — the shape every hibernating sweep
+    /// Assert this sweep really hibernated: the shape every hibernating sweep
     /// wants, so the four of them state it once.
     ///
     /// Deliberately *not* including [`restarted`](Self::restarted). Whether a
@@ -76,7 +76,7 @@ impl Exercised {
     /// however narrow the run; whether the nemesis ever *draws* a restart is a
     /// property of the seed range, which at `slow_seeds`' single local seed is a
     /// coin it loses about two runs in five. That claim belongs on a sweep sized
-    /// by `coverage_seeds`, which never narrows — see
+    /// by `coverage_seeds`, which never narrows; see
     /// `entity_swarm.rs::the_nemesis_actually_restarts_a_node`, where it is stated
     /// once for the nemesis rather than four times for four facets.
     pub fn assert_hibernated(&self) {

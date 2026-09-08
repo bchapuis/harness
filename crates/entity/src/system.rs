@@ -33,13 +33,13 @@ use crate::store::EntityStore;
 
 /// A shard of one entity type's namespace (spec §7.1): the entity-local handle a
 /// [`EntitySystem`] maps to its backing store and consensus group. Kept distinct
-/// from `actor_cluster::GroupId` so the seam signature stays system-agnostic — a
+/// from `actor_cluster::GroupId` so the seam signature stays system-agnostic: a
 /// `Local` single-node system has no Raft group at all.
 ///
 /// An entity's name maps to one `ShardId` by a stable hash of the name onto a
 /// key-range partition of the type's hash space (§5.1): `entities()` founds
 /// `shards` equal ranges ([`shard_for`]), and a split or merge (§7.7) is the only
-/// thing that changes the partition afterward — never membership change.
+/// thing that changes the partition afterward, never membership change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShardId {
     /// The owning entity type (`G::ENTITY_TYPE`); distinguishes shards of different
@@ -50,7 +50,7 @@ pub struct ShardId {
     pub index: u32,
 }
 
-/// FNV-1a over `bytes` — a small, allocation-free, deterministic hash. Used for
+/// FNV-1a over `bytes`: a small, allocation-free, deterministic hash. Used for
 /// name→shard and shard→group, both of which MUST agree on every node and across
 /// runs (the simulator replays a seed exactly, §14), so a randomized hasher is
 /// unusable here.
@@ -65,7 +65,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 /// A reserved shard index, never assigned to a real shard (a deployment cannot
 /// have `u32::MAX` shards), used to derive the per-type **map group**'s id from
-/// [`group_id_for`] — so the map group never collides with a data shard's group.
+/// [`group_id_for`], so the map group never collides with a data shard's group.
 pub(crate) const MAP_SHARD_INDEX: u32 = u32::MAX;
 
 /// The stable hash of an entity name onto the type's 64-bit key space (spec §5.1).
@@ -100,7 +100,7 @@ pub(crate) fn name_at_or_above(entity: &crate::entity::EntityName, from: u64) ->
     name_hash(entity.entity_type(), entity.key()) >= from
 }
 
-/// A contiguous, inclusive range of the 64-bit name-hash space (spec §7.1) — the
+/// A contiguous, inclusive range of the 64-bit name-hash space (spec §7.1): the
 /// keys a shard owns. The founding partition slices the space into `shards` equal
 /// ranges ([`initial_ranges`]); a split divides a range in two and a merge fuses
 /// two adjacent ranges (§7.7), the only operations that change the partition.
@@ -143,7 +143,7 @@ pub(crate) fn initial_ranges(shards: usize) -> Vec<KeyRange> {
 /// initial `shards`-way partition ([`initial_ranges`]) containing the name's
 /// hash, computed in O(1) as `⌊hash·n/2^64⌋`. Stable across nodes and runs, so
 /// resolution is consistent cluster-wide. After a split or merge (§7.7) the
-/// committed shard map, not this function, is the authority — routing consults
+/// committed shard map, not this function, is the authority, routing consults
 /// the map first and falls back here only while the map bootstraps.
 pub fn shard_for(entity_type: &'static str, key: &str, shards: usize) -> ShardId {
     ShardId {
@@ -154,7 +154,7 @@ pub fn shard_for(entity_type: &'static str, key: &str, shards: usize) -> ShardId
 
 /// The founding-partition bucket for a name `hash` under a `shards`-way split:
 /// `⌊hash·shards/2^64⌋` (Lemire's fixed-point map). The one place this formula
-/// lives — every routing path that falls back to the founding partition must
+/// lives: every routing path that falls back to the founding partition must
 /// agree byte-for-byte, so they all call here.
 pub(crate) fn founding_index(hash: u64, shards: usize) -> u32 {
     ((hash as u128 * shards.max(1) as u128) >> 64) as u32
@@ -170,7 +170,7 @@ pub(crate) fn group_id_for(shard: ShardId) -> GroupId {
     GroupId(id.max(1))
 }
 
-/// How a deployment groups nodes into failure domains — racks, availability zones,
+/// How a deployment groups nodes into failure domains: racks, availability zones,
 /// whatever fails together (spec §7.1).
 ///
 /// Replica selection without this spreads voters across the *cluster* but is blind to
@@ -190,7 +190,7 @@ pub type FailureDomains = Arc<dyn Fn(NodeId) -> u64 + Send + Sync>;
 /// (spec §7.1). See [`select_replicas`] for the domain-blind case.
 ///
 /// Walks the rendezvous order and takes a node only while its domain is under the
-/// per-domain cap — `ceil(replicas / distinct domains)`, so R=3 over 3 zones takes one
+/// per-domain cap: `ceil(replicas / distinct domains)`, so R=3 over 3 zones takes one
 /// each, and R=3 over 2 zones takes at most two from either. A second pass fills from
 /// whatever is left if the caps could not be met, because a shard with fewer replicas
 /// than configured is strictly worse than an imperfectly spread one.
@@ -239,7 +239,7 @@ fn select_spread(
     (voters, learners)
 }
 
-/// The members in rendezvous (HRW) order for `group` — the shared ranking both
+/// The members in rendezvous (HRW) order for `group`: the shared ranking both
 /// selection strategies choose from, and the one place the score is computed.
 ///
 /// Every node must derive the same order for the allocation to converge (§7.6), so a
@@ -247,8 +247,8 @@ fn select_spread(
 ///
 /// The group id MUST be hashed, not XORed in raw: `group_id_for` derives a type's
 /// shard groups as `BASE ^ (index+1)`, so consecutive shards' ids differ only in the
-/// low ~4 bits. XORing that raw into a per-node constant leaves the high-order bits —
-/// which dominate the sort — fixed, so every shard would rank the nodes identically and
+/// low ~4 bits. XORing that raw into a per-node constant leaves the high-order bits
+/// (which dominate the sort) fixed, so every shard would rank the nodes identically and
 /// pile onto the same R replicas with the same leader. Diffusing the id through `fnv1a`
 /// first spreads those low-bit differences across all 64 bits, so each shard ranks
 /// independently.
@@ -283,8 +283,8 @@ pub(crate) fn select_replicas_in(
 /// Split `members` into a shard's `replicas` voters and its remaining learners
 /// (spec §7.1) by **rendezvous hashing**: each member is scored by a stable hash
 /// of `(node, group)`, the top `replicas` become voters, the rest learners. This
-/// is a deterministic function of the members and the group — so every node
-/// computes the identical split — and it spreads each shard's voters across the
+/// is a deterministic function of the members and the group (so every node
+/// computes the identical split), and it spreads each shard's voters across the
 /// cluster while moving only `~1/N` of shards when membership changes. `members`
 /// is assumed sorted (the tie-break) and non-empty; `replicas` is clamped to it.
 fn select_replicas(
@@ -344,7 +344,7 @@ pub trait EntitySystem: ActorSystem {
     /// election is in flight. the `Local` tier is always its own leader.
     fn shard_leader(&self, shard: ShardId) -> Option<NodeId>;
 
-    /// Whether this node leads `shard` — the single-writer fence (§8) and the gate
+    /// Whether this node leads `shard`: the single-writer fence (§8) and the gate
     /// for local activation (§5.4). `false` on a node that does not replicate the
     /// shard. the `Local` tier leads every shard.
     fn leads_shard(&self, shard: ShardId) -> bool;
@@ -366,7 +366,7 @@ impl<C: Clock, E: Entropy, S: Spawner> EntitySystem for LocalSystem<C, E, S> {
         _domains: Option<crate::FailureDomains>,
     ) -> Arc<dyn ShardMapSource> {
         // `Local` tier: the single node replicates every shard, all keyed in one
-        // local store (the peer transport is unused — there are no peers). Split
+        // local store (the peer transport is unused; there are no peers). Split
         // and merge are `Quorum` elasticity, so the size trigger is inert here.
         Arc::new(LocalShardMap::new(self.node(), shards, local, io))
     }
@@ -462,7 +462,7 @@ mod tests {
     fn sequential_keys_spread_across_the_range_partition() {
         // The partition is by key range (the hash's HIGH bits pick the shard),
         // and raw FNV-1a barely avalanches a short key's final bytes into the
-        // high bits. Pinned with the least favourable input — short keys
+        // high bits. Pinned with the least favourable input: short keys
         // differing only in a trailing counter.
         let shards = 8usize;
         let mut per_shard = vec![0usize; shards];
@@ -473,7 +473,7 @@ mod tests {
         for (index, &count) in per_shard.iter().enumerate() {
             assert!(
                 count >= 25, // a quarter of the uniform 100 per shard
-                "shard {index} got only {count}/800 sequential keys ({per_shard:?}) — \
+                "shard {index} got only {count}/800 sequential keys ({per_shard:?}); \
                  the range partition's high bits are not avalanching"
             );
         }
@@ -566,16 +566,16 @@ mod tests {
         assert_eq!(
             covered.len(),
             5,
-            "every node must replicate at least one shard — no idle nodes (covered {covered:?})",
+            "every node must replicate at least one shard, no idle nodes (covered {covered:?})",
         );
     }
 
     /// The property a zone loss depends on: R replicas of a shard must not all land
-    /// in one failure domain. Domain-blind rendezvous can and does put them there —
+    /// in one failure domain. Domain-blind rendezvous can and does put them there:
     /// this checks the spread actually prevents it, across every shard, not on average.
     #[test]
     fn replicas_spread_across_failure_domains() {
-        // Nine nodes, three per zone — the shape a three-AZ deployment has.
+        // Nine nodes, three per zone: the shape a three-AZ deployment has.
         let members: Vec<NodeId> = (1..=9).map(NodeId::new).collect();
         let zones: FailureDomains = Arc::new(|node: NodeId| (node.uid() - 1) % 3);
         let mut blind_concentrated = 0;
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn a_lopsided_domain_layout_still_yields_the_full_replica_count() {
         let members: Vec<NodeId> = (1..=5).map(NodeId::new).collect();
-        // Four nodes in zone 0, one in zone 1 — R=3 cannot be spread evenly.
+        // Four nodes in zone 0, one in zone 1: R=3 cannot be spread evenly.
         let zones: FailureDomains = Arc::new(|node: NodeId| u64::from(node.uid() == 5));
         for shard in 0..50u64 {
             let (voters, _) = select_replicas_in(&members, GroupId(shard.max(1)), 3, Some(&zones));
@@ -619,7 +619,7 @@ mod tests {
         }
     }
 
-    /// The spread is still a pure function every node computes identically — the
+    /// The spread is still a pure function every node computes identically: the
     /// property the consensus-agreed allocation rests on (§7.6).
     #[test]
     fn the_spread_is_deterministic() {

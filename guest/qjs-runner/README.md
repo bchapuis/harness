@@ -13,18 +13,18 @@ the agent runtime never compiles it; only `build.sh` does.
 
 ## What the script sees
 
-- `input` — the tool call's `input` value (or `undefined`).
-- `console.log/warn/error/info` — captured, returned as `console`.
+- `input`: the tool call's `input` value (or `undefined`).
+- `console.log/warn/error/info`: captured, returned as `console`.
 - `workspace.read(path) -> string | null`, `workspace.write(path, content) -> bool`
-  — over the host capability handle (sandbox spec §3.1; paths outside the
+  over the host capability handle (sandbox spec §3.1; paths outside the
   workspace are unrepresentable).
-- `Math.random()` — seeded from the host seed (deterministic, sandbox §3.2 S2).
-- `Date.now()` / `new Date()` — frozen epoch; time does not advance.
+- `Math.random()`: seeded from the host seed (deterministic, sandbox §3.2 S2).
+- `Date.now()` / `new Date()`: frozen epoch; time does not advance.
 - Nothing else: no `fetch`, no timers, no Node APIs.
 
 The script's completion value returns as `{result, console}`; a thrown
 exception returns `{error, console}`. Both are tool *outcomes* the model
-reads — only a fuel-exhausted or ABI-violating guest is a `ToolError`.
+reads; only a fuel-exhausted or ABI-violating guest is a `ToolError`.
 
 ## Building
 

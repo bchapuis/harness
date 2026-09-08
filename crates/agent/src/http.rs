@@ -3,9 +3,9 @@
 //! shared adapter shell that drives a protocol through the bounded retry
 //! engine.
 //!
-//! An adapter crate owns its **protocol** — the [`Protocol`] four: path,
+//! An adapter crate owns its **protocol**, the [`Protocol`] four: path,
 //! headers, the wire JSON, and the `classify` taxonomy mapping a response
-//! onto [`ModelError`] — and nothing else. The plumbing that is not protocol
+//! onto [`ModelError`], and nothing else. The plumbing that is not protocol
 //! lives here, once: a deployment implements [`HttpPost`] over its HTTP stack
 //! of choice (hyper, reqwest, raw rustls) and the same value serves every
 //! adapter; [`ProtocolModel`] holds the socket, the key, the seams, and the
@@ -94,7 +94,7 @@ fn backoff<E: Entropy + ?Sized>(retry: &RetryPolicy, entropy: &E, attempt: u32) 
     (base + Duration::from_nanos(jitter_nanos)).min(retry.max_backoff)
 }
 
-/// A provider protocol: the wire-specific four an adapter crate owns — the
+/// A provider protocol: the wire-specific four an adapter crate owns; the
 /// path, the headers carrying the key, the request JSON, and the `classify`
 /// taxonomy mapping a completed exchange onto [`ModelError`] (§4.3). Which of
 /// those errors retry is the shared shell's judgment, not the protocol's.
@@ -111,7 +111,7 @@ pub trait Protocol: Send + Sync + 'static {
 
 /// The shared adapter shell (§4.2): the socket, the key, the injected seams,
 /// and the retry policy, held once for every protocol. Each completion
-/// encodes through `P`, then drives the bounded policy — POST, classify,
+/// encodes through `P`, then drives the bounded policy: POST, classify,
 /// retry pressure and transport blips with capped exponential backoff. An
 /// adapter crate defines a [`Protocol`] and exports an alias, e.g.
 /// `pub type AnthropicModel<C, E> = ProtocolModel<Messages, C, E>;`.

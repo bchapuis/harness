@@ -21,7 +21,7 @@ use crate::SimNetwork;
 use crate::transport::Process;
 use crate::transport::SimNode;
 
-/// A node's process was replaced by [`SimNetwork::restart`] — emitted on the
+/// A node's process was replaced by [`SimNetwork::restart`]: emitted on the
 /// event stream (actor §16) just before the old system is shut down.
 ///
 /// A successor process assigns actor *paths* from zero, so `node-2//user/0`
@@ -41,8 +41,8 @@ impl SimNetwork {
     /// `joining` selects founding (`Up`) vs joiner (`Joining`) startup (spec §9.3).
     fn bring_up(&self, node: NodeId, joining: bool) -> SimNode {
         // A fresh scheduler domain per incarnation, not per node: `restart` needs
-        // to retire the outgoing process's tasks while leaving its successor's —
-        // which carry the same `NodeId` — untouched.
+        // to retire the outgoing process's tasks while leaving its successor's
+        // (which carry the same `NodeId`) untouched.
         let (spawner, domain) = self.spawner.with_fresh_domain();
         let (tx, rx) = async_channel::unbounded();
         let transport = self.transport(node);
@@ -187,7 +187,7 @@ impl SimNetwork {
         }
     }
 
-    /// Isolate a node from every peer (spec §18.3) — a crash, as seen by the
+    /// Isolate a node from every peer (spec §18.3), a crash, as seen by the
     /// rest of the cluster: its frames are dropped in both directions.
     pub fn crash(&self, node: NodeId) {
         let mut inner = self.inner.lock().expect("network mutex poisoned");
@@ -204,7 +204,7 @@ impl SimNetwork {
     }
 
     /// Inject a raw frame directly into a node's inbound queue, bypassing
-    /// routing — for negative tests that feed hostile or corrupt frames a
+    /// routing, for negative tests that feed hostile or corrupt frames a
     /// well-behaved peer would never send (spec §5.4, §7.3). A no-op if the
     /// target node is unknown.
     pub fn inject(&self, from: NodeId, to: NodeId, frame: Frame) {
@@ -265,7 +265,7 @@ impl SimNetwork {
     }
 
     /// Stop injecting transport faults: from here on frames are neither dropped,
-    /// duplicated, nor jittered (the fixed base latency stays — it is not a
+    /// duplicated, nor jittered (the fixed base latency stays; it is not a
     /// fault, spec §18.2).
     ///
     /// Reaching a **converged** cluster needs this, not just

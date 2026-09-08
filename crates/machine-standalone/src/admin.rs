@@ -7,12 +7,12 @@
 //! command. A member that short never survives long enough for the failure
 //! detector to probe it alive, so after the first invocation its id sits
 //! unreachable, gossip stops flowing to it, and the next process to claim the
-//! id discovers no hosts at all. Nothing there is a bug to fix — a detector
+//! id discovers no hosts at all. Nothing there is a bug to fix: a detector
 //! that believes an absent member is absent is correct. The mismatch is the
 //! shape, so the CLI stops being a member.
 //!
-//! Instead each node offers a loopback admin socket, and the node — already a
-//! member, already routing — issues the entity command. One JSON request per
+//! Instead each node offers a loopback admin socket, and the node (already a
+//! member, already routing) issues the entity command. One JSON request per
 //! line, one JSON reply. Every operation is an ordinary journaled entity
 //! command (machine §3); this socket adds no state, no authority, and no
 //! durability of its own, so it stays a transport detail rather than a second
@@ -69,7 +69,7 @@ pub enum AdminRequest {
 #[derive(Serialize, Deserialize)]
 pub enum AdminReply {
     Done,
-    /// The machine was already provisioned — reported rather than failed, so a
+    /// The machine was already provisioned: reported rather than failed, so a
     /// re-run of a demo, or a retried command whose first landing was lost, is
     /// a no-op instead of an error.
     AlreadyProvisioned,
@@ -184,7 +184,7 @@ fn reply_of<E: std::fmt::Display>(outcome: Result<(), E>) -> AdminReply {
 /// Issue one request, trying each node's admin socket in turn.
 ///
 /// Trying several is the point: a machine is reachable through *any* node, so
-/// the CLI keeps working after the node it usually talks to is killed — which
+/// the CLI keeps working after the node it usually talks to is killed, which
 /// is exactly what the failure drill does.
 pub async fn call(addrs: &[String], request: AdminRequest) -> Result<AdminReply, String> {
     let mut last = "no --admin address given".to_string();

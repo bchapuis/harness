@@ -4,12 +4,12 @@
 //! entity's `Quorum` tier rides Raft: a shard elects its leader through the system's
 //! consensus engine, and only `MembershipMode::Leader` builds one. A clustered
 //! deployment wired in any other mode (Static, Registry, Gossip) reports no
-//! configured voters, so no shard ever elects — the gateway's redirect then hints
+//! configured voters, so no shard ever elects: the gateway's redirect then hints
 //! the receiving node back at itself and every entity call loops on `NotLeader`.
 //! That was the exact symptom of the standalone harness booting in `Static` mode.
 //!
 //! The guard lives in `RaftShardMap::new` (the cluster shard-map path), so it
-//! catches the whole class regardless of the deployment on top — here through the
+//! catches the whole class regardless of the deployment on top: here through the
 //! public `entities()` entry point, the same call the standalone node makes.
 
 use std::time::Duration;
@@ -63,6 +63,6 @@ fn hosting_a_entity_without_consensus_panics_at_construction() {
         ..EntityConfig::default()
     };
     // Eager: `entities()` builds the shard map synchronously, so the guard fires
-    // here — before any turn, any sim step, any network traffic.
+    // here; before any turn, any sim step, any network traffic.
     let _ = system.entities::<Probe>(config);
 }

@@ -2,7 +2,7 @@
 //!
 //! One logical instance of an actor cluster-wide. Every hosting node runs a
 //! **manager** per singleton name: a tick loop that observes only the local
-//! membership view and spawns the instance iff this node is the **anchor** —
+//! membership view and spawns the instance iff this node is the **anchor**;
 //! the rendezvous owner of the singleton's name over the serving set
 //! (utilities spec §2). The anchor is a pure function of the view, so converged
 //! nodes agree on it in every control-plane mode; no coordination is added.
@@ -15,7 +15,7 @@
 //! through its own handler, which SHOULD call `ctx.stop()` promptly).
 //!
 //! **Guarantee honesty (utilities spec §4 item 3):** at most one activation per
-//! *converged* view. While views diverge — a partition, detector lag — two
+//! *converged* view. While views diverge (a partition, detector lag) two
 //! nodes MAY each believe they are anchor and both run an instance; once views
 //! converge the surplus manager stops its instance. The singleton is *not* a
 //! mutual-exclusion primitive; callers needing exclusivity must fence. Calls
@@ -56,7 +56,7 @@ where
     /// that only call it use [`singleton_proxy`](Self::singleton_proxy).
     ///
     /// `stop` is the handoff message (`A: Handler<M>` proves the instance
-    /// accepts it); its handler SHOULD `ctx.stop()` promptly — until the old
+    /// accepts it); its handler SHOULD `ctx.stop()` promptly, until the old
     /// instance terminates, its registration lingers and proxies may still
     /// reach it.
     pub fn singleton<A, M, F>(&self, name: &'static str, factory: F, stop: M) -> SingletonProxy<A>
@@ -113,7 +113,7 @@ async fn manager<C, E, S, T, A, M, F>(
     let key: Key<A> = Key::new(name);
     let interval = system.probe_interval();
     // `spawn_with` consumes a factory per activation (it keeps it for
-    // supervision restarts), and the manager re-activates after a stop — so the
+    // supervision restarts), and the manager re-activates after a stop, so the
     // one user factory is shared and each activation hands the host a fresh
     // delegating closure.
     let factory = Arc::new(Mutex::new(factory));
@@ -136,7 +136,7 @@ async fn manager<C, E, S, T, A, M, F>(
                 });
                 State::Active(instance)
             }
-            // Observed terminated — by handoff, supervision Stop, or its own
+            // Observed terminated, by handoff, supervision Stop, or its own
             // doing. Back to Idle; the next tick re-activates iff still anchor
             // (the liveness half of U2).
             State::Active(instance) | State::Stopping(instance)

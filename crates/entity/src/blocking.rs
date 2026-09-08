@@ -9,13 +9,13 @@
 //! append. That worker is also driving Raft heartbeats, election timers, and every
 //! other shard's quorum wait, so one slow device does not merely slow one write: it
 //! stalls heartbeats past the election timeout, the shard elects a new leader, the
-//! entities on the old one step down (§6), and the next access rehydrates them — a
+//! entities on the old one step down (§6), and the next access rehydrates them; a
 //! cluster-wide event produced by a local hiccup, and one that makes more I/O while
 //! the disk is already the bottleneck.
 //!
 //! **The argument is about the tail, not the median.** On a datacenter NVMe with
 //! power-loss protection a flush of a small append costs tens of microseconds, which
-//! against a 250 ms heartbeat, on a node with dozens of cores, is nothing — the
+//! against a 250 ms heartbeat, on a node with dozens of cores, is nothing: the
 //! feedback loop above cannot start from a *typical* write
 //! (`docs/hardware-envelope.md` §2). It starts from the atypical one: the same device
 //! stalls for hundreds of milliseconds during garbage collection, a RAID rebuild, or
@@ -34,11 +34,11 @@
 //! **Which calls come through here.** Everything that writes the device:
 //! `store_record`, `store_snapshot`, `prepare` (it rewrites the shard's fence file
 //! whenever the term advances), `seal_range`, `put_blob`, and the reclamation calls
-//! `delete_blob`, `retain_blobs` and `delete_blobs` — a sweep is not an fsync but it
+//! `delete_blob`, `retain_blobs` and `delete_blobs`; a sweep is not an fsync but it
 //! unlinks one file per reclaimed blob, so an entity that has churned a large disk
 //! image makes thousands of synchronous unlinks against the device the durability
-//! path needs. Reads do not — `head`, `read`, `snapshot`, `get_blob`, `has_blob`,
-//! `blob_ids`, `entities` — and that is a deliberate line rather than an omission. The argument above is about a device
+//! path needs. Reads do not (`head`, `read`, `snapshot`, `get_blob`, `has_blob`,
+//! `blob_ids`, `entities`), and that is a deliberate line rather than an omission. The argument above is about a device
 //! stalling *while a durability barrier is open*; a read has no barrier to hold, is
 //! usually served from the store's loaded segment without touching the device at all,
 //! and sits on the activation-latency path where an extra hop between threads is a
@@ -53,8 +53,8 @@
 //! five hundred blobs on the async worker, one per block, with the heartbeats.
 //!
 //! **Why a seam and not just a thread pool.** The deterministic simulator (§14) runs
-//! the *production* store — `raft_journal.rs` cold-restarts a real
-//! [`FileEntityStore`](crate::FileEntityStore) under virtual time — and a real thread
+//! the *production* store: `raft_journal.rs` cold-restarts a real
+//! [`FileEntityStore`](crate::FileEntityStore) under virtual time, and a real thread
 //! pool there would make a run's outcome depend on OS scheduling, breaking the
 //! seed-reproducibility the whole test strategy rests on (actor §18.1). [`InlineIo`]
 //! is therefore the default and runs the job on the calling thread, reproducing
@@ -73,7 +73,7 @@ pub(crate) type Job = Box<dyn FnOnce() + Send + 'static>;
 /// implementation is free to run jobs on as many threads as it likes.
 pub trait BlockingIo: Send + Sync + 'static {
     /// Take `job` and run it, now or on another thread. Returns `false` only if the
-    /// job was **refused and will never run** — a pool that is shutting down — which
+    /// job was **refused and will never run** (a pool that is shutting down) which
     /// the caller must distinguish from "not finished yet", since it is waiting on a
     /// signal the job itself sends.
     ///
@@ -82,7 +82,7 @@ pub trait BlockingIo: Send + Sync + 'static {
     fn submit(&self, job: Job) -> bool;
 }
 
-/// Run `f` on `io` and await its value — the ergonomic form of
+/// Run `f` on `io` and await its value: the ergonomic form of
 /// [`BlockingIo::submit`], which deals only in erased `()` jobs so it can stay
 /// object-safe.
 ///
@@ -109,13 +109,13 @@ where
     rx.await.expect("an accepted job always sends its value")
 }
 
-/// Run one [`EntityStore`] call on `io` and await its outcome — [`offload`] in the
+/// Run one [`EntityStore`] call on `io` and await its outcome: [`offload`] in the
 /// shape every replication seam wants, and **the** way a store call reaches the pool.
 ///
 /// The `Arc::clone` is here rather than at each call site because it is not a choice:
 /// the job must own everything it touches to be `'static`, so every caller was
 /// writing the same two lines ahead of the same `offload`. Collapsing them matters
-/// less for the lines saved than for what the name does — a reader can now tell, at a
+/// less for the lines saved than for what the name does: a reader can now tell, at a
 /// glance and by grep, which store calls run on the pool and which run inline, which
 /// is a policy question (see the module docs) rather than an accident of how each
 /// site happened to be written.
@@ -137,7 +137,7 @@ where
     offload(io, move || call(store.as_ref())).await
 }
 
-/// Run the job on the calling thread — the default, and the only implementation the
+/// Run the job on the calling thread: the default, and the only implementation the
 /// deterministic simulation may use (see the module docs).
 ///
 /// This is not a degenerate case to be tolerated: it is the behaviour the store had
@@ -171,7 +171,7 @@ impl ThreadPoolIo {
         let threads = threads.max(1);
         // `async_channel` is the workspace's queue (actor §4.2 mailboxes use it) and is
         // multi-consumer, so each worker holds its own receiver and the first one free
-        // takes the next job — the scheduling a device-bound queue wants, without a
+        // takes the next job: the scheduling a device-bound queue wants, without a
         // shared dequeue lock in front of it.
         let (jobs, rx) = async_channel::unbounded::<Job>();
         let workers = (0..threads)
@@ -199,7 +199,7 @@ impl ThreadPoolIo {
     /// write from blocking an unrelated one. That argument is about the tail and does
     /// not depend on the median.
     ///
-    /// The **ceiling** is a throughput claim, and it is measured — `benches/flush.rs`
+    /// The **ceiling** is a throughput claim, and it is measured: `benches/flush.rs`
     /// sweeps concurrent `atomic_replace`s across this clamp and past both ends of it.
     /// On the one host measured so far (an Apple-silicon laptop, APFS, where `sync_all`
     /// is `F_FULLFSYNC` and so a real media flush) aggregate durable writes per second
@@ -212,7 +212,7 @@ impl ThreadPoolIo {
     /// came from Linux `fsync` on enterprise NVMe (~30 µs with power-loss protection,
     /// ~500 µs without); a full drive-cache flush on a consumer SSD is two orders away
     /// from it. The deployment's own figure is still unmeasured, and the shape of the
-    /// curve — not its height — is what licenses the ceiling. Re-run the bench with
+    /// curve (not its height) is what licenses the ceiling. Re-run the bench with
     /// `TMPDIR` on the deployment volume before treating either end as settled.
     pub fn sized_for_host() -> ThreadPoolIo {
         let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);

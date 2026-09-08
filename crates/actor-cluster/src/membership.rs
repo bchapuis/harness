@@ -7,8 +7,8 @@
 //! Reachability is detected by **direct and indirect probing** and disseminated
 //! by **gossip** with **incarnation refutation** (spec §9.2, §10): a successful
 //! probe clears a suspicion; a suspicion unrefuted for `suspect_timeout` becomes
-//! `Unreachable`. Who may then declare `down` — and who drives the
-//! `joining → up` / `leaving → down` lifecycle — is the **control plane**, one
+//! `Unreachable`. Who may then declare `down` (and who drives the
+//! `joining → up` / `leaving → down` lifecycle) is the **control plane**, one
 //! of four configurable [`MembershipMode`]s (spec §9.4). Stamped authority
 //! decisions (registry revisions, Raft commit indexes) enter through
 //! [`Membership::apply_stamped`] and win the view merge (spec §9.2).
@@ -52,8 +52,8 @@ fn reachability_event(observer: NodeId, node: NodeId, reachability: Reachability
 
 /// The **status-axis** merge order (spec §9.2): whether an incoming
 /// `(stamp, status)` view supersedes the current one. A higher **authority
-/// stamp** — the registry revision (registry-based, spec §9.4.2) or the log
-/// commit index (leader-based, spec §9.4.3) — wins; at equal stamp the
+/// stamp**: the registry revision (registry-based, spec §9.4.2) or the log
+/// commit index (leader-based, spec §9.4.3); wins; at equal stamp the
 /// more-advanced rank wins (the `joining → … → removed` lattice).
 fn status_supersedes(incoming: (u64, MemberStatus), current: (u64, MemberStatus)) -> bool {
     incoming.0 > current.0 || (incoming.0 == current.0 && incoming.1.rank() > current.1.rank())
@@ -94,8 +94,8 @@ pub enum MemberStatus {
     /// Full member; may host and address actors.
     Up,
     /// **Reversible** maintenance state, available in the modes with an
-    /// authoritative control plane — registry-based and leader-based (spec
-    /// §9.1, §9.4): the node is cordoned — callers route away — but it stays a
+    /// authoritative control plane, registry-based and leader-based (spec
+    /// §9.1, §9.4): the node is cordoned (callers route away), but it stays a
     /// full member and is *not* terminal. A later `resume` returns it to
     /// [`Up`](MemberStatus::Up). Being reversible it sits off the monotonic
     /// `joining → … → removed` ladder and shares [`Up`](MemberStatus::Up)'s rank;
@@ -103,7 +103,7 @@ pub enum MemberStatus {
     Draining,
     /// Graceful shutdown initiated; draining (spec §9.3).
     Leaving,
-    /// Declared dead — terminal and irrevocable (spec §9.1).
+    /// Declared dead: terminal and irrevocable (spec §9.1).
     Down,
     /// Tombstone for a long-dead member (spec §9.1): kept briefly so the removal
     /// disseminates, then pruned from the roster. The node's `NodeId` is never
@@ -149,7 +149,7 @@ pub enum Reachability {
 }
 
 /// How an `unreachable` member becomes `down` (spec §9.4). A policy exists only
-/// in the modes whose authority downs at all — applied by the coordinator
+/// in the modes whose authority downs at all: applied by the coordinator
 /// (gossip-based, spec §9.4.4) or committed by the leader (leader-based, spec
 /// §9.4.3). The default is conservative: a partition alone never downs a node
 /// (invariant #16).
@@ -162,8 +162,8 @@ pub enum DowningPolicy {
 }
 
 /// SWIM detector parameters (spec §10). All MUST be configurable. The detector
-/// is a pure reachability *sensor*: what its confirmations may cause — nothing,
-/// an observation, or a `down` — is the mode's [`DowningPolicy`], not part of
+/// is a pure reachability *sensor*: what its confirmations may cause (nothing,
+/// an observation, or a `down`) is the mode's [`DowningPolicy`], not part of
 /// this config.
 #[derive(Clone, Copy, Debug)]
 pub struct SwimConfig {
@@ -196,7 +196,7 @@ impl Default for SwimConfig {
 /// lives in an external registry the cluster reads but does not operate. Every
 /// member runs a sync loop against [`client`](RegistryMode::client) and applies
 /// the registry's revision-stamped state to its view; the detector is
-/// **observe-only** — only a registry mutation ever declares `down`.
+/// **observe-only**, only a registry mutation ever declares `down`.
 #[derive(Clone)]
 pub struct RegistryMode {
     /// Detector parameters (observe-only, spec §10).
@@ -215,14 +215,14 @@ pub struct RegistryMode {
 pub enum MembershipCommand {
     /// Admit a node as a full `up` member (`joining → up`, or a new member).
     Admit(NodeId),
-    /// Cordon a member for maintenance — the reversible `draining` state.
+    /// Cordon a member for maintenance: the reversible `draining` state.
     Drain(NodeId),
     /// Return a drained member to `up`.
     Resume(NodeId),
     /// Finalize a graceful leave (`leaving → down`), committed at the departing
     /// node's request (spec §9.3).
     Leave(NodeId),
-    /// Declare a member terminally `down` — the detector-fed, policy-gated,
+    /// Declare a member terminally `down`: the detector-fed, policy-gated,
     /// quorum-committed downing decision (spec §9.4.3 item 4, invariant #22).
     Down(NodeId),
 }
@@ -239,15 +239,15 @@ impl MembershipCommand {
     }
 
     /// Encode as the control group's opaque app payload: the [`MEMBERSHIP`] stamp
-    /// ahead of the fixed 9-byte [`body`](MembershipCommand::body). **Canonical** —
-    /// one value encodes to one byte string, since the stamp is a fixed prefix — so
+    /// ahead of the fixed 9-byte [`body`](MembershipCommand::body). **Canonical**
+    /// (one value encodes to one byte string, since the stamp is a fixed prefix), so
     /// the engine's byte-equality dedup of a re-proposed command holds.
     ///
     /// **V4's two-release ordering does not apply to a boundary's introduction
     /// here**, because the thing it protects does not exist. Read-new-first buys one
     /// release in which every peer learns to read a form before any peer writes it,
     /// and it earns its cost exactly when there are peers in the field on the older
-    /// build — a deployment mid-rollout, whose oldest node stops applying membership
+    /// build: a deployment mid-rollout, whose oldest node stops applying membership
     /// on `ACMEMB…` or, older still, skips the entry and holds a member set with a
     /// gap in it. This tree has no such deployment: a build of it meets only its own
     /// peers. So the boundary lands in one step, and V4 becomes live again the
@@ -281,7 +281,7 @@ impl MembershipCommand {
     }
 
     /// Decode a committed control-group app payload. `None` on a payload this
-    /// build cannot read: a short or malformed one, or an unknown tag — a
+    /// build cannot read: a short or malformed one, or an unknown tag; a
     /// transition a later build defined and this one has never heard of.
     ///
     /// The two are one answer here because the codec has no policy: `None` means
@@ -308,12 +308,12 @@ impl MembershipCommand {
     /// `Err` carries why the payload is unreadable, in the words an operator has to
     /// act on. That is the whole of what the boundary adds: without it an unknown
     /// tag and a short or damaged payload are one answer, and the two have opposite
-    /// fixes — run the node on a build that accepts the entry, or repair a log.
+    /// fixes; run the node on a build that accepts the entry, or repair a log.
     ///
     /// **An unstamped payload is adopted as revision 1** ([`MEMBERSHIP`],
     /// [`compat::Stamp::adopt`]). Every transition committed before the stamp existed is
     /// still in some cluster's log, and a build that refused them would refuse its
-    /// own history — the first rolling upgrade would stop every node on the oldest
+    /// own history: the first rolling upgrade would stop every node on the oldest
     /// entry it replayed. Adoption keeps a *stamped* payload at an unreadable
     /// revision refused rather than handed to the old decoder, which is the
     /// misparse a bare "try the previous format" fallback would introduce.
@@ -335,21 +335,21 @@ impl MembershipCommand {
 /// The payload rides `EntryPayload::App` inside the stamped `actor.raft.log`, whose
 /// revision covers the **envelope** and not this, so without a stamp of its own a
 /// build meeting a transition from a later build stops on a nine-byte payload whose
-/// tag it does not know — indistinguishable from a truncated or damaged one. With
+/// tag it does not know: indistinguishable from a truncated or damaged one. With
 /// one it stops naming a revision, and the difference is what an operator reads: a
 /// mixed-version rollout, or corruption.
 ///
 /// `ACMEMB` cannot be confused with the unstamped predecessor, whose first byte is
 /// a transition tag in `0..=4`. `A` is `0x41`, so the confusion the magic has to
-/// rule out is ruled out by construction rather than by arithmetic — the same
+/// rule out is ruled out by construction rather than by arithmetic: the same
 /// easier half of the job that `entity.shardmap`'s `GRSMAP` gets from JSON's
 /// leading `{`, and that `wal`'s header has to do the hard way.
 ///
 /// **The nine bytes are the argument against, and they lose.** A magic and a
 /// revision more than double the payload, which is the widest relative cost of any
 /// stamp in the tree. In absolute terms it is eight bytes on a record written once
-/// per join, drain, resume, leave, or downing — a few thousand over a cluster's
-/// life — against a refusal an operator can act on at the one boundary whose
+/// per join, drain, resume, leave, or downing (a few thousand over a cluster's
+/// life) against a refusal an operator can act on at the one boundary whose
 /// misread costs a member set. And a stamp is not a thing that can wait for the
 /// revision that needs it: it goes on bytes that outlive the build that wrote them,
 /// so a transition committed today is one a later build reads, and the stamp has to
@@ -373,7 +373,7 @@ pub struct LeaderMode {
 
 /// The gossip-based control plane (spec §9.4.4): membership propagates
 /// peer-to-peer through SWIM and anti-entropy gossip, and the transitions that
-/// need a single actor are performed by the **coordinator** — a deterministic
+/// need a single actor are performed by the **coordinator**; a deterministic
 /// role, the lowest-address reachable member that is neither terminal nor
 /// departing, joiners included (see [`Membership::coordinator`]).
 #[derive(Clone, Copy)]
@@ -385,24 +385,24 @@ pub struct GossipMode {
     pub downing: DowningPolicy,
 }
 
-/// Which **control plane** governs membership (spec §9.4) — where the
+/// Which **control plane** governs membership (spec §9.4), where the
 /// authoritative member set lives, how members learn it, and who may declare a
 /// member dead. One choice at node startup; every node in a cluster MUST run
-/// the same mode. Everything else — the lattice (spec §9.1), the merge rule
-/// (spec §9.2), the lifecycle (spec §9.3), terminal `down` — is shared.
+/// the same mode. Everything else: the lattice (spec §9.1), the merge rule
+/// (spec §9.2), the lifecycle (spec §9.3), terminal `down`; is shared.
 #[derive(Clone)]
 pub enum MembershipMode {
     /// Fixed roster, no lifecycle transitions ever (spec §9.4.1). By default no
     /// detector runs and no membership traffic flows; `detector` MAY enable the
-    /// SWIM loop **observe-only** — reachability events, early `Unreachable`
-    /// completion, discovery routing — with still no down authority.
+    /// SWIM loop **observe-only** (reachability events, early `Unreachable`
+    /// completion, discovery routing) with still no down authority.
     Static { detector: Option<SwimConfig> },
     /// An external registry is the authority (spec §9.4.2).
     Registry(RegistryMode),
     /// A self-hosted Raft log behind an elected leader is the authority
     /// (spec §9.4.3).
     Leader(LeaderMode),
-    /// No authority — peer-to-peer dissemination with a deterministic
+    /// No authority: peer-to-peer dissemination with a deterministic
     /// coordinator (spec §9.4.4).
     Gossip(GossipMode),
 }
@@ -428,7 +428,7 @@ impl MembershipMode {
         matches!(self, MembershipMode::Gossip(_))
     }
 
-    /// The downing policy [`Membership`] itself applies — the gossip-based
+    /// The downing policy [`Membership`] itself applies: the gossip-based
     /// coordinator's (spec §9.4.4 item 4). Every other mode is
     /// [`Conservative`](DowningPolicy::Conservative) here: static and
     /// registry-based have no in-cluster down authority at all (spec §9.4.1,
@@ -451,7 +451,7 @@ struct Member {
     /// The authority stamp behind `status` (spec §9.2): a registry revision or a
     /// Raft commit index; `0` where no authority stamps (static/gossip).
     stamp: u64,
-    /// When `reachability` last changed — drives the suspect and downing timers.
+    /// When `reachability` last changed: drives the suspect and downing timers.
     changed_at: Instant,
 }
 
@@ -471,7 +471,7 @@ pub struct Membership {
     /// view must be unchanged and fully reachable before the coordinator
     /// performs lifecycle transitions. Derived from the probe interval.
     stability_window: Duration,
-    /// The last view snapshot and the instant it has been stable since — the
+    /// The last view snapshot and the instant it has been stable since: the
     /// coordinator's "locally stable" gate (spec §9.4.4 item 3). `None` until
     /// the first detector tick.
     stable_view: Mutex<Option<(ViewSnapshot, Instant)>>,
@@ -484,8 +484,8 @@ pub struct Membership {
     /// (spec §10 #4).
     incarnation: AtomicU64,
     /// The stamp of the authority decision behind this node's own `self_status`.
-    /// A node only *adopts* status decisions about itself — it is never the
-    /// writer — so this just tracks the highest stamp it has accepted.
+    /// A node only *adopts* status decisions about itself (it is never the
+    /// writer), so this just tracks the highest stamp it has accepted.
     self_stamp: AtomicU64,
     /// Why this node stopped applying the control group's committed log, or
     /// `None` while healthy ([`Membership::failure`]). One-way.
@@ -506,7 +506,7 @@ impl Membership {
         // `joining` is meaningful only where admission is an in-cluster decision
         // (gossip- and leader-based, spec §9.1): static members always start
         // `Up`, and in registry-based mode admission *is* the registry entry
-        // (spec §9.4.2 item 2) — the `Joining` state is unused.
+        // (spec §9.4.2 item 2); the `Joining` state is unused.
         let joining =
             joining && matches!(mode, MembershipMode::Gossip(_) | MembershipMode::Leader(_));
         let self_status = if joining {
@@ -546,15 +546,15 @@ impl Membership {
     }
 
     /// Why this node stopped applying committed membership transitions, or `None`
-    /// while healthy — the operator-facing half of [`stop_applying`](
+    /// while healthy: the operator-facing half of [`stop_applying`](
     /// Membership::stop_applying), for a deployment's health probe.
     ///
     /// A node in this state is **still a member and still gossiping**, and that is
     /// deliberate: gossip carries each member's status with the deciding commit
     /// index as its stamp, so a peer that applied the entry can still deliver the
     /// *outcome* here (`merge_peer`), even though the log no longer can. What it
-    /// cannot deliver is a transition this build has no concept of — the case that
-    /// made the node stop in the first place — so this is a node to replace, not
+    /// cannot deliver is a transition this build has no concept of (the case that
+    /// made the node stop in the first place), so this is a node to replace, not
     /// one that heals.
     pub fn failure(&self) -> Option<String> {
         self.stopped.lock().expect("stopped mutex poisoned").clone()
@@ -584,7 +584,7 @@ impl Membership {
         }
     }
 
-    /// Add a peer as `Up`/`Reachable` (idempotent — never resurrects a `Down`).
+    /// Add a peer as `Up`/`Reachable` (idempotent, never resurrects a `Down`).
     pub(crate) fn add_member(&self, node: NodeId, now: Instant) {
         if node == self.node {
             return;
@@ -602,7 +602,7 @@ impl Membership {
             });
     }
 
-    /// Whether `node` is terminal — `down` or its `removed` tombstone (spec
+    /// Whether `node` is terminal: `down` or its `removed` tombstone (spec
     /// §9.1). Used to fail routing fast and to prune receptionist entries.
     pub fn is_down(&self, node: NodeId) -> bool {
         self.members
@@ -627,7 +627,7 @@ impl Membership {
     }
 
     /// Pick up to `k` distinct reachable peers to relay an indirect probe, none
-    /// of them `exclude` (the probe target) — the `k` members of SWIM's indirect
+    /// of them `exclude` (the probe target): the `k` members of SWIM's indirect
     /// probing (spec §10 #2). Fewer than `k` if the cluster is small.
     pub(crate) fn pick_helpers<E: Entropy>(
         &self,
@@ -705,7 +705,7 @@ impl Membership {
     }
 
     /// The gossip-based **coordinator** (spec §9.4.4 item 3): a deterministic
-    /// *role*, not an election — it falls to the lowest-address member of this
+    /// *role*, not an election; it falls to the lowest-address member of this
     /// node's view that is neither terminal nor departing (`Leaving`,
     /// `Draining`) and is reachable, this node included. `Joining` members are
     /// candidates too: that is what lets a fresh cluster bootstrap, since with
@@ -744,7 +744,7 @@ impl Membership {
         self.coordinator() == Some(self.node)
     }
 
-    /// Fold one status observation `(stamp, status)` into an existing member —
+    /// Fold one status observation `(stamp, status)` into an existing member:
     /// the **one** implementation of the status axis's merge rule (invariant
     /// #15, spec §9.1, §9.2), shared by the authority path
     /// ([`apply_stamped`](Membership::apply_stamped)) and the gossip path
@@ -786,7 +786,7 @@ impl Membership {
         )
     }
 
-    /// Apply one **stamped authority decision** to the view — a registry entry at
+    /// Apply one **stamped authority decision** to the view: a registry entry at
     /// its revision (spec §9.4.2) or a committed Raft entry at its commit index
     /// (spec §9.4.3). The single write path for both stamped control planes: the
     /// decision applies iff it supersedes the current view ([`status_supersedes`])
@@ -811,7 +811,7 @@ impl Membership {
         }
         let (event, downed) = {
             let mut members = self.members.lock().expect("members mutex poisoned");
-            // First sight: the decision itself introduces the member — admission
+            // First sight: the decision itself introduces the member; admission
             // is the entry (spec §9.4.2 item 2) or the committed command. The
             // default is a stamp-zero `Joining` ghost the observation folds over
             // immediately, so first sight and re-observation share the one merge
@@ -884,7 +884,7 @@ impl Membership {
     }
 
     /// The coordinator's **stability gate** (spec §9.4.4 item 3): whether the
-    /// view — member set, statuses, reachabilities, and this node's own status —
+    /// view (member set, statuses, reachabilities, and this node's own status)
     /// has been unchanged for the [stability window](Self::stability_window).
     /// Checked once per detector tick, so stability is quantized to the probe
     /// interval; any observed change restarts the window.
@@ -908,7 +908,7 @@ impl Membership {
 
     /// Reachability timeouts and reachability-driven downing (spec §10,
     /// §9.4.4): a suspicion older than the (size-scaled) suspect timeout becomes
-    /// `Unreachable`, and — in gossip-based mode — the coordinator moves an
+    /// `Unreachable`, and (in gossip-based mode) the coordinator moves an
     /// `Unreachable` member to `Down` under a `Timeout` policy.
     ///
     /// Declaring a member `down` is a cluster decision the coordinator owns
@@ -1063,7 +1063,7 @@ impl Membership {
     ///   removed`). Static and gossip-based mode issue no stamp (every stamp is
     ///   `0`), so this reduces to the plain monotonic lattice. Gossiping stamped
     ///   entries is a safe *accelerant*, never a second authority (spec §9.4.2
-    ///   item 1, §9.4.3 item 3). A terminal member (`down`/`removed`) is sticky —
+    ///   item 1, §9.4.3 item 3). A terminal member (`down`/`removed`) is sticky:
     ///   it only advances toward `removed`, never reverts, regardless of stamp
     ///   (invariant #15).
     /// - **Reachability** (the detector axis): a higher incarnation wins, else the
@@ -1092,7 +1092,7 @@ impl Membership {
         downed
     }
 
-    /// Merge one peer's gossiped entry into the roster — the per-entry body of
+    /// Merge one peer's gossiped entry into the roster: the per-entry body of
     /// [`merge`] for a node other than ourselves. Returns the node if this merge
     /// newly declared it `down` (so the caller runs the cascade, spec §8.1).
     fn merge_peer(
@@ -1123,7 +1123,7 @@ impl Membership {
             return (d.status == MemberStatus::Down).then_some(d.node);
         };
 
-        // The status axis: one shared fold (`apply_status`) — terminal
+        // The status axis: one shared fold (`apply_status`); terminal
         // stickiness, then the stamp rule (invariant #15).
         let (event, newly_down) = self.apply_status(d.node, member, d.status, d.stamp, now);
         if let Some(event) = event {
@@ -1149,9 +1149,9 @@ impl Membership {
 
     /// Merge a digest entry that is about *this* node (spec §9.2, §10 #4).
     ///
-    /// A strictly higher **stamp** is an authority decision about us — a registry
+    /// A strictly higher **stamp** is an authority decision about us: a registry
     /// entry or a committed log entry naming this node (admission, drain, resume,
-    /// removal) — which we adopt. Anything else is the unstamped path: refute a
+    /// removal), which we adopt. Anything else is the unstamped path: refute a
     /// stale non-reachable claim by bumping our incarnation, and adopt a forward
     /// rank transition (e.g. the coordinator admitting us `joining → up`).
     fn merge_self(&self, d: MemberDigest) {
@@ -1171,10 +1171,10 @@ impl Membership {
         }
     }
 
-    /// Set this node's own status and announce the transition — the single
+    /// Set this node's own status and announce the transition: the single
     /// mutator of `self_status`. Callers gate it on a real transition (a higher
     /// rank, or a higher stamp). A terminal status (removal) is recorded so the
-    /// node can observe it and shut down, but emits no self event — observers
+    /// node can observe it and shut down, but emits no self event: observers
     /// announce the `down` (spec §8.1).
     fn set_self_status(&self, status: MemberStatus) {
         let mut s = self.self_status.lock().expect("self status mutex poisoned");
@@ -1215,12 +1215,12 @@ impl Membership {
             .collect()
     }
 
-    /// The placement serving set (utilities spec §2.1): every member — including
-    /// this node — that is `Up` and not confirmed `Unreachable`, in `NodeId`
+    /// The placement serving set (utilities spec §2.1): every member (including
+    /// this node) that is `Up` and not confirmed `Unreachable`, in `NodeId`
     /// order. Stricter than the receptionist's listing filter (spec §13 req 4):
     /// placement assigns ownership, so it also routes around
     /// confirmed-unreachable members rather than handing them keys. A merely
-    /// *suspected* member stays in the set — suspicion is refutable noise
+    /// *suspected* member stays in the set: suspicion is refutable noise
     /// (spec §10), and excluding it would flap ownership on every dropped probe.
     pub fn serving_members(&self) -> Vec<NodeId> {
         let mut serving: Vec<NodeId> = self
@@ -1259,7 +1259,7 @@ impl Membership {
     }
 
     /// The members the Raft leader should propose for admission (leader-based
-    /// mode, spec §9.3): currently `Joining` and reachable. Read-only — the
+    /// mode, spec §9.3): currently `Joining` and reachable. Read-only: the
     /// transition itself is a committed log entry applied via
     /// [`apply_stamped`](Self::apply_stamped).
     pub(crate) fn admission_candidates(&self) -> Vec<NodeId> {
@@ -1287,7 +1287,7 @@ impl Membership {
     }
 
     /// The members `policy` would down: confirmed `unreachable` longer than the
-    /// policy allows (leader-based mode, spec §9.4.3 item 4). Read-only — the
+    /// policy allows (leader-based mode, spec §9.4.3 item 4). Read-only: the
     /// leader proposes each as a log entry, so downing stays quorum-gated
     /// (invariant #22); this never mutates the view.
     pub(crate) fn downing_candidates(&self, policy: DowningPolicy, now: Instant) -> Vec<NodeId> {
@@ -1373,7 +1373,7 @@ mod tests {
         );
     }
 
-    /// A stamped transition, encoded the way this build *reads* one — written here
+    /// A stamped transition, encoded the way this build *reads* one: written here
     /// rather than taken from `encode`, so the fixture cannot move with the writer.
     /// That the writer agrees with it is asserted separately, by
     /// `a_transition_is_written_stamped`.
@@ -1446,7 +1446,7 @@ mod tests {
     #[test]
     fn a_stamped_transition_from_a_later_revision_is_refused_by_name() {
         // The whole point of the boundary: a payload this build cannot read stops
-        // it on a *revision*, not on a tag it cannot name — which reads exactly
+        // it on a *revision*, not on a tag it cannot name, which reads exactly
         // like a truncated entry. Note the body is a transition this build knows,
         // so only the revision can be doing the refusing.
         let mut future = MEMBERSHIP.magic().to_vec();
@@ -1496,7 +1496,7 @@ mod tests {
         // A node that stopped applying the log can still be *told* what the log
         // decided, because every transition it knows also travels in gossip
         // stamped with the commit index that decided it. This is what bounds the
-        // damage of stopping — and pinning it here is what keeps that claim from
+        // damage of stopping, and pinning it here is what keeps that claim from
         // being prose alone.
         let membership = roster();
         membership.stop_applying("stopped at entry 9".into());

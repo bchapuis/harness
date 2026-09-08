@@ -12,15 +12,15 @@ name: Soak
 #     SWARM_SEED_BASE=<base> SWARM_SEEDS=<n> cargo test -p <crate> --test <name>
 #
 # Once reproduced, the seed is committed to the corpus in ci.yml as a fixed-seed
-# regression case — the ratchet of docs/simulation-testing.md. Because this job
+# regression case; the ratchet of docs/simulation-testing.md. Because this job
 # sets SWARM_CONTINUE, a sweep reports *every* seed it failed at rather than
-# stopping at the first, and prints them as corpus.txt lines ready to paste — so
+# stopping at the first, and prints them as corpus.txt lines ready to paste, so
 # one soak yields a batch of regressions instead of one.
 #
 # Seed counts are set per crate rather than once for the workspace, because
 # per-seed cost spans about four orders of magnitude across these workloads: a
 # count that keeps actor-simulation busy for an hour would keep machine going
-# for a year. Wall-time budgeting lives here rather than in the sweep helper —
+# for a year. Wall-time budgeting lives here rather than in the sweep helper,
 # under a seed, reading the host clock would make the seeds that ran depend on
 # the machine that ran them, which spec §18.1 exists to deny.
 
@@ -98,8 +98,8 @@ jobs:
           SWARM_SEED_BASE: ${{ steps.seeds.outputs.base }}
           SWARM_SEEDS: ${{ steps.seeds.outputs.store }}
         # `--features sql` because entity's SQL facet (spec §7.14) is off by
-        # default, and its suites — `sql.rs` and `sql_swarm.rs`, 11 tests
-        # including two cluster sweeps — are `#![cfg(feature = "sql")]`. Without
+        # default, and its suites (`sql.rs` and `sql_swarm.rs`, 11 tests
+        # including two cluster sweeps) are `#![cfg(feature = "sql")]`. Without
         # the flag they compile to zero tests, so the facet was soaked by nobody
         # and had rotted into a build error before anyone noticed.
         run: cargo test -p entity --features sql -p blob-store -p tenancy --no-fail-fast

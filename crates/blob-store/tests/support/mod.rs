@@ -7,8 +7,8 @@
 //!
 //! This crate is why the pattern exists. Its §9 column was prose, and prose rots
 //! silently: seven of its cited test names had drifted from the suites they named
-//! — every one of them still describing a real property, none of them still
-//! naming a real test — and nothing failed, because nothing was checking. The
+//! (every one of them still describing a real property, none of them still
+//! naming a real test), and nothing failed, because nothing was checking. The
 //! pointers below are checked.
 //!
 //! Verification is split between this crate's `tests/` and the unit tests beside
@@ -61,7 +61,7 @@ const B_CATALOGUE: &[CatalogueEntry] = &[
         property: "No consensus on the data path: no election, term, agreement round, or write-time read-repair; concurrent writers of the same content do not coordinate and do not fork",
         // Structural, and checked as such: the crate depends on `actor-cluster`, not
         // `entity`, so there is no consensus group available for the data path to
-        // run. The drift test asserts that from Cargo.toml — the day someone adds a
+        // run. The drift test asserts that from Cargo.toml: the day someone adds a
         // entity dependency, this invariant needs re-arguing rather than assuming.
         verify: &[Verify::CompileTime(
             "blob-store depends on actor-cluster, not entity: no consensus group exists to run \

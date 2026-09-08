@@ -93,7 +93,7 @@ fn the_receive_loop_survives_hostile_frames() {
     );
 
     // A legitimate call after the hostile burst still succeeds (the node and its
-    // receive loop survived — spec §5.4).
+    // receive loop survived: spec §5.4).
     let reply = sim.block_on(async move {
         node_b
             .resolve::<Greeter<SimNode>>(id)

@@ -1,5 +1,5 @@
 //! The steps-facet `Pipeline` entity, shared by `steps.rs` (scenarios) and
-//! `steps_swarm.rs` (the sweep) — entity §7.17.
+//! `steps_swarm.rs` (the sweep), entity §7.17.
 //!
 //! A self-driving re-entrant workflow: fetch → (sleep) → double → `Finished`, the
 //! reference shape a linear DSL would generate. Two things about it are load-
@@ -11,14 +11,14 @@
 //! unique across every entity in a run. That is what makes the memo's **write-once**
 //! property observable at all: `complete_step` records only a step that is not
 //! already done, so the first committed result wins and every later drive resolves
-//! from it — but a fixture whose effect always returns `21` cannot tell a memo that
+//! from it, but a fixture whose effect always returns `21` cannot tell a memo that
 //! was preserved from one that was overwritten with an identical value. This is the
 //! property worth asserting, rather than "the effect ran once": [`LaunchGuard`] is
 //! per-activation and never journaled, so a re-activation legitimately re-launches
 //! an unresolved step and the effect may run many times.
 //!
 //! **Nothing has to succeed before the workflow commits.** The entity drives from
-//! `on_activate`, so *any* touch — including the read that observes it — starts the
+//! `on_activate`, so *any* touch (including the read that observes it) starts the
 //! workflow. An earlier version opened with a `Start` ask, which put a round trip
 //! that had to succeed in front of the first commit; under a nemesis that is the
 //! difference between a seed that observes the property and one that observes
@@ -54,7 +54,7 @@ use serde::Serialize;
 /// The entity type name both suites host under.
 pub const PIPELINE_TYPE: &str = "test.Pipeline";
 
-// Step ids — the workflow's stable call-site ordinals.
+// Step ids: the workflow's stable call-site ordinals.
 /// An external effect, whose result is memoized. The step the write-once check reads.
 pub const STEP_FETCH: StepId = 0;
 /// The sleep gate, recorded by `on_alarm`. Only present when [`PipelineConfig::sleep`] is.
@@ -102,7 +102,7 @@ impl Effects {
     }
 
     /// Record a launch of `step` by entity `key` and return the value its effect
-    /// should produce — a fresh ordinal, distinct from every other launch this run.
+    /// should produce: a fresh ordinal, distinct from every other launch this run.
     fn launch(&self, key: &str, step: StepId) -> u32 {
         let mut runs = self.runs.lock().expect("effects mutex poisoned");
         runs.next += 1;
@@ -135,7 +135,7 @@ impl Effects {
             .collect()
     }
 
-    /// Arm the next `fetch` launch to fail without recording a result — the
+    /// Arm the next `fetch` launch to fail without recording a result: the
     /// alarm-free core of a `retry` step.
     pub fn fail_next_fetch(&self) {
         self.fail_next_fetch.store(true, Ordering::SeqCst);
@@ -149,7 +149,7 @@ pub struct PipelineConfig {
     /// fetch → double, with no alarm at all.
     ///
     /// The sweep takes `None`. A `sleep` needs a hosted `AlarmIndex` and its
-    /// per-shard driver, which never quiesces — a real cost in checkers dropped
+    /// per-shard driver, which never quiesces: a real cost in checkers dropped
     /// (`alarm_swarm.rs` carries that argument) and one that buys the memo check
     /// nothing, since the property is decided by `fetch`'s *first* commit and
     /// everything after it is a longer chain to the same claim.
@@ -161,7 +161,7 @@ pub struct PipelineConfig {
     /// [`effect_latency`](PipelineConfig::effect_latency). Together they open a
     /// window in which the activation that launched `fetch` hibernates while its
     /// effect is still outstanding, so the next touch re-activates the entity, finds
-    /// the step unresolved, and launches it again — with a different value.
+    /// the step unresolved, and launches it again, with a different value.
     /// Write-once is what then decides which one the memo keeps.
     pub hibernate_mid_workflow: bool,
     /// How long an effect takes before it self-`tell`s its result back, or `None`
@@ -171,7 +171,7 @@ pub struct PipelineConfig {
     /// in: the `StepDone` is already in the mailbox when the re-activation happens,
     /// so it is handled before the drive that would re-launch, and the second
     /// launch never occurs. That is the shape an earlier fixture had, and it is why
-    /// its re-launches only ever came from the nemesis — on the seeds calm enough
+    /// its re-launches only ever came from the nemesis, on the seeds calm enough
     /// to observe a memo, never.
     pub effect_latency: Option<Duration>,
 }
@@ -298,7 +298,7 @@ impl<S: EntitySystem> Pipeline<S> {
 
     /// The off-command-path half of a step (§7.17): take `latency`, then self-`tell`
     /// the result back. A `tell` that the faults refuse is simply a step that did
-    /// not resolve — the next drive re-launches it.
+    /// not resolve: the next drive re-launches it.
     fn run_effect(&self, ctx: &EntityCtx<Self>, done: StepDone) {
         let this = ctx.this();
         let system = ctx.system().clone();
@@ -339,7 +339,7 @@ impl<S: EntitySystem> Entity for Pipeline<S> {
         // must answer from the committed form, not panic about command scope
         // (workflow reads are valid anywhere, entity §7.17).
         let _ = ctx.steps().is_done(STEP_FETCH);
-        // Resume an in-flight workflow after a (re)activation — and start one on the
+        // Resume an in-flight workflow after a (re)activation, and start one on the
         // first, so the workflow needs no message of its own to begin.
         self.schedule_drive(ctx);
         Ok(())
@@ -436,7 +436,7 @@ impl<S: EntitySystem> EntityHandler<Read> for Pipeline<S> {
     }
 }
 
-/// What the memo holds for [`STEP_FETCH`] — `None` until the step's first result
+/// What the memo holds for [`STEP_FETCH`]: `None` until the step's first result
 /// commits. The observation the write-once check is made of: two reads that both
 /// answer `Some` must answer the same `Some`.
 #[derive(Clone, Serialize, Deserialize)]

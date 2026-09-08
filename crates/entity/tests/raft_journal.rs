@@ -5,7 +5,7 @@
 //! In the `Quorum` tier an entity's records live off the leader-election group's Raft
 //! log, in each replica's [`EntityStore`](entity::EntityStore) (§7.2). So unlike a
 //! shared-log design, surviving a simultaneous restart of every replica needs the
-//! store itself to be durable — injected through [`EntityConfig::entity_store`] and
+//! store itself to be durable: injected through [`EntityConfig::entity_store`] and
 //! preserved across the restart (the entity analogue of the Raft WAL, §7.4). These
 //! tests inject a per-node store that outlives `net.restart`, commit, cold-restart
 //! the whole cluster, and assert each entity recovers its committed state from a
@@ -240,7 +240,7 @@ fn committed_writes_survive_a_full_cluster_cold_restart() {
         "every committed deposit survives the cold restart"
     );
 
-    // A fresh write lands contiguously on the recovered head — no gap, no loss.
+    // A fresh write lands contiguously on the recovered head, no gap, no loss.
     let after = {
         let g = hosts[0].clone();
         drive(&sim, Duration::from_secs(8), async move {
@@ -262,7 +262,7 @@ fn committed_writes_survive_a_full_cluster_cold_restart_with_a_file_store() {
     // store: a file-backed [`FileEntityStore`] under a real directory (§7.4). To prove
     // recovery comes from disk and not a retained handle, the old factory (its
     // per-node cache and open append files) is dropped before the restart and a
-    // brand-new factory is opened at the SAME path afterward — exactly what a process
+    // brand-new factory is opened at the SAME path afterward: exactly what a process
     // restart does. Every committed deposit must come back from the reloaded files.
     let dir = tempfile::tempdir().expect("tempdir");
     let sim = Simulation::new(7);
@@ -328,7 +328,7 @@ fn committed_writes_survive_a_full_cluster_cold_restart_with_a_file_store() {
 fn a_compacted_entity_survives_a_full_cluster_cold_restart() {
     // Like the cold restart above, but snapshots are taken (`snapshot_every`), so a
     // recovering leader reloads each replica's snapshot plus the tail rather than the
-    // whole history — the snapshot-recovery path of §9, exercised across a total
+    // whole history: the snapshot-recovery path of §9, exercised across a total
     // restart where there is no peer to install a snapshot from.
     let sim = Simulation::new(2);
     let net = leader_net(&sim);
@@ -374,16 +374,16 @@ fn a_compacted_entity_survives_a_full_cluster_cold_restart() {
 #[test]
 fn an_ephemeral_store_loses_state_on_a_full_cluster_cold_restart() {
     // The contrast that proves the seam matters: with the *default* (ephemeral)
-    // store, a full-cluster cold restart cannot recover — the records were only in
+    // store, a full-cluster cold restart cannot recover; the records were only in
     // memory. The entity comes back empty (or the call fails); it never returns the
-    // pre-restart value. (Partial failover, where a quorum stays up, still survives —
+    // pre-restart value. (Partial failover, where a quorum stays up, still survives:
     // that is `clustered_entities`.)
     let sim = Simulation::new(3);
     let net = leader_net(&sim);
     let factory = durable_stores();
     let mut systems = [net.join(A), net.join(B), net.join(C)];
     sim.run_for(Duration::from_secs(2));
-    // Note: a fresh ephemeral factory per `entity` call — nothing survives restart.
+    // Note: a fresh ephemeral factory per `entity` call, nothing survives restart.
     let hosts: Vec<Entities<Account>> = systems
         .iter()
         .map(|s| s.entities::<Account>(config(factory.clone(), 0)))

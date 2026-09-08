@@ -13,7 +13,7 @@ default = ["workspace"]
 # The Workspace tier (sandbox spec §3.1): typed tools over a cap-std `Dir`.
 workspace = ["dep:cap-std"]
 # The Compute tier (sandbox spec §3.2): hermetic wasmtime guests over the
-# workspace — a guest sees the §3.1 filesystem and nothing else, so the
+# workspace; a guest sees the §3.1 filesystem and nothing else, so the
 # feature implies `workspace`.
 compute = ["workspace", "dep:wasmtime"]
 # The QuickJS scripting surface (`run_js`): embeds the committed runner
@@ -59,7 +59,7 @@ tempfile.workspace = true
 wat.workspace = true
 tokio = { workspace = true, features = ["process"] }
 # The firecracker suite's fake guest packs and unpacks tars itself, as the
-# real guest agent does — deliberately independent of the host-side codec.
+# real guest agent does: deliberately independent of the host-side codec.
 tar.workspace = true
 
 [lints]

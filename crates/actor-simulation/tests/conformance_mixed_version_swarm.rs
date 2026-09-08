@@ -3,7 +3,7 @@
 //!
 //! The negotiation itself is pinned in `conformance_compatibility.rs`, node by
 //! node and without faults. This is the claim that matters operationally: while a
-//! seeded nemesis rolls the cluster forward release by release — and back again —
+//! seeded nemesis rolls the cluster forward release by release (and back again)
 //! under partitions, crashes, freezes and loss, **no node is ever sent a form of a
 //! message its build cannot read.**
 //!
@@ -13,8 +13,8 @@
 //! windows does not break a cluster. A synthetic `Form` on this workload's own
 //! message is enough to make the property falsifiable: the sender picks it from
 //! `Transport::peer_version`, and a receiver whose window does not accept what
-//! arrived records a violation. Sending the newest form unconditionally — the bug
-//! the gate exists to prevent — fails this test.
+//! arrived records a violation. Sending the newest form unconditionally (the bug
+//! the gate exists to prevent) fails this test.
 //!
 //! What holds it together is that a [`Rollout`] is a *legal* upgrade path,
 //! checked when it is built: adjacent releases share a revision and each accepts
@@ -73,8 +73,8 @@ fn rollout() -> Rollout {
     ])
 }
 
-/// The form a message travels in. Stands in for a real wire change — a payload
-/// laid out differently, a field added ahead of the body, a compression tag — and
+/// The form a message travels in. Stands in for a real wire change (a payload
+/// laid out differently, a field added ahead of the body, a compression tag), and
 /// like all of those it is unreadable to a build that predates it.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 enum Form {
@@ -145,7 +145,7 @@ struct MixedVersionGreetings {
     /// This run's network, published by [`setup`](ClusterWorkload::setup).
     ///
     /// A `rehost` closure is built from `&self` and has only a [`SimNode`] to work
-    /// with, but a respawned greeter needs to read its node's window — so the one
+    /// with, but a respawned greeter needs to read its node's window, so the one
     /// thing that knows windows has to reach it some other way. Replaced on every
     /// seed, since each run builds its own network.
     net: Arc<Mutex<Option<SimNetwork>>>,
@@ -194,7 +194,7 @@ impl ClusterWorkload for MixedVersionGreetings {
 
     fn rehost(&self) -> Option<Rehost> {
         // An upgrade restarts the node, so the fresh process needs its greeter
-        // back — otherwise the rollout would shrink the cluster instead of
+        // back: otherwise the rollout would shrink the cluster instead of
         // upgrading it, and the property would hold because nothing is sent.
         let violations = Arc::clone(&self.violations);
         let net = Arc::clone(&self.net);
@@ -221,7 +221,7 @@ impl ClusterWorkload for MixedVersionGreetings {
         //
         // The sender still moves through the rollout. An upgrade restarts a node
         // only where it may, and never the first one, so node 1's window moves
-        // under its running process — it varies what it writes exactly as its
+        // under its running process: it varies what it writes exactly as its
         // peers vary what they can read.
         let caller = ctx.nodes()[0].clone();
         let net = ctx.net().clone();
@@ -239,7 +239,7 @@ impl ClusterWorkload for MixedVersionGreetings {
                     if to == caller.node() {
                         continue;
                     }
-                    // The gate. `None` — no association yet, or none any more —
+                    // The gate. `None` (no association yet, or none any more)
                     // means write the oldest revision this build accepts, never
                     // the newest.
                     let form = match net.transport(caller.node()).peer_version(to) {
@@ -260,7 +260,7 @@ impl ClusterWorkload for MixedVersionGreetings {
             assert_eq!(
                 violations.load(Ordering::Relaxed),
                 0,
-                "a node was sent a form its build cannot read — the send-side gate \
+                "a node was sent a form its build cannot read: the send-side gate \
                  either was not consulted or was consulted too early",
             );
         })
@@ -329,7 +329,7 @@ mod illegal_rollouts {
     #[test]
     #[should_panic(expected = "cannot read what the older release wrote")]
     fn a_stage_that_drops_what_its_predecessor_writes_is_refused() {
-        // Writes v1, then a release that no longer reads v1: **V4** in reverse —
+        // Writes v1, then a release that no longer reads v1: **V4** in reverse;
         // the upgrade cannot read what is already on the wire.
         Rollout::new(vec![
             Window::new("actor.wire", 1, 2, 1),

@@ -1,7 +1,7 @@
 //! The entity-native content-addressed blob store (durable-workspace design).
 //!
 //! Beside its ordered, term-fenced journal (§7.2), an entity node owns an
-//! **immutable content-addressed store** — a per-entity blob area replicated to the
+//! **immutable content-addressed store**: a per-entity blob area replicated to the
 //! *same* shard replica set through the *same* [`ReplicaStore`](crate::replica_store)
 //! actor, but with the term, order, and read-repair removed: content addressing
 //! needs none of them. It is the colocated, zero-latency storage a Durable Object
@@ -21,7 +21,7 @@
 //! the cheapest byte in the system (`docs/hardware-envelope.md` §3.9, I2).
 //!
 //! Note where that saving actually comes from: [`put`](EntityBlobs::put) itself does
-//! **not** negotiate — it sends the bytes to every peer, and a holder simply writes
+//! **not** negotiate; it sends the bytes to every peer, and a holder simply writes
 //! nothing new. The bandwidth is saved by the *caller* declining to put at all,
 //! having recognized the content as one it already holds. Every writer into this
 //! area is built that way: the workspace facet caches each file's chunk ids, the
@@ -42,7 +42,7 @@ use crate::error::EntityError;
 use crate::journal::DynEntityJournal;
 use crate::journal::EntityJournalError;
 
-/// The 32-byte BLAKE3 digest of a blob's bytes — its content address.
+/// The 32-byte BLAKE3 digest of a blob's bytes, its content address.
 ///
 /// A `BlobId` is a pure function of the bytes: equal content yields the same id
 /// wherever it is stored, so a writer and a reader agree on a blob's name with no
@@ -67,8 +67,8 @@ impl BlobId {
         BlobId(bytes)
     }
 
-    /// Parse the hex form produced by [`Display`](fmt::Display) — 64 lowercase hex
-    /// chars — back into a [`BlobId`], or `None` if it is not that shape.
+    /// Parse the hex form produced by [`Display`](fmt::Display) (64 lowercase hex
+    /// chars) back into a [`BlobId`], or `None` if it is not that shape.
     pub fn from_hex(hex: &str) -> Option<BlobId> {
         if hex.len() != 64 {
             return None;
@@ -80,7 +80,7 @@ impl BlobId {
         Some(BlobId(bytes))
     }
 
-    /// Whether `bytes` hash to this id — the read-path integrity check (B1/E17),
+    /// Whether `bytes` hash to this id: the read-path integrity check (B1/E17),
     /// named once so every fetch site re-hashes the same way.
     pub fn verifies(&self, bytes: &[u8]) -> bool {
         BlobId::of(bytes) == *self
@@ -114,7 +114,7 @@ pub struct EntityBlobs {
     journal: Arc<dyn DynEntityJournal>,
     entity: EntityName,
     /// The facets' live blob roots (spec §7.12), unioned into every
-    /// [`gc`](EntityBlobs::gc) sweep by the handle itself — so an application's
+    /// [`gc`](EntityBlobs::gc) sweep by the handle itself, so an application's
     /// mark-from-roots sweep can never drop a facet's bytes (F3). Empty for a
     /// entity with no facets.
     facet_roots: Arc<dyn Fn() -> BTreeSet<BlobId> + Send + Sync>,
@@ -134,12 +134,12 @@ impl EntityBlobs {
     }
 
     /// Re-replicate every facet-root blob to the entity's current shard replicas
-    /// (spec §7.10, the repair property the blob store numbers B6 — the same
+    /// (spec §7.10, the repair property the blob store numbers B6: the same
     /// obligation over an entity's own replica set rather than the cluster's):
     /// source a verifying copy of each (E17) and re-`put` it,
-    /// re-fanning the bytes to the current replica set — holders dedup (a
+    /// re-fanning the bytes to the current replica set; holders dedup (a
     /// no-op), a replica that lacked it receives it. Root-driven, additive, and
-    /// idempotent; best-effort (a blob no reachable replica holds is skipped —
+    /// idempotent; best-effort (a blob no reachable replica holds is skipped:
     /// loss repair cannot undo). Kick it as a background task off the
     /// activation latency path, like [`gc`](EntityBlobs::gc).
     pub async fn repair_facets(&self) {
@@ -164,8 +164,8 @@ impl EntityBlobs {
     /// Store `bytes` and return their content id. Idempotent and dedup'd: storing
     /// content already present re-acknowledges and writes nothing new (the id is a
     /// pure function of the bytes). On the `Quorum` tier the bytes are durable on a
-    /// write quorum of the entity's replicas — always including this leader, so a
-    /// later [`get`](EntityBlobs::get) reads locally — before this returns; if a
+    /// write quorum of the entity's replicas: always including this leader, so a
+    /// later [`get`](EntityBlobs::get) reads locally; before this returns; if a
     /// quorum is unreachable it is [`EntityError::Unavailable`] and the caller
     /// retries (a retry carries no double-write risk).
     pub async fn put(&self, bytes: Vec<u8>) -> Result<BlobId, EntityError> {
@@ -201,7 +201,7 @@ impl EntityBlobs {
     }
 
     /// Whether `id` is present on **any reachable replica** of this entity's blob area
-    /// (the local copy, else the first peer that holds it — short-circuit, not a quorum
+    /// (the local copy, else the first peer that holds it: short-circuit, not a quorum
     /// count). A `true` answers "a [`get`](EntityBlobs::get) can source these bytes"; it
     /// is not a durability assertion, since a blob is made quorum-durable at
     /// [`put`](EntityBlobs::put) time, not measured here.
@@ -212,18 +212,18 @@ impl EntityBlobs {
             .map_err(into_entity_error)
     }
 
-    /// Drop every blob of this entity not in `live` ∪ the facets' roots (F3) — a
+    /// Drop every blob of this entity not in `live` ∪ the facets' roots (F3): a
     /// mark-from-roots sweep the entity drives from its own metadata (the ids its
     /// state still references), reclaiming blocks orphaned by overwrites without any
     /// cluster-wide reference tracking. Best-effort and idempotent (so it cannot
-    /// fail — a missed replica keeps its garbage until the next sweep).
+    /// fail: a missed replica keeps its garbage until the next sweep).
     pub async fn gc(&self, live: &BTreeSet<BlobId>) {
         let mut retain: Vec<BlobId> = live.iter().copied().collect();
         retain.extend((self.facet_roots)());
         self.journal.retain_blobs(&self.entity, retain).await;
     }
 
-    /// Drop **all** of this entity's blobs — the entity-scoped reclamation on destroy
+    /// Drop **all** of this entity's blobs: the entity-scoped reclamation on destroy
     /// (§ no namespace tombstone, no membership gating: the area lives only on the
     /// entity's known replicas). Best-effort and idempotent (so it cannot fail).
     pub async fn destroy(&self) {

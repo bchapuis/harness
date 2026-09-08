@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 # The trailing slash restricts the glob to directories. Without it, any stray file
-# under `crates/` — an editor artifact, a tool's scratch output — is treated as a
+# under `crates/` (an editor artifact, a tool's scratch output) is treated as a
 # member and fails the whole build with a confusing "failed to read Cargo.toml".
 members = ["crates/*/"]
 
@@ -39,14 +39,14 @@ spec = { path = "crates/spec", version = "0.1.0" }
 # below `wal`, which is itself below its callers.
 compat = { path = "crates/compat", version = "0.1.0" }
 
-# A generic, framed, checksummed write-ahead log — the shared substrate behind the
+# A generic, framed, checksummed write-ahead log: the shared substrate behind the
 # file-backed Raft WAL and entity store.
 wal = { path = "crates/wal", version = "0.1.0" }
 
 # The `wal` crate's frame digest. A log verifies every frame in the file on open, so
 # the digest's throughput is the floor on a node's recovery latency; the byte-at-a-time
 # FNV-1a this replaced ran at ~0.6 GB/s, a serial multiply chain. XXH3 is also the
-# stronger check of the two — 64 bits of avalanche against a torn write.
+# stronger check of the two: 64 bits of avalanche against a torn write.
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # The hand-rolled HTTP/1.1 client substrate shared by the deployment binaries
@@ -105,7 +105,7 @@ serde = { version = "1", features = ["derive"] }
 # hold them, which is the difference between a length and a memcpy and serde's
 # element-at-a-time loop: ~160x on encode and ~670x on decode for a mebibyte under
 # postcard. It changes no encoding for the codecs in this tree, which is asserted
-# rather than assumed — `actor-serialization/tests/wire_bytes.rs`.
+# rather than assumed: `actor-serialization/tests/wire_bytes.rs`.
 serde_bytes = "0.11"
 serde_json = "1"
 # Compact, serde-based binary format for the durable WAL/op-log record payloads
@@ -117,8 +117,8 @@ erased-serde = "0.4"
 futures = "0.3"
 async-channel = "2"
 # Content-addressed blob ids (blob-store spec §2): BLAKE3 hashes faster than
-# SHA-256 (SIMD) — every `get` re-hashes to verify — and is internally a Merkle
-# tree whose root is the id, the structure range-verified streaming will reuse.
+# SHA-256 (SIMD), which matters because every `get` re-hashes to verify, and is
+# internally a Merkle tree whose root is the id, the structure range-verified streaming will reuse.
 blake3 = "1"
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled", "hooks"] }
 rand = "0.8"
@@ -136,8 +136,8 @@ getrandom = "0.2"
 # aws-lc-sys was the single largest compile unit in the workspace (a 76 s
 # build script compiling aws-lc's C), and ring serves the same suites for the
 # in-tree mTLS and client connections. What the swap gives up is aws-lc's
-# `prefer-post-quantum` default — ring has no ML-KEM, so key exchange stays
-# classical X25519 — and FIPS availability, neither of which this tree uses.
+# `prefer-post-quantum` default (ring has no ML-KEM, so key exchange stays
+# classical X25519) and FIPS availability, neither of which this tree uses.
 # rcgen already defaults to ring, so the backends agree.
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
@@ -163,7 +163,7 @@ webpki-roots = "1"
 # The capability-handle filesystem of sandbox spec §3.1, held by
 # `agent-sandbox`, `machine-entity`, and `machine-host`'s workspace codec.
 cap-std = "3"
-# Compute engine of sandbox spec §3.2 (`agent-sandbox` only) — the
+# Compute engine of sandbox spec §3.2 (`agent-sandbox` only): the
 # reference realization's product choice (sandbox spec §3.5).
 wasmtime = { version = "33", default-features = false, features = ["runtime", "cranelift"] }
 # The tar stream that carries a workspace over vsock (`machine-host`'s ws codec,
@@ -196,12 +196,12 @@ divan = "0.1"
 # the workspace's ~80 integration-test binaries each carry it, and cargo keeps
 # every stale variant until `cargo clean`. Line tables keep backtraces
 # (file/line, symbol names) and drop the variable/type debuginfo a debugger
-# needs — raise this to `true` on the crate you are stepping through.
+# needs: raise this to `true` on the crate you are stepping through.
 [profile.dev]
 debug = "line-tables-only"
 
-# The workspace shipped without a release profile, so release builds — and the
-# benchmarks, which inherit from it — ran at cargo's defaults: sixteen codegen
+# The workspace shipped without a release profile, so release builds, and the
+# benchmarks that inherit from it, ran at cargo's defaults: sixteen codegen
 # units and no cross-unit inlining. The hot paths here are small functions called
 # across crate boundaries (`checksum`, `Mailbox::enqueue`, the codec's erased
 # entry points), which is exactly what those defaults leave on the table.

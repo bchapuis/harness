@@ -1,5 +1,5 @@
 //! Catalogue drift test (workflow spec §9): the machine-readable W1–W7 catalogue,
-//! the live checker set, and the specification's own table must agree — a
+//! the live checker set, and the specification's own table must agree; a
 //! checker added in code but not recorded in the catalogue (or vice versa), a
 //! suite renamed under a pointer, or a row moved in one copy fails the build,
 //! the same pattern guarding the core, entity, and agent catalogue.

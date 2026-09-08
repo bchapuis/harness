@@ -1,7 +1,7 @@
 //! Conformance invariant #20 (spec §3.3, §18.5, §18.6): an `ask`/`tell` of a
 //! message an actor has no `Handler` for MUST NOT compile.
 //!
-//! This is the type-safety invariant the simulator cannot check at runtime —
+//! This is the type-safety invariant the simulator cannot check at runtime:
 //! it is asserted by the compiler. Each fixture in `tests/compile_fail/` is
 //! expected to fail compilation with the recorded diagnostic (`*.stderr`).
 //!

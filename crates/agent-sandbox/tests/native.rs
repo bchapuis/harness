@@ -7,7 +7,7 @@
 //! when unavailable, so a machine without docker stays green. The pinned
 //! image is pulled on the first run (`docker pull alpine:3.20` to pre-warm).
 //! Under colima, only `$HOME` and `/tmp/colima` are shared with the VM by
-//! default — point `TMPDIR` somewhere under `$HOME` if provisioning fails
+//! default: point `TMPDIR` somewhere under `$HOME` if provisioning fails
 //! with a mount error. A test that panics mid-flight can stray a container:
 //! `docker ps -a --filter name=agent-sb-` lists them.
 

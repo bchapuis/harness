@@ -11,7 +11,7 @@
 //! - the microVM mechanism needs Linux, `/dev/kvm`, and `vmlinux` + `firecracker`
 //!   + `machine.ext4` from `guest/machine-rootfs/build.sh`;
 //! - the container mechanism needs a docker daemon, `machine.ext4`, and the
-//!   runner image from `guest/machine-docker/build.sh` — so it runs on macOS,
+//!   runner image from `guest/machine-docker/build.sh`, so it runs on macOS,
 //!   where the microVM mechanism cannot.
 //!
 //! With `E2E_REQUIRE` set, a missing prerequisite panics instead: the CI job that
@@ -40,7 +40,7 @@ use machine_host::MachineHost;
 /// The runner image `guest/machine-docker/build.sh` builds.
 const RUNNER_IMAGE: &str = "harness-machine-runner:1";
 
-/// Skip (`None`) on a missing prerequisite — or panic under `E2E_REQUIRE`
+/// Skip (`None`) on a missing prerequisite, or panic under `E2E_REQUIRE`
 /// (module docs).
 fn missing<T>(reason: String) -> Option<T> {
     assert!(
@@ -152,7 +152,7 @@ async fn round_trip(mechanism: Arc<dyn MachineHost>, image: PathBuf, name: &str)
 
     // The workspace volume (machine §3), end to end: push a tree into the
     // guest's tmpfs over the WsPush channel, pull it back over WsPull, and get
-    // the bytes back — the rootfs's /workspace mount, the guest agent's sync
+    // the bytes back; the rootfs's /workspace mount, the guest agent's sync
     // channels, and the host codec, all against a real guest.
     let ws = scratch.path().join("ws");
     std::fs::create_dir(&ws).expect("ws dir");

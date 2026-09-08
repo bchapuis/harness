@@ -4,18 +4,18 @@
 //! §3.3): the uplink is ~125 MB/s and every byte of a blob crosses it `R−1` times
 //! (§3.9), while LZ4 compresses at hundreds of megabytes per second on one core. So a
 //! ratio above roughly 1.2x already pays for its own CPU, and the question was never
-//! whether compression is cheap — it is whether *this deployment's payloads compress*.
+//! whether compression is cheap: it is whether *this deployment's payloads compress*.
 //! That is a property of the data, not of the algorithm, and nothing in the tree had
 //! measured it.
 //!
 //! Two numbers per payload class, because the trade needs both:
 //!
-//! - **ratio** — bytes off the uplink, measured **per unit** (per blob, per record
+//! - **ratio**: bytes off the uplink, measured **per unit** (per blob, per record
 //!   batch), never over a concatenated stream. The distinction is not pedantic: a
 //!   stream lets LZ4 find redundancy *across* units that the wire will never present
 //!   together, and it inflates the ratio several-fold on exactly the small payloads
 //!   where the answer is most marginal.
-//! - **throughput** — the CPU that buys it, on the leader for the encode and on every
+//! - **throughput**: the CPU that buys it, on the leader for the encode and on every
 //!   peer for the decode.
 //!
 //! The payload classes are the ones that actually cross the path: 1 MiB disk-image
@@ -39,8 +39,8 @@
 //! without an older peer reading the tag as blob content and failing the content hash.
 //! `Transport::peer_version` is that: the association reports what it settled on, and
 //! a build accepting two revisions writes the tagged form only to a peer that settled
-//! on the higher one. Taking it is the **V4** two-release path — widen `WIRE` to accept
-//! 1..=2, write 2 in a later release — against the alternative of capability
+//! on the higher one. Taking it is the **V4** two-release path: widen `WIRE` to accept
+//! 1..=2, write 2 in a later release, against the alternative of capability
 //! negotiation, a new blob message older peers reject with `Unhandled` and the sender
 //! caches per peer. Both are rollout decisions rather than measurements, which is why
 //! this file takes neither.
@@ -64,7 +64,7 @@ fn main() {
     divan::main();
 }
 
-/// The disk facet's block size (spec §7.15) — the unit a machine create ships.
+/// The disk facet's block size (spec §7.15): the unit a machine create ships.
 const BLOCK: usize = 1 << 20;
 
 /// The workspace root, from this crate's manifest directory.
@@ -75,7 +75,7 @@ fn workspace_root() -> PathBuf {
 }
 
 /// Up to `limit` files under `rel` whose path and size both match, as owned byte
-/// vectors — the real payloads from a previous run, when the tree has them.
+/// vectors: the real payloads from a previous run, when the tree has them.
 ///
 /// The path filter is what keeps this honest. A run directory holds several kinds of
 /// file, and the ones that never cross the wire are the most compressible of all: a
@@ -117,7 +117,7 @@ fn sample(
 }
 
 /// A generated stand-in for a disk-image block: mostly structured, partly
-/// incompressible — the shape a provisioned filesystem image actually has, and
+/// incompressible; the shape a provisioned filesystem image actually has, and
 /// deliberately not all-zeros, which would report an unreachable ratio.
 fn synthetic_block(seed: u64) -> Vec<u8> {
     let mut bytes = vec![0u8; BLOCK];
@@ -133,7 +133,7 @@ fn synthetic_block(seed: u64) -> Vec<u8> {
     bytes
 }
 
-/// The blob payloads: real 1 MiB image blocks from a machine run's blob area — the
+/// The blob payloads: real 1 MiB image blocks from a machine run's blob area; the
 /// exact unit `StoreBlob` carries, one per `put_blob`.
 fn blocks() -> (Vec<Vec<u8>>, &'static str) {
     let real = sample("machine-data", "blobs", |m| m.len() == BLOCK as u64, 48);
@@ -145,7 +145,7 @@ fn blocks() -> (Vec<Vec<u8>>, &'static str) {
 }
 
 /// The small-control-record payloads: real Raft log files, which is where
-/// `EntryPayload::App` — every entity journal record reaching a follower — lives.
+/// `EntryPayload::App` (every entity journal record reaching a follower) lives.
 ///
 /// Kept as its own class rather than folded into the records above, because it is the
 /// one that answers *against* compressing: these are hundreds of bytes each, and LZ4's
@@ -162,7 +162,7 @@ fn control() -> (Vec<Vec<u8>>, &'static str) {
     }
 }
 
-/// The record payloads: real entity segments from an agent run — an agent session's
+/// The record payloads: real entity segments from an agent run; an agent session's
 /// journal, the thing a snapshot and a record batch are cut from.
 fn records() -> (Vec<Vec<u8>>, &'static str) {
     let real = sample("agent-data", "segments", |m| m.len() > 0, 64);
@@ -182,7 +182,7 @@ fn records() -> (Vec<Vec<u8>>, &'static str) {
     }
 }
 
-/// Print the per-unit ratio table — the number this file exists to produce.
+/// Print the per-unit ratio table: the number this file exists to produce.
 ///
 /// Reported with the count of units that came out **larger** than they went in, which
 /// is the finding that shapes the design: LZ4's frame overhead exceeds the savings on
@@ -226,7 +226,7 @@ fn report_ratios() {
     println!();
 }
 
-/// Compressing one disk block — the cost paid once on the leader per block.
+/// Compressing one disk block: the cost paid once on the leader per block.
 #[divan::bench]
 fn compress_block(bencher: Bencher) {
     let (units, _) = blocks();
@@ -236,7 +236,7 @@ fn compress_block(bencher: Bencher) {
         .bench_local(|| black_box(lz4_flex::block::compress_prepend_size(black_box(&block))));
 }
 
-/// Decompressing one disk block — the cost paid on every peer, `R−1` times per block.
+/// Decompressing one disk block: the cost paid on every peer, `R−1` times per block.
 #[divan::bench]
 fn decompress_block(bencher: Bencher) {
     let (units, _) = blocks();

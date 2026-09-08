@@ -31,7 +31,7 @@ pub enum EntityError {
     ///
     /// The outcome is **ambiguous**, and callers must treat it that way: a
     /// replica minority may already hold the record, and a later activation's
-    /// quorum recovery can find it on a majority and adopt it — so a command
+    /// quorum recovery can find it on a majority and adopt it, so a command
     /// that reported `Unavailable` MAY still become visible, at its own `Seq`
     /// slot, some time afterwards (§7.2, §7.3, §11). That is why the runtime
     /// never auto-retries it (§5.4) and why writes that must not double-apply

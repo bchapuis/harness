@@ -1,6 +1,6 @@
 //! Run-loop conformance (agent spec §3, §5.4, §6.4, §7.4): the happy path,
 //! the tool loop, write-ahead order, idempotent submission (A7), and serialized
-//! turns — each asserted against the journal, the single source of truth
+//! turns; each asserted against the journal, the single source of truth
 //! (§10.1), under the continuous harness checkers (§11).
 
 mod support;
@@ -195,7 +195,7 @@ fn resubmitting_a_turn_never_starts_a_second_run() {
 fn a_resubmission_that_changes_the_budget_is_a_conflict() {
     // §7.4: the turn-equality check covers the literal budget field, so a
     // re-submitted TurnId with a different budget is a caller bug, not a
-    // silent attach — and `None` is not `Some(default)`, so the rejection
+    // silent attach, and `None` is not `Some(default)`, so the rejection
     // never depends on the kind's current default.
     let model = Arc::new(ScriptedModel::new(|_| Ok(final_message("once"))));
     let sandboxes = Arc::new(ScriptedSandboxes::echo());
@@ -306,7 +306,7 @@ fn turns_are_serialized_by_the_journal() {
 
     // Acceptance and start are distinct facts (§7.3): both `TurnSubmitted`s
     // commit as they arrive (this seed acks both before either run begins),
-    // while the runs themselves stay serialized — the second `TurnStarted`
+    // while the runs themselves stay serialized; the second `TurnStarted`
     // commits only after the first's terminal record (§3.1).
     let records = records.lock().unwrap();
     assert_eq!(

@@ -12,8 +12,8 @@
 //!   no API client on the boot path;
 //! - the **process lifecycle** ([`MicroVm`]): spawn with `kill_on_drop` (a
 //!   dropped handle can never leak a running VM), a pid file plus a
-//!   `/proc`-cmdline guard so the *one* leak `kill_on_drop` cannot cover — a
-//!   killed harness process — is swept by the next launch, the boot console
+//!   `/proc`-cmdline guard so the *one* leak `kill_on_drop` cannot cover (a
+//!   killed harness process) is swept by the next launch, the boot console
 //!   captured to a file for diagnosis, and a readiness poll that fails fast
 //!   with the console tail when the VMM exits during boot;
 //! - the **vsock transport** ([`vsock`](crate::vsock)): the Firecracker muxer's
@@ -22,7 +22,7 @@
 //!   sizes anything (a frame header's claim never becomes an allocation);
 //! - the **API-socket client** ([`MicroVm::pause`]/[`MicroVm::resume`]):
 //!   `PATCH /vm` over the `api.sock`, the quiescent-point mechanism the
-//!   machine's capture needs (machine §4) — the only post-boot use of the API
+//!   machine's capture needs (machine §4); the only post-boot use of the API
 //!   socket;
 //! - the **workspace tar codec** ([`ws_sync`](crate::ws_sync), feature `ws`): the capped,
 //!   capability-confined pack/unpack both consumers move a workspace with.
@@ -106,7 +106,7 @@ pub struct VmConfig {
     /// Enable the vsock device, its host-side unix socket at
     /// `control/v.sock` (guest CID 3, the Firecracker convention).
     pub vsock: bool,
-    /// Optional network interface (none for the sandbox — its guests have no
+    /// Optional network interface (none for the sandbox: its guests have no
     /// NIC by construction; the machine adds one under its egress policy).
     pub net: Option<NetIf>,
 }
@@ -147,7 +147,7 @@ const API_SOCK: &str = "api.sock";
 /// Where one VM's control directory lives: `<temp>/<prefix>-<key>`, under the
 /// OS temp directory because unix socket paths have a ~100-byte limit. The
 /// name is stable per VM (`key` is the consumer's digest of its identity) so
-/// a fresh launch finds — and sweeps — the previous activation's debris, and
+/// a fresh launch finds (and sweeps) the previous activation's debris, and
 /// distinct across VMs so two on one node never contend.
 pub fn control_path(prefix: &str, key: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{key}"))
@@ -266,7 +266,7 @@ impl MicroVm {
     }
 
     /// Poll `probe` until it reports the guest ready, the VMM exits (failing
-    /// with the console tail — a boot crash reads as itself, not a timeout),
+    /// with the console tail: a boot crash reads as itself, not a timeout),
     /// or `timeout` elapses (killing the VMM, failing with the tail).
     pub async fn wait_ready<F, Fut>(
         &mut self,
@@ -308,7 +308,7 @@ impl MicroVm {
 
     /// Pause the guest's vCPUs (`PATCH /vm {"state":"Paused"}` over the API
     /// socket): after this resolves the guest issues no further writes to its
-    /// drives — the machine capture's quiescent point (machine §4). Pause is
+    /// drives; the machine capture's quiescent point (machine §4). Pause is
     /// crash-consistency, not filesystem cleanliness: the guest's page cache
     /// is not flushed (a guest-side `sync` first is the consumer's upgrade).
     pub async fn pause(&self) -> Result<(), MicroVmError> {
@@ -389,7 +389,7 @@ fn console_tail(control: &Path) -> Option<String> {
 /// Kill a previous *process death's* orphan VM (`kill_on_drop` covers every
 /// in-process path; only a killed host process leaks). The pid file names
 /// the candidate; the `/proc` command line naming this control directory is
-/// the pid-reuse guard — a recycled pid belongs to someone else and is left
+/// the pid-reuse guard: a recycled pid belongs to someone else and is left
 /// alone.
 #[cfg(target_os = "linux")]
 fn kill_stale_vm(control: &Path) {
@@ -418,7 +418,7 @@ fn kill_stale_vm(control: &Path) {
 fn kill_stale_vm(_control: &Path) {}
 
 /// This node's Firecracker mechanism: the VMM assets every guest it starts
-/// boots with. The per-guest half — the disk, the sizing, the NIC — arrives in
+/// boots with. The per-guest half (the disk, the sizing, the NIC) arrives in
 /// each [`GuestSpec`].
 #[derive(Clone, Debug)]
 pub struct MicroVmHost {
@@ -448,7 +448,7 @@ impl MicroVmHost {
         }
     }
 
-    /// The host-side vsock socket of `key`'s guest, derived from the key alone —
+    /// The host-side vsock socket of `key`'s guest, derived from the key alone:
     /// what [`MachineHost::connect_by_key`] dials, and node-local because the
     /// socket exists only where the guest runs.
     fn vsock_socket_path(&self, key: &GuestKey) -> PathBuf {

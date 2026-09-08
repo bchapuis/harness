@@ -1,5 +1,5 @@
 //! Catalogue drift test (sandbox spec §6): the machine-readable S1–S5
-//! catalogue stays complete and accurate — the same pattern guarding the core,
+//! catalogue stays complete and accurate; the same pattern guarding the core,
 //! utilities, and agent catalogues.
 
 mod support;
@@ -77,7 +77,7 @@ fn no_entry_claims_a_continuous_checker() {
     // S4 is a journal audit at quiescence, never a stream checker: tool
     // execution carries no events for one to consume (agent spec §5.6
     // item 6). Anyone adding a `Verify::Checker` entry here must wire the
-    // checker into a live invariant set first — and then this assertion,
+    // checker into a live invariant set first, and then this assertion,
     // like its agent sibling, becomes the drift test between the two.
     for entry in s_catalogue() {
         assert!(

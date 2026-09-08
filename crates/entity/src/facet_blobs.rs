@@ -13,8 +13,8 @@ use crate::blobs::EntityBlobs;
 use crate::facet::FacetError;
 
 /// The blob ids a facet's activation must keep alive (**F3**): the restored
-/// manifest's plus every later checkpoint's or capture's. The union is kept —
-/// never pruned mid-activation — so a failed `save_snapshot` can never leave the
+/// manifest's plus every later checkpoint's or capture's. The union is kept
+/// (never pruned mid-activation), so a failed `save_snapshot` can never leave the
 /// *current* durable manifest's blobs sweepable; the next activation restores
 /// from the durable manifest and resets the set. Plain data: each facet guards
 /// it with its own lock.
@@ -22,7 +22,7 @@ use crate::facet::FacetError;
 pub(crate) struct RootSet(BTreeSet<BlobId>);
 
 impl RootSet {
-    /// Adopt the durable manifest's ids wholesale — the restore path, the one
+    /// Adopt the durable manifest's ids wholesale: the restore path, the one
     /// place the union may shrink (a fresh activation starts from the durable
     /// truth, so nothing live is dropped).
     pub(crate) fn reset(&mut self, ids: impl IntoIterator<Item = BlobId>) {
@@ -34,7 +34,7 @@ impl RootSet {
         self.0.extend(ids);
     }
 
-    /// The kept ids — the facet's [`Facet::roots`](crate::facet::Facet::roots)
+    /// The kept ids: the facet's [`Facet::roots`](crate::facet::Facet::roots)
     /// contribution.
     pub(crate) fn ids(&self) -> BTreeSet<BlobId> {
         self.0.clone()
@@ -46,8 +46,8 @@ impl RootSet {
 /// The transfers are not free-floating work: each is a quorum round carrying a whole
 /// chunk to every replica, so the bytes in flight are roughly
 /// `IN_FLIGHT_CHUNKS × chunk size × replicas`. Unbounded, a large artifact issues one
-/// per chunk — a 16 GiB disk image at 1 MiB blocks is over sixteen thousand
-/// concurrent quorum puts — and the resulting buffers and sockets are what fails,
+/// per chunk (a 16 GiB disk image at 1 MiB blocks is over sixteen thousand
+/// concurrent quorum puts), and the resulting buffers and sockets are what fails,
 /// long before the device does. The point of a bound is that past the width that
 /// keeps the link busy, more concurrency adds queueing rather than throughput, so
 /// this costs nothing on small artifacts and is the difference between working and
@@ -57,7 +57,7 @@ const IN_FLIGHT_CHUNKS: usize = 16;
 /// Await every future in `work` with at most [`IN_FLIGHT_CHUNKS`] outstanding,
 /// returning their values **in the original order**.
 ///
-/// Every future is polled to completion even after one fails — the reason
+/// Every future is polled to completion even after one fails: the reason
 /// `join_all_results` was chosen over `try_join_all` here. A short-circuiting
 /// combinator drops the transfers still in flight and abandons the peer `ask`s they
 /// had already issued (core spec §18.5 #1); the transfers are independent and
@@ -90,8 +90,8 @@ where
 ///
 /// Takes the whole artifact up front, which suits a facet whose artifact is already
 /// in memory and bounded (the workspace tree's 64 MiB cap, a SQL checkpoint's
-/// serialized pages). A facet whose artifact is not — the disk facet's 16 GiB image
-/// — wants [`put_pulled`], which is the same transfer with the chunks produced as
+/// serialized pages). A facet whose artifact is not (the disk facet's 16 GiB image)
+/// wants [`put_pulled`], which is the same transfer with the chunks produced as
 /// slots free rather than collected first.
 pub(crate) async fn put_chunked(
     blobs: &EntityBlobs,
@@ -109,13 +109,13 @@ pub(crate) async fn put_chunked(
 /// `IN_FLIGHT_CHUNKS` chunks whatever the artifact's total size, and a source that
 /// reads from a file paces itself against the puts instead of racing ahead of them.
 /// That is what lets the disk facet (§7.15) pipeline a 16 GiB image's blocks without
-/// materializing it: the alternative — collect every block, then hand the vector to
-/// [`put_chunked`] — trades the serialized round trips for an allocation the facet's
+/// materializing it: the alternative (collect every block, then hand the vector to
+/// [`put_chunked`]) trades the serialized round trips for an allocation the facet's
 /// whole point is to avoid.
 ///
 /// A chunk the source fails to produce ends the pull: the error is returned, and no
 /// *further* chunk is asked for. That is the same discipline [`bounded_in_order`]
-/// applies to the transfers themselves, read from the other side — declining to
+/// applies to the transfers themselves, read from the other side, declining to
 /// start work is allowed, abandoning work already issued is not, so the transfers
 /// already in flight still run to completion.
 pub(crate) async fn put_pulled<I>(
@@ -145,7 +145,7 @@ where
     // such a closure general enough over the borrow's lifetime.
     //
     // `buffer_unordered` polls its inner stream only while it is under capacity, and
-    // `stream::iter` pulls one iterator item per poll — which is what makes the
+    // `stream::iter` pulls one iterator item per poll, which is what makes the
     // source demand-driven rather than eager, and so bounds the memory.
     let mut done: Vec<(usize, Result<BlobId, FacetError>)> =
         futures::stream::iter(source.enumerate())
@@ -166,7 +166,7 @@ where
     done.into_iter().map(|(_, r)| r).collect()
 }
 
-/// Fetch `ids` from the entity's blob area and concatenate them in order — the
+/// Fetch `ids` from the entity's blob area and concatenate them in order: the
 /// restore half of [`put_chunked`]. The gets issue [`IN_FLIGHT_CHUNKS`] at a time and
 /// each verifies by content (E17). The caller applies its own length discipline to
 /// the result (the manifest, not the chunks, carries the exact byte count).

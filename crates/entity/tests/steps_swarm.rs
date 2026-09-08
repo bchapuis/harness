@@ -9,7 +9,7 @@
 //! once": [`entity::LaunchGuard`] is per-activation and never journaled, so a
 //! re-activation legitimately re-launches an unresolved step and the effect may
 //! run many times (§7.17). What must hold is that `complete_step` records only a
-//! step that is not already done — so the **first committed result wins**, and every
+//! step that is not already done, so the **first committed result wins**, and every
 //! later drive, re-activation and failover resolves from it.
 //!
 //! **What makes it observable.** The fixture's `fetch` effect returns a fresh
@@ -17,16 +17,16 @@
 //! reads differently from one that was kept; a constant-valued effect cannot tell
 //! the two apart. The check is therefore over *observations*: two reads of one
 //! entity's memo that both answer `Some` must answer the same `Some`. That needs no
-//! knowledge of which launch won, which is what makes it decidable under faults —
+//! knowledge of which launch won, which is what makes it decidable under faults:
 //! a read the nemesis refuses is simply not an observation.
 //!
-//! **What makes it reachable.** The property needs a chain — commit a step, be
-//! interrupted, re-launch, still be readable — and the seeds that get furthest are
+//! **What makes it reachable.** The property needs a chain (commit a step, be
+//! interrupted, re-launch, still be readable), and the seeds that get furthest are
 //! the calm ones, which are exactly the seeds that never re-launch. So the
 //! interruption is **driven rather than waited for**: the entity may hibernate with
 //! a step in flight, the effect takes longer than the idle window, and the read
 //! rounds below both observe the memo and re-activate a cold entity whose step is
-//! still outstanding — which is what re-launches it. The nemesis then adds
+//! still outstanding, which is what re-launches it. The nemesis then adds
 //! failovers and process deaths on top. An earlier attempt left the interruption to
 //! the nemesis alone and measured roughly two seeds in twenty-four observing a memo
 //! at all, none of which had re-launched; that workload was never committed.
@@ -105,7 +105,7 @@ const IDLE_AFTER: Duration = Duration::from_millis(150);
 const CALL_DEADLINE: Duration = Duration::from_secs(3);
 
 /// How many read rounds a run makes over every entity. Each round is both an
-/// observation and — on an entity whose step is still outstanding — the touch that
+/// observation and (on an entity whose step is still outstanding) the touch that
 /// re-launches it.
 const ROUNDS: usize = 16;
 
@@ -122,10 +122,10 @@ const ROUND_GAP: Duration = Duration::from_millis(500);
 struct Memos {
     /// This run's `entity key → observed memo values`, in the order they were read.
     /// Cleared at the start of each `drive`, so a check sees one run's observations
-    /// rather than the sweep's — the run-scoped *expectation* the shared
+    /// rather than the sweep's: the run-scoped *expectation* the shared
     /// `Exercised` tallies below are deliberately not.
     run: Arc<Mutex<BTreeMap<String, Vec<u32>>>>,
-    /// Entities whose memo was read at least once, across the whole sweep — the guard
+    /// Entities whose memo was read at least once, across the whole sweep: the guard
     /// against a green run that observed nothing.
     observed: Arc<AtomicUsize>,
     /// Entities that were both **re-launched and observed** in the same run, across
@@ -180,7 +180,7 @@ impl Invariant for MemoWriteOnce {
             .collect();
         if !changed.is_empty() {
             return Err(format!(
-                "a committed step memo changed after the fact (§7.17): {changed:?} — \
+                "a committed step memo changed after the fact (§7.17): {changed:?}; \
                  `complete_step` must record only a step that is not already done, so \
                  every read after the first commit resolves to that first result",
             ));
@@ -203,7 +203,7 @@ fn config() -> EntityConfig {
         shards: SHARDS,
         idle_after: IDLE_AFTER,
         // Every commit checkpoints. A run commits only a handful of records per
-        // entity — the two step memos and the terminal event — so a wider trigger
+        // entity (the two step memos and the terminal event), so a wider trigger
         // would leave every rehydration replaying from an empty base and the
         // snapshot-restore path untested (`Exercised::assert_hibernated`).
         snapshot_every: 1,
@@ -278,14 +278,14 @@ impl ClusterWorkload for StepsSwarm {
             // that *starts* a workflow on an entity never seen before, the
             // re-activation that re-launches a step left outstanding by a
             // hibernation, and the observation the check is made of. A read the
-            // faults refuse is simply not an observation — write-once is a claim
+            // faults refuse is simply not an observation: write-once is a claim
             // about what committed, and an entity this node cannot reach committed
             // whatever it committed either way.
             //
             // **The cadence must not depend on the reads.** Awaiting a round before
             // starting the next one lets a refused read stretch a [`ROUND_GAP`]
             // round into a [`CALL_DEADLINE`] one, and the whole drive shares one 30 s
-            // virtual-time budget — so on exactly the faulty seeds this sweep is
+            // virtual-time budget, so on exactly the faulty seeds this sweep is
             // for, the later rounds would never be issued at all. Sleeping to the
             // round's offset instead keeps the schedule the workload's own.
             let rounds = (0..ROUNDS).map(|round| {
@@ -296,7 +296,7 @@ impl ClusterWorkload for StepsSwarm {
                     // dead the moment its process is replaced, and an ask issued
                     // from one is an ask nothing is left waiting for
                     // (docs/simulation-testing.md, *Invariant sweep*). Routing is
-                    // unaffected — the gateway sends it to whichever node leads
+                    // unaffected: the gateway sends it to whichever node leads
                     // the entity's shard.
                     let entity = hosts[0].entity(key.clone());
                     let memos = memos.clone();
@@ -356,7 +356,7 @@ fn workload() -> StepsSwarm {
 #[test]
 fn a_step_memo_is_write_once_under_the_cluster_swarm() {
     // The safety claim, and only it. What this sweep *observed* is asserted
-    // separately below, on a range that never narrows — see there for why it
+    // separately below, on a range that never narrows; see there for why it
     // cannot ride here.
     let workload = workload();
     if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
@@ -376,7 +376,7 @@ fn a_step_memo_is_write_once_under_the_cluster_swarm() {
 /// ever hibernated. All three are asserted here rather than there because **none of
 /// them holds per seed**. A read only observes a memo if the entity's shard has an
 /// elected leader this node can route to, and on roughly two seeds in five the
-/// nemesis leaves the cluster without one for the whole run — every read comes back
+/// nemesis leaves the cluster without one for the whole run: every read comes back
 /// `NotLeader` and the run observes nothing. That is a property of the seed range,
 /// not of the workload, so it belongs on `coverage_seeds`, which never narrows; the
 /// same assertion on the invariant sweep would not be stricter, only flaky at its
@@ -413,7 +413,7 @@ fn the_steps_swarm_observes_a_memo_something_tried_to_overwrite() {
 
 /// The determinism contract over this workload (actor §18.1 #1): the same seed
 /// twice, byte-identical event streams. It is what makes the launch ordinals
-/// meaningful — a step value that varied run to run would be nondeterminism the
+/// meaningful: a step value that varied run to run would be nondeterminism the
 /// check itself introduced, and the memo values the check reads are drawn from
 /// them.
 #[test]

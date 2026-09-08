@@ -4,7 +4,7 @@
 //! (§12.1): the **scripted model** (a deterministic function of the request) and
 //! the **scripted sandbox** (deterministic outcomes per call). The journal is
 //! the entity's, so the agent runtime tests drive the real entity host, gateway, and
-//! rehydration code under the same seed — simulating the agent runtime *runs the real
+//! rehydration code under the same seed, simulating the agent runtime *runs the real
 //! consensus path*, with the agent's loop the only new code on it.
 //!
 //! Plus the continuous A-invariant checkers (§11) and the machine-readable
@@ -60,7 +60,7 @@ pub fn boxed(f: impl std::future::Future<Output = ()> + Send + 'static) -> BoxFu
 }
 
 /// Build a single-node simulation, a `LocalSystem` on it, and a harness hosting
-/// `kinds` with the given seams — the common setup for the scenario tests.
+/// `kinds` with the given seams: the common setup for the scenario tests.
 pub fn agent_on(
     sim: &Simulation,
     kinds: Kinds,
@@ -72,7 +72,7 @@ pub fn agent_on(
 }
 
 /// Read a session's whole journal via `tail` (§10.2), paging from the last
-/// `Seq` of each full page (one call is clamped to `TAIL_PAGE`) — the journal
+/// `Seq` of each full page (one call is clamped to `TAIL_PAGE`): the journal
 /// is the entity's, so the transcript is read back through the gateway's
 /// journal read (entity §7.5), not a test-held store.
 pub async fn tail_records(session: &agent::SessionRef<SimSystem>) -> Vec<agent::Record> {
@@ -232,7 +232,7 @@ impl ScriptedModel {
 
     /// A script keyed by step: the n-th model call of a run gets `responses[n]`;
     /// past the end, a final "done" message. The step index is the number of
-    /// assistant entries in the transcript — a pure function of the request.
+    /// assistant entries in the transcript: a pure function of the request.
     pub fn steps(responses: Vec<Result<ModelResponse, ModelError>>) -> ScriptedModel {
         ScriptedModel::new(move |req| {
             let step = req
@@ -283,7 +283,7 @@ pub fn tool_call(id: &str, name: &str, input: Value) -> ModelResponse {
     }
 }
 
-/// A model that takes a fixed span of logical time per call — for cancel races
+/// A model that takes a fixed span of logical time per call, for cancel races
 /// (§9.2): the mailbox stays live during the call (§3.2), so a cancel lands at
 /// message granularity.
 pub struct SlowModel {
@@ -438,7 +438,7 @@ impl ScriptedSandboxes {
         self
     }
 
-    /// Echo every call back as `"{name}: ok"` — the do-nothing workspace.
+    /// Echo every call back as `"{name}: ok"`: the do-nothing workspace.
     pub fn echo() -> ScriptedSandboxes {
         ScriptedSandboxes::new(|name, _| Ok(Value::String(format!("{name}: ok"))))
     }
@@ -519,8 +519,8 @@ pub use agent::testing::agent_invariants;
 /// `TierAcquired` at that tier with no `WorkspaceReset` in between, and every
 /// acquired or executed tier lies within the kind's cap.
 ///
-/// Synthesized outcomes — an unknown name, malformed arguments (§5.4), or a
-/// orphaned call resolved as `Interrupted` on resume (§5.5) — carry no effect and
+/// Synthesized outcomes: an unknown name, malformed arguments (§5.4), or a
+/// orphaned call resolved as `Interrupted` on resume (§5.5); carry no effect and
 /// are exempt.
 pub fn audit_tier_acquisition(records: &[agent::Record], kind: &agent::Kind) {
     let cap = kind.tier_cap();
@@ -632,7 +632,7 @@ const A_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 7,
         spec: "agent §7.4",
-        property: "Idempotent submission: a re-submitted TurnId never starts a second run — it returns the recorded outcome or attaches to the live run",
+        property: "Idempotent submission: a re-submitted TurnId never starts a second run; it returns the recorded outcome or attaches to the live run",
         verify: &[
             Verify::Checker("agent-run-discipline"),
             Verify::SimTest("agent/tests/conformance_run.rs"),

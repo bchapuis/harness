@@ -6,7 +6,7 @@
 # three (with occasional ~4 s excursions), and a **warm** one is ~0.2-0.5 s. Both
 # columns used to be dominated by a cold-start cost of ~33 s at one node and 61-65 s at
 # three, which was Raft groups waiting out an election timeout built to detect a
-# failure that had not happened — see `first_election_delay` in actor-cluster.
+# failure that had not happened; see `first_election_delay` in actor-cluster.
 #
 #   ./scripts/bench-machine-cost.sh [image-mib ...]
 #
@@ -15,8 +15,8 @@
 # because the first and the second answer different questions and conflating them is
 # how this measurement went wrong the first time:
 #
-#   - the **first** create pays everything a cold cluster owes — control-plane
-#     warm-up, the shard's first leader, the CLI's own connect and retry — and that
+#   - the **first** create pays everything a cold cluster owes: control-plane
+#     warm-up, the shard's first leader, the CLI's own connect and retry, and that
 #     cost is the same whether the image is one block or a hundred;
 #   - the **second**, against the same live cluster, is the path itself.
 #
@@ -34,7 +34,7 @@
 #   NODES=1|2|3   replicas. The interesting comparison in the tree: 1 node has no
 #                 quorum round at all, so `NODES=1` against `NODES=3` prices the
 #                 fan-out and nothing else.
-#   BIN=path      which binary. Default is release — a debug build costs ~2.4x and
+#   BIN=path      which binary. Default is release: a debug build costs ~2.4x and
 #                 is not what a deployment runs.
 #   FILL=zero     an all-zero image (every block after the first is a dedup hit)
 #                 instead of the default random one (every block a cold put).
@@ -47,7 +47,7 @@ FILL=${FILL:-random}
 SIZES=("$@")
 [ ${#SIZES[@]} -gt 0 ] || SIZES=(16 64 128)
 
-[ -x "$BIN" ] || { echo "no binary at $BIN — cargo build --release -p machine-standalone" >&2; exit 1; }
+[ -x "$BIN" ] || { echo "no binary at $BIN; run cargo build --release -p machine-standalone" >&2; exit 1; }
 
 SECRET=machine-standalone
 PORT_BASE=${MACHINE_PORT_BASE:-7601}
@@ -57,7 +57,7 @@ ADMIN_BASE=${MACHINE_ADMIN_BASE:-7701}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/machine-cost.XXXXXX")
 
 # The nodes are torn down by the trap, not by the happy path, because every way out
-# of this script that is *not* the happy path leaves them running otherwise — a node
+# of this script that is *not* the happy path leaves them running otherwise: a node
 # that never opened its door, a create that failed, a ^C. They hold `$PORT_BASE` when
 # they do, so the next run fails to bind and reports it as that run's problem. The
 # ports are fixed and shared with demo-machine.sh, so one orphan poisons everything
@@ -117,7 +117,7 @@ for mib in "${SIZES[@]}"; do
   for n in 1 2; do
     start=$(python3 -c 'import time; print(time.time())')
     # The create's output goes to a log inside `$WORK`, which the trap deletes on the
-    # way out — so a create that fails has to be reported here or it is reported
+    # way out, so a create that fails has to be reported here or it is reported
     # nowhere, and the run exits with a bare status and no reason.
     "$BIN" create "cost-box-$n" "${ADMIN[@]}" --base-image "$IMAGE" --key "$KEY.pub" \
       --vcpus 1 --mem-mib 512 --checkpoint-secs 30 --lease-secs 10 \

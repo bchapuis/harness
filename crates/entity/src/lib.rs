@@ -2,8 +2,8 @@
 //!
 //! A **entity** is an actor plus three things (entity spec): a name-based virtual
 //! identity, a durable event-sourced journal, and a durability barrier on the
-//! reply. Everything else — mailboxes, serial execution, location-transparent
-//! `ask`/`tell`, supervision, death watch — is inherited unchanged from
+//! reply. Everything else (mailboxes, serial execution, location-transparent
+//! `ask`/`tell`, supervision, death watch) is inherited unchanged from
 //! `actor-core`.
 //!
 //! Author an entity by implementing [`Entity`] (state, events, the pure
@@ -19,9 +19,9 @@
 //! `type Facets`: the [`Kv`] map (§7.13), the [`Ws`] workspace directory
 //! (§7.11), the SQL database (§7.14, behind the `sql` cargo feature), the
 //! [`Alarm`] durable timer (§7.16), and the [`Steps`] step memo (§7.17). A
-//! handler writes through the compile-time-gated `ctx` accessors —
+//! handler writes through the compile-time-gated `ctx` accessors:
 //! [`kv()`](EntityCtx::kv), [`ws()`](EntityCtx::ws), `sql()`,
-//! [`alarm()`](EntityCtx::alarm), [`steps()`](EntityCtx::steps) — and all of a
+//! [`alarm()`](EntityCtx::alarm), [`steps()`](EntityCtx::steps), and all of a
 //! command's records, events and facet operations alike, commit as **one
 //! atomic tagged batch** in the entity's single journal, snapshot as one
 //! composite, and share one unioned blob root set.
@@ -36,7 +36,7 @@
 //! with **no access after a node failover or hibernation**, host a type with
 //! [`entities_with_alarms`](EntityExt::entities_with_alarms): each host registers its
 //! deadline in a per-shard [`AlarmIndex`] (an acknowledged registration, which is
-//! what lets an alarmed entity hibernate — an unacked one pins it resident), and a
+//! what lets an alarmed entity hibernate; an unacked one pins it resident), and a
 //! driver re-activates due entities on the shards this node leads.
 //!
 //! # Scope: two durability tiers, one model
@@ -65,23 +65,23 @@
 //! migration** (§7.7): the new set commits as a `target` (writes and recoveries
 //! then need a majority of BOTH sets), the shard leader's driver catches every
 //! entity's records, snapshot, and blobs up on the target, and only then does the
-//! map flip — so a committed write's durability never rests on replicas that left
+//! map flip, so a committed write's durability never rests on replicas that left
 //! (E14).
 //!
-//! The partition itself is **elastic** (§7.7): a shard **splits** — its key range
+//! The partition itself is **elastic** (§7.7): a shard **splits** (its key range
 //! divides in two, the parent keeping the low half and a fresh child taking the
-//! high half on the same replicas — when it grows past `shard_target_bytes` or on
+//! high half on the same replicas) when it grows past `shard_target_bytes` or on
 //! an explicit request, and two adjacent shards **merge** the reverse way,
 //! reclaiming a leader-election group (E7). A split (or merge) seals the moving
-//! range on a quorum of stores — from which no append to it can reach a write
-//! quorum at any term — transfers each moved entity's committed prefix, snapshot,
+//! range on a quorum of stores (from which no append to it can reach a write
+//! quorum at any term) transfers each moved entity's committed prefix, snapshot,
 //! and blobs to the destination keys, and only then commits the new mapping, so a
 //! entity is writable in exactly one shard at any time and no write is lost or
 //! duplicated across the boundary (E15).
 //!
 //! The following remain **deferred**:
 //!
-//! - Linearizable reads (§7.5): reads are **read-your-leader** (relaxed) — served
+//! - Linearizable reads (§7.5): reads are **read-your-leader** (relaxed); served
 //!   locally from the leader's activation, so a deposed-but-unfenced minority
 //!   leader can serve a stale read (writes never fork, §8).
 //! - Hibernatable connections, follower reads, and cross-entity sagas (§16).

@@ -6,7 +6,7 @@
 //! the guest speaks to a virtual machine monitor, not the host kernel. The
 //! price is provisioning cost (a boot per activation; snapshot warm pools
 //! are not implemented, sandbox spec §7) and a Linux + `/dev/kvm` host at
-//! runtime — this module *builds* everywhere, and its provisioning path
+//! runtime: this module *builds* everywhere, and its provisioning path
 //! fails as a `ToolError` outcome where KVM is absent.
 //!
 //! ## How the workspace travels: tar over vsock, not a mount
@@ -15,13 +15,13 @@
 //! so the bind-mount of the docker fallback has no analogue. Every call
 //! brackets the command with a synchronization pair:
 //!
-//! 1. **push** — the session workspace is walked through its cap-std handle
+//! 1. **push**, the session workspace is walked through its cap-std handle
 //!    (S1: the walk cannot represent a path outside it), packed as a tar
 //!    stream, and sent to the guest agent, which replaces `/workspace` with
 //!    it;
-//! 2. **exec** — `/bin/sh -c <command>` runs with `/workspace` as its
+//! 2. **exec**: `/bin/sh -c <command>` runs with `/workspace` as its
 //!    working directory;
-//! 3. **pull** — the agent tars `/workspace` back, and the host replaces the
+//! 3. **pull**: the agent tars `/workspace` back, and the host replaces the
 //!    workspace's contents with it, again entirely through the handle.
 //!
 //! The host workspace is therefore authoritative *between* calls (a
@@ -43,7 +43,7 @@
 //! The host connects to Firecracker's host-side vsock unix socket and speaks
 //! the muxer's line handshake: `CONNECT 52\n` → `OK <port>\n`. After the
 //! handshake, every message is a frame: a `u32` little-endian length, then
-//! that many bytes — JSON unless stated. One connection serves any number of
+//! that many bytes; JSON unless stated. One connection serves any number of
 //! sequential requests:
 //!
 //! - `{"op":"ping"}` → `{"ok":true}`
@@ -52,7 +52,7 @@
 //! - `{"op":"pull"}` → `{"ok":true}` + one raw tar frame
 //!
 //! Any reply may instead be `{"error":s}`: an op the agent could not honor,
-//! reported over a transport that still works — the call fails as an
+//! reported over a transport that still works; the call fails as an
 //! ordinary outcome and the VM is kept. A *transport* failure (connect
 //! refused, short read, frame over cap) is single-tier loss (sandbox spec
 //! §4): the VM is killed and forgotten, the call fails as a `ToolError`, and
@@ -104,7 +104,7 @@ const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const READY_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The microVM `shell` declaration, ready for [`agent::Kind::tool`]. A
-/// distinct declaration from the docker fallback's [`crate::shell_tool`] —
+/// distinct declaration from the docker fallback's [`crate::shell_tool`]:
 /// the sync-around-each-command semantics are model-visible, and the digest
 /// difference keeps a mixed-realization cluster from agreeing silently.
 pub fn fc_shell_tool() -> ToolDecl {
@@ -158,7 +158,7 @@ impl FirecrackerConfig {
 }
 
 /// Kernel boot arguments: the agent as init with the rootfs on `/dev/vda`.
-/// Not a knob — the tier only works with the agent as pid 1, so exposing this
+/// Not a knob: the tier only works with the agent as pid 1, so exposing this
 /// would let a deployment boot a VM that never answers a ping. `quiet`: the
 /// serial console is an emulated device, so kernel chatter measurably slows
 /// the boot; panics still print.
@@ -195,7 +195,7 @@ pub(crate) struct FirecrackerTier {
     control_key: String,
     /// The VM slot. tokio's mutex, held across the whole call: provisioning
     /// awaits inside it, and one VM serves one push/exec/pull bracket at a
-    /// time — the sync pair must not interleave between concurrent calls.
+    /// time; the sync pair must not interleave between concurrent calls.
     vm: tokio::sync::Mutex<Option<MicroVm>>,
     /// Whether provisioning was ever attempted, letting `release` return
     /// before touching any tokio API when no Native call ever ran.
@@ -261,7 +261,7 @@ impl FirecrackerTier {
     }
 
     /// Boot the session's microVM (lazily, on the first call that carries
-    /// the tier — sandbox spec §2.3 item 2).
+    /// the tier: sandbox spec §2.3 item 2).
     async fn provision(&self) -> Result<MicroVm, ToolError> {
         self.attempted.store(true, Ordering::SeqCst);
         let fail = |e: String| ToolError::Sandbox(format!("firecracker: provision: {e}"));
@@ -319,7 +319,7 @@ impl FirecrackerTier {
 }
 
 /// Why a push/exec/pull bracket failed: the agent answering with an error
-/// over a working transport, or the transport itself (module docs — only the
+/// over a working transport, or the transport itself (module docs, only the
 /// latter is single-tier loss).
 #[derive(Debug)]
 enum BracketError {

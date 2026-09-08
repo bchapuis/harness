@@ -26,7 +26,7 @@ use crate::EntityName;
 /// sequence strictly increases.
 ///
 /// A commit at a sequence at or below the current head means two writers both
-/// believed themselves authoritative — a minority "leader" that committed, or a
+/// believed themselves authoritative: a minority "leader" that committed, or a
 /// replayed entry accepted twice. Either is a split of the commit log.
 pub struct CommitMonotonic {
     label: &'static str,
@@ -35,7 +35,7 @@ pub struct CommitMonotonic {
 }
 
 impl CommitMonotonic {
-    /// Observe under `label`, describing the subject as `noun` in violations —
+    /// Observe under `label`, describing the subject as `noun` in violations:
     /// "entity" for a plain entity suite, "machine" where the entity is a machine.
     pub fn new(label: &'static str, noun: &'static str) -> CommitMonotonic {
         CommitMonotonic {
@@ -71,8 +71,8 @@ impl Invariant for CommitMonotonic {
 ///
 /// Keyed by `(node, name)`, so an activation that migrates to another leader on
 /// failover is not mistaken for a second one. Crash-sound: a node's live set is
-/// cleared when the stream reports that node `NodeDown` — its activations are
-/// gone with it — so a re-activation after the node rejoins and re-leads is not
+/// cleared when the stream reports that node `NodeDown` (its activations are
+/// gone with it), so a re-activation after the node rejoins and re-leads is not
 /// a false positive.
 ///
 /// **Not** [`actor_simulation::SingletonAtMostOnePerNode`], despite the similar
@@ -137,8 +137,8 @@ impl Invariant for ActivationSingletonPerNode {
 /// An [`EntityStore`](crate::EntityStore) with a fixed answer: every write returns
 /// `refusal`, every read is empty, every enumeration is empty.
 ///
-/// The deterministic stand-in for a store that never acknowledges — an index whose
-/// registrations always fail, a replica permanently fenced — where a real store
+/// The deterministic stand-in for a store that never acknowledges (an index whose
+/// registrations always fail, a replica permanently fenced) where a real store
 /// would need a fault injector to reach the same state. `StaticEntityStore::fenced()`
 /// is the common case: writes refused at an unreachably high term.
 pub struct StaticEntityStore {
@@ -152,7 +152,7 @@ impl StaticEntityStore {
     }
 
     /// A store fenced at an unreachably high term, so nothing hosted on it can
-    /// commit while reads still succeed — activation works and the failure surfaces
+    /// commit while reads still succeed: activation works and the failure surfaces
     /// where it does in production, at the commit.
     pub fn fenced() -> StaticEntityStore {
         StaticEntityStore::new(crate::StoreAck::Fenced(crate::Term::new(u64::MAX)))
@@ -270,7 +270,7 @@ impl crate::EntityStore for StaticEntityStore {
 ///
 /// The deterministic stand-in for the state **E4** exists to survive: an entity whose
 /// latest durable snapshot names a seq past its committed head. In production that is
-/// the `Quorum` tier's doing — `head` is recovered from a write quorum (§8, **E14**)
+/// the `Quorum` tier's doing: `head` is recovered from a write quorum (§8, **E14**)
 /// while the snapshot is read from whichever replica holds the newest one, so a
 /// snapshot saved by a former leader can outrun the head a quorum will admit. A
 /// single-node store can never disagree with itself that way, and reaching it through
@@ -357,7 +357,7 @@ impl crate::EntityStore for SnapshotAheadOfHeadStore {
     }
 
     /// Forwarded whole. `read` feeds recovery and the `ReadReply::head` computation,
-    /// which the snapshot's seq participates in — overstating it here would move the
+    /// which the snapshot's seq participates in, overstating it here would move the
     /// head too, and the disagreement being modelled would vanish.
     fn read(&self, shard: u32, entity: &EntityName) -> crate::ReadReply {
         self.inner.read(shard, entity)

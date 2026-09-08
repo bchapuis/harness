@@ -65,7 +65,7 @@ impl ChannelBackend for LocalBackend {
                     machine_host::GuestError::Gone(e) => std::io::Error::new(
                         std::io::ErrorKind::NotFound,
                         format!(
-                            "{machine}: {e} — this machine's activation is on another node, and a \
+                            "{machine}: {e}; this machine's activation is on another node, and a \
                              front door bridges only the machines its own node leads (machine \
                              §8's cross-node relay is not built). Reconnect to the leader's door."
                         ),
@@ -81,7 +81,7 @@ impl ChannelBackend for LocalBackend {
     }
 }
 
-/// A node with no guest to bridge to at all — `--machine fake`, or a build without
+/// A node with no guest to bridge to at all: `--machine fake`, or a build without
 /// the binding. Distinct from a machine led by another node: durability works
 /// here, sessions never will.
 fn no_guest_here(machine: &EntityName) -> std::io::Error {

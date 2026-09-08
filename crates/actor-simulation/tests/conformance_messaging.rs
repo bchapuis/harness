@@ -1,4 +1,4 @@
-//! Conformance: messaging interface — `ask` / `tell` / `ask_timeout` and the
+//! Conformance: messaging interface; `ask` / `tell` / `ask_timeout` and the
 //! error model (spec §3.3, §6, §14). Covers the gaps the audit found; cases that
 //! already have coverage elsewhere are not duplicated here. Also folds in the
 //! local actor-model messaging cases from actor.rs (spec §3, §6) and the
@@ -73,7 +73,7 @@ fn a_full_remote_mailbox_reports_mailboxfull_never_drops() {
     // Backpressure on the *inbound remote* path (spec §6 #5): when a remote
     // actor's bounded mailbox is full, the enqueue is rejected with `MailboxFull`
     // (the receive loop must not block on one full mailbox), and the message is
-    // never silently dropped — every caller still gets an outcome.
+    // never silently dropped; every caller still gets an outcome.
     let sim = Simulation::new(2);
     let net = SimNetwork::new(&sim).with_mailbox_capacity(1);
     let node_a = net.join(NodeId::new(1));
@@ -101,7 +101,7 @@ fn a_full_remote_mailbox_reports_mailboxfull_never_drops() {
         outcomes
             .iter()
             .all(|o| matches!(o, Ok(_) | Err(CallError::MailboxFull))),
-        "each ask resolves to Ok or MailboxFull — never a silent drop: {outcomes:?}",
+        "each ask resolves to Ok or MailboxFull, never a silent drop: {outcomes:?}",
     );
 }
 
@@ -173,8 +173,8 @@ fn application_error_rides_inside_the_reply() {
 fn a_transport_failure_is_the_outer_error_not_the_inner() {
     let (sim, system) = support::local(3);
     let outcome = sim.block_on(async move {
-        // No such actor: the call cannot complete — outer `CallError`, not an
-        // application error (spec §14.1, §14.3 — the two levels stay distinct).
+        // No such actor: the call cannot complete; outer `CallError`, not an
+        // application error (spec §14.1, §14.3; the two levels stay distinct).
         let ghost = ActorId::new(NodeId::new(0), Path::new("/user/404"), 0);
         system
             .resolve::<Fallible<SimSystem>>(ghost)
@@ -497,7 +497,7 @@ fn when_local_is_none_for_a_remote_actor() {
 
 // =============================================================================
 // Merged from actor.rs (spec §3, §6): the local actor model running on
-// `LocalSystem` — ask round-trip, registration, per-sender FIFO, serial
+// `LocalSystem`; ask round-trip, registration, per-sender FIFO, serial
 // non-reentrant execution, and the bounded non-dropping mailbox.
 // =============================================================================
 mod local_model {
@@ -652,7 +652,7 @@ mod local_model {
     impl Handler<Work> for Guard {
         async fn handle(&mut self, _msg: Work, _ctx: &Ctx<Self>) -> bool {
             if self.active.swap(true, Ordering::SeqCst) {
-                return false; // someone else is already inside — reentrancy!
+                return false; // someone else is already inside: reentrancy!
             }
             // Suspend mid-handler; a non-serial executor could start another message.
             self.clock.sleep(Duration::from_millis(10)).await;
@@ -714,7 +714,7 @@ mod local_model {
 
 // =============================================================================
 // Merged from cluster.rs (spec §4, §7): multi-node routing over the simulated
-// network — the same `ask`/`tell` call site works whether the target is local
+// network; the same `ask`/`tell` call site works whether the target is local
 // or remote (invariant #21), real JSON crosses every hop, and node/actor
 // failures surface as the right `CallError`.
 // =============================================================================

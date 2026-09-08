@@ -4,7 +4,7 @@
 //! This is the spec↔code drift gate for entity, the same pattern that guards the
 //! core, utilities, agent, and sandbox catalogues. It fails the build if a
 //! E-number is missing or duplicated, if an entry claims no verification method,
-//! or if a `SimTest`/`CompileFail` pointer names a file that no longer exists —
+//! or if a `SimTest`/`CompileFail` pointer names a file that no longer exists,
 //! which is what makes §15's "Verified by" column mechanically true rather than
 //! merely written down.
 
@@ -129,7 +129,7 @@ fn no_entry_claims_a_continuous_checker() {
     // with the label its own suite reports under, so there is no fixed global name
     // for this table to cross-check against the way `default_invariants()` gives
     // the core catalogue one. Anyone adding a `Verify::Checker` here must first
-    // give entity a named, discoverable checker set — and then this assertion
+    // give entity a named, discoverable checker set, and then this assertion
     // becomes the drift test between the two, as it is in the sandbox catalogue.
     for e in e_catalogue() {
         assert!(

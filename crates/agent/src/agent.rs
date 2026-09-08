@@ -1,14 +1,14 @@
 //! The agent: an autonomous entity (agent spec §3).
 //!
 //! A session *is* an entity ([`entity`]). What the agent runtime adds is **autonomy**:
-//! an agent's activation drives itself forward — model→tools→model — until a run
+//! an agent's activation drives itself forward (model→tools→model) until a run
 //! reaches a terminal outcome. The entity model is decide/apply: [`Entity::apply`]
 //! folds records into [`SessionState`], and each [`EntityHandler`] is a *pure
 //! decision* returning the records to journal plus a reply (entity §4.2). The
 //! loop rides three entity seams, none of which the agent runtime re-implements:
 //!
 //! - **The output gate** (entity §6): a handler's records commit before its
-//!   reply releases, so "intent before effect" (§6.4) is free — a handler that
+//!   reply releases, so "intent before effect" (§6.4) is free; a handler that
 //!   journals an intent never launches the effect itself.
 //! - **Self-messaging** ([`EntityCtx::this`]) + **`ctx.system().launch`**: the
 //!   loop launches each external operation (a model call, a sandboxed tool, a
@@ -20,10 +20,10 @@
 //!   set-up, sandbox release on every deactivation (A8), and the veto that keeps
 //!   a live run from hibernating (§7.2).
 //!
-//! Everything else — the journal, the single-writer fence, placement,
-//! activation, hibernation, lossless failover — is the entity's (§2.1). Ephemeral
+//! Everything else (the journal, the single-writer fence, placement,
+//! activation, hibernation, lossless failover) is the entity's (§2.1). Ephemeral
 //! activation state (the sandbox handle, held tiers, the subscriber set, the
-//! launch-once guard — entity's steps facet's [`LaunchGuard`], entity §7.17) lives
+//! launch-once guard: entity's steps facet's [`LaunchGuard`], entity §7.17) lives
 //! behind a [`Mutex`] on the entity behavior, rebuilt per activation and never
 //! journaled (§5.5, §5.6, §7.4).
 
@@ -91,7 +91,7 @@ use crate::tool::ToolError;
 
 /// How many *consecutive* times an unreachable peer is retried before a
 /// delegation/cancel gives up (§8.1, §9.2): past it the child surfaces as a
-/// tool failure (§5.4) rather than looping forever — the child's budget is the
+/// tool failure (§5.4) rather than looping forever; the child's budget is the
 /// ultimate backstop (§9.2 item 3). A transport bound, backed off between
 /// tries; any successful contact resets it. Distinct from the wait on a
 /// reachable-but-slow child, which is budget-scaled config
@@ -102,8 +102,8 @@ const PROPAGATION_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
 // ===========================================================================
 // Wire contract (§7.3): commands addressed to the entity, and the outbound
-// `RunCompleted` notification. A session is addressed as an entity — its `kind`
-// is the entity type and its `SessionId` the key — so the `EntityName` carries
+// `RunCompleted` notification. A session is addressed as an entity (its `kind`
+// is the entity type and its `SessionId` the key), so the `EntityName` carries
 // both and the commands omit them (entity §4.3).
 // ===========================================================================
 
@@ -127,7 +127,7 @@ impl<S: HarnessSystem> Message for Submit<S> {
 }
 
 /// The `Submit` ack, released by the output gate the moment the `TurnSubmitted`
-/// record commits (§7.3): an ack, not the run's outcome — the outcome travels
+/// record commits (§7.3): an ack, not the run's outcome; the outcome travels
 /// later as a [`RunCompleted`] notification to the `reply_to`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Accepted {
@@ -151,7 +151,7 @@ pub enum SubmitStatus {
 
 /// Why a `Submit` was rejected (§7.4): a deterministic caller-contract
 /// violation, kept distinct from a transport `EntityError`. Both cases are
-/// **permanent** — the same submit always rejects the same way — so a caller
+/// **permanent** (the same submit always rejects the same way), so a caller
 /// must never retry one, unlike a transport failure, which a peer move could
 /// clear.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,7 +221,7 @@ impl Message for RunCompleted {
 // outcomes of launched work back onto the entity's serial command path.
 // ===========================================================================
 
-/// "What does the fold call for next?" — the post-commit continuation and
+/// "What does the fold call for next?", the post-commit continuation and
 /// effect launcher. Idempotent: every path is guarded by a fold fact or an
 /// in-flight flag, so a resume is the same code path as ordinary progress (A1).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -233,7 +233,7 @@ impl Message for Advance {
 }
 
 /// One model call finished (§3.1 step 2): its outcome, back on the loop.
-/// `step` is the run's `own_steps` when the call was issued — the step this
+/// `step` is the run's `own_steps` when the call was issued: the step this
 /// response answers. Receipt matches it against the live run's current
 /// `own_steps`, so a superseded call (an old activation's straggler racing the
 /// reissue after a same-node resume) can never journal a second response for a
@@ -266,7 +266,7 @@ impl Message for ToolDone {
 
 /// One propagated `Cancel` was acked by the child of `(turn, call)` (§9.2):
 /// back on the loop to journal the `CancelDelivered` record that clears the
-/// owed fact — the ack itself is not durable, only the record is.
+/// owed fact; the ack itself is not durable, only the record is.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CancelDone {
     pub turn: TurnId,
@@ -314,7 +314,7 @@ struct SandboxState {
     /// activity (§5.5): false until a `WorkspaceReset` is journaled (or none is
     /// needed); flipped false again on environment loss.
     reconciled: bool,
-    /// Whether the workspace was lost *during* this activation — the provider
+    /// Whether the workspace was lost *during* this activation: the provider
     /// returned `EnvironmentLost` (§5.4). The durable workspace survives
     /// reactivation, so only a loss observed here resets. Set on
     /// `EnvironmentLost`, cleared per activation in `on_activate`.
@@ -405,7 +405,7 @@ struct Activation<S: HarnessSystem> {
 
 impl<S: HarnessSystem> Activation<S> {
     /// Register `reply_to` (if any) for `turn`'s outcome (§7.4). A no-op when the
-    /// submit carried no mailbox — the one place a subscriber is added to the list.
+    /// submit carried no mailbox: the one place a subscriber is added to the list.
     fn subscribe(&mut self, turn: &TurnId, reply_to: Option<ActorRef<ReplyMailbox<S>>>) {
         if let Some(reply_to) = reply_to {
             self.subscribers
@@ -439,7 +439,7 @@ pub struct Agent<S: HarnessSystem> {
     shared: Arc<Shared<S>>,
     /// This entity's kind definition (§7.1). Captured by the factory, which hosts
     /// one entity type per kind (§2.2), so an activation of entity-type `K` always
-    /// has `K`'s definition — kind resolution is infallible, no lookup needed.
+    /// has `K`'s definition: kind resolution is infallible, no lookup needed.
     kind: Arc<Kind>,
     /// The model and sandbox seams for this hosted kind (§4, §5.3), captured by
     /// the factory.
@@ -478,7 +478,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Resolve `call` with a failure outcome as one step: mark it resolved so it
     /// never relaunches, and return the `ToolOutcome` record to journal. The two
-    /// must always happen together — a resolved call with no journaled outcome
+    /// must always happen together: a resolved call with no journaled outcome
     /// would dangle forever; a journaled failure not marked resolved would
     /// re-execute. Callers push the returned record onto the round's batch.
     fn fail_call(
@@ -501,7 +501,7 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// End the live run as one step: owe the §10.4 `RunEnded` event and return
-    /// the terminal record to journal. Paired like `fail_call` — the event
+    /// the terminal record to journal. Paired like `fail_call`: the event
     /// without the record would announce a run the journal never ended; the
     /// record without the event breaks A3's start/end pairing. A turn cancelled
     /// while still queued does not come through here: no run started, so no
@@ -549,8 +549,8 @@ impl<S: HarnessSystem> Agent<S> {
         let digest = turn_digest(&msg.turn.content, msg.turn.budget);
         let mut act = self.lock();
 
-        // Dedup against the journal (§7.4): every accepted turn — queued, live,
-        // or ended — has folded facts, so one check covers all three (A7). The
+        // Dedup against the journal (§7.4): every accepted turn (queued, live,
+        // or ended) has folded facts, so one check covers all three (A7). The
         // digest spans content and the literal budget, so a re-submission that
         // changes either is a conflict, never a silent attach.
         if let Some(facts) = state.turns.get(&turn_id) {
@@ -591,7 +591,7 @@ impl<S: HarnessSystem> Agent<S> {
             };
         }
 
-        // A new turn: journal its acceptance — the committing append releases
+        // A new turn: journal its acceptance; the committing append releases
         // the ack, so an acked turn is durable (§7.3). The run itself starts
         // in the dispatcher when the turn reaches the queue's head with no run
         // live (`start_next_turn`, the one run-start site); the post-commit
@@ -609,7 +609,7 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// The records that accept a turn: `SessionCreated` on the very first turn,
-    /// then `TurnSubmitted` (§7.1, §7.3) — the enqueue, not the run start.
+    /// then `TurnSubmitted` (§7.1, §7.3); the enqueue, not the run start.
     fn accept_records(
         &self,
         state: &SessionState,
@@ -657,7 +657,7 @@ impl<S: HarnessSystem> Agent<S> {
         // is an idempotent no-op (§9.2 item 1). The live run's recorded
         // children are not captured here: the fold moves them into
         // `cancels_owed` when the `RunEnded { Cancelled }` commits, and the
-        // post-commit `Advance` propagates from that (§9.2 item 2) — so the
+        // post-commit `Advance` propagates from that (§9.2 item 2), so the
         // debt survives a crash in between.
         if state.live.as_ref().is_some_and(|l| l.turn == turn) {
             let mut act = self.lock();
@@ -667,7 +667,7 @@ impl<S: HarnessSystem> Agent<S> {
             vec![ended]
         } else if state.queue.iter().any(|q| q.turn == turn) {
             // Queued, never started (§9.2): the terminal record alone moves
-            // the fold — the queue entry drops, and the post-commit `Advance`
+            // the fold; the queue entry drops, and the post-commit `Advance`
             // notifies subscribers off the recorded outcome. No run began, so
             // no `RunStarted`/`RunEnded` event pair is owed (§10.4).
             self.schedule_advance(ctx);
@@ -795,10 +795,10 @@ impl<S: HarnessSystem> Agent<S> {
         // and the files it wrote commit atomically (E19). Every sandboxed call
         // captures, success or failure (a failed shell can still have
         // written; a timed-out one may still be writing, so its capture can be
-        // torn — the next capture diffs against the last committed index and
+        // torn: the next capture diffs against the last committed index and
         // folds in what the straggler finished, §5.3 item 3); a delegation
         // never touched the directory, and a reported environment loss must
-        // not capture — the root may be gone, and a vanished root is never a
+        // not capture; the root may be gone, and a vanished root is never a
         // mass deletion.
         let sandboxed = pending.name != DELEGATE;
         let lost_already = matches!(&outcome, Err(ToolError::EnvironmentLost(_)));
@@ -916,12 +916,12 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// (b) No live run: sweep the per-run scope, then start the fold queue's
-    /// head turn if one waits (§3.1) — the **one** place a run starts.
+    /// head turn if one waits (§3.1); the **one** place a run starts.
     /// Committing the returned `TurnStarted` folds the head into `live` and is
     /// what makes `RunStarted` fire exactly once per turn (§10.4); the
     /// post-commit re-advance dispatches the new run's first model call. The
     /// sweep precedes the record: stale `launched`/`resolved` claims from the
-    /// ended run must not suppress the new run's calls — synthesized
+    /// ended run must not suppress the new run's calls; synthesized
     /// `call-{step}-{i}` ids repeat across runs, and so do the step-keyed
     /// model claims.
     fn start_next_turn(
@@ -968,7 +968,7 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// (d) Step boundary: no calls pending, so issue the next model call (§3.1
-    /// step 2) — unless the budget is exhausted (a terminal `RunEnded`) or a
+    /// step 2); unless the budget is exhausted (a terminal `RunEnded`) or a
     /// lost workspace must be surfaced first (§5.5). Returns the records to
     /// journal; launches the call and returns empty when it proceeds.
     fn step_model(
@@ -981,7 +981,7 @@ impl<S: HarnessSystem> Agent<S> {
         turn: TurnId,
     ) -> Vec<Record> {
         // The step this call answers, tagged on the call and matched again on
-        // receipt (§3.1 step 2) — and the launch-once claim key: an in-flight
+        // receipt (§3.1 step 2), and the launch-once claim key: an in-flight
         // step is claimed, and only its committed response advances
         // `own_steps` to a fresh key.
         let step = live.spend.own_steps;
@@ -993,8 +993,8 @@ impl<S: HarnessSystem> Agent<S> {
             return vec![self.end_run(act, ctx, turn, Err(RunError::BudgetExhausted))];
         }
         // Surface a lost workspace before the model acts on state that is gone
-        // (§5.5). The workspace itself is durable — the agent's facet
-        // rematerializes it on every activation (entity §7.11) — so only a loss
+        // (§5.5). The workspace itself is durable: the agent's facet
+        // rematerializes it on every activation (entity §7.11), so only a loss
         // observed *this* activation (the provider returned `EnvironmentLost`)
         // resets. A fresh environment resets every held tier to `Workspace`;
         // later acquisitions re-journal, never silently inherited.
@@ -1066,7 +1066,7 @@ impl<S: HarnessSystem> Agent<S> {
         for (call, pending) in &live.pending {
             // A non-claiming read: calls skipped here may still be listed as
             // `ready` intents this round, and an intent batch returns without
-            // launching them (§6.4) — only `launch_call` claims.
+            // launching them (§6.4), only `launch_call` claims.
             if act.run.launched.is_claimed(&StepKey::Call(call.clone()))
                 || act.run.resolved.contains(call)
             {
@@ -1190,7 +1190,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Launch one ready call (§3.1): a sandboxed tool, or a delegation. The
     /// `delegate` exception executes in the loop (§5.2, §8). Returns the
-    /// records to journal — normally none, but a call that cannot launch
+    /// records to journal: normally none, but a call that cannot launch
     /// *after* claiming resolves as a failure here: a claimed call that bailed
     /// silently would suppress every relaunch and stall the run forever.
     #[allow(clippy::too_many_arguments)]
@@ -1209,8 +1209,8 @@ impl<S: HarnessSystem> Agent<S> {
                 return Vec::new(); // already in flight this activation
             }
             let Some(child) = pending.child.clone() else {
-                // Unreachable by construction — `dispatch_pending` journals the
-                // `ChildRun` intent before a delegation is ready — but claimed,
+                // Unreachable by construction (`dispatch_pending` journals the
+                // `ChildRun` intent before a delegation is ready), but claimed,
                 // so it must resolve rather than dangle.
                 return vec![self.fail_call(
                     act,
@@ -1225,7 +1225,7 @@ impl<S: HarnessSystem> Agent<S> {
                 Err(e) => {
                     // Same shape: `plan_delegation` validated this input when it
                     // journaled the intent, so a failure here is a drifted
-                    // schema — resolve the claimed call, never strand it.
+                    // schema; resolve the claimed call, never strand it.
                     return vec![self.fail_call(
                         act,
                         ctx,
@@ -1339,7 +1339,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Launch the child submission of a journaled delegation (§8.1 steps 2-3): an
     /// ordinary entity submit with a reply-to mailbox, awaiting the child's
-    /// `RunCompleted`, retried on transport failure (safe — the derived `TurnId`
+    /// `RunCompleted`, retried on transport failure (safe; the derived `TurnId`
     /// dedups, A7). The outcome becomes this call's tool outcome (§5.4).
     fn launch_delegation(
         &self,
@@ -1396,7 +1396,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Emit the run-boundary events this activation owes, after their records
     /// committed (§10.4): `RunStarted` once per turn this activation started (a
-    /// resume emits none — it attaches, never journals a `TurnSubmitted`), and
+    /// resume emits none; it attaches, never journals a `TurnSubmitted`), and
     /// `RunEnded` once per turn this activation ended (A3).
     fn emit_run_events(
         &self,
@@ -1498,7 +1498,7 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Propagate every cancel the fold still owes (§9.2 item 2): the owed set
     /// is journal-derived (`cancels_owed`), so a crash between the
-    /// `RunEnded { Cancelled }` commit and the send loses nothing — the next
+    /// `RunEnded { Cancelled }` commit and the send loses nothing; the next
     /// activation's first `Advance` lands here and re-sends the undelivered
     /// remainder (A5). Each ack comes back as [`CancelDone`] and journals the
     /// `CancelDelivered` that clears the debt; until then a re-send is safe (a
@@ -1515,7 +1515,7 @@ impl<S: HarnessSystem> Agent<S> {
                     continue; // launched this activation already
                 }
                 let Some(entities) = self.shared.hosts().get(&child.kind).cloned() else {
-                    // No route to the child's kind — unreachable on a node
+                    // No route to the child's kind: unreachable on a node
                     // built through `HarnessBuilder`, which requires every
                     // hosted kind's delegates in the directory. Kept as
                     // defense: the debt stays in the fold for a
@@ -1547,8 +1547,8 @@ impl<S: HarnessSystem> Agent<S> {
                             }
                             // Give up for this attempt only, and re-arm the
                             // launch-once guard: the fold keeps owing, so the
-                            // next message that drives the session — the §7.5
-                            // resume nudge, a re-sent `Cancel` — re-launches
+                            // next message that drives the session; the §7.5
+                            // resume nudge, a re-sent `Cancel`; re-launches
                             // the send even on this same activation (A5); the
                             // child's budget bounds the meantime (§9.2 item 3).
                             Err(_) => {
@@ -1568,7 +1568,7 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// A propagated cancel was acked (§9.2): journal the `CancelDelivered`
-    /// that clears the owed fact — unless a concurrent delivery (an old
+    /// that clears the owed fact; unless a concurrent delivery (an old
     /// activation's straggler) already cleared it, in which case commit
     /// nothing.
     fn on_cancel_done(
@@ -1606,7 +1606,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// Take the bound sandbox out of `act` (A8): swap the slot to `Closed`, clear
     /// the `bound` flag, and report the sandbox to release (if the slot was open)
     /// plus whether a `SandboxReleased` is owed. The caller drives the release
-    /// future — deferred off the command path in
+    /// future: deferred off the command path in
     /// [`release_sandbox`](Self::release_sandbox), awaited inline on deactivation.
     /// The announce is paired with `bound` here, independent of the slot: an
     /// unpaired bind is always announced (A8), so a `SandboxReleased` matches
@@ -1703,7 +1703,7 @@ impl<S: HarnessSystem> Entity for Agent<S> {
     }
 
     async fn on_deactivate(&mut self, ctx: &EntityCtx<Self>) {
-        // Release the sandbox on every deactivation — idle hibernation, migration,
+        // Release the sandbox on every deactivation: idle hibernation, migration,
         // or forced step-down (A8). The workspace goes with it (§5.5). Scope the
         // lock so the guard is dropped before the async release.
         let (release, announce) = {
@@ -1720,7 +1720,7 @@ impl<S: HarnessSystem> Entity for Agent<S> {
 
     fn can_hibernate(&self, state: &SessionState) -> bool {
         // Never hibernate a session whose run is live or whose fold queue
-        // holds an accepted turn (§7.2) — both mean work is owed now — nor one
+        // holds an accepted turn (§7.2) (both mean work is owed now) nor one
         // with a launched effect whose outcome could still arrive (the guard's
         // claims are swept by the post-end `Advance`).
         if state.live.is_some() || !state.queue.is_empty() {
@@ -1831,7 +1831,7 @@ pub(crate) enum AttachOutcome {
 /// `RunCompleted` bounded by `within`. Wrapping it in a retry loop is safe
 /// because re-submitting the same `TurnId` is idempotent (A7). The mailbox
 /// lives exactly as long as the attempt: a [`MailboxGuard`] stops it on every
-/// path that ends without an outcome — including this future being dropped —
+/// path that ends without an outcome (including this future being dropped),
 /// so a re-attach replaces the mailbox rather than accumulating one per
 /// attempt (§7.4).
 pub(crate) async fn submit_and_attach<S: HarnessSystem>(

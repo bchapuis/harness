@@ -90,7 +90,7 @@ pub trait Actor: Sized + Send + 'static {
     /// List the messages this actor accepts over the network (spec §4.4).
     ///
     /// Each `r.accept::<M>()` captures the dispatch entry for `(Self, M)`. The
-    /// default registers nothing — a purely local actor. An actor addressable
+    /// default registers nothing: a purely local actor. An actor addressable
     /// remotely overrides this (or an optional derive generates it); the
     /// registry it fills is the deserialization allowlist (spec §5, §15).
     fn register(_registry: &mut HandlerRegistry<Self>) {}
@@ -109,7 +109,7 @@ pub trait Actor: Sized + Send + 'static {
 ///
 /// `handle` takes `&mut self`; exclusive mutation is sound because the executor
 /// is serial (spec §6). An actor accepts exactly the set of `M` for which it
-/// implements `Handler<M>` — anything else is a compile error at the call site.
+/// implements `Handler<M>`, anything else is a compile error at the call site.
 pub trait Handler<M: Message>: Actor {
     /// Process one message and produce its reply.
     fn handle(&mut self, msg: M, ctx: &Ctx<Self>) -> impl Future<Output = M::Reply> + Send;

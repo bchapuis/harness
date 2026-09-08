@@ -2,7 +2,7 @@
 //!
 //! A [`FaultPolicy`] is the *input* side of fault injection: the per-frame drop,
 //! duplication, and latency a run applies to the in-memory network. The *output*
-//! side — what a run actually exercised — is the coverage tally in
+//! side (what a run actually exercised) is the coverage tally in
 //! [`crate::coverage`].
 
 use std::time::Duration;
@@ -53,7 +53,7 @@ pub struct RegistryFaultPolicy {
     /// Each fetch sleeps a seeded duration in `[0, max_latency]` before
     /// returning (zero disables).
     pub max_latency: Duration,
-    /// A fetch returns a **stale** snapshot — an older state from the history —
+    /// A fetch returns a **stale** snapshot (an older state from the history)
     /// with probability `stale_num / stale_den` (a zero numerator disables).
     pub stale_num: u64,
     pub stale_den: u64,

@@ -54,7 +54,7 @@ pub type SimNode = ClusterSystem<SimClock, SimEntropy, SimSpawner, SimTransport>
 /// One node's **live** process on the network: the inbound frame sender its
 /// receive loop reads from, the process incarnation (scheduler domain) that
 /// `pause`/`resume` freeze and `restart` retires, and the running system a new
-/// joiner is wired into. One entry travels as one unit — a restart replaces the
+/// joiner is wired into. One entry travels as one unit: a restart replaces the
 /// whole entry, so the three can never disagree about which incarnation is live.
 pub(crate) struct Process {
     pub(crate) node: NodeId,
@@ -71,7 +71,7 @@ pub(crate) struct NetInner {
     /// Last scheduled delivery time per directed pair, kept strictly increasing
     /// so per-pair FIFO survives latency jitter (spec §7.2, invariant #3).
     pair_clock: BTreeMap<(NodeId, NodeId), Instant>,
-    /// Nodes running a wire window other than [`WIRE`] — what a simulated node's
+    /// Nodes running a wire window other than [`WIRE`]: what a simulated node's
     /// *build* accepts and writes (spec §7.1, compatibility spec §3).
     ///
     /// Holds only the overrides, so a node absent here is one running the window
@@ -170,7 +170,7 @@ impl SimNetwork {
 
     /// Run every node in **registry-based** mode (spec §9.4.2): the SWIM
     /// detector observes reachability, but the external registry behind
-    /// `client` is the authority — every node syncs against it each
+    /// `client` is the authority; every node syncs against it each
     /// `sync_interval`, and only a registry mutation declares `down`.
     pub fn with_registry(
         mut self,
@@ -224,14 +224,14 @@ impl SimNetwork {
     }
 
     /// Set the per-actor bounded mailbox capacity on every node (spec §6). A
-    /// small capacity makes backpressure — `MailboxFull` on the inbound remote
-    /// path (invariant #5) — observable in a test without flooding the default.
+    /// small capacity makes backpressure: `MailboxFull` on the inbound remote
+    /// path (invariant #5); observable in a test without flooding the default.
     pub fn with_mailbox_capacity(mut self, capacity: usize) -> SimNetwork {
         self.mailbox_capacity = capacity;
         self
     }
 
-    /// The [`Transport`] handle `node`'s system sends through — the same one
+    /// The [`Transport`] handle `node`'s system sends through: the same one
     /// [`bring_up`](SimNetwork::join) hands it, so asking this what it would settle
     /// with a peer asks the running node's own send path.
     pub fn transport(&self, node: NodeId) -> SimTransport {
@@ -242,7 +242,7 @@ impl SimNetwork {
     }
 
     /// Move `node` to another release's wire window and record it as an injected
-    /// fault (spec §18.3) — the nemesis's rolling upgrade, as distinct from
+    /// fault (spec §18.3): the nemesis's rolling upgrade, as distinct from
     /// [`set_wire_window`](SimNetwork::set_wire_window), which a scenario uses to
     /// set a run's starting shape and which nothing counts.
     pub(crate) fn upgrade(&self, node: NodeId, window: compat::Window) {
@@ -354,7 +354,7 @@ impl SimNetwork {
     /// error to catch it.
     fn reserve_pair_slot(&self, from: NodeId, to: NodeId, max_latency: Duration) -> Instant {
         // Seeded jitter only when `max_latency` is set (drawing entropy); floored by
-        // the fixed [`BASE_LATENCY`] so every delivery is at least `now + base` — the
+        // the fixed [`BASE_LATENCY`] so every delivery is at least `now + base`: the
         // floor draws no entropy.
         let jitter = if max_latency.is_zero() {
             Duration::ZERO
@@ -392,14 +392,14 @@ impl Transport for SimTransport {
     }
 
     /// The revision this node and `peer` would settle on (spec §7.1,
-    /// compatibility spec §3.1) — the same `negotiate` over the same two ranges
+    /// compatibility spec §3.1): the same `negotiate` over the same two ranges
     /// the TCP handshake runs, against whatever windows the two nodes are running
     /// ([`SimNetwork::set_wire_window`]).
     ///
     /// The simulator keeps no association, so what stands in for one is the
     /// condition under which a real one would exist: the peer is a node on this
     /// network, and the directed pair is not blocked. That makes a partition
-    /// answer `None` — a gate must not keep writing a revision agreed with a peer
+    /// answer `None`: a gate must not keep writing a revision agreed with a peer
     /// it can no longer reach, because whatever comes back may not be the process
     /// that agreed to it.
     fn peer_version(&self, peer: NodeId) -> Option<compat::Version> {
@@ -410,7 +410,7 @@ impl Transport for SimTransport {
         let ours = inner.windows.get(&self.from).copied().unwrap_or(WIRE);
         let theirs = inner.windows.get(&peer).copied().unwrap_or(WIRE);
         // Disjoint ranges are a refused association (**V2**), which reaches a
-        // caller as no association at all — the same `None` an unreachable peer
+        // caller as no association at all: the same `None` an unreachable peer
         // gives, and the same conservative send it must produce.
         ours.negotiate(theirs.accepted()).ok()
     }

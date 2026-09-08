@@ -1,14 +1,14 @@
 //! The agent runtime (agent-spec.md): compound AI sessions run as
 //! **entities** on a mutualized cluster. An agent is an entity ([`entity`]) plus
-//! three things — a self-driving loop, a model seam, and a sandbox — and nothing
+//! three things (a self-driving loop, a model seam, and a sandbox), and nothing
 //! else: identity, the journal, the single-writer fence, placement, activation,
 //! hibernation, and lossless failover are all inherited from the entity unchanged.
 //!
 //! The design in one sentence (§2.1): **the entity is the session; the activation
 //! and the sandbox are disposable; the seams are the only world.** The loop runs
-//! as the entity's activation behavior — serial, journaled, effect-free outside
-//! its two seams (the [`Model`] and the [`Sandbox`]) and the entity's own journal
-//! — and every tool effect lands in one isolated environment per session (§5.1).
+//! as the entity's activation behavior; serial, journaled, effect-free outside
+//! its two seams (the [`Model`] and the [`Sandbox`]) and the entity's own journal,
+//! and every tool effect lands in one isolated environment per session (§5.1).
 //! Time, randomness, task spawning, transport, and the journal come from entity
 //! and the core seams, so one seed reproduces an entire multi-node agentic run
 //! (§12).

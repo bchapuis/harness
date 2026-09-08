@@ -1,8 +1,8 @@
 //! The golden corpus's fixture discipline, for this crate's one boundary
 //! (compatibility spec §4).
 //!
-//! `actor.membership` is a hand-rolled nine-byte form — a tag and a little-endian
-//! node uid — inside the control group's replicated log. Nothing in the type system
+//! `actor.membership` is a hand-rolled nine-byte form (a tag and a little-endian
+//! node uid) inside the control group's replicated log. Nothing in the type system
 //! notices a tag renumbered or a field widened: both compile, both round-trip
 //! against themselves, and both make a build read every transition its peers
 //! committed as a *different* transition. That is a member set diverging silently,
@@ -12,7 +12,7 @@
 //! **The files are evidence, not output.** A fixture for a revision that has
 //! shipped records what those bytes meant; regenerating it destroys the only thing
 //! holding **V4**/**V5** up. [`golden`] therefore writes only a file that is
-//! *absent* — the case of adding a revision — and never rewrites one that exists.
+//! *absent* (the case of adding a revision), and never rewrites one that exists.
 //! When a fixture stops decoding, the corpus has done its job: widen the window,
 //! keep the old decoder, and add the new revision's bytes beside it.
 
@@ -37,7 +37,7 @@ pub(crate) fn golden(boundary: &str, revision: u16, produce: impl FnOnce() -> Ve
         std::env::var_os("GOLDEN_UPDATE").is_some(),
         "no corpus fixture at {}. If this revision is new, create it with \
          GOLDEN_UPDATE=1 cargo test -p actor-cluster. If it is not, the file was \
-         deleted — restore it from git rather than regenerating it, or the corpus \
+         deleted; restore it from git rather than regenerating it, or the corpus \
          stops being evidence of what the old bytes meant.",
         path.display(),
     );

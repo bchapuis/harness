@@ -98,7 +98,7 @@ fn live_checker_names() -> BTreeSet<&'static str> {
     default_invariants().iter().map(|i| i.name()).collect()
 }
 
-/// The pairing, both ways and **per invariant** — not over the two sets of
+/// The pairing, both ways and **per invariant**, not over the two sets of
 /// checker *names*, which cannot see one entry dropping its `Verify::Checker`
 /// while a sibling entry still names the same checker. Today each core checker
 /// carries exactly one invariant, so the two comparisons happen to agree; the
@@ -128,7 +128,7 @@ fn the_declared_checkers_are_exactly_the_live_ones() {
 }
 
 /// Every `SimTest`/`Differential`/`CompileFail` file pointer must name a file
-/// that actually exists — otherwise a renamed or deleted conformance test drifts
+/// that actually exists: otherwise a renamed or deleted conformance test drifts
 /// out from under the catalogue unnoticed, and the §17 "Verified by" column stops
 /// being mechanically true. `SimTest`/`Differential` pointers are comma-separated
 /// `*.rs` files under this crate's `tests/` directory; a `CompileFail` pointer is

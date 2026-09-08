@@ -60,13 +60,13 @@ authenticated form with opaque per-tenant tokens.
   beside it (`fences/<shard>`), tokio/rustls HTTP to the Messages API, and
   per-session workspaces behind an explicit `--sandbox` choice, required and
   never defaulted: a `docker` container, a
-  `firecracker` microVM (Linux/KVM), or `durable` — the typed file tools over
+  `firecracker` microVM (Linux/KVM), or `durable`, the typed file tools over
   the same durable workspace, with no shell at all. There is no unconfined mode.
 - A **gateway-as-cluster-client edge** (`crates/agent-gateway`): an `axum`
   HTTP/SSE tier that is the single public boundary. It joins the actor transport
   as a non-voting, non-hosting member (the Orleans cluster-client pattern),
   terminates tenant auth (a bearer token → a principal), and addresses the
-  session's entity **directly** — no control protocol, no per-node listener, no
+  session's entity **directly**: no control protocol, no per-node listener, no
   forwarding hop. It holds no durable state, so it scales independently; SSE
   carries the live record stream.
 - **Multi-tenant isolation** (`crates/tenancy`): each tenant's sessions stay
@@ -76,12 +76,12 @@ authenticated form with opaque per-tenant tokens.
   untrusted callers reach it only over HTTP with a bearer token.
 - **Two clients** (`crates/agent-tui`, `clients/agent-vscode`): the only
   parts of the tree that are not in the cluster. Both sit on the gateway's
-  HTTP/SSE surface and speak nothing else — a terminal chat UI, and a VS Code
+  HTTP/SSE surface and speak nothing else: a terminal chat UI, and a VS Code
   extension that surfaces a session as an agent in the Agents window. Each lists
   a tenant's sessions, submits a prompt, and streams the run's records live.
 - **Persistent machines** (`crates/machine-entity`, `crates/machine-host`,
   `crates/machine-frontdoor`): the agent's sibling. Same entity, different
-  consumer — a lightweight VM you address by name and reach over SSH, whose
+  consumer: a lightweight VM you address by name and reach over SSH, whose
   *whole rootfs* is the durable state. Not an agent: no run loop, no model, no
   autonomy, just a box that survives.
 
@@ -93,30 +93,30 @@ authenticated form with opaque per-tenant tokens.
 
 Same cluster, different thing on top of it: three nodes, a machine named
 `dev-box`, and an SSH front door on each node. `ssh alice@127.0.0.1 -p 2222`
-lands you in a Firecracker microVM whose disk is an entity — installed packages
-and all — so it outlives disconnection, idle hibernation, and the node it was
+lands you in a Firecracker microVM whose disk is an entity, installed packages
+and all, so it outlives disconnection, idle hibernation, and the node it was
 running on. The front door authenticates your key against the machine's
 *journaled* key set and presents the machine's own journaled host key, so your
 `known_hosts` pin survives every move the machine makes.
 
 The failure drill is the same shape as the agent runtime's: kill the node holding your
 session, reconnect through another node's door, and find your files where you
-left them — rewound at most to the last capture, never forked.
+left them, rewound at most to the last capture, never forked.
 
 Which mechanism holds the guest is the node's `--machine` flag, and the script
 fills it in (set `MACHINE_KIND` to choose yourself). A microVM per machine needs
 Linux with `/dev/kvm` and the assets `guest/machine-rootfs/build.sh` produces;
-elsewhere — macOS included — `--machine docker` holds the machine's *own* rootfs
+elsewhere, macOS included, `--machine docker` holds the machine's *own* rootfs
 in a privileged container that loop-mounts the disk image and chroots into it,
 so the shell and the whole-rootfs persistence are real. It gives shared-kernel
 isolation rather than the microVM boundary, it runs no init inside the rootfs,
 and it has no network: a development mechanism, not the one to put untrusted
 guests behind. With neither available the script picks `--machine fake` and says
-so — everything durable still runs, and only the shell is missing.
+so: everything durable still runs, and only the shell is missing.
 
 ## Going deeper
 
-[docs/README.md](docs/README.md) indexes everything — the ten specifications,
+[docs/README.md](docs/README.md) indexes everything: the ten specifications,
 the guides, and the testing conventions. The paths worth taking first:
 
 - [docs/standalone-deployment.md](docs/standalone-deployment.md): the full
@@ -129,11 +129,11 @@ the guides, and the testing conventions. The paths worth taking first:
   silos, with the gateway joining it as a cluster client.
 - [docs/agent-spec.md](docs/agent-spec.md): why the journal
   is the session.
-- [docs/entity-spec.md](docs/entity-spec.md): the substrate under all of it —
+- [docs/entity-spec.md](docs/entity-spec.md): the substrate under all of it:
   what an entity is, the fenced journal, shards and snapshots, and the facet model
   every storage feature is built from.
 - [docs/machine-spec.md](docs/machine-spec.md): why a machine is an entity plus
-  durable storage and a network seam — the disk facet, the session-grained
+  durable storage and a network seam: the disk facet, the session-grained
   capture cadence, the self-fencing lease, and the SSH front door.
 - [docs/sandbox-spec.md](docs/sandbox-spec.md): the execution tiers a tool call
   runs at, what each grants and withholds, and what a provider must guarantee.

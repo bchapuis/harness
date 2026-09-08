@@ -14,7 +14,7 @@ use std::ops::Range;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// The 32-byte BLAKE3 digest of a blob's bytes — its content address (spec §2).
+/// The 32-byte BLAKE3 digest of a blob's bytes: its content address (spec §2).
 ///
 /// A `BlobId` is a pure function of the bytes: the same content yields the same
 /// id wherever and however it is stored, so a writer and a reader agree on a
@@ -77,7 +77,7 @@ impl Namespace {
         Namespace(id.into())
     }
 
-    /// The opaque identifier's bytes — hashed into the rendezvous key that places
+    /// The opaque identifier's bytes: hashed into the rendezvous key that places
     /// a blob's owners (spec §5.2), never into the [`BlobId`].
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
@@ -149,7 +149,7 @@ pub struct BlobConfig {
     pub max_blob_bytes: usize,
 }
 
-/// Re-hash `bytes` and compare to `id` — the read-path integrity check (spec §4,
+/// Re-hash `bytes` and compare to `id`: the read-path integrity check (spec §4,
 /// **B1**).
 ///
 /// Every `get` MUST call this before returning bytes, *after* any network
@@ -169,7 +169,7 @@ pub fn verify(id: &BlobId, bytes: &[u8]) -> Result<(), BlobError> {
 /// Slice an already-verified whole blob to `range`, clamped to the blob's length
 /// so an out-of-bounds range yields the in-bounds intersection rather than a panic
 /// (efficient range streaming is deferred, spec §2, §10). A blob is obtained and
-/// verified whole, then sliced — on both tiers — so verification always covers the
+/// verified whole, then sliced (on both tiers), so verification always covers the
 /// id's full preimage (**B1**).
 pub(crate) fn slice(bytes: Vec<u8>, range: Option<Range<u64>>) -> Vec<u8> {
     match range {
@@ -187,7 +187,7 @@ pub(crate) fn slice(bytes: Vec<u8>, range: Option<Range<u64>>) -> Vec<u8> {
 ///
 /// The simulation and deployment seam, like `EntityJournal`, `Transport`, and
 /// `Clock` (entity §7.3, actor §4.6): the [`Local`](crate) and `Clustered` tiers
-/// satisfy the contract identically. The trait is codec-agnostic — it moves raw
+/// satisfy the contract identically. The trait is codec-agnostic: it moves raw
 /// bytes, and the [`BlobId`] is computed from those bytes, so no serialization
 /// format leaks across the seam.
 ///

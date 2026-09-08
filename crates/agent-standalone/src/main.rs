@@ -30,7 +30,7 @@ node options (defaults in parentheses; every node must agree on all of them):
   --model <id>         Anthropic model id                 (claude-sonnet-4-6)
   --secret <s>         cluster secret                     (agent-standalone)
   --api-url <url>      Messages API base                  (https://api.anthropic.com)
-  --sandbox <mode>     sandbox provider, REQUIRED — no default:
+  --sandbox <mode>     sandbox provider, REQUIRED, no default:
                          docker | firecracker   confined `shell`, durable workspace
                          durable                typed file tools, no shell
   --sandbox-image <r>  container image for --sandbox docker (required there)

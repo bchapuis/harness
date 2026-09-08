@@ -1,7 +1,7 @@
 //! The compatibility-boundary vocabulary (compatibility spec §2).
 //!
 //! A **compatibility boundary** is any place bytes produced by one build are
-//! consumed by another. Every boundary needs the same three things and no more —
+//! consumed by another. Every boundary needs the same three things and no more:
 //! a **stamp** (the bytes, or the peer, say which revision they are), a **window**
 //! (this build declares which revisions it accepts and which it writes), and a
 //! **verdict** (outside the window it refuses, by name, without parsing).
@@ -23,7 +23,7 @@
 //!
 //! A durable boundary that predates its own stamp needs one move more:
 //! **adoption**. Bytes already on disk carry no magic, so a reader accepts both
-//! forms — [`Stamp::is_stamped`] asks which one it is holding — reads a legacy file
+//! forms: [`Stamp::is_stamped`] asks which one it is holding; reads a legacy file
 //! with the legacy decoder, and lets the next ordinary write rewrite it stamped.
 //! What adoption must not do is treat "no magic" and "a revision I refuse" alike:
 //! the first is a predecessor and the second is a skew, and answering the second
@@ -55,7 +55,7 @@ impl fmt::Display for Version {
     }
 }
 
-/// An inclusive range of accepted revisions — one side of a compatibility check.
+/// An inclusive range of accepted revisions: one side of a compatibility check.
 ///
 /// Kept apart from [`Window`], which also carries the revision its build *writes*:
 /// a peer announces what it can read, never what it will write.
@@ -74,7 +74,7 @@ impl Accepted {
         }
     }
 
-    /// The range accepting exactly one revision — what a peer that announces a
+    /// The range accepting exactly one revision: what a peer that announces a
     /// single version amounts to.
     pub const fn only(v: u16) -> Accepted {
         Accepted::new(v, v)
@@ -105,7 +105,7 @@ impl fmt::Display for Accepted {
 /// ```
 ///
 /// `writes` is a single revision, not a range, because a build that could write
-/// two revisions would have to decide between them at every write — a decision
+/// two revisions would have to decide between them at every write; a decision
 /// belonging to the release, not the call site.
 #[derive(Clone, Copy, Debug)]
 pub struct Window {
@@ -152,7 +152,7 @@ impl Window {
         self.writes
     }
 
-    /// The range to announce across the boundary — what this build can read.
+    /// The range to announce across the boundary: what this build can read.
     pub const fn accepted(&self) -> Accepted {
         self.accepted
     }
@@ -215,7 +215,7 @@ impl Stamp {
     /// The stamp writing `magic` ahead of `window`'s revision.
     ///
     /// `magic` should be chosen so the formats it might be confused with cannot
-    /// begin with it — see `wal`'s header for the arithmetic that keeps a
+    /// begin with it; see `wal`'s header for the arithmetic that keeps a
     /// headerless log from ever reading as a stamped one.
     pub const fn new(magic: &'static [u8], window: Window) -> Stamp {
         assert!(!magic.is_empty(), "a stamp needs a magic to recognize");
@@ -232,14 +232,14 @@ impl Stamp {
         self.magic
     }
 
-    /// Whether `bytes` carry this stamp's magic — the question an **adopting**
+    /// Whether `bytes` carry this stamp's magic: the question an **adopting**
     /// reader asks before [`unstamp`](Stamp::unstamp), so an unstamped predecessor
     /// can be read by its own decoder while a stamped input at an unreadable
     /// revision is still refused (**V2**).
     ///
     /// Without it the two are one [`Incompatible::Unstamped`], and a reader that
     /// took that to mean "try the old decoder" would silently downgrade a refusal
-    /// into a misparse — the failure the stamp exists to prevent.
+    /// into a misparse: the failure the stamp exists to prevent.
     ///
     /// This is a question about the *format*, not about the shape of a verdict: a
     /// caller still propagates [`Incompatible`] unexamined.
@@ -256,8 +256,8 @@ impl Stamp {
     /// a version skew (**V2**) and never reaches the decoder; only bytes without it
     /// are the predecessor, which its own decoder reads exactly as it always did.
     ///
-    /// Asking the two questions the other way round — or answering
-    /// [`Incompatible::Version`] by trying the old decoder — turns a refusal into
+    /// Asking the two questions the other way round, or answering
+    /// [`Incompatible::Version`] by trying the old decoder: turns a refusal into
     /// the misparse the stamp was added to stop, which is why every durable
     /// boundary in the tree adopts through this one method rather than writing the
     /// sequence out again.
@@ -315,7 +315,7 @@ impl Stamp {
 /// An extension area is only sound if unknown entries can be *safely* ignored, and
 /// that is not true of every change. So criticality is carried in the key:
 ///
-/// - a key with [`CRITICAL`](Extensions::CRITICAL) set MUST be understood — a reader
+/// - a key with [`CRITICAL`](Extensions::CRITICAL) set MUST be understood: a reader
 ///   that does not know it refuses the whole input;
 /// - any other key MAY be ignored, so a reader that predates it behaves exactly as
 ///   it did before.
@@ -399,7 +399,7 @@ pub enum Incompatible {
         found: Version,
         accepted: Accepted,
     },
-    /// Two ranges with no revision in common — the handshake case, where neither
+    /// Two ranges with no revision in common: the handshake case, where neither
     /// end is wrong and one of them has to move.
     Disjoint {
         boundary: &'static str,
@@ -444,7 +444,7 @@ impl fmt::Display for Incompatible {
                 theirs,
             } => write!(
                 f,
-                "{boundary}: no shared revision — we read {ours}, the peer reads {theirs}"
+                "{boundary}: no shared revision; we read {ours}, the peer reads {theirs}"
             ),
             Incompatible::UnknownCritical { boundary, key } => write!(
                 f,
@@ -505,7 +505,7 @@ mod tests {
         let err = WIRE.negotiate(Accepted::new(7, 9)).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "test.wire: no shared revision — we read v1..=v3, the peer reads v7..=v9"
+            "test.wire: no shared revision; we read v1..=v3, the peer reads v7..=v9"
         );
     }
 

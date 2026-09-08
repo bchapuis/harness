@@ -1,4 +1,4 @@
-//! The machine guest-agent wire protocol (machine spec §5.1) — the **single
+//! The machine guest-agent wire protocol (machine spec §5.1), the **single
 //! definition** all three peers consume: the front door's channel relay
 //! (`machine-frontdoor`), the machine's workspace-sync driver
 //! (`machine_entity::runtime`), and the guest agent (`guest/machine-agent`, which path-
@@ -63,11 +63,11 @@ pub enum ChannelKind {
     /// stream the host sends: [`Frame::Data`] chunks then [`Frame::Eof`],
     /// accumulated under [`MAX_TAR`]. The agent clears the directory's
     /// children (the mount survives), unpacks, and replies
-    /// [`Frame::ExitStatus`] `0` — or [`Frame::Stderr`] then `ExitStatus` 1.
+    /// [`Frame::ExitStatus`] `0`, or [`Frame::Stderr`] then `ExitStatus` 1.
     WsPush,
     /// Pack the guest's `/workspace` and send it to the host as
     /// [`Frame::Data`] chunks then [`Frame::Eof`] then [`Frame::ExitStatus`]
-    /// `0`, the pack budgeted under [`MAX_TAR`] — or [`Frame::Stderr`] then
+    /// `0`, the pack budgeted under [`MAX_TAR`], or [`Frame::Stderr`] then
     /// `ExitStatus` 1 with no data.
     WsPull,
 }
@@ -96,7 +96,7 @@ pub enum Frame {
     /// Guest→host: stderr (SSH extended data). Never sent for a PTY (a
     /// terminal merges the streams).
     Stderr(Vec<u8>),
-    /// Host→guest: the terminal resized (`cols`, `rows`) — a PTY channel only.
+    /// Host→guest: the terminal resized (`cols`, `rows`); a PTY channel only.
     WindowChange { cols: u16, rows: u16 },
     /// Host→guest: deliver a signal to the process group by name (e.g.
     /// `"TERM"`, `"INT"`), the SSH `signal` request.

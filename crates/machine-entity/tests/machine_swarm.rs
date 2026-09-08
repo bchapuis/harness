@@ -6,7 +6,7 @@
 //! delay. What that uniquely exercises:
 //!
 //! - **M1/M3 under crashes.** A leader crash mid-session ends the activation;
-//!   the next attach rebuilds the image from the last committed capture —
+//!   the next attach rebuilds the image from the last committed capture,
 //!   never a fork, never a torn image (the disk facet's swarm obligations,
 //!   re-run here with a live "guest" dirtying the image between captures).
 //! - **M5's self-fence.** A deposed activation's next checkpoint-alarm append
@@ -197,8 +197,8 @@ impl ClusterWorkload for MachineSwarm {
             futures::future::join_all(tasks).await;
 
             // Cleanup: unlike the disk/sql swarm entities, an *attached* machine
-            // never goes quiet — the checkpoint alarm chains by design
-            // (machine §4) — and a faulted `Detach` can leak an attachment. So
+            // never goes quiet; the checkpoint alarm chains by design
+            // (machine §4), and a faulted `Detach` can leak an attachment. So
             // the drive ends by outlasting the bounded nemesis, healing
             // whatever it left torn, and detaching every surviving attachment,
             // letting each machine run its final capture and consume its
@@ -265,8 +265,8 @@ fn machine_cluster_swarm_actually_fires_each_fault_type() {
     // #8, sized for the slowest workload in the tree: `coverage_seeds` never
     // narrows, so the declared range is the whole cost, and a machine seed drives
     // a fake guest through boot, dirty blocks, and capture on three nodes. Four
-    // carries the claim — each seed draws its own transport fault rates and runs
-    // six nemesis rounds — without the coverage check dominating the suite.
+    // carries the claim (each seed draws its own transport fault rates and runs
+    // six nemesis rounds) without the coverage check dominating the suite.
     let dir = tempfile::tempdir().expect("tempdir");
     let workload = MachineSwarm {
         nodes: 3,

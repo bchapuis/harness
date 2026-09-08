@@ -1,5 +1,5 @@
 //! E10: an entity that does not implement `EntityHandler<Unhandled>` must reject a
-//! call carrying `Unhandled` — at compile time, via the `G: EntityHandler<M>`
+//! call carrying `Unhandled`, at compile time, via the `G: EntityHandler<M>`
 //! bound on `EntityRef::ask`.
 
 use actor_core::LocalSystem;
@@ -67,7 +67,7 @@ impl Message for IsOn {
 }
 
 // A second handler, so the command type is inferred from the argument (not
-// unified with a lone impl) — making `Switch: EntityHandler<Unhandled>` the
+// unified with a lone impl), making `Switch: EntityHandler<Unhandled>` the
 // unsatisfied bound the error names.
 impl EntityHandler<IsOn> for Switch {
     async fn handle(&self, state: &State, _msg: IsOn, _ctx: &EntityCtx<Self>) -> (Vec<Event>, bool) {

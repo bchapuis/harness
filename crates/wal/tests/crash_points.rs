@@ -3,7 +3,7 @@
 //! A write-ahead log's whole promise is what survives a process that died
 //! mid-write, and the only interesting question is *where* it died. The unit
 //! tests in `src/lib.rs` check a handful of hand-picked truncations; this file
-//! checks **all of them** — every byte offset from empty to the full file — plus
+//! checks **all of them** (every byte offset from empty to the full file) plus
 //! every single-byte corruption of a header, payload, and checksum.
 //!
 //! Exhaustive rather than seeded on purpose. Elsewhere in this tree a property is
@@ -15,14 +15,14 @@
 //!
 //! The property, at every crash point:
 //!
-//! 1. **Prefix.** Recovery yields some prefix of the appended records — never a
+//! 1. **Prefix.** Recovery yields some prefix of the appended records, never a
 //!    record that was never written, never one out of order, never a partial one
 //!    deserialized into a whole.
 //! 2. **Monotone.** Truncating further never recovers *more*. This is what rules
 //!    out a scan that resynchronizes on a byte pattern and finds a "record" in the
 //!    middle of a payload.
 //! 3. **Durable.** Recovery rewrites the valid prefix to disk, so reopening the
-//!    recovered file yields exactly the same records — a torn tail is dropped
+//!    recovered file yields exactly the same records: a torn tail is dropped
 //!    once, not re-examined forever.
 //! 4. **Usable.** A recovered log still appends, and the appended record comes
 //!    back on the next open. Recovery leaves the file in a writable state, with
@@ -116,7 +116,7 @@ fn every_truncation_recovers_a_prefix_and_stays_recovered() {
         let again = Wal::<Entry>::open(&path, MAX_RECORD, &RECORDS).expect("reopen").1;
         assert_eq!(
             again, recovered,
-            "reopening the log recovered at {cut} produced a different history — \
+            "reopening the log recovered at {cut} produced a different history: \
              the torn tail was not truncated durably",
         );
 
@@ -140,7 +140,7 @@ fn every_truncation_recovers_a_prefix_and_stays_recovered() {
     }
 
     // The exhaustive loop is only meaningful if it actually saw the log grow from
-    // empty to whole — otherwise the file was empty and every case was trivial.
+    // empty to whole: otherwise the file was empty and every case was trivial.
     assert_eq!(
         previous,
         records.len(),
@@ -165,7 +165,7 @@ fn every_single_byte_corruption_drops_that_record_and_the_rest() {
             // Damage in the *file* header is a different outcome, and the stronger
             // one: the log's identity is what was damaged, so nothing about the
             // frames can be trusted and `open` refuses outright rather than
-            // recovering a prefix. Every one of the sixteen bytes is covered — the
+            // recovering a prefix. Every one of the sixteen bytes is covered: the
             // magic, the frame revision, the checksum kind, the record schema, and
             // the reserved field.
             let path = dir.path().join(format!("hdr{pos}.log"));
@@ -188,7 +188,7 @@ fn every_single_byte_corruption_drops_that_record_and_the_rest() {
             recovered[..],
             records[..recovered.len()],
             "corrupting byte {pos} recovered a history that is not a prefix of \
-             the appended records — a damaged record was returned as good",
+             the appended records: a damaged record was returned as good",
         );
     }
 }
@@ -201,7 +201,7 @@ fn a_length_header_claiming_more_than_the_file_holds_is_refused() {
 
     // Rewrite the first record's length header as `MAX_RECORD + 1`. The scan must
     // treat an oversized length as corruption rather than trusting it and reading
-    // past the end — the case a hostile or bit-rotted header produces. The frames
+    // past the end: the case a hostile or bit-rotted header produces. The frames
     // begin after the file header, which this must not disturb.
     full[wal::HEADER_LEN..wal::HEADER_LEN + 4].copy_from_slice(&(MAX_RECORD + 1).to_le_bytes());
     let (recovered, _) = recover(dir.path(), "oversized.log", &full);

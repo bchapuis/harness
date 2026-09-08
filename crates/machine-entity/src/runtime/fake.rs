@@ -196,10 +196,10 @@ impl MachineRuntime for FakeRuntime {
             if self.killed.load(Ordering::Relaxed) {
                 return Err(RuntimeError("fake runtime killed".to_string()));
             }
-            // All synchronous IO, so the guard is held across it — no clone
+            // All synchronous IO, so the guard is held across it, no clone
             // of the file bytes.
             let map = self.lock_ws();
-            // Replace, never merge — the guest's view is authoritative
+            // Replace, never merge: the guest's view is authoritative
             // across a pull, as for the real agent.
             for entry in std::fs::read_dir(&ws)? {
                 let entry = entry?;

@@ -15,7 +15,7 @@
 //!   control plane and node-internal addresses (link-local and metadata
 //!   endpoints included).
 //!
-//! [`nft_ruleset`] is a **pure function** — the mechanism M6 is verified
+//! [`nft_ruleset`] is a **pure function**: the mechanism M6 is verified
 //! against. Applying it (the tap device, the node NAT, invoking `nft`) is the
 //! Linux-only, `CAP_NET_ADMIN` realization behind [`feature = "net"`](apply).
 
@@ -27,7 +27,7 @@ use entity::BlobId;
 use entity::EntityName;
 
 /// The interface name for a machine's tap device: `hm-` plus 8 hex of the
-/// entity-name hash. Stable per machine — the attribution key (M6) — and short
+/// entity-name hash. Stable per machine: the attribution key (M6), and short
 /// enough for the 15-char Linux interface-name limit.
 pub fn tap_name(machine: &EntityName) -> String {
     let hash = BlobId::of(machine.to_string().as_bytes());
@@ -131,8 +131,8 @@ pub fn nft_ruleset(
 
 /// Deployment-level egress configuration for a node (machine §5.2): the ranges
 /// the ruleset must fence off, the uplink it masquerades out, and the address
-/// pool per-machine guest /30s are carved from. The per-machine half — which
-/// slot, which policy — is decided per boot. Its presence is what turns egress
+/// pool per-machine guest /30s are carved from. The per-machine half (which
+/// slot, which policy) is decided per boot. Its presence is what turns egress
 /// on: a provider built without it boots machines with no NIC, so a deployment
 /// that has not provisioned an uplink stays functional.
 #[derive(Clone, Debug)]
@@ -157,7 +157,7 @@ pub struct EgressConfig {
 /// /30 the tap is addressed from, and the guest's own address, gateway, and MAC.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestNet {
-    /// The tap device name — the stable per-machine attribution key ([`tap_name`]).
+    /// The tap device name: the stable per-machine attribution key ([`tap_name`]).
     pub tap: String,
     /// The tap's host-side address with prefix, e.g. `172.31.0.1/30`; what
     /// [`apply::install`] assigns to the tap and the guest's default gateway.
@@ -167,7 +167,7 @@ pub struct GuestNet {
     /// The guest's own address, e.g. `172.31.0.2`.
     pub guest_ip: String,
     /// A stable, locally-administered MAC for the guest NIC (derived from the
-    /// machine name, so it survives reboots — attribution stability, M6).
+    /// machine name, so it survives reboots: attribution stability, M6).
     pub guest_mac: String,
 }
 
@@ -386,7 +386,7 @@ mod tests {
             "the tap is the attribution key"
         );
 
-        // The next slot is the next /30 — four addresses on.
+        // The next slot is the next /30: four addresses on.
         let b = guest_net(&machine(), base, 1);
         assert_eq!(b.gateway, "172.31.0.5");
         assert_eq!(b.guest_ip, "172.31.0.6");

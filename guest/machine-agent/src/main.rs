@@ -1,11 +1,11 @@
 //! The persistent machine's guest agent (machine spec §5.1): a channel broker
-//! inside the microVM, serving the wire protocol in [`machine_proto`] — the
+//! inside the microVM, serving the wire protocol in [`machine_proto`]; the
 //! same crate the front door compiles, so the two ends cannot drift.
 //!
 //! Unlike agent-sandbox's `fc-agent`, this is **not** pid 1: it is an
 //! ordinary service the *user's own rootfs* ships (machine §2.1), started by
 //! the rootfs's init. So it mounts nothing and assumes a booted system. It
-//! listens on vsock port 62 and serves each connection — one SSH channel — on
+//! listens on vsock port 62 and serves each connection (one SSH channel) on
 //! its own thread, so a wedged PTY never blocks the next channel.
 //!
 //! vsock is reachable only from the host (machine §5.1): possession of the
@@ -266,7 +266,7 @@ fn serve_piped<S: Read + Write + AsRawFd + Send + 'static>(
     let err_writer = Arc::clone(&writer);
     let err = std::thread::spawn(move || pump(&mut stderr, &err_writer, Frame::Stderr));
 
-    // The child's own death ends the channel — never the host falling quiet.
+    // The child's own death ends the channel, never the host falling quiet.
     // The host closes its end only *after* it reads the exit status (the front
     // door turns that frame into SSH's `exit-status` and closes the channel),
     // so waiting for the host to close before reporting deadlocks the pair:
@@ -331,7 +331,7 @@ fn serve_pty<S: Read + Write + AsRawFd + Send + 'static>(
     // master → host Data, and then the exit status: the shell's death is what
     // ends the channel, never the host falling quiet. The master reads EIO
     // once the last slave fd closes, which *is* the shell exiting, so the pump
-    // returning is the signal — see `serve_piped` for why waiting on the host
+    // returning is the signal; see `serve_piped` for why waiting on the host
     // instead would deadlock the pair.
     let out_master = Arc::clone(&master);
     let out_writer = Arc::clone(&writer);
@@ -426,7 +426,7 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 }
 
 /// Deliver a named signal (the SSH `signal` request) to the process group led
-/// by `pgid` — a piped child's own group, or the PTY's foreground job.
+/// by `pgid`: a piped child's own group, or the PTY's foreground job.
 fn signal_group(pgid: i32, name: &str) {
     #[cfg(target_os = "linux")]
     {
@@ -619,7 +619,7 @@ mod tests {
 
     /// The same contract for a terminal: leaving the shell ends the channel.
     /// This is the demo's `exit`, which hung the client before the shell's
-    /// death — not the host's silence — became what closes a PTY channel.
+    /// death (not the host's silence) became what closes a PTY channel.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_pty_channel_reports_its_status_when_the_shell_exits() {

@@ -9,7 +9,7 @@
 //! **The files are evidence, not output.** A fixture for a revision that has
 //! shipped records what those bytes meant, so regenerating it destroys the only
 //! thing holding **V4**/**V5** up. `GOLDEN_UPDATE=1` therefore writes only files
-//! that are *absent* — the case of adding a revision — and refuses to touch one
+//! that are *absent* (the case of adding a revision), and refuses to touch one
 //! that exists. A format change that makes an existing fixture unreadable is the
 //! corpus working, not a stale fixture: widen the window, keep the old decoder,
 //! and add the new revision's bytes beside it.
@@ -56,7 +56,7 @@ const MAX: u32 = 1 << 20;
 
 /// The window the corpus is written and read under. `wal.test` rather than a live
 /// caller's boundary: this file exercises the *frame* layout and the header, which
-/// is what `wal.frame` versions — the callers' record schemas are their own
+/// is what `wal.frame` versions; the callers' record schemas are their own
 /// boundaries and their own fixtures.
 const RECORDS: compat::Window = compat::Window::at("wal.test", 1);
 
@@ -75,7 +75,7 @@ fn golden(boundary: &str, revision: u16, produce: impl FnOnce() -> Vec<u8>) -> V
         std::env::var_os("GOLDEN_UPDATE").is_some(),
         "no corpus fixture at {}. If this revision is new, create it with \
          GOLDEN_UPDATE=1 cargo test -p wal --test corpus. If it is not, the file \
-         was deleted — restore it from git rather than regenerating it, or the \
+         was deleted; restore it from git rather than regenerating it, or the \
          corpus stops being evidence of what the old bytes meant.",
         path.display(),
     );
@@ -101,7 +101,7 @@ fn wal_frame_v1_still_opens_and_recovers_its_records() {
     let bytes = golden("wal.frame", 1, produce_frame_log);
 
     // `open` truncates a torn tail and stamps a fresh header, so it must never run
-    // against the checked-in file itself — a build that could not read the fixture
+    // against the checked-in file itself: a build that could not read the fixture
     // would rewrite it and erase the failure.
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("log");
@@ -121,7 +121,7 @@ fn wal_frame_v1_still_opens_and_recovers_its_records() {
     assert_eq!(
         std::fs::read(&path).expect("re-read"),
         bytes,
-        "opening the fixture rewrote it — a frame was discarded as torn",
+        "opening the fixture rewrote it: a frame was discarded as torn",
     );
 }
 

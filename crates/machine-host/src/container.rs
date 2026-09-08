@@ -10,7 +10,7 @@
 //! Two ways in, because the two consumers hold different things:
 //!
 //! - [`ContainerHost::start_container`] runs any OCI image with mounts, a user,
-//!   and an entrypoint of the caller's choosing — the shape the agent sandbox's
+//!   and an entrypoint of the caller's choosing: the shape the agent sandbox's
 //!   `Native` tier needs, whose virtue is requiring *nothing* inside the image.
 //! - [`MachineHost::start`] holds a **block image** guest: the runner image
 //!   loop-mounts `spec.disk` and chroots into it, so the guest is the disk's own
@@ -19,8 +19,8 @@
 //!   and `mount` cost, and the reason this mechanism is a development one.
 //!
 //! Reaching an agent inside differs from vsock: a unix socket the guest creates
-//! is not one the host can dial — on macOS the container sits inside a VM of its
-//! own — so [`MachineGuest::connect`] relays through `docker exec` and `socat`, then
+//! is not one the host can dial (on macOS the container sits inside a VM of its
+//! own), so [`MachineGuest::connect`] relays through `docker exec` and `socat`, then
 //! speaks the same muxer handshake Firecracker performs host-side. One agent
 //! binary therefore serves either mechanism unchanged.
 
@@ -388,7 +388,7 @@ pub struct ContainerGuest {
 
 impl ContainerGuest {
     /// Run a command **in the container**, outside any chroot its runner made:
-    /// this is the host acting on the container, never the guest's own shell —
+    /// this is the host acting on the container, never the guest's own shell;
     /// except for the one consumer whose guest *is* the container (the sandbox's
     /// `Native` tier), for which this is the whole mechanism.
     ///
@@ -453,7 +453,7 @@ impl MachineGuest for ContainerGuest {
         Box::pin(async move {
             // Freezing the container's processes stops new writes but flushes
             // none: the guest's blocks sit in this kernel's cache, not in the
-            // image file a capture scans. So sync first — which makes this
+            // image file a capture scans. So sync first, which makes this
             // mechanism's quiescent point filesystem-clean, not merely
             // crash-consistent (machine §2.2).
             self.exec(&["sync"]).await?;
@@ -480,7 +480,7 @@ impl MachineGuest for ContainerGuest {
             // `rm -f`, not `stop`: a paused container cannot be stopped
             // gracefully, and this path is reached from a forced step-down
             // too. The runner's own unmount is a nicety for `docker stop`, not
-            // something durability rests on — the consumer's capture cadence
+            // something durability rests on: the consumer's capture cadence
             // bounds exactly this loss (machine §4, M3).
             self.stopped.store(true, Ordering::SeqCst);
             let _ = run(&self.cli, &["rm", "-f", &self.name]).await;
@@ -512,8 +512,8 @@ async fn connect(cli: &str, name: &str, port: u32) -> Result<Box<dyn Duplex>, Gu
         // A relay that cannot reach the socket is the agent being absent, which
         // for a guest that should be serving means the guest is effectively
         // gone: the consumer re-provisions rather than retrying in place. The
-        // relay's own stderr is what says *why* — a missing container reads as
-        // the daemon's message, not as an unexplained short read — so it is
+        // relay's own stderr is what says *why* (a missing container reads as
+        // the daemon's message, not as an unexplained short read), so it is
         // read here, on the one path that can use it.
         Err(e) => Err(GuestError::Gone(format!(
             "container {name}: agent on port {port}: {e}{}",
@@ -562,7 +562,7 @@ async fn exec_channel(cli: &str, name: &str, port: u32) -> std::io::Result<ExecC
 
 /// One guest channel: the stdio of a relaying `docker exec`. Holds the child so
 /// the exec lives exactly as long as the channel and dies with it
-/// (`kill_on_drop`) — a dropped PTY channel must not leave a relay attached to
+/// (`kill_on_drop`): a dropped PTY channel must not leave a relay attached to
 /// the agent. Private: callers receive it as a [`Duplex`].
 struct ExecChannel {
     _child: Child,
@@ -571,7 +571,7 @@ struct ExecChannel {
     /// The relay's own complaints, read only when opening the channel failed
     /// ([`stderr_tail`](ExecChannel::stderr_tail)). Piped rather than inherited
     /// so they land in that error instead of raw on the host's stderr; a channel
-    /// that opened keeps the pipe idle, which `socat` never fills — it writes
+    /// that opened keeps the pipe idle, which `socat` never fills: it writes
     /// here only on the way out.
     stderr: Option<ChildStderr>,
 }

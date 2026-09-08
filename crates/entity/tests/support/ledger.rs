@@ -2,7 +2,7 @@
 //!
 //! An entity whose durable state is entirely its SQLite database, plus the three
 //! messages both SQL suites drive it with. Shared by `sql.rs` (scenarios) and
-//! `sql_swarm.rs` (sweeps) so the two exercise the *same* entity — a fixture that
+//! `sql_swarm.rs` (sweeps) so the two exercise the *same* entity: a fixture that
 //! drifted between them would make the sweep stop covering what the scenarios
 //! specify.
 //!
@@ -47,7 +47,7 @@ pub fn ensure_schema(ctx: &EntityCtx<Ledger>) {
         .expect("ddl");
 }
 
-/// Insert one entry; reply with the row count after the insert — read-your-own
+/// Insert one entry; reply with the row count after the insert; read-your-own
 /// (transactional) writes inside the command.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Add {
@@ -78,7 +78,7 @@ impl EntityHandler<Add> for Ledger {
 }
 
 /// Insert a row whose value SQLite itself draws with `random()`, and reply with
-/// it — nondeterministic SQL, fine under physical replication (§7.14, F1 holds
+/// it: nondeterministic SQL, fine under physical replication (§7.14, F1 holds
 /// on the frames, not the SQL).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AddRandom;
@@ -113,7 +113,7 @@ impl EntityHandler<AddRandom> for Ledger {
     }
 }
 
-/// The sum of all entries — a pure read: no frames, no record, no commit (§7.5).
+/// The sum of all entries, a pure read: no frames, no record, no commit (§7.5).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Total;
 impl Message for Total {

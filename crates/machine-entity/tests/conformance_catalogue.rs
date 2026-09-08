@@ -4,7 +4,7 @@
 //! The machine's spec↔code drift gate, the same pattern guarding the core,
 //! utilities, agent, sandbox, and entity catalogues. It fails the build if an
 //! M-number is missing or duplicated, if an entry claims no verification method, or
-//! if a pointer names a file that no longer exists — which is what keeps §7's
+//! if a pointer names a file that no longer exists, which is what keeps §7's
 //! "Verified by" column mechanically true rather than merely written down.
 
 mod support;
@@ -53,7 +53,7 @@ fn every_named_test_exists() {
             assert!(
                 defined_in(&name).is_some(),
                 "M{} names test {name:?}, which is defined in none of the machine \
-                 crates — a rename left the spec's \"Verified by\" column pointing \
+                 crates: a rename left the spec's \"Verified by\" column pointing \
                  at nothing",
                 e.invariant,
             );
@@ -77,7 +77,7 @@ fn named_tests(verify: &[Verify]) -> Vec<String> {
 ///
 /// The machine spans `machine-entity`, `machine-frontdoor`, and `machine-host`, and
 /// half the point of M4 and M6 is that they are decided outside the entity's own
-/// suites — so the search covers the siblings, and the answer says which file.
+/// suites, so the search covers the siblings, and the answer says which file.
 fn defined_in(name: &str) -> Option<String> {
     fn walk(dir: &Path, needle: &str, out: &mut Option<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {

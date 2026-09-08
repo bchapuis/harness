@@ -4,7 +4,7 @@
 //! A subscriber reconciles by `Seq`: it rides an entity record subscription and
 //! backfills from the journal on any gap or after the stream goes dead. The
 //! property under test is that the reconstructed sequence equals the committed
-//! one — contiguous, in order, no gap or duplicate — regardless of buffer
+//! one (contiguous, in order, no gap or duplicate) regardless of buffer
 //! overflow (a burst writer) or a shard-leader crash mid-stream (push stops; the
 //! re-sync backfill recovers every post-move record). The collector below is the
 //! reference reconciler; `agent::Follower` implements the same contract.
@@ -40,7 +40,7 @@ const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
 
 /// Append `val`, retrying through a failover (`NotLeader`/`Unavailable`) until it
-/// commits — the writer's at-least-once discipline across an election.
+/// commits: the writer's at-least-once discipline across an election.
 async fn append_retry(system: &SimNode, entity: &EntityRef<LogEntity>, val: i64) {
     loop {
         match entity.ask(Append(val)).await {
@@ -208,7 +208,7 @@ fn subscription_survives_a_leader_crash_mid_stream() {
 
 #[test]
 fn hibernation_closes_the_subscribers_stream() {
-    // §7.9: when the host drops its sink set — here by hibernating (§10) — a
+    // §7.9: when the host drops its sink set; here by hibernating (§10); a
     // dropped sink *observes its stream close* and re-subscribes. The close has to
     // be told to the sink, which lives on the subscriber's node: the host merely
     // dropping its end would leave the stream open and silent, and a subscriber

@@ -2,7 +2,7 @@
 //!
 //! Layout is the sessions list (left), the transcript (right), the input line,
 //! and a status/hints bar. The transcript is word-wrapped *here* into physical
-//! rows so the scroll offset is exact — when "following", the view parks at the
+//! rows so the scroll offset is exact, when "following", the view parks at the
 //! bottom; scrolling up detaches until the user pages back down. A `?` overlay
 //! maps every key to the gateway endpoint it drives.
 
@@ -128,7 +128,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     // re-wrapping can disagree with our offset and clip the final record.
     let logical = if app.records.is_empty() {
         vec![Line::styled(
-            "  no records yet — type a prompt below and press Enter",
+            "  no records yet: type a prompt below and press Enter",
             Style::default().fg(DIM),
         )]
     } else {
@@ -247,7 +247,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
 
     let mut lines = vec![
         Line::styled(
-            " agent-tui — keys map to gateway endpoints",
+            " agent-tui: keys map to gateway endpoints",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
@@ -585,7 +585,7 @@ mod tests {
         // "the quick " is 10, "brown fox " is 10, then "jumps".
         let texts: Vec<String> = rows.iter().map(text).collect();
         assert_eq!(texts, vec!["the quick ", "brown fox ", "jumps"]);
-        // No row exceeds the width — the property the scroll math depends on.
+        // No row exceeds the width: the property the scroll math depends on.
         for row in &rows {
             assert!(text(row).chars().count() <= 10);
         }

@@ -2,8 +2,8 @@
 //! a request acts as (design: `docs/multi-tenant-edge.md`).
 //!
 //! The trust boundary is the gateway. A request presents a token in its
-//! `Authorization: Bearer` header; the gateway verifies it here — at the edge,
-//! never in an entity, whose fold must stay pure (entity §4.1) — to a
+//! `Authorization: Bearer` header; the gateway verifies it here, at the edge,
+//! never in an entity, whose fold must stay pure (entity §4.1), to a
 //! [`PrincipalId`]. Every session that request then addresses is scoped under
 //! that principal by [`scoped_session`], so one tenant can never name another's
 //! entities.
@@ -17,8 +17,8 @@ use std::net::IpAddr;
 
 /// The tenant identity a request acts as.
 ///
-/// The charset is deliberately narrow — ASCII alphanumerics plus `_`, `-`, `.`
-/// — and excludes `/`, so a principal can prefix a session key as
+/// The charset is deliberately narrow: ASCII alphanumerics plus `_`, `-`, `.`,
+/// and excludes `/`, so a principal can prefix a session key as
 /// `"{principal}/{session}"` ([`scoped_session`]) and the prefix splits back
 /// unambiguously. That namespacing is what isolates one tenant's entities.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -26,7 +26,7 @@ pub struct PrincipalId(String);
 
 impl PrincipalId {
     /// Parse a principal id, accepting only `[A-Za-z0-9_.-]` and rejecting the
-    /// empty string. `None` for anything else — notably a `/`, which would break
+    /// empty string. `None` for anything else: notably a `/`, which would break
     /// the session-key prefixing the isolation relies on.
     pub fn parse(s: &str) -> Option<PrincipalId> {
         let ok = !s.is_empty()
@@ -50,12 +50,12 @@ impl std::fmt::Display for PrincipalId {
 /// Whether a **client-supplied** session id is well formed: non-empty and free of
 /// `/`.
 ///
-/// Cross-tenant isolation does not depend on this — the principal prefix already
+/// Cross-tenant isolation does not depend on this: the principal prefix already
 /// confines a client to its own namespace, whatever it sends ([`scoped_session`]).
 /// What the rule protects is the namespace *inside* a tenant. A delegated sub-agent
 /// is named `"{session}/{turn}/{child}"` (multi-tenant-edge design), and those
 /// segments are minted by the agent, never supplied by a client. A client free to
-/// send `"demo/t-1/c-2"` could therefore address — or pre-create — one of its own
+/// send `"demo/t-1/c-2"` could therefore address (or pre-create) one of its own
 /// sub-agents' entities, which is not a boundary break but is a name collision the
 /// caller was never meant to be able to cause.
 ///
@@ -66,8 +66,8 @@ pub fn is_valid_session(session: &str) -> bool {
 }
 
 /// The entity session key for `session` under `principal`: the principal-prefixed
-/// namespace that isolates tenants. The gateway always supplies the prefix — a
-/// client only ever names the unprefixed `session` — so a client cannot address
+/// namespace that isolates tenants. The gateway always supplies the prefix (a
+/// client only ever names the unprefixed `session`), so a client cannot address
 /// an entity outside its own principal. A delegated child id (`session/t-1/c-2`)
 /// inherits the prefix transitively, keeping worker entities in-tenant for free.
 pub fn scoped_session(principal: &PrincipalId, session: &str) -> String {
@@ -83,7 +83,7 @@ pub fn unscope_session<'a>(principal: &PrincipalId, key: &'a str) -> Option<&'a 
         .and_then(|rest| rest.strip_prefix('/'))
 }
 
-/// Whether `host` is a loopback interface — the bind the insecure dev mode is
+/// Whether `host` is a loopback interface: the bind the insecure dev mode is
 /// confined to. Accepts the common literals and any address that parses as a
 /// loopback IP.
 pub fn is_loopback(host: &str) -> bool {
@@ -94,7 +94,7 @@ pub fn is_loopback(host: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Verify a bearer token, returning the principal it authenticates — or `None`
+/// Verify a bearer token, returning the principal it authenticates, or `None`
 /// if the token is unknown or malformed. Runs at the gateway edge, so it may be
 /// stateful and impure (unlike an entity fold).
 pub trait TokenVerifier: Send + Sync {
@@ -102,8 +102,8 @@ pub trait TokenVerifier: Send + Sync {
 }
 
 /// The secure mode: a static map of opaque secret token → principal, supplied by
-/// the operator (`--auth-tokens <file>`). A token is an API key — secret,
-/// high-entropy, possession-grants-the-principal — so verification is a lookup.
+/// the operator (`--auth-tokens <file>`). A token is an API key (secret,
+/// high-entropy, possession-grants-the-principal), so verification is a lookup.
 #[derive(Clone, Debug, Default)]
 pub struct StaticTokens {
     by_token: HashMap<String, PrincipalId>,

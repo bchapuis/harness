@@ -26,7 +26,7 @@ pub struct FaultStats {
     pub registry_outages: u64,
     /// Registry fetches served a stale snapshot by a seeded roll (spec §18.3).
     pub registry_stale: u64,
-    /// Nodes moved to another release's wire window by the nemesis — a rolling
+    /// Nodes moved to another release's wire window by the nemesis: a rolling
     /// upgrade or a rollback (spec §18.3, compatibility §4).
     pub upgrades: u64,
 }

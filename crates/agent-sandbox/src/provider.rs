@@ -94,7 +94,7 @@ pub struct TieredSandboxes {
     /// Deployment-registered compute modules (the QuickJS runner and kin):
     /// resolved by name before any workspace path, so a guest write can
     /// never shadow them. Shared across sessions, which sandbox spec §2.3
-    /// item 2 permits: a module is code, not working state — every call
+    /// item 2 permits: a module is code, not working state; every call
     /// still gets a fresh store.
     modules: BTreeMap<String, Arc<[u8]>>,
     /// The container CLI binary for the native tier; `docker` by default.
@@ -209,8 +209,8 @@ impl SandboxProvider for TieredSandboxes {
         #[cfg(feature = "compute")]
         let modules = Arc::new(self.modules.clone());
         // §2.2 of the sandbox spec: holding `Native` implies `Network`'s
-        // grants. Neither native realization has a dataplane — the container
-        // runs `--network none`, the microVM has no network device — so both
+        // grants. Neither native realization has a dataplane (the container
+        // runs `--network none`, the microVM has no network device), so both
         // deliver exactly an *empty* egress allowlist. A profile that names
         // egress (or explicitly caps in `Network`) asks for a dataplane this
         // provider does not have: fail the open loudly, never silently
@@ -243,7 +243,7 @@ impl SandboxProvider for TieredSandboxes {
             // already; open creates-if-missing rather than demanding it. The
             // loss detector below is unaffected: it watches for the directory
             // *vanishing after* this open. Opening it as a capability handle
-            // is this crate's only use of ambient authority — every tier
+            // is this crate's only use of ambient authority: every tier
             // after this reaches the filesystem through the handle (S1).
             std::fs::create_dir_all(&workspace)
                 .map_err(|e| SandboxError(format!("workspace open: {e}")))?;
@@ -409,7 +409,7 @@ pub(crate) fn capped(bytes: &[u8]) -> String {
 /// journal `WorkspaceReset`). The loss outranks even an `Ok`: the open handle
 /// keeps a deleted directory's fd alive, so a call can "succeed" against it
 /// (an empty listing, a tar sync of nothing) while its effects have no
-/// durable home — an ambient stat of the path, not a handle read, is the
+/// durable home; an ambient stat of the path, not a handle read, is the
 /// only witness of the deletion.
 fn escalate_loss(
     result: Result<Value, ToolError>,

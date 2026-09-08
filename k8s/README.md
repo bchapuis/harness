@@ -21,7 +21,7 @@ append per entity (spec §7.2).
 ```
 
 The gateway verifies a caller's bearer token to a tenant (it terminates auth),
-then addresses the session's entity **directly** over the actor transport — no
+then addresses the session's entity **directly** over the actor transport: no
 control protocol, no forwarding hop. Because it holds `EntityRef`s and rides the
 receptionist gossip, the gateway sits **inside** the cluster's trust boundary
 (it presents the cluster secret); untrusted callers reach it only over HTTP with
@@ -124,7 +124,7 @@ would deadlock.
 
 ## 4. Talk to it
 
-The gateway's HTTP API is the only tenant-facing path — the nodes have no
+The gateway's HTTP API is the only tenant-facing path; the nodes have no
 client-facing listener. Forward the gateway Service, pull a tenant token from
 the Secret, and stream a turn as Server-Sent Events:
 
@@ -155,7 +155,7 @@ kubectl logs agent-0 | grep -E 'Suspected|Unreachable'
 
 # Re-issue the SAME prompt (same turn id) through the gateway. The new owner
 # recovers the entity's head from a quorum, folds the journal, and resumes from
-# the last committed record — the run completes as if nothing happened:
+# the last committed record, and the run completes as if nothing happened:
 curl -N -X POST http://127.0.0.1:8080/v1/assistant/demo/prompt \
   -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
   -d '{"turn":"t-1","content":"…the same turn…"}'
@@ -168,8 +168,8 @@ it rejoins as the same node and new sessions place onto it again.
 
 The manifest runs `--sandbox durable`: the `Workspace` tier is backed by a
 durable filesystem entity (entity §7.10), so a session's files survive
-hibernation, migration, and node loss. It needs no extra in-cluster runtime —
-the right starter default — but it offers the typed file tools
+hibernation, migration, and node loss. It needs no extra in-cluster runtime,
+the right starter default, but it offers the typed file tools
 (`read_file`/`write_file`/`edit_file`/`list_dir`/`remove`) only: **no `shell`
 and no `run_js`**.
 
@@ -206,7 +206,7 @@ the right boundary.
   there.
 - **The transport is plaintext, guarded by the cluster secret** (`agent-cluster`).
   The gateway joins it inside the trust boundary, so it must be a trusted
-  component — which it is, being where tenant auth terminates. Fine within a
+  component, which it is, being where tenant auth terminates. Fine within a
   trusted cluster network; provision transport TLS (`TlsConfig`, on both the
   nodes and the gateways) before crossing untrusted links.
 - **`storage: 1Gi` per pod** is arbitrary; size it to your sessions.

@@ -6,7 +6,7 @@
 //! real files, with no interposition. Durability comes from **capture**: after a
 //! command's side effects have landed on disk, the handler calls
 //! [`WsHandle::capture`], which diffs the durable subtree against the committed
-//! index and stages one record per changed file — the file's bytes **inline**, so
+//! index and stages one record per changed file; the file's bytes **inline**, so
 //! replay is a byte-deterministic fold (F1 holds on the bytes, never on
 //! re-execution). The staged records join the command's atomic batch (E19): the
 //! tool outcome and the workspace delta commit together or not at all.
@@ -14,7 +14,7 @@
 //! **The physical discipline (E20/F4).** The directory mutates before durability
 //! (tools write it directly). On any non-committed outcome the host
 //! [`Facet::discard`]s the materialization outright and the next activation
-//! rebuilds it from the composite snapshot plus committed records — the local
+//! rebuilds it from the composite snapshot plus committed records: the local
 //! directory is a rebuildable cache, never a source of truth (§1).
 //!
 //! **Checkpoints are the snapshot contribution.** At snapshot time every durable
@@ -30,7 +30,7 @@
 //! directories, symlinks, and special files are not durable (matching what the
 //! sandbox tar/untar paths preserve). Trees named in [`EXCLUDED`] (regenerable
 //! caches like `target/`) live in the same directory but are never captured,
-//! journaled, or restored — a rebuild on a new node regenerates them.
+//! journaled, or restored: a rebuild on a new node regenerates them.
 
 use actor_core::join_all_results;
 use std::collections::BTreeMap;
@@ -96,7 +96,7 @@ pub struct Ws;
 
 impl Sealed for Ws {}
 
-/// A workspace operation failed — an *application-level* outcome the handler maps
+/// A workspace operation failed: an *application-level* outcome the handler maps
 /// into its reply, distinct from a durability failure (§12).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WsError {
@@ -133,7 +133,7 @@ impl std::fmt::Display for WsError {
 impl std::error::Error for WsError {}
 
 /// One journaled record (spec §7.11): a captured whole-file write (bytes inline,
-/// applied byte-deterministically on replay — F1) or the paths a capture found
+/// applied byte-deterministically on replay; F1) or the paths a capture found
 /// deleted. Per-file `Write` records keep each record bounded by the largest
 /// single file while `drain` still joins them in ONE atomic batch (E19).
 #[derive(Serialize, Deserialize)]
@@ -143,7 +143,7 @@ enum WsRecord {
 }
 
 /// The checkpoint manifest (spec §7.11): the facet's composite-snapshot
-/// contribution — every durable file as content-addressed chunks in the entity's
+/// contribution; every durable file as content-addressed chunks in the entity's
 /// blob area, in path order.
 #[derive(Serialize, Deserialize)]
 struct WsManifest {
@@ -161,7 +161,7 @@ struct WsManifestFile {
 /// One durable file in the committed index.
 struct WsEntry {
     len: u64,
-    /// Content hash — the change detector capture diffs against.
+    /// Content hash: the change detector capture diffs against.
     hash: BlobId,
     /// The last checkpoint's chunk ids, if the file is unchanged since: lets the
     /// next snapshot skip re-reading and re-putting it. `None` = dirty.
@@ -178,7 +178,7 @@ struct WsEntry {
 struct WsDir {
     root: PathBuf,
     index: Mutex<BTreeMap<String, WsEntry>>,
-    /// The live checkpoint-chunk roots (union-kept for F3 — see [`RootSet`]).
+    /// The live checkpoint-chunk roots (union-kept for F3; see [`RootSet`]).
     roots: Mutex<RootSet>,
 }
 
@@ -232,7 +232,7 @@ impl Facet for Ws {
     /// Fold the staged delta into the committed index. The index mutates HERE,
     /// not in capture: the pre-seal `abandon` path (an event that will not
     /// encode) leaves the form untouched, and every post-seal failure routes
-    /// through discard (E20) — so the index can never silently diverge from the
+    /// through discard (E20), so the index can never silently diverge from the
     /// journal.
     fn seal(form: &mut WsForm, stage: &mut WsStage) -> Result<(), FacetError> {
         if stage.writes.is_empty() && stage.removes.is_empty() {
@@ -276,7 +276,7 @@ impl Facet for Ws {
         records
     }
 
-    /// Replay only: the live path skips physical facets (§7.12) — the bytes were
+    /// Replay only: the live path skips physical facets (§7.12); the bytes were
     /// on disk before the record was captured. Applies one record to the
     /// directory and the index, byte-deterministically (F1).
     fn fold(form: &mut WsForm, payload: &[u8]) -> Result<(), FacetError> {
@@ -314,7 +314,7 @@ impl Facet for Ws {
         Ok(())
     }
 
-    /// Delete the materialization — the discard of E20.
+    /// Delete the materialization: the discard of E20.
     fn discard(form: &mut WsForm) {
         if let Some(dir) = &form.0 {
             let _ = fs::remove_dir_all(&dir.root);
@@ -354,7 +354,7 @@ impl Facet for Ws {
                         fs::read(rel_to_disk(&dir.root, &path)?).map_err(io_facet_err("ws"))?;
                     // The snapshot must be the COMMITTED image (E4). Bytes that
                     // do not hash to the committed entry are an in-flight tool's
-                    // uncaptured dirt: fail — a snapshot is only an optimization
+                    // uncaptured dirt: fail; a snapshot is only an optimization
                     // and the idle/deactivation snapshot runs quiesced.
                     if BlobId::of(&bytes) != hash {
                         return Err(FacetError(format!(
@@ -414,7 +414,7 @@ impl Facet for Ws {
             let manifest: WsManifest = decode_payload("ws restore", bytes)?;
             // Fetch every file's chunks concurrently; each get verifies by
             // content (E17). `join_all_results`, not `try_join_all` (core spec
-            // §18.5 #1 — see `put_chunked`).
+            // §18.5 #1; see `put_chunked`).
             let contents = join_all_results(
                 manifest
                     .files
@@ -486,7 +486,7 @@ where
 
 impl<G: Entity> EntityCtx<G> {
     /// The entity's workspace directory (spec §7.11). Compiles exactly when the
-    /// entity declares the [`Ws`] facet (`type Facets = (Ws, …)`) — the E10
+    /// entity declares the [`Ws`] facet (`type Facets = (Ws, …)`): the E10
     /// discipline applied to storage. [`capture`](WsHandle::capture) is valid
     /// only inside a command handler (§7.12).
     pub fn ws<I>(&self) -> WsHandle<'_, G, I>
@@ -504,7 +504,7 @@ impl<G: Entity, I> WsHandle<'_, G, I>
 where
     G::Facets: HasFacet<Ws, I>,
 {
-    /// The materialization root — the real directory every sandbox tier runs
+    /// The materialization root: the real directory every sandbox tier runs
     /// over. Valid whenever the form is materialized (any time after
     /// rehydration).
     pub fn dir_path(&self) -> Result<PathBuf, WsError> {

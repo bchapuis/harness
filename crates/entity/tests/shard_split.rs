@@ -3,8 +3,8 @@
 //! A shard that grows too large or too hot splits: the parent keeps the low half
 //! of its key range in place, a fresh child shard takes the high half on the same
 //! replicas, and the committed shard map flips before either side serves the
-//! moved range. These tests drive the whole protocol — seal, transfer, commit,
-//! re-route — through the public API on a 3-node cluster and check the E15
+//! moved range. These tests drive the whole protocol (seal, transfer, commit,
+//! re-route) through the public API on a 3-node cluster and check the E15
 //! contract from the event stream: an entity is writable in exactly one shard at
 //! any time, and a split loses or duplicates no write. This includes the
 //! §14-mandated fault case, a split under concurrent writes, plus the
@@ -377,7 +377,7 @@ fn await_split(sim: &Simulation, recorder: &Recorder) -> (u32, u32, u64) {
 /// committed head and continues, so the seq only ever advances. A *duplicated*
 /// write (e.g. a moved-range append that committed on both sides) repeats a seq,
 /// and a *lost* acknowledged write leaves the next activation recovering a lower
-/// head — both surface here as a non-increasing seq. Covers every entity type on
+/// head: both surface here as a non-increasing seq. Covers every entity type on
 /// the stream. (The "writable in exactly one shard at a time" half is exercised
 /// by the linearizability tests, where two concurrent write streams for one
 /// entity could not produce a linearizable history.)
@@ -400,7 +400,7 @@ fn assert_split_safety(recorder: &Recorder) {
         for (shard, seq) in commits {
             assert!(
                 seq > last_seq,
-                "E15: {entity} committed seq {seq} at shard {shard} after seq {last_seq} — \
+                "E15: {entity} committed seq {seq} at shard {shard} after seq {last_seq}; \
                  a lost or duplicated write across a split/merge boundary"
             );
             last_seq = seq;
@@ -432,8 +432,8 @@ where
 #[test]
 fn a_split_moves_entities_to_a_child_and_loses_no_write() {
     // The entity §7.7 sequence: commit state across many entities of one shard,
-    // split it, and prove every committed write survives — including compacted
-    // entities whose prefix exists only in their snapshot — and that the same
+    // split it, and prove every committed write survives (including compacted
+    // entities whose prefix exists only in their snapshot), and that the same
     // pre-split refs (with their now-stale host caches) keep working against
     // whichever side owns each key. The map changed exactly once.
     let sim = Simulation::new(11);
@@ -519,11 +519,11 @@ fn a_split_under_concurrent_writes_is_linearizable() {
     // The §14-mandated fault case: a shard split under concurrent writes. Three
     // counter entities span the boundary; clients on two nodes keep writing and
     // reading through the whole seal → transfer → commit window. Every observed
-    // history must stay linearizable — an append that slipped through the seal
+    // history must stay linearizable: an append that slipped through the seal
     // and was then dropped (lost write) or retried onto the child after
     // committing on the parent (double apply) is exactly what the checker
     // catches. Ops that fail in the split window are recorded pending, which
-    // the checker may place or drop — the §2.2 ambiguity contract.
+    // the checker may place or drop: the §2.2 ambiguity contract.
     scenario_sweep("shard-split/split-writes", sweep_seeds(0..8), |seed| {
         let sim = Simulation::new(seed);
         let (_net, recorder, systems, hosts) =
@@ -591,8 +591,8 @@ fn a_split_under_concurrent_writes_is_linearizable() {
 fn a_crashed_parent_leader_re_drives_the_split() {
     // Crash-recovery of the driver itself: the parent leader starts the split
     // (seal fanned, transfer possibly mid-pass) and crashes. The new leader's
-    // split loop finds the committed plan and re-drives — every step is
-    // idempotent — so the split still commits and every committed write reads
+    // split loop finds the committed plan and re-drives (every step is
+    // idempotent), so the split still commits and every committed write reads
     // back from the survivors.
     let sim = Simulation::new(23);
     let (net, recorder, _systems, hosts) = cluster_of::<Account>(&sim, one_shard_config());
@@ -615,7 +615,7 @@ fn a_crashed_parent_leader_re_drives_the_split() {
 
     // Everything lives in shard 0; its leader is the split driver. Request the
     // split on EVERY node, so the request (which queues node-locally until it
-    // commits as `SplitStarted`) is not lost with the crashed driver — a
+    // commits as `SplitStarted`) is not lost with the crashed driver: a
     // survivor's proposer still carries it. Give the driver a moment to start
     // sealing/transferring, then kill it mid-flight; a survivor re-drives.
     let driver = hosts[0]
@@ -659,7 +659,7 @@ fn a_crashed_parent_leader_re_drives_the_split() {
 #[test]
 fn the_size_trigger_splits_a_shard_that_grows_past_its_target() {
     // §7.7 elasticity: with a `shard_target_bytes` the shard leader auto-splits
-    // once its durable footprint grows past it — no explicit `split_shard` call.
+    // once its durable footprint grows past it, no explicit `split_shard` call.
     // Blob entities give a controllable size: 16 entities × a 512-byte blob ≈ 8 KiB
     // in one shard, past the 5 KiB target, so the trigger fires; each ≈4 KiB
     // half then sits under it, so the split converges instead of cascading.
@@ -689,7 +689,7 @@ fn the_size_trigger_splits_a_shard_that_grows_past_its_target() {
         stored.push((key.clone(), id, bytes));
     }
 
-    // No explicit split request — the size trigger must fire it on its own.
+    // No explicit split request: the size trigger must fire it on its own.
     let (parent, child, _boundary) = await_split(&sim, &recorder);
     assert_eq!(parent, 0);
     assert_ne!(child, 0);
@@ -717,7 +717,7 @@ fn the_size_trigger_splits_a_shard_that_grows_past_its_target() {
 #[test]
 fn blobs_move_with_their_entities_across_a_split() {
     // §7.10 across §7.7: an entity's content-addressed blob area rides the split
-    // with it — after the flip, the owning side serves a verified read of every
+    // with it; after the flip, the owning side serves a verified read of every
     // pre-split blob.
     let sim = Simulation::new(31);
     let (_net, recorder, _systems, hosts) = cluster_of::<BlobEntity>(&sim, one_shard_config());
@@ -810,7 +810,7 @@ fn a_merge_folds_a_shard_into_its_neighbour_and_loses_no_write() {
     let (left, right) = await_merge(&sim, &recorder);
     assert_eq!(left, 0, "shard 0 absorbs its neighbour");
 
-    // Every entity — from both former shards — reads back and takes further
+    // Every entity (from both former shards) reads back and takes further
     // writes through the extended left shard.
     for key in &keys {
         let after = {
@@ -835,7 +835,7 @@ fn a_merge_folds_a_shard_into_its_neighbour_and_loses_no_write() {
     }
 
     assert_eq!(merges_of(&recorder).len(), 1, "exactly one committed merge");
-    // The retired shard no longer routes any entity — every key now resolves to
+    // The retired shard no longer routes any entity: every key now resolves to
     // the surviving left shard, and the right index holds nothing.
     for key in &keys {
         assert_ne!(
@@ -915,7 +915,7 @@ fn split_then_merge_round_trips_the_partition() {
 fn a_merge_under_concurrent_writes_is_linearizable() {
     // The merge counterpart of the §14 split fault case: fold two adjacent shards
     // while clients write and read across the seal → transfer → commit window.
-    // Every history must stay linearizable — a write lost at the seal or
+    // Every history must stay linearizable: a write lost at the seal or
     // double-applied onto the left shard would break it.
     scenario_sweep("shard-split/merge-writes", sweep_seeds(0..6), |seed| {
         let sim = Simulation::new(seed);

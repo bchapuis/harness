@@ -1,5 +1,5 @@
 //! Tail conformance (agent spec §10.2): reading a run is a journal read at
-//! the entity gateway, not a session command — so observation neither wakes a
+//! the entity gateway, not a session command, so observation neither wakes a
 //! hibernated session (rehydration plus workspace rematerialization) nor loses
 //! records across the hibernation it leaves undisturbed.
 
@@ -119,7 +119,7 @@ fn tail_leaves_a_hibernated_session_asleep() {
         "the Seqs are the journal's own, strictly ascending",
     );
 
-    // The read woke nothing: exactly one activation — the run's — and no
+    // The read woke nothing: exactly one activation (the run's), and no
     // re-activation after the hibernation the poll left undisturbed.
     sim.block_on({
         let clock = sim.clock();
@@ -215,8 +215,8 @@ fn a_compacted_session_announces_truncation_to_tail_and_follower() {
         "the readable suffix is identical from ZERO and from the base",
     );
 
-    // The follower surfaces the same fact as an explicit step — told *before*
-    // the stream resumes past the gap — then yields the surviving suffix.
+    // The follower surfaces the same fact as an explicit step (told *before*
+    // the stream resumes past the gap) then yields the surviving suffix.
     let (first, second) = sim.block_on({
         let session = session.clone();
         async move {

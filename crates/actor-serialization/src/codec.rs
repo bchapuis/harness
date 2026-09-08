@@ -68,7 +68,7 @@ pub fn decode<T: DeserializeOwned>(codec: &dyn Codec, bytes: &[u8]) -> Result<T,
 ///
 /// It is the wrong default for a deployment that moves **bulk bytes**. JSON has
 /// no byte-string form, so a `Vec<u8>` is written as an array of decimal
-/// numbers — about 3.6 chars per byte — and an envelope's payload pays that
+/// numbers, about 3.6 chars per byte, and an envelope's payload pays that
 /// twice, once as the message payload and again as the frame's `payload:
 /// Vec<u8>` field. A 1 MiB value costs ~10.7 MiB on the wire and over a second
 /// of CPU per copy, which is more than a quorum write's budget. Deployments
@@ -109,8 +109,8 @@ impl Codec for JsonCodec {
 ///
 /// Not self-describing: `postcard` writes no field names or type tags, so it
 /// decodes only against the same type definition that encoded it. A message
-/// type that needs `deserialize_any` — `serde_json::Value`, `#[serde(untagged)]`
-/// or `#[serde(flatten)]` — cannot travel over it, and a system carrying one
+/// type that needs `deserialize_any`: `serde_json::Value`, `#[serde(untagged)]`
+/// or `#[serde(flatten)]`; cannot travel over it, and a system carrying one
 /// wants [`JsonCodec`]. Both ends of an association must agree either way; the
 /// handshake compares [`Codec::name`] and refuses a mismatch (spec §7.1).
 #[derive(Clone, Copy, Default)]

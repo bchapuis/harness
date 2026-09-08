@@ -32,7 +32,7 @@ pub type NodeMachine = Machine<TcpCluster, NodeRuntimeProvider>;
 /// A [`MachineAuthority`] backed by the cluster (machine §5.1).
 pub struct EntityAuthority {
     machines: Entities<NodeMachine>,
-    /// The front-door actor holding these connections — the machine's
+    /// The front-door actor holding these connections: the machine's
     /// death-watch target, so a front door that dies without detaching has
     /// its attachments reaped (`Detached { FrontDoorLost }`).
     door: ActorId,

@@ -11,7 +11,7 @@
 //!   namespace's blobs scatter cluster-wide, which is why deletion fans out to
 //!   every node rather than to `R` (spec §5.3).
 //! - [`key_ns`] hashes the **namespace alone**, giving a namespace's tombstone a
-//!   stable home — its [`tombstone_owners`] — independent of any blob, where the
+//!   stable home (its [`tombstone_owners`]) independent of any blob, where the
 //!   durable tombstone is anchored and sweep completion is reported (spec §5.3).
 //!
 //! Both are pure functions of their inputs, and [`placement::top`] reassigns only
@@ -25,8 +25,8 @@ use crate::blob::BlobId;
 use crate::blob::Namespace;
 
 /// The rendezvous key that places a blob's owners: the namespace bytes followed
-/// by the 32-byte content hash (spec §5.2). Hashing them together — rather than
-/// the id alone — spreads each namespace's blobs across the whole cluster.
+/// by the 32-byte content hash (spec §5.2). Hashing them together (rather than
+/// the id alone) spreads each namespace's blobs across the whole cluster.
 pub fn key(ns: &Namespace, id: &BlobId) -> Vec<u8> {
     let ns = ns.as_bytes();
     let mut key = Vec::with_capacity(ns.len() + 32);

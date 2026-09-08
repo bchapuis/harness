@@ -42,7 +42,7 @@ fn every_identifier_the_specs_name_is_declared() {
 }
 
 /// The exemption list is an assertion of absence, so it is checked that way. An
-/// entry the tree has started to define has outlived its reason and must go —
+/// entry the tree has started to define has outlived its reason and must go,
 /// which is what keeps the list from becoming a place to hide failures.
 #[test]
 fn no_exemption_has_outlived_its_reason() {
@@ -52,7 +52,7 @@ fn no_exemption_has_outlived_its_reason() {
         "these exemptions name things the tree now declares; delete them:\n{}",
         found
             .iter()
-            .map(|x| format!("  {} — was exempt because: {}", x.name, x.reason))
+            .map(|x| format!("  {}, was exempt because: {}", x.name, x.reason))
             .collect::<Vec<_>>()
             .join("\n"),
     );

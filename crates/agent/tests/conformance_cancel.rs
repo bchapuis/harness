@@ -100,9 +100,9 @@ fn a_cancel_takes_effect_during_a_model_call() {
 #[test]
 fn a_cancel_of_a_queued_turn_is_a_journaled_terminal_without_a_run() {
     // Timeline (10s model calls): t=0 run A starts and its call flies to t=10;
-    // t=1 turn B is accepted behind it — fold state, not activation memory
+    // t=1 turn B is accepted behind it; fold state, not activation memory
     // (§7.3); t=2 a re-submission of B with different content is rejected off
-    // the journal (§7.4 — the dedup covers queued turns); t=3 B is cancelled:
+    // the journal (§7.4, the dedup covers queued turns); t=3 B is cancelled:
     // its `RunEnded { Cancelled }` journals with no run ever starting (§9.2),
     // and B's waiting prompt resolves from the recorded outcome. A is
     // untouched and completes at t=10.
@@ -140,7 +140,7 @@ fn a_cancel_of_a_queued_turn_is_a_journaled_terminal_without_a_run() {
                     async move {
                         clock.sleep(Duration::from_secs(2)).await;
                         // The queued turn is dedup-checked like any other (§7.4):
-                        // same TurnId, different content — a caller bug, rejected.
+                        // same TurnId, different content; a caller bug, rejected.
                         let conflict = session.prompt(Turn::new(TurnId::new("t-b"), "not b")).await;
                         assert!(conflict.is_err(), "queued re-submit content-checked");
                         clock.sleep(Duration::from_secs(1)).await;
@@ -237,7 +237,7 @@ fn a_cancel_propagates_down_the_delegation_tree() {
     };
     let make_model = |system: &SimSystem| -> Arc<dyn Model> {
         // The parent delegates immediately; the child's model call hangs for an
-        // hour — only cancellation ends it.
+        // hour, only cancellation ends it.
         let script = ScriptedModel::new(|req| {
             if req.system_prompt == "child agent" {
                 Ok(final_message("child-answer"))

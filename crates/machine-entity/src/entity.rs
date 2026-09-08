@@ -3,11 +3,11 @@
 //! `Facets = (Disk, Alarm, Ws)`: the disk facet (entity §7.15) owns the rootfs
 //! image's capture, checkpoint, and rehydration; the alarm facet (entity
 //! §7.16) supplies the one timer machine §4 needs; the workspace facet (entity
-//! §7.11) is the machine's `/workspace` volume — a host-side directory the
+//! §7.11) is the machine's `/workspace` volume; a host-side directory the
 //! guest sees as a tmpfs, pushed at boot and pulled at every capture
 //! quiescent point, so the ws delta and the disk manifest commit in **one
 //! atomic batch** (E19). Facet-0 state is metadata only (machine §3): keys,
-//! host key, egress policy, sizing, intervals, and the live attachment set —
+//! host key, egress policy, sizing, intervals, and the live attachment set,
 //! never image or workspace bytes.
 //!
 //! **File commands without a guest (machine §3).** [`WsWrite`], [`WsRead`],
@@ -65,7 +65,7 @@ use crate::runtime::MachineRuntimeProvider;
 /// with this type and the machine's name as the key).
 pub const MACHINE_TYPE: &str = "machine";
 
-/// A machine operation failed — an application-level outcome carried in the
+/// A machine operation failed: an application-level outcome carried in the
 /// reply, distinct from a durability failure (entity §12).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MachineError {
@@ -103,7 +103,7 @@ impl std::fmt::Display for MachineError {
 impl std::error::Error for MachineError {}
 
 /// The journaled egress policy (machine §5.2, M6). `Open` is the fresh
-/// machine's default — the development-machine posture; an owner MAY narrow
+/// machine's default: the development-machine posture; an owner MAY narrow
 /// it, and the provider realizes exactly what it grants.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EgressPolicy {
@@ -124,11 +124,11 @@ pub enum DetachReason {
 }
 
 /// One live attachment (machine §5.1): who reached the machine, through which
-/// front-door member, when — the journaled, attributable half of M4.
+/// front-door member, when; the journaled, attributable half of M4.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     pub principal: String,
-    /// The front-door actor holding the connection — the death-watch target.
+    /// The front-door actor holding the connection: the death-watch target.
     pub front_door: ActorId,
     pub at_nanos: u64,
 }
@@ -143,8 +143,8 @@ pub struct MachineState {
     pub authorized_keys: BTreeMap<String, String>,
     /// The machine's SSH host-key material (machine §3): the raw 32-byte
     /// ed25519 seed drawn from system entropy at provisioning, which the
-    /// front door expands into the host key it presents at KEX (machine §5.1)
-    /// — one identity across hibernation, migration, and failover.
+    /// front door expands into the host key it presents at KEX (machine §5.1);
+    /// one identity across hibernation, migration, and failover.
     pub host_key: Vec<u8>,
     pub egress: EgressPolicy,
     pub vcpus: u8,
@@ -152,8 +152,8 @@ pub struct MachineState {
     pub base_image: String,
     /// The capture cadence while attached (machine §4, M3).
     pub checkpoint_nanos: u64,
-    /// The self-fence bound (machine §4, M5): the alarm — the activation's
-    /// fenced append — fires at least once per `min(checkpoint, lease)`.
+    /// The self-fence bound (machine §4, M5): the alarm (the activation's
+    /// fenced append) fires at least once per `min(checkpoint, lease)`.
     pub lease_nanos: u64,
     pub attachments: BTreeMap<u64, Attachment>,
     pub next_attachment: u64,
@@ -176,7 +176,7 @@ impl MachineState {
 }
 
 /// The journal record (machine §3, §5.1): provisioning, policy, attachment,
-/// and capture history — an operator answers "who reached this machine, and
+/// and capture history; an operator answers "who reached this machine, and
 /// when" from the journal alone (M4).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MachineEvent {
@@ -225,7 +225,7 @@ pub enum MachineEvent {
         tree_bytes: u64,
     },
     /// A workspace pull (or its staging) failed at a quiescent point, so the
-    /// disk capture proceeded without a ws delta — machine §5.1's blessed
+    /// disk capture proceeded without a ws delta: machine §5.1's blessed
     /// degrade, journaled so "who lost workspace cadence, and since when" is
     /// answerable from the journal alone (M4).
     WsCaptureSkipped {
@@ -239,13 +239,13 @@ pub enum MachineEvent {
 #[derive(Default)]
 struct Activation {
     runtime: Option<Arc<dyn MachineRuntime>>,
-    /// The guest has run since the last committed capture — the conservative
+    /// The guest has run since the last committed capture, the conservative
     /// dirty flag of entity §7.15: the host cannot observe guest block writes,
     /// so "has run" over-approximates "has written", which is safe (an extra
     /// capture, never a stranded dirty image).
     dirty: bool,
-    /// When the last capture committed (activation clock), so the alarm — the
-    /// lease heartbeat — captures only once per checkpoint interval.
+    /// When the last capture committed (activation clock), so the alarm (the
+    /// lease heartbeat) captures only once per checkpoint interval.
     last_capture: Option<Instant>,
     /// Front-door members already death-watched by this activation, so the
     /// re-watch sweep (below) registers each once.
@@ -327,7 +327,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> Machine<S, P> {
     /// Death-watch the front-door member of every folded attachment not yet
     /// watched by this activation (machine §5.1). `on_activate` cannot see
     /// state, so a rehydrated machine re-watches on its first state-bearing
-    /// entry point — the pending alarm's fire, or any command; watch-after-
+    /// entry point: the pending alarm's fire, or any command; watch-after-
     /// death then folds `Detached { FrontDoorLost }` for holders that died
     /// while the entity was down.
     fn watch_attachments(&self, state: &MachineState, ctx: &EntityCtx<Self>) {
@@ -345,7 +345,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> Machine<S, P> {
     }
 
     /// Record a committed capture (advance the capture clock) and map its
-    /// stats to the journal event — `None` for a clean image (§7.5).
+    /// stats to the journal event: `None` for a clean image (§7.5).
     fn capture_event(&self, stats: entity::DiskCaptureStats, now: Instant) -> Option<MachineEvent> {
         self.lock().last_capture = Some(now);
         if stats.blocks == 0 {
@@ -362,15 +362,15 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> Machine<S, P> {
     /// Pull the guest's `/workspace` into the facet's directory and stage the
     /// delta into the *current* command's batch, so it commits atomically
     /// with the disk manifest that follows (E19). Must run while the guest
-    /// can still answer — before pause or kill (machine §4).
+    /// can still answer: before pause or kill (machine §4).
     ///
     /// Degrades gracefully (machine §5.1): a failed pull, or a
-    /// [`entity::WsError::TooLarge`], skips ws staging this cadence —
-    /// journaled as [`MachineEvent::WsCaptureSkipped`] — and the disk capture
+    /// [`entity::WsError::TooLarge`], skips ws staging this cadence;
+    /// journaled as [`MachineEvent::WsCaptureSkipped`], and the disk capture
     /// proceeds; the ws delta waits for the next quiescent point.
     ///
     /// Cost: a pull rewrites every workspace file (fresh mtimes), so the
-    /// capture's stat-prune never applies on this path — each checkpoint
+    /// capture's stat-prune never applies on this path; each checkpoint
     /// re-hashes the full pulled tree, accepted at the facet's 64 MiB cap.
     async fn pull_and_capture_ws(
         &self,
@@ -429,7 +429,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> Machine<S, P> {
                     // Never capture a running guest's image (entity §7.15).
                     // Treat the guest as lost; the image keeps its writes and
                     // stays dirty until the next capture, the M3 window. The
-                    // staged ws delta still commits — it is real pulled bytes.
+                    // staged ws delta still commits: it is real pulled bytes.
                     self.kill_vm().await;
                     return (events, false);
                 }
@@ -548,7 +548,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> Entity for Machine<S, P> {
 
     async fn on_activate(&mut self, _ctx: &EntityCtx<Self>) -> Result<(), actor_core::BoxError> {
         // The runtime, dirty flag, and watch set are activation-local (E3): a fresh
-        // activation has a freshly rehydrated — clean — image and no guest.
+        // activation has a freshly rehydrated (clean) image and no guest.
         *self.lock() = Activation::default();
         Ok(())
     }
@@ -603,7 +603,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> Entity for Machine<S, P> {
         }
         // Pause-and-resume around the capture; the ws delta is as-of-pull,
         // the disk as-of-pause, the skew bounded by the pull duration
-        // (machine §4). The guest stays dirty — it keeps running.
+        // (machine §4). The guest stays dirty: it keeps running.
         let (events, _committed) = self.run_capture(ctx, now, Quiesce::Pause).await;
         events
     }
@@ -684,7 +684,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<Provision> for Ma
             return (vec![], Err(MachineError::Disk(e.to_string())));
         }
         // The host key is born here and nowhere else: 32 bytes journaled as a
-        // raw ed25519 seed — any 32 bytes are a valid seed (RFC 8032). Drawing
+        // raw ed25519 seed; any 32 bytes are a valid seed (RFC 8032). Drawing
         // from the Entropy seam (actor §4.6) keeps both worlds right:
         // production entropy is OS-seeded, so the key is fresh and secret; the
         // simulator's is run-seeded, so a replayed seed reproduces the same
@@ -709,7 +709,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<Provision> for Ma
 }
 
 /// What a successful [`Attach`] returns to the front door (machine §5.1). The
-/// host key is not here: the door already read it — SSH presents it at KEX,
+/// host key is not here: the door already read it; SSH presents it at KEX,
 /// before any principal exists to attach ([`DoorPolicy`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachReply {
@@ -722,7 +722,7 @@ pub struct AttachReply {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Attach {
     pub principal: String,
-    /// The front-door actor holding this connection — the death-watch target.
+    /// The front-door actor holding this connection: the death-watch target.
     pub front_door: ActorId,
 }
 
@@ -763,7 +763,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<Attach> for Machi
 
 /// Detach a connection (machine §5.1): journaled; when the last attachment
 /// goes, the final capture is scheduled immediately (machine §4, quiescent
-/// point 1) so the idle path finds a clean disk. Idempotent — detaching an
+/// point 1) so the idle path finds a clean disk. Idempotent, detaching an
 /// unknown or already-detached id is a no-op, so there is no failure to
 /// report and the reply is `()`.
 #[derive(Clone, Serialize, Deserialize)]
@@ -884,7 +884,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<SetEgress> for Ma
 /// What the front door must know *before* it can serve a connection (machine
 /// §5.1), read in one command because SSH needs both at the same moment: the
 /// host key is presented at KEX, and the authorized-key set decides the
-/// publickey method that immediately follows — both before any `Attach`.
+/// publickey method that immediately follows; both before any `Attach`.
 ///
 /// The reply carries the machine's private host-key material: a front door is
 /// a cluster member inside the trust boundary (machine §5.1), and no key
@@ -961,7 +961,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> EntityHandler<Status> for Machi
         ctx: &EntityCtx<Self>,
     ) -> (Vec<MachineEvent>, StatusReply) {
         let image_bytes = ctx.disk().image_bytes().unwrap_or(0);
-        // The committed-image digest, derived from the block index — no
+        // The committed-image digest, derived from the block index, no
         // multi-MiB read on this read command (entity §7.15).
         let image_digest = ctx.disk().content_digest().ok().flatten();
         (

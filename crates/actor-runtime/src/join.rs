@@ -1,7 +1,7 @@
-//! The composed production node bring-up — [`join`], the counterpart of the
-//! simulator's `SimNetwork::join` (spec §18.2): one call takes a deployment's
+//! The composed production node bring-up: [`join`], the counterpart of the
+//! simulator's `SimNetwork::join` (spec §18.2). One call takes a deployment's
 //! genuine choices and absorbs the assembly the simulator already absorbs on
-//! its side — the dial map, the allowlist, the bind, the transport, the
+//! its side; the dial map, the allowlist, the bind, the transport, the
 //! system, and the membership seeding.
 //!
 //! Before this existed every deployment binary hand-copied that recipe, and
@@ -31,7 +31,7 @@ use crate::transport::TcpConfig;
 use crate::transport::TcpTransport;
 use crate::transport::node_addr;
 
-/// A deployment's genuine choices when a process joins a cluster — everything
+/// A deployment's genuine choices when a process joins a cluster, everything
 /// else about bring-up is [`join`]'s job. Ports follow the one address plan:
 /// node or client `i`'s transport port is `port_base + i - 1`.
 pub struct JoinOptions {
@@ -43,14 +43,14 @@ pub struct JoinOptions {
     /// Per-id reachable host overrides for the dial map; loopback when unset.
     pub peer_hosts: BTreeMap<u64, String>,
     /// Non-voting clients this node admits (id → host). A host that does not
-    /// resolve yet is admitted anyway — the client dials in and gossip flows
-    /// over its connection — so a not-yet-scheduled edge pod never blocks a
+    /// resolve yet is admitted anyway (the client dials in and gossip flows
+    /// over its connection), so a not-yet-scheduled edge pod never blocks a
     /// node's startup.
     pub clients: BTreeMap<u64, String>,
     /// The interface this process binds its transport on; `0.0.0.0` in a
     /// container.
     pub bind_host: String,
-    /// The host peers dial back, when it differs from the natural one — a
+    /// The host peers dial back, when it differs from the natural one: a
     /// voter's default is its own `peer_hosts` entry (else loopback), a
     /// client's is `bind_host`. They differ behind a `0.0.0.0` wildcard bind.
     pub advertise_host: Option<String>,
@@ -66,9 +66,9 @@ pub struct JoinOptions {
     pub events: Arc<dyn EventSink>,
     /// Transport encryption. Stated rather than defaulted, because the choice
     /// carries a threat model: `PlaintextTrusted` is valid only on a network
-    /// the operator controls — the secret crosses the wire in the handshake.
+    /// the operator controls; the secret crosses the wire in the handshake.
     pub encryption: Encryption,
-    /// Build the membership mode from the computed voter roster — the one
+    /// Build the membership mode from the computed voter roster: the one
     /// place the roster reaches configuration, so Raft's voters and the
     /// admitted member set cannot drift. A voter names
     /// [`MembershipMode::Leader`] (seeding `RaftConfig` from the given
@@ -79,7 +79,7 @@ pub struct JoinOptions {
 
 /// Bring one process into a cluster: resolve the address plan, bind, start the
 /// TCP transport, start the [`ClusterSystem`] over it, and seed the membership
-/// view with every admitted peer. The inbound frame channel never surfaces —
+/// view with every admitted peer. The inbound frame channel never surfaces:
 /// transport and system are paired here, so a mismatched pairing cannot be
 /// expressed.
 pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
@@ -123,7 +123,7 @@ pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
                 peers.insert(NodeId::new(*id), addr);
             }
             Err(e) => eprintln!(
-                "[{node}] client {id}={host} does not resolve yet ({e}); admitting it anyway — \
+                "[{node}] client {id}={host} does not resolve yet ({e}); admitting it anyway: \
                  it will dial in"
             ),
         }
@@ -190,7 +190,7 @@ pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
 /// Hold startup open until the cluster has converged enough to serve: every
 /// peer is in the membership view and the control group has elected a leader
 /// (so shard groups can elect too). A convenience, not a correctness
-/// requirement — the layers above absorb a command issued before convergence
+/// requirement: the layers above absorb a command issued before convergence
 /// (e.g. entity's bounded redirect, E13).
 ///
 /// `expected` is the cluster size; `members()` reports peers only (never this
@@ -199,8 +199,8 @@ pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
 /// rather than a wall-clock deadline: reading the host clock directly is what
 /// the `Clock` seam exists to prevent (spec §4.6), and the elapsed figure is
 /// derived from the count. Size `budget` to cover peer discovery plus the
-/// first election; exhausting it then means something is actually wrong — a
-/// peer that never appeared, or a group that cannot elect — reported with the
+/// first election; exhausting it then means something is actually wrong (a
+/// peer that never appeared, or a group that cannot elect) reported with the
 /// member and leader state, and the node serves anyway.
 pub async fn wait_for_cluster(system: &TcpCluster, expected: usize, budget: Duration) {
     const POLL: Duration = Duration::from_millis(100);

@@ -1,6 +1,6 @@
 //! Straggler rejection end to end (workflow spec §4.5, §3.1): W5.
 //!
-//! An outcome MAY arrive after its key has left the desired set — a timeout
+//! An outcome MAY arrive after its key has left the desired set: a timeout
 //! racing the real result, a retracted effect completing anyway, an effect of a
 //! previous activation reaching a leader that has since re-derived the world.
 //! The workflow discards such a `Settled` without calling `settle`, and writes no
@@ -81,7 +81,7 @@ fn an_outcome_whose_key_left_the_desired_set_is_discarded_and_writes_nothing() {
     assert_eq!(
         read_script(&script, |s| s.completions(0)),
         1,
-        "the retracted effect ran to completion anyway — that is the race"
+        "the retracted effect ran to completion anyway: that is the race"
     );
     assert_eq!(
         discarded(&recorder.events()),
@@ -133,7 +133,7 @@ fn a_retracted_key_that_never_returns_leaves_the_activation_free_to_rest() {
     assert!(
         announced_quiescence(&recorder.events()),
         "with its only key retracted the activation has nothing in flight and \
-         nothing at all in its desired set — it must reach quiescence (§6)"
+         nothing at all in its desired set: it must reach quiescence (§6)"
     );
 }
 
@@ -146,7 +146,7 @@ fn a_reused_key_lets_the_first_occurrences_outcome_be_settled_as_the_seconds() {
     // own result arrives to an absent key and is dropped.
     //
     // This is not a bug in the workflow. It is why "a key MUST be unique over the
-    // entity's whole journal" is the consumer's obligation and normative — the
+    // entity's whole journal" is the consumer's obligation and normative: the
     // harness's synthesized call ids and step keys repeat across runs, and have
     // to be qualified by the turn before they can sit here.
     let sim = Simulation::new(47);
@@ -206,7 +206,7 @@ fn a_reused_key_lets_the_first_occurrences_outcome_be_settled_as_the_seconds() {
     );
 
     // The second occurrence's own outcome, when it finally lands, finds its key
-    // absent and is discarded — the mirror image of the mistake above.
+    // absent and is discarded: the mirror image of the mistake above.
     sim.run_for(Duration::from_secs(60));
     assert_eq!(
         read_script(&script, |s| s.completions(0)),

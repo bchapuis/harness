@@ -1,15 +1,15 @@
 //! Per-key backoff (workflow spec §3.4), and the cap that puts a key **at rest**
 //! (§6).
 //!
-//! An effect that settles unproductively — `Err`, or a settle that returns no
-//! records — and stays in the desired set would otherwise be relaunched by the
+//! An effect that settles unproductively (`Err`, or a settle that returns no
+//! records), and stays in the desired set would otherwise be relaunched by the
 //! very next tick, at the rate the engine cycles. So the engine holds a per-key
 //! count of consecutive unproductive settles and delays that key's next launch
 //! by a capped exponential backoff, timed by `Clock` and jittered from
 //! `Entropy`, so the delay is virtual and seed-reproducible under simulation.
 //!
 //! The count is activation state, like the claim: a re-activation starts at
-//! zero. The engine imposes **no attempt bound** — bounding the work is the
+//! zero. The engine imposes **no attempt bound**, bounding the work is the
 //! consumer's, because only the consumer knows what the work is worth. What the
 //! workflow bounds is the *delay*, and reaching the cap has a second meaning: a key
 //! backed off to the cap is at rest, no longer holding the activation resident.
@@ -96,7 +96,7 @@ impl<K: Ord> Backoff<K> {
     }
 
     /// Record one unproductive settle of `key` and return how long the engine
-    /// must wait before relaunching it — or `None` if the key has reached the
+    /// must wait before relaunching it, or `None` if the key has reached the
     /// cap and is now **at rest**.
     ///
     /// `now` and `jitter` come from the system's `Clock` and `Entropy`, so the
@@ -109,7 +109,7 @@ impl<K: Ord> Backoff<K> {
     /// activation would become quiescent, hibernate, and then be woken by its own
     /// stale timer a moment later, so the entity would churn instead of resting
     /// and the clause would buy nothing. Giving up the timer is giving up
-    /// *unattended* progress, which is exactly what §6 trades away — the debt is
+    /// *unattended* progress, which is exactly what §6 trades away: the debt is
     /// a fold, so a caller's next contact ([`wake`](Backoff::wake)) or the next
     /// activation re-derives and re-drives it.
     pub fn failed(&mut self, key: K, now: Instant, jitter: u64) -> Option<Duration> {
@@ -151,7 +151,7 @@ impl<K: Ord> Backoff<K> {
     /// This is the difference between the engine's own timer re-entering the cycle
     /// and *someone asking*. The agent runtime draws the same line today: it abandons a
     /// propagation launch after bounded retries, and "the next message that drives
-    /// the session — on this same activation or a later one — re-launches the
+    /// the session (on this same activation or a later one) re-launches the
     /// send" (agent §9.2 item 3). A key at rest is waiting for exactly that
     /// message, so the count starts over when it arrives.
     pub fn wake(&mut self) {
@@ -164,7 +164,7 @@ impl<K: Ord> Backoff<K> {
         self.entries.remove(key);
     }
 
-    /// Drop every key absent from the desired set — the engine's step 2 (§3.2),
+    /// Drop every key absent from the desired set: the engine's step 2 (§3.2),
     /// which bounds this table by the work outstanding rather than by the work
     /// ever done.
     pub fn retain_keys(&mut self, live: impl Fn(&K) -> bool) {
@@ -187,7 +187,7 @@ impl<K: Ord> Backoff<K> {
     /// has stopped arming a timer for it and it no longer holds the activation
     /// resident.
     ///
-    /// A key merely waiting out an early, short delay is *not* at rest — the
+    /// A key merely waiting out an early, short delay is *not* at rest: the
     /// activation should stay resident for it, because it is about to retry.
     pub fn at_rest(&self, key: &K) -> bool {
         self.entries.get(key).is_some_and(|e| e.until.is_none())

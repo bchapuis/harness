@@ -30,11 +30,11 @@ use crate::event::BlobEvent;
 /// **B5**).
 pub trait BlobSystem: ActorSystem {
     /// The set of nodes currently serving, the candidate set for owner selection
-    /// (spec §5.2). The `Local` tier is a single node — itself; the `Clustered`
+    /// (spec §5.2). The `Local` tier is a single node, itself; the `Clustered`
     /// tier reads the SWIM serving set (`Membership::serving_members`).
     fn serving_members(&self) -> Vec<NodeId>;
 
-    /// Whether `node` has reached a **terminal** membership state — `down` or
+    /// Whether `node` has reached a **terminal** membership state: `down` or
     /// `removed`, or pruned from the roster entirely (actor §9.1). This is the
     /// load-bearing predicate for tombstone reclamation (spec §5.3, **B7**): a
     /// terminal node can rejoin only under a fresh, empty identity, so it can never

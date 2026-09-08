@@ -1,5 +1,5 @@
 //! Conformance: API-misuse semantics. Spec-defined or sensible behavior when an
-//! actor author uses the API wrongly — double watch, redundant unwatch, repeated
+//! actor author uses the API wrongly: double watch, redundant unwatch, repeated
 //! stop, and a zero-capacity mailbox.
 
 mod support;
@@ -43,7 +43,7 @@ impl<S: ActorSystem> Actor for DoubleWatcher<S> {
     type System = S;
     async fn started(&mut self, ctx: &Ctx<Self>) -> Result<(), BoxError> {
         ctx.watch(&self.target);
-        ctx.watch(&self.target); // redundant — must not double-deliver
+        ctx.watch(&self.target); // redundant: must not double-deliver
         Ok(())
     }
 }
@@ -89,7 +89,7 @@ struct IdleUnwatcher<S: ActorSystem> {
 impl<S: ActorSystem> Actor for IdleUnwatcher<S> {
     type System = S;
     async fn started(&mut self, ctx: &Ctx<Self>) -> Result<(), BoxError> {
-        ctx.unwatch(&self.target); // never watched — must not panic
+        ctx.unwatch(&self.target); // never watched: must not panic
         Ok(())
     }
     fn register(r: &mut HandlerRegistry<Self>) {

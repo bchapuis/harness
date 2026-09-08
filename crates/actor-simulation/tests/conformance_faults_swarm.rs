@@ -44,7 +44,7 @@ use serde::Serialize;
 // it actually exercised across its seed range, and these tests assert that every
 // fault type fired at least once. If a future change to the fault sampling or
 // the network silently stopped injecting (say) duplication, these tests go red
-// even though no invariant was violated — surfacing a coverage regression that
+// even though no invariant was violated, surfacing a coverage regression that
 // the invariant checks alone could never see.
 
 struct CovGreeter;
@@ -167,8 +167,8 @@ fn the_cluster_swarm_actually_exercises_every_fault_type() {
 }
 
 /// The same chatter under the **registry-based** control plane (spec §9.4.2):
-/// proves the registry-specific faults — outage windows opened by the nemesis,
-/// stale snapshots served by the seeded policy — actually fired across the
+/// proves the registry-specific faults (outage windows opened by the nemesis,
+/// stale snapshots served by the seeded policy) actually fired across the
 /// sweep, on top of the transport faults (spec §18.3).
 struct RegistryChatter {
     nodes: usize,
@@ -274,8 +274,8 @@ impl Handler<Halt> for CovGreeter {
 
 const COV_SINGLETON: &str = "cov-singleton";
 
-/// All traffic flows through the cluster utilities — group routers (round-robin,
-/// seeded random, rendezvous-hashed, and `tell`) and a singleton proxy — while
+/// All traffic flows through the cluster utilities: group routers (round-robin,
+/// seeded random, rendezvous-hashed, and `tell`) and a singleton proxy, while
 /// the nemesis partitions and crashes nodes. The coverage sweep then proves the
 /// utilities really ran under loss, duplication, reordering, and partition, not
 /// just under the controlled faults of their conformance tests; the standing

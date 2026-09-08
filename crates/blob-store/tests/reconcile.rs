@@ -146,7 +146,7 @@ fn a_departed_owner_is_re_replicated() {
 fn rebalancing_never_deletes() {
     // B6 (additive): reconcile only restores copies, it never drops them. A blob
     // put on its owners stays present across many reconcile passes with no
-    // membership change — rebalancing is additive and tolerates over-replication.
+    // membership change, rebalancing is additive and tolerates over-replication.
     let sim = Simulation::new(2);
     let nodes = [A, B, C, D];
     let (_net, stores, _dirs) = cluster(&sim, &nodes);
@@ -180,7 +180,7 @@ fn rebalancing_never_deletes() {
 fn a_delete_with_all_nodes_swept_releases_the_anchor() {
     // B7 liveness: when delete_namespace completes with every serving node swept,
     // the anchor's per-namespace sweep bookkeeping becomes reclaimable, and the
-    // reconcile loop releases it — bounding tombstone retention without a timer.
+    // reconcile loop releases it, bounding tombstone retention without a timer.
     // The tiny awareness flag is retained, so the namespace still resolves nowhere.
     let sim = Simulation::new(3);
     let nodes = [A, B, C];
@@ -201,7 +201,7 @@ fn a_delete_with_all_nodes_swept_releases_the_anchor() {
     // The delete anchored cluster-wide (the awareness flag is set), and because all
     // three serving nodes swept synchronously during the fan-out, the anchor's
     // per-namespace sweep bookkeeping was reclaimable and the reconcile loop
-    // released it — bounding tombstone retention without a timer (B7 liveness). The
+    // released it, bounding tombstone retention without a timer (B7 liveness). The
     // tiny awareness flag is retained, so the namespace still resolves nowhere.
     assert!(
         anchor.tombstones().contains(&ns),

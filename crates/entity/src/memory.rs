@@ -8,7 +8,7 @@
 //! It never returns `NotLeader` or `Unavailable`: with a single store there is always
 //! a leader and always a quorum (those outcomes arise on the clustered `Quorum`
 //! tier, `EntityJournal for Arc<QuorumReplicator>` in replicator.rs). Every method here is the
-//! whole of what this tier does — it writes and reads the [`EntityStore`] seam it
+//! whole of what this tier does: it writes and reads the [`EntityStore`] seam it
 //! shares with the clustered tier, and there is no durability machinery under it to
 //! hold apart.
 

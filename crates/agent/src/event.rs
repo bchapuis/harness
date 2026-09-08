@@ -1,6 +1,6 @@
 //! Harness observability events (agent spec §10.4): checker-facing,
-//! ephemeral, describing the *machinery around* sessions — run pairing, model
-//! spend, the sandbox bind/release pair — so the A-invariant are checkable over
+//! ephemeral, describing the *machinery around* sessions (run pairing, model
+//! spend, the sandbox bind/release pair), so the A-invariant are checkable over
 //! a run's stream. They carry nothing about a session's content: records are the
 //! durable, user-facing account (§10.1). Activation, deactivation, and the
 //! single-writer fence are the entity's events (`Activated`/`Deactivated`/
@@ -22,7 +22,7 @@ use crate::session::TurnId;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentEvent {
     /// A run began for a newly journaled turn: fires once per `(session, turn)`
-    /// — on the activation whose append committed the turn — under any
+    /// (on the activation whose append committed the turn) under any
     /// duplication or retry (A7). A resume emits **no** second `RunStarted`: a
     /// checker recognizes a resume as the entity's `Activated` followed by a
     /// `ModelCompleted` on an already-started turn (§10.4). `parent` is the
@@ -60,11 +60,11 @@ pub enum AgentEvent {
         turn: TurnId,
         outcome: &'static str,
     },
-    /// The activation opened its sandbox — first sandboxed call (§5.3).
+    /// The activation opened its sandbox: first sandboxed call (§5.3).
     /// Alternates with [`SandboxReleased`](AgentEvent::SandboxReleased)
     /// within the entity's activation window (A8).
     SandboxBound { session: SessionId, node: NodeId },
-    /// That sandbox was torn down — deactivation, loss, or step-down.
+    /// That sandbox was torn down: deactivation, loss, or step-down.
     SandboxReleased { session: SessionId, node: NodeId },
 }
 

@@ -2,7 +2,7 @@
 //! (blob-store spec).
 //!
 //! The crate sits beside entity, not above it (spec §1): a blob store is built
-//! from plain cluster actors and needs none of the entity machinery — no virtual
+//! from plain cluster actors and needs none of the entity machinery, no virtual
 //! identity, no journal, no single-activation lease. A blob is an immutable byte
 //! string named by the BLAKE3 hash of its content **within a consumer-chosen
 //! namespace** (spec §2). A content hash names exactly one byte sequence for all
@@ -43,7 +43,7 @@ pub use system::BlobSystem;
 pub use tombstone::{AnchorTracker, Tombstone, TombstoneSet};
 
 /// Open (creating if absent) the single-node, on-disk `Local` tier rooted at
-/// `path` (spec §5.1) — the embedded, test, and simulator tier. The
+/// `path` (spec §5.1): the embedded, test, and simulator tier. The
 /// free-function spelling of Appendix A's `BlobStore::local`.
 pub fn local(path: impl AsRef<Path>) -> io::Result<LocalBlobStore> {
     LocalBlobStore::open(path.as_ref())

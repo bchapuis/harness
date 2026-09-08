@@ -1,5 +1,5 @@
-//! The `Native` tier (sandbox spec §3.4): OS processes inside an OCI container
-//! — the development fallback of sandbox spec §3.5, not the microVM grade.
+//! The `Native` tier (sandbox spec §3.4): OS processes inside an OCI container;
+//! the development fallback of sandbox spec §3.5, not the microVM grade.
 //!
 //! The container itself is `machine_host::container`'s, shared with the persistent
 //! machine's binding (machine §2.1); what is here is what a `Native` call means:
@@ -102,7 +102,7 @@ pub(crate) struct NativeTier {
     host_workspace: PathBuf,
     /// Names this session's container. A name, not just a handle: a provision
     /// future dropped after `docker run` succeeds would leak a container no
-    /// handle records — the name keeps the orphan addressable. Carries a digest
+    /// handle records; the name keeps the orphan addressable. Carries a digest
     /// of the host workspace path so two providers holding the same session id
     /// never contend for one name.
     key: GuestKey,
@@ -172,8 +172,8 @@ impl NativeTier {
             Err(e) => {
                 // The container (or the daemon under it) is gone while the
                 // workspace survives: single-tier loss (sandbox spec §4).
-                // Forget the slot — the next call MAY re-provision lazily under
-                // the acquisition this activation already journaled — and fail
+                // Forget the slot (the next call MAY re-provision lazily under
+                // the acquisition this activation already journaled), and fail
                 // this call as an ordinary outcome, never a silent re-grant.
                 if matches!(e, GuestError::Gone(_)) {
                     self.forget(&guest).await;
@@ -197,7 +197,7 @@ impl NativeTier {
     }
 
     /// Run the session's container (lazily, on the first call that carries the
-    /// tier — sandbox spec §2.3 item 2).
+    /// tier: sandbox spec §2.3 item 2).
     async fn provision(&self) -> Result<ContainerGuest, ToolError> {
         self.attempted.store(true, Ordering::SeqCst);
         let mut spec = ContainerSpec::image(self.key.clone(), &self.image)
@@ -209,7 +209,7 @@ impl NativeTier {
             .entrypoint("sleep", ["2147483647".to_string()]);
         // Without `--user`, files the container creates in the mount are
         // root-owned on Linux and release()'s host-side removal fails (S5).
-        // The uid usually has no passwd entry in the image — acceptable for
+        // The uid usually has no passwd entry in the image: acceptable for
         // `shell`. (Docker Desktop on macOS maps ownership regardless.)
         #[cfg(unix)]
         {
@@ -239,13 +239,13 @@ impl NativeTier {
     }
 
     /// Remove the container (S5). Idempotent, and *awaited*: when this returns
-    /// the container is gone, not being removed — a caller may create the next
+    /// the container is gone, not being removed; a caller may create the next
     /// one under the same name immediately.
     ///
     /// Stopping the guest we hold, rather than removing by name over the top of
     /// it, is what keeps that true: `stop` latches the handle so its `Drop` does
     /// not fire a second, detached removal that would still be in flight here.
-    /// The name-based sweep is for the orphan case alone — a provision dropped
+    /// The name-based sweep is for the orphan case alone: a provision dropped
     /// after `docker run` succeeded, whose handle no caller ever received.
     pub(crate) async fn release(&self) {
         if let Some(guest) = self.container.lock().await.take() {

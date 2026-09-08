@@ -1,7 +1,7 @@
 //! Sandbox conformance (agent spec §5.3, §5.5, §5.6; invariant A8; sandbox
 //! spec S4): lazy open, provisioning failure as a transcript value, per-tool
-//! timeouts, environment loss surfacing as a journaled `WorkspaceReset` — never
-//! as silent corruption — and the tier acquisition discipline: journaled,
+//! timeouts, environment loss surfacing as a journaled `WorkspaceReset` (never
+//! as silent corruption), and the tier acquisition discipline: journaled,
 //! monotone, capped, restarted by a reset.
 
 mod support;
@@ -175,8 +175,8 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
             "ended"
         ],
     );
-    // The loss tore down one environment; the next call opened a fresh one (§5.5)
-    // — and both were released exactly once (A8).
+    // The loss tore down one environment; the next call opened a fresh one (§5.5),
+    // and both were released exactly once (A8).
     assert_eq!(stats.opened(), 2);
     assert_eq!(stats.released(), 2);
 }
@@ -185,7 +185,7 @@ fn a_lost_environment_surfaces_as_a_journaled_workspace_reset() {
 fn a_durable_workspace_still_resets_on_a_genuine_mid_run_loss() {
     // The routine reactivation reset is gone (the workspace is the agent's own
     // durable facet), but a real `EnvironmentLost` during the run is not
-    // routine — that environment's working state is gone, so the reset must
+    // routine: that environment's working state is gone, so the reset must
     // still be journaled (the `lost_this_activation` gate).
     let sandboxes = ScriptedSandboxes::new(|_, input| {
         if input.get("lose").is_some() {
@@ -379,7 +379,7 @@ fn a_tier_is_acquired_under_a_journaled_record_before_its_first_effect() {
     ]);
     let (records, stats) = run_tiered("tier-acquisition", model, "s-4", 71);
 
-    // The Workspace call needs no record — opening grants Workspace and nothing
+    // The Workspace call needs no record, opening grants Workspace and nothing
     // else (§5.6 item 1); the Compute call's acquisition is journaled before its
     // outcome: intent before effect (§6.4).
     assert_eq!(
@@ -481,7 +481,7 @@ fn a_reset_restarts_the_held_set_and_reacquisition_is_rejournaled() {
     let records = records.lock().unwrap();
     // The fresh environment resets every held tier (§5.5): after the journaled
     // reset, the held set is back to Workspace and the second Compute call
-    // re-journals its acquisition — never silently inherited.
+    // re-journals its acquisition, never silently inherited.
     assert_eq!(
         record_kinds(&records),
         vec![

@@ -1,6 +1,6 @@
 //! The wire protocol: frames exchanged over an association (spec §7.1).
 //!
-//! This is the vocabulary every subsystem speaks across the network — actor
+//! This is the vocabulary every subsystem speaks across the network: actor
 //! envelopes and replies, SWIM probes, death-watch, and receptionist
 //! replication. It references domain types (e.g. [`MemberDigest`]); the
 //! [`Transport`](crate::Transport) that carries it does not.
@@ -21,8 +21,8 @@ use crate::raft::RaftEntry;
 /// compatibility spec §3).
 ///
 /// It sits with the protocol rather than with a transport because it describes
-/// the **frames**, not the carrier. Both transports in the tree — the TCP one and
-/// the simulator's in-memory network — judge a peer against this same window, so
+/// the **frames**, not the carrier. Both transports in the tree (the TCP one and
+/// the simulator's in-memory network) judge a peer against this same window, so
 /// a mixed-version simulation exercises the policy the cluster actually ships
 /// rather than a copy of it that can drift.
 ///
@@ -45,14 +45,14 @@ pub const WIRE: compat::Window = compat::Window::at("actor.wire", 1);
 ///
 /// The other bulk-byte fields on this wire take `#[serde(with = "serde_bytes")]`
 /// directly. This one cannot: [`ReplyResult`] is `Result<Vec<u8>, CallError>`, a type
-/// alias, and there is no field on it to attach an attribute to — the `Vec<u8>` is
+/// alias, and there is no field on it to attach an attribute to; the `Vec<u8>` is
 /// inside someone else's generic. Changing the alias would be a public-API change
 /// across the workspace for a serialization concern that belongs to this one frame.
 ///
 /// So the representation is mirrored instead, and mirroring is the whole risk: these
 /// enums must serialize *exactly* as serde's own `Result` does or this is a wire-format
 /// change, and `actor.wire` is at revision 1 with no way to run two revisions at once
-/// (compatibility spec §3.1). Two properties carry it — two newtype variants, named
+/// (compatibility spec §3.1). Two properties carry it: two newtype variants, named
 /// `Ok` and `Err`, in that order. The names are what self-describing formats emit
 /// (`{"Ok": …}` under JSON) and the order is what index-based ones emit (variant 0 and
 /// 1 under postcard); the enum's *own* name is not on the wire in either. That is
@@ -133,13 +133,13 @@ pub enum Frame {
         manifest: String,
         correlation: Option<CallId>,
         /// Already codec-encoded by the sender, and encoded *again* as part of this
-        /// frame — so bulk bytes cross the wire through two encoders, and both have
+        /// frame, so bulk bytes cross the wire through two encoders, and both have
         /// to be told they are bytes. Without the attribute serde takes its default
         /// sequence path and the decoder grows a `Vec` one `u8` at a time: ~16 ms a
         /// mebibyte, which measured as the whole per-block cost of replicating a disk
         /// image. `benches/frame.rs` measures this outer layer; annotating it took the
         /// deduplicated two-node figure from 12.7 ms a block to 1.9. Neutral on the
-        /// wire for both codecs in the tree —
+        /// wire for both codecs in the tree:
         /// `actor-serialization/tests/wire_bytes.rs` is that claim, and covers this
         /// struct-variant shape specifically.
         #[serde(with = "serde_bytes")]
@@ -202,7 +202,7 @@ pub enum Frame {
         watcher: ActorId,
         reason: TerminationReason,
     },
-    /// A receptionist registration replicated from `origin` (spec §13) —
+    /// A receptionist registration replicated from `origin` (spec §13):
     /// broadcast on change, when a registration first happens.
     Receptionist {
         key: String,
@@ -210,8 +210,8 @@ pub enum Frame {
         actor: ActorId,
     },
     /// A node's full receptionist registry, pushed periodically to a random peer
-    /// for anti-entropy (spec §13): it reconciles registrations a node missed —
-    /// because it joined late or a broadcast was lost — without the registrant
+    /// for anti-entropy (spec §13): it reconciles registrations a node missed
+    /// (because it joined late or a broadcast was lost) without the registrant
     /// having to re-broadcast.
     ReceptionistSync { entries: Vec<ReceptionistEntry> },
     /// A Raft vote request (leader-based mode, spec §9.4.3): `candidate` asks
@@ -266,7 +266,7 @@ pub enum Frame {
         snapshot_term: u64,
         voters: Vec<NodeId>,
         learners: Vec<NodeId>,
-        /// The opaque application snapshot — bulk bytes, so tagged for the same
+        /// The opaque application snapshot: bulk bytes, so tagged for the same
         /// reason as `Envelope::payload`.
         #[serde(with = "serde_bytes")]
         data: Vec<u8>,
@@ -276,8 +276,8 @@ pub enum Frame {
     ///
     /// A heartbeat is an empty [`RaftAppend`](Frame::RaftAppend), and a node that
     /// leads `G` groups sends one to each of `R-1` followers every heartbeat
-    /// interval. Sent individually that is `G × (R-1)` frames — each its own
-    /// serialization, its own transport send — repeated several times a second, for
+    /// interval. Sent individually that is `G × (R-1)` frames (each its own
+    /// serialization, its own transport send) repeated several times a second, for
     /// traffic that carries no data at all. Since entity runs one Raft group per
     /// shard (entity §8.2) and shard count is the elasticity knob (entity §7.7), `G`
     /// grows with the cluster, and this becomes the ceiling on how far a node can be
@@ -295,7 +295,7 @@ pub enum Frame {
     ///
     /// Sent only to a voter the leader has confirmed is caught up to its own last
     /// index, so the recipient can win immediately rather than being rejected for a
-    /// stale log. It is safe by construction — it starts an ordinary election, which
+    /// stale log. It is safe by construction: it starts an ordinary election, which
     /// still requires a quorum of votes, so it can move leadership but never split
     /// it. Its purpose is to make a *planned* departure cheap: without it a draining
     /// node's groups each wait a full election timeout, which for a node leading many
@@ -308,8 +308,8 @@ pub enum Frame {
     /// An application command offered to `group`'s leader (spec §9.4.3 item 1):
     /// a non-leader node sends it to a voter, which forwards it to its leader.
     /// The command is the opaque app payload (the engine's `EntryPayload::App`
-    /// bytes — for the control group, an encoded `MembershipCommand`).
-    /// `forwarded` stops a stale-leader loop — a forwarded proposal landing on
+    /// bytes, for the control group, an encoded `MembershipCommand`).
+    /// `forwarded` stops a stale-leader loop: a forwarded proposal landing on
     /// a non-leader is dropped, and the proposer's bounded wait reports failure.
     RaftPropose {
         group: GroupId,
@@ -321,7 +321,7 @@ pub enum Frame {
     },
 }
 
-/// One group's heartbeat inside a [`Frame::RaftHeartbeats`] — the fields of an
+/// One group's heartbeat inside a [`Frame::RaftHeartbeats`]: the fields of an
 /// empty [`Frame::RaftAppend`], minus the `entries` that make it empty.
 ///
 /// `leader` is carried per beat rather than once per frame because a node can lead
@@ -338,8 +338,8 @@ pub struct RaftBeat {
 }
 
 impl RaftBeat {
-    /// The batching lift (spec §9.4.3): an **empty** [`Frame::RaftAppend`] —
-    /// a pure heartbeat — reduced to its beat; `None` for anything else,
+    /// The batching lift (spec §9.4.3): an **empty** [`Frame::RaftAppend`]
+    /// (a pure heartbeat) reduced to its beat; `None` for anything else,
     /// including an append that carries entries (real replication, never
     /// batched). This constructor and [`RaftBeatReply::from_reply`] are the
     /// whole correspondence between the batched and unbatched forms; they
@@ -368,7 +368,7 @@ impl RaftBeat {
     }
 }
 
-/// One group's reply inside a [`Frame::RaftHeartbeatReplies`] — the fields of a
+/// One group's reply inside a [`Frame::RaftHeartbeatReplies`]: the fields of a
 /// [`Frame::RaftAppendReply`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RaftBeatReply {
@@ -415,7 +415,7 @@ mod tests {
     /// its *names*, and neither pins both.
     const CODECS: &[(&str, &dyn Codec)] = &[("postcard", &PostcardCodec), ("json", &JsonCodec)];
 
-    /// The outcome as [`Frame::Reply`] writes it — through [`reply_bytes`].
+    /// The outcome as [`Frame::Reply`] writes it: through [`reply_bytes`].
     #[derive(Serialize, Deserialize)]
     struct Mirrored(#[serde(with = "reply_bytes")] ReplyResult);
 
@@ -440,7 +440,7 @@ mod tests {
     /// has that shape.
     ///
     /// The distinction is the point. That file compares two types it declares itself,
-    /// so it would keep passing if `reply_bytes` drifted — it is a statement about
+    /// so it would keep passing if `reply_bytes` drifted: it is a statement about
     /// serde, not about us. This one encodes through the real module and compares
     /// against what serde does with a real `Result`, so a renamed variant or a swapped
     /// order fails here, which is where the wire break would actually be.
@@ -453,7 +453,7 @@ mod tests {
                 assert_eq!(
                     mirrored, plain,
                     "{name}: `reply_bytes` no longer encodes as serde's own `Result` \
-                     ({outcome:?}) — `actor.wire` is at revision 1 and cannot run two \
+                     ({outcome:?}); `actor.wire` is at revision 1 and cannot run two \
                      revisions at once (compatibility spec §3.1), so this is a flag day",
                 );
             }
@@ -488,7 +488,7 @@ mod tests {
     /// declaration, read off the first byte.
     ///
     /// Sound only while the enum stays under 128 variants, where postcard's
-    /// varint is a single byte — asserted rather than assumed, so this helper
+    /// varint is a single byte: asserted rather than assumed, so this helper
     /// cannot start lying as the vocabulary grows.
     fn discriminant(frame: &Frame) -> u8 {
         let bytes = encode(&PostcardCodec, frame).expect("a frame encodes");
@@ -505,7 +505,7 @@ mod tests {
         // **The failure this catches has no other detector.** `Frame`'s postcard
         // encoding is *positional*: a variant inserted anywhere but the end
         // shifts every discriminant after it, so a peer one release behind reads
-        // every subsequent frame as a different one — a `RaftAppend` arriving as
+        // every subsequent frame as a different one; a `RaftAppend` arriving as
         // a `Watch`. It compiles, it round-trips against itself, and both ends
         // agree right up until they are not the same build. No round-trip test
         // can see it, because a round-trip only ever asks one build to agree
@@ -519,7 +519,7 @@ mod tests {
         // and not an edit.
         //
         // The SWIM family is pinned because it is the likeliest thing to be
-        // reshaped — its digest is where a membership field would want to go —
+        // reshaped (its digest is where a membership field would want to go),
         // and `RaftPropose` because it is the last variant, so an insertion
         // *anywhere* moves it.
         let digest = Vec::new();

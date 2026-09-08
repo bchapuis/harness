@@ -21,9 +21,9 @@
 //! rejects that: its mutating operations carry no idempotency key, so a re-applied
 //! one is indistinguishable from a fresh one.
 //!
-//! That is the framework's contract rather than a defect in it — spec §7.2 puts
+//! That is the framework's contract rather than a defect in it: spec §7.2 puts
 //! exactly-once out of scope, "built atop this layer with explicit idempotency
-//! keys" — and it is the same shape the `linearizable-remote-register` corpus
+//! keys", and it is the same shape the `linearizable-remote-register` corpus
 //! entries record, where the resolution was to give the object the key the spec
 //! prescribes rather than to weaken the wire. It is also the same trap: the first
 //! version of this sweep tracked every acknowledged name and demanded it be
@@ -33,13 +33,13 @@
 //! (The second version failed for a duller reason worth recording: it kept those
 //! names on the *workload*, which a sweep shares across every seed, so each run
 //! was judged against its predecessors' names too. Expectations are per run and
-//! live in `drive` — see "A workload outlives its runs" in
+//! live in `drive`; see "A workload outlives its runs" in
 //! `docs/simulation-testing.md`.)
 //!
 //! So the names are split by what can be claimed about them:
 //!
 //! - **Keep names** are only ever recorded, never forgotten. `Record` is
-//!   effect-idempotent — applying it twice leaves the same entry — so no amount
+//!   effect-idempotent (applying it twice leaves the same entry), so no amount
 //!   of duplication, delay, or reordering changes where they end up. Every one
 //!   whose `Record` acknowledged **must** be in the index at the end, and that is
 //!   a real E14 claim: it is the acknowledged-write-survives-failover property.
@@ -93,7 +93,7 @@ const IDLE_FOR: Duration = Duration::from_millis(500);
 ///
 /// It has to be bounded, and bounded *in total* rather than per name. Each probe
 /// is a real quorum write that can sit out its own timeout, so a per-name retry
-/// budget multiplies by however many names the run acknowledged — enough, on a
+/// budget multiplies by however many names the run acknowledged: enough, on a
 /// cluster still recovering, to overrun the driver's own time budget and fail the
 /// seed for liveness rather than for anything it observed. When this runs out the
 /// remaining names go unchecked, which is the right trade: a seed that makes no
@@ -130,8 +130,8 @@ fn churn(client: usize, n: u64) -> EntityName {
 }
 
 /// The keep names whose `Record` was acknowledged, per principal. A call that
-/// failed says nothing either way — the record may sit on a replica minority and
-/// be adopted by a later recovery (§7.2, §11) — so it is not tracked.
+/// failed says nothing either way: the record may sit on a replica minority and
+/// be adopted by a later recovery (§7.2, §11), so it is not tracked.
 #[derive(Default)]
 struct Acked {
     recorded: BTreeSet<(String, EntityName)>,
@@ -145,7 +145,7 @@ struct DirectorySwarm {
     ops: u64,
     /// Names checked against a final index, tallied across the whole sweep so a
     /// green run is not one where every call happened to fail. Cumulative on
-    /// purpose, unlike the per-run expectations — which live in [`drive`] and
+    /// purpose, unlike the per-run expectations, which live in [`drive`] and
     /// must not be workload state.
     ///
     /// [`drive`]: ClusterWorkload::drive
@@ -153,8 +153,8 @@ struct DirectorySwarm {
     /// Whether to hold the final index to what was acknowledged.
     ///
     /// Off for the reproducibility and coverage sweeps: they are about the
-    /// *traffic* — that a seed replays byte-identically, and that the faults it
-    /// configures actually fire — and the end check costs them a heal, a quiesce,
+    /// *traffic* (that a seed replays byte-identically, and that the faults it
+    /// configures actually fire), and the end check costs them a heal, a quiesce,
     /// and a settle they have no reason to pay for.
     check_index: bool,
 }
@@ -245,7 +245,7 @@ impl ClusterWorkload for DirectorySwarm {
                         let slot = entropy.next_u64() % 3;
 
                         if entropy.next_u64().is_multiple_of(3) {
-                            // CHURN: record then forget. No end-state claim — a
+                            // CHURN: record then forget. No end-state claim: a
                             // delayed duplicate of either call can decide it.
                             let name = churn(c, slot);
                             let _ = dir
@@ -261,8 +261,8 @@ impl ClusterWorkload for DirectorySwarm {
                                 .ask_timeout(Forget { name }, Duration::from_secs(2))
                                 .await;
                         } else {
-                            // KEEP: record only. Any acknowledged outcome —
-                            // `Created`, `Updated`, or `Unchanged` — means the name
+                            // KEEP: record only. Any acknowledged outcome
+                            // (`Created`, `Updated`, or `Unchanged`) means the name
                             // is owned once the call returns, and nothing in this
                             // run ever removes it, so it must still be owned at the
                             // end however the wire behaved.
@@ -318,7 +318,7 @@ impl ClusterWorkload for DirectorySwarm {
             //
             // `List` is a query, and a query commits nothing, so §7.5 serves it
             // from the activation: "read-your-leader (relaxed), not linearizable
-            // under partition" — a deposed-but-unfenced leader may answer from
+            // under partition"; a deposed-but-unfenced leader may answer from
             // stale state, and a quorum-less recovery may have seeded that state
             // with an uncommitted record. Asserting a durability property against
             // it asks the wrong question, and a `List`-based version of this check
@@ -328,7 +328,7 @@ impl ClusterWorkload for DirectorySwarm {
             // trivial writing command, which rides the §6 output gate and so
             // "commits through the shard leader and reflects committed state, or
             // fails". `Record` with *different* metadata is one: it commits either
-            // way, and its reply is the committed answer to the question asked —
+            // way, and its reply is the committed answer to the question asked;
             // `Updated` iff the name was already owned, `Created` iff it was not.
             let verify_by = clock.now() + VERIFY_BUDGET;
             for (principal, name) in &recorded {
@@ -357,7 +357,7 @@ impl ClusterWorkload for DirectorySwarm {
                     {
                         // `Unchanged` cannot come from a first delivery here (the
                         // metadata differs), only from a duplicate of a probe that
-                        // already landed — which itself proves the name is owned.
+                        // already landed, which itself proves the name is owned.
                         Ok(outcome) => {
                             answer = Some(outcome);
                             break;
@@ -369,8 +369,8 @@ impl ClusterWorkload for DirectorySwarm {
                 assert_ne!(
                     answer,
                     Recorded::Created,
-                    "{principal} acknowledged Record({name}) — a name nothing in \
-                     this run ever forgets — and a committed probe found it absent: \
+                    "{principal} acknowledged Record({name}): a name nothing in \
+                     this run ever forgets, and a committed probe found it absent: \
                      an acknowledged write was lost (E14)",
                 );
                 verified.fetch_add(1, Ordering::Relaxed);
@@ -400,7 +400,7 @@ fn the_directory_index_survives_the_cluster_swarm() {
     }
     assert!(
         workload.verified.load(Ordering::Relaxed) > 0,
-        "no acknowledged name was ever checked against a readable index — the \
+        "no acknowledged name was ever checked against a readable index: the \
          sweep asserted nothing about ownership",
     );
 }

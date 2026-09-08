@@ -1,4 +1,4 @@
-//! Conformance: swarm testing (spec §18.4, §18.6) — single-node and cluster
+//! Conformance: swarm testing (spec §18.4, §18.6); single-node and cluster
 //! workloads swept across seeds under fault injection, with continuous invariant
 //! checking and fault-coverage assertions.
 
@@ -65,7 +65,7 @@ impl Handler<Ping> for Echo {
 }
 
 /// Sleeps mid-handler, so concurrent asks would overlap if execution were not
-/// serial — exercising the serial-execution invariant under random scheduling.
+/// serial, exercising the serial-execution invariant under random scheduling.
 struct Worker {
     clock: actor_simulation::SimClock,
 }
@@ -271,8 +271,8 @@ impl Workload for FlakyService {
         Box::pin(async move {
             let service = system.spawn_with(|| Flaky);
             for i in 0..rounds {
-                // Each call completes — `Ok` or `DeadLetter` (its handler
-                // faulted) — never hanging; the restart keeps the service alive.
+                // Each call completes: `Ok` or `DeadLetter` (its handler
+                // faulted), never hanging; the restart keeps the service alive.
                 let _ = service.ask(Work(i)).await;
             }
         })
@@ -328,7 +328,7 @@ fn swarm_swim() -> SwimConfig {
 /// Each node hosts and publishes a greeter; node 0 repeatedly discovers and
 /// calls them, tolerating whatever failures the nemesis induces. Parameterized by
 /// membership `mode` so the *same* workload and nemesis sweep the static,
-/// gossip-based, registry-based, and leader-based control planes (spec §9.4) —
+/// gossip-based, registry-based, and leader-based control planes (spec §9.4):
 /// the safety invariants must hold under every mode.
 struct DiscoverAndCall {
     nodes: usize,
@@ -402,7 +402,7 @@ fn discover_and_call_holds_across_seeds_under_faults() {
 #[test]
 fn discover_and_call_holds_across_seeds_in_registry_mode() {
     // The same chaos under the **registry-based** control plane (spec §9.4.2):
-    // the detector is observe-only, so a crashed node is never auto-downed — its
+    // the detector is observe-only, so a crashed node is never auto-downed; its
     // in-flight calls complete by timeout rather than the node-down cascade. The
     // safety invariants (no silent loss, serial, lifecycle, down-terminal) must
     // still hold on every seed, with the registry sync itself faulted (latency
@@ -430,8 +430,8 @@ fn discover_and_call_holds_across_seeds_in_registry_mode() {
 fn discover_and_call_holds_across_seeds_in_leader_mode() {
     // The same chaos under the **leader-based** control plane (spec §9.4.3):
     // the nemesis crashes and partitions voters, forcing elections and quorum
-    // loss mid-traffic. The safety invariants — now including one-leader-per-term
-    // (invariant #22's election-safety half) — must hold on every seed.
+    // loss mid-traffic. The safety invariants: now including one-leader-per-term
+    // (invariant #22's election-safety half); must hold on every seed.
     let workload = DiscoverAndCall {
         nodes: 3,
         rounds: 12,
@@ -511,9 +511,9 @@ const TARGETS: Key<Target> = Key::new("watch-targets");
 
 /// Node 0 watches every other node's target, then drives those targets to stop
 /// or fail while the nemesis independently crashes and partitions nodes. Three
-/// causes of `Terminated` then race per target — a graceful stop frame, a fault,
+/// causes of `Terminated` then race per target: a graceful stop frame, a fault,
 /// and a synthesized `NodeDown` (spec §8.1 step 4). This drives the death-watch
-/// paths — local delivery, cross-node frame forwarding, and node-down synthesis —
+/// paths (local delivery, cross-node frame forwarding, and node-down synthesis)
 /// across the whole fault space, where the standing safety invariants
 /// (no-silent-loss, serial, lifecycle, down-terminal) must still hold.
 /// Parameterized by `mode` so both the gossip coordinator's downing and the
@@ -636,11 +636,11 @@ fn watch_under_chaos_upholds_safety_invariants_in_leader_mode() {
 #[test]
 fn watch_under_chaos_never_double_delivers_a_terminated() {
     // Each watcher here watches its target exactly once, so it must observe at
-    // most one `Terminated` — even as graceful-stop, fault, and node-down causes
+    // most one `Terminated`: even as graceful-stop, fault, and node-down causes
     // race across the fault space. (This is *not* the general invariant: watching
     // the same target twice legitimately yields two signals, spec §12. It is a
     // workload-specific guard against `TerminatedDelivered` being emitted more
-    // than once per real delivery — e.g. once where a node forwards the signal to
+    // than once per real delivery, e.g. once where a node forwards the signal to
     // a remote watcher and again where it actually lands.)
     use std::collections::BTreeMap;
     let workload = WatchUnderChaos {
@@ -678,7 +678,7 @@ fn watch_under_chaos_never_double_delivers_a_terminated() {
 
 /// Leader-mode traffic while voters restart every round: each restarted voter
 /// reloads its persisted term, vote, and log through the per-node storage seam.
-/// This is the regression guard for the classic persistence bug — a voter that
+/// This is the regression guard for the classic persistence bug: a voter that
 /// forgets `voted_for` across a restart can grant a second vote in the same
 /// term and elect two leaders, which the continuous `OneLeaderPerTerm` checker
 /// (invariant #22) would catch on some seed of the sweep.
@@ -713,7 +713,7 @@ impl ClusterWorkload for RestartChurn {
 
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
         // Node 1 stays up as the caller; voters 2 and 3 restart on alternating
-        // rounds — often mid-election, thanks to the nemesis's partitions.
+        // rounds: often mid-election, thanks to the nemesis's partitions.
         let caller = ctx.nodes()[0].clone();
         let net = ctx.net().clone();
         let victims = [ctx.nodes()[1].node(), ctx.nodes()[2].node()];
@@ -725,8 +725,8 @@ impl ClusterWorkload for RestartChurn {
                 net.restart(victims[(round % 2) as usize]);
                 for service in caller.receptionist().lookup(GREETERS).iter() {
                     // Any outcome is acceptable (a restarted host loses its
-                    // actors); the invariant is completion, and — via the
-                    // checker — election safety across all the churn.
+                    // actors); the invariant is completion, and (via the
+                    // checker) election safety across all the churn.
                     let _ = service.ask_timeout(Greet, Duration::from_millis(500)).await;
                 }
             }
@@ -784,7 +784,7 @@ const SINGLETON: &str = "swarm-highlander";
 ///
 /// "Live" is judged by the *actor's* lifecycle, not the manager's report. A
 /// manager emits `SingletonStopped` when it observes the termination, on its
-/// next tick (utilities spec §5) — so an instance that stops in the last tick of
+/// next tick (utilities spec §5), so an instance that stops in the last tick of
 /// a run is gone while its `Stopped` is still one tick away. `ResignId` is
 /// emitted synchronously as the identity is released (core spec §4.2 step 5),
 /// which is the ground truth the count wants. Taking either event as the end of
@@ -835,7 +835,7 @@ impl actor_simulation::Invariant for SingletonConverged {
 /// Every node hosts the singleton while every node calls it through its proxy
 /// and the nemesis crashes and partitions at will. The drive outlasts the
 /// nemesis (whose rounds end within ~7s of virtual time), then heals and lets
-/// views reconverge, so the at-quiescence exactly-one check is sound — a run
+/// views reconverge, so the at-quiescence exactly-one check is sound: a run
 /// that ended mid-partition could legally hold two instances. Parameterized by
 /// `mode` so the same chaos sweeps all four control planes (spec §9.4); in
 /// static mode the anchor simply never moves, and the checks still hold.
@@ -883,8 +883,8 @@ impl ClusterWorkload for SingletonChaos {
         let net = ctx.net().clone();
         Box::pin(async move {
             let clock = nodes[0].clock().clone();
-            // Chaos phase: every node keeps calling its proxy; any outcome —
-            // Ok, DeadLetter in a handoff gap, Timeout across a partition — is
+            // Chaos phase: every node keeps calling its proxy; any outcome
+            // (Ok, DeadLetter in a handoff gap, Timeout across a partition) is
             // acceptable, the invariant is that calls complete and activations
             // stay disciplined.
             for _ in 0..12 {
@@ -917,7 +917,7 @@ fn singleton_chaos_converges_to_one_instance_across_seeds() {
     // Conservative downing: with an aggressive gossip timeout, the nemesis's
     // total partitions make every isolated coordinator *terminally* down the
     // others, legally fracturing one cluster into several permanent one-node
-    // clusters — each then correctly runs its own singleton, and a global
+    // clusters; each then correctly runs its own singleton, and a global
     // exactly-one no longer applies. The downing-driven handoff path is pinned
     // by `conformance_singleton.rs` (anchor crash) under controlled faults.
     let workload = SingletonChaos {
@@ -959,7 +959,7 @@ fn singleton_chaos_converges_in_leader_mode() {
         // Conservative downing, for the reason the gossip twin above gives, which
         // leader mode takes further. An aggressive timeout under the nemesis's
         // total partitions lets each isolated side down the rest, and `down` is
-        // terminal (spec invariant #15) — a heal cannot undo it. In leader mode
+        // terminal (spec invariant #15): a heal cannot undo it. In leader mode
         // the voter set is fixed, so a node the previous leader downed still
         // votes; the survivors elect a new leader that downs *it*, and the cluster
         // can end with every node `Down`, an empty serving set on all of them, and
@@ -977,7 +977,7 @@ fn singleton_chaos_converges_in_leader_mode() {
 #[test]
 fn singleton_chaos_converges_in_static_mode() {
     // No detector: reachability never changes, the anchor never moves, and the
-    // nemesis's crashes are invisible to membership — but the partition still
+    // nemesis's crashes are invisible to membership, but the partition still
     // blocks frames, so calls fail and must fail *fast and completely*.
     let workload = SingletonChaos {
         nodes: 3,

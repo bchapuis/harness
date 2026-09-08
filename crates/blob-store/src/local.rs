@@ -8,7 +8,7 @@
 //!
 //! A blob is written to `blobs/<ns>/<hh>/<hex>` via the `wal` atomic-replace
 //! discipline (wal §5): write a temp file, fsync, rename onto the final path,
-//! fsync the directory — so a reader sees either the whole blob or no blob, never
+//! fsync the directory, so a reader sees either the whole blob or no blob, never
 //! a torn one. `<ns>` is the namespace (the unit of deletion), and `<hh>` is the
 //! first hex byte of the content hash, fanning each namespace so no directory
 //! grows unbounded. Because the path *is* the namespace plus the content hash, a
@@ -19,7 +19,7 @@
 //! Deletion is a **tombstone** plus a sweep (spec §5.3): `delete_namespace`
 //! records a tombstone for `<ns>` (so a later `put` into it is refused) and then
 //! removes the `blobs/<ns>` subtree. A partial removal interrupted by a crash is
-//! harmless and re-driven, because the tombstone — not the presence of files —
+//! harmless and re-driven, because the tombstone (not the presence of files)
 //! makes the namespace gone. `Local` is CP trivially (one store, one writer) and
 //! cannot survive losing that node's disk.
 //!
@@ -49,9 +49,9 @@ use crate::blob::verify;
 
 /// The stamp on a tombstone file (compatibility §3, `blob.tombstone`).
 ///
-/// `BSTOMB` cannot be confused with the unstamped predecessor by length alone —
-/// that form is exactly [`TOMBSTONE_LEGACY_BYTES`], and a stamped record is longer
-/// — but the magic is what lets the reader say so without depending on a width
+/// `BSTOMB` cannot be confused with the unstamped predecessor by length alone
+/// (that form is exactly [`TOMBSTONE_LEGACY_BYTES`], and a stamped record is longer),
+/// but the magic is what lets the reader say so without depending on a width
 /// that a later revision may change.
 const TOMBSTONE: compat::Stamp =
     compat::Stamp::new(b"BSTOMB", compat::Window::at("blob.tombstone", 1));
@@ -81,7 +81,7 @@ const TOMBSTONE_LEGACY_BYTES: usize = 16;
 
 /// A single-node, on-disk content-addressed store (spec §5.1).
 ///
-/// Clone is cheap — the handle is an `Arc<Inner>` — so the tier and the node's
+/// Clone is cheap (the handle is an `Arc<Inner>`), so the tier and the node's
 /// replica actor share one store.
 #[derive(Clone)]
 pub struct LocalBlobStore {
@@ -96,7 +96,7 @@ struct Inner {
     /// Serializes mutations (blob writes and deletes) so a `put` and a
     /// `delete_namespace` of the same namespace cannot interleave: a `put` either
     /// completes before the tombstone (then the sweep removes it) or observes the
-    /// tombstone and is refused (spec §5.3, B7). Reads stay lock-free — the atomic
+    /// tombstone and is refused (spec §5.3, B7). Reads stay lock-free: the atomic
     /// rename gives them a whole blob or none.
     write: Mutex<()>,
     /// A process-local, monotonic stamp source for `Local` tombstones. `Local`
@@ -182,7 +182,7 @@ impl LocalBlobStore {
     /// This is what the replica actor's `FetchBlob` handler returns (spec §6): the
     /// *caller* re-hashes after the network transfer (spec §4, §5.2, **B1**), so
     /// an owner that returned non-verifying bytes is distinguishable from one that
-    /// had none — the distinction `get` needs to choose [`BlobError::Corrupt`] over
+    /// had none; the distinction `get` needs to choose [`BlobError::Corrupt`] over
     /// [`BlobError::Unavailable`]. Contrast [`fetch`](Self::fetch), which verifies
     /// for the single-node `Local` tier.
     pub fn read_raw(&self, ns: &Namespace, id: &BlobId) -> Option<Vec<u8>> {
@@ -219,7 +219,7 @@ impl LocalBlobStore {
     /// makes a namespace gone (spec §5.3), so a namespace stays deleted even if a
     /// build cannot read the stamp inside. What such a build loses is the stamp,
     /// which [`tombstoned_at`](Self::tombstoned_at) reports and which is
-    /// informational — never the deletion itself.
+    /// informational, never the deletion itself.
     pub fn is_tombstoned(&self, ns: &Namespace) -> bool {
         self.inner.tombstones.join(ns.to_string()).exists()
     }
@@ -234,7 +234,7 @@ impl LocalBlobStore {
     /// # Errors
     ///
     /// The bytes are neither a stamped record this build accepts nor the unstamped
-    /// predecessor — a format skew or bit-rot, which is reported rather than read
+    /// predecessor: a format skew or bit-rot, which is reported rather than read
     /// as an absent tombstone.
     ///
     /// [`TombstoneSet`]: crate::tombstone::TombstoneSet
@@ -255,7 +255,7 @@ impl LocalBlobStore {
         let _ = wal::sync_dir(&self.inner.blobs);
     }
 
-    /// Enumerate every blob this node holds on disk, as `(namespace, id)` pairs —
+    /// Enumerate every blob this node holds on disk, as `(namespace, id)` pairs:
     /// what the reconcile loop walks to re-push under-replicated blobs to their
     /// current owners (spec §7, **B6**). Reconstructs each `Namespace` and
     /// [`BlobId`] from its hex path component; entries that do not decode (e.g. a
@@ -510,8 +510,8 @@ mod tests {
     /// The `blob.tombstone` fixture still decodes to the stamp it recorded
     /// (compatibility §4). A `postcard` body is positional, so a field added to
     /// `TombstoneBody` or two of them reordered compiles cleanly and silently
-    /// changes what every stored record means; nothing else in this crate — which
-    /// has no in-tree consumer — would notice.
+    /// changes what every stored record means; nothing else in this crate (which
+    /// has no in-tree consumer) would notice.
     #[test]
     fn blob_tombstone_v1_still_reads_its_stamp() {
         let (_dir, store) = store();
@@ -545,7 +545,7 @@ mod tests {
 
     /// A record carrying the magic is *this* format, so a revision outside the
     /// window is refused by name (**V2**) instead of being handed to the older
-    /// decoder — the misparse `is_stamped` exists to prevent.
+    /// decoder: the misparse `is_stamped` exists to prevent.
     #[test]
     fn a_tombstone_from_another_revision_is_refused_rather_than_adopted() {
         let (_dir, store) = store();
@@ -569,7 +569,7 @@ mod tests {
 
     /// **Presence**, not the record's contents, is what makes a namespace gone
     /// (spec §5.3). Pinned so a later change to the body cannot quietly make
-    /// deletion depend on parsing — a build that could not read the stamp would
+    /// deletion depend on parsing: a build that could not read the stamp would
     /// otherwise start serving blobs from a deleted namespace.
     #[test]
     fn a_tombstone_is_gone_by_presence_whatever_its_bytes() {

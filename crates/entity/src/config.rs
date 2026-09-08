@@ -32,15 +32,15 @@ pub struct EntityConfig {
     /// The mechanism comes from Durable Objects (DO §5); the *number* does not. DO
     /// evicts after ten seconds because it multiplexes tenants onto shared hosts and
     /// prices resident memory. On a dedicated node the two sides of the trade read
-    /// differently: eviction reclaims an entity's state — kilobytes against a machine
-    /// sized in the hundreds of gigabytes — and costs a quorum head-recovery round
+    /// differently: eviction reclaims an entity's state (kilobytes against a machine
+    /// sized in the hundreds of gigabytes), and costs a quorum head-recovery round
     /// trip on the next touch, plus a snapshot on the way out if enough has
     /// accumulated (§9). Memory is the abundant resource here and the round trip is
     /// the scarce one, so the window is set long enough that an entity in intermittent
     /// use stays resident between touches (`docs/hardware-envelope.md` §3.1, §3.2).
     ///
     /// Shorten it for a type with many rarely-touched entities and large state;
-    /// lengthen it for one whose entities are touched in bursts minutes apart — an
+    /// lengthen it for one whose entities are touched in bursts minutes apart: an
     /// agent session between turns is exactly that shape.
     pub idle_after: Duration,
     /// Persist a snapshot every this many committed events (§9). `0` disables
@@ -48,13 +48,13 @@ pub struct EntityConfig {
     ///
     /// The trigger for **both** snapshot paths, the write path and idle hibernation
     /// (§10), so this one number decides how often an entity pays what a snapshot
-    /// costs — and on the `Quorum` tier that cost lands on every replica (§7.3),
+    /// costs, and on the `Quorum` tier that cost lands on every replica (§7.3),
     /// billed R−1 times to the uplink (`docs/hardware-envelope.md` §3.9). It is no
     /// longer O(state): past 64 KiB facet 0's state travels as content-defined
     /// chunks and only the chunks that changed are sent (§7.12), so a snapshot is
     /// roughly O(delta) plus a manifest. What it buys is a shorter replay, and
-    /// replay reads are **local** (§9). The default stays high — the thing being
-    /// saved is still cheap and a snapshot is still not free — but the penalty for
+    /// replay reads are **local** (§9). The default stays high (the thing being
+    /// saved is still cheap and a snapshot is still not free), but the penalty for
     /// lowering it is far smaller for an entity whose state grows by accretion.
     ///
     /// The counter-pressure is failover, not steady state: a new leader recovers the
@@ -66,17 +66,17 @@ pub struct EntityConfig {
     /// How each node obtains its durable [`EntityStore`](crate::store::EntityStore)
     /// (spec §7.4). `None` (the default) gives every node a fresh in-memory store,
     /// lost on restart. A deployment that must survive a full-cluster cold restart
-    /// supplies a factory that caches per node and outlives a restart — the entity
+    /// supplies a factory that caches per node and outlives a restart: the entity
     /// analogue of the Raft WAL storage seam (actor §9.4.3).
     pub entity_store: Option<EntityStoreFactory>,
-    /// How this deployment groups nodes into failure domains — racks, zones,
+    /// How this deployment groups nodes into failure domains: racks, zones,
     /// whatever fails together (spec §7.1). `None` (the default) treats every node as
     /// its own domain, which is the historical behaviour: replicas spread across the
     /// cluster but nothing stops all R of a shard landing in one zone, so a single
     /// zone loss can take shards below quorum while the cluster looks healthy.
     ///
     /// Supplying it makes the allocator take at most `ceil(R / domains)` replicas per
-    /// domain. The mapping MUST agree on every node — see
+    /// domain. The mapping MUST agree on every node; see
     /// [`FailureDomains`](crate::FailureDomains).
     pub failure_domains: Option<crate::FailureDomains>,
     /// How long a per-entity quorum append, snapshot, or blob put waits before
@@ -93,7 +93,7 @@ pub struct EntityConfig {
     /// setting it too low is not a slow write but a *false* one: every timeout is
     /// ambiguous (the append MAY still commit later, §7.2), so it steps the
     /// activation down and forces a full rehydration, turning transient slowness into
-    /// activation churn — which itself generates more I/O.
+    /// activation churn, which itself generates more I/O.
     pub quorum_timeout: Duration,
     /// How long a recovery read quorum waits before falling back to local state
     /// (§7.5, read-your-leader) or reporting `Unavailable` (spec §8, §11).
@@ -106,9 +106,9 @@ pub struct EntityConfig {
     /// How many resolved host handles a node caches per entity type (spec §5.4).
     ///
     /// The cache is what keeps a repeat call off the serial gateway, so it wants to
-    /// be large; it is also per *name*, and a long-lived client — the gateway fronts
-    /// every tenant — would otherwise grow one entry for every name it has ever
-    /// addressed. A miss is not an error, only one gateway round-trip — which is
+    /// be large; it is also per *name*, and a long-lived client (the gateway fronts
+    /// every tenant) would otherwise grow one entry for every name it has ever
+    /// addressed. A miss is not an error, only one gateway round-trip, which is
     /// precisely the resource this deployment is short of, so the bound is set by what
     /// the entries cost (a handle and a name, tens of megabytes at this size) rather
     /// than by how many are expected to be live (`docs/hardware-envelope.md` §3.1,

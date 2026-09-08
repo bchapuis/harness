@@ -1,6 +1,6 @@
 //! Conformance: death watch (spec §12): multiple watchers, `unwatch`, and signal
 //! ordering through the mailbox, plus a watcher receiving exactly one
-//! [`Terminated`] when a watched actor stops, fails, or — the distributed case —
+//! [`Terminated`] when a watched actor stops, fails, or (the distributed case)
 //! has its node declared `down` (the node-down cascade, spec §8.1 step 4).
 
 mod support;
@@ -155,7 +155,7 @@ fn terminated_arrives_in_mailbox_order_after_earlier_messages() {
         let watcher = system.spawn(Watcher::new(target.clone(), observed));
         clock.sleep(Duration::from_millis(1)).await;
         // Messages sent before the target stops are observed before Terminated
-        // (spec §12 #13 — signals ride the mailbox in serial order).
+        // (spec §12 #13: signals ride the mailbox in serial order).
         watcher.tell(Note(1)).await.unwrap();
         watcher.tell(Note(2)).await.unwrap();
         target.tell(Stop).await.unwrap();
@@ -168,7 +168,7 @@ fn terminated_arrives_in_mailbox_order_after_earlier_messages() {
 #[test]
 fn remote_graceful_stop_notifies_a_remote_watcher() {
     // A watcher on node A watches a greeter on node B. When B's greeter stops
-    // gracefully, B sends a `Terminated` frame to A and the watcher is notified —
+    // gracefully, B sends a `Terminated` frame to A and the watcher is notified,
     // not only on node-down (spec §12).
     let (sim, net) = support::cluster(8, None);
     let node_a = net.join(actor_core::NodeId::new(1));
@@ -256,7 +256,7 @@ impl Handler<Terminated> for WatchWatcher {
     }
 }
 
-/// A single-node cluster with SWIM off — so `block_on` reaches quiescence.
+/// A single-node cluster with SWIM off, so `block_on` reaches quiescence.
 fn one_node(seed: u64) -> (Simulation, SimNode) {
     let sim = Simulation::new(seed);
     let node = SimNetwork::new(&sim).join(NodeId::new(1));

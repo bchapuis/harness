@@ -35,7 +35,7 @@ use crate::system::EntitySystem;
 /// The stable, cluster-wide identity of an entity (spec §3): a `(entity type, key)`
 /// pair, where `key` is an arbitrary application string (`"account/42"`, a UUID,
 /// a tenant id). Unlike an `ActorId`, an `EntityName` names a logical object, not a
-/// node — it is not locality-classifiable on its own (§5.1).
+/// node: it is not locality-classifiable on its own (§5.1).
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct EntityName {
     entity_type: String,
@@ -85,7 +85,7 @@ impl NoEvent {
 /// The implementing type is the **behavior**: immutable configuration. The
 /// runtime supplies identity, durability, the gates, and the lifecycle.
 ///
-/// `Self::System` must be an [`EntitySystem`] — a system that can host entities
+/// `Self::System` must be an [`EntitySystem`]: a system that can host entities
 /// (`Local` [`LocalSystem`](actor_core::LocalSystem), or a `Quorum` shard-hosting
 /// clustered system).
 pub trait Entity: Sized + Send + 'static {
@@ -99,13 +99,13 @@ pub trait Entity: Sized + Send + 'static {
     type Event: SerializationRequirement;
 
     /// The entity's declared facet set (spec §7.12): `()` for none, or a tuple of
-    /// built-in facets — e.g. `(Kv,)`, `(Kv, Ws)`. Each declared facet
+    /// built-in facets, e.g. `(Kv,)`, `(Kv, Ws)`. Each declared facet
     /// surfaces a compile-time-gated [`EntityCtx`] accessor, contributes tagged
     /// records to the same atomic per-command batch (E19), joins the composite
     /// snapshot, and adds its blob roots to the entity's unioned live set.
     type Facets: FacetSet;
 
-    /// The entity type's stable identity — the namespace tag in every
+    /// The entity type's stable identity: the namespace tag in every
     /// [`EntityName`] of this type and the key the gateway is discovered under
     /// (§5.3). An explicit constant (e.g. `"bank.Account"`) is RECOMMENDED:
     /// deriving one from `type_name` would not be rename-stable.
@@ -131,7 +131,7 @@ pub trait Entity: Sized + Send + 'static {
         async { Ok(()) }
     }
 
-    /// Called once before the activation deactivates — idle eviction, handoff, or
+    /// Called once before the activation deactivates: idle eviction, handoff, or
     /// a forced step-down (§10). Safe even when the journal is unwritable, because
     /// it cannot persist ([`EntityCtx`] exposes no `persist`); use it to release
     /// non-durable per-activation resources.
@@ -167,7 +167,7 @@ pub trait Entity: Sized + Send + 'static {
     }
 
     /// Called when an actor this entity watched through
-    /// [`EntityCtx::watch`] terminates (actor §12) — including its node going
+    /// [`EntityCtx::watch`] terminates (actor §12), including its node going
     /// down. Like [`on_alarm`](Entity::on_alarm), a callerless **decision**
     /// through the same §6 barrier: return the events to journal (an empty
     /// result commits nothing, §7.5). The default ignores the signal.
@@ -188,7 +188,7 @@ pub trait Entity: Sized + Send + 'static {
 /// `handle` is a *decision*, not a mutation: it MUST NOT mutate state
 /// directly (state changes only through [`Entity::apply`]) and MUST NOT perform
 /// durable I/O (the host owns persistence, §6). A read-only command returns no
-/// events — `(vec![], reply)` — which commits nothing (§7.5).
+/// events: `(vec![], reply)`, which commits nothing (§7.5).
 pub trait EntityHandler<M: Message>: Entity {
     /// Decide the outcome of a command (spec §4.2).
     fn handle(
@@ -202,8 +202,8 @@ pub trait EntityHandler<M: Message>: Entity {
 /// A completed event read ([`EntityCtx::events`], [`EntityRef::events`]
 /// (crate::EntityRef::events)): the decoded events, plus the highest compaction
 /// **base** the read observed (§9). A slot at `Seq <= base` that is absent from
-/// `events` is truncated history — compacted away, subsumed by the entity's
-/// snapshot — not one of the interleaved records the projection skips (§7.12);
+/// `events` is truncated history (compacted away, subsumed by the entity's
+/// snapshot) not one of the interleaved records the projection skips (§7.12);
 /// a read whose `from` lay below `base` therefore did **not** see the events in
 /// `(from, base]`, and `base <= from` means nothing the caller asked after was
 /// compacted. Every page carries the base because compaction is not bounded by
@@ -247,12 +247,12 @@ pub(crate) fn committed_prefix(
     (base, records, at_head)
 }
 
-/// The events among one loaded journal page — the record-to-event projection
+/// The events among one loaded journal page, the record-to-event projection
 /// (spec §7.9) applied to a `load` page: each record split into facet tag and
 /// payload, facet records (§7.12) skipped, the events returned at the journal's
 /// real slots. Shared by the activation's [`EntityCtx::events`] and the gateway's
 /// non-activating read (§7.5), so the two projections cannot drift. A record
-/// that will not split is corruption — an error, never silently skipped.
+/// that will not split is corruption: an error, never silently skipped.
 /// Consumes the page and strips each event's one-byte envelope in place, so
 /// the serial gateway pays a memmove per event, never a second allocation.
 pub(crate) fn events_in_page(
@@ -271,7 +271,7 @@ pub(crate) fn events_in_page(
 }
 
 /// The handler/lifecycle context (spec §4.3). It deliberately exposes **no**
-/// `persist` method and no state mutation — state changes only through events
+/// `persist` method and no state mutation: state changes only through events
 /// folded by [`Entity::apply`] (§4.2).
 pub struct EntityCtx<G: Entity> {
     entity_type: &'static str,
@@ -285,7 +285,7 @@ pub struct EntityCtx<G: Entity> {
     /// [`events`](EntityCtx::events). The local store alone cannot tell a
     /// committed record from a tentative one (a leader writes its own replica
     /// before the quorum resolves, §7.2), and the returned future is `'static`
-    /// — an entity may launch it, racing the host's own in-flight append — so
+    /// (an entity may launch it, racing the host's own in-flight append), so
     /// the read clamps to this cell rather than trusting the input gate.
     committed: crate::host::CommittedCell,
     /// The host's facet cell (spec §7.12): committed forms plus the per-command
@@ -326,8 +326,8 @@ impl<G: Entity> EntityCtx<G> {
         }
     }
 
-    /// Death-watch `target` (actor §12): when it terminates for any reason —
-    /// including its node going down — the entity's
+    /// Death-watch `target` (actor §12): when it terminates for any reason
+    /// (including its node going down) the entity's
     /// [`on_peer_terminated`](Entity::on_peer_terminated) runs through the
     /// ordinary §6 barrier. The registration is queued here and installed by the
     /// host after the current handler (or lifecycle hook) completes; it lives
@@ -347,7 +347,7 @@ impl<G: Entity> EntityCtx<G> {
     /// coordination: the disk facet's capture scans and hashes a whole image, which on
     /// the async worker stalls this node's Raft heartbeats for as long as it runs. The
     /// default is [`InlineIo`](crate::InlineIo), so a deployment that has not opted
-    /// into a pool — and the deterministic simulation, which must not — behaves exactly
+    /// into a pool (and the deterministic simulation, which must not) behaves exactly
     /// as it did before the seam existed.
     pub(crate) fn blocking_io(&self) -> &Arc<dyn crate::BlockingIo> {
         &self.blocking_io
@@ -388,26 +388,26 @@ impl<G: Entity> EntityCtx<G> {
     }
 
     /// Up to `limit` of this entity's committed **events** after `from`
-    /// (exclusive), decoded, in ascending `Seq` order — the load-path form of
+    /// (exclusive), decoded, in ascending `Seq` order, the load-path form of
     /// the subscription's event projection (spec §7.9): facet records (§7.12)
     /// are skipped, so the returned `Seq`s are the journal's real slots and may
     /// have gaps between consecutive events. A local, fence-free read of the
     /// leader's journal (§7.3), read-your-leader like any query (§7.5).
     ///
     /// Returns fewer than `limit` events only when the head is reached, so an
-    /// empty page means no event follows `from` — the loop pages past facet
+    /// empty page means no event follows `from`: the loop pages past facet
     /// records rather than surfacing them as short pages. A record that will
     /// not split or decode is [`EntityJournalError::Unavailable`]: corruption,
     /// never silently skipped.
     ///
     /// The returned [`EventHistory`] carries the store's compaction base (§9):
     /// a `from` below it asked for history the snapshot has subsumed, and the
-    /// events in `(from, base]` are not — and can no longer be — served.
+    /// events in `(from, base]` are not (and can no longer be) served.
     ///
     /// Every page is bounded by the activation's **committed head**, exactly
     /// like the gateway's non-activating read (§7.5): the local store may hold
     /// an in-flight append's tentative slots (§7.2), and this future is
-    /// `'static` — an entity may launch it, so it can race the host's own
+    /// `'static`; an entity may launch it, so it can race the host's own
     /// append. Slots above the head are simply not served (**E5**).
     pub fn events(&self, from: Seq, limit: usize) -> EventsFuture<G::Event> {
         /// Journal entries per `load` page: sized to a subscription batch, not
@@ -421,7 +421,7 @@ impl<G: Entity> EntityCtx<G> {
             let floor = committed.load(std::sync::atomic::Ordering::Acquire);
             if floor == crate::host::HEAD_UNPUBLISHED {
                 // Only reachable from a future that escaped a host still
-                // rehydrating: the head is being recovered — transient, and a
+                // rehydrating: the head is being recovered; transient, and a
                 // read commits nothing, so re-asking is safe.
                 return Err(EntityJournalError::Unavailable(
                     "the entity's committed head is not yet recovered".into(),
@@ -503,7 +503,7 @@ impl<G: Entity> EntityRegistry<G> {
     }
 }
 
-/// The set of command manifests an entity type accepts (spec §5.5) — the
+/// The set of command manifests an entity type accepts (spec §5.5): the
 /// deserialization allowlist, obtained by running [`Entity::register`].
 pub fn accepted_manifests<G: Entity>() -> BTreeSet<&'static str> {
     let mut registry = EntityRegistry::<G>::new();

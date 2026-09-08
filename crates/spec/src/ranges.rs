@@ -3,7 +3,7 @@
 //!
 //! A spec names a sibling's catalogue by its extent: `entity §N` (its invariants as
 //! **E1–E20**), "the agent runtime (A1–A8)", "core §18.5 #1–#22". The range is a
-//! citation like any other — it points at a catalogue and says how far it runs —
+//! citation like any other (it points at a catalogue and says how far it runs),
 //! but where [`crate::citations`] resolves a `§` against a heading and
 //! [`crate::identifiers`] resolves a backticked name against the tree, nothing
 //! resolved these. So they rot the same way, and quietly: a catalogue that *grows*
@@ -11,7 +11,7 @@
 //! than the one on disk, and each of those sentences still reads exactly right.
 //!
 //! That is not hypothetical. `E21` was catalogued at entity §7.16 and every
-//! citation of entity's extent went on saying `E1–E20` — six of them across four
+//! citation of entity's extent went on saying `E1–E20`, six of them across four
 //! documents: the agent runtime and machine preambles, the machine's §7,
 //! `docs/README.md`, and `simulation-testing.md`. Every one parses, resolves, and
 //! passes every other gate.
@@ -20,11 +20,11 @@
 //!
 //! Two directions, and neither is the obvious one.
 //!
-//! The obvious check — every number in the span exists — is *wrong here*: the
+//! The obvious check (every number in the span exists) is *wrong here*: the
 //! harness catalogue has no A2 (agent §11 retires it deliberately), so `A1–A8`
 //! spans a number nothing defines and is still the correct way to write the
-//! harness's extent. And the natural stronger check — a range is the whole
-//! catalogue, so its high end is the last invariant — is wrong too, because
+//! harness's extent. And the natural stronger check (a range is the whole
+//! catalogue, so its high end is the last invariant) is wrong too, because
 //! `M1–M3` in machine §7 is a genuine claim about three of six.
 //!
 //! What holds without exception is the pair:
@@ -33,13 +33,13 @@
 //!   invariant no catalogue defines, whatever the surrounding sentence meant.
 //! - **The end is named somewhere.** Across the whole document set, some range
 //!   reaches the catalogue's last invariant. One spec's sub-span is another's
-//!   full extent, so the union is what carries the claim — and a catalogue that
+//!   full extent, so the union is what carries the claim, and a catalogue that
 //!   grows past every citation of it is precisely the `E21` case.
 //!
 //! Together they pin the extent from both sides without a rule about what any one
 //! sentence intended. The second is also what makes a catalogue nothing cites at
 //! all fail rather than pass vacuously: `docs/README.md` rendered the wal
-//! catalogue's column as `—` while `wal §7` held L1–L5 and
+//! catalogue's column as a bare dash while `wal §7` held L1–L5 and
 //! `crates/wal/tests/conformance_catalogue.rs` compared them, and the extent went
 //! unstated by the entire set.
 
@@ -59,7 +59,7 @@ pub enum Owner {
     /// Its rows are parsed and the range is held against them.
     Catalogue(&'static str),
     /// A table the catalogue gates do not read, with the reason. Ranges carrying
-    /// the label are scanned and then skipped — by a declaration naming what is
+    /// the label are scanned and then skipped, by a declaration naming what is
     /// unguarded, rather than by a scan that silently finds nothing.
     Unregistered(&'static str),
 }
@@ -68,7 +68,7 @@ pub enum Owner {
 ///
 /// The letters are the catalogues' own (`E` for `E1`, `#` for the core's bare
 /// numbering). A label absent from this table fails [`resolve`] rather than being
-/// skipped, so a new catalogue is registered here as part of adding it — the way
+/// skipped, so a new catalogue is registered here as part of adding it: the way
 /// a new spec is registered in [`DOCUMENTS`].
 pub const LABELS: &[(&str, Owner)] = &[
     ("#", Owner::Catalogue("core")),
@@ -91,7 +91,7 @@ pub const LABELS: &[(&str, Owner)] = &[
         "V",
         Owner::Unregistered(
             "compatibility §2: a two-column table with neither a `Defined in` nor a \
-             `Verified by`, so there is no Rust copy to compare it against — V3 is \
+             `Verified by`, so there is no Rust copy to compare it against: V3 is \
              held at compile time by `compat::Window` and V4/V5 by the golden corpus \
              (compatibility §4)",
         ),

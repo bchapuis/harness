@@ -2,12 +2,12 @@
 //! checked-in bytes, and every checked-in fixture belongs to a registered boundary
 //! (compatibility spec §3, §4).
 //!
-//! The corpus itself is distributed — a fixture's *decoder* lives with the format
+//! The corpus itself is distributed: a fixture's *decoder* lives with the format
 //! that owns it, because `compat` owns no format and reads no file on any live path
 //! (§2). What can only be checked centrally is the part a per-crate test cannot
 //! see: that a **new** boundary did not ship without a corpus at all. §3 says a new
 //! durable or wire format MUST appear in the registry; this makes the sentence
-//! after it — that it must also be decodable by a later build — mechanical rather
+//! after it (that it must also be decodable by a later build) mechanical rather
 //! than remembered.
 //!
 //! So this test reads the registry table out of the specification and holds the
@@ -30,9 +30,9 @@ fn workspace() -> PathBuf {
 
 /// The registry of §3, as `boundary -> revision`.
 ///
-/// A boundary whose `Rev` column is `—` carries no revision at all — it is an
+/// A boundary whose `Rev` column reads `none` carries no revision at all: it is an
 /// identity field (`wal.checksum`) or a reserved one (`wal.reserved`), matched
-/// rather than compared — so it has nothing for a corpus to pin and is left out.
+/// rather than compared, so it has nothing for a corpus to pin and is left out.
 fn registry() -> BTreeMap<String, u16> {
     let spec = std::fs::read_to_string(workspace().join("docs/compatibility-spec.md"))
         .expect("read the compatibility specification");
@@ -60,7 +60,7 @@ fn registry() -> BTreeMap<String, u16> {
     }
     assert!(
         found.len() >= 6,
-        "parsed only {} rows out of the §3 registry — the table's shape changed and \
+        "parsed only {} rows out of the §3 registry: the table's shape changed and \
          this gate is no longer reading it",
         found.len(),
     );
@@ -139,7 +139,7 @@ fn every_corpus_belongs_to_a_registered_boundary() {
     for boundary in corpora().keys() {
         assert!(
             registry.contains_key(boundary),
-            "corpus directory {boundary:?} names no boundary in the §3 registry — \
+            "corpus directory {boundary:?} names no boundary in the §3 registry; \
              register the format, or delete the fixtures with it",
         );
     }

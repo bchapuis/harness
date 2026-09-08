@@ -4,9 +4,9 @@
 //! Covers the mechanisms that compose it: the [`AlarmIndex`] entity's
 //! register/clear/query behaviour, a host **registering** its pending deadline in
 //! the index as it arms (`entities_with_alarms`), the per-type **driver**
-//! re-activating an indexed entity that is no longer resident — the reactivation a
+//! re-activating an indexed entity that is no longer resident (the reactivation a
 //! new leader performs after a failover, exercised here on the `Local` tier by
-//! letting an entity hibernate and driving the sweep — and **alarm hibernation**:
+//! letting an entity hibernate and driving the sweep), and **alarm hibernation**:
 //! an alarmed entity hibernates once (and only once) the index has acknowledged
 //! its deadline, the driver waking it when the alarm falls due.
 
@@ -233,7 +233,7 @@ fn driver_reactivates_an_indexed_entity() {
         shards: SHARDS,
         ..EntityConfig::default()
     });
-    // A short idle window so the entity hibernates once touched — standing in for the
+    // A short idle window so the entity hibernates once touched, standing in for the
     // deactivation a failover forces. The driver must bring it back from the index.
     let pokes = system.entities_with_alarms::<Poke>(
         EntityConfig {
@@ -281,7 +281,7 @@ fn acked_registration_lets_an_alarmed_entity_hibernate_and_the_driver_fires_it()
     // (the registration ask returned from the index entity's commit), the standing
     // alarm no longer pins the entity resident. The entity hibernates well before
     // its deadline; the driver's sweep re-activates it when the alarm falls due,
-    // and its own re-armed timer fires it — no caller at any point.
+    // and its own re-armed timer fires it, no caller at any point.
     let sim = Simulation::new(4);
     let recorder = Recorder::new();
     let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());
@@ -331,7 +331,7 @@ fn acked_registration_lets_an_alarmed_entity_hibernate_and_the_driver_fires_it()
 #[test]
 fn unacked_registration_keeps_an_alarmed_entity_resident() {
     // The safety half: with the index's every commit refused, no registration ask
-    // can ever ack, so the host has no evidence the driver would wake the entity —
+    // can ever ack, so the host has no evidence the driver would wake the entity;
     // the veto must hold and the entity stay resident (where its own timer covers
     // the fire), however long it idles. The idle tick retries the registration;
     // each retry fails the same way, and none of that reaches the command path.

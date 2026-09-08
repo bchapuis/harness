@@ -13,13 +13,13 @@ use actor_simulation::Verify;
 ///
 /// S4 is deliberately verified in the *agent* suite
 /// (`agent/tests/conformance_sandbox.rs`): the acquisition discipline is
-/// loop conduct, observed through the journal — a write-ahead-order audit at
+/// loop conduct, observed through the journal; a write-ahead-order audit at
 /// quiescence (agent §6.3, E5), never a stream checker (agent spec §5.6
 /// item 6).
 ///
 /// Each `verify` entry names suites and nothing else, as its siblings do and as
-/// `Verify::SimTest` has always specified. What each suite contributes — the
-/// adversarial traversal, the two confinement smokes, the teardown accounting — is
+/// `Verify::SimTest` has always specified. What each suite contributes (the
+/// adversarial traversal, the two confinement smokes, the teardown accounting) is
 /// the spec row's to say, and §6 says it. Keeping the explanation in one of the two
 /// copies rather than both is what lets the other be checked.
 pub fn s_catalogue() -> &'static [CatalogueEntry] {
@@ -30,7 +30,7 @@ const S_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 1,
         spec: "sandbox §3.1, §3.2",
-        property: "Workspace confinement: at every tier, no path outside the session's workspace is representable to a tool or a guest — confinement is by capability handle, never by sanitization of a representable escape",
+        property: "Workspace confinement: at every tier, no path outside the session's workspace is representable to a tool or a guest; confinement is by capability handle, never by sanitization of a representable escape",
         verify: &[
             Verify::CompileTime(
                 "the cap-std Dir handle is the only filesystem capability the provider holds; \

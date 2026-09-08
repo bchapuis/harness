@@ -1,4 +1,4 @@
-//! Conformance: receptionist (spec §13) — empty lookups, concurrent registration
+//! Conformance: receptionist (spec §13); empty lookups, concurrent registration
 //! merge, graceful-stop prune, and anti-entropy convergence (late joiners and
 //! partition heals), plus end-to-end remote service discovery, death-watch
 //! pruning of a downed node's registrations, and subscription snapshot/updates.

@@ -6,7 +6,7 @@
 //! over a second of CPU per copy. That claim has never been measured. These benchmarks
 //! measure it, on the two shapes that behave differently:
 //!
-//! - `bytes` is a `Vec<u8>` — the shape the warning is about, and the shape an entity's
+//! - `bytes` is a `Vec<u8>`: the shape the warning is about, and the shape an entity's
 //!   journaled event or a blob actually is.
 //! - `record` is an ordinary struct of strings and numbers, where the two formats are
 //!   much closer and JSON's readability is worth something.
@@ -34,7 +34,7 @@ fn main() {
     divan::main();
 }
 
-/// A message of ordinary scalar fields — the shape where JSON is competitive and its
+/// A message of ordinary scalar fields: the shape where JSON is competitive and its
 /// readability is a real benefit.
 #[derive(Serialize, Deserialize, Clone)]
 struct Record {
@@ -81,9 +81,9 @@ fn decode_bench<T: Serialize + DeserializeOwned + Sync>(
 ///
 /// The distinction is one `#[serde(with)]` and it changes which serde call the codec
 /// sees: `serialize_bytes` and `deserialize_bytes` instead of the default sequence
-/// path's element-at-a-time loop. It changes nothing on the wire — under postcard a
+/// path's element-at-a-time loop. It changes nothing on the wire, under postcard a
 /// byte string and a `Vec<u8>` are the same varint length and the same payload, and
-/// under JSON `serde_json` has no byte form so it emits the identical number array —
+/// under JSON `serde_json` has no byte form so it emits the identical number array,
 /// which is what makes the `*_fast` figures below a free comparison rather than a
 /// format trade.
 #[derive(Serialize, Deserialize)]
@@ -95,7 +95,7 @@ fn bytes_postcard<const N: usize>(bencher: Bencher) {
     encode_bench(bencher, &PostcardCodec, &vec![0x5a_u8; N], N);
 }
 
-/// The same encode with the codec told these are bytes — the paired figure.
+/// The same encode with the codec told these are bytes: the paired figure.
 #[divan::bench(consts = [1024, 65_536, 1_048_576])]
 fn bytes_postcard_fast<const N: usize>(bencher: Bencher) {
     encode_bench(bencher, &PostcardCodec, &Bytes(vec![0x5a_u8; N]), N);
@@ -108,7 +108,7 @@ fn bytes_json<const N: usize>(bencher: Bencher) {
     encode_bench(bencher, &JsonCodec, &vec![0x5a_u8; N], N);
 }
 
-/// Decoding a `Vec<u8>` through postcard — the other half of a round trip.
+/// Decoding a `Vec<u8>` through postcard: the other half of a round trip.
 ///
 /// Here because a replicated blob pays both directions and neither is free: the leader
 /// encodes the payload into each peer's message and the peer decodes it before its
@@ -117,7 +117,7 @@ fn bytes_json<const N: usize>(bencher: Bencher) {
 /// single thing the codec is asked to do, and a peer round trip carrying one measured
 /// ~33 ms on loopback with the peer's disk work deduplicated away entirely
 /// (`scripts/bench-machine-cost.sh`). Encode plus decode is how much of that the codec
-/// can account for — and it turned out to be nearly all of it, at each of the two
+/// can account for, and it turned out to be nearly all of it, at each of the two
 /// layers a blob is encoded by.
 #[divan::bench(consts = [1024, 65_536, 1_048_576])]
 fn bytes_postcard_decode<const N: usize>(bencher: Bencher) {
@@ -134,7 +134,7 @@ fn bytes_postcard_decode_fast<const N: usize>(bencher: Bencher) {
 
 /// JSON's encode with the codec told these are bytes.
 ///
-/// Measured because the obvious prediction is that it cannot matter — `serde_json`
+/// Measured because the obvious prediction is that it cannot matter: `serde_json`
 /// has no byte form, so `serialize_bytes` emits the same array of decimal numbers,
 /// and the bytes on the wire are indeed identical. It is ~2.5x faster anyway (139
 /// MB/s to 343 MB/s at a mebibyte): what changes is not the output but the path to
@@ -151,7 +151,7 @@ fn bytes_json_fast<const N: usize>(bencher: Bencher) {
 // test` does not run bench targets, so a test living in this file would compile in CI and
 // never execute. Benchmarks measure; tests assert.
 
-/// A scalar-field message through postcard — the common small-message case.
+/// A scalar-field message through postcard: the common small-message case.
 #[divan::bench]
 fn record_postcard(bencher: Bencher) {
     encode_bench(bencher, &PostcardCodec, &record(), 0);

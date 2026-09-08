@@ -4,7 +4,7 @@
 //! resolution it carries the **transport boundary** (spec §4.1): locality
 //! classification, the system codec, and the byte-level `remote_ask`/
 //! `remote_tell` the typed [`ActorRef`] layer encodes onto. [`LocalSystem`] is
-//! the single-node implementation — its remote methods are unreachable because
+//! the single-node implementation: its remote methods are unreachable because
 //! it has no peers; the cluster runtime (`actor-cluster`) provides a networked
 //! implementation over the same trait.
 
@@ -38,8 +38,8 @@ use crate::runtime::Spawner;
 /// The runtime an actor runs on (spec §4). A cloneable handle: cloning shares
 /// the same underlying system.
 pub trait ActorSystem: Clone + Send + Sync + 'static {
-    /// Spawn an actor from `factory`, parented to `parent` (`None` for a root)
-    /// — the one spawn seam an implementation supplies (spec §4.1, §4.2). The
+    /// Spawn an actor from `factory`, parented to `parent` (`None` for a root):
+    /// the one spawn seam an implementation supplies (spec §4.1, §4.2). The
     /// factory yields the initial instance and any restart re-creations, and
     /// `None` once exhausted (spec §11.2). Callers use the four provided forms
     /// ([`spawn`], [`spawn_with`], [`Ctx::spawn`], [`Ctx::spawn_with`]), which
@@ -113,13 +113,13 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// Classify `id` as owned by this node, from the id alone (spec §4.3).
     fn is_local(&self, id: &ActorId) -> bool;
 
-    /// Whether `node` is currently accepting new work — used to route service
+    /// Whether `node` is currently accepting new work: used to route service
     /// discovery away from a node taken out of rotation. The default is `true`
     /// (a system without membership treats every node as available); a clustered
     /// system returns `false` for a node an operator has drained for maintenance,
     /// or one that is down (spec §9.4, §13). It gates which actors a
     /// receptionist [`lookup`](crate::Receptionist::lookup) hands back, not
-    /// whether a node is reachable — a drained node still answers direct calls.
+    /// whether a node is reachable: a drained node still answers direct calls.
     fn is_serving(&self, _node: NodeId) -> bool {
         true
     }
@@ -133,8 +133,8 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     ///
     /// **Contract (invariant #1):** the implementation must bracket every call
     /// with [`Event::AskIssued`] before dispatch and exactly one
-    /// [`Event::AskOutcome`] when it resolves — success or [`CallError`] alike
-    /// — mirroring the bracket [`Mailbox::ask`] emits on the local path. The
+    /// [`Event::AskOutcome`] when it resolves (success or [`CallError`] alike)
+    /// mirroring the bracket [`Mailbox::ask`] emits on the local path. The
     /// checker proves no ask is silently lost from those pairs; an
     /// implementation that skips them hides exactly the losses the invariant
     /// exists to catch.
@@ -172,14 +172,14 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     fn next_random(&self) -> u64;
 
     /// The system's [`Clock`] (§4.6): the single source of time. Layered
-    /// runtimes read and schedule time through this — never a host clock — so
+    /// runtimes read and schedule time through this (never a host clock), so
     /// one seed reproduces their timing under simulation.
     type Clock: Clock;
 
     /// The system clock.
     fn clock(&self) -> &Self::Clock;
 
-    /// The current logical time — [`clock`](ActorSystem::clock)`().now()`.
+    /// The current logical time: [`clock`](ActorSystem::clock)`().now()`.
     fn now(&self) -> Instant {
         self.clock().now()
     }
@@ -193,7 +193,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
         Box::pin(async move { clock.sleep(dur).await })
     }
 
-    /// Launch a detached background task on the system's executor (§4.6) — the
+    /// Launch a detached background task on the system's executor (§4.6): the
     /// same [`Spawner`](crate::Spawner) that runs the mailboxes, so layered
     /// runtimes' loops are scheduled (and, under simulation, interleaved
     /// deterministically) like everything else.
@@ -208,7 +208,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     fn receptionist_state(&self) -> Arc<ReceptionistState>;
 
     /// Replicate a registration to the rest of the cluster (spec §13). The
-    /// default does nothing — a single-node system has no peers.
+    /// default does nothing: a single-node system has no peers.
     fn replicate_registration(&self, _key: &str, _origin: NodeId, _id: ActorId) {}
 
     /// The receptionist for service discovery (spec §13).
@@ -379,7 +379,7 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
     fn watch(&self, target: ActorId, watcher: ActorId, deliver: WatchDelivery) {
         // An already-terminated target is the host's case to judge (it holds the
         // termination record, invariant #12); the immediate delivery it hands
-        // back is launched rather than run inline — delivery applies mailbox
+        // back is launched rather than run inline: delivery applies mailbox
         // backpressure, and a watcher calling `watch` from inside its own
         // handler must not block on (or deadlock against) its own mailbox.
         if let Some(immediate) = self.inner.host.watch(target, watcher, deliver) {

@@ -1,7 +1,7 @@
 //! The per-shard leader-election group (spec §7.1, §8).
 //!
-//! A shard's placement is a small Raft group of its *R* replicas — the
-//! **leader-election group** — that elects one leader per term and records the
+//! A shard's placement is a small Raft group of its *R* replicas (the
+//! **leader-election group**) that elects one leader per term and records the
 //! replica set. It holds **no entity data** (§7.1): entity never proposes an entity's
 //! records to it. Its only role is to answer "who may write this shard's entities, and
 //! under which term," and that term is the single-writer fencing token every
@@ -37,7 +37,7 @@ impl<R: RaftConsensus> LeaderElection<R> {
         }
     }
 
-    /// Whether this node currently leads the shard — the single-writer gate (§8):
+    /// Whether this node currently leads the shard, the single-writer gate (§8):
     /// only the leader appends; a follower's append is fenced with `NotLeader`.
     pub(crate) fn is_leader(&self) -> bool {
         self.consensus.group_is_leader(self.group)

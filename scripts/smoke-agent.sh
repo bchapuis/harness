@@ -2,7 +2,7 @@
 # End-to-end smoke test for agent-standalone: three node processes against a
 # fake Messages API, fronted by the agent-gateway (the public HTTP edge, joined
 # as a cluster client). One prompt over HTTP, a records read, then a node kill and
-# a same-turn resume — driven entirely through the gateway, which routes around
+# a same-turn resume: driven entirely through the gateway, which routes around
 # the dead node. Run from the workspace root.
 set -u
 cd "$(dirname "$0")/.."
@@ -41,7 +41,7 @@ NODE_PIDS=()
 for i in 1 2 3; do
   # --sandbox durable keeps the script dependency-free (no docker/KVM): the
   # canned fake API above never returns a tool call, so the sandbox is opened
-  # but never invoked — the entity-backed Workspace tier is all this smoke run
+  # but never invoked; the entity-backed Workspace tier is all this smoke run
   # needs. --client admits the gateway (id $GATEWAY_ID) as a non-voting member.
   "$BIN" node --id "$i" --data "$DATA/data" --api-url http://127.0.0.1:7600 \
     --sandbox durable --client "$GATEWAY_ID=127.0.0.1" \

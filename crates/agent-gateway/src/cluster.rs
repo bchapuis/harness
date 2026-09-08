@@ -2,7 +2,7 @@
 //!
 //! The gateway builds a [`TcpCluster`] in [`MembershipMode::Static`]: it speaks
 //! the cluster secret, dials the nodes, and is brought into the membership view
-//! (`add_member`) so it receives the receptionist gossip — but it runs no Raft
+//! (`add_member`) so it receives the receptionist gossip, but it runs no Raft
 //! engine, so it never votes, and it never calls `entities_named`, so it never
 //! hosts an entity. Its node id is OUTSIDE the voter roster `1..=nodes`, and each
 //! node must admit it with `--client <id>=<host>`.
@@ -27,7 +27,7 @@ use actor_runtime::TcpCluster;
 /// dials, and the secret it presents.
 #[derive(Clone, Debug)]
 pub struct ClusterOptions {
-    /// The gateway's node id — OUTSIDE `1..=nodes`, so it never votes or hosts.
+    /// The gateway's node id: OUTSIDE `1..=nodes`, so it never votes or hosts.
     pub node_id: u64,
     /// The voter roster size; the nodes are ids `1..=nodes`.
     pub nodes: u64,
@@ -75,7 +75,7 @@ pub async fn join(opts: ClusterOptions) -> Result<TcpCluster, String> {
         encryption: Encryption::PlaintextTrusted,
         // No Raft, no SWIM voting: a client observes membership but does not
         // drive it. `Static` without a detector is the non-participating mode
-        // (system.rs) — the gateway never hosts, so it has no shard groups to
+        // (system.rs): the gateway never hosts, so it has no shard groups to
         // elect and nothing to down.
         membership: Box::new(|_| MembershipMode::Static { detector: None }),
     })
@@ -87,7 +87,7 @@ pub async fn join(opts: ClusterOptions) -> Result<TcpCluster, String> {
     Ok(system)
 }
 
-/// Membership and reachability transitions on stderr — enough for an operator to
+/// Membership and reachability transitions on stderr: enough for an operator to
 /// see the gateway join and the nodes come and go.
 struct GatewayEvents {
     node: NodeId,

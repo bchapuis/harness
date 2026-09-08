@@ -8,7 +8,7 @@
 //! silently: a renamed or deleted suite leaves the column pointing at nothing, and
 //! nothing fails. That is exactly how the blob-store spec came to cite seven test
 //! names that no longer existed. Recording the pointers here instead makes the
-//! column mechanically true — a rename that misses this table fails the build.
+//! column mechanically true: a rename that misses this table fails the build.
 //!
 //! `SimTest` pointers name files under this crate's `tests/` directory;
 //! `CompileFail` names a path relative to `crates/`, as the core catalogue does.
@@ -176,7 +176,7 @@ const E_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 21,
         spec: "entity §7.16",
-        property: "An alarm fires at most once per arm: the fired deadline's Clear joins the same atomic batch as on_alarm's records and the epoch guard voids a superseded timer, so one armed deadline commits at most one callerless effect — the bound is on effects that commit, not on handler invocations",
+        property: "An alarm fires at most once per arm: the fired deadline's Clear joins the same atomic batch as on_alarm's records and the epoch guard voids a superseded timer, so one armed deadline commits at most one callerless effect; the bound is on effects that commit, not on handler invocations",
         verify: &[Verify::SimTest(
             "alarm.rs, alarm_cluster.rs, alarm_swarm.rs",
         )],

@@ -3,20 +3,20 @@
 //! Autonomous work outlives the request that started it. A caller that asked for
 //! it therefore cannot receive it as a reply: a reply handle is resolved exactly
 //! once within the delivery of one message (core §4.5) and the work spans many.
-//! Every consumer of the workflow meets this the same way — an ack, a registered
-//! reply-to, and a later notification (agent §7.3) — so the pattern is
+//! Every consumer of the workflow meets this the same way: an ack, a registered
+//! reply-to, and a later notification (agent §7.3), so the pattern is
 //! supplied here as a **component**, with a normative discipline and no trait
 //! method.
 //!
 //! It is a component and not a trait method because the *key* and the *payload*
-//! are the consumer's, and because a consumer with no external callers — one
-//! workflow entirely by alarms — should carry none of it.
+//! are the consumer's, and because a consumer with no external callers (one
+//! workflow entirely by alarms) should carry none of it.
 //!
 //! The discipline (§7.1), which this type enforces where it can and documents
 //! where it cannot:
 //!
 //! 1. The set MUST NOT be journaled. It is ephemeral activation state, rebuilt
-//!    by callers re-contacting after a resume — like the claims and for the same
+//!    by callers re-contacting after a resume, like the claims and for the same
 //!    reason: a reply-to is a routing address, not a fact about the work.
 //! 2. A notification MUST be sent only **after** the record carrying the outcome
 //!    commits (entity §6), so no caller holds a completion the journal could
@@ -28,7 +28,7 @@
 //!    notification is recovered by the caller re-contacting the entity, never by
 //!    a transparent retry (core §1.2).
 //! 4. A caller arriving after the outcome has committed MUST be answered
-//!    immediately from the fold, not registered — otherwise it waits for a
+//!    immediately from the fold, not registered: otherwise it waits for a
 //!    notification that has already been sent. That check is the consumer's,
 //!    because only the consumer's fold knows whether the work is done.
 
@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 ///
 /// `K` identifies the unit of work a caller is waiting on (the agent runtime's
 /// `TurnId`); `V` is the consumer's own notification address (an `ActorRef` to a
-/// reply mailbox). Several callers may wait on one `K` — that is what
+/// reply mailbox). Several callers may wait on one `K`: that is what
 /// "attaching to a live run" is.
 pub struct Subscribers<K: Ord, V> {
     waiting: BTreeMap<K, Vec<V>>,

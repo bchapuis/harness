@@ -1,4 +1,4 @@
-//! Conformance: supervision (spec §11) — backoff timing, custom decider
+//! Conformance: supervision (spec §11); backoff timing, custom decider
 //! integration, repeated startup failure, and sibling isolation, together with
 //! the restart/backoff cases from supervision.rs and the
 //! hierarchy/escalate cases from escalation.rs, plus the local panic-containment
@@ -208,8 +208,8 @@ impl Handler<Ping> for PanicsOnStart {
 #[test]
 fn a_panic_in_started_unwinds_into_a_supervision_decision() {
     // The executor boundary catches a panic in `started` just as it catches one
-    // in a handler (spec §11.1): the actor takes the `started`-failed path — the
-    // default directive stops it — and a queued ask dead-letters rather than
+    // in a handler (spec §11.1): the actor takes the `started`-failed path (the
+    // default directive stops it), and a queued ask dead-letters rather than
     // hanging or taking the node down.
     let (sim, system, recorder) = support::local_recorded(8);
     let outcome = sim.block_on(async move {
@@ -239,8 +239,8 @@ fn a_panic_in_started_unwinds_into_a_supervision_decision() {
 //
 // `Restart` rebuilds an actor from its factory; an actor spawned **by value**
 // (`spawn`, not `spawn_with`) has no factory, so the directive degrades to
-// `Stop` (spec §11.2). The safety property is unaffected — the fault is still
-// contained — but the event stream MUST report the *effective* decision, `Stop`,
+// `Stop` (spec §11.2). The safety property is unaffected (the fault is still
+// contained), but the event stream MUST report the *effective* decision, `Stop`,
 // never the candidate `Restart` (§16): an observer or continuous checker that
 // saw `Restart` would expect a `Restarted` that can never come.
 
@@ -527,7 +527,7 @@ mod merged_supervision {
     // The canonical parent→child path is `Ctx::spawn` (§11.1), but a value-spawned
     // child cannot be reconstructed, so its `Restart` directive degrades to `Stop`.
     // `Ctx::spawn_with` gives the child a factory, so `Restart` actually re-creates
-    // it — keeping its id and mailbox — exactly like a factory-spawned root.
+    // it (keeping its id and mailbox) exactly like a factory-spawned root.
 
     struct Parent {
         starts: Arc<AtomicU32>,
@@ -714,7 +714,7 @@ mod merged_supervision {
 // =============================================================================
 mod merged_escalation {
     //! Supervision hierarchy (spec §11.1): a child that faults with `Escalate` fails
-    //! its parent, which then applies its own strategy — stop, restart, or escalate
+    //! its parent, which then applies its own strategy; stop, restart, or escalate
     //! further up the tree.
 
     use std::sync::Arc;
@@ -928,7 +928,7 @@ mod merged_escalation {
 
 // =============================================================================
 // Merged from actor.rs (spec §11, invariant #18): a handler panic is contained
-// to its actor — the caller observes DeadLetter, the faulted actor resigns, and
+// to its actor; the caller observes DeadLetter, the faulted actor resigns, and
 // the node keeps serving other actors.
 // =============================================================================
 mod local_containment {
@@ -1021,7 +1021,7 @@ mod local_containment {
 
         let (boom, hello) = sim.block_on(async move {
             let bomb = system.spawn(Panicky);
-            // The panic unwinds the reply path, so the caller observes DeadLetter —
+            // The panic unwinds the reply path, so the caller observes DeadLetter,
             // never a hang, and the node keeps running.
             let boom = bomb.ask(Boom).await;
 

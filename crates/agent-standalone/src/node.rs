@@ -8,7 +8,7 @@
 //! session is an entity, so durability, placement, and the single-writer fence are
 //! entity's: each node hosts every kind's entity type, joining its shards' Raft
 //! groups and registering its gateway (§5.3). Membership is a static roster with
-//! the SWIM detector observe-only (core spec §9.4.1) — reachability drives the
+//! the SWIM detector observe-only (core spec §9.4.1): reachability drives the
 //! shard map's reallocation and the gateway gossip nodes route activations
 //! through. A `--client` (the gateway) is admitted to that membership so the same
 //! gossip reaches it, but never to the Raft roster, so it never votes or hosts.
@@ -62,7 +62,7 @@ use crate::http::HttpsPost;
 pub enum SandboxMode {
     /// `agent-sandbox`'s container-backed `Native` tier: `shell` runs inside
     /// a per-session OCI container (the facet's workspace directory
-    /// bind-mounted, no network — shared-kernel confinement, sandbox spec
+    /// bind-mounted, no network; shared-kernel confinement, sandbox spec
     /// §3.5's development fallback). Each variant carries exactly the
     /// configuration its mode needs, so a flag for the wrong mode is a parse
     /// error rather than a silently ignored field.
@@ -74,7 +74,7 @@ pub enum SandboxMode {
     },
     /// `agent-sandbox`'s microVM-backed `Native` tier: `shell` runs inside a
     /// per-session Firecracker VM (the workspace synced over vsock, no network
-    /// device — hardware-virtualization confinement, sandbox spec §3.4's
+    /// device; hardware-virtualization confinement, sandbox spec §3.4's
     /// stronger grade; Linux with `/dev/kvm` only).
     Firecracker {
         /// The firecracker executable.
@@ -85,14 +85,14 @@ pub enum SandboxMode {
         /// as the profile image.
         rootfs: String,
     },
-    /// The typed file tools alone over the facet's workspace directory — no
+    /// The typed file tools alone over the facet's workspace directory, no
     /// guest shell or compute.
     Durable,
 }
 
 /// Everything `node` takes from the command line. The defaults make
 /// `node --id N --sandbox <mode>` enough for the three-node local
-/// deployment — the sandbox is the one choice without a default, because
+/// deployment: the sandbox is the one choice without a default, because
 /// the unconfined mode must never be reached by omission.
 #[derive(Clone, Debug)]
 pub struct NodeOptions {
@@ -115,8 +115,8 @@ pub struct NodeOptions {
     pub peer_hosts: BTreeMap<u64, String>,
     /// Clients to admit, from `--client <id>=<host>` (the HTTP gateway). Each id
     /// is outside `1..=nodes`: the client joins the transport and membership as a
-    /// non-voting, non-hosting participant — so it receives the receptionist
-    /// gossip that carries the gateway refs it routes through — but is never added
+    /// non-voting, non-hosting participant (so it receives the receptionist
+    /// gossip that carries the gateway refs it routes through), but is never added
     /// to the Raft roster, so it never votes or hosts an entity.
     pub clients: BTreeMap<u64, String>,
     /// Node `i`'s transport port is `port_base + i - 1`. A `--client <id>`'s
@@ -191,7 +191,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // and snapshots with, and the entity store's stamp naming that codec (entity
     // §7.4). The store refuses to open under a codec other than the one that wrote
     // it, so a stamp taken from a *different* value than the message layer's would
-    // be worse than none — it would enforce agreement with the wrong thing.
+    // be worse than none: it would enforce agreement with the wrong thing.
     let codec: Arc<dyn Codec> = Arc::new(JsonCodec);
     let raft_dir = opts.data.join("raft");
     let system: TcpCluster = actor_runtime::join(JoinOptions {
@@ -249,7 +249,7 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // driving this node's Raft heartbeats and its shards' quorum waits, so a slow disk
     // becomes spurious elections and a rehydration storm rather than just slow writes.
     // The metrics registry: commit latency by outcome, rehydration cost, and the
-    // resident entity count — the signals that say whether this node's shards are
+    // resident entity count; the signals that say whether this node's shards are
     // healthy. Distinct from the event stream, which is shaped for the simulator's
     // checkers, not for an operator.
     let entity_node = system
@@ -358,8 +358,8 @@ async fn shutdown_signal() {
 
 /// The cluster-wide kind map (agent spec §7.1). One pure function of the
 /// node options that shape kinds (`--model`, `--sandbox`, `--sandbox-image`):
-/// every node must register byte-identical kinds — the digest is pinned by
-/// `SessionCreated` — so all nodes must run with the same values for those
+/// every node must register byte-identical kinds (the digest is pinned by
+/// `SessionCreated`), so all nodes must run with the same values for those
 /// flags.
 fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, entity_store: EntityStoreFactory) -> Kinds {
     let params = ModelParams {
@@ -368,7 +368,7 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, entity_store: EntitySto
     };
     // The sandbox tools per mode: the same `shell` name and shape, but distinct
     // declarations (and a profile image in docker/firecracker mode), so the digests
-    // differ — a mixed-mode cluster fails to agree instead of silently splitting
+    // differ; a mixed-mode cluster fails to agree instead of silently splitting
     // confinement. Every mode offers the typed `Workspace` file tools over the
     // durable entity-backed workspace (§7.10); the shell-capable modes add `shell`
     // (the confined Native tier) and `run_js` (the hermetic QuickJS Compute tier,
@@ -401,7 +401,7 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, entity_store: EntitySto
     // Durable entity storage under --data (§7.4): a session is an entity, so its
     // journal must outlive a process restart for a cold-restarted cluster to recover
     // the conversation. Without this, each node's entity store is in-memory and a full
-    // restart loses every session (the records do NOT ride the Raft log — that log
+    // restart loses every session (the records do NOT ride the Raft log: that log
     // only carries leader election and the shard map, §7.1). `data_dir` places the
     // workspace facet's per-session directory materializations (entity §7.11) under
     // --data as well.

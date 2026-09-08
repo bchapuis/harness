@@ -3,7 +3,7 @@
 //! [`ThreadPoolIo`] is justified in `blocking.rs` by **tail** isolation: a stalled
 //! device must not block the async worker that is also driving Raft heartbeats and
 //! other shards' quorum waits. That argument is about the tail and is right. But the
-//! pool's *width* — `sized_for_host`'s `clamp(2, 8)` — was set from the median, and no
+//! pool's *width*: `sized_for_host`'s `clamp(2, 8)`; was set from the median, and no
 //! measurement of that median existed. It matters because the two devices a deployment
 //! might be on differ by more than an order of magnitude:
 //!
@@ -19,17 +19,17 @@
 //!
 //! Two measurements, because they answer different halves:
 //!
-//! 1. [`one_flush`] — the cost of a single durable write, the `atomic_replace`
+//! 1. [`one_flush`]: the cost of a single durable write, the `atomic_replace`
 //!    primitive every store write ends in (write, fsync, rename, fsync the directory).
 //!    Its **median** places the host on the scale above; its **max** is the tail the
 //!    pool exists to isolate, and the two are usually far apart.
-//! 2. [`concurrent_flushes`] — the same write from `N` threads at once, swept across
+//! 2. [`concurrent_flushes`]: the same write from `N` threads at once, swept across
 //!    the clamp's range and past it. This is the sizing answer directly: throughput
 //!    that keeps climbing past 8 says the ceiling is too low for this device, and
 //!    throughput that flattens at 2 says the extra threads are only queueing.
 //!
 //! Run with `cargo bench -p entity --bench flush`. It writes to a temp directory, so
-//! it measures **that** filesystem — point `TMPDIR` at the volume a deployment will
+//! it measures **that** filesystem: point `TMPDIR` at the volume a deployment will
 //! actually use, because a laptop's internal SSD and a server's NVMe are exactly the
 //! comparison this file exists to stop people from assuming away.
 

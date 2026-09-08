@@ -11,8 +11,8 @@
 //! **The files are evidence, not output.** A fixture for a revision that has
 //! shipped records what those bytes meant; regenerating it destroys the only thing
 //! holding **V4**/**V5** up, and converts a caught format break into a green run.
-//! So [`golden`] writes only a file that is *absent* — the case of adding a
-//! revision — and never rewrites one that exists.
+//! So [`golden`] writes only a file that is *absent* (the case of adding a
+//! revision), and never rewrites one that exists.
 //!
 //! When a fixture stops decoding, the corpus has done its job. The fix is the
 //! compatibility spec's, not the fixture's: widen the window to keep reading the
@@ -44,8 +44,8 @@ pub(crate) fn golden(boundary: &str, revision: u16, produce: impl FnOnce() -> Ve
     assert!(
         std::env::var_os("GOLDEN_UPDATE").is_some(),
         "no corpus fixture at {}. If this revision is new, create it with \
-         GOLDEN_UPDATE=1 cargo test -p entity. If it is not, the file was deleted \
-         — restore it from git rather than regenerating it, or the corpus stops \
+         GOLDEN_UPDATE=1 cargo test -p entity. If it is not, the file was deleted; \
+         restore it from git rather than regenerating it, or the corpus stops \
          being evidence of what the old bytes meant.",
         path.display(),
     );

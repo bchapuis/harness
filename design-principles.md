@@ -4,7 +4,7 @@ Distilled from John Ousterhout, *A Philosophy of Software Design*. Use these as 
 when writing or reviewing code anywhere in this tree. The actor framework's
 [specification](docs/distributed-actor-spec.md) was written against them, so the examples
 below are drawn from the framework itself and cite the spec section that embodies the
-principle — read them as both guidance and a map of why the design is shaped the way it
+principle: read them as both guidance and a map of why the design is shaped the way it
 is. Bare **§N** citations throughout refer to that specification; the layers above it
 ([docs/README.md](docs/README.md)) were written against the same defaults.
 
@@ -26,7 +26,7 @@ Working code is not the goal; a good design is. Spend a steady fraction of effor
 improving structure rather than bolting on the smallest patch that works. The spec's
 design stance is this principle in the large: hand-written manifests and `register` lists
 (§1.1, §4.4) cost the user boilerplate now to keep the wire contract explicit and the
-framework simple — a deliberate investment, not the smallest thing that compiles.
+framework simple, a deliberate investment, not the smallest thing that compiles.
 
 ```rust
 // ✗ Each new failure mode bolted onto the call site.
@@ -62,7 +62,7 @@ own handlers (§3.5).
 ```rust
 // ✗ A handle that hands out the actor's state couples every caller to it.
 
-// ✓ ActorRef holds only { id, system } — never state or handlers (§3.3). The actor's
+// ✓ ActorRef holds only { id, system }, never state or handlers (§3.3). The actor's
 //   fields stay private; the codec is likewise a private, per-system choice (§5).
 pub struct ActorRef<A: Actor> { id: ActorId, system: A::System }
 ```
@@ -88,7 +88,7 @@ pub trait Spawner: Send + Sync + 'static { fn launch(&self, task: BoxFuture<'sta
 Each layer should offer a different abstraction. Delete layers that only relay. Remove
 pass-through methods and pass-through variables; carry cross-cutting values in a context.
 The typed `ActorRef` layer and the byte-level `ActorSystem` trait are genuinely different
-abstractions — types and locality above, serialized payloads and transport below (§4.1) —
+abstractions (types and locality above, serialized payloads and transport below, §4.1),
 not one forwarding to the other.
 
 ```rust
@@ -114,7 +114,7 @@ fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A>;
 
 Pull down complexity about *how* the module works. Leave up choices about *what* the
 caller wants. A purely local actor inherits an empty `register` default and never thinks
-about the wire (§4.4); a remote one overrides it — one spawn path serves both.
+about the wire (§4.4); a remote one overrides it; one spawn path serves both.
 
 ## Define errors out of existence
 
@@ -124,15 +124,15 @@ otherwise mask it inside the module or handle many sites in one place.
 ```rust
 // ✗ If resolution could fail, every send site would branch on it.
 
-// ✓ Every ActorId is well-formed and locality-classifiable, so resolve is infallible —
+// ✓ Every ActorId is well-formed and locality-classifiable, so resolve is infallible:
 //   there is no failure case to handle (§3.6, §4.3).
 fn resolve<A: Actor<System = Self>>(&self, id: ActorId) -> ActorRef<A>;
 ```
 
 This is design, not `unwrap()`. Keep `Result`/`CallError` for genuine transport failures;
 eliminate the fake ones. And keep the two kinds apart: an application failure is a *value*
-inside `M::Reply` (e.g. `Result<T, E>`), distinct from a transport `CallError` (§3.2, §14)
-— the type system then forces the caller to handle the real ones.
+inside `M::Reply` (e.g. `Result<T, E>`), distinct from a transport `CallError` (§3.2, §14).
+The type system then forces the caller to handle the real ones.
 
 ## Decide: together or apart
 
@@ -140,7 +140,7 @@ Combine code that shares information, is always used together, or cannot be unde
 alone. Separate unrelated concerns. Splitting adds interfaces; split only for a clean
 sub-task with a simple interface. The crate layout is this judgment applied (Appendix B):
 `actor-core` (the model), `actor-cluster` (the reference distributed runtime),
-`actor-runtime` and `actor-simulation` (the production and test seams) — each a concern
+`actor-runtime` and `actor-simulation` (the production and test seams), each a concern
 that stands alone behind a small interface.
 
 Pull repeated logic into one function. Avoid conjoined methods you must read in pairs.
@@ -153,7 +153,7 @@ hard to describe, the design is too complex.
 
 ```rust
 /// Build a typed handle to `id`. Infallible: every `ActorId` is well-formed and
-/// locality-classifiable (§3.6), so resolution never fails — callers need no error arm.
+/// locality-classifiable (§3.6), so resolution never fails; callers need no error arm.
 fn resolve<A: Actor<System = Self>>(&self, id: ActorId) -> ActorRef<A>;
 ```
 
@@ -164,7 +164,7 @@ consistently. A name you cannot choose signals a muddled design.
 
 ```rust
 // ✗ spawn() for both raw tasks and actors blurs two distinct concepts.
-// ✓ launch() a raw future; spawn() an actor — one word per concept (§4.6, §3.4).
+// ✓ launch() a raw future; spawn() an actor: one word per concept (§4.6, §3.4).
 fn launch(&self, task: BoxFuture<'static, ()>);   // Spawner
 fn spawn<A: Actor>(&self, actor: A) -> ActorRef<A>;
 ```
@@ -185,14 +185,14 @@ SupervisionDirective::Restart { max: 5, within: Duration::from_secs(30), backoff
 
 A pattern, framework, or method earns its place only when it cuts complexity here. Simple
 code is often the fastest and the easiest to optimize. Measure, find the critical path,
-and remove work there — which usually simplifies the code. Know what the critical path
+and remove work there, which usually simplifies the code. Know what the critical path
 costs before deciding: [docs/hardware-envelope.md](docs/hardware-envelope.md) states the
 machine this tree targets and the arithmetic that follows, so a technique inherited from
 slower storage has to re-earn its complexity against the numbers rather than against
 habit. The local fast path is design,
 not micro-optimization: a local send enqueues by value and skips serialization entirely
 (§4.3), yet its observable result is identical to the remote path. And the framework ships
-no macros of its own (§1.1) — resisting the derive-everything trend except where an
+no macros of its own (§1.1), resisting the derive-everything trend except where an
 *optional* derive genuinely lowers boilerplate.
 
 ## Checklist
@@ -205,7 +205,7 @@ no macros of its own (§1.1) — resisting the derive-everything trend except wh
 6. Distinct layers? Any pass-throughs?
 7. Complexity pulled down, not pushed onto callers?
 8. Any error definable out of existence?
-9. Together or apart — no repetition, no conjoined methods?
+9. Together or apart: no repetition, no conjoined methods?
 10. Do comments give why and contracts, not restate code?
 11. Names precise and consistent?
 12. Two designs considered?
@@ -213,16 +213,16 @@ no macros of its own (§1.1) — resisting the derive-everything trend except wh
 
 ## Red flags
 
-- **Shallow module** — interface as complex as implementation.
-- **Information leakage** — one decision in two modules.
-- **Temporal decomposition** — structure follows execution order, not hiding.
-- **Pass-through** — a method or variable that only forwards.
-- **Repetition** — the same logic in many places.
-- **Special-general mixture** — a mechanism tangled with one use of it.
-- **Conjoined methods** — two pieces understood only together.
-- **Comment repeats code** — adds nothing.
-- **Vague or hard-to-pick name** — often a design smell.
-- **Nonobvious code** — understanding needs inference or distant reading.
+- **Shallow module**: interface as complex as implementation.
+- **Information leakage**: one decision in two modules.
+- **Temporal decomposition**: structure follows execution order, not hiding.
+- **Pass-through**: a method or variable that only forwards.
+- **Repetition**: the same logic in many places.
+- **Special-general mixture**: a mechanism tangled with one use of it.
+- **Conjoined methods**: two pieces understood only together.
+- **Comment repeats code**: adds nothing.
+- **Vague or hard-to-pick name**: often a design smell.
+- **Nonobvious code**: understanding needs inference or distant reading.
 
 ---
 *Examples are original paraphrases for design guidance, not quotations.*

@@ -271,7 +271,7 @@ fn locality_is_classified_from_the_id_without_a_network_call() {
 }
 
 // =============================================================================
-// Merged from actor.rs (spec §4.2, invariant #6): local lifecycle ordering —
+// Merged from actor.rs (spec §4.2, invariant #6): local lifecycle ordering;
 // assign → ready → resign exactly once, and a failed startup that resigns
 // without ever becoming ready.
 // =============================================================================

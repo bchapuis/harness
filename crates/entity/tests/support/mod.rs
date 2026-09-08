@@ -4,25 +4,25 @@
 //! sweep covers the same entity its scenarios specify. Each fixture is its own
 //! module; `mod.rs` only wires them up.
 //!
-//! - [`counter`] — the event-sourced `CounterEntity`, shared by `entities.rs`
+//! - [`counter`]: the event-sourced `CounterEntity`, shared by `entities.rs`
 //!   (scenarios) and `entity_swarm.rs` (sweeps).
-//! - [`ledger`] — the SQL-facet `Ledger`, shared by `sql.rs` and `sql_swarm.rs`.
+//! - [`ledger`]: the SQL-facet `Ledger`, shared by `sql.rs` and `sql_swarm.rs`.
 //!   Gated on the `sql` feature, like both suites that use it.
-//! - [`exercised`] — coverage accounting for hibernation and process restarts,
+//! - [`exercised`]: coverage accounting for hibernation and process restarts,
 //!   shared by every `*_swarm.rs` with a hibernating variant.
-//! - [`log`] — the appendable `LogEntity` and the reference subscription
+//! - [`log`]: the appendable `LogEntity` and the reference subscription
 //!   reconciler, shared by `subscription_faults.rs` (scripted §14 cases) and
 //!   `subscription_swarm.rs` (the same object under the nemesis).
-//! - [`timer`] — the alarm-bearing `Timer`, generic over the hosting system, so
+//! - [`timer`]: the alarm-bearing `Timer`, generic over the hosting system, so
 //!   `alarm_index.rs` drives it on the `Local` tier and `alarm_cluster.rs` and
 //!   `alarm_loss.rs` drive the same entity on the clustered one.
-//! - [`pipeline`] — the steps-facet `Pipeline`, likewise generic over the
+//! - [`pipeline`]: the steps-facet `Pipeline`, likewise generic over the
 //!   system, shared by `steps.rs` (scenarios) and `steps_swarm.rs` (the
 //!   sweep). Its shape varies by `PipelineConfig` rather than by a second entity,
 //!   so the sweep asserts against the object the scenarios specify.
 //!
 //! `counter` is re-exported flat; `ledger` is not. Both define an `Add`, so two
-//! globs would make the name ambiguous — and because `ledger` is feature-gated,
+//! globs would make the name ambiguous, and because `ledger` is feature-gated,
 //! that break only appeared once `--features sql` was on, which nothing in CI or
 //! `soak.yml` turns on. The `sql` suites name their module instead.
 

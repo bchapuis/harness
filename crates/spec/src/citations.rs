@@ -1,6 +1,6 @@
 //! The `§` citations the specs make of each other, resolved.
 //!
-//! The specs address each other by section — `entity §7.12`, `actor §18.5`, a bare
+//! The specs address each other by section: `entity §7.12`, `actor §18.5`, a bare
 //! `§9` inside the document that owns it. There are two thousand-odd such
 //! citations across fourteen documents and nothing has ever checked one. A
 //! renumbered section is the ordinary way they break: the edit is local, the
@@ -18,14 +18,14 @@
 //!
 //! Three addressing schemes are in use, and [`anchors`] indexes all three:
 //!
-//! 1. **Numbered headings** — `## 7. Durability and replication`, `### 7.12 The
+//! 1. **Numbered headings**: `## 7. Durability and replication`, `### 7.12 The
 //!    facet model`. A heading also makes each of its ancestors addressable, so
 //!    `§7.12` implies `§7` whether or not anything writes `## 7.` alone.
-//! 2. **Numbered list items under a leaf section** — `DO §2.3` is the third item of
+//! 2. **Numbered list items under a leaf section**: `DO §2.3` is the third item of
 //!    `## 2. Key properties`, which carries no sub-headings. Indexed *only* for
 //!    sections with no sub-heading, so a spec's real subsections are never shadowed
 //!    by a list that happens to sit above them.
-//! 3. **Bold inline labels** — the hardware envelope defines `hw §3.1` as a bolded
+//! 3. **Bold inline labels**: the hardware envelope defines `hw §3.1` as a bolded
 //!    run opening a paragraph inside `## 3.`, not as a heading of its own.
 //!
 //! Code fences are skipped when indexing anchors and *scanned* when collecting
@@ -35,12 +35,12 @@
 //! # What a citation names
 //!
 //! A citation is a `§` and a dotted number. What comes before it decides which
-//! document it addresses, and the prose says so in four different ways — all four
+//! document it addresses, and the prose says so in four different ways, all four
 //! are read here rather than pushed back onto the writing:
 //!
 //! - **A prefix is a word that names a registered document, and nothing else**
-//!   ([`DocSpec::aliases`]). The alternative — treat whatever word precedes the `§`
-//!   as a prefix — makes a prefix out of every `in §4.1` and `and §7.6`. Two words
+//!   ([`DocSpec::aliases`]). The alternative (treat whatever word precedes the `§`
+//!   as a prefix) makes a prefix out of every `in §4.1` and `and §7.6`. Two words
 //!   are examined, which is what lets `utilities spec §2.3` name the utilities spec
 //!   while a bare `spec §6.1` stays unprefixed. The search crosses a line break,
 //!   because a wrapped paragraph splits `sandbox` from its `spec §3.4`, but not a
@@ -51,8 +51,8 @@
 //! - **A prefix carries across separators.** `actor §18.5/§18.6` cites the actor
 //!   spec twice and only the first says so. The inheritance is this crate's
 //!   inference, but it binds like a written prefix, which means a citation that
-//!   changes document mid-list has to say so. One did — `entity §6, §6.2`, where
-//!   the second is the agent runtime's own — and saying so was the cheaper fix.
+//!   changes document mid-list has to say so. One did: `entity §6, §6.2`, where
+//!   the second is the agent runtime's own, and saying so was the cheaper fix.
 //! - **An unprefixed citation follows the citing document's own convention**,
 //!   declared per document as [`Unprefixed`]. Most specs number their own sections
 //!   and mean themselves. Some number nothing and mean one particular spec
@@ -61,13 +61,13 @@
 //!
 //! # What is not checked
 //!
-//! Citations of documents outside the tree ([`EXTERNAL_PREFIXES`]) are skipped —
+//! Citations of documents outside the tree ([`EXTERNAL_PREFIXES`]) are skipped:
 //! `Raft §3.10` is a section of the Raft paper and this crate has no copy of it.
 //! An unrecognized prefix is treated as prose rather than as a typo, so a
 //! misspelled `granray §5` resolves against the citing document instead of being
 //! reported; it will usually fail there anyway, but that is a consequence rather
 //! than a guarantee. Nothing here checks that a cited section says what the citing
-//! sentence claims — only that it exists.
+//! sentence claims, only that it exists.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -180,7 +180,7 @@ impl Registry {
         &self.documents
     }
 
-    /// Total citations across the set — the number this gate is worth.
+    /// Total citations across the set: the number this gate is worth.
     pub fn citation_count(&self) -> usize {
         self.documents.iter().map(|d| d.citations.len()).sum()
     }
@@ -379,9 +379,9 @@ fn list_item_number(line: &str) -> Option<u32> {
     line[..end].parse().ok()
 }
 
-/// `**hw §3.1 — Amortize round trips…**` → `3.1`.
+/// `**hw §3.1: Amortize round trips…**` → `3.1`.
 ///
-/// The em dash is what separates a *definition* from a citation that happens to
+/// The colon is what separates a *definition* from a citation that happens to
 /// fall inside bold text.
 fn bold_label_number(line: &str) -> Option<String> {
     let rest = line.trim_start().strip_prefix("**")?;
@@ -391,7 +391,7 @@ fn bold_label_number(line: &str) -> Option<String> {
         .find(|c: char| !c.is_ascii_digit() && c != '.')
         .unwrap_or(after.len());
     let number = after[..end].trim_end_matches('.');
-    if number.is_empty() || !after[end..].trim_start().starts_with('—') {
+    if number.is_empty() || !after[end..].trim_start().starts_with(':') {
         return None;
     }
     Some(number.to_string())
@@ -560,12 +560,12 @@ mod tests {
 
     #[test]
     fn a_bold_label_defines_a_section() {
-        let a = anchors("## 3. What follows\n\n**hw §3.1 — Amortize round trips.** Body.\n");
+        let a = anchors("## 3. What follows\n\n**hw §3.1: Amortize round trips.** Body.\n");
         assert!(a.contains("3.1"), "got {a:?}");
     }
 
     #[test]
-    fn a_bold_citation_without_an_em_dash_defines_nothing() {
+    fn a_bold_citation_without_a_colon_defines_nothing() {
         let a = anchors("## 3. What follows\n\n**See hw §3.9 for the arithmetic.**\n");
         assert!(!a.contains("3.9"), "got {a:?}");
     }

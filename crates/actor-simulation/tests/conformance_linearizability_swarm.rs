@@ -5,7 +5,7 @@
 //! checker has teeth and that a local register is linearizable. This is the
 //! distributed claim: the same register, reached across the network, stays
 //! linearizable while a seeded nemesis injects partitions, crashes, loss,
-//! duplication, and delay — with unknown-outcome (`info`) operations carrying
+//! duplication, and delay, with unknown-outcome (`info`) operations carrying
 //! the weight, since an `ask` that returns `Unreachable` may or may not have
 //! taken effect.
 //!
@@ -109,7 +109,7 @@ impl ClusterWorkload for RemoteRegisterWorkload {
     }
 
     fn setup(&self, ctx: &ClusterCtx) {
-        // A single register lives on node 0 — the one linearizable object.
+        // A single register lives on node 0: the one linearizable object.
         let host = &ctx.nodes()[0];
         let reg = host.spawn(RegisterActorIn::<SimNode>::new());
         host.receptionist().register(REG, &reg);
@@ -118,7 +118,7 @@ impl ClusterWorkload for RemoteRegisterWorkload {
     fn drive(&self, ctx: &ClusterCtx) -> BoxFuture<'static, ()> {
         // Clients run on the *other* nodes, so their calls cross the faulted
         // network: a drop/partition/crash surfaces as Unreachable/Timeout and is
-        // recorded as a pending (info) op — exactly the unknown-outcome case the
+        // recorded as a pending (info) op; exactly the unknown-outcome case the
         // checker must handle.
         let nodes: Vec<SimNode> = ctx.nodes().to_vec();
         let clients = self.clients;
@@ -174,7 +174,7 @@ fn remote_register_is_linearizable_under_faults() {
 #[test]
 fn the_register_sweep_actually_fires_each_fault_type() {
     // #8, and this workload needs it more than most. The bug its corpus entries
-    // record — a duplicated `Cas` applied twice, with the first reply lost — takes
+    // record (a duplicated `Cas` applied twice, with the first reply lost) takes
     // *two* faults at once and showed up at roughly 0.2% of seeds. A sweep that
     // quietly stopped duplicating frames would still pass every seed and prove
     // nothing about the idempotency key that now carries the claim.
@@ -189,7 +189,7 @@ fn the_register_sweep_actually_fires_each_fault_type() {
     };
     assert!(
         stats.duplicated > 0,
-        "the sweep never duplicated a frame — the case the corpus entries are \
+        "the sweep never duplicated a frame: the case the corpus entries are \
          about goes unexercised: {stats:?}"
     );
     assert!(

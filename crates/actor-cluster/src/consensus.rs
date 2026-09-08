@@ -42,7 +42,7 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     fn cluster_voters(&self) -> Vec<NodeId>;
 
     /// The cluster's **statically configured** voter set (the founding
-    /// `RaftConfig.voters`, spec §9.4.3) — identical on every node and unchanging,
+    /// `RaftConfig.voters`, spec §9.4.3): identical on every node and unchanging,
     /// regardless of when the node joined. It, not the live `cluster_voters`, is
     /// the **creation seed** for a metadata group: a late joiner seeding from the
     /// live set would form a divergent group and disrupt elections. Empty outside
@@ -59,7 +59,7 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     /// Create an application Raft group with `voters` and non-voting `learners`
     /// (spec §9.4.3, §7.1). Voters elect, lead, and form the commit quorum;
     /// learners only replicate the log (so they can route and serve reads) and are
-    /// absent from the quorum — bounding `voters` to `R` keeps write quorum at
+    /// absent from the quorum, bounding `voters` to `R` keeps write quorum at
     /// `⌈R/2⌉` regardless of cluster size. The membership control group is created
     /// at startup; this is for application groups. To see a group's log from its
     /// first entry, call [`subscribe_commits`](RaftConsensus::subscribe_commits) right
@@ -67,8 +67,8 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     fn create_group(&self, group: GroupId, voters: Vec<NodeId>, learners: Vec<NodeId>);
 
     /// Retire an application Raft group (spec §7.7, E7): stop running it so it no
-    /// longer elects, heartbeats, or commits. A group that holds no data — one
-    /// used for leader election / placement only — needs no in-group consensus
+    /// longer elects, heartbeats, or commits. A group that holds no data (one
+    /// used for leader election / placement only) needs no in-group consensus
     /// to retire: each node drops it as it applies the committed merge.
     /// Idempotent; a no-op on a group this node never ran and outside
     /// leader-based mode.
@@ -91,7 +91,7 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     /// initiated (Raft §3.10).
     ///
     /// `false` means "not yet": this node does not lead `group`, `target` is not one
-    /// of its voters, or `target` has not yet replicated this leader's last entry —
+    /// of its voters, or `target` has not yet replicated this leader's last entry;
     /// a peer in that state would lose the election it was invited to hold, so the
     /// caller retries while replication catches it up.
     ///
@@ -118,11 +118,11 @@ pub trait RaftConsensus: Clone + Send + Sync + 'static {
     /// The leader of `group` as this node believes it.
     fn group_leader(&self, group: GroupId) -> Option<NodeId>;
 
-    /// A future that completes after `dur` of the system's (virtual) time —
+    /// A future that completes after `dur` of the system's (virtual) time,
     /// for bounding a wait on a commit or retrying a proposal.
     fn sleep(&self, dur: Duration) -> BoxFuture<'static, ()>;
 
-    /// Launch a detached background task on the system's executor — for
+    /// Launch a detached background task on the system's executor, for
     /// driving loops over [`subscribe_commits`](RaftConsensus::subscribe_commits).
     fn launch(&self, task: BoxFuture<'static, ()>);
 }

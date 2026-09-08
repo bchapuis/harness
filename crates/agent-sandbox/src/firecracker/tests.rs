@@ -1,7 +1,7 @@
 //! Protocol and sync tests that run without KVM, docker, or firecracker:
-//! a fake guest serves the module's wire protocol over a plain unix socket —
-//! including the muxer's `CONNECT` handshake, so the host-side client code
-//! path is byte-identical to production — and executes `/bin/sh` against a
+//! a fake guest serves the module's wire protocol over a plain unix socket
+//! (including the muxer's `CONNECT` handshake, so the host-side client code
+//! path is byte-identical to production), and executes `/bin/sh` against a
 //! private "guest workspace" directory. Only the VMM lifecycle itself needs
 //! the KVM-gated suite (`tests/firecracker.rs`).
 
@@ -122,7 +122,7 @@ fn serve(
             }
             Some("pull") => {
                 let mut builder = tar::Builder::new(Vec::new());
-                // As the real agent: archive the symlink, never its target —
+                // As the real agent: archive the symlink, never its target,
                 // following one here would copy host files *into* the tar.
                 builder.follow_symlinks(false);
                 builder.append_dir_all("", workspace)?;

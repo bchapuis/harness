@@ -40,7 +40,7 @@ fn config() -> BlobConfig {
     BlobConfig {
         replication_factor: 3,
         write_quorum: 2,
-        max_blob_bytes: 1 << 10, // 1 KiB — small, so a test can exceed it cheaply
+        max_blob_bytes: 1 << 10, // 1 KiB; small, so a test can exceed it cheaply
     }
 }
 
@@ -86,7 +86,7 @@ fn cluster(sim: &Simulation) -> (SimNetwork, Vec<Node>, Vec<tempfile::TempDir>) 
 #[test]
 fn a_rejoining_unaware_holder_does_not_resurrect_a_deleted_namespace() {
     // Spec §8 / B7: delete a namespace while one owner is partitioned, then heal the
-    // partition (the node returns with its disk — only `unreachable`, never downed,
+    // partition (the node returns with its disk, only `unreachable`, never downed,
     // under the conservative policy). The healed node MUST NOT resolve the deleted
     // namespace: a `get`/`has` issued *on* it must not serve the swept blob, and it
     // must not push a stale copy back. The tombstone must reach it (re-sync/gossip)
@@ -132,7 +132,7 @@ fn a_rejoining_unaware_holder_does_not_resurrect_a_deleted_namespace() {
     sim.run_for(Duration::from_secs(5)); // SWIM reconverges; reconcile runs on C
 
     // C must now resolve the deleted namespace nowhere. Today it does not know the
-    // tombstone (no gossip/re-sync is wired), so it still serves its own copy — a
+    // tombstone (no gossip/re-sync is wired), so it still serves its own copy: a
     // B7 resurrection.
     let got = drive(&sim, Duration::from_secs(5), {
         let (s, ns) = (store_of(C).unwrap(), ns.clone());

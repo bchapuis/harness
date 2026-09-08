@@ -2,8 +2,8 @@
 //!
 //! A [`Transport`] is the pluggable *mechanism* that carries [`Frame`]s between
 //! nodes (spec §7); the default TCP transport and the simulator's in-memory
-//! network are two implementations of the one trait. The frames it carries — the
-//! wire *protocol* — live in [`crate::protocol`], so the carrier stays decoupled
+//! network are two implementations of the one trait. The frames it carries (the
+//! wire *protocol*) live in [`crate::protocol`], so the carrier stays decoupled
 //! from any subsystem's payload.
 
 use std::future::Future;
@@ -48,7 +48,7 @@ pub trait Transport: Clone + Send + Sync + 'static {
     ///
     /// This is the *send-side gate*, and the reason the negotiated revision has to
     /// leave the handshake at all. A build whose window spans two revisions must
-    /// not write the higher one to a peer that settled on the lower — negotiation
+    /// not write the higher one to a peer that settled on the lower: negotiation
     /// alone only lets that be detected, on the receiving end, as an association
     /// torn down. Gating needs the value here, above the transport, where the
     /// frame is composed.
@@ -66,8 +66,8 @@ pub trait Transport: Clone + Send + Sync + 'static {
     /// for in the first place.
     fn peer_version(&self, peer: NodeId) -> Option<compat::Version>;
 
-    /// Release the transport's resources — background tasks, listeners, and open
-    /// associations — on a graceful node stop (spec §9.3). Closing the inbound
+    /// Release the transport's resources (background tasks, listeners, and open
+    /// associations) on a graceful node stop (spec §9.3). Closing the inbound
     /// path also ends the system's receive loop. The default is a no-op, for a
     /// transport that holds nothing to release.
     fn shutdown(&self) {}

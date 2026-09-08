@@ -6,22 +6,22 @@
 //! #22) and comes back over its compacted log rather than a blank one. Each write
 //! path carries the durability technique that fits it:
 //!
-//! - **`term`** — one JSON record `{term, voted_for}`, rewritten on every
+//! - **`term`**: one JSON record `{term, voted_for}`, rewritten on every
 //!   [`save_term_and_vote`](RaftWAL::save_term_and_vote) by atomic replace
 //!   ([`wal::atomic_replace`]). A torn write is impossible: a reader sees either the
 //!   old record or the new one. It stays JSON so that its parse failure is the
 //!   corruption check protecting election safety. The stamp ahead of it
-//!   (`actor.raft.term`, compatibility §3) answers a different question — that
-//!   the bytes are this format at all — so a build skew is refused *by name*
+//!   (`actor.raft.term`, compatibility §3) answers a different question (that
+//!   the bytes are this format at all), so a build skew is refused *by name*
 //!   rather than reported as the corruption this JSON body exists to detect. The
 //!   two have opposite fixes: roll the binary back, versus re-seed the node and
 //!   lose its vote history. The reader also accepts the unstamped predecessor.
-//! - **`log`** — a framed, checksummed append-only [`wal::Wal`] of `(absolute index,
+//! - **`log`**: a framed, checksummed append-only [`wal::Wal`] of `(absolute index,
 //!   entry)` records. Carrying the absolute index makes a crash mid-compaction
 //!   self-healing (below). Raft's truncate-then-append maps to
 //!   [`Wal::truncate`](wal::Wal::truncate) at the entry's recorded offset followed by
 //!   [`Wal::append_batch`](wal::Wal::append_batch); both fsync before returning.
-//! - **`snapshot`** — one postcard record `{index, term, data}` for the compacted
+//! - **`snapshot`**: one postcard record `{index, term, data}` for the compacted
 //!   prefix (§9), rewritten by the same atomic replace as `term`. Written *before*
 //!   the log prefix it subsumes is dropped, so a crash can leave a snapshot newer
 //!   than the log but never the reverse. Stamped as `actor.raft.snapshot`
@@ -38,7 +38,7 @@
 //! safety, so only the operator may resolve it.
 //!
 //! **Failure policy.** A voter whose state cannot be made durable cannot safely
-//! continue: it might announce un-persisted state — vote twice in a term, or
+//! continue: it might announce un-persisted state; vote twice in a term, or
 //! acknowledge an entry it cannot replay. An I/O error after open therefore **poisons**
 //! this WAL: the reason is recorded and logged once, every later write answers
 //! [`WalAck::Failed`] without touching the disk, and the engine steps the node out of
@@ -48,7 +48,7 @@
 //! does not reliably stop a voter: a panic inside an actor is caught by supervision
 //! and becomes a restart, and one inside a spawned consensus loop kills that task
 //! alone. Either leaves the node up, gossiping, and counted in quorums with nothing
-//! durable behind it — which is the exact failure this policy exists to prevent, made
+//! durable behind it, which is the exact failure this policy exists to prevent, made
 //! harder to see. Poisoning stops the voter *and* leaves it answering, so peers elect
 //! around it at once and [`poisoned`](RaftWAL::poisoned) tells an operator which node
 //! to replace.
@@ -94,7 +94,7 @@ const LOG_RECORDS: compat::Window = compat::Window::at("actor.raft.log", 1);
 /// The stamp on the `term` file (compatibility spec §3, `actor.raft.term`).
 ///
 /// `\x89RFTERM\n` is `wal::MAGIC`'s convention, and the discrimination it buys
-/// here is total in both directions — the rare case. A `term` file that predates
+/// here is total in both directions: the rare case. A `term` file that predates
 /// the stamp is `serde_json` of a struct, so it always begins `{`, and no JSON
 /// value may begin `0x89`. A stamped reader can never take the predecessor for a
 /// stamp, and a build predating the stamp fails at byte 0 rather than parsing part
@@ -106,7 +106,7 @@ const TERM: compat::Stamp =
 const TERM_EXT_KNOWN: &[u16] = &[];
 
 /// The `term` file's content (spec §9.4.3 item 2): the current term and the
-/// vote cast in it, always written together — they are one atomic decision.
+/// vote cast in it, always written together; they are one atomic decision.
 #[derive(Serialize, Deserialize)]
 struct TermRecord {
     term: u64,
@@ -114,8 +114,8 @@ struct TermRecord {
     /// Room to grow without a revision bump (compatibility spec §2.1).
     ///
     /// JSON already tolerates a field a reader does not know, so the *ancillary*
-    /// half of the rule comes free. What it cannot express is the other half —
-    /// "a reader that does not know this MUST refuse" — and the term file is
+    /// half of the rule comes free. What it cannot express is the other half
+    /// ("a reader that does not know this MUST refuse"), and the term file is
     /// exactly where a silently-ignored field would cost election safety. A
     /// pre-vote term or a lease recorded here and skipped by an older build is a
     /// double vote waiting to happen.
@@ -135,7 +135,7 @@ struct TermRecord {
 /// a `postcard` varint, so *every* byte is a possible first byte of one: no magic
 /// can make the older decoder safe against stamped bytes. Read as a
 /// [`SnapshotRecord`], `\x89RFSNAP\n` decodes to `index = 10505`, `term = 70`, and
-/// a payload length of 83 — and `postcard::from_bytes` ignores trailing bytes, so
+/// a payload length of 83, and `postcard::from_bytes` ignores trailing bytes, so
 /// a snapshot with 83 bytes of state or more decodes *successfully* to a wrong
 /// index, after which [`FileRaftWAL::open`] drops every log record at or below it.
 /// Committed entries, gone silently.
@@ -181,7 +181,7 @@ struct SnapshotRecord {
 }
 
 struct Inner {
-    /// The framed log of `(absolute index, entry)` records — the retained suffix
+    /// The framed log of `(absolute index, entry)` records: the retained suffix
     /// above `snapshot_index`. Owns the file handle and the per-record offsets.
     log: Wal<(u64, RaftEntry)>,
     /// The in-memory mirror of the durable state; every write updates it after
@@ -200,20 +200,20 @@ pub struct FileRaftWAL {
     /// **One-way, and store-wide.** One-way because nothing here can establish that
     /// the volume recovered, and a Raft log that resumed writing after a gap would be
     /// worse than one that stopped: the entries written either side of the gap would
-    /// look contiguous. Store-wide because the failures it catches — a full or
-    /// read-only filesystem, a device that has stopped acknowledging — are properties
+    /// look contiguous. Store-wide because the failures it catches (a full or
+    /// read-only filesystem, a device that has stopped acknowledging) are properties
     /// of the volume, not of the record that happened to hit them.
     poison: Mutex<Option<String>>,
 }
 
 impl FileRaftWAL {
     /// Open (creating if needed) the storage directory: load the term and snapshot,
-    /// recover the log's valid prefix — discarding a torn tail and any records the
-    /// snapshot subsumes — and load the persisted state.
+    /// recover the log's valid prefix (discarding a torn tail and any records the
+    /// snapshot subsumes), and load the persisted state.
     ///
     /// # Errors
     ///
-    /// Any filesystem error, and — deliberately — a corrupt `term` or `snapshot`
+    /// Any filesystem error, and (deliberately) a corrupt `term` or `snapshot`
     /// file: guessing either could violate a safety property (a wrong term risks a
     /// double vote), so only the operator may resolve it.
     pub fn open(dir: impl Into<PathBuf>) -> io::Result<FileRaftWAL> {
@@ -368,7 +368,7 @@ impl FileRaftWAL {
     }
 
     /// The one write path every [`RaftWAL`] method shares: refuse if poisoned,
-    /// run the fallible body, and poison this WAL on its first error — `what`
+    /// run the fallible body, and poison this WAL on its first error; `what`
     /// names the state that could not be made durable.
     fn write(&self, what: &str, body: impl FnOnce() -> io::Result<()>) -> WalAck {
         if self.poisoned().is_some() {
@@ -376,7 +376,7 @@ impl FileRaftWAL {
         }
         if let Err(err) = body() {
             return self.fail(format!(
-                "raft {what} persistence failed at {}: {err} — a voter that cannot \
+                "raft {what} persistence failed at {}: {err}; a voter that cannot \
                  make its state durable cannot safely continue",
                 self.dir.display()
             ));
@@ -450,7 +450,7 @@ impl FileRaftWAL {
         wal::atomic_replace(&self.dir, "snapshot", &SNAPSHOT.stamp(&body))?;
 
         // Drop the prefix the snapshot subsumes, then rewrite the log to what
-        // remains — the shared fold, so a stale/duplicate index discards nothing
+        // remains: the shared fold, so a stale/duplicate index discards nothing
         // here exactly as it discards nothing in the in-memory WAL.
         inner.state.apply_snapshot(index, term, data);
 
@@ -468,13 +468,13 @@ impl FileRaftWAL {
 
 /// A version-skew refusal (**V2**): the file is this format, from a revision
 /// this build does not accept. Deliberately worded as a skew and never as
-/// corruption — the remedy is a compatible build, and the state must be kept.
+/// corruption: the remedy is a compatible build, and the state must be kept.
 fn skew_error(what: &str, path: &Path, err: impl std::fmt::Display) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
             "{what} {} was written by a different build ({err}); this is a version \
-             skew, not corruption — run this node on a build that accepts it, and \
+             skew, not corruption: run this node on a build that accepts it, and \
              keep the node's state",
             path.display()
         ),
@@ -498,7 +498,7 @@ fn corrupt_error(what: &str, path: &Path, guess: &str, err: impl std::fmt::Displ
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "corrupt {what} {} ({err}); refusing to guess {guess} — restore or \
+            "corrupt {what} {} ({err}); refusing to guess {guess}; restore or \
              remove the node's state and rejoin it as a new member",
             path.display()
         ),
@@ -836,7 +836,7 @@ mod tests {
     /// *are* these values.
     ///
     /// One of each [`EntryPayload`] variant, because `postcard` encodes a variant
-    /// as a positional discriminant — inserting a variant anywhere but the end
+    /// as a positional discriminant, inserting a variant anywhere but the end
     /// silently reinterprets every entry written under the ones after it. `App`
     /// carries the `serde_bytes` shape whose encoding must stay byte-identical
     /// (see its own note), so the fixture pins that too.
@@ -1066,7 +1066,7 @@ mod tests {
     /// rather than asserted.
     ///
     /// A stamped snapshot handed to the decoder that predates the stamp does not
-    /// fail — it *succeeds*, at a fabricated index, because the magic's own bytes
+    /// fail: it *succeeds*, at a fabricated index, because the magic's own bytes
     /// are a valid `postcard` prefix and `from_bytes` ignores whatever trails. A
     /// build reading that would then drop every log record at or below index
     /// 10505: committed entries destroyed with no diagnostic. Nothing but the
@@ -1075,7 +1075,7 @@ mod tests {
     fn a_stamped_snapshot_misparses_under_the_older_decoder() {
         let bytes = stamped_snapshot(4, 2, (0u8..=199).collect());
         let misread: SnapshotRecord = postcard::from_bytes(&bytes)
-            .expect("the older decoder accepts these bytes — that is the hazard");
+            .expect("the older decoder accepts these bytes: that is the hazard");
 
         assert_eq!(
             misread.index, 10505,
@@ -1085,7 +1085,7 @@ mod tests {
         assert_ne!(misread.index, 4, "and it is not the index that was written");
     }
 
-    /// **V4**'s write step, now that every build reads both forms — and the one
+    /// **V4**'s write step, now that every build reads both forms, and the one
     /// place the ordering was not optional: a build predating the read release
     /// decodes these bytes to index 10505 and truncates its log, as
     /// `a_stamped_snapshot_misparses_under_the_older_decoder` shows.

@@ -1,7 +1,7 @@
 //! The journal seam (spec §7.3).
 //!
-//! An entity's journal is its durable, totally-ordered, append-only log of events
-//! — the **source of truth** (§1, invariant **E3**). The [`EntityJournal`] trait is a
+//! An entity's journal is its durable, totally-ordered, append-only log of events:
+//! the **source of truth** (§1, invariant **E3**). The [`EntityJournal`] trait is a
 //! simulation and deployment seam like `Transport` and `Clock` (actor §4.6, §7),
 //! operating on opaque, codec-encoded event bytes so it stays codec-agnostic.
 //!
@@ -96,7 +96,7 @@ pub enum AppendOutcome {
 
 /// One [`load`](EntityJournal::load) page (spec §7.3): up to `limit` records
 /// after `from`, plus the store's compaction **base** at the moment of the read
-/// (§9) — read together under one segment lock, so the base always explains
+/// (§9); read together under one segment lock, so the base always explains
 /// this page's missing prefix. Slots at `Seq <= base` are compacted: subsumed
 /// by the entity's snapshot and gone from every read path. Without the base a
 /// reader below it cannot tell truncated history from the interleaved slots a
@@ -153,7 +153,7 @@ pub trait EntityJournal: Clone + Send + Sync + 'static {
         limit: usize,
     ) -> impl Future<Output = Result<RecordPage, EntityJournalError>> + Send;
 
-    /// The entity's committed head — the authoritative source of `head` on
+    /// The entity's committed head: the authoritative source of `head` on
     /// rehydration (§9, invariant **E3**), and the **rehydration barrier** itself.
     /// `Seq::ZERO` for an entity with no committed events.
     ///
@@ -173,7 +173,7 @@ pub trait EntityJournal: Clone + Send + Sync + 'static {
     ///
     /// This is the *validity token* of the gateway's non-activating read (§7.5):
     /// a [`head`](EntityJournal::head) recovery is trustworthy only while the
-    /// leadership it ran under persists — leadership regained is a **higher**
+    /// leadership it ran under persists; leadership regained is a **higher**
     /// term, so an unchanged term proves no other node could have appended in
     /// between. The `Local` tier never elects and so always leads at
     /// [`Term::ZERO`].
@@ -191,7 +191,7 @@ pub trait EntityJournal: Clone + Send + Sync + 'static {
     /// The latest snapshot for one entity, if any (§9), read from the **local**
     /// store on every tier. On the `Quorum` tier the quorum-best snapshot is
     /// chosen during `head`'s recovery (§8) and cached locally there, so this
-    /// read — like `load` — costs no round trip and follows that recovery.
+    /// read (like `load`) costs no round trip and follows that recovery.
     fn load_snapshot(
         &self,
         entity: &EntityName,
@@ -221,7 +221,7 @@ pub trait EntityJournal: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<Vec<u8>>, EntityJournalError>> + Send;
 
     /// Whether one entity's blob is present on **any reachable replica** (the local
-    /// copy, else the first peer that holds it — not a quorum count). A `true` means a
+    /// copy, else the first peer that holds it, not a quorum count). A `true` means a
     /// [`get_blob`](EntityJournal::get_blob) can source the bytes, not that they are
     /// quorum-durable (durability is established at [`put_blob`](EntityJournal::put_blob)).
     fn has_blob(
@@ -230,7 +230,7 @@ pub trait EntityJournal: Clone + Send + Sync + 'static {
         id: BlobId,
     ) -> impl Future<Output = Result<bool, EntityJournalError>> + Send;
 
-    /// Keep only the listed blobs of one entity, dropping the rest — the entity's
+    /// Keep only the listed blobs of one entity, dropping the rest: the entity's
     /// mark-from-roots GC. Best-effort.
     fn retain_blobs(
         &self,
@@ -238,7 +238,7 @@ pub trait EntityJournal: Clone + Send + Sync + 'static {
         retain: Vec<BlobId>,
     ) -> impl Future<Output = ()> + Send;
 
-    /// Drop **all** of one entity's blobs — entity-scoped reclamation on destroy.
+    /// Drop **all** of one entity's blobs: entity-scoped reclamation on destroy.
     /// Best-effort.
     fn delete_blobs(&self, entity: &EntityName) -> impl Future<Output = ()> + Send;
 }

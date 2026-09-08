@@ -8,7 +8,7 @@
 //!
 //! [`collect`] is the contract `agent::Follower` implements: subscribe,
 //! backfill the gap by `load`, take live batches, and re-check the journal when
-//! the stream goes quiet. Everything it does is forced by **E16** — push is a
+//! the stream goes quiet. Everything it does is forced by **E16**: push is a
 //! latency optimization and correctness rests on the journal, so a sink that
 //! trusted delivery would be asserting the wrong thing.
 
@@ -29,7 +29,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// How long a caught-up collector waits for a live record before re-checking the
-/// journal — the liveness net that detects a silent leader move.
+/// journal: the liveness net that detects a silent leader move.
 pub const RESYNC: Duration = Duration::from_millis(400);
 
 // --- An entity whose records are an appendable log, readable by seq -------------
