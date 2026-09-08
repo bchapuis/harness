@@ -418,7 +418,7 @@ pub(crate) struct PendingCall {
 /// A recorded delegation target (§8.1, §9.2): the child's kind (entity type),
 /// session, turn, and carved budget; enough to address it and cancel it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ChildRef {
+pub struct ChildRef {
     pub kind: KindId,
     pub session: SessionId,
     pub turn: TurnId,

@@ -1,6 +1,6 @@
 # Workflow: Specification
 
-**Status:** Implemented by the `workflow` crate. The agent runtime depends on it and takes its `OnOrphan` (agent §5.2), derives a fold-only desired set (`agent`'s `desired` module), and has moved its environment reconciliation into a pre-pass ahead of the dispatch (agent §5.4, §5.5, §5.6), so its launch decision is now the pure set and the launch-once claim, and nothing else. What remains is the trait impl itself: `pending` and `perform` in place of the hand-built dispatcher, and the machinery of Appendix C retired with it.
+**Status:** Implemented by the `workflow` crate and consumed by the agent runtime, which implements `Workflow` (agent §3.2, §13): its `pending` is a pure desired set, its `perform` the model and sandbox seams, its `settle` the fold of one outcome, and the engine holds the claims, the orphan classification, the straggler filter, and quiescence. What the agent keeps beside the cycle is what no fold expresses: an environment pre-pass ahead of every tick (agent §5.4, §5.5, §5.6), plus owed-cancel propagation, its subscriber set, and its event outbox, which could follow and block nothing.
 **Scope:** The mechanism of autonomy under an entity, specified as its own layer: re-derive the work committed state calls for, launch what is not yet in flight, fold each outcome back, and stop when nothing is left. The entity layer supplies identity, the journal, the single-writer fence, placement, activation, and hibernation. The workflow adds the cycle that reconciles wanted work against launched work, and the properties that make that cycle safe under crash and failover.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
@@ -497,23 +497,19 @@ workflow/                  # the autonomous entity (this spec): an entity that d
 
 ---
 
-## Appendix C: What moves out of the agent runtime
+## Appendix C: What the agent runtime handed over, and what it kept
 
-The measure of the seam, mostly still to be taken: the agent runtime does not yet sit on the workflow. Each row is machinery the agent runtime owns today and would consume instead; the last column names what it becomes a case of. Rows marked *done* have landed ahead of the rest, because each could move without the trait: a copied type, and the gating that had to leave the launch path before `pending` could be pure at all.
+The measure of the seam, taken. The agent runtime implements `Workflow` (agent §3.2, §13), and what it used to own of the cycle is gone rather than wrapped: its launch guard is the engine's claims (**W3**); its dispatch loop and three launch paths are `pending` and `perform` (**W2**, **W4**); its once-per-activation orphan resolution is first-sight classification (**W6**); its resolved-call set is the desired set itself, exact now that a key names its turn (**W5**, §3.1); its self-driving advance command is `Tick` (§3.2) and its two outcome commands are one `Settled` (§4.2); its per-tool recovery policy is this crate's `OnOrphan` (§4.4); and the effect clause of its `can_hibernate` is derived quiescence (**W7**). That is the claim this document made, tested by making it true.
 
-| Today, in `agent/agent.rs` | Under the workflow | Becomes |
+Four things stayed, and only one of them is a decision this layer should ever revisit.
+
+| Kept in `agent/agent.rs` | Why | Would become |
 |---|---|---|
-| `RunScope::launched` (`LaunchGuard<StepKey>`) | claims, in the cycle | W3 |
-| `reconcile` (the environment pre-pass, *done*), then `dispatch`, `launch_call`, `launch_open`, `launch_delegation` | `pending` + `perform` | W2, W4 |
-| `resolve_orphans`, `RunScope::orphans_resolved` | first-sight classification | W6 |
-| `OnOrphan`, `ToolDecl::on_orphan` | the workflow's `OnOrphan`, re-exported (*done*) | §3.1, §4.4 |
-| `RunScope::resolved` | the desired set itself, once the keys are unique (§3.1) | W5 |
-| `Advance` and its scheduling | the workflow cycle's entry points | §3.2 |
-| `ModelDone`, `ToolDone`, `CancelDone` | one `Settled` | §4.2 |
-| `cancels_launched`, `propagate_cancels`, `TRANSPORT_RETRIES`, `propagation_backoff` | owed cancels as ordinary effects | §7.2, §3.4 |
-| `SandboxSlot`, `release_sandbox`, the `on_deactivate` release | `Binding<Sandbox>` | §6 |
-| `can_hibernate`'s effect clauses (a launched call outstanding, `SandboxSlot::Opening`) | derived quiescence and `Binding`'s *opening* state | W7 |
-| `Activation::subscribers`, `subscribe`, `notify`, `notify_finished` | `Subscribers` | §7.1 |
-| `EventOutbox` | post-commit emission in the cycle | §8 |
+| the environment pre-pass (agent §5.4, §5.5, §5.6) | a lost workspace, a failed sandbox open, and an unheld tier are activation state, not fold state, so no `pending` can express them and no engine can gate on them | nothing: this is the consumer's, by construction |
+| owed-cancel propagation and its transport retries (agent §9.2) | a debt the fold already carries, driven by a launch guard of its own | ordinary effects, with §3.4's backoff in place of the retry loop (§7.2) |
+| the sandbox slot, its release, and the `opening` clause of `can_hibernate` (agent §5.3) | an open-once resource with a release on every deactivation | `Binding<Sandbox>` (§6) |
+| the subscriber set and the run-boundary event outbox (agent §7.4, §10.4) | callers waiting on a durable outcome, and events owed once their records commit | `Subscribers` (§7.1) and post-commit emission in the cycle (§8) |
 
-What stays is what the agent runtime is about: the transcript and its fold, the model seam and its request assembly, the tool registry and the tier discipline, kinds and their digest, budgets, delegation policy, and idempotent submission (§1.1). Two smaller things stay with it and are worth naming, because a table of departures reads as a claim that nothing else is left: `can_hibernate` keeps its queued-turn clause, work owed that no effect represents (§6), and the agent runtime's `StepKey` and synthesized call ids must be qualified by the turn to satisfy §3.1's uniqueness rule, since they repeat across runs today and the workflow's straggler filter is exact only if they stop. That list describes an agent runtime. The list above describes nothing in particular, which is why it belongs one layer down.
+The first row is the one worth reading twice. It is not a gap in the layering but the shape of it: the workflow launches the whole desired set, so a consumer holding a gate the set cannot express MUST settle that gate before it ticks, never inside its launch. The agent runtime does exactly that, and holds itself to it with an assertion on every round.
+
+What stays for good is what the agent runtime is about: the transcript and its fold, the model seam and its request assembly, the tool registry and the tier discipline, kinds and their digest, budgets, delegation policy, and idempotent submission (§1.1). Its `can_hibernate` also keeps a clause of its own, for a turn accepted into the queue but not yet started: work owed now that no effect represents (§6). That list describes an agent runtime. The list above describes nothing in particular, which is why it belongs one layer down.

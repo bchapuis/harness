@@ -8,16 +8,16 @@
 //! welded to one agentic policy (agent §3); this crate is the mechanism on
 //! its own, with no model, tool, or prompt in it.
 //!
-//! The agent runtime is moving onto it rather than beside it. It already takes
-//! this crate's [`OnOrphan`] for its own tool declarations, derives a fold-only
-//! desired set (`agent`'s `desired` module), and has moved its **environment
-//! reconciliation** ahead of the dispatch: a failed sandbox open, a tier
-//! acquisition, and a lost workspace each used to gate a launch from the
-//! activation rather than the fold (agent §5.4, §5.5, §5.6), and each is now
-//! settled by a pre-pass that runs first, so what the dispatch walks is the pure
-//! set and the launch-once claim, and nothing else. That is the property
-//! [`Workflow`] cannot be given by a consumer that lacks it, and an assertion
-//! holds the agent to it on every round. What remains is the trait impl.
+//! **The agent runtime sits on it.** Its `Workflow` impl supplies `pending`,
+//! `perform` and `settle`; this crate's [`Engine`] supplies everything between
+//! them, and its [`OnOrphan`] is the type a tool declaration's recovery policy
+//! has (agent §3.2, §13). What the agent kept beside the cycle is the thing no
+//! desired set can express: a lost workspace, a failed sandbox open, and a tier
+//! not yet held are activation state, so it settles them in a pre-pass ahead of
+//! every tick rather than inside a launch (agent §5.4, §5.5, §5.6). That is the
+//! shape of the seam, not a gap in it: a consumer holding a gate the set cannot
+//! express MUST settle it before it ticks, because the engine launches the whole
+//! set and cannot see what it does not hold.
 //!
 //! The whole of it rests on one decision: **the work outstanding is a pure
 //! function of committed state**, [`Workflow::pending`], never a journaled queue.

@@ -61,8 +61,8 @@ entity = { path = "crates/entity", version = "0.1.0" }
 # Workflow: the autonomous entity (workflow spec); the desired set as a pure
 # function of committed state, intent before effect, orphan resolution, and
 # quiescence, with no model, tool, or prompt in it. The agent runtime is one
-# policy over this mechanism and is moving onto it a piece at a time; until the
-# trait impl lands it still drives its own dispatch loop over the same set.
+# policy over this mechanism and now sits on it: `agent` implements `Workflow`
+# and keeps the agentic half.
 workflow = { path = "crates/workflow", version = "0.1.0" }
 
 # Blob store: a namespaced, content-addressed object store on the actor

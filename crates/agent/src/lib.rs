@@ -22,11 +22,10 @@
 pub mod agent;
 pub mod budget;
 pub mod client;
-/// The desired set, as a pure function of committed state: the agent runtime's
-/// `Workflow::pending` ahead of the trait impl, and what the dispatcher walks
-/// now that the environment reconciliation runs ahead of it. Crate-internal
-/// while the dispatcher is still the one that launches.
-mod desired;
+/// The desired set, as a pure function of committed state: this runtime's
+/// `Workflow::pending`, and with it the `Effect` type the workflow carries from
+/// `pending` to `perform`.
+pub mod desired;
 pub mod event;
 pub mod http;
 pub mod kind;

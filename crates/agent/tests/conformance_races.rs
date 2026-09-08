@@ -1,15 +1,15 @@
 //! Run-loop race conformance: the entity's serial mailbox gives no ordering
-//! guarantee between a client's `Submit` and the loop's own self-driving
-//! messages (`Advance`, `ModelDone`), so the loop's fold-external flags must
+//! guarantee between a client's `Submit` and the workflow's own self-driving
+//! messages (`Tick`, `Settled`), so what the loop keeps outside the fold must
 //! stay correct under any interleaving (§3.2). Two races regress here:
 //!
-//! 1. A `Submit` processed between a run's terminal commit and its post-end
-//!    `Advance` starts the next run directly: it must not inherit the ended
-//!    run's per-run flags (stale `launched`/`resolved` call ids suppress the
-//!    new run's calls, because synthesized ids repeat across runs).
-//! 2. A straggler `ModelDone` of an ended run must not release the successor
-//!    run's model-call launch claim, and a superseded call's response must
-//!    never journal a second `ModelResponse` for a step (§3.1 step 2, §9.1 item 4).
+//! 1. A `Submit` processed between a run's terminal commit and the tick that
+//!    follows it starts the next run directly: it must not inherit anything of
+//!    the ended run's, which is why an effect's key names its turn (`StepKey`,
+//!    workflow §3.1) even though a synthesized call id repeats across runs.
+//! 2. A straggler outcome of an ended run must not release the successor run's
+//!    launch claim, and a superseded call's response must never journal a second
+//!    `ModelResponse` for a step (§3.1 step 2, §9.1 item 4).
 
 mod support;
 
@@ -70,16 +70,16 @@ fn probing_script() -> ScriptedModel {
 
 #[test]
 fn a_submit_racing_the_post_end_advance_starts_clean() {
-    // Run A takes two 10s model calls, so its final `ModelDone` (the message
-    // whose processing commits `RunEnded` and launches the post-end `Advance`)
-    // lands at exactly t=20. Submitting B at t=20 puts three enqueues at one
-    // virtual instant (A's `ModelDone`, B's `Submit`, the `Advance`), and the
-    // executor's seed-randomized scheduling explores their orderings. On the
-    // interleaving where B's `Submit` is processed after the terminal commit
-    // but before the `Advance`, the turn starts directly and must not inherit
-    // the ended run's per-run flags: B's synthesized `call-1-0` collides with
-    // A's resolved `call-1-0`, and an unswept loop skips the call forever;
-    // the run hangs and the prompt times out.
+    // Run A takes two 10s model calls, so its final outcome (the message whose
+    // processing commits `RunEnded` and brings the tick that follows it) lands
+    // at exactly t=20. Submitting B at t=20 puts three enqueues at one virtual
+    // instant (A's outcome, B's `Submit`, the tick), and the executor's
+    // seed-randomized scheduling explores their orderings. On the interleaving
+    // where B's `Submit` is processed after the terminal commit but before the
+    // tick, the turn starts directly and must not inherit anything of the ended
+    // run's: B's synthesized `call-1-0` is A's `call-1-0` by name, and a loop
+    // that keyed a claim by the id alone would skip B's call forever, hanging
+    // the run until the prompt times out.
     scenario_sweep(
         "agent-races/submit-post-end",
         sweep_seeds(0..96),
@@ -131,9 +131,9 @@ fn a_straggler_model_done_never_unlocks_a_second_call() {
     //   t=1   run A is cancelled; the call keeps flying (§9.2 item 4).
     //   t=2   run B starts; its own model call flies until t=12.
     //   t=9   the first wait on B lapses (7s deadline).
-    //   t=10  run A's straggler `ModelDone` lands, after B's call launched,
+    //   t=10  run A's straggler outcome lands, after B's call launched,
     //         before B's response: it must not release B's launch claim.
-    //   t=11  the re-attach nudges an `Advance`: a loop that let the straggler
+    //   t=11  the re-attach nudges a tick: a loop that let the straggler
     //         release the claim issues a second concurrent call for B here, and
     //         its response would journal a second `ModelResponse` for the step.
     //   t=12  B's real response journals; the tool runs to t=42; B finishes.
