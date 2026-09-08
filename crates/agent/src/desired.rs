@@ -2,22 +2,21 @@
 //! function of it (workflow spec §3.1, W1).
 //!
 //! This is the agent runtime's [`Workflow::pending`](workflow::Workflow::pending)
-//! ahead of the trait impl that will call it. The agent drives itself through a
-//! hand-built dispatcher ([`Agent::advance`](crate::agent::Agent), agent §3.1)
-//! whose launch decision reads both the fold *and* the activation's ephemeral
-//! environment; the workflow's mechanism requires the fold alone. [`desired`] is
-//! the fold-only half, extracted and held against the dispatcher by
-//! [`Agent::debug_assert_desired`](crate::agent::Agent) at both launch sites, so
-//! every existing suite (including the seeded swarm and cluster runs) checks
-//! the two agree before anything is rewired.
+//! ahead of the trait impl that will call it, and since the environment
+//! reconciliation moved ahead of the dispatch it is also what the dispatcher
+//! now walks. [`Agent::advance`](crate::agent::Agent) reconciles the
+//! activation's environment first (agent §5.4, §5.5, §5.6) and then launches
+//! this set, member by member, with no gate of its own left but the launch-once
+//! claim.
 //!
-//! **The obligation it checks is one-directional and deliberate:** every effect
-//! the dispatcher launches MUST be a member of this set (soundness; the pure
-//! function never *misses* work the dispatcher does). The converse does not
-//! hold and must not be asserted: a member may be blocked this round by a claim
-//! or by the environment reconciliation the dispatcher still performs inline
-//! (§5.4, §5.5, §5.6). Those three gates are what the inversion has to hoist out
-//! of the dispatch path; until it does, the set is a superset of what launches.
+//! **The obligation therefore runs both ways.** Soundness, that nothing
+//! launches outside the set, is structural: the dispatch iterates the set and
+//! nothing else. The converse is the one worth asserting, because it is what
+//! the workflow's engine assumes and what a gate kept back would quietly break,
+//! so `Agent::debug_assert_launchable` holds every unclaimed member of the set
+//! to being launchable as it stands: its tier held, its environment bound, its
+//! delegation recorded. Every suite in the crate, the seeded swarm and cluster
+//! runs included, checks it on every round.
 
 use serde::Deserialize;
 use serde::Serialize;

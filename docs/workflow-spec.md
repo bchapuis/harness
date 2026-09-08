@@ -1,6 +1,6 @@
 # Workflow: Specification
 
-**Status:** Implemented by the `workflow` crate. The agent runtime depends on it and takes its `OnOrphan` (agent §5.2), and holds its dispatcher against a fold-only desired set (`agent`'s `desired` module, agent §13), but does not yet implement `Workflow`: its environment reconciliation (agent §5.4, §5.5, §5.6) gates a launch from the activation rather than the fold and must move ahead of the cycle first.
+**Status:** Implemented by the `workflow` crate. The agent runtime depends on it and takes its `OnOrphan` (agent §5.2), derives a fold-only desired set (`agent`'s `desired` module), and has moved its environment reconciliation into a pre-pass ahead of the dispatch (agent §5.4, §5.5, §5.6), so its launch decision is now the pure set and the launch-once claim, and nothing else. What remains is the trait impl itself: `pending` and `perform` in place of the hand-built dispatcher, and the machinery of Appendix C retired with it.
 **Scope:** The mechanism of autonomy under an entity, specified as its own layer: re-derive the work committed state calls for, launch what is not yet in flight, fold each outcome back, and stop when nothing is left. The entity layer supplies identity, the journal, the single-writer fence, placement, activation, and hibernation. The workflow adds the cycle that reconciles wanted work against launched work, and the properties that make that cycle safe under crash and failover.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** carry the meanings defined in RFC 2119.
@@ -499,12 +499,12 @@ workflow/                  # the autonomous entity (this spec): an entity that d
 
 ## Appendix C: What moves out of the agent runtime
 
-The measure of the seam, still to be taken: the agent runtime does not yet sit on the workflow. Each row is machinery the agent runtime owns today and would consume instead; the last column names what it becomes a case of. One row has landed ahead of the rest, marked *done*: the type was a copy rather than a mechanism, so it moved on its own.
+The measure of the seam, mostly still to be taken: the agent runtime does not yet sit on the workflow. Each row is machinery the agent runtime owns today and would consume instead; the last column names what it becomes a case of. Rows marked *done* have landed ahead of the rest, because each could move without the trait: a copied type, and the gating that had to leave the launch path before `pending` could be pure at all.
 
 | Today, in `agent/agent.rs` | Under the workflow | Becomes |
 |---|---|---|
 | `RunScope::launched` (`LaunchGuard<StepKey>`) | claims, in the cycle | W3 |
-| `dispatch_pending`, `launch_call`, `launch_open`, `launch_delegation` | `pending` + `perform` | W2, W4 |
+| `reconcile` (the environment pre-pass, *done*), then `dispatch`, `launch_call`, `launch_open`, `launch_delegation` | `pending` + `perform` | W2, W4 |
 | `resolve_orphans`, `RunScope::orphans_resolved` | first-sight classification | W6 |
 | `OnOrphan`, `ToolDecl::on_orphan` | the workflow's `OnOrphan`, re-exported (*done*) | §3.1, §4.4 |
 | `RunScope::resolved` | the desired set itself, once the keys are unique (§3.1) | W5 |

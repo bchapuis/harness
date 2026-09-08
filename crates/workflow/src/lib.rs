@@ -9,15 +9,15 @@
 //! its own, with no model, tool, or prompt in it.
 //!
 //! The agent runtime is moving onto it rather than beside it. It already takes
-//! this crate's [`OnOrphan`] for its own tool declarations, and its dispatcher is
-//! held against a fold-only desired set (`agent`'s `desired` module) by an
-//! assertion at every launch site: the standing check that its launch decision
-//! reads nothing outside the journal, which is the one property [`Workflow`]
-//! cannot be given by a consumer that lacks it. What remains before the agent
-//! can implement the trait is its **environment reconciliation**: a failed
-//! sandbox open, a tier acquisition, and a lost workspace each gate a launch from
-//! the activation rather than the fold (agent §5.4, §5.5, §5.6), and all three
-//! must move ahead of the tick so [`Workflow::pending`] stays pure (W1).
+//! this crate's [`OnOrphan`] for its own tool declarations, derives a fold-only
+//! desired set (`agent`'s `desired` module), and has moved its **environment
+//! reconciliation** ahead of the dispatch: a failed sandbox open, a tier
+//! acquisition, and a lost workspace each used to gate a launch from the
+//! activation rather than the fold (agent §5.4, §5.5, §5.6), and each is now
+//! settled by a pre-pass that runs first, so what the dispatch walks is the pure
+//! set and the launch-once claim, and nothing else. That is the property
+//! [`Workflow`] cannot be given by a consumer that lacks it, and an assertion
+//! holds the agent to it on every round. What remains is the trait impl.
 //!
 //! The whole of it rests on one decision: **the work outstanding is a pure
 //! function of committed state**, [`Workflow::pending`], never a journaled queue.

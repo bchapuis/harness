@@ -53,11 +53,14 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
+use workflow::Pending;
+
 use crate::client::HarnessSystem;
 use crate::client::MailboxGuard;
 use crate::client::ReplyMailbox;
 use crate::client::Seams;
 use crate::client::Shared;
+use crate::desired::Effect;
 use crate::event::AgentEvent;
 use crate::kind::Kind;
 use crate::model::ModelError;
@@ -296,6 +299,41 @@ enum SandboxSlot {
     /// The last open failed (§5.4): the next `Advance` fails the calls that
     /// needed it and resets to `Closed`, so a later call retries the open.
     Failed(String),
+}
+
+impl SandboxSlot {
+    /// The bound handle, or `None` in any other state: the one read a launch
+    /// makes of the binding, now that the pre-pass has established which it is.
+    fn sandbox(&self) -> Option<Arc<dyn Sandbox>> {
+        match self {
+            SandboxSlot::Open(sandbox) => Some(Arc::clone(sandbox)),
+            _ => None,
+        }
+    }
+}
+
+// Hand-written: the held handle is a `dyn Sandbox`, which carries no `Debug`.
+impl std::fmt::Debug for SandboxSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SandboxSlot::Closed => write!(f, "Closed"),
+            SandboxSlot::Opening => write!(f, "Opening"),
+            SandboxSlot::Open(_) => write!(f, "Open"),
+            SandboxSlot::Failed(why) => write!(f, "Failed({why})"),
+        }
+    }
+}
+
+/// What the environment pre-pass concluded about this round (§5.4, §5.5, §5.6).
+enum Reconciled {
+    /// Records to commit before anything launches; the post-commit `Advance`
+    /// re-enters the dispatcher (§6.4).
+    Records(Vec<Record>),
+    /// The environment is not ready and an open is in flight. Nothing launches
+    /// this round; the open's own `Advance` re-enters.
+    Waiting,
+    /// Every desired effect is launchable as it stands.
+    Ready,
 }
 
 /// The sandbox binding and tier grants this activation holds (§5.4, §5.6):
@@ -844,37 +882,85 @@ impl<S: HarnessSystem> Agent<S> {
         )]
     }
 
-    /// Hold the dispatcher against the pure desired set (workflow §3.1, W1):
-    /// every effect this activation launches MUST be a member of
-    /// [`desired`](crate::desired::desired) over the same committed state.
+    /// Hold the pre-pass to what the workflow's mechanism requires (workflow
+    /// §3.1, W1): once [`reconcile`](Self::reconcile) reports ready, **every**
+    /// member of the pure desired set this activation has not already claimed is
+    /// launchable as it stands, with no gate left between it and its launch.
     ///
-    /// The check that the agent runtime can sit on the workflow's mechanism,
-    /// run by every suite in the crate, including the seeded swarm and cluster
-    /// runs, where a resumed activation recomputes the set from a journal it did
-    /// not write. A failure means the launch decision depends on something
-    /// outside the fold, which is the one thing the inversion cannot carry.
+    /// This is the two-directional form of the check `desired.rs` arrived with.
+    /// Soundness, that nothing launches outside the set, is structural now:
+    /// [`dispatch`](Self::dispatch) iterates the set and nothing else. What is
+    /// worth asserting is the converse, because that is the property the
+    /// inversion needs and the one a stray gate would quietly break: an engine
+    /// that launches the whole set cannot honor a gate its consumer kept to
+    /// itself.
     ///
-    /// Only soundness is asserted, never the converse: a member may be blocked
-    /// this round by a claim or by the environment reconciliation the dispatcher
-    /// still performs inline (§5.4, §5.5, §5.6), so the set is a superset of
-    /// what launches until that gating is hoisted out.
-    ///
-    /// Debug-only: it re-derives the set per launch, which is the fold's cost
-    /// again, and it proves a property of the code rather than guarding the
-    /// production path.
+    /// Run by every suite in the crate, including the seeded swarm and cluster
+    /// runs where a resumed activation recomputes the set from a journal it did
+    /// not write. Debug-only: it re-walks the set per round and proves a
+    /// property of the code rather than guarding the production path.
     #[cfg(debug_assertions)]
-    fn debug_assert_desired(&self, state: &SessionState, key: &StepKey) {
-        let set = crate::desired::desired(&self.kind, state, self.shared.config.budget_floor);
-        assert!(
-            set.iter().any(|p| &p.key == key),
-            "launched {key:?} outside the desired set {:?}; the launch decision \
-             reads state outside the fold (workflow W1)",
-            set.iter().map(|p| &p.key).collect::<Vec<_>>()
-        );
+    fn debug_assert_launchable(
+        &self,
+        act: &Activation<S>,
+        kind: &Kind,
+        live: &LiveRun,
+        desired: &[Pending<StepKey, Effect>],
+    ) {
+        for p in desired {
+            if act.run.launched.is_claimed(&p.key) {
+                continue;
+            }
+            match &p.effect {
+                Effect::Model { .. } => assert!(
+                    act.env.reconciled,
+                    "a model call is desired with the environment unreconciled; \
+                     the launch decision still reads outside the fold (workflow W1)"
+                ),
+                Effect::Call { call, name } => {
+                    if act.run.resolved.contains(call) {
+                        continue;
+                    }
+                    let pending = live
+                        .pending
+                        .get(call)
+                        .expect("the desired set is derived from `live.pending`");
+                    if name == DELEGATE {
+                        assert!(
+                            pending.child.is_some(),
+                            "delegation {call} is desired with no ChildRun journaled; \
+                             the pre-pass left an intent unrecorded (§8.1)"
+                        );
+                        continue;
+                    }
+                    let decl = kind.tools.get(name).unwrap_or_else(|| {
+                        panic!("tool call {call} to unknown tool '{name}' left in the desired set")
+                    });
+                    assert!(
+                        act.env.tiers_held.contains(&decl.tier),
+                        "tool call {call} is desired at a tier this activation does not hold; \
+                         the acquisition gate is still inside the launch (§5.6)"
+                    );
+                    assert!(
+                        matches!(act.env.slot, SandboxSlot::Open(_)),
+                        "tool call {call} is desired with no sandbox bound ({:?}); \
+                         the environment gate is still inside the launch (§5.3, §5.4)",
+                        act.env.slot
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(not(debug_assertions))]
-    fn debug_assert_desired(&self, _state: &SessionState, _key: &StepKey) {}
+    fn debug_assert_launchable(
+        &self,
+        _act: &Activation<S>,
+        _kind: &Kind,
+        _live: &LiveRun,
+        _desired: &[Pending<StepKey, Effect>],
+    ) {
+    }
 
     // -- the dispatcher (§3.1) ----------------------------------------------
 
@@ -905,14 +991,22 @@ impl<S: HarnessSystem> Agent<S> {
             return events;
         }
 
-        // (d) Step boundary: no pending calls ⇒ a model call (§3.1 step 2).
-        if live.pending.is_empty() {
-            return self.step_model(state, ctx, kind, &mut act, live, turn);
+        // (d) Reconcile the activation's environment against what the fold
+        //     calls for (§5.4, §5.5, §5.6), before anything launches.
+        let desired = crate::desired::desired(kind, state, self.shared.config.budget_floor);
+        match self.reconcile(ctx, kind, &mut act, live, &turn, &desired) {
+            // Records first: the commit re-enters the dispatcher (§6.4), and
+            // nothing launches against a fold that is about to change.
+            Reconciled::Records(records) => return records,
+            // An open is in flight; its `Advance` re-enters (§5.3 item 1).
+            Reconciled::Waiting => return Vec::new(),
+            Reconciled::Ready => {}
         }
 
-        // (e) Execute every journaled intent not yet launched or resolved
-        //     (§3.1 step 4; on resume this is orphaned re-execution, §5.5).
-        self.dispatch_pending(state, ctx, kind, &mut act, live, &turn)
+        // (e) Launch every desired effect this activation has not claimed
+        //     (§3.1 steps 2 and 4; on resume, orphaned re-execution, §5.5).
+        self.debug_assert_launchable(&act, kind, live, &desired);
+        self.dispatch(state, ctx, kind, &mut act, live, &turn, &desired)
     }
 
     /// (b) No live run: sweep the per-run scope, then start the fold queue's
@@ -967,68 +1061,68 @@ impl<S: HarnessSystem> Agent<S> {
         (!events.is_empty()).then_some(events)
     }
 
-    /// (d) Step boundary: no calls pending, so issue the next model call (§3.1
-    /// step 2); unless the budget is exhausted (a terminal `RunEnded`) or a
-    /// lost workspace must be surfaced first (§5.5). Returns the records to
-    /// journal; launches the call and returns empty when it proceeds.
-    fn step_model(
+    /// (d) Reconcile the activation's environment against the desired set
+    /// (§5.4, §5.5, §5.6), ahead of every launch.
+    ///
+    /// The three gates that used to sit *inside* the launch decision live here:
+    /// a workspace lost during this activation, a failed sandbox open, and a
+    /// tier not yet held. Each is settled by a record or by an open in flight,
+    /// and only once none of them applies does the round launch anything. That
+    /// ordering is the whole point: the pre-pass reads the activation freely,
+    /// and what follows it reads nothing but the launch claims, which is what
+    /// makes the launch decision a function of the fold alone (workflow W1).
+    ///
+    /// The per-call intents belong here for the same reason: a delegation with
+    /// no `ChildRun` yet, an unknown tool, and a malformed input are decided
+    /// from the fold, but each writes a record the dispatch must not race
+    /// (§5.4, §8.1).
+    ///
+    /// Only members this activation has not claimed are considered, which is
+    /// what the launch itself did before: a call already in flight needs no
+    /// environment and a straggler must not reopen one.
+    fn reconcile(
         &self,
-        state: &SessionState,
         ctx: &EntityCtx<Agent<S>>,
         kind: &Kind,
         act: &mut Activation<S>,
         live: &LiveRun,
-        turn: TurnId,
-    ) -> Vec<Record> {
-        // The step this call answers, tagged on the call and matched again on
-        // receipt (§3.1 step 2), and the launch-once claim key: an in-flight
-        // step is claimed, and only its committed response advances
-        // `own_steps` to a fresh key.
-        let step = live.spend.own_steps;
-        if act.run.launched.is_claimed(&StepKey::Model(step)) {
-            return Vec::new();
+        turn: &TurnId,
+        desired: &[Pending<StepKey, Effect>],
+    ) -> Reconciled {
+        // The budget gate (§3.1 step 2). `desired` already folds it: a live run
+        // with nothing pending whose state calls for no model call is a run
+        // that cannot afford one, so the empty set *is* the exhaustion.
+        if desired.is_empty() && live.pending.is_empty() {
+            return Reconciled::Records(vec![self.end_run(
+                act,
+                ctx,
+                turn.clone(),
+                Err(RunError::BudgetExhausted),
+            )]);
         }
-        let floor = self.shared.config.budget_floor;
-        if !live.spend.allows_call(&live.budget, floor) {
-            return vec![self.end_run(act, ctx, turn, Err(RunError::BudgetExhausted))];
-        }
+
         // Surface a lost workspace before the model acts on state that is gone
         // (§5.5). The workspace itself is durable: the agent's facet
         // rematerializes it on every activation (entity §7.11), so only a loss
         // observed *this* activation (the provider returned `EnvironmentLost`)
         // resets. A fresh environment resets every held tier to `Workspace`;
         // later acquisitions re-journal, never silently inherited.
-        if !act.env.reconciled && act.env.lost_this_activation {
+        let model_wanted = desired.iter().any(|p| {
+            matches!(p.effect, Effect::Model { .. }) && !act.run.launched.is_claimed(&p.key)
+        });
+        if model_wanted && !act.env.reconciled {
             act.env.reconciled = true;
-            act.env.tiers_held = BTreeSet::from([Tier::Workspace]);
-            return vec![self.rec(ctx, RecordBody::WorkspaceReset)];
+            if act.env.lost_this_activation {
+                act.env.tiers_held = BTreeSet::from([Tier::Workspace]);
+                return Reconciled::Records(vec![self.rec(ctx, RecordBody::WorkspaceReset)]);
+            }
         }
-        act.env.reconciled = true;
-        self.debug_assert_desired(state, &StepKey::Model(step));
-        act.run.launched.claim(StepKey::Model(step));
-        let request = self.build_request(state, kind, live);
-        let this = ctx.this();
-        let model = self.seams.model.clone();
-        ctx.system().launch(Box::pin(async move {
-            let result = model.complete(request).await;
-            let _ = this.tell(ModelDone { turn, step, result }).await;
-        }));
-        Vec::new()
-    }
 
-    /// (e) Execute every journaled intent not yet launched or resolved (§3.1
-    /// step 4; on resume, orphaned re-execution, §5.5). Synthesized failures and
-    /// acquisition/delegation intents are journaled first and re-advanced; once
-    /// none remain, every ready call launches. Returns the records to journal.
-    fn dispatch_pending(
-        &self,
-        state: &SessionState,
-        ctx: &EntityCtx<Agent<S>>,
-        kind: &Kind,
-        act: &mut Activation<S>,
-        live: &LiveRun,
-        turn: &TurnId,
-    ) -> Vec<Record> {
+        // Computed once for the three passes below: each of them either returns
+        // its records, in which case the commit re-advances and everything is
+        // recomputed, or leaves the set exactly as it found it.
+        let unclaimed = self.unclaimed_calls(act, live, desired);
+
         // A failed sandbox open fails the calls that needed it (§5.4), then
         // resets to `Closed` so a later call retries the open.
         if matches!(act.env.slot, SandboxSlot::Failed(_)) {
@@ -1038,12 +1132,9 @@ impl<S: HarnessSystem> Agent<S> {
                 unreachable!("guarded by matches! above")
             };
             let mut events = Vec::new();
-            for (call, pending) in &live.pending {
-                if act.run.launched.is_claimed(&StepKey::Call(call.clone()))
-                    || act.run.resolved.contains(call)
-                    || pending.name == DELEGATE
-                {
-                    continue;
+            for call in &unclaimed {
+                if live.pending[call].name == DELEGATE {
+                    continue; // a delegation never needed the environment (§8)
                 }
                 events.push(self.fail_call(
                     act,
@@ -1054,97 +1145,203 @@ impl<S: HarnessSystem> Agent<S> {
                 ));
             }
             if !events.is_empty() {
-                return events;
+                return Reconciled::Records(events);
             }
         }
 
-        // Collect intents (TierAcquired/ChildRun) and synthesized failures to
-        // journal this round; if any, commit them first and re-advance. Else
-        // launch every ready call.
+        // The per-call intents and synthesized failures: a delegation's
+        // `ChildRun` (§8.1 step 1), an unknown tool or malformed input (§5.4),
+        // and the acquisition of a tier not yet held (§5.6). All are journaled
+        // first and re-advanced.
         let mut events = Vec::new();
-        let mut ready: Vec<(CallId, PendingCall)> = Vec::new();
-        for (call, pending) in &live.pending {
-            // A non-claiming read: calls skipped here may still be listed as
-            // `ready` intents this round, and an intent batch returns without
-            // launching them (§6.4), only `launch_call` claims.
-            if act.run.launched.is_claimed(&StepKey::Call(call.clone()))
-                || act.run.resolved.contains(call)
-            {
-                continue;
-            }
+        for call in &unclaimed {
+            let pending = live.pending[call].clone();
             if pending.name == DELEGATE {
-                if pending.child.is_some() {
-                    ready.push((call.clone(), pending.clone()));
-                } else {
-                    match self.plan_delegation(ctx, kind, turn, call, pending, live) {
+                if pending.child.is_none() {
+                    match self.plan_delegation(ctx, kind, turn, call, &pending, live) {
                         Ok(child_run) => events.push(child_run),
                         Err(tool_err) => {
-                            events.push(self.fail_call(act, ctx, turn, call, tool_err));
+                            events.push(self.fail_call(act, ctx, turn, call, tool_err))
                         }
                     }
                 }
-            } else {
-                match kind.tools.get(&pending.name) {
-                    None => {
-                        events.push(self.fail_call(
-                            act,
+                continue;
+            }
+            match kind.tools.get(&pending.name) {
+                None => events.push(self.fail_call(
+                    act,
+                    ctx,
+                    turn,
+                    call,
+                    ToolError::UnknownTool {
+                        name: pending.name.clone(),
+                    },
+                )),
+                Some(_) if !pending.input.is_object() => events.push(self.fail_call(
+                    act,
+                    ctx,
+                    turn,
+                    call,
+                    ToolError::InvalidArguments("tool input must be a JSON object".into()),
+                )),
+                Some(decl) => {
+                    // Journal `TierAcquired` before the first call at a tier not
+                    // yet held, and mark it held optimistically so neither a
+                    // same-batch sibling nor the post-commit re-advance
+                    // re-journals it. A failed commit forces step-down, which
+                    // resets held tiers to `Workspace` on the next activation
+                    // (§5.5), so the optimism is safe.
+                    if act.env.tiers_held.insert(decl.tier) {
+                        events.push(self.rec(
                             ctx,
-                            turn,
-                            call,
-                            ToolError::UnknownTool {
-                                name: pending.name.clone(),
+                            RecordBody::TierAcquired {
+                                turn: turn.clone(),
+                                tier: decl.tier,
                             },
                         ));
-                    }
-                    Some(_) if !pending.input.is_object() => {
-                        events.push(self.fail_call(
-                            act,
-                            ctx,
-                            turn,
-                            call,
-                            ToolError::InvalidArguments("tool input must be a JSON object".into()),
-                        ));
-                    }
-                    Some(decl) if act.env.tiers_held.contains(&decl.tier) => {
-                        ready.push((call.clone(), pending.clone()));
-                    }
-                    Some(decl) => {
-                        // The acquisition gate (§5.6): journal `TierAcquired` before
-                        // the first call at a tier not yet held, and mark it held
-                        // optimistically so neither a same-batch sibling nor the
-                        // post-commit re-advance re-journals it. A failed commit
-                        // forces step-down, which resets held tiers to `Workspace`
-                        // on the next activation (§5.5), so the optimism is safe.
-                        if act.env.tiers_held.insert(decl.tier) {
-                            events.push(self.rec(
-                                ctx,
-                                RecordBody::TierAcquired {
-                                    turn: turn.clone(),
-                                    tier: decl.tier,
-                                },
-                            ));
-                        }
                     }
                 }
             }
         }
         if !events.is_empty() {
-            return events;
+            return Reconciled::Records(events);
         }
+
+        // The lazy open (§5.3 item 1): the first sandboxed call opens the
+        // environment, and the round waits for it rather than launching against
+        // a half-ready activation. The provider runs over the facet's
+        // materialized workspace directory (entity §7.11), which rehydration
+        // built before any command could reach here. A delegation waits with it,
+        // which costs one open and buys a launch path with no environment in it.
+        let sandboxed = unclaimed
+            .iter()
+            .any(|call| live.pending[call].name != DELEGATE);
+        if sandboxed {
+            match &act.env.slot {
+                SandboxSlot::Open(_) => {}
+                SandboxSlot::Opening => return Reconciled::Waiting,
+                // `Failed` was drained above; reaching it here means every call
+                // it concerned was already resolved, so the retry is the next
+                // demand's (the slot is `Closed` by then).
+                SandboxSlot::Failed(_) => return Reconciled::Waiting,
+                SandboxSlot::Closed => {
+                    match ctx.ws().dir_path() {
+                        Ok(workspace) => {
+                            act.env.slot = SandboxSlot::Opening;
+                            self.launch_open(ctx, kind.profile.clone(), workspace);
+                        }
+                        // No workspace to run over: the next round's failure
+                        // pass turns this into a `ToolError::Sandbox` outcome
+                        // for every call that needed it.
+                        Err(e) => {
+                            act.env.slot = SandboxSlot::Failed(format!("workspace: {e}"));
+                            self.schedule_advance(ctx);
+                        }
+                    }
+                    return Reconciled::Waiting;
+                }
+            }
+        }
+
+        Reconciled::Ready
+    }
+
+    /// The desired calls this activation has neither claimed nor resolved: what
+    /// the pre-pass reconciles for and the dispatch then launches.
+    fn unclaimed_calls(
+        &self,
+        act: &Activation<S>,
+        live: &LiveRun,
+        desired: &[Pending<StepKey, Effect>],
+    ) -> Vec<CallId> {
+        desired
+            .iter()
+            .filter_map(|p| match &p.effect {
+                Effect::Call { call, .. } => Some(call),
+                Effect::Model { .. } => None,
+            })
+            .filter(|call| {
+                !act.run.launched.is_claimed(&StepKey::Call((*call).clone()))
+                    && !act.run.resolved.contains(*call)
+                    && live.pending.contains_key(*call)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// (e) Launch every desired effect this activation has not claimed (§3.1
+    /// steps 2 and 4).
+    ///
+    /// Mechanical, and deliberately so: the pre-pass left no gate but the
+    /// launch-once claim, so this walks the pure set and nothing else, which is
+    /// the shape [`Engine::advance`](workflow::Engine::advance) takes over.
+    /// Returns the records to journal: normally none, but a call that cannot
+    /// launch *after* claiming resolves as a failure rather than dangling.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &self,
+        state: &SessionState,
+        ctx: &EntityCtx<Agent<S>>,
+        kind: &Kind,
+        act: &mut Activation<S>,
+        live: &LiveRun,
+        turn: &TurnId,
+        desired: &[Pending<StepKey, Effect>],
+    ) -> Vec<Record> {
         let root = state
             .created
             .as_ref()
             .map(|c| c.root.clone())
             .unwrap_or_else(|| Self::session(ctx));
-        // A ready call that cannot launch after claiming resolves as a failure
-        // instead of orphaned (see `launch_call`); those records commit like
-        // any synthesized outcome.
         let mut failed = Vec::new();
-        for (call, pending) in ready {
-            self.debug_assert_desired(state, &StepKey::Call(call.clone()));
-            failed.extend(self.launch_call(act, ctx, kind, turn, &root, call, pending));
+        for p in desired {
+            match &p.effect {
+                Effect::Model { step } => {
+                    if act.run.launched.claim(StepKey::Model(*step)) {
+                        self.launch_model(state, ctx, kind, live, turn.clone(), *step);
+                    }
+                }
+                Effect::Call { call, .. } => {
+                    if act.run.resolved.contains(call) {
+                        continue;
+                    }
+                    let Some(pending) = live.pending.get(call).cloned() else {
+                        continue;
+                    };
+                    failed.extend(self.launch_call(
+                        act,
+                        ctx,
+                        kind,
+                        turn,
+                        &root,
+                        call.clone(),
+                        pending,
+                    ));
+                }
+            }
         }
         failed
+    }
+
+    /// Issue the model call answering `step` (§3.1 step 2), tagged with the step
+    /// so receipt can match it against the live run's current `own_steps` and
+    /// discard a superseded one.
+    fn launch_model(
+        &self,
+        state: &SessionState,
+        ctx: &EntityCtx<Agent<S>>,
+        kind: &Kind,
+        live: &LiveRun,
+        turn: TurnId,
+        step: u32,
+    ) {
+        let request = self.build_request(state, kind, live);
+        let this = ctx.this();
+        let model = self.seams.model.clone();
+        ctx.system().launch(Box::pin(async move {
+            let result = model.complete(request).await;
+            let _ = this.tell(ModelDone { turn, step, result }).await;
+        }));
     }
 
     /// Plan a fresh delegation (§8.1 step 1): validate the child kind against the
@@ -1249,53 +1446,47 @@ impl<S: HarnessSystem> Agent<S> {
         };
         let tier = decl.tier;
         let timeout = decl.timeout.unwrap_or(self.shared.config.tool_timeout);
-        match &act.env.slot {
-            SandboxSlot::Open(sandbox) => {
-                if !act.run.launched.claim(StepKey::Call(call.clone())) {
-                    return Vec::new(); // already in flight this activation
-                }
-                let sandbox = Arc::clone(sandbox);
-                let this = ctx.this();
-                let system = ctx.system().clone();
-                let name = pending.name.clone();
-                let input = pending.input.clone();
-                let turn = turn.clone();
-                system.clone().launch(Box::pin(async move {
-                    let call_fut = Box::pin(sandbox.call(tier, &name, input));
-                    let sleep = system.sleep(timeout);
-                    let outcome = match select(call_fut, sleep).await {
-                        Either::Left((outcome, _)) => outcome,
-                        Either::Right(((), _)) => Err(ToolError::Timeout),
-                    };
-                    let _ = this
-                        .tell(ToolDone {
-                            turn,
-                            call,
-                            outcome,
-                        })
-                        .await;
-                }));
-            }
-            // `Opening` waits for the open task to re-advance; `Failed` is resolved
-            // by `advance` before any call reaches here, so it is never seen.
-            SandboxSlot::Opening | SandboxSlot::Failed(_) => {}
-            SandboxSlot::Closed => {
-                // Lazy open on the first sandboxed call (§5.3 item 1); the call
-                // stays pending and is re-driven when the environment is ready.
-                // The provider runs over the facet's materialized workspace
-                // directory (entity §7.11), which rehydration built before any
-                // command could reach here.
-                match ctx.ws().dir_path() {
-                    Ok(workspace) => {
-                        act.env.slot = SandboxSlot::Opening;
-                        self.launch_open(ctx, kind.profile.clone(), workspace);
-                    }
-                    Err(e) => {
-                        act.env.slot = SandboxSlot::Failed(format!("workspace: {e}"));
-                    }
-                }
-            }
+        let Some(sandbox) = act.env.slot.sandbox() else {
+            // Unreachable: the pre-pass opens the environment and waits on it
+            // before any sandboxed call is dispatched (§5.3 item 1), which
+            // `debug_assert_launchable` holds it to. Resolved rather than
+            // skipped, on the same reasoning as the delegation cases above: a
+            // silent bail would leave the call pending with nothing to relaunch
+            // it and stall the run.
+            return vec![self.fail_call(
+                act,
+                ctx,
+                turn,
+                &call,
+                ToolError::Sandbox(format!(
+                    "no sandbox bound when '{}' was dispatched",
+                    pending.name
+                )),
+            )];
+        };
+        if !act.run.launched.claim(StepKey::Call(call.clone())) {
+            return Vec::new(); // already in flight this activation
         }
+        let this = ctx.this();
+        let system = ctx.system().clone();
+        let name = pending.name.clone();
+        let input = pending.input.clone();
+        let turn = turn.clone();
+        system.clone().launch(Box::pin(async move {
+            let call_fut = Box::pin(sandbox.call(tier, &name, input));
+            let sleep = system.sleep(timeout);
+            let outcome = match select(call_fut, sleep).await {
+                Either::Left((outcome, _)) => outcome,
+                Either::Right(((), _)) => Err(ToolError::Timeout),
+            };
+            let _ = this
+                .tell(ToolDone {
+                    turn,
+                    call,
+                    outcome,
+                })
+                .await;
+        }));
         Vec::new()
     }
 
@@ -1458,7 +1649,12 @@ impl<S: HarnessSystem> Agent<S> {
 
     /// Notify every caller registered for a run that has finished (§7.3), then
     /// drop their registrations.
-    fn notify_finished(&self, act: &mut Activation<S>, state: &SessionState, ctx: &EntityCtx<Agent<S>>) {
+    fn notify_finished(
+        &self,
+        act: &mut Activation<S>,
+        state: &SessionState,
+        ctx: &EntityCtx<Agent<S>>,
+    ) {
         let mut finished = Vec::new();
         act.subscribers
             .retain(|turn, subs| match state.turns.get(turn) {
