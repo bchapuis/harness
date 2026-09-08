@@ -12,7 +12,7 @@ const PARTICIPANT = "agent";
  * the gateway to cancel the turn.
  */
 export class AgentSessionContentProvider implements vscode.ChatSessionContentProvider {
-  /** Highest record seq seen per session — the exclusive resume cursor. */
+  /** Highest record seq seen per session: the exclusive resume cursor. */
   private readonly lastSeq = new Map<string, number>();
 
   constructor(
@@ -163,7 +163,7 @@ function buildHistory(records: SeqRecord[]): Array<vscode.ChatRequestTurn | vsco
     flush();
     return turns;
   } catch (err) {
-    console.warn(`agent: could not rebuild history — ${describe(err)}`);
+    console.warn(`agent: could not rebuild history: ${describe(err)}`);
     return [];
   }
 }

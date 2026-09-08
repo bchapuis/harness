@@ -12,8 +12,8 @@
 #   # edit /etc/agent/node.env, then:
 #   systemctl daemon-reload && systemctl enable --now agent-node
 #
-# See deploy/systemd/README.md for the disk layout and the rolling-restart procedure —
-# in particular, this unit stops with SIGTERM and a generous timeout on purpose, and
+# See deploy/systemd/README.md for the disk layout and the rolling-restart procedure.
+# In particular, this unit stops with SIGTERM and a generous timeout on purpose, and
 # shortening that is how a rolling restart becomes an outage.
 
 [Unit]
@@ -49,13 +49,13 @@ ExecStart=/usr/local/bin/agent-standalone node \
 #
 # The secret reaches the process as an argument, so it is visible in `ps` to any local
 # user. That is the binary's only interface for it today. On a machine with untrusted
-# local users, keep the node off it — this deployment already assumes the machine is
+# local users, keep the node off it; this deployment already assumes the machine is
 # trusted (it holds the API key and every tenant's entity data on disk).
 
 # --- Shutdown -----------------------------------------------------------------
 #
 # SIGTERM, and then wait. The node hands off leadership of every shard it leads
-# before exiting (spec §8.3); skipping that is safe but expensive — each shard it
+# before exiting (spec §8.3); skipping that is safe but expensive: each shard it
 # still led waits a full election timeout before its replicas elect, and every entity
 # on those shards rehydrates on the new leader. A node leading many shards therefore
 # turns an ordinary rolling restart into that many simultaneous failovers, which is
@@ -78,7 +78,7 @@ StartLimitBurst=5
 #
 # The entity store keeps up to 65536 segment files open (DEFAULT_SEGMENT_CAPACITY),
 # plus transport connections and transient blob opens. Below ~70000 the process hits
-# the kernel's limit before the store's cache ever evicts anything — see
+# the kernel's limit before the store's cache ever evicts anything; see
 # docs/standalone-deployment.md, "Descriptors".
 LimitNOFILE=131072
 
@@ -103,7 +103,7 @@ ProtectControlGroups=yes
 RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-# NOTE: `--sandbox docker` or `--sandbox firecracker` needs more than this — a docker
+# NOTE: `--sandbox docker` or `--sandbox firecracker` needs more than this: a docker
 # socket or /dev/kvm, and the namespace restrictions above will block them. Those
 # modes want their own unit; `durable` (the typed file tools, no guest shell) runs
 # entirely within these bounds.

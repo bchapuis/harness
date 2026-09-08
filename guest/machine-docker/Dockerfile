@@ -1,6 +1,6 @@
 # The container mechanism's runner image (`machine_host::container`, machine spec
 # §2.1): the scaffolding that turns a container into a machine's guest. It holds
-# no user-visible state — the user's rootfs is the disk-facet image `init.sh`
+# no user-visible state: the user's rootfs is the disk-facet image `init.sh`
 # loop-mounts and chroots into.
 #
 # util-linux for losetup and mount; socat because the host reaches the guest

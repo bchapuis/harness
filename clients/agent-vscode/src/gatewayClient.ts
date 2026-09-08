@@ -2,7 +2,7 @@
 // (`crates/agent-gateway/src/http.rs`). It mirrors the TUI reference client
 // (`crates/agent-tui/src/client.rs`): a bearer token on every request, JSON
 // bodies, and SSE for live runs. Uses the Node 18+ global `fetch` /
-// `AbortController` that VS Code ships — no extra HTTP dependency.
+// `AbortController` that VS Code ships, so no extra HTTP dependency.
 
 import { SseParser } from "./sse.js";
 import type { GatewayErrorBody, GatewayEvent, RunOutcome, SeqRecord, SessionListEntry } from "./types.js";

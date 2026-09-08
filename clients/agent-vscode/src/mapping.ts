@@ -13,7 +13,7 @@ export type RenderPart =
 
 /**
  * A record's contribution to the *current response*. `TurnSubmitted` is not
- * rendered here — it starts a user turn, handled at the transcript level — and
+ * rendered here (it starts a user turn, handled at the transcript level) and
  * neither is the terminal `RunEnded`, whose outcome is rendered by
  * `outcomeToParts` (the same value the SSE `outcome` event carries).
  */
@@ -41,8 +41,8 @@ export function recordToParts(body: RecordBody): RenderPart[] {
   if ("ToolOutcome" in body) {
     const { call, outcome } = body.ToolOutcome;
     if ("Err" in outcome) {
-      // A failing tool never fails the run (agent spec §5.4) — surface it as a
-      // note, not an error.
+      // A failing tool never fails the run (agent spec §5.4), so surface it as
+      // a note, not an error.
       return [{ role: "markdown", text: `⚠️ tool \`${call}\` failed: ${describeToolError(outcome.Err)}` }];
     }
     return [{ role: "progress", text: `tool \`${call}\` ok` }];

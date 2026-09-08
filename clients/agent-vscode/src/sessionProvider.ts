@@ -4,7 +4,7 @@ import type { GatewayClient } from "./gatewayClient.js";
 /**
  * Populates the Agents window's list of agent sessions. It merges the
  * gateway's own session list (`GET /v1/sessions`) with locally-created names
- * that have not yet been prompted — the gateway only lists a session once it
+ * that have not yet been prompted: the gateway only lists a session once it
  * has records, so a freshly-named session would otherwise be invisible until
  * its first turn.
  */
@@ -38,7 +38,7 @@ export class AgentSessionItemProvider implements vscode.ChatSessionItemProvider 
       }
     } catch (err) {
       // Surface once but still show any pending names so the user isn't stuck.
-      vscode.window.showWarningMessage(`Agent: could not list sessions — ${describe(err)}`);
+      vscode.window.showWarningMessage(`Agent: could not list sessions: ${describe(err)}`);
     }
     return [...names].sort().map((session) => ({ id: session, label: session }));
   }

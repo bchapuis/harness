@@ -1,8 +1,8 @@
 // Hand-pinned subset of VS Code's PROPOSED `chatSessionsProvider` API.
 //
-// This is NOT the verbatim upstream file. The real proposed API is in flux —
-// it is mid-migration from a provider model to a controller model
-// (`createChatSessionItemController`, microsoft/vscode#288457) — so we declare
+// This is NOT the verbatim upstream file. The real proposed API is in flux: it
+// is mid-migration from a provider model to a controller model
+// (`createChatSessionItemController`, microsoft/vscode#288457), so we declare
 // only the symbols this extension actually calls, and augment the stable
 // `vscode` module with them. When you target a specific VS Code build, replace
 // this file with the exact upstream `vscode.proposed.chatSessionsProvider.d.ts`

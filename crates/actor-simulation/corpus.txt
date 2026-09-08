@@ -2,13 +2,13 @@
 #
 # Representative failing seeds, pruned per workload: a collecting soak reports
 # one finding a hundred times over, and a few seeds per workload guard it as
-# well as all of them. Once listed, a seed replays on every swarm run — local,
-# CI, and soak alike — regardless of how wide that run's sweep is. That is what
+# well as all of them. Once listed, a seed replays on every swarm run (local,
+# CI, and soak alike) regardless of how wide that run's sweep is. That is what
 # makes the suite a ratchet: a bug found once can never come back quietly, even
 # in the edit loop where sweeps are only a few seeds.
 #
 # Format: one `<workload-name> <seed>` per line; `#` comments and blank lines
-# ignored. The name is the workload's `name()` — the same string the failure
+# ignored. The name is the workload's `name()`, the same string the failure
 # reports, so a failure message names its own corpus key. A trailing comment
 # after the seed is free-form; record what broke and where it was fixed.
 #
@@ -27,14 +27,14 @@
 # --- Split-brain singleton after heal -----------------------------------------
 #
 # `2 live activations at quiescence on a healed, converged cluster`, against
-# `singleton-converged-exactly-one` — plus, in leader mode, its mirror image,
+# `singleton-converged-exactly-one`, plus, in leader mode, its mirror image,
 # `0 live activations`. Recorded a hundred times over from collecting soaks
 # (SWARM_CONTINUE=1) across the gossip, registry, and leader control planes at
 # roughly 0.5-1% of seeds; `static`, whose membership never changes, was clean.
 #
 # Three separate reasons the workload asserted something it had not set up, none
 # of them a defect in the singleton (utilities spec §4), which held its guarantee
-# throughout — at most one activation per *converged* view:
+# throughout: at most one activation per *converged* view:
 #
 #  1. The tail was never quiescent. `net.heal()` clears partitions but leaves the
 #     wire's seeded frame loss running, so probes kept going missing, peers kept
@@ -45,12 +45,12 @@
 #     heal (`conformance_faults.rs::quiescing_the_network_stops_injecting_faults`).
 #  2. The count lagged reality. A manager emits `SingletonStopped` when it
 #     observes the termination, on its next tick, so an instance that stopped in
-#     a run's last tick was gone while its `Stopped` was still 100ms away — and
+#     a run's last tick was gone while its `Stopped` was still 100ms away, and
 #     counted as live. `SingletonConverged` now ends an activation at whichever
 #     comes first, the manager's report or the actor's own `ResignId`.
 #  3. Leader mode could dissolve the cluster. With `DowningPolicy::Timeout` each
 #     isolated side downs the rest, `down` is terminal, and the fixed voter set
-#     lets the survivors elect a leader that downs the previous one in turn —
+#     lets the survivors elect a leader that downs the previous one in turn,
 #     ending with every node `Down`, no serving set anywhere, and correctly no
 #     singleton at all. It now uses conservative downing, as its gossip twin
 #     already did for the same reason.
@@ -74,7 +74,7 @@ singleton-chaos/gossip 31000512   # same, found after the first two fixes
 
 # --- Remote register not linearizable under duplication -----------------------
 #
-# `no sequential order linearizes the N completed/pending operations` — a `Cas`
+# `no sequential order linearizes the N completed/pending operations`: a `Cas`
 # that succeeded reported `false`. Around 0.2% of seeds, because it needs two
 # faults at once: the request frame duplicated onto a mutating op, *and* the
 # first reply dropped.
@@ -83,11 +83,11 @@ singleton-chaos/gossip 31000512   # same, found after the first two fixes
 # swaps the value and answers `true`, the second finds it already swapped and
 # answers `false`, and with the first reply lost the caller resolves against the
 # second. Both replies carry the same correlation id, so nothing downstream can
-# tell them apart — there is no caller-side fix.
+# tell them apart, and there is no caller-side fix.
 #
 # That is the framework's contract, not a defect in it: at-most-once holds at the
 # caller, and spec §7.2 puts exactly-once out of scope, "built atop this layer
-# with explicit idempotency keys". The workload was the side claiming too much —
+# with explicit idempotency keys". The workload was the side claiming too much:
 # a bare register is not a linearizable object over a duplicating wire. The
 # register in `tests/support/` now carries that key on its mutating operations,
 # which is the construction the spec prescribes, and the sweep is what shows it
@@ -105,14 +105,14 @@ linearizable-remote-register 88000261
 
 # --- Asks left pending at quiescence ------------------------------------------
 #
-# `[no-silent-loss] N ask(s) still pending at quiescence` — spec §18.5 #1 — and,
+# `[no-silent-loss] N ask(s) still pending at quiescence` (spec §18.5 #1) and,
 # where a dispatch was the thing still in flight, `[serial-execution] dispatch
 # ... never completed`. Reproduced across four entity workloads and machine,
 # which share only the actor framework and the cluster driver underneath. Three
 # causes, found in that order, each one hiding the next:
 #
 #  1. The driver called quiescence too early. It flushed a fixed 2s after the
-#     traffic finished — no longer than the deadline entity's own quorum append
+#     traffic finished, no longer than the deadline entity's own quorum append
 #     carries, and that append fans out further asks behind it (the drained
 #     stragglers of a committed quorum, §7.2). A call issued at the end of the
 #     drive could not possibly have closed by the time the question was asked, so
@@ -121,13 +121,13 @@ linearizable-remote-register 88000261
 #     abandoned one still reaches the invariant.
 #  2. `try_join_all` abandoned asks for real. Entity fanned out blob puts, blob
 #     gets, and spilled-value reads with `futures::future::try_join_all`, which
-#     returns on the first error and drops the futures still in flight — with the
+#     returns on the first error and drops the futures still in flight, with the
 #     `ask`s they had already issued. Those never reach a reply or a `CallError`,
 #     which is exactly what §18.5 #1 forbids. The four sites now use
 #     `actor_core::join_all_results`, which awaits every future and then reports
 #     the first error; the helper's doc is where the rule now lives.
 #  3. Only then could the seeds behind these two run to the end, and two further
-#     bugs surfaced — see the two sections below.
+#     bugs surfaced; see the two sections below.
 #
 # Pruned to a couple of seeds per workload.
 
@@ -138,7 +138,7 @@ entity-blob-swarm 99000090
 entity-ws-swarm 94000683        # same, on the workspace checkpoint's chunk puts (2)
 entity-ws-swarm 99000858
 
-# Found the first time the SQL facet's swarm ever ran — it is behind
+# Found the first time the SQL facet's swarm ever ran: it is behind
 # `--features sql`, which neither ci.yml nor soak.yml enabled, and the suite had
 # bit-rotted into a compile error in the meantime.
 entity-sql-account-swarm 95000206
@@ -151,7 +151,7 @@ machine-swarm 70000001
 # after previous head 2 (E3/E5)`. Unmasked by the fixes above; a genuine E14
 # violation, and the most serious thing the corpus turned up.
 #
-# A replica refuses an append that lands on a slot it has already filled — the
+# A replica refuses an append that lands on a slot it has already filled, the
 # optimistic head check of entity §8, which is what stops a leader whose
 # recovered head is stale from overwriting a committed record. It made an
 # exception for a re-delivered append, and identified one *by its bytes*. But
@@ -163,7 +163,7 @@ machine-swarm 70000001
 # durable; the entity held one record.
 #
 # Fixed in `store.rs`: an append may proceed onto an occupied slot only if it is
-# the same append — same shard term as well as same bytes — and the check now
+# the same append (same shard term as well as same bytes) and the check now
 # covers every slot of the batch, not just the first. Pinned by
 # `store::tests::an_identical_record_from_a_newer_term_is_still_a_stale_head`.
 
@@ -178,7 +178,7 @@ entity-account-swarm 41000332
 # `Put` and treated every failure as if nothing had happened. But `Unavailable`
 # is ambiguous by definition (entity §7.2, §11): the record may already sit on a
 # replica minority, and the next activation's quorum recovery can find it on a
-# majority and adopt it — the spec's own fault list asks for exactly this case to
+# majority and adopt it; the spec's own fault list asks for exactly this case to
 # be exercised. Reading those bytes back is correct. `EntityError::Unavailable`'s
 # doc comment said the opposite ("so the write did not commit"), which is how the
 # claim came to be written that way; both are fixed.
@@ -200,7 +200,7 @@ entity-ws-swarm 6
 # Entity caches a resolved host ref per entity (`HostCache`), guarded before each
 # send by a leadership check but not by liveness. So a ref cached before the
 # restart still looked good afterwards and delivered to whatever now sat at that
-# path — another entity's host. The `Record` was applied to principal `p0`'s
+# path: another entity's host. The `Record` was applied to principal `p0`'s
 # directory, committed there, and answered `Created`; `p2`, which the caller had
 # addressed, never saw it. `ActorId::incarnation` exists precisely to separate a
 # fresh actor from "a resigned predecessor that reused the same path" and was
@@ -209,8 +209,8 @@ entity-ws-swarm 6
 # Fixed by stamping the **process** incarnation onto every id a host assigns
 # (`LocalHost::with_incarnation`), threaded through `ClusterConfig::incarnation`;
 # the simulation passes the scheduler domain, which is already one per incarnation.
-# A stale ref now fails to resolve, which is a `DeadLetter` — the one outcome that
-# proves the command never ran (§2.2) — so `EntityRef` re-resolves and re-issues.
+# A stale ref now fails to resolve, which is a `DeadLetter`, the one outcome that
+# proves the command never ran (§2.2), so `EntityRef` re-resolves and re-issues.
 #
 # Kept as a corpus seed because the sweep that found it only reaches this with a
 # restart, a deactivation, and a cached ref lining up.

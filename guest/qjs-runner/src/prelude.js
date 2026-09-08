@@ -5,7 +5,7 @@
 // replaced by a function of the host seed.
 (() => {
   // Seeded xorshift64*: Math.random becomes a function of the host seed.
-  // __seed() returns the u64 seed as a decimal string, losslessly — an f64
+  // __seed() returns the u64 seed as a decimal string, losslessly; an f64
   // would collapse seeds that differ below 2^-52 mantissa precision, and the
   // host's seeds span the full 64-bit range.
   const mask = 0xffffffffffffffffn;

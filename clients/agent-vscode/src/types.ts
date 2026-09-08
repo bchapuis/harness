@@ -4,30 +4,30 @@
 // `tool.rs`, and `sandbox.rs`. Newtypes such as `Seq(u64)`, `TurnId(String)`,
 // and `CallId(String)` serialize transparently as their inner value.
 
-/** `crates/agent/src/budget.rs` — Budget { tokens, steps }. */
+/** `crates/agent/src/budget.rs`: Budget { tokens, steps }. */
 export interface Budget {
   tokens: number;
   steps: number;
 }
 
-/** `crates/agent/src/budget.rs` — Usage { input_tokens, output_tokens }. */
+/** `crates/agent/src/budget.rs`: Usage { input_tokens, output_tokens }. */
 export interface Usage {
   input_tokens: number;
   output_tokens: number;
 }
 
-/** `crates/agent/src/model.rs` — ToolCall { id, name, input }. */
+/** `crates/agent/src/model.rs`: ToolCall { id, name, input }. */
 export interface ToolCall {
   id: string;
   name: string;
   input: unknown;
 }
 
-/** `crates/agent/src/sandbox.rs` — Tier (unit enum → string). */
+/** `crates/agent/src/sandbox.rs`: Tier (unit enum → string). */
 export type Tier = "Workspace" | "Compute" | "Network" | "Native";
 
 /**
- * `crates/agent/src/tool.rs` — ToolError (externally tagged). Unit variants
+ * `crates/agent/src/tool.rs`: ToolError (externally tagged). Unit variants
  * are bare strings; data-carrying variants are single-key objects.
  */
 export type ToolError =
@@ -42,26 +42,26 @@ export type ToolError =
 /** A `Result<T, E>` as serde encodes it: `{ Ok }` or `{ Err }`. */
 export type Result<T, E> = { Ok: T } | { Err: E };
 
-/** `crates/agent/src/model.rs` — ModelError, opaque here. */
+/** `crates/agent/src/model.rs`: ModelError, opaque here. */
 export type ModelError = unknown;
 
-/** `crates/agent/src/session.rs` — RunError (externally tagged). */
+/** `crates/agent/src/session.rs`: RunError (externally tagged). */
 export type RunError =
   | "BudgetExhausted"
   | "Cancelled"
   | { Model: ModelError };
 
-/** `crates/agent/src/session.rs` — Completion { content, tokens }. */
+/** `crates/agent/src/session.rs`: Completion { content, tokens }. */
 export interface Completion {
   content: string;
   tokens: number;
 }
 
-/** `crates/agent/src/session.rs` — RunOutcome = Result<Completion, RunError>. */
+/** `crates/agent/src/session.rs`: RunOutcome = Result<Completion, RunError>. */
 export type RunOutcome = Result<Completion, RunError>;
 
 /**
- * `crates/agent/src/session.rs` — RecordBody (externally tagged). Only the
+ * `crates/agent/src/session.rs`: RecordBody (externally tagged). Only the
  * fields this client reads are typed; unmentioned fields are ignored.
  */
 export type RecordBody =
@@ -74,7 +74,7 @@ export type RecordBody =
   | { RunEnded: { turn: string; outcome: RunOutcome } }
   | "WorkspaceReset";
 
-/** `crates/agent/src/session.rs` — Record { at_nanos, body }. */
+/** `crates/agent/src/session.rs`: Record { at_nanos, body }. */
 export interface Record {
   at_nanos: number;
   body: RecordBody;

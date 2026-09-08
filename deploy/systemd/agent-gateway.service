@@ -2,13 +2,13 @@
 #
 # The gateway joins the same cluster as a non-voting, non-hosting CLIENT (the Orleans
 # cluster-client pattern). It verifies a caller's bearer token to a tenant, then
-# addresses the session's entity directly over the actor transport — no forwarding hop.
+# addresses the session's entity directly over the actor transport: no forwarding hop.
 # Because it holds `EntityRef`s and rides the receptionist gossip it sits INSIDE the
 # cluster's trust boundary and presents the cluster secret; untrusted callers reach it
 # only over HTTP with a bearer token.
 #
-# Run it on its own machine, or at least give it its own node id. It is stateless —
-# no --data, nothing to replicate — so unlike a node it can be restarted freely.
+# Run it on its own machine, or at least give it its own node id. It is stateless
+# (no --data, nothing to replicate), so unlike a node it can be restarted freely.
 #
 # Install: as for agent-node, with /etc/agent/gateway.env.
 

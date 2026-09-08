@@ -47,7 +47,7 @@ async function newSession(items: AgentSessionItemProvider): Promise<void> {
   }
   items.addPending(trimmed);
   vscode.window.showInformationMessage(
-    `Agent: session "${trimmed}" ready — pick it in the Agents window to start.`
+    `Agent: session "${trimmed}" ready. Pick it in the Agents window to start.`
   );
 }
 
