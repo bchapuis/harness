@@ -499,7 +499,7 @@ workflow/                  # the autonomous entity (this spec): an entity that d
 
 ## Appendix C: What the agent runtime handed over, and what it kept
 
-The measure of the seam, taken. The agent runtime implements `Workflow` (agent §3.2, §13), and what it used to own of the cycle is gone rather than wrapped: its launch guard is the engine's claims (**W3**); its dispatch loop and three launch paths are `pending` and `perform` (**W2**, **W4**); its once-per-activation orphan resolution is first-sight classification (**W6**); its resolved-call set is the desired set itself, exact now that a key names its turn (**W5**, §3.1); its self-driving advance command is `Tick` (§3.2) and its two outcome commands are one `Settled` (§4.2); its per-tool recovery policy is this crate's `OnOrphan` (§4.4); and the effect clause of its `can_hibernate` is derived quiescence (**W7**). That is the claim this document made, tested by making it true.
+The measure of the seam, taken. The agent runtime implements `Workflow` (agent §3.2, §13), and what it used to own of the cycle is gone rather than wrapped: its launch guard is the engine's claims (**W3**); its dispatch loop and three launch paths are `pending` and `perform` (**W2**, **W4**); its once-per-activation orphan resolution is first-sight classification (**W6**); its resolved-call set is the desired set itself, exact now that a key names its turn (**W5**, §3.1); its self-driving advance command is `Tick` (§3.2) and its two outcome commands are one `Settled` (§4.2); its per-tool recovery policy is this crate's `OnOrphan` (§4.4); and the effect clause of its `can_hibernate` is derived quiescence (**W7**). Both components went the same way: its sandbox slot is a `Binding<Arc<dyn Sandbox>>` (§6) and its subscriber set a `Subscribers<TurnId, ActorRef<ReplyMailbox>>` (§7.1), so the two state machines this document describes have exactly one implementation each. That is the claim this document made, tested by making it true.
 
 Four things stayed, and only one of them is a decision this layer should ever revisit.
 
@@ -507,8 +507,8 @@ Four things stayed, and only one of them is a decision this layer should ever re
 |---|---|---|
 | the environment pre-pass (agent §5.4, §5.5, §5.6) | a lost workspace, a failed sandbox open, and an unheld tier are activation state, not fold state, so no `pending` can express them and no engine can gate on them | nothing: this is the consumer's, by construction |
 | owed-cancel propagation and its transport retries (agent §9.2) | a debt the fold already carries, driven by a launch guard of its own | ordinary effects, with §3.4's backoff in place of the retry loop (§7.2) |
-| the sandbox slot, its release, and the `opening` clause of `can_hibernate` (agent §5.3) | an open-once resource with a release on every deactivation | `Binding<Sandbox>` (§6) |
-| the subscriber set and the run-boundary event outbox (agent §7.4, §10.4) | callers waiting on a durable outcome, and events owed once their records commit | `Subscribers` (§7.1) and post-commit emission in the cycle (§8) |
+| the sandbox's open path, its release, and the `opening` clause of `can_hibernate` (agent §5.3) | the resource's type and how it opens are the consumer's; only the state machine around them was ever general | nothing: the slot itself is a `Binding` (§6), and conjoining its `opening` state is what §6 asks a consumer to do |
+| the run-boundary event outbox (agent §10.4) | events owed once their records commit | post-commit emission in the cycle (§8) |
 
 The first row is the one worth reading twice. It is not a gap in the layering but the shape of it: the workflow launches the whole desired set, so a consumer holding a gate the set cannot express MUST settle that gate before it ticks, never inside its launch. The agent runtime does exactly that, and holds itself to it with an assertion on every round.
 

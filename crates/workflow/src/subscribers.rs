@@ -77,6 +77,17 @@ impl<K: Ord, V> Subscribers<K, V> {
         self.waiting.get(key).map(Vec::len).unwrap_or(0)
     }
 
+    /// The units of work something is registered against, in key order.
+    ///
+    /// The post-commit pass reads this to decide what to
+    /// [`take`](Subscribers::take): which of them just finished is a question
+    /// only the consumer's fold can answer (discipline item 4), so the set of
+    /// candidates has to come back out. Registrations are not exposed with it;
+    /// `take` remains the only way to an address.
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.waiting.keys()
+    }
+
     /// Whether nothing is registered at all.
     pub fn is_empty(&self) -> bool {
         self.waiting.is_empty()
@@ -103,6 +114,21 @@ mod tests {
         assert_eq!(s.take(&1), vec!["a", "b"]);
         assert_eq!(s.waiting_on(&1), 0);
         assert_eq!(s.waiting_on(&2), 1);
+    }
+
+    #[test]
+    fn the_post_commit_pass_sees_every_registered_key() {
+        let mut s: Subscribers<u8, &str> = Subscribers::default();
+        s.register(2, "c");
+        s.register(1, "a");
+        s.register(1, "b");
+        assert_eq!(s.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
+        s.take(&1);
+        assert_eq!(
+            s.keys().copied().collect::<Vec<_>>(),
+            vec![2],
+            "a taken key leaves the candidate set"
+        );
     }
 
     #[test]

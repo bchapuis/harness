@@ -34,7 +34,6 @@
 //! set) lives behind a [`Mutex`] on the entity behavior, rebuilt per activation
 //! and never journaled (§5.5, §5.6, §7.4); the engine keeps its own beside it.
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -59,11 +58,13 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
+use workflow::Binding;
 use workflow::EffectError;
 use workflow::Engine;
 use workflow::Pending;
 use workflow::Perform;
 use workflow::Settled;
+use workflow::Subscribers;
 use workflow::Tick;
 use workflow::Workflow;
 
@@ -274,45 +275,6 @@ impl Message for CancelDone {
 // The entity
 // ===========================================================================
 
-/// The activation's sandbox binding (§5.3): at most one live sandbox per
-/// activation (invariant A8). The opened handle is not serializable, so it is
-/// filled by the open task directly under the [`Mutex`] (the one place a task
-/// touches activation state off the command path) rather than carried in a
-/// message; the task then re-enters the cycle with a [`Tick`].
-#[derive(Default)]
-enum SandboxSlot {
-    #[default]
-    Closed,
-    Opening,
-    Open(Arc<dyn Sandbox>),
-    /// The last open failed (§5.4): the next tick fails the calls that needed
-    /// it and resets to `Closed`, so a later call retries the open.
-    Failed(String),
-}
-
-impl SandboxSlot {
-    /// The bound handle, or `None` in any other state: the one read a launch
-    /// makes of the binding, now that the pre-pass has established which it is.
-    fn sandbox(&self) -> Option<Arc<dyn Sandbox>> {
-        match self {
-            SandboxSlot::Open(sandbox) => Some(Arc::clone(sandbox)),
-            _ => None,
-        }
-    }
-}
-
-// Hand-written: the held handle is a `dyn Sandbox`, which carries no `Debug`.
-impl std::fmt::Debug for SandboxSlot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SandboxSlot::Closed => write!(f, "Closed"),
-            SandboxSlot::Opening => write!(f, "Opening"),
-            SandboxSlot::Open(_) => write!(f, "Open"),
-            SandboxSlot::Failed(why) => write!(f, "Failed({why})"),
-        }
-    }
-}
-
 /// What the environment pre-pass concluded about this round (§5.4, §5.5, §5.6).
 enum Reconciled {
     /// Records to commit before anything launches; the tick their commit brings
@@ -330,8 +292,16 @@ enum Reconciled {
 /// deactivation (A8).
 #[derive(Default)]
 struct SandboxState {
-    /// The sandbox handle's lifecycle slot.
-    slot: SandboxSlot,
+    /// The sandbox handle's lifecycle slot: at most one live sandbox per
+    /// activation (invariant A8). This is the workflow's activation-scoped
+    /// binding (workflow §6) at its motivating case: opened once on demand,
+    /// vetoing hibernation while the open is in flight, released on every
+    /// deactivation, and never journaled. The opened handle is not
+    /// serializable, so the open task fills the binding directly under the
+    /// [`Mutex`] (the one place a task touches activation state off the command
+    /// path) rather than carrying it in a message; the task then re-enters the
+    /// cycle with a [`Tick`].
+    slot: Binding<Arc<dyn Sandbox>>,
     /// `SandboxBound` was emitted and not yet paired (A8).
     bound: bool,
     /// Tiers this activation holds (§5.6): working state, never fold state.
@@ -400,8 +370,10 @@ struct Activation<S: HarnessSystem> {
     /// Run-boundary events awaiting their records' commit (§10.4).
     events: EventOutbox,
     /// Callers registered for a run's outcome (§7.4): notified on `RunEnded`,
-    /// rebuilt by callers re-contacting after a resume.
-    subscribers: BTreeMap<TurnId, Vec<ActorRef<ReplyMailbox<S>>>>,
+    /// rebuilt by callers re-contacting after a resume. The workflow's
+    /// component (workflow §7.1), which is where the discipline this follows
+    /// is written down.
+    subscribers: Subscribers<TurnId, ActorRef<ReplyMailbox<S>>>,
     /// Owed cancels whose propagation this activation already launched (§9.2):
     /// a launch-once guard over the fold's `cancels_owed`, so repeated
     /// ticks do not stack duplicate sends. Per-activation, like every
@@ -417,10 +389,7 @@ impl<S: HarnessSystem> Activation<S> {
     /// submit carried no mailbox: the one place a subscriber is added to the list.
     fn subscribe(&mut self, turn: &TurnId, reply_to: Option<ActorRef<ReplyMailbox<S>>>) {
         if let Some(reply_to) = reply_to {
-            self.subscribers
-                .entry(turn.clone())
-                .or_default()
-                .push(reply_to);
+            self.subscribers.register(turn.clone(), reply_to);
         }
     }
 }
@@ -432,7 +401,7 @@ impl<S: HarnessSystem> Default for Activation<S> {
         Activation {
             env: SandboxState::default(),
             events: EventOutbox::default(),
-            subscribers: BTreeMap::new(),
+            subscribers: Subscribers::default(),
             cancels_launched: BTreeSet::new(),
         }
     }
@@ -911,10 +880,10 @@ impl<S: HarnessSystem> Agent<S> {
                          the acquisition gate is still inside the launch (§5.6)"
                     );
                     assert!(
-                        matches!(act.env.slot, SandboxSlot::Open(_)),
+                        act.env.slot.get().is_some(),
                         "tool call {call} is desired with no sandbox bound ({:?}); \
                          the environment gate is still inside the launch (§5.3, §5.4)",
-                        act.env.slot
+                        act.env.slot.state()
                     );
                 }
                 // A delegation runs in the loop and a synthesized failure runs
@@ -1077,12 +1046,8 @@ impl<S: HarnessSystem> Agent<S> {
         // Batched rather than settled one by one, because the reset must not
         // land between two of them and start an open the rest would then wait
         // on.
-        if matches!(act.env.slot, SandboxSlot::Failed(_)) {
-            let SandboxSlot::Failed(error) =
-                std::mem::replace(&mut act.env.slot, SandboxSlot::Closed)
-            else {
-                unreachable!("guarded by matches! above")
-            };
+        if let Some(error) = act.env.slot.failure().map(str::to_owned) {
+            act.env.slot.clear_failure();
             let events: Vec<Record> = desired
                 .iter()
                 .filter_map(|p| match &p.effect {
@@ -1141,18 +1106,18 @@ impl<S: HarnessSystem> Agent<S> {
         let sandboxed = desired
             .iter()
             .any(|p| matches!(p.effect, Effect::Tool { .. }));
-        if sandboxed && !matches!(act.env.slot, SandboxSlot::Open(_)) {
-            if matches!(act.env.slot, SandboxSlot::Closed) {
+        if sandboxed && act.env.slot.get().is_none() {
+            // `begin_open` is the claim: true only from `Closed`, so exactly one
+            // open is ever in flight and a round that finds one already going
+            // just waits for it.
+            if act.env.slot.begin_open() {
                 match ctx.ws().dir_path() {
-                    Ok(workspace) => {
-                        act.env.slot = SandboxSlot::Opening;
-                        self.launch_open(ctx, kind.profile.clone(), workspace);
-                    }
+                    Ok(workspace) => self.launch_open(ctx, kind.profile.clone(), workspace),
                     // No workspace to run over: the next round's failure pass
                     // turns this into a `ToolError::Sandbox` outcome for every
                     // call that needed it, so the tick has to come back.
                     Err(e) => {
-                        act.env.slot = SandboxSlot::Failed(format!("workspace: {e}"));
+                        act.env.slot.failed(format!("workspace: {e}"));
                         self.retick(ctx);
                     }
                 }
@@ -1205,7 +1170,7 @@ impl<S: HarnessSystem> Agent<S> {
     }
 
     /// Open the sandbox off the command path (§5.3): the task fills the
-    /// [`SandboxSlot`] under the mutex and re-enters the cycle with a [`Tick`];
+    /// [`Binding`] under the mutex and re-enters the cycle with a [`Tick`];
     /// success emits `SandboxBound` (A8).
     fn launch_open(
         &self,
@@ -1225,12 +1190,12 @@ impl<S: HarnessSystem> Agent<S> {
                 let mut a = act.lock().expect("agent activation mutex poisoned");
                 match result {
                     Ok(sandbox) => {
-                        a.env.slot = SandboxSlot::Open(sandbox);
+                        a.env.slot.opened(sandbox);
                         a.env.bound = true;
                         true
                     }
                     Err(error) => {
-                        a.env.slot = SandboxSlot::Failed(error.to_string());
+                        a.env.slot.failed(error.to_string());
                         false
                     }
                 }
@@ -1314,18 +1279,17 @@ impl<S: HarnessSystem> Agent<S> {
         state: &SessionState,
         ctx: &EntityCtx<Agent<S>>,
     ) {
-        let mut finished = Vec::new();
-        act.subscribers
-            .retain(|turn, subs| match state.turns.get(turn) {
-                Some(facts) if facts.outcome.is_some() => {
-                    let outcome = facts.outcome.clone().expect("checked some");
-                    finished.push((turn.clone(), std::mem::take(subs), outcome));
-                    false
-                }
-                _ => true,
-            });
-        for (turn, subs, outcome) in finished {
-            for sub in subs {
+        // Which registered turns finished is a question only the fold answers
+        // (workflow §7.1 item 4), so the candidates come out of the component
+        // and the outcomes come out of `state`. Collected first, because `take`
+        // needs a mutable borrow and reading the keys holds a shared one.
+        let finished: Vec<(TurnId, RunOutcome)> = act
+            .subscribers
+            .keys()
+            .filter_map(|turn| Some((turn.clone(), state.turns.get(turn)?.outcome.clone()?)))
+            .collect();
+        for (turn, outcome) in finished {
+            for sub in act.subscribers.take(&turn) {
                 self.notify(ctx, sub, &turn, outcome.clone());
             }
         }
@@ -1467,10 +1431,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// unpaired bind is always announced (A8), so a `SandboxReleased` matches
     /// every `SandboxBound` exactly once.
     fn take_sandbox(act: &mut Activation<S>) -> (Option<Arc<dyn Sandbox>>, bool) {
-        let release = match std::mem::replace(&mut act.env.slot, SandboxSlot::Closed) {
-            SandboxSlot::Open(sandbox) => Some(sandbox),
-            _ => None,
-        };
+        let release = act.env.slot.take();
         let announce = act.env.bound;
         act.env.bound = false;
         (release, announce)
@@ -1567,7 +1528,7 @@ impl<S: HarnessSystem> Entity for Agent<S> {
         if !state.queue.is_empty() || !self.engine.quiescent() {
             return false;
         }
-        !matches!(self.lock().env.slot, SandboxSlot::Opening)
+        !self.lock().env.slot.is_opening()
     }
 }
 
@@ -1642,7 +1603,7 @@ impl<S: HarnessSystem> Workflow for Agent<S> {
         cx: Perform<S>,
     ) -> impl Future<Output = Result<StepOutcome, EffectError>> + Send + 'static {
         let model = self.seams.model.clone();
-        let sandbox = self.lock().env.slot.sandbox();
+        let sandbox = self.lock().env.slot.get().cloned();
         let shared = Arc::clone(&self.shared);
         let session = SessionId::new(cx.name().key());
         let system = cx.system().clone();
