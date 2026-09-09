@@ -24,7 +24,7 @@
 //! difference between a seed that observes the property and one that observes
 //! nothing.
 //!
-//! Generic over the hosting system, like [`entity::AlarmIndex`], so `steps.rs`
+//! Generic over the hosting system, like [`entity::cluster::AlarmIndex`], so `steps.rs`
 //! drives it on the `Local` tier and `steps_swarm.rs` drives the same entity on
 //! the clustered one.
 
@@ -38,16 +38,16 @@ use std::time::Duration;
 
 use actor_core::Manifest;
 use actor_core::Message;
-use entity::Alarm;
 use entity::Entity;
 use entity::EntityCtx;
 use entity::EntityHandler;
 use entity::EntitySystem;
-use entity::LaunchGuard;
-use entity::StepDone;
-use entity::StepId;
-use entity::Steps;
-use entity::complete_step;
+use entity::facet::Alarm;
+use entity::facet::LaunchGuard;
+use entity::facet::StepDone;
+use entity::facet::StepId;
+use entity::facet::Steps;
+use entity::facet::complete_step;
 use serde::Deserialize;
 use serde::Serialize;
 

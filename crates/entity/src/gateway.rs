@@ -11,7 +11,7 @@
 //!
 //! The gateway is also the **router** (§5.4), but **single-shot**: resolving a
 //! name is two levels; name→shard by the committed key-range partition (the
-//! shard map, §5.1; the founding [`shard_for`](crate::shard_for) while it
+//! shard map, §5.1; the founding [`shard_for`](crate::system::shard_for) while it
 //! bootstraps), shard→leader from the system (`leads_shard`/`shard_leader`). When
 //! this node leads the shard it activates the host locally and returns the handle;
 //! otherwise it returns `NotLeader(hint)` *immediately* (§5.4 step 4). The bounded

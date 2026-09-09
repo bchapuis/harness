@@ -44,15 +44,15 @@ use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_cluster_swarm_coverage;
 use actor_simulation::slow_seeds;
-use entity::Disk;
-use entity::DiskCaptureStats;
-use entity::DiskError;
 use entity::Entity;
 use entity::EntityConfig;
 use entity::EntityCtx;
 use entity::EntityExt;
 use entity::EntityHandler;
 use entity::NoEvent;
+use entity::facet::Disk;
+use entity::facet::DiskCaptureStats;
+use entity::facet::DiskError;
 use entity::testing::ActivationSingletonPerNode;
 use entity::testing::CommitMonotonic;
 

@@ -23,17 +23,17 @@ use actor_serialization::Codec;
 use actor_serialization::JsonCodec;
 use std::collections::BTreeSet;
 
-use entity::BlobId;
-use entity::EntityBlobStore;
 use entity::EntityName;
-use entity::EntityStore;
-use entity::FileEntityStore;
-use entity::MemoryEntityStore;
-use entity::ReadOutcome;
 use entity::Seq;
-use entity::StoreAck;
-use entity::Term;
-use entity::WriteKind;
+use entity::facet::BlobId;
+use entity::store::EntityBlobStore;
+use entity::store::EntityStore;
+use entity::store::FileEntityStore;
+use entity::store::MemoryEntityStore;
+use entity::store::ReadOutcome;
+use entity::store::StoreAck;
+use entity::store::Term;
+use entity::store::WriteKind;
 
 /// Shards, so the per-shard fence and append bound are exercised as *shared* state
 /// across entities and as *isolated* state across shards.
@@ -530,7 +530,7 @@ fn concurrent_puts_of_one_blob_neither_fail_nor_poison_the_store() {
             scope.spawn(|| {
                 assert_eq!(
                     store.put_blob(0, &g, id, bytes.clone()),
-                    entity::BlobAck::Stored,
+                    entity::store::BlobAck::Stored,
                     "a concurrent put of already-agreed content was refused"
                 );
             });
@@ -546,6 +546,6 @@ fn concurrent_puts_of_one_blob_neither_fail_nor_poison_the_store() {
     // The store still takes writes: what poisoning would have taken away.
     assert_eq!(
         store.put_blob(0, &g, BlobId::of(b"after"), b"after".to_vec()),
-        entity::BlobAck::Stored,
+        entity::store::BlobAck::Stored,
     );
 }

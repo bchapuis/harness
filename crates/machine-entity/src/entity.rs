@@ -45,15 +45,15 @@ use actor_core::Instant;
 use actor_core::Manifest;
 use actor_core::Message;
 use actor_core::TerminationReason;
-use entity::Alarm;
-use entity::BlobId;
-use entity::Disk;
 use entity::Entity;
 use entity::EntityCtx;
 use entity::EntityHandler;
 use entity::EntityRegistry;
 use entity::EntitySystem;
-use entity::Ws;
+use entity::facet::Alarm;
+use entity::facet::BlobId;
+use entity::facet::Disk;
+use entity::facet::Ws;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -346,7 +346,11 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> Machine<S, P> {
 
     /// Record a committed capture (advance the capture clock) and map its
     /// stats to the journal event: `None` for a clean image (§7.5).
-    fn capture_event(&self, stats: entity::DiskCaptureStats, now: Instant) -> Option<MachineEvent> {
+    fn capture_event(
+        &self,
+        stats: entity::facet::DiskCaptureStats,
+        now: Instant,
+    ) -> Option<MachineEvent> {
         self.lock().last_capture = Some(now);
         if stats.blocks == 0 {
             None
@@ -365,7 +369,7 @@ impl<S: EntitySystem, P: MachineRuntimeProvider> Machine<S, P> {
     /// can still answer: before pause or kill (machine §4).
     ///
     /// Degrades gracefully (machine §5.1): a failed pull, or a
-    /// [`entity::WsError::TooLarge`], skips ws staging this cadence;
+    /// [`entity::facet::WsError::TooLarge`], skips ws staging this cadence;
     /// journaled as [`MachineEvent::WsCaptureSkipped`], and the disk capture
     /// proceeds; the ws delta waits for the next quiescent point.
     ///

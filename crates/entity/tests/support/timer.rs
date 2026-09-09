@@ -7,7 +7,7 @@
 //! alarm's effect actually committed, not how many times the host invoked the
 //! handler, which under faults is a different and much larger number (§7.16).
 //!
-//! Generic over the hosting system, like [`entity::AlarmIndex`] itself, so the
+//! Generic over the hosting system, like [`entity::cluster::AlarmIndex`] itself, so the
 //! same entity runs on the `Local` tier in `alarm_index.rs` and on the clustered
 //! `Quorum` tier in `alarm_cluster.rs` and `alarm_loss.rs`. Before it moved here
 //! the first two carried byte-identical copies differing only in `type System`.
@@ -17,11 +17,11 @@ use std::time::Duration;
 
 use actor_core::Manifest;
 use actor_core::Message;
-use entity::Alarm;
 use entity::Entity;
 use entity::EntityCtx;
 use entity::EntityHandler;
 use entity::EntitySystem;
+use entity::facet::Alarm;
 use serde::Deserialize;
 use serde::Serialize;
 

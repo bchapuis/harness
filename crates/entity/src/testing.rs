@@ -134,7 +134,7 @@ impl Invariant for ActivationSingletonPerNode {
     }
 }
 
-/// An [`EntityStore`](crate::EntityStore) with a fixed answer: every write returns
+/// An [`EntityStore`](crate::store::EntityStore) with a fixed answer: every write returns
 /// `refusal`, every read is empty, every enumeration is empty.
 ///
 /// The deterministic stand-in for a store that never acknowledges (an index whose
@@ -142,12 +142,12 @@ impl Invariant for ActivationSingletonPerNode {
 /// would need a fault injector to reach the same state. `StaticEntityStore::fenced()`
 /// is the common case: writes refused at an unreachably high term.
 pub struct StaticEntityStore {
-    refusal: crate::StoreAck,
+    refusal: crate::store::StoreAck,
 }
 
 impl StaticEntityStore {
     /// A store whose every write is refused with `refusal`.
-    pub fn new(refusal: crate::StoreAck) -> StaticEntityStore {
+    pub fn new(refusal: crate::store::StoreAck) -> StaticEntityStore {
         StaticEntityStore { refusal }
     }
 
@@ -155,64 +155,77 @@ impl StaticEntityStore {
     /// commit while reads still succeed: activation works and the failure surfaces
     /// where it does in production, at the commit.
     pub fn fenced() -> StaticEntityStore {
-        StaticEntityStore::new(crate::StoreAck::Fenced(crate::Term::new(u64::MAX)))
+        StaticEntityStore::new(crate::store::StoreAck::Fenced(crate::journal::Term::new(
+            u64::MAX,
+        )))
     }
 
     /// A factory handing this store to every node, for
     /// [`EntityConfig::entity_store`](crate::EntityConfig).
-    pub fn factory(refusal: crate::StoreAck) -> crate::EntityStoreFactory {
+    pub fn factory(refusal: crate::store::StoreAck) -> crate::store::EntityStoreFactory {
         std::sync::Arc::new(move |_, _| {
             std::sync::Arc::new(StaticEntityStore::new(refusal.clone()))
-                as std::sync::Arc<dyn crate::EntityStore>
+                as std::sync::Arc<dyn crate::store::EntityStore>
         })
     }
 }
 
-impl crate::EntityBlobStore for StaticEntityStore {
+impl crate::store::EntityBlobStore for StaticEntityStore {
     fn put_blob(
         &self,
         _shard: u32,
         _entity: &EntityName,
-        _id: crate::BlobId,
+        _id: crate::blobs::BlobId,
         _bytes: Vec<u8>,
-    ) -> crate::BlobAck {
-        crate::BlobAck::Stored
+    ) -> crate::store::BlobAck {
+        crate::store::BlobAck::Stored
     }
 
-    fn get_blob(&self, _shard: u32, _entity: &EntityName, _id: crate::BlobId) -> Option<Vec<u8>> {
+    fn get_blob(
+        &self,
+        _shard: u32,
+        _entity: &EntityName,
+        _id: crate::blobs::BlobId,
+    ) -> Option<Vec<u8>> {
         None
     }
 
-    fn has_blob(&self, _shard: u32, _entity: &EntityName, _id: crate::BlobId) -> bool {
+    fn has_blob(&self, _shard: u32, _entity: &EntityName, _id: crate::blobs::BlobId) -> bool {
         false
     }
 
-    fn delete_blob(&self, _shard: u32, _entity: &EntityName, _id: crate::BlobId) {}
+    fn delete_blob(&self, _shard: u32, _entity: &EntityName, _id: crate::blobs::BlobId) {}
 
     fn delete_blobs(&self, _shard: u32, _entity: &EntityName) {}
 
-    fn retain_blobs(&self, _shard: u32, _entity: &EntityName, _retain: &BTreeSet<crate::BlobId>) {}
+    fn retain_blobs(
+        &self,
+        _shard: u32,
+        _entity: &EntityName,
+        _retain: &BTreeSet<crate::blobs::BlobId>,
+    ) {
+    }
 
-    fn blob_ids(&self, _shard: u32, _entity: &EntityName) -> Vec<crate::BlobId> {
+    fn blob_ids(&self, _shard: u32, _entity: &EntityName) -> Vec<crate::blobs::BlobId> {
         Vec::new()
     }
 }
 
-impl crate::EntityStore for StaticEntityStore {
+impl crate::store::EntityStore for StaticEntityStore {
     fn store_record(
         &self,
         _shard: u32,
         _entity: &EntityName,
         _after: crate::Seq,
-        _term: crate::Term,
+        _term: crate::journal::Term,
         _records: Vec<Vec<u8>>,
-        _kind: crate::WriteKind,
-    ) -> crate::StoreAck {
+        _kind: crate::store::WriteKind,
+    ) -> crate::store::StoreAck {
         self.refusal.clone()
     }
 
-    fn read(&self, _shard: u32, _entity: &EntityName) -> crate::ReadReply {
-        crate::ReadReply::default()
+    fn read(&self, _shard: u32, _entity: &EntityName) -> crate::store::ReadReply {
+        crate::store::ReadReply::default()
     }
 
     fn read_from(
@@ -221,14 +234,19 @@ impl crate::EntityStore for StaticEntityStore {
         _entity: &EntityName,
         _from: crate::Seq,
         _limit: usize,
-    ) -> crate::RecordPage {
-        crate::RecordPage::default()
+    ) -> crate::journal::RecordPage {
+        crate::journal::RecordPage::default()
     }
 
-    fn prepare(&self, _shard: u32, _entity: &EntityName, _term: crate::Term) -> crate::ReadOutcome {
+    fn prepare(
+        &self,
+        _shard: u32,
+        _entity: &EntityName,
+        _term: crate::journal::Term,
+    ) -> crate::store::ReadOutcome {
         // Prepared, not fenced: a read must succeed so activation gets far enough
         // for the refusal to land at the commit.
-        crate::ReadOutcome::Prepared(crate::ReadReply::default())
+        crate::store::ReadOutcome::Prepared(crate::store::ReadReply::default())
     }
 
     fn store_snapshot(
@@ -236,14 +254,21 @@ impl crate::EntityStore for StaticEntityStore {
         _shard: u32,
         _entity: &EntityName,
         _at: crate::Seq,
-        _term: crate::Term,
+        _term: crate::journal::Term,
         _state: Vec<u8>,
-        _kind: crate::WriteKind,
-    ) -> crate::StoreAck {
+        _kind: crate::store::WriteKind,
+    ) -> crate::store::StoreAck {
         self.refusal.clone()
     }
 
-    fn truncate(&self, _shard: u32, _entity: &EntityName, _after: crate::Seq, _term: crate::Term) {}
+    fn truncate(
+        &self,
+        _shard: u32,
+        _entity: &EntityName,
+        _after: crate::Seq,
+        _term: crate::journal::Term,
+    ) {
+    }
 
     fn entities(&self, _shard: u32) -> Vec<EntityName> {
         Vec::new()
@@ -264,7 +289,7 @@ impl crate::EntityStore for StaticEntityStore {
     }
 }
 
-/// An [`EntityStore`](crate::EntityStore) wrapper that reports its snapshot at a seq
+/// An [`EntityStore`](crate::store::EntityStore) wrapper that reports its snapshot at a seq
 /// `ahead` slots **beyond** the one it was saved at, leaving records, head, and
 /// snapshot bytes untouched.
 ///
@@ -281,51 +306,56 @@ impl crate::EntityStore for StaticEntityStore {
 /// journal is the authority (**E3**), and seeding from a snapshot the head does not
 /// cover would fold a state no committed prefix supports.
 pub struct SnapshotAheadOfHeadStore {
-    inner: std::sync::Arc<dyn crate::EntityStore>,
+    inner: std::sync::Arc<dyn crate::store::EntityStore>,
     ahead: u64,
 }
 
 impl SnapshotAheadOfHeadStore {
     /// Wrap `inner`, reporting every snapshot `ahead` slots past its real seq.
     pub fn new(
-        inner: std::sync::Arc<dyn crate::EntityStore>,
+        inner: std::sync::Arc<dyn crate::store::EntityStore>,
         ahead: u64,
     ) -> SnapshotAheadOfHeadStore {
         SnapshotAheadOfHeadStore { inner, ahead }
     }
 
-    /// A factory giving every store its own wrapped [`MemoryEntityStore`](crate::MemoryEntityStore),
+    /// A factory giving every store its own wrapped [`MemoryEntityStore`](crate::store::MemoryEntityStore),
     /// for [`EntityConfig::entity_store`](crate::EntityConfig).
-    pub fn factory(ahead: u64) -> crate::EntityStoreFactory {
+    pub fn factory(ahead: u64) -> crate::store::EntityStoreFactory {
         std::sync::Arc::new(move |_, _| {
             std::sync::Arc::new(SnapshotAheadOfHeadStore::new(
-                std::sync::Arc::new(crate::MemoryEntityStore::new()),
+                std::sync::Arc::new(crate::store::MemoryEntityStore::new()),
                 ahead,
-            )) as std::sync::Arc<dyn crate::EntityStore>
+            )) as std::sync::Arc<dyn crate::store::EntityStore>
         })
     }
 }
 
-impl crate::EntityBlobStore for SnapshotAheadOfHeadStore {
+impl crate::store::EntityBlobStore for SnapshotAheadOfHeadStore {
     fn put_blob(
         &self,
         shard: u32,
         entity: &EntityName,
-        id: crate::BlobId,
+        id: crate::blobs::BlobId,
         bytes: Vec<u8>,
-    ) -> crate::BlobAck {
+    ) -> crate::store::BlobAck {
         self.inner.put_blob(shard, entity, id, bytes)
     }
 
-    fn get_blob(&self, shard: u32, entity: &EntityName, id: crate::BlobId) -> Option<Vec<u8>> {
+    fn get_blob(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        id: crate::blobs::BlobId,
+    ) -> Option<Vec<u8>> {
         self.inner.get_blob(shard, entity, id)
     }
 
-    fn has_blob(&self, shard: u32, entity: &EntityName, id: crate::BlobId) -> bool {
+    fn has_blob(&self, shard: u32, entity: &EntityName, id: crate::blobs::BlobId) -> bool {
         self.inner.has_blob(shard, entity, id)
     }
 
-    fn delete_blob(&self, shard: u32, entity: &EntityName, id: crate::BlobId) {
+    fn delete_blob(&self, shard: u32, entity: &EntityName, id: crate::blobs::BlobId) {
         self.inner.delete_blob(shard, entity, id)
     }
 
@@ -333,25 +363,30 @@ impl crate::EntityBlobStore for SnapshotAheadOfHeadStore {
         self.inner.delete_blobs(shard, entity)
     }
 
-    fn retain_blobs(&self, shard: u32, entity: &EntityName, retain: &BTreeSet<crate::BlobId>) {
+    fn retain_blobs(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        retain: &BTreeSet<crate::blobs::BlobId>,
+    ) {
         self.inner.retain_blobs(shard, entity, retain)
     }
 
-    fn blob_ids(&self, shard: u32, entity: &EntityName) -> Vec<crate::BlobId> {
+    fn blob_ids(&self, shard: u32, entity: &EntityName) -> Vec<crate::blobs::BlobId> {
         self.inner.blob_ids(shard, entity)
     }
 }
 
-impl crate::EntityStore for SnapshotAheadOfHeadStore {
+impl crate::store::EntityStore for SnapshotAheadOfHeadStore {
     fn store_record(
         &self,
         shard: u32,
         entity: &EntityName,
         after: crate::Seq,
-        term: crate::Term,
+        term: crate::journal::Term,
         records: Vec<Vec<u8>>,
-        kind: crate::WriteKind,
-    ) -> crate::StoreAck {
+        kind: crate::store::WriteKind,
+    ) -> crate::store::StoreAck {
         self.inner
             .store_record(shard, entity, after, term, records, kind)
     }
@@ -359,7 +394,7 @@ impl crate::EntityStore for SnapshotAheadOfHeadStore {
     /// Forwarded whole. `read` feeds recovery and the `ReadReply::head` computation,
     /// which the snapshot's seq participates in, overstating it here would move the
     /// head too, and the disagreement being modelled would vanish.
-    fn read(&self, shard: u32, entity: &EntityName) -> crate::ReadReply {
+    fn read(&self, shard: u32, entity: &EntityName) -> crate::store::ReadReply {
         self.inner.read(shard, entity)
     }
 
@@ -383,11 +418,16 @@ impl crate::EntityStore for SnapshotAheadOfHeadStore {
         entity: &EntityName,
         from: crate::Seq,
         limit: usize,
-    ) -> crate::RecordPage {
+    ) -> crate::journal::RecordPage {
         self.inner.read_from(shard, entity, from, limit)
     }
 
-    fn prepare(&self, shard: u32, entity: &EntityName, term: crate::Term) -> crate::ReadOutcome {
+    fn prepare(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        term: crate::journal::Term,
+    ) -> crate::store::ReadOutcome {
         self.inner.prepare(shard, entity, term)
     }
 
@@ -396,15 +436,21 @@ impl crate::EntityStore for SnapshotAheadOfHeadStore {
         shard: u32,
         entity: &EntityName,
         at: crate::Seq,
-        term: crate::Term,
+        term: crate::journal::Term,
         state: Vec<u8>,
-        kind: crate::WriteKind,
-    ) -> crate::StoreAck {
+        kind: crate::store::WriteKind,
+    ) -> crate::store::StoreAck {
         self.inner
             .store_snapshot(shard, entity, at, term, state, kind)
     }
 
-    fn truncate(&self, shard: u32, entity: &EntityName, after: crate::Seq, term: crate::Term) {
+    fn truncate(
+        &self,
+        shard: u32,
+        entity: &EntityName,
+        after: crate::Seq,
+        term: crate::journal::Term,
+    ) {
         self.inner.truncate(shard, entity, after, term)
     }
 

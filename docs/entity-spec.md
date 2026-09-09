@@ -1123,9 +1123,28 @@ entity/                 # the entity runtime, built on actor-core + actor-cluste
   facet_blobs.rs         # blob machinery shared by the checkpointing facets (§7.12): the F3
                          #   root-keeping discipline and the chunked blob-area transfers
   testing.rs             # shared simulation invariants over entity events (§14)
+  cluster.rs             # the sharding and replication namespace: a re-export surface over
+                         #   system.rs, shardmap.rs, replica_store.rs, replicator.rs, node.rs
+                         #   and alarm_index.rs, defining nothing of its own
 ```
 
 (`entity_ref.rs` rather than `ref.rs`, since `ref` is a reserved word.)
+
+**The public surface is a deep root and three deep modules.** The root carries the
+authoring vocabulary and nothing else: `Entity`, `EntityCtx`, `EntityHandler`,
+`EntityName`, `EntityRegistry`, `EntityRef`, `Entities`, `EntityExt`, `EntityError`,
+`EntityEvent`, `EntityConfig`, `EntitySystem`, `NoEvent`, `EventHistory`,
+`EventsFuture`, `accepted_manifests`, and `Seq`. Everything else is reached through
+`entity::facet` (the facet family of §7.11 to §7.17 and its seam), `entity::store`
+(the durability substrate a deployment wires: the `EntityStore` and `EntityJournal`
+seams, the stock implementations, `BlockingIo`, the record subscriptions, and the
+commit metrics), or `entity::cluster` (§7.1, §7.2, §7.6, §7.7 above).
+
+The root is not a fourth namespace, and deliberately so: authoring an entity is
+written in the names above, so putting them behind a module every consumer would
+open in full would add a layer that relays and says nothing. The split is drawn
+where the crate's own dependencies are already drawn: `entity::store` and
+`entity::cluster` name the entity programming model only through `EntityName`.
 
 `entity` depends on `actor-core` (the model and seams), `actor-cluster` (the
 clustered `ActorSystem`, the leader-based control plane, and the Raft

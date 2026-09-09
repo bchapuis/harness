@@ -143,7 +143,7 @@ impl<G: Entity> Actor for RecordSink<G> {
 
     /// Accept pushed batches, and the close, over the network: the host that
     /// leads the entity's shard may be another node (§5.2), so these are the
-    /// deserialization allowlist entries for `RecordBatch` and [`CloseSink`]
+    /// deserialization allowlist entries for `RecordBatch` and `CloseSink`
     /// (actor §5, §15).
     fn register(registry: &mut HandlerRegistry<Self>) {
         registry.accept::<RecordBatch>();

@@ -23,12 +23,12 @@ use divan::Bencher;
 use divan::black_box;
 use divan::counter::ItemsCount;
 use entity::EntityName;
-use entity::EntityStore;
-use entity::FileEntityStore;
-use entity::MemoryEntityStore;
 use entity::Seq;
-use entity::Term;
-use entity::WriteKind;
+use entity::store::EntityStore;
+use entity::store::FileEntityStore;
+use entity::store::MemoryEntityStore;
+use entity::store::Term;
+use entity::store::WriteKind;
 
 #[global_allocator]
 static ALLOC: divan::AllocProfiler = divan::AllocProfiler::system();

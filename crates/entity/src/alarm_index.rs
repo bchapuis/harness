@@ -1,5 +1,5 @@
 //! The per-shard alarm index (spec §7.16): a durable directory of the pending
-//! [`Alarm`](crate::Alarm) deadlines of one entity type's entities, so a node that
+//! [`Alarm`](crate::alarm::Alarm) deadlines of one entity type's entities, so a node that
 //! acquires a shard's leadership can re-activate the entities that owe a callerless
 //! wake; **without** scanning every entity or holding them all resident.
 //!
@@ -158,7 +158,7 @@ impl<S: EntitySystem> Entity for AlarmIndex<S> {
 /// Sync an entity's alarm state into the index at a journal head (spec §7.16). `due` is
 /// `Some(ns)` while an alarm is pending, `None` once it clears. Applied only if
 /// `head` is at least the entry's last head, so an out-of-order pair from one
-/// activation resolves to the higher head (see [`Slot`]). Idempotent: an
+/// activation resolves to the higher head (see `Slot`). Idempotent: an
 /// unchanged `(due, head)` commits nothing (§7.5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Sync {

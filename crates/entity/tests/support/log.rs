@@ -24,7 +24,7 @@ use entity::EntityHandler;
 use entity::EntityRef;
 use entity::EntitySystem;
 use entity::Seq;
-use entity::Subscription;
+use entity::store::Subscription;
 use serde::Deserialize;
 use serde::Serialize;
 

@@ -187,10 +187,10 @@ pub struct Host<G: Entity> {
     config: EntityConfig,
     /// The operator-facing sink (§13), lifted out of `config` because it is read on
     /// every commit.
-    metrics: Arc<dyn crate::EntityMetrics>,
+    metrics: Arc<dyn crate::metrics::EntityMetrics>,
     /// This node's blocking-I/O pool (§7.4), handed to each [`EntityCtx`] so a physical
     /// facet's scan runs off the executor driving Raft.
-    blocking_io: Arc<dyn crate::BlockingIo>,
+    blocking_io: Arc<dyn crate::blocking::BlockingIo>,
     gateway: ActorRef<Gateway<G>>,
     /// Virtual time of the last *command* (not a tick), for idle eviction (§10).
     last_active: actor_core::Instant,
@@ -803,7 +803,7 @@ impl<G: Entity> Host<G> {
         }));
     }
 
-    /// Arm the durable-alarm timer (spec §7.16) from the folded [`Alarm`](crate::Alarm)
+    /// Arm the durable-alarm timer (spec §7.16) from the folded [`Alarm`](crate::alarm::Alarm)
     /// form. Every call supersedes any prior timer: it bumps [`alarm_epoch`], so a
     /// still-sleeping earlier timer's [`AlarmDue`] is ignored; a cancellation
     /// without a channel, and the sole disarm when the form carries no deadline.

@@ -180,7 +180,7 @@ mod tests {
     /// degrades silently. This is the one crate that sees all three.
     #[test]
     fn the_sync_caps_agree_across_the_crates() {
-        assert_eq!(MAX_TAR as u64, entity::MAX_TREE_BYTES);
+        assert_eq!(MAX_TAR as u64, entity::facet::MAX_TREE_BYTES);
         assert_eq!(MAX_TAR, machine_proto::MAX_TAR);
     }
 

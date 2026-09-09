@@ -33,7 +33,6 @@ use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
 use actor_simulation::raft_config;
 use actor_simulation::swim_config;
-use entity::BlobId;
 use entity::Entities;
 use entity::Entity;
 use entity::EntityConfig;
@@ -42,7 +41,8 @@ use entity::EntityEvent;
 use entity::EntityExt;
 use entity::EntityHandler;
 use entity::EntitySystem;
-use entity::FileEntityStore;
+use entity::facet::BlobId;
+use entity::store::FileEntityStore;
 use serde::Deserialize;
 use serde::Serialize;
 

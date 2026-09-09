@@ -28,18 +28,18 @@ use actor_core::CallError;
 use actor_core::Ctx;
 use actor_core::Handler;
 use actor_core::HandlerRegistry;
+use entity::Entities;
+use entity::EntityError;
+use entity::EntityExt;
+use entity::EntityRef;
+use entity::EntitySystem;
+use entity::EventHistory;
+use entity::Seq;
+use entity::cluster::EntityNode;
+use entity::store::Subscription;
 use futures::channel::oneshot;
 use futures::future::Either;
 use futures::future::select;
-use entity::EventHistory;
-use entity::EntityError;
-use entity::EntityRef;
-use entity::Entities;
-use entity::EntityExt;
-use entity::EntityNode;
-use entity::EntitySystem;
-use entity::Seq;
-use entity::Subscription;
 
 use crate::agent::Agent;
 use crate::agent::AttachOutcome;
@@ -603,7 +603,9 @@ impl<S: HarnessSystem> SessionRef<S> {
     /// truncation would be indistinguishable from the facet slots the
     /// projection legally skips.
     pub async fn tail(&self, from: Seq, limit: u32) -> Result<EventHistory<Record>, EntityError> {
-        self.entity.events(from, limit.min(TAIL_PAGE) as usize).await
+        self.entity
+            .events(from, limit.min(TAIL_PAGE) as usize)
+            .await
     }
 
     /// Follow the session's records live from `from` (entity §7.9). See

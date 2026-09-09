@@ -11,7 +11,7 @@ use actor_core::Message;
 use entity::EntityCtx;
 use entity::EntityHandler;
 use entity::EntitySystem;
-use entity::WsError;
+use entity::facet::WsError;
 
 use super::Machine;
 use super::MachineError;

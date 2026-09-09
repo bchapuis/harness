@@ -157,7 +157,7 @@ pub trait Entity: Sized + Send + 'static {
     /// Same durability barrier as a command (§6): its events and staged alarm
     /// change commit before any effect they imply.
     ///
-    /// [`Alarm`]: crate::Alarm
+    /// [`Alarm`]: crate::alarm::Alarm
     fn on_alarm(
         &self,
         _state: &Self::State,
@@ -297,7 +297,7 @@ pub struct EntityCtx<G: Entity> {
     /// scans off the async executor: a facet that reads and hashes a whole image
     /// inline stalls the worker driving this node's Raft heartbeats, which is a
     /// cluster-wide event produced by one entity's local work.
-    blocking_io: Arc<dyn crate::BlockingIo>,
+    blocking_io: Arc<dyn crate::blocking::BlockingIo>,
 }
 
 impl<G: Entity> EntityCtx<G> {
@@ -311,7 +311,7 @@ impl<G: Entity> EntityCtx<G> {
         committed: crate::host::CommittedCell,
         facets: Arc<FacetCell<G::Facets>>,
         watches: Arc<std::sync::Mutex<Vec<ActorId>>>,
-        blocking_io: Arc<dyn crate::BlockingIo>,
+        blocking_io: Arc<dyn crate::blocking::BlockingIo>,
     ) -> EntityCtx<G> {
         EntityCtx {
             entity_type,
@@ -346,10 +346,10 @@ impl<G: Entity> EntityCtx<G> {
     /// For a **physical facet** whose work is bulk device I/O and hashing rather than
     /// coordination: the disk facet's capture scans and hashes a whole image, which on
     /// the async worker stalls this node's Raft heartbeats for as long as it runs. The
-    /// default is [`InlineIo`](crate::InlineIo), so a deployment that has not opted
+    /// default is [`InlineIo`](crate::blocking::InlineIo), so a deployment that has not opted
     /// into a pool (and the deterministic simulation, which must not) behaves exactly
     /// as it did before the seam existed.
-    pub(crate) fn blocking_io(&self) -> &Arc<dyn crate::BlockingIo> {
+    pub(crate) fn blocking_io(&self) -> &Arc<dyn crate::blocking::BlockingIo> {
         &self.blocking_io
     }
 
@@ -359,10 +359,10 @@ impl<G: Entity> EntityCtx<G> {
 
     /// A handle to this entity's **colocated content-addressed blob area**:
     /// immutable bulk bytes the entity stores by content and references by
-    /// [`BlobId`](crate::BlobId) from its small foldable state. They sit beside,
+    /// [`BlobId`](crate::blobs::BlobId) from its small foldable state. They sit beside,
     /// not in, the journal, on the entity's own shard replicas, and the entity
     /// drives their reclamation from its own live id set
-    /// ([`EntityBlobs::gc`](crate::EntityBlobs::gc)).
+    /// ([`EntityBlobs::gc`](crate::blobs::EntityBlobs::gc)).
     pub fn blobs(&self) -> EntityBlobs {
         // Every sweep through this handle unions the facets' live roots (spec
         // §7.12), so neither the entity nor the host can drop the other's bytes.

@@ -952,11 +952,11 @@ pub trait EntityExt: EntitySystem {
 
     /// Host entities of type `G` **with durable-alarm firing across hibernation and
     /// failover** (spec §7.16). Like [`entities_named`](EntityExt::entities_named), but
-    /// each host registers its pending [`Alarm`](crate::Alarm) deadline with the
+    /// each host registers its pending [`Alarm`](crate::alarm::Alarm) deadline with the
     /// per-shard `index`, and a background driver re-activates due entities on the
     /// shards this node leads. The caller starts **one** shared `AlarmIndex`
     /// entity and passes its handle to every alarm-bearing type; a type without
-    /// the [`Alarm`](crate::Alarm) facet gains nothing from wiring it.
+    /// the [`Alarm`](crate::alarm::Alarm) facet gains nothing from wiring it.
     fn entities_named_with_alarms<G>(
         &self,
         entity_type: &'static str,

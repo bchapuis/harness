@@ -947,7 +947,7 @@ fn quorum_loss_is_contained_to_its_shard_others_keep_serving() {
         std::collections::BTreeMap::new();
     for i in 0..80u64 {
         let key = format!("account/{i}");
-        let idx = entity::shard_for("bank.Account", &key, SHARDS).index;
+        let idx = entity::cluster::shard_for("bank.Account", &key, SHARDS).index;
         if let std::collections::btree_map::Entry::Vacant(slot) = shard_of.entry(idx) {
             let replicas = hosts[0].replicas(&key);
             if let Some(leader) = hosts[0].leader(&key)
@@ -1236,7 +1236,7 @@ fn many_entities_collapse_onto_a_bounded_set_of_shards() {
     let mut replica_sets = std::collections::BTreeSet::new();
     for i in 0..300u64 {
         let key = format!("account/{i}");
-        shard_indices.insert(entity::shard_for("bank.Account", &key, shards).index);
+        shard_indices.insert(entity::cluster::shard_for("bank.Account", &key, shards).index);
         let replicas = hosts[0].replicas(&key);
         assert!(
             !replicas.is_empty(),

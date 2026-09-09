@@ -21,14 +21,14 @@ use actor_core::Message;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
 use entity::Entity;
-use entity::EntityBlobStore;
 use entity::EntityConfig;
 use entity::EntityCtx;
 use entity::EntityExt;
 use entity::EntityHandler;
 use entity::EntityName;
-use entity::EntityStore;
-use entity::MemoryEntityStore;
+use entity::store::EntityBlobStore;
+use entity::store::EntityStore;
+use entity::store::MemoryEntityStore;
 use serde::Deserialize;
 use serde::Serialize;
 

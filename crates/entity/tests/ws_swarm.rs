@@ -58,8 +58,8 @@ use entity::EntityHandler;
 use entity::EntityRegistry;
 use entity::EntitySystem;
 use entity::NoEvent;
-use entity::Ws;
-use entity::WsError;
+use entity::facet::Ws;
+use entity::facet::WsError;
 
 use serde::Deserialize;
 use serde::Serialize;

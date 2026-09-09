@@ -32,8 +32,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use actor_core::BoxFuture;
-use entity::BlobId;
 use entity::EntityName;
+use entity::facet::BlobId;
 use machine_host::Duplex;
 use machine_host::GuestError;
 use machine_host::GuestKey;

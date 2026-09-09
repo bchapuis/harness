@@ -1602,7 +1602,7 @@ fn merge(replies: Vec<crate::store::ReadReply>, our_term: Term) -> Merged {
 /// The clustered `Quorum` journal (spec §7, §7.4): the shard's replicator
 /// handle *is* the [`EntityJournal`], no layer relays between them, because
 /// the composition (election + replicator) already happened in
-/// [`QuorumReplicator::for_shard`]. An entity write is an independent per-entity
+/// `QuorumReplicator::for_shard`. An entity write is an independent per-entity
 /// quorum append (§7.2), not an entry in a shared shard log, so a write-heavy
 /// entity never queues behind its shard-mates. On `Arc` because a journal
 /// clones per activation, sharing one replicator.

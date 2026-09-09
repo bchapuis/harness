@@ -64,20 +64,20 @@ use divan::Bencher;
 use divan::black_box;
 use divan::counter::BytesCount;
 use divan::counter::ItemsCount;
-use entity::BlobId;
-use entity::Disk;
-use entity::DiskCaptureStats;
-use entity::DiskError;
 use entity::Entity;
-use entity::EntityBlobStore;
 use entity::EntityConfig;
 use entity::EntityCtx;
 use entity::EntityExt;
 use entity::EntityHandler;
 use entity::EntityName;
-use entity::FileEntityStore;
-use entity::MemoryEntityStore;
 use entity::NoEvent;
+use entity::facet::BlobId;
+use entity::facet::Disk;
+use entity::facet::DiskCaptureStats;
+use entity::facet::DiskError;
+use entity::store::EntityBlobStore;
+use entity::store::FileEntityStore;
+use entity::store::MemoryEntityStore;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -366,7 +366,10 @@ fn sim_system(sim: &Simulation, recorder: &Recorder) -> SimSystem {
 /// many iterations divan chose, which is the one thing a benchmark must not let
 /// vary. What is being measured is the capture path, not the hibernation policy;
 /// what a checkpoint costs is `benches/store.rs`'s subject.
-fn config(scratch: &std::path::Path, store: Option<entity::EntityStoreFactory>) -> EntityConfig {
+fn config(
+    scratch: &std::path::Path,
+    store: Option<entity::store::EntityStoreFactory>,
+) -> EntityConfig {
     EntityConfig {
         idle_after: Duration::from_secs(3600),
         snapshot_every: 0,
@@ -430,7 +433,7 @@ fn refresh_source(path: &std::path::Path, mib: usize, stamp: u8) {
 /// leaves a whole image behind in the store. Enough samples and the numbers stop
 /// describing the path and start describing allocator pressure or a filling disk:
 /// the two callers below hold the retained total to a few hundred megabytes.
-fn import(bencher: Bencher, mib: usize, store: Option<entity::EntityStoreFactory>) {
+fn import(bencher: Bencher, mib: usize, store: Option<entity::store::EntityStoreFactory>) {
     let scratch = tempfile::tempdir().expect("scratch dir");
     let src = scratch.path().join("base.img");
     write_source(&src, mib);

@@ -47,7 +47,7 @@ impl LocalEntityJournal {
         LocalEntityJournal::over(
             Arc::new(MemoryEntityStore::new()),
             0,
-            Arc::new(crate::InlineIo),
+            Arc::new(crate::blocking::InlineIo),
         )
     }
 

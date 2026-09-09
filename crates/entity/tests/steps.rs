@@ -1,7 +1,7 @@
 //! Durable-workflow scenarios under deterministic simulation (entity §7.17).
 //!
-//! Exercises the [`Steps`](entity::Steps) step memo + the
-//! [`Alarm`](entity::Alarm)-backed `sleep` through the self-driving
+//! Exercises the [`Steps`](entity::facet::Steps) step memo + the
+//! [`Alarm`](entity::facet::Alarm)-backed `sleep` through the self-driving
 //! [`Pipeline`](support::pipeline::Pipeline) entity: the reference shape a linear
 //! DSL would generate. One seed each, hand-built: `sleep` resumes the workflow with
 //! no caller (the alarm), a `retry` step re-launches after a failed effect, and the
@@ -28,7 +28,7 @@ use actor_simulation::Simulation;
 use entity::EntityConfig;
 use entity::EntityEvent;
 use entity::EntityExt;
-use entity::LaunchGuard;
+use entity::facet::LaunchGuard;
 
 use support::pipeline::Effects;
 use support::pipeline::PipelineConfig;

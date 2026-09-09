@@ -13,15 +13,15 @@ use actor_core::Message;
 use actor_simulation::Recorder;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
-use entity::BlobId;
 use entity::Entity;
 use entity::EntityConfig;
 use entity::EntityCtx;
 use entity::EntityEvent;
 use entity::EntityExt;
 use entity::EntityHandler;
-use entity::INLINE_MAX;
-use entity::Kv;
+use entity::facet::BlobId;
+use entity::facet::INLINE_MAX;
+use entity::facet::Kv;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -207,7 +207,7 @@ impl Entity for Project {
     type System = SimSystem;
     type State = PrefsState;
     type Event = PrefsEvent;
-    type Facets = (Kv, entity::Ws);
+    type Facets = (Kv, entity::facet::Ws);
     const ENTITY_TYPE: &'static str = "test.Project";
 
     fn apply(state: &mut PrefsState, event: &PrefsEvent) {
@@ -227,7 +227,7 @@ struct SaveDoc {
     content: Vec<u8>,
 }
 impl Message for SaveDoc {
-    type Reply = Result<u64, entity::WsError>;
+    type Reply = Result<u64, entity::facet::WsError>;
     const MANIFEST: Manifest = Manifest::new("test.SaveDoc");
 }
 impl EntityHandler<SaveDoc> for Project {
@@ -236,7 +236,7 @@ impl EntityHandler<SaveDoc> for Project {
         _state: &PrefsState,
         msg: SaveDoc,
         ctx: &EntityCtx<Self>,
-    ) -> (Vec<PrefsEvent>, Result<u64, entity::WsError>) {
+    ) -> (Vec<PrefsEvent>, Result<u64, entity::facet::WsError>) {
         let dir = match ctx.ws().dir_path() {
             Ok(dir) => dir,
             Err(e) => return (vec![], Err(e)),

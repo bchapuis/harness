@@ -102,7 +102,7 @@ pub(crate) fn name_at_or_above(entity: &crate::entity::EntityName, from: u64) ->
 
 /// A contiguous, inclusive range of the 64-bit name-hash space (spec §7.1): the
 /// keys a shard owns. The founding partition slices the space into `shards` equal
-/// ranges ([`initial_ranges`]); a split divides a range in two and a merge fuses
+/// ranges (`initial_ranges`); a split divides a range in two and a merge fuses
 /// two adjacent ranges (§7.7), the only operations that change the partition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyRange {
@@ -140,7 +140,7 @@ pub(crate) fn initial_ranges(shards: usize) -> Vec<KeyRange> {
 }
 
 /// Map an entity name to its **founding** shard (spec §5.1): the range of the
-/// initial `shards`-way partition ([`initial_ranges`]) containing the name's
+/// initial `shards`-way partition (`initial_ranges`) containing the name's
 /// hash, computed in O(1) as `⌊hash·n/2^64⌋`. Stable across nodes and runs, so
 /// resolution is consistent cluster-wide. After a split or merge (§7.7) the
 /// committed shard map, not this function, is the authority, routing consults
@@ -334,9 +334,9 @@ pub trait EntitySystem: ActorSystem {
         split_target_bytes: u64,
         local: Arc<dyn EntityStore>,
         transport: Arc<dyn ReplicaTransport>,
-        io: Arc<dyn crate::BlockingIo>,
+        io: Arc<dyn crate::blocking::BlockingIo>,
         deadlines: crate::replicator::Deadlines,
-        domains: Option<crate::FailureDomains>,
+        domains: Option<crate::system::FailureDomains>,
     ) -> Arc<dyn ShardMapSource>;
 
     /// The node that currently leads `shard`, where its entities activate (§5.2), or
@@ -359,11 +359,11 @@ impl<C: Clock, E: Entropy, S: Spawner> EntitySystem for LocalSystem<C, E, S> {
         _split_target_bytes: u64,
         local: Arc<dyn EntityStore>,
         _transport: Arc<dyn ReplicaTransport>,
-        io: Arc<dyn crate::BlockingIo>,
+        io: Arc<dyn crate::blocking::BlockingIo>,
         // The `Local` tier has no quorum and no recovery read to bound.
         _deadlines: crate::replicator::Deadlines,
         // One node replicates everything, so there is nothing to spread.
-        _domains: Option<crate::FailureDomains>,
+        _domains: Option<crate::system::FailureDomains>,
     ) -> Arc<dyn ShardMapSource> {
         // `Local` tier: the single node replicates every shard, all keyed in one
         // local store (the peer transport is unused; there are no peers). Split
@@ -395,9 +395,9 @@ where
         split_target_bytes: u64,
         local: Arc<dyn EntityStore>,
         transport: Arc<dyn ReplicaTransport>,
-        io: Arc<dyn crate::BlockingIo>,
+        io: Arc<dyn crate::blocking::BlockingIo>,
         deadlines: crate::replicator::Deadlines,
-        domains: Option<crate::FailureDomains>,
+        domains: Option<crate::system::FailureDomains>,
     ) -> Arc<dyn ShardMapSource> {
         // `Quorum` tier: a per-type Raft group whose committed log is the allocation,
         // so every node agrees on each shard's replica set (§7.6). It creates each

@@ -17,7 +17,7 @@
 //! §7.10 discipline) and the map keeps only its [`BlobId`]; `get` fetches it
 //! back, verified by content (E17). Spilled ids are the facet's root set (F3),
 //! so a deleted or overwritten key's spilled bytes become orphans reclaimed by
-//! the next [`EntityBlobs::gc`](crate::EntityBlobs::gc) sweep, which unions the
+//! the next [`EntityBlobs::gc`](crate::blobs::EntityBlobs::gc) sweep, which unions the
 //! facet roots so a sweep can never drop a *live* spilled value.
 //!
 //! Native rather than sugar over SQL (§7.13): no C dependency, the form lives in

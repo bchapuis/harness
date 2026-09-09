@@ -91,9 +91,9 @@ pub use tool::ToolRegistry;
 
 // Re-exported entity types that appear in the agent runtime's public surface, so a
 // consumer needs no direct entity dependency for ordinary use.
-pub use entity::EventHistory;
-pub use entity::FileEntityStore;
-pub use entity::EntityError;
-pub use entity::EntityStoreFactory;
 pub use entity::EntityConfig;
+pub use entity::EntityError;
+pub use entity::EventHistory;
 pub use entity::Seq;
+pub use entity::store::EntityStoreFactory;
+pub use entity::store::FileEntityStore;

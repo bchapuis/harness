@@ -1,6 +1,6 @@
 //! Where a store's blocking file I/O runs (spec §7.4, §14).
 //!
-//! An [`EntityStore`](crate::EntityStore) call is synchronous by contract: when it
+//! An [`EntityStore`](crate::store::EntityStore) call is synchronous by contract: when it
 //! returns, its outcome is settled, and for the file-backed store that means the
 //! bytes have been written and fsynced. Someone has to block for that. The question
 //! this module answers is *which thread*.
@@ -46,7 +46,7 @@
 //! them across too, but that is a decision to take on evidence, not a gap to close on
 //! symmetry.
 //!
-//! Call it through [`on_store`] rather than [`offload`] directly, so the line above is
+//! Call it through [`on_store`] rather than `offload` directly, so the line above is
 //! one a reader can check by grep instead of by reading every call site. It has not
 //! always been checkable: `put_blob` on the leader's own quorum path was inline until
 //! the disk facet's capture path was measured, which meant a machine create fsynced
@@ -54,7 +54,7 @@
 //!
 //! **Why a seam and not just a thread pool.** The deterministic simulator (§14) runs
 //! the *production* store: `raft_journal.rs` cold-restarts a real
-//! [`FileEntityStore`](crate::FileEntityStore) under virtual time, and a real thread
+//! [`FileEntityStore`](crate::file_store::FileEntityStore) under virtual time, and a real thread
 //! pool there would make a run's outcome depend on OS scheduling, breaking the
 //! seed-reproducibility the whole test strategy rests on (actor §18.1). [`InlineIo`]
 //! is therefore the default and runs the job on the calling thread, reproducing
@@ -77,7 +77,7 @@ pub trait BlockingIo: Send + Sync + 'static {
     /// the caller must distinguish from "not finished yet", since it is waiting on a
     /// signal the job itself sends.
     ///
-    /// Completion is not reported here: [`offload`] carries the job's value back, and
+    /// Completion is not reported here: `offload` carries the job's value back, and
     /// one signal is enough. A second one is a second thing that can disagree with it.
     fn submit(&self, job: Job) -> bool;
 }
@@ -109,7 +109,7 @@ where
     rx.await.expect("an accepted job always sends its value")
 }
 
-/// Run one [`EntityStore`] call on `io` and await its outcome: [`offload`] in the
+/// Run one [`EntityStore`] call on `io` and await its outcome: `offload` in the
 /// shape every replication seam wants, and **the** way a store call reaches the pool.
 ///
 /// The `Arc::clone` is here rather than at each call site because it is not a choice:

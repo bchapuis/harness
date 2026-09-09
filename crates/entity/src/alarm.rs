@@ -8,14 +8,14 @@
 //! entity's own journal under the alarm tag, folded into a single `Option<Instant>`;
 //! that folded form is the **source of truth** for whether and when the entity
 //! fires. A handler arms or cancels it through [`EntityCtx::alarm`](crate::EntityCtx::alarm),
-//! staged into the command's atomic batch exactly like a [`Kv`](crate::Kv) write.
+//! staged into the command's atomic batch exactly like a [`Kv`](crate::kv::Kv) write.
 //!
 //! **Firing is the runtime half.** The host reads the folded due time
-//! ([`FacetSet::alarm_due`](crate::FacetSet::alarm_due)) after each commit and on
+//! ([`FacetSet::alarm_due`](crate::facet::FacetSet::alarm_due)) after each commit and on
 //! activation, and arms an in-activation timer that delivers the callerless
 //! `AlarmDue` command when the deadline passes (host.rs). Firing that survives the
 //! entity's own hibernation and a node failover is layered above, through the
-//! per-shard alarm index ([`AlarmIndex`](crate::AlarmIndex)).
+//! per-shard alarm index ([`AlarmIndex`](crate::alarm_index::AlarmIndex)).
 //!
 //! The due time is stored as raw nanoseconds since the clock epoch
 //! ([`Instant::as_nanos`]): [`actor_core::Instant`] is deliberately not

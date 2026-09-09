@@ -77,8 +77,8 @@ pub struct EntityConfig {
     ///
     /// Supplying it makes the allocator take at most `ceil(R / domains)` replicas per
     /// domain. The mapping MUST agree on every node; see
-    /// [`FailureDomains`](crate::FailureDomains).
-    pub failure_domains: Option<crate::FailureDomains>,
+    /// [`FailureDomains`](crate::system::FailureDomains).
+    pub failure_domains: Option<crate::system::FailureDomains>,
     /// How long a per-entity quorum append, snapshot, or blob put waits before
     /// reporting `Unavailable` (spec §11).
     ///

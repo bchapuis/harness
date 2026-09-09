@@ -202,7 +202,7 @@ pub trait EntityJournal: Clone + Send + Sync + 'static {
     // An entity's immutable blobs, replicated to the *same* shard replicas as its
     // records but off the ordered/fenced path (no `Seq`, no term). On the journal seam
     // so the host needs no extra dependency to hand the entity a
-    // [`EntityBlobs`](crate::EntityBlobs) handle.
+    // [`EntityBlobs`](crate::blobs::EntityBlobs) handle.
 
     /// Store an immutable blob for one entity, durable on a write quorum of its
     /// replicas (one local copy on `Local`). Idempotent and dedup'd by content.

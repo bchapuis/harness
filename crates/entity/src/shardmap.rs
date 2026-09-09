@@ -70,7 +70,7 @@ pub trait ShardMapSource: Send + Sync + 'static {
     /// while the map is still bootstrapping (or on a routing-only client, which
     /// never holds the allocation). The authority once ranges have committed:
     /// after a split or merge (§7.7) only the map knows the partition; the
-    /// founding [`shard_for`](crate::shard_for) fallback covers only bootstrap.
+    /// founding [`shard_for`](crate::system::shard_for) fallback covers only bootstrap.
     fn shard_of(&self, hash: u64) -> Option<u32>;
 
     /// The committed shard indices, in order: the live partition's shards, for
@@ -113,12 +113,12 @@ pub trait ShardMapSource: Send + Sync + 'static {
     /// healthy (spec §7.6). One-way: nothing clears it, because nothing here can
     /// establish that the entry became readable.
     ///
-    /// Set when a committed map command cannot be decoded ([`admit`]). A poisoned
+    /// Set when a committed map command cannot be decoded (`admit`). A poisoned
     /// map keeps *answering*: its allocation is frozen at the last command it
     /// could apply, which is a prefix of the committed log and therefore exactly
     /// the state of a node that is merely behind, but it will never advance
     /// again, so the node is one to replace. The deployment's health probe reads
-    /// this, as it reads [`FileEntityStore::failure`](crate::FileEntityStore::failure).
+    /// this, as it reads [`FileEntityStore::failure`](crate::file_store::FileEntityStore::failure).
     ///
     /// `None` on the tiers that have no committed log to fall behind: the `Local`
     /// map is this node's own, and a routing-only client tracks no allocation.
@@ -137,7 +137,7 @@ pub trait ShardMapSource: Send + Sync + 'static {
 
 /// Resolve an entity key to its shard (spec §5.1): the committed key-range
 /// partition once the map has it ([`ShardMapSource::shard_of`]), else the
-/// founding partition ([`shard_for`](crate::shard_for)) while the map
+/// founding partition ([`shard_for`](crate::system::shard_for)) while the map
 /// bootstraps; the two agree until the first split/merge, which only ever
 /// commits through the map. The one name→shard function behind the gateway, the
 /// host cache's pre-send guard, and the `Entities` observability reads.
@@ -302,7 +302,7 @@ pub(crate) const SHARDMAP: compat::Stamp =
 /// meets only its own peers. So the boundary lands in one step, and V4 becomes live
 /// again the moment there is a fleet to roll.
 ///
-/// What that does **not** change is [`admit`]'s adoption of the unstamped
+/// What that does **not** change is `admit`'s adoption of the unstamped
 /// predecessor. That obligation is **V5**'s and it is about bytes at rest, not about
 /// release cadence: commands committed by any earlier build of this tree are still
 /// in the map group's log on disk, and a build that refused them would refuse its
@@ -376,7 +376,7 @@ impl LocalShardMap {
         node: NodeId,
         shards: usize,
         store: Arc<dyn EntityStore>,
-        io: Arc<dyn crate::BlockingIo>,
+        io: Arc<dyn crate::blocking::BlockingIo>,
     ) -> LocalShardMap {
         let journals = (0..shards)
             .map(|shard| {
@@ -539,9 +539,9 @@ impl RaftShardMap {
         split_target_bytes: u64,
         local: Arc<dyn EntityStore>,
         transport: Arc<dyn ReplicaTransport>,
-        io: Arc<dyn crate::BlockingIo>,
+        io: Arc<dyn crate::blocking::BlockingIo>,
         deadlines: crate::replicator::Deadlines,
-        domains: Option<crate::FailureDomains>,
+        domains: Option<crate::system::FailureDomains>,
         emit: EmitEvent,
     ) -> RaftShardMap {
         let group = map_group_id_for(entity_type);
@@ -820,7 +820,7 @@ struct ShardApply<R: RaftConsensus> {
     handles: Arc<Mutex<ShardHandles<R>>>,
     local: Arc<dyn EntityStore>,
     transport: Arc<dyn ReplicaTransport>,
-    io: Arc<dyn crate::BlockingIo>,
+    io: Arc<dyn crate::blocking::BlockingIo>,
     deadlines: crate::replicator::Deadlines,
     emit: EmitEvent,
 }
@@ -1347,7 +1347,7 @@ async fn allocator_loop<R: RaftConsensus>(
     group: GroupId,
     shards: usize,
     replicas: usize,
-    domains: Option<crate::FailureDomains>,
+    domains: Option<crate::system::FailureDomains>,
     inner: Weak<Mutex<Inner>>,
 ) {
     let consensus = &consensus;
@@ -1929,7 +1929,7 @@ async fn merge_loop<R: RaftConsensus>(
 /// How often the size trigger re-measures the shards it leads.
 ///
 /// Much slower than the allocator's cadence, because the measurement is not cheap:
-/// [`EntityStore::shard_bytes`](crate::EntityStore::shard_bytes) walks every entity in
+/// [`EntityStore::shard_bytes`](crate::store::EntityStore::shard_bytes) walks every entity in
 /// the shard, stat-ing its segment and enumerating its blob directory, so its cost is
 /// O(entities), not O(shards). At half a second that walk was the dominant steady-state
 /// I/O of a large node: repeated to learn a number that moves slowly and gates an

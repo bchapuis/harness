@@ -44,8 +44,8 @@ impl<S: EntitySystem> MachineRuntimeProvider for FakeRuntimeProvider<S> {
             });
             // Seed the write stream from the machine's name, so each
             // machine's guest activity is distinct but seed-stable.
-            let mut lcg: u64 = entity::BlobId::of(spec.machine.to_string().as_bytes()).as_bytes()
-                [..8]
+            let mut lcg: u64 = entity::facet::BlobId::of(spec.machine.to_string().as_bytes())
+                .as_bytes()[..8]
                 .try_into()
                 .map(u64::from_le_bytes)
                 .expect("eight bytes");

@@ -35,8 +35,8 @@ use actor_runtime::Encryption;
 use actor_runtime::FileRaftWAL;
 use actor_runtime::JoinOptions;
 use actor_runtime::TcpCluster;
-use entity::AlarmIndex;
-use entity::FileEntityStore;
+use entity::cluster::AlarmIndex;
+use entity::store::FileEntityStore;
 use entity::EntityName;
 use entity::Entities;
 use entity::EntityConfig;
@@ -277,8 +277,8 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // executor hardest here, and the node is also running Raft heartbeats on it.
     let entity_node = system
         .entity_node()
-        .blocking_io(Arc::new(entity::ThreadPoolIo::sized_for_host()))
-        .metrics(Arc::new(entity::AtomicEntityMetrics::new()));
+        .blocking_io(Arc::new(entity::store::ThreadPoolIo::sized_for_host()))
+        .metrics(Arc::new(entity::store::AtomicEntityMetrics::new()));
     let config = EntityConfig {
         shards: opts.shards,
         entity_store: Some(entity_store.clone()),

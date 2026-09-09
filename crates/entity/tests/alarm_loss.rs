@@ -44,10 +44,10 @@ use actor_simulation::Simulation;
 use actor_simulation::raft_config;
 use actor_simulation::sweep_seeds;
 use actor_simulation::swim_config;
-use entity::AlarmIndex;
 use entity::Entities;
 use entity::EntityConfig;
 use entity::EntityExt;
+use entity::cluster::AlarmIndex;
 
 use support::timer::Arm;
 

@@ -6,7 +6,7 @@
 //! crashes, restarts, pauses, heals, loss, duplication, and delay.
 //!
 //! **The property is that the memo is write-once.** It is *not* "the effect ran
-//! once": [`entity::LaunchGuard`] is per-activation and never journaled, so a
+//! once": [`entity::facet::LaunchGuard`] is per-activation and never journaled, so a
 //! re-activation legitimately re-launches an unresolved step and the effect may
 //! run many times (§7.17). What must hold is that `complete_step` records only a
 //! step that is not already done, so the **first committed result wins**, and every

@@ -702,15 +702,15 @@ fn entity_named_hosts_one_entity_under_many_type_names() {
 /// it, so `snapshot.seq <= head` is an identity, not a condition to be checked.
 #[test]
 fn a_snapshot_never_outruns_the_head_it_is_measured_against() {
-    use entity::EntityStore;
+    use entity::store::EntityStore;
 
-    let store = entity::MemoryEntityStore::new();
+    let store = entity::store::MemoryEntityStore::new();
     let name = entity::EntityName::new("test.Counter", "g4/structural");
     let shard = 0u32;
 
-    let head_of = |store: &entity::MemoryEntityStore| store.head(shard, &name);
+    let head_of = |store: &entity::store::MemoryEntityStore| store.head(shard, &name);
     let snapshot_seq_of =
-        |store: &entity::MemoryEntityStore| store.snapshot(shard, &name).map(|(seq, _)| seq);
+        |store: &entity::store::MemoryEntityStore| store.snapshot(shard, &name).map(|(seq, _)| seq);
 
     // Interleave appends and snapshots the way a live entity does, checking the
     // identity after every step, including right after a snapshot, which is the
@@ -721,9 +721,9 @@ fn a_snapshot_never_outruns_the_head_it_is_measured_against() {
             shard,
             &name,
             after,
-            entity::Term::ZERO,
+            entity::store::Term::ZERO,
             vec![vec![round as u8], vec![round as u8]],
-            entity::WriteKind::Append,
+            entity::store::WriteKind::Append,
         );
 
         let head = head_of(&store);
@@ -739,9 +739,9 @@ fn a_snapshot_never_outruns_the_head_it_is_measured_against() {
             shard,
             &name,
             head,
-            entity::Term::ZERO,
+            entity::store::Term::ZERO,
             vec![round as u8],
-            entity::WriteKind::Append,
+            entity::store::WriteKind::Append,
         );
 
         let head = head_of(&store);

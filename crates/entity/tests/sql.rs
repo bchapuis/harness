@@ -21,10 +21,10 @@ use entity::EntityError;
 use entity::EntityEvent;
 use entity::EntityExt;
 use entity::EntityHandler;
-use entity::MAX_QUERY_ROWS;
 use entity::NoEvent;
-use entity::Sql;
-use entity::SqlValue;
+use entity::facet::MAX_QUERY_ROWS;
+use entity::facet::Sql;
+use entity::facet::SqlValue;
 use serde::Deserialize;
 use serde::Serialize;
 

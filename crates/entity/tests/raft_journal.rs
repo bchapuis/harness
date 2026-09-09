@@ -3,7 +3,7 @@
 //! makes non-trivial: **a full-cluster cold restart**.
 //!
 //! In the `Quorum` tier an entity's records live off the leader-election group's Raft
-//! log, in each replica's [`EntityStore`](entity::EntityStore) (§7.2). So unlike a
+//! log, in each replica's [`EntityStore`](entity::store::EntityStore) (§7.2). So unlike a
 //! shared-log design, surviving a simultaneous restart of every replica needs the
 //! store itself to be durable: injected through [`EntityConfig::entity_store`] and
 //! preserved across the restart (the entity analogue of the Raft WAL, §7.4). These
@@ -35,10 +35,10 @@ use entity::EntityConfig;
 use entity::EntityCtx;
 use entity::EntityExt;
 use entity::EntityHandler;
-use entity::EntityStore;
-use entity::EntityStoreFactory;
-use entity::FileEntityStore;
-use entity::MemoryEntityStore;
+use entity::store::EntityStore;
+use entity::store::EntityStoreFactory;
+use entity::store::FileEntityStore;
+use entity::store::MemoryEntityStore;
 use serde::Deserialize;
 use serde::Serialize;
 

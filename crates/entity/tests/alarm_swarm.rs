@@ -71,10 +71,10 @@ use actor_simulation::default_invariants;
 use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::sweep_seeds;
-use entity::AlarmIndex;
 use entity::Entities;
 use entity::EntityConfig;
 use entity::EntityExt;
+use entity::cluster::AlarmIndex;
 use entity::testing::CommitMonotonic;
 
 use support::timer::Arm;

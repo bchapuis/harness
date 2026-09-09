@@ -29,18 +29,18 @@ use crate::system::EntitySystem;
 /// handle rather than building the default one again.
 #[derive(Clone)]
 pub(crate) struct NodeCapabilities {
-    io: Arc<dyn crate::BlockingIo>,
-    metrics: Arc<dyn crate::EntityMetrics>,
+    io: Arc<dyn crate::blocking::BlockingIo>,
+    metrics: Arc<dyn crate::metrics::EntityMetrics>,
 }
 
 impl Default for NodeCapabilities {
     /// The documented defaults: blocking store I/O runs inline on the calling async
     /// worker, and measurements are discarded. Correct, and what the deterministic
-    /// simulation requires (§14); see [`crate::blocking`] for why the pool is a seam
+    /// simulation requires (§14); see `crate::blocking` for why the pool is a seam
     /// rather than a default.
     fn default() -> NodeCapabilities {
         NodeCapabilities {
-            io: Arc::new(crate::InlineIo),
+            io: Arc::new(crate::blocking::InlineIo),
             metrics: Arc::new(()),
         }
     }
@@ -48,12 +48,12 @@ impl Default for NodeCapabilities {
 
 impl NodeCapabilities {
     /// This node's blocking-I/O seam (§7.4).
-    pub(crate) fn blocking_io(&self) -> &Arc<dyn crate::BlockingIo> {
+    pub(crate) fn blocking_io(&self) -> &Arc<dyn crate::blocking::BlockingIo> {
         &self.io
     }
 
     /// This node's metrics sink (§13).
-    pub(crate) fn metrics(&self) -> &Arc<dyn crate::EntityMetrics> {
+    pub(crate) fn metrics(&self) -> &Arc<dyn crate::metrics::EntityMetrics> {
         &self.metrics
     }
 }
@@ -104,10 +104,10 @@ impl<S: EntitySystem> EntityNode<S> {
     /// Without it every fsync runs on the async worker that is also driving this
     /// node's Raft heartbeats and its other shards' quorum waits, so a slow device
     /// becomes spurious elections and a rehydration storm rather than merely slow
-    /// writes. Supply [`ThreadPoolIo`](crate::ThreadPoolIo) on real storage; see
-    /// [`crate::blocking`] for why the case for it is the tail rather than the median.
+    /// writes. Supply [`ThreadPoolIo`](crate::blocking::ThreadPoolIo) on real storage; see
+    /// `crate::blocking` for why the case for it is the tail rather than the median.
     #[must_use]
-    pub fn blocking_io(mut self, io: Arc<dyn crate::BlockingIo>) -> EntityNode<S> {
+    pub fn blocking_io(mut self, io: Arc<dyn crate::blocking::BlockingIo>) -> EntityNode<S> {
         self.capabilities.io = io;
         self
     }
@@ -115,9 +115,9 @@ impl<S: EntitySystem> EntityNode<S> {
     /// Where this node reports its operator-facing measurements (spec §13).
     ///
     /// Distinct from the event stream, which is the checker's interface: see
-    /// [`crate::metrics`] for why both exist.
+    /// `crate::metrics` for why both exist.
     #[must_use]
-    pub fn metrics(mut self, metrics: Arc<dyn crate::EntityMetrics>) -> EntityNode<S> {
+    pub fn metrics(mut self, metrics: Arc<dyn crate::metrics::EntityMetrics>) -> EntityNode<S> {
         self.capabilities.metrics = metrics;
         self
     }

@@ -55,12 +55,12 @@ use actor_simulation::replay_cluster_swarm;
 use actor_simulation::run_cluster_swarm;
 use actor_simulation::run_cluster_swarm_coverage;
 use actor_simulation::sweep_seeds;
-use entity::BlobId;
 use entity::Entity;
 use entity::EntityConfig;
 use entity::EntityCtx;
 use entity::EntityExt;
 use entity::EntityHandler;
+use entity::facet::BlobId;
 
 use serde::Deserialize;
 use serde::Serialize;

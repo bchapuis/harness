@@ -44,9 +44,9 @@ fn seq_round_trips() {
 /// user codec like any other reply payload and must survive the round trip.
 #[cfg(feature = "sql")]
 mod sql {
-    use entity::QueryResult;
-    use entity::SqlError;
-    use entity::SqlValue;
+    use entity::facet::QueryResult;
+    use entity::facet::SqlError;
+    use entity::facet::SqlValue;
 
     use super::roundtrip;
 

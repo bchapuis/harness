@@ -16,9 +16,9 @@
 //! # Facets: one entity, many storage features
 //!
 //! Beyond the event fold, an entity composes **facets** (spec §7.12) by declaring
-//! `type Facets`: the [`Kv`] map (§7.13), the [`Ws`] workspace directory
+//! `type Facets`: the [`Kv`](facet::Kv) map (§7.13), the [`Ws`](facet::Ws) workspace directory
 //! (§7.11), the SQL database (§7.14, behind the `sql` cargo feature), the
-//! [`Alarm`] durable timer (§7.16), and the [`Steps`] step memo (§7.17). A
+//! [`Alarm`](facet::Alarm) durable timer (§7.16), and the [`Steps`](facet::Steps) step memo (§7.17). A
 //! handler writes through the compile-time-gated `ctx` accessors:
 //! [`kv()`](EntityCtx::kv), [`ws()`](EntityCtx::ws), `sql()`,
 //! [`alarm()`](EntityCtx::alarm), [`steps()`](EntityCtx::steps), and all of a
@@ -28,14 +28,14 @@
 //!
 //! # Durable alarms and workflows
 //!
-//! The [`Alarm`] facet stores a single per-entity deadline; when it passes the
+//! The [`Alarm`](facet::Alarm) facet stores a single per-entity deadline; when it passes the
 //! runtime fires [`Entity::on_alarm`] with **no caller present** (spec §7.16). The
-//! [`Steps`] step memo builds on it: each step's effect runs at most once
+//! [`Steps`](facet::Steps) step memo builds on it: each step's effect runs at most once
 //! across crashes because its result is journaled and memoized. An alarm fires
 //! while its entity is resident and re-arms on re-activation. To fire
 //! with **no access after a node failover or hibernation**, host a type with
 //! [`entities_with_alarms`](EntityExt::entities_with_alarms): each host registers its
-//! deadline in a per-shard [`AlarmIndex`] (an acknowledged registration, which is
+//! deadline in a per-shard [`AlarmIndex`](cluster::AlarmIndex) (an acknowledged registration, which is
 //! what lets an alarmed entity hibernate; an unacked one pins it resident), and a
 //! driver re-activates due entities on the shards this node leads.
 //!
@@ -44,7 +44,7 @@
 //! The full entity programming model runs on either durability tier, selected by
 //! the system an entity is hosted on (§7.4):
 //!
-//! - **`Local`, single-node** ([`LocalEntityJournal`]): one linearizable local store,
+//! - **`Local`, single-node** ([`LocalEntityJournal`](store::LocalEntityJournal)): one linearizable local store,
 //!   CP trivially. Hosted on a [`LocalSystem`](actor_core::LocalSystem).
 //! - **`Quorum`, clustered** (the shard replicator, replicator.rs): the namespace is partitioned
 //!   into shards (`EntityConfig::shards`), each a leader-election Raft group holding
@@ -60,7 +60,7 @@
 //!   registry, fed by [`Entity::register`] (see [`accepted_manifests`]).
 //!
 //! The shard map (§7.6) is a per-type Raft group whose committed log is the
-//! allocation ([`ShardMapSource`]), storing each shard's **key range** and replica
+//! allocation ([`ShardMapSource`](cluster::ShardMapSource)), storing each shard's **key range** and replica
 //! set. As cluster membership changes, a shard rebalances by **joint-quorum
 //! migration** (§7.7): the new set commits as a `target` (writes and recoveries
 //! then need a majority of BOTH sets), the shard leader's driver catches every
@@ -89,6 +89,19 @@
 #[cfg(feature = "testing")]
 pub mod testing;
 
+// The crate's three deep modules, beside a root that keeps the authoring
+// surface. The split follows what the code already is: a durable-object
+// programming model (root), a family of composable storage features
+// ([`facet`]), the durable substrate a deployment wires ([`store`]), and the
+// sharding and replication that make it clustered ([`cluster`]). The root is not
+// a fourth namespace, because it is the interface: `Entity`, `EntityCtx`,
+// `EntityHandler` and their neighbours are what authoring an entity is written
+// in, and putting them behind a module every consumer would open in full would
+// add a name to say nothing.
+pub mod cluster;
+pub mod facet;
+pub mod store;
+
 mod alarm;
 mod alarm_index;
 mod blobs;
@@ -103,7 +116,6 @@ mod entity;
 mod entity_ref;
 mod error;
 mod event;
-mod facet;
 mod facet_blobs;
 mod file_store;
 mod gateway;
@@ -119,39 +131,13 @@ mod shardmap;
 #[cfg(feature = "sql")]
 mod sql;
 mod steps;
-mod store;
 mod subscription;
 mod system;
 mod ws;
 
-pub use alarm::Alarm;
-pub use alarm::AlarmHandle;
-pub use alarm_index::AlarmIndex;
-// The alarm-index runtime vocabulary, published for the crate's own integration
-// tests.
-#[doc(hidden)]
-pub use alarm_index::ALARM_INDEX_TYPE;
-#[doc(hidden)]
-pub use alarm_index::AllPending;
-#[doc(hidden)]
-pub use alarm_index::DueBefore;
-#[doc(hidden)]
-pub use alarm_index::Pending;
-#[doc(hidden)]
-pub use alarm_index::Sync as AlarmSync;
-#[doc(hidden)]
-pub use alarm_index::index_key;
-pub use blobs::BlobId;
-pub use blobs::EntityBlobs;
-pub use blocking::BlockingIo;
-pub use blocking::InlineIo;
-pub use blocking::ThreadPoolIo;
+// The authoring surface: what writing an entity is written in. Everything else
+// lives in one of the three modules above.
 pub use config::EntityConfig;
-pub use disk::Disk;
-pub use disk::DiskCaptureStats;
-pub use disk::DiskError;
-pub use disk::DiskHandle;
-pub use disk::MAX_IMAGE_BYTES;
 pub use entity::Entity;
 pub use entity::EntityCtx;
 pub use entity::EntityHandler;
@@ -166,72 +152,8 @@ pub use entity_ref::EntityExt;
 pub use entity_ref::EntityRef;
 pub use error::EntityError;
 pub use event::EntityEvent;
-pub use facet::Facet;
-pub use facet::FacetError;
-pub use facet::FacetSet;
-pub use facet::HasFacet;
-pub use facet::Here;
-pub use facet::There;
-pub use file_store::FileEntityStore;
-pub use journal::AppendOutcome;
-pub use journal::DynEntityJournal;
-pub use journal::EntityJournal;
-pub use journal::EntityJournalError;
-pub use journal::RecordPage;
+// The journal position an `EntityRef` read reports and a caller waits on: part of
+// the authoring surface rather than the store's, which is why it alone of the
+// journal vocabulary sits here.
 pub use journal::Seq;
-pub use journal::Term;
-pub use kv::INLINE_MAX;
-pub use kv::Kv;
-pub use kv::KvHandle;
-pub use memory::LocalEntityJournal;
-pub use metrics::AtomicEntityMetrics;
-pub use metrics::CommitOutcome;
-pub use metrics::EntityMetrics;
-pub use node::EntityNode;
-pub use replica_store::ReplicaTransport;
-pub use replicator::Deadlines;
-pub use shardmap::ShardMapSource;
-#[cfg(feature = "sql")]
-pub use sql::MAX_QUERY_ROWS;
-#[cfg(feature = "sql")]
-pub use sql::QueryResult;
-#[cfg(feature = "sql")]
-pub use sql::Sql;
-#[cfg(feature = "sql")]
-pub use sql::SqlError;
-#[cfg(feature = "sql")]
-pub use sql::SqlHandle;
-#[cfg(feature = "sql")]
-pub use sql::SqlRow;
-#[cfg(feature = "sql")]
-pub use sql::SqlValue;
-pub use steps::LaunchGuard;
-pub use steps::StepDone;
-pub use steps::StepId;
-pub use steps::Steps;
-pub use steps::StepsHandle;
-pub use steps::complete_step;
-pub use store::BlobAck;
-pub use store::EntityBlobStore;
-pub use store::EntityStore;
-pub use store::EntityStoreFactory;
-pub use store::MemoryEntityStore;
-pub use store::ReadOutcome;
-pub use store::ReadReply;
-pub use store::StoreAck;
-pub use store::WriteKind;
-pub use subscription::RecordBatch;
-pub use subscription::RecordSink;
-pub use subscription::RecordStream;
-pub use subscription::Subscribe;
-pub use subscription::Subscribed;
-pub use subscription::Subscription;
 pub use system::EntitySystem;
-pub use system::FailureDomains;
-pub use system::ShardId;
-pub use system::shard_for;
-pub use ws::MAX_TREE_BYTES;
-pub use ws::Ws;
-pub use ws::WsCapture;
-pub use ws::WsError;
-pub use ws::WsHandle;

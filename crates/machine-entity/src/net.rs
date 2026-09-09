@@ -23,8 +23,8 @@ use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 
 use crate::entity::EgressPolicy;
-use entity::BlobId;
 use entity::EntityName;
+use entity::facet::BlobId;
 
 /// The interface name for a machine's tap device: `hm-` plus 8 hex of the
 /// entity-name hash. Stable per machine: the attribution key (M6), and short

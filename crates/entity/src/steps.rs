@@ -1,6 +1,6 @@
 //! The steps facet (spec §7.17): durable **step memoization** for the
 //! Cloudflare-Workflows-style `step`/`sleep`/`retry` pattern, layered on the event
-//! fold, the [`Alarm`](crate::Alarm) facet, and an entity's self-driving loop.
+//! fold, the [`Alarm`](crate::alarm::Alarm) facet, and an entity's self-driving loop.
 //!
 //! **The durable core is memoization.** A workflow is a re-entrant decision the
 //! entity re-drives after every commit (agent §3). Each **step** runs an external
@@ -8,7 +8,7 @@
 //! `step id → bytes` map. On replay (a later drive, a re-activation, a failover)
 //! a completed step resolves from the map instead of re-running, so effects are
 //! at-most-once across crashes. `sleep` is a step whose effect is a durable
-//! [`Alarm`](crate::Alarm); `retry` is a step that re-launches after an
+//! [`Alarm`](crate::alarm::Alarm); `retry` is a step that re-launches after an
 //! alarm-backed backoff.
 //!
 //! **What the entity still wires.** Launching a step's effect off the command path

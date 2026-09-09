@@ -254,8 +254,8 @@ pub async fn run(opts: NodeOptions, api_key: String) -> Result<(), String> {
     // checkers, not for an operator.
     let entity_node = system
         .entity_node()
-        .blocking_io(Arc::new(entity::ThreadPoolIo::sized_for_host()))
-        .metrics(Arc::new(entity::AtomicEntityMetrics::new()));
+        .blocking_io(Arc::new(entity::store::ThreadPoolIo::sized_for_host()))
+        .metrics(Arc::new(entity::store::AtomicEntityMetrics::new()));
     // Every mode runs over the agent entity's own workspace facet (see `SandboxMode`);
     // the provider just opens the supplied directory.
     let sandboxes: Arc<dyn SandboxProvider> = match &sandbox_mode {

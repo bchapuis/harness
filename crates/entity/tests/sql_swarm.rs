@@ -53,8 +53,8 @@ use entity::EntityCtx;
 use entity::EntityExt;
 use entity::EntityHandler;
 use entity::NoEvent;
-use entity::Sql;
-use entity::SqlValue;
+use entity::facet::Sql;
+use entity::facet::SqlValue;
 use entity::testing::ActivationSingletonPerNode;
 use entity::testing::CommitMonotonic;
 

@@ -15,13 +15,38 @@
 //! loss supplies a file-backed `EntityStore` through the same seam (§7.4).
 //!
 //! **Per-entity segmentation.** An entity's records are an independent **segment**
-//! (its own [`EntityRecords`] behind its own lock), so concurrent entities never
+//! (its own `EntityRecords` behind its own lock), so concurrent entities never
 //! serialize on a single store-wide lock, and one entity's snapshot compaction
 //! touches only its own segment (§9). The one piece shared across a shard's entities
 //! is the **fence**: the highest shard term the store has acknowledged (§8). It sits
 //! behind its own leaf lock, taken *inside* an entity's segment lock, so an entity's
 //! write and that same entity's recovery `prepare` serialize on the segment lock
 //! (the only fencing-critical race, §8).
+
+// The rest of the durable substrate, re-exported so a deployment wiring storage
+// finds it under one name: the journal vocabulary these stores speak, the two
+// stock journals, where blocking store calls run, the committed-record streams
+// read back out, and the commit metrics.
+pub use crate::blocking::BlockingIo;
+pub use crate::blocking::InlineIo;
+pub use crate::blocking::ThreadPoolIo;
+pub use crate::file_store::FileEntityStore;
+pub use crate::journal::AppendOutcome;
+pub use crate::journal::DynEntityJournal;
+pub use crate::journal::EntityJournal;
+pub use crate::journal::EntityJournalError;
+pub use crate::journal::RecordPage;
+pub use crate::journal::Term;
+pub use crate::memory::LocalEntityJournal;
+pub use crate::metrics::AtomicEntityMetrics;
+pub use crate::metrics::CommitOutcome;
+pub use crate::metrics::EntityMetrics;
+pub use crate::subscription::RecordBatch;
+pub use crate::subscription::RecordSink;
+pub use crate::subscription::RecordStream;
+pub use crate::subscription::Subscribe;
+pub use crate::subscription::Subscribed;
+pub use crate::subscription::Subscription;
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -34,9 +59,7 @@ use serde::Serialize;
 
 use crate::blobs::BlobId;
 use crate::entity::EntityName;
-use crate::journal::RecordPage;
 use crate::journal::Seq;
-use crate::journal::Term;
 
 /// One stored record: the opaque event bytes and the **shard term** under which it
 /// was committed. The term is what a recovering leader picks by, per `Seq` slot (§8).
@@ -79,7 +102,7 @@ pub enum StoreAck {
     /// an unreachable replica: it does not satisfy a quorum, it carries no term or
     /// head worth believing, and it must never be read as a commit. A store that
     /// answers `Failed` once answers it for everything afterwards
-    /// ([`FileEntityStore`](crate::FileEntityStore) poisons itself), so the node
+    /// ([`FileEntityStore`](crate::file_store::FileEntityStore) poisons itself), so the node
     /// simply stops counting toward its shards' quorums instead of crashing and
     /// failing over every shard it happened to lead.
     Failed,
@@ -131,7 +154,7 @@ pub(crate) fn fold_head(base: u64, occupied: impl IntoIterator<Item = u64>) -> S
 
 impl ReadReply {
     /// The head this reply describes: the snapshot's seq (or zero) plus the leading
-    /// gap-free run of records above it; [`fold_head`], read off the wire shape,
+    /// gap-free run of records above it; `fold_head`, read off the wire shape,
     /// so the local tier and a recovering leader read a reply the same way.
     pub fn head(&self) -> Seq {
         fold_head(
@@ -464,7 +487,7 @@ pub(crate) struct EntityRecords {
 /// entity's segment to a single `Checkpoint` op holding this, folding away the record
 /// ops the entity's snapshot made redundant.
 ///
-/// Distinct from [`EntityRecords`] because this is the frozen on-disk contract (it must
+/// Distinct from `EntityRecords` because this is the frozen on-disk contract (it must
 /// deserialize old segments), while `EntityRecords` is the live in-memory
 /// representation and stays free to change. [`export`](EntityRecords::export) and
 /// [`from_checkpoint`](EntityRecords::from_checkpoint) are the only bridge.
@@ -496,7 +519,7 @@ impl EntityRecords {
     }
 
     /// The committed head: `base` plus the leading gap-free run of `slots`;
-    /// [`fold_head`], with a vacant slot yielding a non-successor seq that ends
+    /// `fold_head`, with a vacant slot yielding a non-successor seq that ends
     /// the run.
     pub(crate) fn head(&self) -> Seq {
         let base = self.base.value();
@@ -687,7 +710,7 @@ impl EntityRecords {
     }
 }
 
-/// One entity's in-memory segment handle: its [`EntityRecords`] behind its own lock,
+/// One entity's in-memory segment handle: its `EntityRecords` behind its own lock,
 /// shared (cloned) out of the registry so an op holds only that entity's lock.
 type Segment = Arc<Mutex<EntityRecords>>;
 

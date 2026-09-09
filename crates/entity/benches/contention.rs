@@ -46,13 +46,13 @@ use entity::Entity;
 use entity::EntityConfig;
 use entity::EntityExt;
 use entity::EntityName;
-use entity::EntityStore;
-use entity::FileEntityStore;
 use entity::NoEvent;
 use entity::Seq;
-use entity::StoreAck;
-use entity::Term;
-use entity::WriteKind;
+use entity::store::EntityStore;
+use entity::store::FileEntityStore;
+use entity::store::StoreAck;
+use entity::store::Term;
+use entity::store::WriteKind;
 
 fn main() {
     divan::main();

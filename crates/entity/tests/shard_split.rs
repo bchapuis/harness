@@ -36,7 +36,6 @@ use actor_simulation::raft_config;
 use actor_simulation::scenario_sweep;
 use actor_simulation::sweep_seeds;
 use actor_simulation::swim_config;
-use entity::BlobId;
 use entity::Entities;
 use entity::Entity;
 use entity::EntityConfig;
@@ -45,6 +44,7 @@ use entity::EntityError;
 use entity::EntityEvent;
 use entity::EntityExt;
 use entity::EntityHandler;
+use entity::facet::BlobId;
 use serde::Deserialize;
 use serde::Serialize;
 

@@ -31,7 +31,7 @@ pub const MAX_FRAME: usize = 1024 * 1024;
 /// Cap on one workspace tar stream, either direction, accumulated across its
 /// [`Frame::Data`] chunks (machine §4). Pinned to the workspace codec's
 /// budget (`machine_host::ws_sync::MAX_TAR`) and the ws facet's durable-tree cap
-/// (`entity::MAX_TREE_BYTES`) by a test in the `machine-entity` crate, the one
+/// (`entity::facet::MAX_TREE_BYTES`) by a test in the `machine-entity` crate, the one
 /// consumer that sees all three.
 pub const MAX_TAR: usize = 64 * 1024 * 1024;
 

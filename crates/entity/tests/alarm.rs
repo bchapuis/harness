@@ -17,13 +17,13 @@ use actor_core::Message;
 use actor_simulation::Recorder;
 use actor_simulation::SimSystem;
 use actor_simulation::Simulation;
-use entity::Alarm;
 use entity::Entity;
 use entity::EntityConfig;
 use entity::EntityCtx;
 use entity::EntityEvent;
 use entity::EntityExt;
 use entity::EntityHandler;
+use entity::facet::Alarm;
 use serde::Deserialize;
 use serde::Serialize;
 

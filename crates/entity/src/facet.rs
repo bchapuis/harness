@@ -7,9 +7,9 @@
 //! substrate.
 //!
 //! **Tagged records, one order, one barrier (E19).** Every record an entity
-//! journals carries a one-byte facet tag; tag [`EVENT_TAG`] (0) is *facet 0*, the
-//! entity's own event fold. Tags run to [`MAX_TAG`], the high bit being reserved as
-//! the escape into a later envelope revision ([`RECORD`]). All records a command
+//! journals carries a one-byte facet tag; tag `EVENT_TAG` (0) is *facet 0*, the
+//! entity's own event fold. Tags run to `MAX_TAG`, the high bit being reserved as
+//! the escape into a later envelope revision (`RECORD`). All records a command
 //! produces (its events plus every facet's staged operations) append as one
 //! atomic batch (§6), so a command that touches state, the KV map, and the
 //! filesystem commits everywhere or nowhere. Replay dispatches each record to its
@@ -39,14 +39,53 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+// The concrete facets (spec §7.11, §7.13-§7.17), re-exported so the family is one
+// name away rather than scattered across the crate root. Each is an independent
+// leaf: it depends on this module and on blobs, never on another facet.
+pub use crate::alarm::Alarm;
+pub use crate::alarm::AlarmHandle;
+pub use crate::blobs::BlobId;
+pub use crate::blobs::EntityBlobs;
+pub use crate::disk::Disk;
+pub use crate::disk::DiskCaptureStats;
+pub use crate::disk::DiskError;
+pub use crate::disk::DiskHandle;
+pub use crate::disk::MAX_IMAGE_BYTES;
+pub use crate::kv::INLINE_MAX;
+pub use crate::kv::Kv;
+pub use crate::kv::KvHandle;
+#[cfg(feature = "sql")]
+pub use crate::sql::MAX_QUERY_ROWS;
+#[cfg(feature = "sql")]
+pub use crate::sql::QueryResult;
+#[cfg(feature = "sql")]
+pub use crate::sql::Sql;
+#[cfg(feature = "sql")]
+pub use crate::sql::SqlError;
+#[cfg(feature = "sql")]
+pub use crate::sql::SqlHandle;
+#[cfg(feature = "sql")]
+pub use crate::sql::SqlRow;
+#[cfg(feature = "sql")]
+pub use crate::sql::SqlValue;
+pub use crate::steps::LaunchGuard;
+pub use crate::steps::StepDone;
+pub use crate::steps::StepId;
+pub use crate::steps::Steps;
+pub use crate::steps::StepsHandle;
+pub use crate::steps::complete_step;
+pub use crate::ws::MAX_TREE_BYTES;
+pub use crate::ws::Ws;
+pub use crate::ws::WsCapture;
+pub use crate::ws::WsError;
+pub use crate::ws::WsHandle;
+
 use std::marker::PhantomData;
 use std::sync::Mutex;
 
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::blobs::BlobId;
-use crate::blobs::EntityBlobs;
 use crate::facet_blobs::RootSet;
 
 /// The record tag of facet 0: the entity's own event fold (spec §7.12).
@@ -62,7 +101,7 @@ pub(crate) const EVENT_TAG: u8 = 0;
 /// 0x01]` are the same bytes.
 ///
 /// A future revision announces itself by setting the high bit of the leading byte
-/// (see [`MAX_TAG`]), which no revision-1 record can do.
+/// (see `MAX_TAG`), which no revision-1 record can do.
 pub(crate) const RECORD: compat::Window = compat::Window::at("entity.record", 1);
 
 /// The largest facet tag a record envelope may carry.
@@ -105,7 +144,7 @@ impl std::error::Error for FacetError {}
 /// Prefix `payload` with its facet `tag`: the record envelope every journaled
 /// record wears (spec §7.12).
 ///
-/// Panics on a tag above [`MAX_TAG`], mirroring the refusal in [`split_record`]:
+/// Panics on a tag above `MAX_TAG`, mirroring the refusal in [`split_record`]:
 /// the high bit means "a later envelope revision" to every reader, so a record
 /// carrying it must never be written by a build whose envelope is revision 1.
 pub(crate) fn tag_record(tag: u8, payload: &[u8]) -> Vec<u8> {
@@ -159,7 +198,7 @@ pub(crate) fn decode_payload<T: serde::de::DeserializeOwned>(
 /// The composite snapshot's stamp (spec §7.12, compatibility spec §3).
 ///
 /// A snapshot gets a full magic and revision rather than the record envelope's
-/// reserved bit ([`RECORD`]): `postcard` gives its leading bytes no structure a
+/// reserved bit (`RECORD`): `postcard` gives its leading bytes no structure a
 /// reader could use to recognize the format otherwise. Reading the revision
 /// **before** the body is what lets a snapshot from another revision be refused
 /// instead of misparsed.
@@ -219,7 +258,7 @@ const SNAPSHOT_EXT_KNOWN: &[u16] = &[EXT_STATE_CHUNKS];
 /// Where facet 0's encoded `State` lives in a snapshot (spec §7.12).
 ///
 /// Small states ride inline in the snapshot record, as they always have. Past
-/// [`INLINE_MAX`] the state is cut into content-defined chunks ([`crate::cdc`]),
+/// [`SNAPSHOT_INLINE_MAX`] the state is cut into content-defined chunks ([`crate::cdc`]),
 /// stored in the entity's blob area (§7.10), and the record carries only their ids,
 /// so a snapshot of an entity that grew by one turn puts one or two chunks instead of
 /// broadcasting the whole folded transcript to every replica (`docs/hardware-envelope.md`
@@ -248,11 +287,11 @@ pub(crate) struct StateManifest {
 /// size costs about half a millisecond of a 125 MB/s uplink even re-sent whole
 /// (hw §3.3), and staying inline also keeps a small entity's snapshot free of blobs
 /// to root, fetch, and sweep.
-const INLINE_MAX: usize = 64 * 1024;
+const SNAPSHOT_INLINE_MAX: usize = 64 * 1024;
 
 impl StatePayload {
     /// Choose a carriage for `state` and make it durable: inline under
-    /// [`INLINE_MAX`], else chunked into the entity's blob area.
+    /// [`SNAPSHOT_INLINE_MAX`], else chunked into the entity's blob area.
     ///
     /// `rooted` is the ids this entity already holds durably: the host's live root
     /// set (**F3**). A chunk already in it is *not* put again, and that skip is the
@@ -267,7 +306,7 @@ impl StatePayload {
         blobs: &EntityBlobs,
         rooted: &BTreeSet<BlobId>,
     ) -> Result<StatePayload, FacetError> {
-        if state.len() <= INLINE_MAX {
+        if state.len() <= SNAPSHOT_INLINE_MAX {
             return Ok(StatePayload::Inline(state));
         }
         let bytes = state.len() as u64;
@@ -529,7 +568,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
 
     /// The runtime hook for durable alarms (spec §7.16): the pending deadline this
     /// facet holds, in nanoseconds since the clock epoch, or `None`. Only the
-    /// [`Alarm`](crate::Alarm) facet returns a deadline; every other facet keeps
+    /// [`Alarm`](crate::alarm::Alarm) facet returns a deadline; every other facet keeps
     /// the default. The host reads it through [`FacetSet::alarm_due`] to arm the
     /// callerless timer without a compile-time [`HasFacet`] bound.
     ///
@@ -545,7 +584,7 @@ pub trait Facet: sealed::Sealed + Send + Sync + 'static {
     /// Stage the consumption of a fired alarm (spec §7.16): before invoking
     /// `on_alarm`, the host stages a cancel so a fired alarm clears atomically
     /// unless the handler re-arms it (last write wins in the shared stage, the DO
-    /// consume-on-fire semantic). Only the [`Alarm`](crate::Alarm) facet acts;
+    /// consume-on-fire semantic). Only the [`Alarm`](crate::alarm::Alarm) facet acts;
     /// every other facet keeps the no-op default.
     fn stage_clear_alarm(_stage: &mut Self::Stage) {}
 }
@@ -612,12 +651,12 @@ pub trait FacetSet: sealed::Sealed + Send + Sync + 'static {
     fn roots(forms: &Self::Forms) -> BTreeSet<BlobId>;
 
     /// The pending alarm deadline of whichever facet holds one (spec §7.16), or
-    /// `None`. At most one facet in a set is the [`Alarm`](crate::Alarm) facet, so
+    /// `None`. At most one facet in a set is the [`Alarm`](crate::alarm::Alarm) facet, so
     /// the first non-`None` is the entity's single alarm.
     fn alarm_due(forms: &Self::Forms) -> Option<u64>;
 
     /// Stage the consumption of a fired alarm across the set (spec §7.16). Only the
-    /// [`Alarm`](crate::Alarm) facet's stage is touched.
+    /// [`Alarm`](crate::alarm::Alarm) facet's stage is touched.
     fn stage_clear_alarm(stages: &mut Self::Stages);
 }
 
@@ -793,7 +832,7 @@ pub struct There<I>(PhantomData<I>);
 /// A compile-time containment proof: the facet set holds `F` at position `I`
 /// (spec §7.12). The index parameter exists only so the per-position impls do
 /// not overlap; call sites leave it to inference: `ctx.kv()` compiles exactly
-/// when the entity's set contains [`Kv`](crate::Kv) once (the E10 discipline).
+/// when the entity's set contains [`Kv`](crate::kv::Kv) once (the E10 discipline).
 pub trait HasFacet<F: Facet, I>: FacetSet {
     /// Project `F`'s committed form out of the composed forms.
     fn form(forms: &Self::Forms) -> &F::Form;
@@ -841,7 +880,7 @@ pub(crate) struct FacetCell<FS: FacetSet> {
     /// ([`StatePayload`]), union-kept under the same **F3** discipline the
     /// checkpointing facets keep theirs under. They live here rather than beside
     /// the host's other activation state because this cell is what supplies
-    /// [`EntityBlobs::gc`](crate::EntityBlobs::gc) its roots: a set kept anywhere
+    /// [`EntityBlobs::gc`](crate::blobs::EntityBlobs::gc) its roots: a set kept anywhere
     /// else would be swept by the entity's own sweep.
     state_roots: Mutex<RootSet>,
 }
@@ -850,7 +889,7 @@ impl<FS: FacetSet> FacetCell<FS> {
     /// A fresh cell with empty forms and no armed stage. Asserts the declared
     /// tags are distinct, nonzero, and within the tag space (a duplicated tag
     /// would make record dispatch ambiguous; tag 0 is facet 0's; the high bit is
-    /// the envelope-revision escape, [`MAX_TAG`]).
+    /// the envelope-revision escape, `MAX_TAG`).
     pub(crate) fn new() -> FacetCell<FS> {
         let mut seen = BTreeSet::new();
         for &tag in FS::TAGS {
@@ -939,7 +978,7 @@ impl<FS: FacetSet> FacetCell<FS> {
     }
 
     /// The union of every facet's blob roots **and facet 0's** (§7.12): what the
-    /// host adds to any [`EntityBlobs::gc`](crate::EntityBlobs::gc) sweep.
+    /// host adds to any [`EntityBlobs::gc`](crate::blobs::EntityBlobs::gc) sweep.
     pub(crate) fn roots(&self) -> BTreeSet<BlobId> {
         let mut roots = FS::roots(&self.forms.lock().expect("facet forms lock"));
         roots.extend(self.state_roots());
