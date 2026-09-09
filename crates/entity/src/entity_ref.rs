@@ -1079,12 +1079,12 @@ where
         None => Arc::new(MemoryEntityStore::new()),
     };
     let io = capabilities.blocking_io();
-    let replica_store = system.spawn(ReplicaStore::<G>::new(Arc::clone(&store), Arc::clone(io)));
+    let replica_store = system.spawn(ReplicaStore::<S>::new(Arc::clone(&store), Arc::clone(io)));
     system
         .receptionist()
-        .register(replica_store_key::<G>(entity_type), &replica_store);
+        .register(replica_store_key::<S>(entity_type), &replica_store);
     let transport: Arc<dyn ReplicaTransport> =
-        Arc::new(ActorReplicaTransport::<G>::new(system.clone(), entity_type));
+        Arc::new(ActorReplicaTransport::<S>::new(system.clone(), entity_type));
     // Build the consensus-agreed shard map (§7.6): a per-type Raft group whose
     // committed log is the allocation, so every node agrees on each shard's replica
     // set and only the replicas store it. Keyed by the runtime `entity_type`, so two

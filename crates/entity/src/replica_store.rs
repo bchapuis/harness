@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use actor_core::Actor;
 use actor_core::ActorRef;
-use actor_core::ActorSystem;
 use actor_core::BoxFuture;
 use actor_core::CallError;
 use actor_core::Ctx;
@@ -35,7 +34,6 @@ use std::sync::Arc;
 use crate::blobs::BlobId;
 use crate::blocking::BlockingIo;
 use crate::blocking::on_store;
-use crate::entity::Entity;
 use crate::entity::EntityName;
 use crate::journal::Seq;
 use crate::journal::Term;
@@ -46,6 +44,7 @@ use crate::store::EntityStore;
 use crate::store::ReadOutcome;
 use crate::store::StoreAck;
 use crate::store::WriteKind;
+use crate::system::EntitySystem;
 
 /// Per-entity-type interned key strings for the replica store. The receptionist keys
 /// purely by string, so the replica store MUST register under a string distinct from
@@ -69,7 +68,9 @@ fn replica_store_key_id(entity_type: &'static str) -> &'static str {
 /// well-known key per type (distinct from the gateway's), one entry per node; the
 /// replicator looks a replica node's store up here, the way routing looks a gateway
 /// up (spec §5.3).
-pub(crate) fn replica_store_key<G: Entity>(entity_type: &'static str) -> Key<ReplicaStore<G>> {
+pub(crate) fn replica_store_key<S: EntitySystem>(
+    entity_type: &'static str,
+) -> Key<ReplicaStore<S>> {
     Key::new(replica_store_key_id(entity_type))
 }
 
@@ -242,11 +243,18 @@ impl Message for ListBlobs {
     const MANIFEST: Manifest = Manifest::new("entity.ListBlobs");
 }
 
-/// The node-local replica store for entity type `G` (spec §7.2): a thin actor over
+/// The node-local replica store for one entity type (spec §7.2): a thin actor over
 /// this node's [`EntityStore`], reachable across the cluster so the shard leader's
 /// replicator can quorum-append to it and read it back for recovery. One per node
 /// per entity type (like the gateway), registered under [`replica_store_key`].
-pub(crate) struct ReplicaStore<G: Entity> {
+///
+/// Parameterized by the **system**, not by the entity type: this actor never folds
+/// state, applies an event, or names a facet, so `S: EntitySystem` is the whole of
+/// what it needs. Two entity types on one system therefore share this Rust type and
+/// are told apart the way the receptionist tells anything apart, by the key string
+/// [`replica_store_key_id`] interns per type. The parameter survives only because
+/// [`Actor::System`] must name a system and a struct must use its parameters.
+pub(crate) struct ReplicaStore<S: EntitySystem> {
     store: Arc<dyn EntityStore>,
     /// Where this replica's blocking store calls run (§7.4). Every durable write in
     /// the cluster that is not the leader's own copy arrives here, so this is the
@@ -254,11 +262,11 @@ pub(crate) struct ReplicaStore<G: Entity> {
     /// is also driving this node's Raft heartbeats and every other shard's quorum
     /// wait (see [`crate::blocking`]).
     io: Arc<dyn BlockingIo>,
-    _marker: PhantomData<fn() -> G>,
+    _marker: PhantomData<fn() -> S>,
 }
 
-impl<G: Entity> ReplicaStore<G> {
-    pub(crate) fn new(store: Arc<dyn EntityStore>, io: Arc<dyn BlockingIo>) -> ReplicaStore<G> {
+impl<S: EntitySystem> ReplicaStore<S> {
+    pub(crate) fn new(store: Arc<dyn EntityStore>, io: Arc<dyn BlockingIo>) -> ReplicaStore<S> {
         ReplicaStore {
             store,
             io,
@@ -267,10 +275,10 @@ impl<G: Entity> ReplicaStore<G> {
     }
 }
 
-impl<G: Entity> Actor for ReplicaStore<G> {
-    type System = G::System;
+impl<S: EntitySystem> Actor for ReplicaStore<S> {
+    type System = S;
 
-    fn register(registry: &mut HandlerRegistry<ReplicaStore<G>>) {
+    fn register(registry: &mut HandlerRegistry<ReplicaStore<S>>) {
         registry.accept::<StoreRecord>();
         registry.accept::<ReadEntity>();
         registry.accept::<StoreSnapshot>();
@@ -289,8 +297,8 @@ impl<G: Entity> Actor for ReplicaStore<G> {
 // this replica toward a quorum for something this node has not stored (**E14**). The
 // store settles the write before it returns, so the durability is the offloaded call's
 // own: there is nothing further to await here.
-impl<G: Entity> Handler<StoreRecord> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: StoreRecord, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
+impl<S: EntitySystem> Handler<StoreRecord> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: StoreRecord, _ctx: &Ctx<ReplicaStore<S>>) -> StoreAck {
         on_store(&self.io, &self.store, move |store| {
             store.store_record(
                 msg.shard,
@@ -308,8 +316,8 @@ impl<G: Entity> Handler<StoreRecord> for ReplicaStore<G> {
     }
 }
 
-impl<G: Entity> Handler<ReadEntity> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: ReadEntity, _ctx: &Ctx<ReplicaStore<G>>) -> ReadOutcome {
+impl<S: EntitySystem> Handler<ReadEntity> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: ReadEntity, _ctx: &Ctx<ReplicaStore<S>>) -> ReadOutcome {
         on_store(&self.io, &self.store, move |store| {
             store.prepare(msg.shard, &msg.entity, msg.term)
         })
@@ -317,8 +325,8 @@ impl<G: Entity> Handler<ReadEntity> for ReplicaStore<G> {
     }
 }
 
-impl<G: Entity> Handler<StoreSnapshot> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: StoreSnapshot, _ctx: &Ctx<ReplicaStore<G>>) -> StoreAck {
+impl<S: EntitySystem> Handler<StoreSnapshot> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: StoreSnapshot, _ctx: &Ctx<ReplicaStore<S>>) -> StoreAck {
         on_store(&self.io, &self.store, move |store| {
             store.store_snapshot(
                 msg.shard,
@@ -333,8 +341,8 @@ impl<G: Entity> Handler<StoreSnapshot> for ReplicaStore<G> {
     }
 }
 
-impl<G: Entity> Handler<SealRange> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: SealRange, _ctx: &Ctx<ReplicaStore<G>>) {
+impl<S: EntitySystem> Handler<SealRange> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: SealRange, _ctx: &Ctx<ReplicaStore<S>>) {
         // The bound must be durable before this ask resolves, or a majority could
         // report itself sealed while a restart would forget the promise (**E15**).
         on_store(&self.io, &self.store, move |store| {
@@ -344,8 +352,8 @@ impl<G: Entity> Handler<SealRange> for ReplicaStore<G> {
     }
 }
 
-impl<G: Entity> Handler<StoreBlob> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: StoreBlob, _ctx: &Ctx<ReplicaStore<G>>) -> BlobAck {
+impl<S: EntitySystem> Handler<StoreBlob> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: StoreBlob, _ctx: &Ctx<ReplicaStore<S>>) -> BlobAck {
         on_store(&self.io, &self.store, move |store| {
             store.put_blob(msg.shard, &msg.entity, msg.id, msg.bytes)
         })
@@ -353,22 +361,22 @@ impl<G: Entity> Handler<StoreBlob> for ReplicaStore<G> {
     }
 }
 
-impl<G: Entity> Handler<FetchBlob> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: FetchBlob, _ctx: &Ctx<ReplicaStore<G>>) -> Option<ByteBuf> {
+impl<S: EntitySystem> Handler<FetchBlob> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: FetchBlob, _ctx: &Ctx<ReplicaStore<S>>) -> Option<ByteBuf> {
         self.store
             .get_blob(msg.shard, &msg.entity, msg.id)
             .map(ByteBuf::from)
     }
 }
 
-impl<G: Entity> Handler<HasBlob> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: HasBlob, _ctx: &Ctx<ReplicaStore<G>>) -> bool {
+impl<S: EntitySystem> Handler<HasBlob> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: HasBlob, _ctx: &Ctx<ReplicaStore<S>>) -> bool {
         self.store.has_blob(msg.shard, &msg.entity, msg.id)
     }
 }
 
-impl<G: Entity> Handler<SweepBlobs> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: SweepBlobs, _ctx: &Ctx<ReplicaStore<G>>) {
+impl<S: EntitySystem> Handler<SweepBlobs> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: SweepBlobs, _ctx: &Ctx<ReplicaStore<S>>) {
         // Offloaded like the writes: a sweep unlinks one file per reclaimed blob, so
         // an entity that has churned a large disk image makes this thousands of
         // synchronous unlinks against the same device the durability path needs.
@@ -380,22 +388,22 @@ impl<G: Entity> Handler<SweepBlobs> for ReplicaStore<G> {
     }
 }
 
-impl<G: Entity> Handler<ListEntities> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: ListEntities, _ctx: &Ctx<ReplicaStore<G>>) -> Vec<EntityName> {
+impl<S: EntitySystem> Handler<ListEntities> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: ListEntities, _ctx: &Ctx<ReplicaStore<S>>) -> Vec<EntityName> {
         self.store.entities(msg.shard)
     }
 }
 
-impl<G: Entity> Handler<ListBlobs> for ReplicaStore<G> {
-    async fn handle(&mut self, msg: ListBlobs, _ctx: &Ctx<ReplicaStore<G>>) -> Vec<BlobId> {
+impl<S: EntitySystem> Handler<ListBlobs> for ReplicaStore<S> {
+    async fn handle(&mut self, msg: ListBlobs, _ctx: &Ctx<ReplicaStore<S>>) -> Vec<BlobId> {
         self.store.blob_ids(msg.shard, &msg.entity)
     }
 }
 
 /// How the replicator reaches a shard's replica stores (spec §7.2). Object-safe, so
-/// the journal stays generic over just the consensus type `R` and never names `G`:
-/// the one G-aware piece (the typed [`ReplicaStore`] ref and its receptionist key)
-/// lives behind this seam, built in `entities_named` where `G` is known.
+/// the journal stays generic over just the consensus type `R` and names no system
+/// type at all: the typed [`ReplicaStore`] ref and its receptionist key live behind
+/// this seam, built in `entities_named` where the system is known.
 pub trait ReplicaTransport: Send + Sync + 'static {
     #[allow(clippy::too_many_arguments)]
     fn store_record(
@@ -518,13 +526,13 @@ pub trait ReplicaTransport: Send + Sync + 'static {
 /// is a local call with no serialization (§5.2). Resolution is a local receptionist
 /// read each call, never stale across a peer restart (a restarted node re-registers a
 /// fresh ref).
-pub(crate) struct ActorReplicaTransport<G: Entity> {
-    system: G::System,
+pub(crate) struct ActorReplicaTransport<S: EntitySystem> {
+    system: S,
     entity_type: &'static str,
 }
 
-impl<G: Entity> ActorReplicaTransport<G> {
-    pub(crate) fn new(system: G::System, entity_type: &'static str) -> ActorReplicaTransport<G> {
+impl<S: EntitySystem> ActorReplicaTransport<S> {
+    pub(crate) fn new(system: S, entity_type: &'static str) -> ActorReplicaTransport<S> {
         ActorReplicaTransport {
             system,
             entity_type,
@@ -532,10 +540,10 @@ impl<G: Entity> ActorReplicaTransport<G> {
     }
 
     /// The replica store registered on `node`, if discovered (spec §5.3).
-    fn resolve(&self, node: NodeId) -> Option<ActorRef<ReplicaStore<G>>> {
+    fn resolve(&self, node: NodeId) -> Option<ActorRef<ReplicaStore<S>>> {
         self.system
             .receptionist()
-            .lookup(replica_store_key::<G>(self.entity_type))
+            .lookup(replica_store_key::<S>(self.entity_type))
             .into_vec()
             .into_iter()
             .find(|store| store.id().node() == node)
@@ -551,7 +559,7 @@ impl<G: Entity> ActorReplicaTransport<G> {
     ) -> BoxFuture<'static, Result<M::Reply, CallError>>
     where
         M: Message,
-        ReplicaStore<G>: Handler<M>,
+        ReplicaStore<S>: Handler<M>,
     {
         let store = self.resolve(node);
         Box::pin(async move {
@@ -563,7 +571,7 @@ impl<G: Entity> ActorReplicaTransport<G> {
     }
 }
 
-impl<G: Entity> ReplicaTransport for ActorReplicaTransport<G> {
+impl<S: EntitySystem> ReplicaTransport for ActorReplicaTransport<S> {
     #[allow(clippy::too_many_arguments)]
     fn store_record(
         &self,
