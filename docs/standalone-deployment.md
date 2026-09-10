@@ -58,14 +58,14 @@ Two agent kinds are registered on every node:
 
 Every `--sandbox` mode carries the typed file tools
 (`read_file`, `write_file`, `edit_file`, `list_dir`, `remove`) over a workspace
-backed by a durable filesystem entity (entity §7.10), so a session's files
-survive hibernation, migration, and node loss. The shell-capable modes add two
-tools on top of the same workspace: `shell`, the Native tier (the container or
-microVM `--sandbox` selected), and `run_js`, the hermetic QuickJS Compute tier
-(sandbox spec §3.2), so the model runs JavaScript without any language runtime
-in the shell image. The runtime-free `--sandbox durable` mode has the file
-tools alone, with no `shell` and no `run_js`, so the rows above lose their last two
-entries.
+backed by the session entity's own workspace facet (entity §7.11), so a
+session's files survive hibernation, migration, and node loss. The shell-capable
+modes add two tools on top of the same workspace: `shell`, the Native tier (the
+container or microVM `--sandbox` selected), and `run_js`, the hermetic QuickJS
+Compute tier (sandbox spec §3.2), so the model runs JavaScript without any
+language runtime in the shell image. The runtime-free `--sandbox durable` mode
+has the file tools alone, with no `shell` and no `run_js`, so the rows above
+lose their last two entries.
 
 ## Prerequisites
 

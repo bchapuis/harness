@@ -370,9 +370,9 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, entity_store: EntitySto
     // declarations (and a profile image in docker/firecracker mode), so the digests
     // differ; a mixed-mode cluster fails to agree instead of silently splitting
     // confinement. Every mode offers the typed `Workspace` file tools over the
-    // durable entity-backed workspace (§7.10); the shell-capable modes add `shell`
-    // (the confined Native tier) and `run_js` (the hermetic QuickJS Compute tier,
-    // sandbox spec §3.2) on top, over the same workspace.
+    // entity's own workspace facet (entity §7.11); the shell-capable modes add
+    // `shell` (the confined Native tier) and `run_js` (the hermetic QuickJS
+    // Compute tier, sandbox spec §3.2) on top, over the same workspace.
     let with_file_tools = |kind: Kind| -> Kind {
         agent_sandbox::workspace_tools()
             .into_iter()
@@ -393,8 +393,8 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, entity_store: EntitySto
                     .tool(agent_sandbox::run_js_tool())
                     .sandbox(agent::SandboxProfile::image(rootfs)),
             ),
-            // No guest shell or compute: the typed file tools alone, over the durable
-            // filesystem entity (entity §7.10).
+            // No guest shell or compute: the typed file tools alone, over the
+            // workspace facet's directory (entity §7.11).
             SandboxMode::Durable => with_file_tools(kind),
         }
     };
