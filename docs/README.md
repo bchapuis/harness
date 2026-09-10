@@ -13,12 +13,18 @@ suite, so there is no Rust copy to hold it against (its V3 is asserted at compil
 time and its V4/V5 by the golden corpus instead, compatibility §4). They layer
 bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`,
 `entity §N`, and so on), citations the build resolves rather than trusts (the
-`spec` crate, under Testing). The one exception is the workflow, which cites the agent runtime above it: that is the
-layer the workflow generalizes, so it is at once the motivation and the measure. The dependency runs the right way
-in both senses now: `agent` depends on `workflow`, and it implements `Workflow` rather than re-deriving it, so what
-the citations point at is a worked consumer rather than a plan. What the agent kept beside the cycle is the
-environment reconciliation of agent §5.4, §5.5 and §5.6, which is activation state and so no function of any fold;
-it runs as a pre-pass ahead of every tick.
+`spec` crate, under Testing). A spec may still *name* a layer above it where that
+is what explains a choice: actor §9.4.3 cites entity's group-per-shard count to
+motivate heartbeat coalescing, cluster-utilities §4 and §7 cite entity to
+disclaim a sharding utility, and entity §7.17 names the agent as the steps
+facet's reference consumer. The workflow is the one whose *argument* runs upward:
+it cites the agent runtime as its motivation, its worked example, and its
+measure, because the agent is the layer it generalizes. The crate dependency runs
+the other way, `agent` on `workflow`, and the agent implements `Workflow` rather
+than re-deriving it, so what those citations point at is a worked consumer. What
+the agent keeps beside the cycle is the environment reconciliation of agent §5.4,
+§5.5 and §5.6, which is activation state and so no function of any fold; it runs
+as a pre-pass ahead of every tick.
 
 | | Spec | Owns | Invariants |
 |---|---|---|---|

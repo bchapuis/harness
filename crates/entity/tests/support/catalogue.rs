@@ -126,7 +126,7 @@ const E_CATALOGUE: &[CatalogueEntry] = &[
     CatalogueEntry {
         invariant: 14,
         spec: "entity §8, §8.3",
-        property: "Lossless failover: a new shard leader recovers each entity's committed head from a write quorum; by quorum intersection no acknowledged write is lost across a leadership change",
+        property: "Lossless failover: a new shard leader recovers each entity's committed head by fence-reading a read quorum and writing the merged tail back under its own term; by quorum intersection no acknowledged write is lost across a leadership change",
         verify: &[Verify::SimTest(
             "clustered_entities.rs, entity_swarm.rs, partition_safety.rs, raft_journal.rs, ws_clustered.rs, ws_swarm.rs",
         )],

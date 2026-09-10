@@ -481,9 +481,9 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         }
     }
 
-    /// Recover an entity's head from a write quorum by read-repair (spec §8, **E14**):
-    /// the rehydration barrier. Fence-read a quorum
-    /// (a Paxos prepare that bars a deposed leader from committing after we read),
+    /// Recover an entity's head by read-repair over a read quorum (spec §8,
+    /// **E14**): the rehydration barrier. Fence-read that quorum (a Paxos prepare
+    /// that bars a deposed leader from committing after we read),
     /// take the highest-term record per slot, write the recovered tail back under our
     /// own term so the adopted head is itself quorum-durable, and leave the records
     /// and snapshot in the local store so subsequent `load`/`load_snapshot` read
