@@ -61,7 +61,7 @@ const B_CATALOGUE: &[CatalogueEntry] = &[
         property: "No consensus on the data path: no election, term, agreement round, or write-time read-repair; concurrent writers of the same content do not coordinate and do not fork",
         // Structural, and checked as such: the crate depends on `actor-cluster`, not
         // `entity`, so there is no consensus group available for the data path to
-        // run. The drift test asserts that from Cargo.toml: the day someone adds a
+        // run. The drift test asserts that from Cargo.toml: the day someone adds an
         // entity dependency, this invariant needs re-arguing rather than assuming.
         verify: &[Verify::CompileTime(
             "blob-store depends on actor-cluster, not entity: no consensus group exists to run \

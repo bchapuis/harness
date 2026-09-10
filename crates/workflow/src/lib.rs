@@ -125,7 +125,7 @@ impl<K, E> Pending<K, E> {
         }
     }
 
-    /// A pending effect whose repetition the consumer will not risk blindly: a
+    /// A pending effect whose repetition the consumer will not risk blindly: an
     /// orphaned one resolves as [`EffectError::Interrupted`] and the consumer
     /// decides (§4.4).
     pub fn interrupt(key: K, effect: E) -> Self {
@@ -137,7 +137,7 @@ impl<K, E> Pending<K, E> {
     }
 }
 
-/// Resume's policy for a **orphaned** effect: one whose intent committed and
+/// Resume's policy for an **orphaned** effect: one whose intent committed and
 /// whose outcome did not, so nothing says whether it ran (spec §4.4).
 ///
 /// This is the workflow's type, and the home of the decision. The agent runtime's

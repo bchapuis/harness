@@ -429,7 +429,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
         // awaited first: the peer asks are lazy futures, so awaiting the flush here
         // would keep every `StoreRecord` off the wire until this node's disk answered,
         // making a commit cost `local + RTT`. `local_store_ack` gives back a handle so
-        // the write is still awaited before this returns (which is what preserves a
+        // the write is still awaited before this returns (which is what preserves an
         // entity's write order), but the peers travel while it runs.
         let (name, shard) = (entity.clone(), self.shard);
         let (local, local_write) =

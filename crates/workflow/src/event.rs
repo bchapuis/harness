@@ -61,7 +61,7 @@ pub enum WorkflowEvent {
     /// arrived and changed nothing.
     ///
     /// Emitted **after** the records commit when there are records to commit
-    /// (§8): the workflow stages it and releases it from the workflow that follows the
+    /// (§8): the workflow stages it and releases it from the tick that follows the
     /// commit, so a settle whose append fails (the activation stepping down)
     /// leaves no `Settled` claiming records that never became durable. A settle
     /// that decided no records has nothing to wait for and emits at once.

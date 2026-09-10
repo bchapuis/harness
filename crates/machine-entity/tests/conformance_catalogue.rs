@@ -114,7 +114,7 @@ fn the_ingress_and_egress_invariants_are_verified_outside_the_entity_suites() {
     // M4 and M6 are the machine's two seam invariants (§5), and neither is provable
     // from the entity's own simulation: the front door terminates SSH in another
     // crate, and the egress rules are a pure generator with no entity in the loop.
-    // Pinning that here keeps a future edit from "simplifying" them into a
+    // Pinning that here keeps a future edit from "simplifying" them into an
     // entity-only pointer that no longer covers what the invariant claims.
     // Asked of where the named tests actually live rather than of how the pointer
     // is spelled: the catalogue names functions, and a function says nothing about

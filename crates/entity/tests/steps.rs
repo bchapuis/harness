@@ -143,7 +143,7 @@ fn steps_memoize_across_hibernation() {
 #[test]
 fn a_relaunched_step_does_not_overwrite_the_memo() {
     // The write-once rule, driven rather than waited for. The effect takes time and
-    // the entity may hibernate under it, so the second touch below re-activates a
+    // the entity may hibernate under it, so the second touch below re-activates an
     // entity whose `fetch` is still outstanding: the drive that follows finds an
     // unresolved step and launches a *second* effect carrying a different ordinal.
     // `complete_step` refuses the second result, so the memo (and the terminal

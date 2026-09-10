@@ -18,7 +18,7 @@
 //! coverage claim that only came true on a wide run would be a claim about the
 //! run rather than the workload. Most hibernating workloads earn that by
 //! *driving* these paths rather than sampling them: they idle past `idle_after`
-//! on a fixed cadence rather than a seeded coin, and snapshot often enough that a
+//! on a fixed cadence rather than a seeded coin, and snapshot often enough that an
 //! entity has a checkpoint to return from before it first hibernates. What stays
 //! seeded is everything the nemesis and the wire do around that.
 //!
@@ -71,7 +71,7 @@ impl Exercised {
     /// Assert this sweep really hibernated: the shape every hibernating sweep
     /// wants, so the four of them state it once.
     ///
-    /// Deliberately *not* including [`restarted`](Self::restarted). Whether a
+    /// Deliberately *not* including [`restarted`](Self::restarted). Whether an
     /// entity hibernates and returns is something the workload drives, so it holds
     /// however narrow the run; whether the nemesis ever *draws* a restart is a
     /// property of the seed range, which at `slow_seeds`' single local seed is a

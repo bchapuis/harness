@@ -519,7 +519,7 @@ pub use agent::testing::agent_invariants;
 /// `TierAcquired` at that tier with no `WorkspaceReset` in between, and every
 /// acquired or executed tier lies within the kind's cap.
 ///
-/// Synthesized outcomes: an unknown name, malformed arguments (§5.4), or a
+/// Synthesized outcomes: an unknown name, malformed arguments (§5.4), or an
 /// orphaned call resolved as `Interrupted` on resume (§5.5); carry no effect and
 /// are exempt.
 pub fn audit_tier_acquisition(records: &[agent::Record], kind: &agent::Kind) {

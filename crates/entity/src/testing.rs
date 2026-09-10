@@ -66,7 +66,7 @@ impl Invariant for CommitMonotonic {
     }
 }
 
-/// **Exactly-once activation per node** (invariant **E6**): on any one node, a
+/// **Exactly-once activation per node** (invariant **E6**): on any one node, an
 /// entity is never live twice at once.
 ///
 /// Keyed by `(node, name)`, so an activation that migrates to another leader on

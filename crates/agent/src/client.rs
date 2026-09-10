@@ -78,7 +78,7 @@ fn leak_entity_type(kind_id: &KindId) -> &'static str {
     id
 }
 
-/// The system a harness runs on: exactly an [`EntitySystem`] (the agent is a
+/// The system a harness runs on: exactly an [`EntitySystem`] (the agent is an
 /// entity, §2.1; its events ride [`ActorSystem::emit`]). The name is the
 /// harness's own vocabulary for the requirement, so a consumer writes
 /// `S: HarnessSystem` without naming the storage layer; the blanket impl makes
@@ -150,7 +150,7 @@ impl Default for HarnessConfig {
 pub(crate) struct Shared<S: HarnessSystem> {
     pub(crate) kinds: Kinds,
     pub(crate) config: HarnessConfig,
-    /// One `Entities` handle per kind, set once after every kind is built, so a
+    /// One `Entities` handle per kind, set once after every kind is built, so an
     /// entity can address children of any kind for delegation (§8.1) and cancel
     /// propagation (§9.2). Filled after construction: the factories that produce
     /// activations are captured before the handles exist.

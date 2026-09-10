@@ -138,7 +138,7 @@ Any image works; the choice is just what `shell` finds on its `PATH`.
 model to actually run things. `alpine:3.20` is leaner (sh + awk only) if you
 only need file and text tasks.
 
-Without docker (or `/dev/kvm` for firecracker), run `--sandbox durable`: a
+Without docker (or `/dev/kvm` for firecracker), run `--sandbox durable`: an
 entity-backed durable workspace with the typed file tools and no shell, and no
 container runtime required.
 

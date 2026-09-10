@@ -275,7 +275,7 @@ A failing tool does not fail the run. The agent runtime journals its `ToolError`
 
 ### 5.5 Crash, loss, and resume (no silent loss)
 
-A tool call's **intent** is journaled before execution and its **outcome** after (§6.4); a crash, hibernation, or migration between the two leaves a *orphaned call*. On the next activation (entity §10, §7.5):
+A tool call's **intent** is journaled before execution and its **outcome** after (§6.4); a crash, hibernation, or migration between the two leaves an *orphaned call*. On the next activation (entity §10, §7.5):
 
 - an orphaned call declared `OnOrphan::Reexecute` MUST be re-executed, in a fresh sandbox if the old one is gone; the re-execution may fail for exactly that reason, surfacing per §5.4;
 - an orphaned call declared `Interrupt` MUST be resolved as `ToolError::Interrupted`, fed to the model like any tool failure (§5.4), so the *model* decides whether to retry the side effect.

@@ -154,7 +154,7 @@ use crate::store::WriteGuard;
 use crate::store::WriteKind;
 
 /// Upper bound on one framed record's payload, a sanity check while scanning: a
-/// length above this is treated as corruption, not an allocation. Generous, since a
+/// length above this is treated as corruption, not an allocation. Generous, since an
 /// entity's record bytes and a whole-segment `Checkpoint` record can be large.
 const MAX_RECORD: u32 = 1 << 30;
 
@@ -453,7 +453,7 @@ impl FileEntityStore {
     ///
     /// Every loaded segment holds an **open file descriptor** (a `Wal` owns its
     /// `File`), and until this existed nothing ever closed one: a segment entered the
-    /// map on first access and left only when its entity was explicitly deleted. A
+    /// map on first access and left only when its entity was explicitly deleted. An
     /// entity hibernating (§10) does not touch the store, so a node accumulated one fd
     /// per distinct entity it had *ever* served, for its whole lifetime: a hard
     /// ceiling at the process's descriptor limit, reached at an entity count far below

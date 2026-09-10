@@ -160,9 +160,9 @@ impl<D: Workflow> Engine<D> {
     ///
     /// A consumer calls this from `Entity::can_hibernate` and MAY narrow it
     /// further by conjoining its own condition; it never has to widen it. The
-    /// harness narrows exactly once, for a turn accepted into its queue but not
-    /// yet started: work owed *now* that no effect represents, so it is invisible
-    /// to the desired set.
+    /// agent runtime narrows exactly once, for a turn accepted into its queue
+    /// but not yet started: work owed *now* that no effect represents, so it is
+    /// invisible to the desired set.
     ///
     /// It answers from the last cycle's conclusion rather than recomputing,
     /// because `can_hibernate` takes no seams and so cannot read the clock. That
@@ -179,7 +179,7 @@ impl<D: Workflow> Engine<D> {
     /// consumer's own commit (§3.2 item 1) or after anything that commits nothing
     /// (§3.2 item 4).
     ///
-    /// A consumer calls this from every handler whose records it wants workflow,
+    /// A consumer calls this from every handler whose records it wants driven,
     /// with the `state` the handler was given. The tell is launched, not awaited,
     /// so it runs after the current handler's records commit, which is what makes
     /// launching effects from the resulting cycle honor the write-ahead discipline
@@ -435,7 +435,7 @@ impl<D: Workflow> Engine<D> {
     // -- launching -----------------------------------------------------------
 
     /// Hand one effect to the spawner and return (§3.2). The engine MUST NOT await
-    /// a launch: the activation therefore never blocks, which is what lets a
+    /// a launch: the activation therefore never blocks, which is what lets an
     /// entity with a hundred outstanding effects hold no thread and, once
     /// quiescent, no memory.
     fn launch(&self, workflow: &D, ctx: &EntityCtx<D>, key: D::Key, effect: D::Effect) {

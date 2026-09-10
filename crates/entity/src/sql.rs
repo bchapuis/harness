@@ -89,7 +89,7 @@ impl std::fmt::Display for SqlError {
 
 impl std::error::Error for SqlError {}
 
-/// One SQL value, in and out of the database (spec §7.14). Serializable so a
+/// One SQL value, in and out of the database (spec §7.14). Serializable so an
 /// entity can carry query results in its replies.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SqlValue {

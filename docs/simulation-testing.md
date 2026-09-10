@@ -634,10 +634,10 @@ One question decides it: **whose contract is this a claim about?**
 | one suite's workload | that suite's own file | `SingletonConverged` in `conformance_swarm.rs` |
 
 The middle tier is feature-gated because it is test support, not part of the
-crate's API, and it must not ship in a production build. `entity` and `harness`
-both have one; a crate reaches another's by enabling it in dev-dependencies
-(`entity = { workspace = true, features = ["testing"] }`), and its own by
-depending on itself (`agent = { path = ".", features = ["testing"] }`).
+crate's API, and it must not ship in a production build. `entity`, `workflow`,
+and `agent` each have one; a crate reaches another's by enabling it in
+dev-dependencies (`entity = { workspace = true, features = ["testing"] }`), and
+its own by depending on itself (`agent = { path = ".", features = ["testing"] }`).
 
 Each shared invariant is constructed with the label it reports under, so a suite
 still names its own violations:

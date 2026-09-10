@@ -1,7 +1,7 @@
 //! The per-node replica-store actor and the [`ReplicaTransport`] seam (spec §7.2, §8).
 //!
 //! Durability in the `Quorum` tier is a **per-entity quorum append** (§7.2): the
-//! shard leader's [`QuorumReplicator`](crate::replicator::QuorumReplicator) fans a
+//! shard leader's [`QuorumReplicator`](crate::replicator::QuorumReplicator) fans an
 //! entity's records out to the shard's replicas and reports them durable once a
 //! quorum has stored them. This module is the replicas' side of that protocol and
 //! the leader's way of reaching them, both built on actor messaging so entity adds

@@ -14,7 +14,7 @@ export ANTHROPIC_API_KEY=sk-ant-…
 That builds the workspace and boots a three-node cluster: three OS processes on
 your machine, each with its own data directory (the journal replicates between
 them; nothing is shared on disk), each `shell` call inside a per-session
-container. In front of it sits the HTTP gateway on `127.0.0.1:8080`. Engine a
+container. In front of it sits the HTTP gateway on `127.0.0.1:8080`. Drive a
 session with `curl`, streaming the run as Server-Sent Events:
 
 ```sh

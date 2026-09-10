@@ -54,7 +54,7 @@ pub fn index_key(target_type: &str, shard: usize) -> String {
 }
 
 /// One registered entity's state: its pending deadline and the **journal head** of
-/// the target entity at the commit that last changed it. The head totally orders a
+/// the target entity at the commit that last changed it. The head totally orders an
 /// entity's own alarm changes (it advances by every commit and never regresses, even
 /// across activations), so the index resolves an out-of-order pair of updates (the
 /// register and clear a single activation may emit as independently launched

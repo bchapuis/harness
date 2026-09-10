@@ -301,7 +301,7 @@ pub trait EntityStore: EntityBlobStore {
     ) -> StoreAck;
 
     /// Every occupied slot (with its term) and the latest snapshot for an entity:
-    /// a non-fencing local read, used for recovery merge and replay (§9). Empty for a
+    /// a non-fencing local read, used for recovery merge and replay (§9). Empty for an
     /// entity this store has never seen. The reply may name records this store has
     /// applied but not yet made stable, which a caller must not count toward a quorum
     /// (**E14**).
@@ -447,7 +447,7 @@ pub trait EntityStore: EntityBlobStore {
 
 /// How the runtime obtains a node's [`EntityStore`] (spec §7.4). Supplied on
 /// [`EntityConfig`](crate::EntityConfig); a factory that **caches per
-/// `(entity_type, node)`**, held by the deployment across a restart, is what makes a
+/// `(entity_type, node)`**, held by the deployment across a restart, is what makes an
 /// entity's records survive a full-cluster cold restart. The default is a fresh
 /// ephemeral [`MemoryEntityStore`] per store (lost on restart).
 ///
@@ -483,7 +483,7 @@ pub(crate) struct EntityRecords {
 }
 
 /// A serializable checkpoint of one entity's segment (spec §9): the basis for the
-/// file store's per-entity, snapshot-driven log compaction. The file store rewrites a
+/// file store's per-entity, snapshot-driven log compaction. The file store rewrites an
 /// entity's segment to a single `Checkpoint` op holding this, folding away the record
 /// ops the entity's snapshot made redundant.
 ///

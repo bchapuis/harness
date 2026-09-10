@@ -115,7 +115,7 @@ pub struct EntityBlobs {
     entity: EntityName,
     /// The facets' live blob roots (spec §7.12), unioned into every
     /// [`gc`](EntityBlobs::gc) sweep by the handle itself, so an application's
-    /// mark-from-roots sweep can never drop a facet's bytes (F3). Empty for a
+    /// mark-from-roots sweep can never drop a facet's bytes (F3). Empty for an
     /// entity with no facets.
     facet_roots: Arc<dyn Fn() -> BTreeSet<BlobId> + Send + Sync>,
 }

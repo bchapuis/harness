@@ -1,6 +1,6 @@
 //! Entities: durable objects ("entities") on the distributed actor framework.
 //!
-//! A **entity** is an actor plus three things (entity spec): a name-based virtual
+//! An **entity** is an actor plus three things (entity spec): a name-based virtual
 //! identity, a durable event-sourced journal, and a durability barrier on the
 //! reply. Everything else (mailboxes, serial execution, location-transparent
 //! `ask`/`tell`, supervision, death watch) is inherited unchanged from
@@ -48,8 +48,8 @@
 //!   CP trivially. Hosted on a [`LocalSystem`](actor_core::LocalSystem).
 //! - **`Quorum`, clustered** (the shard replicator, replicator.rs): the namespace is partitioned
 //!   into shards (`EntityConfig::shards`), each a leader-election Raft group holding
-//!   no entity data (§7.1) over which a per-entity **quorum append** (§7.2) makes a
-//!   entity's records durable on the shard's replicas, fenced by the shard term. A
+//!   no entity data (§7.1) over which a per-entity **quorum append** (§7.2) makes an
+//!   entity's records durable on the shard's replicas, fenced by the shard term. An
 //!   entity activates on its shard's leader (§5.2), an [`EntityRef`] call from any node
 //!   routes name→shard→leader (§5.4), the §8 single-writer fence and the
 //!   `NotLeader`/`Unavailable` durability outcomes (§11) apply, and a new leader
@@ -75,7 +75,7 @@
 //! reclaiming a leader-election group (E7). A split (or merge) seals the moving
 //! range on a quorum of stores (from which no append to it can reach a write
 //! quorum at any term) transfers each moved entity's committed prefix, snapshot,
-//! and blobs to the destination keys, and only then commits the new mapping, so a
+//! and blobs to the destination keys, and only then commits the new mapping, so an
 //! entity is writable in exactly one shard at any time and no write is lost or
 //! duplicated across the boundary (E15).
 //!
