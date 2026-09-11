@@ -17,11 +17,10 @@ use actor_simulation::Verify;
 /// quiescence (agent §6.3, E5), never a stream checker (agent spec §5.6
 /// item 6).
 ///
-/// Each `verify` entry names suites and nothing else, as its siblings do and as
-/// `Verify::SimTest` has always specified. What each suite contributes (the
-/// adversarial traversal, the two confinement smokes, the teardown accounting) is
-/// the spec row's to say, and §6 says it. Keeping the explanation in one of the two
-/// copies rather than both is what lets the other be checked.
+/// Each `verify` entry names suites and nothing else, as `Verify::SimTest`
+/// specifies. What each suite contributes is the spec row's to say, and §6 says
+/// it: keeping the explanation in one of the two copies rather than both is what
+/// lets the other be checked.
 pub fn s_catalogue() -> &'static [CatalogueEntry] {
     S_CATALOGUE
 }

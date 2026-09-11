@@ -3,7 +3,7 @@
 //!
 //! The `docs/` analogue of the per-crate catalogue drift tests. Those keep an
 //! invariant's "Verified by" column pointing at a real test; this keeps a spec's
-//! `entity §7.12` pointing at a real section. Both fail for the same reason,
+//! `entity §7.12` pointing at a real section. Both fail for the same reason:
 //! renaming or renumbering is a local edit whose citations are not local, and
 //! prose does not fail on its own.
 //!

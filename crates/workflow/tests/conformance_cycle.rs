@@ -1,12 +1,11 @@
 //! The workflow cycle end to end (workflow spec §3, §5, §6): W1, W2, W4, W7.
 //!
 //! Every test here runs the **real entity host, gateway, and journal** under one
-//! seed (§10): the workflow cycle is the only new code on the simulated path. What
-//! the assertions are about is not the plumbing but the four claims the cycle
-//! makes: that the desired set is a pure function of committed state, that
-//! everything in it eventually launches, that nothing launches before the record
-//! that wanted it committed, and that the activation hibernates exactly when its
-//! work has come to rest.
+//! seed (§10): the workflow cycle is the only new code on the simulated path. The
+//! assertions are about the four claims the cycle makes: that the desired set is
+//! a pure function of committed state, that everything in it eventually launches,
+//! that nothing launches before the record that wanted it committed, and that the
+//! activation hibernates exactly when its work has come to rest.
 
 mod support;
 
@@ -309,7 +308,7 @@ fn a_key_backed_off_to_the_cap_stops_holding_the_activation_resident() {
     // §6's at-rest clause. §3.4 imposes no attempt bound, so without it one
     // permanently unproductive effect would veto eviction forever and pin an
     // activation whose only remaining work is a timer: strictly worse than what
-    // the agent runtime does today (agent §9.2 item 3).
+    // the agent runtime does (agent §9.2 item 3).
     let sim = Simulation::new(31);
     let recorder = Recorder::new();
     let system = sim_system(&sim, &recorder);

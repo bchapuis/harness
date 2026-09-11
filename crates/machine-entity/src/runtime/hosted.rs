@@ -1,12 +1,12 @@
 //! The machine's production binding (machine §2.1): one implementation over
 //! [`machine_host::MachineHost`], whichever mechanism a node was configured with.
 //!
-//! A machine's durability does not depend on how its guest is held. The disk
+//! A machine's durability does not depend on how its guest is held: the disk
 //! facet's image is the durable thing (entity §7.15), the capture command's
 //! quiescent point is a pause, and `/workspace` travels as a tar over a channel
-//! to the guest agent, and all three read the same whether the guest is a
-//! Firecracker microVM or a container holding the same rootfs. So this file
-//! states them once, and `machine-host` states the two mechanisms:
+//! to the guest agent, whether the guest is a Firecracker microVM or a
+//! container holding the same rootfs. So this file states them once, and
+//! `machine-host` states the two mechanisms:
 //!
 //! - **The drive is the disk facet's materialized image** (entity §7.15), used in
 //!   place, no per-guest copy, because the guest writing that file between

@@ -5,8 +5,7 @@
 //! so an entity run produces one totally-ordered stream interleaved with the core
 //! actor events and the simulator's invariant checkers (§14) read them with
 //! [`Event::as_app::<EntityEvent>`](actor_core::Event::as_app). `EntityEvent`
-//! qualifies as an `AppEvent` through the framework's blanket impl; no
-//! hand-written impl is needed.
+//! qualifies as an `AppEvent` through the framework's blanket impl.
 
 use actor_core::NodeId;
 

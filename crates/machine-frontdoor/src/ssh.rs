@@ -272,7 +272,6 @@ impl<A: MachineAuthority, B: ChannelBackend> Handler for FrontDoorHandler<A, B> 
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // A shell: the login shell (empty argv), on a PTY if one was requested.
         let kind = self.channel_kind(vec![]);
         self.start_channel(channel, kind, session).await
     }

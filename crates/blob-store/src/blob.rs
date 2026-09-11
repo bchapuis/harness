@@ -19,8 +19,8 @@ use serde::Serialize;
 /// A `BlobId` is a pure function of the bytes: the same content yields the same
 /// id wherever and however it is stored, so a writer and a reader agree on a
 /// blob's name with no coordination, and a reader proves it received the right
-/// bytes by re-hashing them ([`verify`], B1). BLAKE3: every `get` re-hashes its
-/// bytes, so hashing sits on the read path, not only the write path (spec §2).
+/// bytes by re-hashing them ([`verify`], B1). BLAKE3 because every `get` re-hashes
+/// its bytes, so hashing sits on the read path too (spec §2).
 ///
 /// Rendered in lowercase hex for display.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -104,17 +104,17 @@ impl fmt::Debug for Namespace {
 /// A failure to store, fetch, or reclaim a blob (spec §3, Appendix A).
 ///
 /// Like the entity error model (entity §12), this carries only the failures of
-/// *reaching and committing*, kept distinct from a blob's bytes: a `get` either
-/// returns verified bytes or one of these, never wrong bytes (B1).
+/// *reaching and committing*: a `get` either returns verified bytes or one of
+/// these, never wrong bytes (B1).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlobError {
     /// Could not reach `W` copies on `put`, or any owner on `get` (spec §5.2).
     /// On `put` the blob MAY be partially stored; a retry is safe and idempotent,
     /// because the id is a pure function of the bytes (spec §3, B2).
     Unavailable(String),
-    /// A copy was found but none verified against the requested id (spec §4). The
-    /// id names the bytes the caller asked for; this means every reachable copy
-    /// failed that check, so the data is lost rather than silently wrong.
+    /// A copy was found but none verified against the requested id (spec §4):
+    /// every reachable copy failed that check, so the data is lost rather than
+    /// silently wrong.
     Corrupt(BlobId),
     /// The target namespace has been deleted (spec §5.3). Monotonic: once a
     /// namespace is gone it stays gone, so this never reverts to a live blob.
@@ -188,8 +188,7 @@ pub(crate) fn slice(bytes: Vec<u8>, range: Option<Range<u64>>) -> Vec<u8> {
 /// The simulation and deployment seam, like `EntityJournal`, `Transport`, and
 /// `Clock` (entity §7.3, actor §4.6): the [`Local`](crate) and `Clustered` tiers
 /// satisfy the contract identically. The trait is codec-agnostic: it moves raw
-/// bytes, and the [`BlobId`] is computed from those bytes, so no serialization
-/// format leaks across the seam.
+/// bytes, so no serialization format leaks across the seam.
 ///
 /// `Clone` (like `EntityJournal`) so the object-safe [`DynBlobStore`] mirror can
 /// adapt any implementation into `'static` boxed futures; tiers wrap an
@@ -265,7 +264,7 @@ type BoxFuture<T> = actor_core::BoxFuture<'static, T>;
 /// [`BlobStore`]'s `impl Future` returns are not object-safe; this mirror boxes
 /// them ([`BoxFuture`](actor_core::BoxFuture)). The blanket impl below clones the
 /// store and the namespace/id into each boxed future, so the returned future is
-/// `'static` and the caller borrows nothing.
+/// `'static`.
 pub trait DynBlobStore: Send + Sync + 'static {
     /// See [`BlobStore::put`].
     fn put(&self, ns: &Namespace, bytes: Vec<u8>) -> PutFuture;

@@ -159,8 +159,8 @@ pub(crate) struct StoreBlob {
     pub(crate) shard: u32,
     pub(crate) entity: EntityName,
     pub(crate) id: BlobId,
-    /// The mebibyte this whole exercise is about: one encode on the leader and one
-    /// decode on every peer, per block, on the create path.
+    /// One encode on the leader and one decode on every peer, per mebibyte block, on
+    /// the create path.
     #[serde(with = "serde_bytes")]
     pub(crate) bytes: Vec<u8>,
 }
@@ -251,9 +251,9 @@ impl Message for ListBlobs {
 /// Parameterized by the **system**, not by the entity type: this actor never folds
 /// state, applies an event, or names a facet, so `S: EntitySystem` is the whole of
 /// what it needs. Two entity types on one system therefore share this Rust type and
-/// are told apart the way the receptionist tells anything apart, by the key string
-/// [`replica_store_key_id`] interns per type. The parameter survives only because
-/// [`Actor::System`] must name a system and a struct must use its parameters.
+/// are told apart by the key string [`replica_store_key_id`] interns per type. The
+/// parameter survives only because [`Actor::System`] must name a system and a struct
+/// must use its parameters.
 pub(crate) struct ReplicaStore<S: EntitySystem> {
     store: Arc<dyn EntityStore>,
     /// Where this replica's blocking store calls run (§7.4). Every durable write in
@@ -295,8 +295,7 @@ impl<S: EntitySystem> Actor for ReplicaStore<S> {
 // Every handler's reply IS the peer's acknowledgement, so each returns only what the
 // store has already made durable: a reply released early would let the leader count
 // this replica toward a quorum for something this node has not stored (**E14**). The
-// store settles the write before it returns, so the durability is the offloaded call's
-// own: there is nothing further to await here.
+// store settles the write before it returns, so there is nothing further to await.
 impl<S: EntitySystem> Handler<StoreRecord> for ReplicaStore<S> {
     async fn handle(&mut self, msg: StoreRecord, _ctx: &Ctx<ReplicaStore<S>>) -> StoreAck {
         on_store(&self.io, &self.store, move |store| {

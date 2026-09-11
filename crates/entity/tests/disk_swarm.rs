@@ -225,10 +225,10 @@ impl DiskBoxSwarm {
             // Checkpoint often: the index-manifest contribution runs under
             // faults, and failover rematerializes from it plus the later
             // capture records (fold + rehydrate). Oftener still when
-            // hibernating, so an entity has a checkpoint to come back from before
-            // it first hibernates: otherwise every rehydration replays from an
-            // empty base and the manifest restore path goes untested, which is
-            // what `Exercised::from_snapshot` refuses to let pass silently.
+            // hibernating, so an entity has a checkpoint to come back from
+            // before it first hibernates; otherwise every rehydration replays
+            // from an empty base and the manifest restore path goes untested,
+            // which `Exercised::from_snapshot` refuses to let pass.
             snapshot_every: if self.hibernating { 2 } else { 4 },
             data_dir: Some(self.dir.clone()),
             ..EntityConfig::default()
@@ -386,12 +386,11 @@ fn disk_entity_invariants_hold_under_the_cluster_swarm() {
 // --- The same claims across hibernation and process death --------------------
 //
 // The sweep above holds every activation resident, so a read is served from the
-// image the write landed in, the block image is never rebuilt. This one tears it
-// down: the entity hibernates, its image goes, and the next read is served from
-// one the new activation rehydrated block by block out of content-addressed
+// image the write landed in and the block image is never rebuilt. This one tears
+// it down: the entity hibernates, its image goes, and the next read is served
+// from one the new activation rehydrated block by block out of content-addressed
 // blobs, possibly in a process that did not exist when the write committed. That
-// is the disk facet's whole durability story, and until now only a scripted
-// failover reached it.
+// is the disk facet's whole durability story.
 
 #[test]
 fn disk_entity_invariants_hold_across_hibernation_and_restarts() {
@@ -406,30 +405,27 @@ fn disk_entity_invariants_hold_across_hibernation_and_restarts() {
 
 #[test]
 fn disk_hibernation_actually_deactivates_and_restores_from_a_snapshot() {
-    // The sweep above is where the invariants are checked, and it narrows: at
-    // `slow_seeds` a local run gets one seed of the declared sixteen. That is
-    // right for an invariant, which every seed must satisfy, and wrong for the
-    // coverage claim that used to ride along with it.
+    // The sweep above checks the invariants, and it narrows: at `slow_seeds` a
+    // local run gets one seed of the declared sixteen. That is right for an
+    // invariant, which every seed must satisfy, and wrong for a coverage claim.
     //
     // Whether this workload hibernates and returns from a checkpoint is a
     // property of the *seed range*, not of any one seed. Nothing forces it: the
     // entity has to commit past `snapshot_every`, then idle out, then be called
     // again, and the nemesis spends stretches of most seeds unable to reach a
-    // write quorum, so on the declared range it happens on some seeds and not
-    // others; seeds 2 and 3 never hibernate at all. Asserted on a narrowed
-    // sweep it was a claim about which seed a local run happened to draw, and it
-    // held only because seed 0 was one of the ones that covered. Any change that
-    // shifted the schedule could turn it red without breaking anything, and one
-    // did: pipelining the disk facet's block puts made captures finish sooner,
-    // which shortened the run and took hibernations with it.
+    // write quorum, so it happens on some seeds and not others; seeds 2 and 3
+    // never hibernate at all. On a narrowed sweep the assertion held only
+    // because seed 0 happened to cover, and any change that shifted the schedule
+    // could turn it red without breaking anything. One did: pipelining the disk
+    // facet's block puts made captures finish sooner, which shortened the run
+    // and took hibernations with it.
     //
-    // So state it where it is true, on a sweep sized by `coverage_seeds`, which
-    // never narrows: the same treatment `restarted` gets in
-    // `entity_swarm.rs::the_nemesis_actually_restarts_a_node`, and the same one
+    // So state it on a sweep sized by `coverage_seeds`, which never narrows, the
+    // same treatment `restarted` gets in
+    // `entity_swarm.rs::the_nemesis_actually_restarts_a_node` and
     // `disk_cluster_swarm_actually_fires_each_fault_type` gets below. The whole
-    // declared sixteen, because that is the range the claim is an aggregate
-    // over: the seeds that cover are not spread evenly through it, and a half
-    // range picked to save time covered none of them.
+    // declared sixteen, because the seeds that cover are not spread evenly
+    // through it and a half range picked to save time covered none of them.
     let dir = tempfile::tempdir().expect("tempdir");
     let workload = DiskBoxSwarm::hibernating(3, 3, 5, dir.path().to_path_buf());
     if let Err(failure) = run_cluster_swarm(&workload, coverage_seeds(0..16)) {

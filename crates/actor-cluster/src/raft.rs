@@ -150,11 +150,11 @@ impl PersistedRaft {
 
 /// Whether a [`RaftWAL`] write reached stable storage.
 ///
-/// The distinction is not advisory. Every write through this seam happens *before* the
-/// state it records takes effect, because the caller announces that state immediately
-/// after: a vote, an accepted append, a snapshot. A write that did not land and is
-/// reported as if it had is precisely how a voter votes twice in one term across a
-/// restart, or acknowledges an entry it cannot replay.
+/// Every write through this seam happens *before* the state it records takes effect,
+/// because the caller announces that state immediately after: a vote, an accepted
+/// append, a snapshot. A write that did not land and is reported as if it had is
+/// precisely how a voter votes twice in one term across a restart, or acknowledges an
+/// entry it cannot replay.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[must_use = "a voter that cannot persist must stop voting (spec §9.4.3 item 2)"]
 pub enum WalAck {
@@ -524,8 +524,8 @@ const FIRST_ELECTION_SLOTS: u32 = 10;
 ///   that exists is at some term ≥ 1 with a log, and Raft rejects a `RequestVote` whose
 ///   term is below the receiver's; the candidate then adopts the higher term and steps
 ///   down. The cost of a node joining an established group is one wasted round, not a
-///   disruption. (This is exactly the case pre-vote exists for, and exactly the case
-///   pre-vote is *not* needed for: the danger is a candidate with a **higher** term.)
+///   disruption. (The danger pre-vote guards against is a candidate with a **higher**
+///   term, which this is not.)
 /// - **It does not split the vote.** The delay is staggered one slot per voter, so on a
 ///   cold cluster the voters campaign in sequence and the first one wins outright
 ///   rather than three of them tying and rearming.
@@ -808,14 +808,10 @@ impl RaftGroup {
 
     /// Stop participating in consensus, permanently (spec §9.4.3 item 2).
     ///
-    /// A voter that cannot persist its term must stop voting. It cannot simply crash:
-    /// an unwind is caught by actor supervision or takes down one task, and either way
-    /// the node can stay up, gossiping, and counted in quorums with no durability
-    /// behind it; the failure mode this exists to prevent. So the group steps down to
-    /// a follower that never elects, never grants a vote, and never acknowledges an
-    /// append. The node remains visible and answers with its term, so peers elect
-    /// around it promptly instead of waiting out a silence, and an operator sees a
-    /// member to replace.
+    /// The group steps down to a follower that never elects, never grants a vote, and
+    /// never acknowledges an append. The node remains visible and answers with its
+    /// term, so peers elect around it promptly instead of waiting out a silence, and
+    /// an operator sees a member to replace.
     fn wal_failed(&self, state: &mut RaftState) {
         state.wal_poisoned = true;
         state.role = Role::Follower;
@@ -867,8 +863,7 @@ impl RaftGroup {
     /// This does **not** step down. It cannot: leadership is a quorum fact, and the
     /// only thing that legitimately ends our term is someone else winning a higher
     /// one. All this does is invite a caught-up peer to try immediately instead of
-    /// after its election timeout. If that peer fails, nothing is lost: we are
-    /// still the leader and the caller can pick another target.
+    /// after its election timeout.
     pub(crate) fn transfer_leadership(&self, target: NodeId) -> (bool, RaftOutput) {
         let mut out = RaftOutput::default();
         let state = self.lock();
@@ -1088,10 +1083,10 @@ impl RaftGroup {
             return;
         }
         let term = state.term_at(index);
-        // Persist before the prefix leaves memory: the ordering this seam promises,
-        // and the one that makes a refusal harmless, since the entries compaction would have
-        // shed are still in memory and still on disk, so the group stops with its log
-        // whole rather than with a hole where its base should be.
+        // Persist before the prefix leaves memory, which also makes a refusal
+        // harmless: the entries compaction would have shed are still in memory and
+        // still on disk, so the group stops with its log whole rather than with a
+        // hole where its base should be.
         if self.storage.save_snapshot(index, term, &snapshot) == WalAck::Failed {
             self.wal_failed(&mut state);
             return;
@@ -1771,7 +1766,7 @@ mod tests {
                     committed.entry((group, src)).or_default().push(command);
                 }
                 // A test that drives compaction replaces the recorded log with the
-                // snapshot's commands; the agent runtime here only exercises plain applies.
+                // snapshot's commands; the harness here only exercises plain applies.
                 Committed::Snapshot { .. } => {}
             }
         }
@@ -2287,12 +2282,11 @@ mod tests {
     }
 
     /// Guard for spec §18.5 #22: once a leader commits its own `RemoveVoter` it is
-    /// no longer a voter and MUST NOT count itself toward the commit quorum;
-    /// otherwise a non-voter leader could advance commit on a phantom self-vote
-    /// with only sub-quorum real replication, a minority evicting the majority.
-    /// In the full engine the `tick` non-voter early-return keeps such a leader
-    /// dormant, so this drives `advance_commit` directly to pin the property to
-    /// the commit arithmetic itself rather than to that outer guard.
+    /// no longer a voter and MUST NOT count itself toward the commit quorum (see
+    /// `advance_commit`). In the full engine the `tick` non-voter
+    /// early-return keeps such a leader dormant, so this drives `advance_commit`
+    /// directly to pin the property to the commit arithmetic itself rather than to
+    /// that outer guard.
     #[test]
     fn a_self_removed_leader_does_not_count_its_own_phantom_vote() {
         let node = NodeId::new(1);
@@ -2331,8 +2325,7 @@ mod tests {
 
         // Restore node 1 to the voter set (quorum 2 of {1, 2, 3}); now the same
         // single follower plus the leader's own legitimate vote reaches quorum, so
-        // the entry commits. Proves the guard blocks only the phantom vote, not a
-        // real one: it is not a blanket refusal to commit.
+        // the entry commits: the guard blocks only the phantom vote, not a real one.
         state.voters = vec![node, v2, v3];
         group.advance_commit(&mut state);
         assert_eq!(
@@ -2572,8 +2565,7 @@ mod tests {
         );
         // It does not campaign inside the first heartbeat: a group created into a
         // cluster that already has a leader must hear from it before it decides there
-        // is none. This is not a detail, skipping it cost a measured 0.3 s warm create
-        // 3.5 s, the whole time the group spent a candidate with no leader to route to.
+        // is none.
         let out = group.tick(Instant::ZERO + heartbeat, &entropy);
         assert!(
             out.elected.is_none(),

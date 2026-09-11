@@ -58,9 +58,7 @@ const DEFAULT_ASK_TIMEOUT: Duration = Duration::from_secs(5);
 const RESOLVE_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Safety bound on the redirect loop; the real bound is the caller's deadline
-/// (`within`), checked each attempt. A run started during failover is absorbed
-/// rather than surfaced, so a remote call stays observably identical to a local
-/// one (invariant **E13**).
+/// (`within`), checked each attempt.
 const RESOLVE_ATTEMPTS: usize = 200;
 
 /// How long one resolution attempt waits on a gateway before treating it as
@@ -79,20 +77,19 @@ const EVENT_SCAN_FLOOR: usize = 256;
 /// The cached handles, in two generations so the cache stays **bounded** without an
 /// intrusive recency list (spec §5.4).
 ///
-/// Bounding it is not housekeeping. An `EntityRef` is handed out per name, and the
-/// gateway is one long-lived process fronting every tenant, so an unbounded map grows
-/// with the number of *distinct names the process has ever addressed*: unbounded in
-/// exactly the deployment that is scaled horizontally and expected to stay up. Worse,
-/// most of what accumulates is dead weight: an entity hibernates after `idle_after`
-/// (§10) and its host stops, but the handle to it lingers until some later call fails
-/// against it.
+/// An `EntityRef` is handed out per name, and the gateway is one long-lived process
+/// fronting every tenant, so an unbounded map grows with the number of *distinct names
+/// the process has ever addressed*: unbounded in exactly the deployment that is scaled
+/// horizontally and expected to stay up. Most of what accumulates is dead weight: an
+/// entity hibernates after `idle_after` (§10) and its host stops, but the handle to it
+/// lingers until some later call fails against it.
 ///
 /// A hit is served from either generation and promotes into `hot`; when `hot` fills,
 /// it becomes `cold` and a fresh `hot` starts, dropping whatever `cold` held. That
 /// keeps the whole structure to `2 × capacity` entries with O(1) work per operation
 /// and no per-entry bookkeeping. It approximates LRU rather than implementing it,
-/// which is the right trade here, because a miss is not an error: it costs one
-/// gateway round-trip, the path §5.4 specifies anyway.
+/// because a miss is not an error: it costs one gateway round-trip, the path §5.4
+/// specifies anyway.
 struct Generations<V: Clone> {
     hot: HashMap<EntityName, V>,
     cold: HashMap<EntityName, V>,
@@ -168,23 +165,22 @@ impl<V: Clone> Generations<V> {
 /// Bounded by [`Generations`], so a long-lived process that addresses many distinct
 /// names does not grow one entry per name for its whole lifetime.
 ///
-/// **One mutex, and measured rather than assumed.** The map is taken on every call
+/// **One mutex, measured rather than assumed.** The map is taken on every call
 /// including a hit, in a gateway that is one long-lived process fronting every tenant
 /// on a many-core box (`docs/hardware-envelope.md` §3.4): the shape that invites
 /// sharding it by name hash. `benches/contention.rs` sweeps concurrent lookups across
-/// it, and the contention is real: aggregate throughput *falls* with concurrency, from
-/// 18.4 M lookups/s on one thread to 8.6 M at sixteen, which is the signature of a
-/// lock that has become the serial point rather than one that merely queues.
+/// it, and aggregate throughput *falls* with concurrency, from 18.4 M lookups/s on one
+/// thread to 8.6 M at sixteen: the signature of a lock that has become the serial
+/// point rather than one that merely queues.
 ///
 /// It is deliberately not sharded anyway, because the absolute number is the one that
 /// decides. 8.6 M lookups/s is the floor under contention, and the deployment's
 /// binding constraint is a 1 Gbps uplink (hw §3.3): a request that does one lookup and
 /// then any real work cannot arrive within three orders of magnitude of that rate.
 /// Sharding would buy throughput this deployment has no way to ask for, at the cost of
-/// a partitioned generation policy, so the number is recorded here instead, along
-/// with the condition that would change the answer. Revisit if a gateway is ever
-/// expected to sustain millions of entity dispatches per second, or if a profile shows
-/// this lock held for longer than a hash lookup.
+/// a partitioned generation policy. Revisit if a gateway is ever expected to sustain
+/// millions of entity dispatches per second, or if a profile shows this lock held for
+/// longer than a hash lookup.
 pub(crate) struct HostCache<G: Entity> {
     system: G::System,
     entity_type: &'static str,
@@ -467,12 +463,10 @@ impl<G: Entity> EntityRef<G> {
     /// result means no event follows `from` **that the journal still holds**:
     /// the returned [`EventHistory`]'s `base` reports how far compaction has
     /// truncated the log (§9), and a `from` below it asked for events the
-    /// entity's snapshot has subsumed; absent slots at or below `base` are
-    /// truncated history, not the interleaved records the projection skips.
-    /// Page by re-asking from the last `Seq` returned. Read-your-leader like
-    /// any read (§7.5). A failed or corrupt journal read surfaces as
-    /// [`EntityError::Unavailable`]: transient; a read commits nothing, so
-    /// re-asking is always safe.
+    /// entity's snapshot has subsumed. Page by re-asking from the last `Seq`
+    /// returned. Read-your-leader like any read (§7.5). A failed or corrupt
+    /// journal read surfaces as [`EntityError::Unavailable`]: transient; a read
+    /// commits nothing, so re-asking is always safe.
     pub async fn events(
         &self,
         from: Seq,
@@ -488,12 +482,9 @@ impl<G: Entity> EntityRef<G> {
         // re-asking from the cursor is always safe.
         let mut target = self.gateway.clone();
         while events.len() < limit {
-            // The wire `limit` bounds the *records scanned* server-side, and
-            // facet records among them are skipped, not surfaced, so a want
-            // shrunk to the few events this loop still misses would crawl a
-            // dense facet run one record per round trip, all under the one
-            // deadline. Scan a floored page instead and drop any events past
-            // the caller's `limit` below; the caller re-pages from the last
+            // The wire `limit` bounds the *records scanned* server-side, so
+            // scan a floored page (see `EVENT_SCAN_FLOOR`) and drop any events
+            // past the caller's `limit` below; the caller re-pages from the last
             // `Seq` returned, so the drop only moves its resume point earlier.
             let want = (limit - events.len())
                 .max(EVENT_SCAN_FLOOR)
@@ -837,8 +828,7 @@ impl<G: Entity> Entities<G> {
     /// this node led then waits a full leader-election timeout before its replicas
     /// elect, and every entity on those shards rehydrates on the new leader. A node
     /// leading many shards therefore turns an ordinary rolling restart into that many
-    /// simultaneous failovers, which is the single most common way a healthy cluster
-    /// is made to look unhealthy.
+    /// simultaneous failovers.
     ///
     /// Best-effort: a shard whose other replicas are all lagging or unreachable keeps
     /// its leader here and fails over the slow way. A non-zero return is information
@@ -870,7 +860,7 @@ pub trait EntityExt: EntitySystem {
     ///
     /// Both are properties of the *node*, not of an entity type, so a deployment sets
     /// them once here and hosts every type through the returned handle. Hosting
-    /// straight off the system: `system.entities(..)`; is the same call with both
+    /// straight off the system (`system.entities(..)`) is the same call with both
     /// defaulted (inline I/O, discarded metrics), which is what the `Local` tier and
     /// the deterministic simulation want.
     ///
@@ -917,8 +907,8 @@ pub trait EntityExt: EntitySystem {
         Some(Entities {
             gateway,
             // A routing-only client has no `EntityConfig` to read, so it takes the
-            // default bound. This is the path that most needs one: the gateway is a
-            // client, long-lived, and addresses every tenant's names.
+            // default bound, and it is the path that most needs one: a long-lived
+            // gateway client addresses every tenant's names.
             cache: HostCache::new(
                 self.clone(),
                 entity_type,
@@ -1153,8 +1143,6 @@ where
     S: EntitySystem,
     G: Entity<System = S>,
 {
-    // The type name and founding shard count ride on the handle; this loop
-    // takes no copy of facts the `Entities` already carries.
     let entity_type = entities.cache.entity_type;
     loop {
         system.sleep(ALARM_DRIVE_INTERVAL).await;
@@ -1222,9 +1210,7 @@ mod tests {
     }
 
     /// The property the bound exists for: addressing an unbounded stream of distinct
-    /// names must not grow the cache without limit. Before this, the gateway (one
-    /// long-lived process fronting every tenant) kept an entry per name it had ever
-    /// addressed, most of them stale handles to entities that had since hibernated.
+    /// names must not grow the cache without limit.
     #[test]
     fn the_cache_stays_bounded_across_unboundedly_many_names() {
         let mut cache: Generations<u32> = Generations::new(16);

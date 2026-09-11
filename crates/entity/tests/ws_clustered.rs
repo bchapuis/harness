@@ -4,8 +4,7 @@
 //! handle is readable from any node (E13), the workspace survives losing a
 //! minority of replicas (delta records ride the record quorum, E14), and
 //! **root-driven blob repair** (§7.10 B6) re-replicates a checkpoint chunk to a
-//! replica that missed its write; the consumer-level restoration of the
-//! durability margin.
+//! replica that missed its write, restoring the durability margin.
 
 use actor_serialization::JsonCodec;
 use std::marker::PhantomData;
@@ -78,7 +77,7 @@ impl<S: EntitySystem> Entity for Studio<S> {
     ) -> impl Future<Output = Result<(), BoxError>> + Send {
         // Off the activation latency path: sweep chunks a prior activation
         // orphaned and re-fan the live checkpoint chunks to the current
-        // replicas (§7.10 B6); the same conduct as the agent runtime agent.
+        // replicas (§7.10 B6), as the agent runtime does.
         let blobs = ctx.blobs();
         let system = ctx.system().clone();
         async move {
@@ -310,8 +309,7 @@ fn repair_re_replicates_a_chunk_a_partitioned_replica_missed() {
     // A replica partitioned during a checkpoint misses the chunk blobs; after
     // the partition heals, the entity's re-activation runs root-driven repair
     // (§7.10 B6), which re-fans the live checkpoint chunks to the current
-    // replicas, restoring the copy on the node that missed them. Verified by
-    // the chunk's on-disk presence per node.
+    // replicas, restoring the copy on the node that missed them.
     let sim = Simulation::new(3);
     let dir = tempfile::tempdir().unwrap();
     let scratch = tempfile::tempdir().unwrap();

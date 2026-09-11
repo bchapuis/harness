@@ -6,14 +6,12 @@
 //! The workflow discards such a `Settled` without calling `settle`, and writes no
 //! record for it.
 //!
-//! The suite has two halves, and the second is the more interesting. The first
-//! shows the filter working: a key retracted mid-flight has its outcome dropped.
-//! The second shows what the filter rests on. Its only test is **presence in the
-//! set**, not identity, so §3.1's rule that a key is unique over the entity's
-//! whole journal is not decoration: with a key reused across occurrences the
-//! workflow settles the *first* occurrence's outcome as the second's, and no
-//! machinery here can tell. That test exists so the obligation is pinned by a
-//! run rather than by a sentence.
+//! The suite has two halves. The first shows the filter working: a key retracted
+//! mid-flight has its outcome dropped. The second shows what the filter rests on.
+//! Its only test is **presence in the set**, not identity, so §3.1's rule that a
+//! key is unique over the entity's whole journal is load-bearing: with a key
+//! reused across occurrences the workflow settles the *first* occurrence's
+//! outcome as the second's, and no machinery here can tell.
 
 mod support;
 
@@ -145,10 +143,10 @@ fn a_reused_key_lets_the_first_occurrences_outcome_be_settled_as_the_seconds() {
     // present again and is settled as the second's outcome, while the second's
     // own result arrives to an absent key and is dropped.
     //
-    // This is not a bug in the workflow. It is why "a key MUST be unique over the
-    // entity's whole journal" is the consumer's obligation and normative: the
-    // harness's synthesized call ids and step keys repeat across runs, and have
-    // to be qualified by the turn before they can sit here.
+    // This is why "a key MUST be unique over the entity's whole journal" is the
+    // consumer's obligation and normative: the agent runtime's synthesized call
+    // ids and step keys repeat across runs, and have to be qualified by the turn
+    // before they can sit here.
     let sim = Simulation::new(47);
     let recorder = Recorder::new();
     let system = sim_system(&sim, &recorder);

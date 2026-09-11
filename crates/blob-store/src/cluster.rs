@@ -6,8 +6,8 @@
 //! leader and no quorum-intersection requirement: with immutable content, `W` and
 //! `R` are independent durability and availability knobs, not a correctness
 //! constraint (spec §4, contrast entity §8). A fan-out of immutable bytes, a
-//! verified rank-order read, and a monotonic delete flag: no election, no term,
-//! and no write-time read-repair (**B4**).
+//! verified rank-order read, and a monotonic delete flag, with no write-time
+//! read-repair (**B4**).
 //!
 //! A node running this tier owns its on-disk [`LocalBlobStore`], a [`BlobReplica`]
 //! actor over it (so peers can reach it), the node's [`TombstoneSet`] (shared with

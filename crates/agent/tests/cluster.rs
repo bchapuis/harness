@@ -352,10 +352,10 @@ fn await_journal(
 
 /// The R1 crash window (§9.2, A5): `RunEnded { Cancelled }` commits, and the
 /// leader crashes before the propagating send reaches the recorded child. The
-/// owed propagation is a fold fact (`cancels_owed`), so the next contact:
-/// a re-sent `Cancel`, the §7.5 resume trigger; re-derives it on the new
-/// leader and drives it to the child, which ends `Cancelled`; the delivery
-/// then journals `CancelDelivered`, retiring the debt.
+/// owed propagation is a fold fact (`cancels_owed`), so the next contact (a
+/// re-sent `Cancel`, the §7.5 resume trigger) re-derives it on the new leader
+/// and drives it to the child, which ends `Cancelled`; the delivery then
+/// journals `CancelDelivered`, retiring the debt.
 #[test]
 fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
     let sim = Simulation::new(23);
@@ -474,8 +474,8 @@ fn an_owed_cancel_survives_a_leader_crash_and_propagates_on_resume() {
     net.heal();
 
     // Let the shard groups re-elect, then check the window is real: the
-    // child's run must still be live; the crash destroyed the send, and with
-    // it the old design's only copy of the propagation.
+    // child's run must still be live, since the crash destroyed the send and
+    // only the fold's owed fact survives it.
     sim.run_for(Duration::from_secs(3));
     let child_before = await_journal(
         &sim,

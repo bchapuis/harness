@@ -2,10 +2,9 @@
 //!
 //! Every value entity puts on the wire: the entity identity `EntityName`, the
 //! sequence position `Seq`, and the durability/transport error `EntityError` that
-//! rides inside a command's reply (§6, §12); must survive an encode/decode
-//! round trip unchanged. The framework codec is `serde`-based (the same one the
-//! shard log uses), so these decode exactly what they encoded; a silent change to
-//! any of these representations would corrupt cross-node routing or replies.
+//! rides inside a command's reply (§6, §12); must survive an encode/decode round
+//! trip unchanged. A silent change to any of these representations would corrupt
+//! cross-node routing or replies.
 
 use actor_core::CallError;
 use actor_core::NodeId;
@@ -41,7 +40,7 @@ fn seq_round_trips() {
 
 /// The SQL facet's reply-carried types (spec §7.14): a handler puts query
 /// results and SQL errors *inside its reply*, so they cross the wire with the
-/// user codec like any other reply payload and must survive the round trip.
+/// user codec and must survive the round trip.
 #[cfg(feature = "sql")]
 mod sql {
     use entity::facet::QueryResult;
@@ -97,8 +96,7 @@ mod sql {
 #[test]
 fn entity_error_round_trips_every_variant() {
     // EntityError rides inside the host's reply on the wire, so every variant must
-    // decode to itself (§6, §12): the two failure layers stay distinct only if
-    // the durability/transport layer survives transport.
+    // decode to itself (§6, §12).
     let cases = [
         EntityError::Call(CallError::Unreachable),
         EntityError::Call(CallError::Timeout),

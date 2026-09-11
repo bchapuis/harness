@@ -2,17 +2,18 @@
 //! (§6).
 //!
 //! An effect that settles unproductively (`Err`, or a settle that returns no
-//! records), and stays in the desired set would otherwise be relaunched by the
-//! very next tick, at the rate the engine cycles. So the engine holds a per-key
-//! count of consecutive unproductive settles and delays that key's next launch
-//! by a capped exponential backoff, timed by `Clock` and jittered from
-//! `Entropy`, so the delay is virtual and seed-reproducible under simulation.
+//! records) and stays in the desired set would otherwise be relaunched by the
+//! very next tick. So the engine holds a per-key count of consecutive
+//! unproductive settles and delays that key's next launch by a capped
+//! exponential backoff, timed by `Clock` and jittered from `Entropy`, so the
+//! delay is virtual and seed-reproducible under simulation.
 //!
 //! The count is activation state, like the claim: a re-activation starts at
-//! zero. The engine imposes **no attempt bound**, bounding the work is the
-//! consumer's, because only the consumer knows what the work is worth. What the
-//! workflow bounds is the *delay*, and reaching the cap has a second meaning: a key
-//! backed off to the cap is at rest, no longer holding the activation resident.
+//! zero. The engine imposes **no attempt bound**: bounding the work is the
+//! consumer's job, because only the consumer knows what the work is worth. What
+//! the workflow bounds is the *delay*, and reaching the cap has a second meaning:
+//! a key backed off to the cap is at rest, no longer holding the activation
+//! resident.
 //! Without that, "no attempt bound" and the quiescence rule would together pin
 //! an activation forever on one permanently failing effect.
 
@@ -107,11 +108,11 @@ impl<K: Ord> Backoff<K> {
     /// **At the cap the engine arms no timer**, and that is the whole of the
     /// at-rest rule (§6). Arming one anyway would be worse than useless: the
     /// activation would become quiescent, hibernate, and then be woken by its own
-    /// stale timer a moment later, so the entity would churn instead of resting
-    /// and the clause would buy nothing. Giving up the timer is giving up
-    /// *unattended* progress, which is exactly what §6 trades away: the debt is
-    /// a fold, so a caller's next contact ([`wake`](Backoff::wake)) or the next
-    /// activation re-derives and re-drives it.
+    /// stale timer a moment later, churning instead of resting. Giving up the
+    /// timer is giving up *unattended* progress, which is exactly what §6 trades
+    /// away: the debt is a fold, so a caller's next contact
+    /// ([`wake`](Backoff::wake)) or the next activation re-derives and re-drives
+    /// it.
     pub fn failed(&mut self, key: K, now: Instant, jitter: u64) -> Option<Duration> {
         let failures = self
             .entries
@@ -149,7 +150,7 @@ impl<K: Ord> Backoff<K> {
     /// Clear every at-rest key, so a caller-driven drive retries it.
     ///
     /// This is the difference between the engine's own timer re-entering the cycle
-    /// and *someone asking*. The agent runtime draws the same line today: it abandons a
+    /// and *someone asking*. The agent runtime draws the same line: it abandons a
     /// propagation launch after bounded retries, and "the next message that drives
     /// the session (on this same activation or a later one) re-launches the
     /// send" (agent §9.2 item 3). A key at rest is waiting for exactly that
@@ -246,9 +247,8 @@ mod tests {
 
     #[test]
     fn at_the_cap_the_drive_arms_nothing_and_the_key_comes_to_rest() {
-        // The whole of the at-rest rule (§6). Arming a timer here would be worse
-        // than useless: the activation would hibernate and then be woken by its
-        // own stale timer, churning instead of resting.
+        // The whole of the at-rest rule (§6): at the cap no timer is armed, so
+        // the activation is free to hibernate instead of churning.
         let mut b: Backoff<u8> = Backoff::default();
         let mut armed = 0;
         for _ in 0..8 {

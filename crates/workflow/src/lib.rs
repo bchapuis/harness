@@ -4,20 +4,18 @@
 //! commits them, and replies (entity §4.2, §6). An **autonomous** entity does
 //! not wait: its activation re-derives the work its committed state calls for,
 //! launches what is not yet in flight, folds each outcome back, and stops when
-//! there is nothing left. The agent runtime builds that mechanism by hand,
-//! welded to one agentic policy (agent §3); this crate is the mechanism on
-//! its own, with no model, tool, or prompt in it.
+//! there is nothing left. This crate is that mechanism on its own, with no
+//! model, tool, or prompt in it.
 //!
 //! **The agent runtime sits on it.** Its `Workflow` impl supplies `pending`,
 //! `perform` and `settle`; this crate's [`Engine`] supplies everything between
 //! them, and its [`OnOrphan`] is the type a tool declaration's recovery policy
-//! has (agent §3.2, §13). What the agent kept beside the cycle is the thing no
+//! has (agent §3.2, §13). What the agent keeps beside the cycle is what no
 //! desired set can express: a lost workspace, a failed sandbox open, and a tier
 //! not yet held are activation state, so it settles them in a pre-pass ahead of
-//! every tick rather than inside a launch (agent §5.4, §5.5, §5.6). That is the
-//! shape of the seam, not a gap in it: a consumer holding a gate the set cannot
-//! express MUST settle it before it ticks, because the engine launches the whole
-//! set and cannot see what it does not hold.
+//! every tick rather than inside a launch (agent §5.4, §5.5, §5.6). A consumer
+//! holding a gate the set cannot express MUST settle it before it ticks, because
+//! the engine launches the whole set and cannot see what it does not hold.
 //!
 //! The whole of it rests on one decision: **the work outstanding is a pure
 //! function of committed state**, [`Workflow::pending`], never a journaled queue.
@@ -38,9 +36,7 @@
 //!
 //! A consumer implements [`Workflow`] beside its [`Entity`], holds an [`Engine`] in
 //! its behavior, and forwards four hooks. There is deliberately no blanket
-//! `EntityHandler` impl (the orphan rule forbids one, and entity's stance is
-//! that the hand-written form is normative), so the two commands are two small
-//! handlers:
+//! `EntityHandler` impl, so the two commands are two small handlers:
 //!
 //! ```ignore
 //! impl Entity for Fanout {
@@ -142,11 +138,9 @@ impl<K, E> Pending<K, E> {
 ///
 /// This is the workflow's type, and the home of the decision. The agent runtime's
 /// `ToolDecl::on_orphan` (agent §5.2) **is** this type: a tool declaration's
-/// recovery policy is exactly what its [`Pending`] carries, so the two were one
-/// decision written twice until `agent` took its dependency on this crate. What
-/// the agent still keeps of its own is the *outcome* an interrupted call
-/// synthesizes: a `ToolError` the model reads, where a workflow mints an
-/// [`EffectError`] for a consumer's fold.
+/// recovery policy is exactly what its [`Pending`] carries. What the agent keeps
+/// of its own is the *outcome* an interrupted call synthesizes: a `ToolError` the
+/// model reads, where a workflow mints an [`EffectError`] for a consumer's fold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum OnOrphan {
     /// Launch it again, as an ordinary launch. The consumer has declared the
@@ -309,10 +303,9 @@ pub trait Workflow:
     /// make the outcome durable; the entity's output gate commits them; the
     /// commit re-enters the workflow.
     ///
-    /// Returning no records is legal and commits nothing (entity §7.5) (the
-    /// way a consumer says "this outcome changed nothing") which then leaves
-    /// the key in the desired set for the backoff timer to relaunch (§3.2 item
-    /// 3), since this settle committed nothing to bring the next tick.
+    /// Returning no records is legal and commits nothing (entity §7.5), the way
+    /// a consumer says "this outcome changed nothing". The key then stays in the
+    /// desired set for the backoff timer to relaunch (§3.2 item 3).
     ///
     /// [`EntityHandler`]: entity::EntityHandler
     fn settle(

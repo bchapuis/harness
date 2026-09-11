@@ -203,12 +203,10 @@ pub trait EntityHandler<M: Message>: Entity {
 /// (crate::EntityRef::events)): the decoded events, plus the highest compaction
 /// **base** the read observed (§9). A slot at `Seq <= base` that is absent from
 /// `events` is truncated history (compacted away, subsumed by the entity's
-/// snapshot) not one of the interleaved records the projection skips (§7.12);
-/// a read whose `from` lay below `base` therefore did **not** see the events in
-/// `(from, base]`, and `base <= from` means nothing the caller asked after was
-/// compacted. Every page carries the base because compaction is not bounded by
-/// any reader's cursor (a snapshot at the head can outrun a slow pager), so a
-/// multi-page read reports the highest it saw.
+/// snapshot), not one of the interleaved records the projection skips (§7.12).
+/// Every page carries the base because compaction is not bounded by any reader's
+/// cursor (a snapshot at the head can outrun a slow pager), so a multi-page read
+/// reports the highest it saw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventHistory<E> {
     /// The compaction base: absent slots at or below it are truncation, and
@@ -228,9 +226,8 @@ pub type EventsFuture<E> = BoxFuture<'static, Result<EventHistory<E>, EntityJour
 /// once a commit or recovery raises the floor, and a page is at head exactly
 /// when the clamp cut it short or the store ran out before `limit`. Returns
 /// `(base, committed records, at_head)`. Shared by the activation's
-/// [`EntityCtx::events`] and the gateway's non-activating read, like
-/// [`events_in_page`] below, so the two reads cannot drift on the subtlest
-/// part of the contract.
+/// [`EntityCtx::events`] and the gateway's non-activating read, so the two
+/// cannot drift.
 pub(crate) fn committed_prefix(
     page: crate::journal::RecordPage,
     floor: Seq,
@@ -284,9 +281,8 @@ pub struct EntityCtx<G: Entity> {
     /// The host's published committed head (spec §7.5): the floor of
     /// [`events`](EntityCtx::events). The local store alone cannot tell a
     /// committed record from a tentative one (a leader writes its own replica
-    /// before the quorum resolves, §7.2), and the returned future is `'static`
-    /// (an entity may launch it, racing the host's own in-flight append), so
-    /// the read clamps to this cell rather than trusting the input gate.
+    /// before the quorum resolves, §7.2), so the read clamps to this cell
+    /// rather than trusting the input gate.
     committed: crate::host::CommittedCell,
     /// The host's facet cell (spec §7.12): committed forms plus the per-command
     /// stage, shared so the facet accessors (`kv()`, `ws()`, …) read and stage
@@ -341,14 +337,13 @@ impl<G: Entity> EntityCtx<G> {
         &self.facets
     }
 
-    /// This node's blocking-I/O pool (spec §7.4).
-    ///
-    /// For a **physical facet** whose work is bulk device I/O and hashing rather than
-    /// coordination: the disk facet's capture scans and hashes a whole image, which on
-    /// the async worker stalls this node's Raft heartbeats for as long as it runs. The
-    /// default is [`InlineIo`](crate::blocking::InlineIo), so a deployment that has not opted
-    /// into a pool (and the deterministic simulation, which must not) behaves exactly
-    /// as it did before the seam existed.
+    /// This node's blocking-I/O pool (spec §7.4), for a **physical facet** whose work
+    /// is bulk device I/O and hashing rather than coordination: the disk facet's
+    /// capture scans and hashes a whole image, which on the async worker stalls this
+    /// node's Raft heartbeats for as long as it runs. The default is
+    /// [`InlineIo`](crate::blocking::InlineIo), which runs the work inline: what a
+    /// deployment that has not opted into a pool gets, and what the deterministic
+    /// simulation requires.
     pub(crate) fn blocking_io(&self) -> &Arc<dyn crate::blocking::BlockingIo> {
         &self.blocking_io
     }
@@ -406,9 +401,9 @@ impl<G: Entity> EntityCtx<G> {
     ///
     /// Every page is bounded by the activation's **committed head**, exactly
     /// like the gateway's non-activating read (§7.5): the local store may hold
-    /// an in-flight append's tentative slots (§7.2), and this future is
-    /// `'static`; an entity may launch it, so it can race the host's own
-    /// append. Slots above the head are simply not served (**E5**).
+    /// an in-flight append's tentative slots (§7.2), and this `'static` future
+    /// may race the host's own append. Slots above the head are not served
+    /// (**E5**).
     pub fn events(&self, from: Seq, limit: usize) -> EventsFuture<G::Event> {
         /// Journal entries per `load` page: sized to a subscription batch, not
         /// to `limit`, so a caller's large `limit` cannot force one huge read.

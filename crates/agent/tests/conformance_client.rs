@@ -262,8 +262,8 @@ fn the_child_wait_scales_with_the_carved_steps() {
     // A child answering after 700s of virtual time, delegated twice: a 3-step
     // carve waits 60 + 3×300 = 960s ≥ 700 and collects the answer; a 1-step
     // carve waits 60 + 300 = 360s < 700 and resolves as the give-up failure.
-    // The wait is a function of the carve (§8.1), not a flat cap, under the
-    // old 32×30s cap both would have completed identically.
+    // The wait is a function of the carve (§8.1), not a flat cap: under a flat
+    // 32×30s cap both would have completed identically.
     let sim = Simulation::new(47);
     let sink = CollectingSink::default();
     let system: SimSystem = LocalSystemBuilder::new(sim.clock(), sim.entropy(), sim.spawner())

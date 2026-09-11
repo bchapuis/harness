@@ -10,20 +10,20 @@
 //! leaves every sibling that stated its old extent describing a shorter document
 //! than the one on disk, and each of those sentences still reads exactly right.
 //!
-//! That is not hypothetical. `E21` was catalogued at entity §7.16 and every
-//! citation of entity's extent went on saying `E1–E20`, six of them across four
-//! documents: the agent runtime and machine preambles, the machine's §7,
-//! `docs/README.md`, and `simulation-testing.md`. Every one parses, resolves, and
-//! passes every other gate.
+//! `E21` was catalogued at entity §7.16 while every citation of entity's extent
+//! went on saying `E1–E20`, six of them across four documents: the agent runtime
+//! and machine preambles, the machine's §7, `docs/README.md`, and
+//! `simulation-testing.md`. Every one parses, resolves, and passes every other
+//! gate.
 //!
 //! # What is checked
 //!
 //! Two directions, and neither is the obvious one.
 //!
 //! The obvious check (every number in the span exists) is *wrong here*: the
-//! harness catalogue has no A2 (agent §11 retires it deliberately), so `A1–A8`
+//! agent catalogue has no A2 (agent §11 retires it deliberately), so `A1–A8`
 //! spans a number nothing defines and is still the correct way to write the
-//! harness's extent. And the natural stronger check (a range is the whole
+//! agent's extent. And the natural stronger check (a range is the whole
 //! catalogue, so its high end is the last invariant) is wrong too, because
 //! `M1–M3` in machine §7 is a genuine claim about three of six.
 //!

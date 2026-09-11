@@ -7,10 +7,10 @@
 //! node (**B1**, **B5**); equal content converges to one id (**B2**); and a
 //! `delete_namespace` fans a tombstone cluster-wide so the namespace then resolves
 //! nowhere and a `put` back into it is refused (**B7**). The reconcile loop (spec
-//! §7) and the full fault swarm (spec §8) land in their own phases; this is the
+//! §7) and the full fault swarm (spec §8) have their own suites; this is the
 //! happy-path-plus-delete proof that the tier composes over the actor framework.
 //!
-//! The agent runtime mirrors entity's `tests/clustered_entities.rs`, swapping the
+//! The harness mirrors entity's `tests/clustered_entities.rs`, swapping the
 //! leader/raft network for SWIM gossip membership: a blob store needs the serving
 //! set, not consensus (spec §1, §4).
 

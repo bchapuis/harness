@@ -34,14 +34,13 @@ pub const DELEGATE: &str = "delegate";
 /// Resume's policy for an orphaned call: intent journaled, outcome not
 /// (agent spec §5.5).
 ///
-/// This is [`workflow::OnOrphan`], not a type of the agent runtime's own. A
+/// This is [`workflow::OnOrphan`], not a type of the agent runtime's own: a
 /// tool call is one effect of an autonomous entity, and its recovery policy is
 /// exactly what a [`workflow::Pending`] carries (workflow §4.4), so the
-/// declaration and the mechanism name the same two variants because they are
-/// the same decision, not because they agree. [`ToolError::Interrupted`] is
-/// still the agent runtime's own: the loop synthesizes a *tool outcome* the
-/// model reads, where the workflow mints an [`EffectError`](workflow::EffectError)
-/// for a consumer's fold.
+/// declaration and the mechanism name the same decision.
+/// [`ToolError::Interrupted`] is still the agent runtime's own: the loop
+/// synthesizes a *tool outcome* the model reads, where the workflow mints an
+/// [`EffectError`](workflow::EffectError) for a consumer's fold.
 pub use workflow::OnOrphan;
 
 /// One declared tool (agent spec §5.2).

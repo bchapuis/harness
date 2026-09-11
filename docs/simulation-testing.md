@@ -5,32 +5,30 @@ strategies, the primitives, the shapes a test can take, where each belongs, and
 how a run decides how many seeds to spend. The mechanism lives in
 `actor-simulation`. The [specification](distributed-actor-spec.md) says *what*
 must hold: §16 (events), §17 (conformance), §18 (deterministic simulation); this
-document says how it is held up.
+document says how.
 
 Three principles govern the strategy.
 
 - **Determinism.** Replay every failure from a `(workload, seed)` pair alone
   (§18.1, §18.6). One seed drives time, randomness, scheduling, *and* the run's
-  sampled fault configuration, so an entire multi-node run reproduces exactly:
-  there is nothing else to carry.
-- **Specification.** Assert the invariants of §18.5, not chosen outputs.
-  Correctness is a small set of properties checked over the §16 event stream,
-  not a pile of example assertions.
+  sampled fault configuration, so an entire multi-node run reproduces exactly.
+- **Specification.** Assert the invariants of §18.5 over the §16 event stream,
+  not chosen outputs and not a pile of example assertions.
 - **Fault injection.** Bugs hide in the failure paths. Inject partitions,
   crashes, loss, duplication, delay, and reordering under seed control (§18.3),
   and prove the injection actually fired.
 
-## The agent runtime is owned, not imported
+## The simulator is owned, not imported
 
-Build the agent runtime; do not import one. The spec routes every source of
-nondeterminism through four traits (`Clock`, `Entropy`, `Spawner` (§4.6), and
-`Transport` (§7)), and §18.2 mandates that simulation reuse *those same traits*,
-swapping only the implementations. A generic network or scheduler crate
-(`madsim`, `turmoil`, `shuttle`, `loom`, `stateright`) cannot satisfy that
-contract: it would test a model of the system, not the real `ActorSystem`,
-mailbox, SWIM, supervision, and receptionist code. So the simulator, the
-invariant checkers, the reproducibility harness, and the linearizability
-decision are all owned, in `actor-simulation`, atop `rand_chacha`.
+The spec routes every source of nondeterminism through four traits (`Clock`,
+`Entropy`, `Spawner` (§4.6), and `Transport` (§7)), and §18.2 mandates that
+simulation reuse *those same traits*, swapping only the implementations. A
+generic network or scheduler crate (`madsim`, `turmoil`, `shuttle`, `loom`,
+`stateright`) cannot satisfy that contract: it would test a model of the
+system, not the real `ActorSystem`, mailbox, SWIM, supervision, and
+receptionist code. So the simulator, the invariant checkers, the
+reproducibility harness, and the linearizability decision are all owned, in
+`actor-simulation`, atop `rand_chacha`.
 
 The one external test-only tool is **`trybuild`**, which drives the compile-fail
 cases for invariant #20 (an invalid `ask`/`tell` must not compile), a property
@@ -46,7 +44,7 @@ system (§4.6); every draw (application randomness, gossip peer selection,
 SWIM's `k` members, backoff jitter, and the scheduler's own tie-breaks) comes
 from it. Production seeds it from the OS (`OsEntropy`); simulation seeds one
 `ChaCha8` stream from the run seed (`SimEntropy`), and cloning a handle shares
-the *same* stream, which is what makes a run reproducible.
+the *same* stream, which makes a run reproducible.
 
 ```rust
 pub trait Entropy: Send + Sync + 'static {
@@ -102,25 +100,25 @@ excepted, §3.5.1), then let the runner check invariants. `run_swarm` /
 as a `RunFailure` carrying the `(workload, seed)` that replays it; the seed
 regenerates the run's faults, so there is nothing run-shaped to carry beyond it.
 
-Note the asymmetry the checkers have to respect: a single-node run is driven to
+The checkers have to respect an asymmetry: a single-node run is driven to
 **quiescence**, but a cluster run is **time-bounded** (`run_for`) because the
 failure detector never quiesces. A property that must hold for both has to hold
 at every *prefix*. Getting an end-of-run claim to mean anything takes more than
 waiting; see "Asserting at quiescence" below.
 
-**Continuous invariant checking.** Rather than bespoke per-scenario assertions,
-a small set of always-on `Invariant`s observe the event stream live through a
+**Continuous invariant checking.** Instead of per-scenario assertions, a small
+set of always-on `Invariant`s observe the event stream live through a
 `Checker`, on every run and at final quiescence. Seven ship as continuous
 checkers today, `NoSilentLoss` (#1), `SerialExecution` (#4),
 `LifecycleExactlyOnce` (#6), `SignalInBand` (#13), `DownIsTerminal` (#15),
 `OneLeaderPerTerm` (#22), and `SingletonAtMostOnePerNode` (utilities U2),
 chosen because each is a safety property ("a bad thing never happens")
-expressible over the existing §16 events. `SignalInBand` (#13) holds the line
-that a `Terminated` is delivered *through the watcher's mailbox*, never out of
-band: since a signal flows through `enqueue_signal` (an `Enqueue` of the
-`Terminated` manifest) before the serial loop dispatches it, a `DispatchStart`
-of that signal with no matching prior `Enqueue` is an out-of-band delivery,
-caught live. It is a *per-event* (prefix) property, so it is sound for both
+expressible over the existing §16 events. `SignalInBand` (#13) checks that a
+`Terminated` is delivered *through the watcher's mailbox*, never out of band:
+since a signal flows through `enqueue_signal` (an `Enqueue` of the `Terminated`
+manifest) before the serial loop dispatches it, a `DispatchStart` of that
+signal with no matching prior `Enqueue` is an out-of-band delivery, caught
+live. It is a *per-event* (prefix) property, so it is sound for both
 quiescence-driven single-node runs and the time-bounded cluster runs (`run_for`)
 that stop mid-flight.
 
@@ -290,7 +288,7 @@ under cluster nemesis and transport faults (`check_reproducible` /
 
 ### Escape hatch: `scenario_sweep`
 
-For a scenario worth sweeping but too bespoke to fit `Workload`; it drives the
+For a scenario worth sweeping but too specific to fit `Workload`; it drives the
 cluster through a hand-written narrative rather than generating traffic.
 `scenario_sweep` gives such a loop the one thing it otherwise lacks, a name:
 
@@ -406,9 +404,9 @@ variables:
 - `SWARM_SEED_BASE=<n>`: offset every sweep by `n`. `soak.yml` sets this fresh
   per run from the run id, so successive soaks explore disjoint ground.
 
-CI pins `SWARM_SEEDS: full`. Local runs, with neither set, take the cost-class
-width. CI runs many seeds per change across fault configurations; the metric is
-cluster-hours exercised, not tests counted.
+CI pins `SWARM_SEEDS: full` and runs many seeds per change across fault
+configurations; the metric is cluster-hours exercised, not tests counted. Local
+runs, with neither set, take the cost-class width.
 
 ## Stopping at the first failure, or collecting them all
 
@@ -424,8 +422,8 @@ stops exploring new ground until someone fixes the bug.
 
 A collecting run also catches a panic *inside* a workload, attributes it to its
 seed, and carries on. Sweeps fail two ways: an invariant returns a violation, or
-the workload simply asserts (a `drive` that checks its own outcome, a
-`scenario_sweep` body).
+the workload asserts (a `drive` that checks its own outcome, a `scenario_sweep`
+body).
 
 One seed reports once, even though the corpus replay and a wide sweep can both
 reach it.
@@ -465,24 +463,23 @@ runs out of budget makes no claim rather than a false one.
 **Some subsystems never quiesce, and the answer is per checker, not per sweep.**
 A background loop that polls for as long as its node lives has something in
 flight at *any* stopping point, so a quiescence assertion over it fails on a
-fraction of seeds no matter how long the runner waits. The entity layer's alarm driver
-sweeps its shard's index every 500 ms (`ALARM_DRIVE_INTERVAL`) and breaks two
-default checkers; `blob-store`'s reconcile loop probes owners continuously and
-breaks one of them, and the two checkers do not deserve the same remedy.
+fraction of seeds no matter how long the runner waits. The entity layer's alarm
+driver sweeps its shard's index every 500 ms (`ALARM_DRIVE_INTERVAL`) and breaks
+two default checkers; `blob-store`'s reconcile loop probes owners continuously
+and breaks one of them, and the two checkers do not deserve the same remedy.
 `no-silent-loss` is *entirely* a quiescence claim, so a workload over such a
 subsystem drops it whole, which both `alarm_swarm.rs` and `blob-store`'s
 `swarm.rs` do. `serial-execution` is two claims in one: `observe` asserts no
 reentrant dispatch, which is real safety and holds fine, and only
 `at_quiescence` asserts nothing is left open. `blob-store`'s swarm keeps it
-whole; only the alarm driver, which re-activates entities forever, leaves a
+whole. Only the alarm driver, which re-activates entities forever, leaves a
 dispatch open at an arbitrary stopping point, and dropping the checker whole
 would throw away the safety half, so `alarm_swarm.rs` wraps the real one in
-`NotReentrant` and overrides the final call alone. Read a failing checker
-before deleting it: the
-question is not "does this subsystem satisfy it" but "which of its claims does
-it satisfy". Dropping a quiescence claim stays honest only while the workload
-awaits every op it issues to an outcome, which is what keeps the data path's
-no-loss covered with the checker gone.
+`NotReentrant` and overrides the final call alone. Read a failing checker before
+deleting it: the question is not "does this subsystem satisfy it" but "which of
+its claims does it satisfy". Dropping a quiescence claim stays honest only while
+the workload awaits every op it issues to an outcome, which is what keeps the
+data path's no-loss covered with the checker gone.
 
 ## The regression corpus
 
@@ -584,7 +581,7 @@ recur in workloads that assert one:
    is**, because that decides where it goes:
 
    - Something the *workload* drives holds however narrow the run, so it can
-     ride the invariant sweep. Make it actually deterministic: idle past
+     ride the invariant sweep. Make it deterministic: idle past
      `idle_after` on a fixed cadence rather than a seeded coin, and snapshot
      often enough that an entity has a checkpoint to return from before it first
      hibernates. `entity`'s `support::Exercised` is the shared tally.
@@ -677,7 +674,7 @@ are policy, held by the golden corpus and the mixed-version sweep (compatibility
 The core catalogue's properties are framework ones, not database ones: there is
 no durability, serializability, or lost-update notion at that layer (the actor
 model is in-memory, at-most-once, eventually consistent, §1.2, §7.2). The shape
-worth internalizing:
+worth knowing:
 
 - **Messaging & execution (#1, #3–#5, #9).** No silent loss; per-pair FIFO under
   reordering; serial, non-reentrant dispatch; bounded non-dropping mailbox;

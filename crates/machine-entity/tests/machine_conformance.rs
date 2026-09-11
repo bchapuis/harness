@@ -71,8 +71,7 @@ impl Invariant for NeverForks {
 
 // E6 ("at most one committing activation per node") is *not* redefined here:
 // it is `entity::testing::ActivationSingletonPerNode`, shared with
-// `machine_swarm.rs` and entity's own suites. An independently-maintained copy
-// is exactly what that module exists to prevent.
+// `machine_swarm.rs` and entity's own suites.
 
 struct Narrative {
     dir: PathBuf,

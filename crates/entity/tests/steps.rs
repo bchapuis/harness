@@ -10,9 +10,8 @@
 //! The property these state and `steps_swarm.rs` sweeps is the memo's
 //! **write-once** rule: `complete_step` records only a step that is not already
 //! done, so the first committed result wins. Here it is asserted on a clean
-//! single-node run: the necessary counterpart to the sweep, which bounds what can
-//! change and would be satisfied just as well by a fixture whose workflow never
-//! commits anything at all.
+//! single-node run, the counterpart to the sweep, which bounds what can change and
+//! would be satisfied by a fixture whose workflow never commits at all.
 
 mod support;
 
@@ -105,12 +104,12 @@ fn steps_run_sleep_and_finish() {
 
 #[test]
 fn steps_memoize_across_hibernation() {
-    // Aggressive idle window: the entity hibernates in every gap the workflow allows
-    // (after Finished, and (because the alarm veto holds during the sleep) the
-    // memo must still carry completed steps across the reactivations the drive
-    // triggers). The witness is the terminal value: `finished` is twice whatever
-    // `fetch` first committed, and a re-launch that overwrote the memo would carry
-    // a later ordinal into it.
+    // Aggressive idle window: the entity hibernates in every gap the workflow
+    // allows (the alarm veto holds during the sleep, so the gap is after Finished),
+    // and the memo must still carry completed steps across the re-activations the
+    // drive triggers. The witness is the terminal value: `finished` is twice
+    // whatever `fetch` first committed, so a re-launch that overwrote the memo
+    // would carry a later ordinal into it.
     let fx = Effects::default();
     let (sim, recorder, entities) = rig(
         2,
@@ -149,15 +148,14 @@ fn a_relaunched_step_does_not_overwrite_the_memo() {
     // `complete_step` refuses the second result, so the memo (and the terminal
     // value derived from it) stay at the first.
     //
-    // The second touch is what makes the window observable, and it has to be a
-    // separate one: a `StepDone` re-activating the entity itself is already in the
-    // mailbox ahead of the drive it triggers, so that path commits the step before
-    // anything could re-launch it.
+    // The second touch has to be a separate one: a `StepDone` re-activating the
+    // entity is already in the mailbox ahead of the drive it triggers, so that path
+    // commits the step before anything could re-launch it.
     //
     // The touches are **launched, not blocked on**: `block_on` drives the scheduler
     // to quiescence, so blocking on the first read would run the whole workflow to
-    // completion (deadline and all) before the second read was ever issued, and
-    // there would be no in-flight window left to interrupt.
+    // completion (deadline and all) before the second read was issued, leaving no
+    // in-flight window to interrupt.
     //
     // This is the shape `steps_swarm.rs` sweeps under the nemesis; here it is
     // pinned on one seed with no faults at all, so a failure names an interleaving
@@ -214,9 +212,9 @@ fn a_relaunched_step_does_not_overwrite_the_memo() {
 
 #[test]
 fn launch_guard_claims_by_arbitrary_key() {
-    // The guard is generic over the consumer's step key (the agent runtime agent
-    // keys tool steps by the model's call id): claims are per-key, readable
-    // without claiming, and reset restores idleness.
+    // The guard is generic over the consumer's step key (the agent runtime keys
+    // tool steps by the model's call id): claims are per-key, readable without
+    // claiming, and reset restores idleness.
     let mut guard: LaunchGuard<String> = LaunchGuard::default();
     assert!(guard.is_idle(), "a fresh guard holds no claims");
     assert!(guard.claim("call-1-0".to_string()));

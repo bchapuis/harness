@@ -1,12 +1,12 @@
 # agent-vscode
 
-A VS Code extension that surfaces a **agent session** as an agent in the
+A VS Code extension that surfaces an **agent session** as an agent in the
 **Agents window**, driven over the gateway's HTTP/SSE edge
 (`crates/agent-gateway`). Pick a session, send a prompt, and watch the run,
 with model responses, tool calls, tier acquisitions, and the terminal outcome
 streaming in live. Cancel interrupts the turn.
 
-It talks directly to the gateway's existing REST + Server-Sent-Events endpoints
+It talks directly to the gateway's REST + Server-Sent-Events endpoints
 (the same protocol the Rust TUI in `crates/agent-tui` uses). There is no ACP
 wire protocol on either side: the gateway is *ACP-aligned* in its semantics
 (transport errors vs. in-run outcomes kept distinct), and this extension maps

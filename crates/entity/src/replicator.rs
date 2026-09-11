@@ -86,15 +86,13 @@ type LocalWrite = futures::future::Shared<actor_core::BoxFuture<'static, StoreAc
 /// last puts the peer asks on the wire before the flush is submitted. The
 /// [`LocalWrite`] stays with the caller, which **must** await it before returning.
 ///
-/// That second obligation is not belt-and-braces. [`BlockingIo`] promises threads and
-/// explicitly *not* order (see its trait doc), and `ThreadPoolIo` runs several workers
-/// off one queue, so two store calls for the same entity that are in flight together
-/// may execute in either order. Today nothing exercises that, because every caller
-/// awaits its store call before issuing the next one: the serialized flush this
-/// change removes is exactly what has been enforcing an entity's write order. Awaiting
-/// here keeps that property (one outstanding store call per entity) while still
-/// overlapping the flush with the peers, which is the whole point: the ordering
-/// guarantee costs a wait only when the peers beat the disk, and never a round trip.
+/// That second obligation is what keeps an entity's writes ordered. [`BlockingIo`]
+/// promises threads and explicitly *not* order (see its trait doc), and
+/// `ThreadPoolIo` runs several workers off one queue, so two store calls for the same
+/// entity in flight together may execute in either order. Awaiting here holds the
+/// property to one outstanding store call per entity while still overlapping the
+/// flush with the peers: the ordering guarantee costs a wait only when the peers beat
+/// the disk, and never a round trip.
 fn local_store_ack(
     node: NodeId,
     io: &Arc<dyn BlockingIo>,
@@ -128,16 +126,14 @@ type Merged = (Vec<Vec<u8>>, Seq, Option<(Seq, Term, Vec<u8>)>, bool);
 
 /// The deadlines a replicator applies, from [`EntityConfig`](crate::EntityConfig).
 ///
-/// Carried as a pair rather than read from the config at each use so the two are
-/// visibly a policy the deployment sets, not constants the code assumes. They were
-/// compile-time constants; the right values depend on the deployment's network and
-/// storage, and setting them too low is worse than slow: every timeout here is
-/// ambiguous (§7.2), so it steps the activation down and forces a rehydration.
+/// Carried as a pair rather than read from the config at each use, so the two are
+/// visibly a policy the deployment sets. The right values depend on the deployment's
+/// network and storage, and setting them too low is worse than slow: every timeout
+/// here is ambiguous (§7.2), so it steps the activation down and forces a rehydration.
 ///
 /// Deliberately without a `Default`: the defaults live once, in
 /// [`EntityConfig`](crate::EntityConfig), and a second set here would be a second
-/// place to edit one tuning number, which is how such a pair silently drifts apart.
-/// Every construction comes from a config.
+/// place to edit one tuning number. Every construction comes from a config.
 #[derive(Clone, Copy, Debug)]
 pub struct Deadlines {
     /// A quorum append, snapshot, or blob put (§11).
@@ -420,17 +416,15 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             )
         });
         // The local write joins the fan-out as one more replica's ack (the leader is a
-        // replica, §5.2). All R acks are gathered the same way, so this node counts
-        // toward the quorum exactly when its own bytes are stable.
-        //
-        // Offloaded, not inline: this is an fsync, and running it on the async worker
-        // would stall that worker's Raft heartbeats and every other shard's quorum wait
-        // (see [`crate::blocking`]). Handed to the quorum *unresolved* rather than
-        // awaited first: the peer asks are lazy futures, so awaiting the flush here
-        // would keep every `StoreRecord` off the wire until this node's disk answered,
-        // making a commit cost `local + RTT`. `local_store_ack` gives back a handle so
-        // the write is still awaited before this returns (which is what preserves an
-        // entity's write order), but the peers travel while it runs.
+        // replica, §5.2), so this node counts toward the quorum exactly when its own
+        // bytes are stable. Offloaded, not inline: this is an fsync, and running it on
+        // the async worker would stall that worker's Raft heartbeats and every other
+        // shard's quorum wait (see [`crate::blocking`]). Handed to the quorum
+        // *unresolved* rather than awaited first: the peer asks are lazy futures, so
+        // awaiting the flush here would keep every `StoreRecord` off the wire until
+        // this node's disk answered, making a commit cost `local + RTT`.
+        // `local_store_ack` gives back the handle awaited below, which is what
+        // preserves an entity's write order.
         let (name, shard) = (entity.clone(), self.shard);
         let (local, local_write) =
             local_store_ack(self.self_node, &self.io, &self.local, move |store| {
@@ -607,12 +601,11 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             store.prepare(shard, &name, term)
         })
         .await;
-        // Naming both terms, because the interesting failure is not the ordinary one.
-        // A higher term from a *peer* is a deposed leader learning it lost an election,
-        // and the next activation on the winner recovers. A higher term in our **own**
-        // store is the pathological one (the local fence outran this shard's group, so
-        // no leader of it can ever read again), and only the two numbers tell them
-        // apart.
+        // Both terms are named because the two failures differ. A higher term from a
+        // *peer* is a deposed leader learning it lost an election, and the next
+        // activation on the winner recovers. A higher term in our **own** store is the
+        // pathological one (the local fence outran this shard's group, so no leader of
+        // it can ever read again), and only the two numbers tell them apart.
         let local_reply = match local {
             ReadOutcome::Prepared(reply) => reply,
             ReadOutcome::Fenced(fence) => {
@@ -772,16 +765,14 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// quorum is unreachable, so the caller learns the bytes are not yet durable.
     ///
     /// **It puts the bytes unconditionally, and an offer round here would not pay.**
-    /// The obvious refinement (`has` the id on each peer first, then put only where
-    /// it is absent) was proposed and withdrawn, and is recorded here because the
-    /// shape of this function is what invites it again. Two reasons it loses:
+    /// The obvious refinement (`has` the id on each peer first, then put only where it
+    /// is absent) loses twice:
     ///
     /// - It catches nothing new. The facets above already filter what they have seen,
     ///   and the case an offer round *would* catch (a chunk two different entities
     ///   produced) is unreachable, because an entity's blob area is per-entity all the
     ///   way down (`FileEntityStore::segment_id` keys on `(shard, entity)`, and
-    ///   `has_blob` with it). The round can only ask about *this* entity, so
-    ///   centralizing the question here would not create cross-entity dedup.
+    ///   `has_blob` with it). The round can only ask about *this* entity.
     /// - It costs a round on exactly the path that cannot afford one. On a create
     ///   every chunk is cold, so every put would pay the probe and then put anyway;
     ///   with the puts pipelined into waves, a put is one round per wave and an offer
@@ -1193,9 +1184,8 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
             .map(|(_, _, bytes)| bytes.clone())
             .collect();
         if let Some((at, _, state)) = reply.snapshot {
-            // Spelled as an `if` rather than `bool::then` because the write is
-            // offloaded and so has to be awaited, which a synchronous closure cannot
-            // do. The condition and the `Option` it produces are unchanged.
+            // An `if` rather than `bool::then`: the write is offloaded and so has to
+            // be awaited, which a synchronous closure cannot do.
             let local = if dest_replicas.contains(&self.self_node) {
                 let (name, copy) = (entity.clone(), state.clone());
                 Some(
@@ -1349,7 +1339,7 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
     /// orphan swept mid-copy, safely skipped). A destination that is this
     /// node writes through the local store's blocking pool. Idempotent
     /// (content-addressed). `on_unreachable` is the migration-vs-transfer
-    /// policy split, kept explicit because it is load-bearing (E17 vs E18).
+    /// policy split (E17 vs E18).
     async fn copy_blob_area(
         &self,
         entity: &EntityName,
@@ -1493,12 +1483,10 @@ impl<R: RaftConsensus> QuorumReplicator<R> {
                     sealed = true;
                     false
                 }
-                // A replica whose storage failed is exactly an absent replica: it
-                // did not store, and (unlike the refusals above) it decided
-                // nothing, so it sets no flag and steers the outcome nowhere. If the
-                // remaining replicas still make a quorum the write commits normally;
-                // otherwise this falls through to `Unavailable`, which is the honest
-                // report of a write whose fate the caller must not assume.
+                // A replica whose storage failed is exactly an absent replica: it did
+                // not store, and (unlike the refusals above) it decided nothing, so it
+                // sets no flag. If the remaining replicas still make a quorum the write
+                // commits normally; otherwise this falls through to `Unavailable`.
                 Ok(StoreAck::Failed) => false,
                 Err(_) => false,
             })

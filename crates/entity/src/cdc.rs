@@ -20,8 +20,7 @@
 //! The hash is FastCDC's gear function without normalized chunking:
 //! `h = (h << 1) + GEAR[byte]`, cut when the top bits are clear. Normalization
 //! tightens the size distribution; the min/max bounds here already cap both tails,
-//! which is what the transfer path cares about, so the simpler function is the one
-//! in the tree.
+//! which is what the transfer path cares about, so the simpler function suffices.
 
 /// The smallest chunk the splitter will emit (except the last).
 ///

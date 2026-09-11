@@ -31,13 +31,12 @@ pub struct EntityConfig {
     ///
     /// The mechanism comes from Durable Objects (DO §5); the *number* does not. DO
     /// evicts after ten seconds because it multiplexes tenants onto shared hosts and
-    /// prices resident memory. On a dedicated node the two sides of the trade read
-    /// differently: eviction reclaims an entity's state (kilobytes against a machine
-    /// sized in the hundreds of gigabytes), and costs a quorum head-recovery round
-    /// trip on the next touch, plus a snapshot on the way out if enough has
-    /// accumulated (§9). Memory is the abundant resource here and the round trip is
-    /// the scarce one, so the window is set long enough that an entity in intermittent
-    /// use stays resident between touches (`docs/hardware-envelope.md` §3.1, §3.2).
+    /// prices resident memory. On a dedicated node, eviction reclaims kilobytes
+    /// against a machine sized in the hundreds of gigabytes, and costs a quorum
+    /// head-recovery round trip on the next touch, plus a snapshot on the way out if
+    /// enough has accumulated (§9). Memory is abundant here and the round trip is
+    /// scarce, so the window is long enough that an entity in intermittent use stays
+    /// resident between touches (`docs/hardware-envelope.md` §3.1, §3.2).
     ///
     /// Shorten it for a type with many rarely-touched entities and large state;
     /// lengthen it for one whose entities are touched in bursts minutes apart: an
@@ -53,15 +52,14 @@ pub struct EntityConfig {
     /// longer O(state): past 64 KiB facet 0's state travels as content-defined
     /// chunks and only the chunks that changed are sent (§7.12), so a snapshot is
     /// roughly O(delta) plus a manifest. What it buys is a shorter replay, and
-    /// replay reads are **local** (§9). The default stays high (the thing being
-    /// saved is still cheap and a snapshot is still not free), but the penalty for
+    /// replay reads are **local** (§9). The default stays high, but the penalty for
     /// lowering it is far smaller for an entity whose state grows by accretion.
     ///
     /// The counter-pressure is failover, not steady state: a new leader recovers the
     /// records above the last snapshot from a quorum (§8), so a larger gap means a
-    /// larger one-off recovery read per entity. That is once per leadership change
-    /// against a broadcast every threshold, which is why the balance sits where it
-    /// does. A type whose events are large relative to its state should lower it.
+    /// larger one-off recovery read per entity, once per leadership change against a
+    /// broadcast every threshold. A type whose events are large relative to its state
+    /// should lower it.
     pub snapshot_every: u64,
     /// How each node obtains its durable [`EntityStore`](crate::store::EntityStore)
     /// (spec §7.4). `None` (the default) gives every node a fresh in-memory store,
@@ -71,9 +69,9 @@ pub struct EntityConfig {
     pub entity_store: Option<EntityStoreFactory>,
     /// How this deployment groups nodes into failure domains: racks, zones,
     /// whatever fails together (spec §7.1). `None` (the default) treats every node as
-    /// its own domain, which is the historical behaviour: replicas spread across the
-    /// cluster but nothing stops all R of a shard landing in one zone, so a single
-    /// zone loss can take shards below quorum while the cluster looks healthy.
+    /// its own domain: replicas spread across the cluster but nothing stops all R of a
+    /// shard landing in one zone, so a single zone loss can take shards below quorum
+    /// while the cluster looks healthy.
     ///
     /// Supplying it makes the allocator take at most `ceil(R / domains)` replicas per
     /// domain. The mapping MUST agree on every node; see
@@ -89,11 +87,10 @@ pub struct EntityConfig {
     /// spanning regions is in the hundreds. `docs/standalone-deployment.md` carries
     /// the per-topology table; `docs/hardware-envelope.md` §2 carries the round-trip
     /// numbers it is derived from. Set it well above the p99.9 commit latency you
-    /// actually observe, never against a median (hw §3.7). The cost of
-    /// setting it too low is not a slow write but a *false* one: every timeout is
-    /// ambiguous (the append MAY still commit later, §7.2), so it steps the
-    /// activation down and forces a full rehydration, turning transient slowness into
-    /// activation churn, which itself generates more I/O.
+    /// actually observe, never against a median (hw §3.7). The cost of setting it too
+    /// low is not a slow write but a *false* one: every timeout is ambiguous (the
+    /// append MAY still commit later, §7.2), so it steps the activation down and
+    /// forces a full rehydration, turning transient slowness into activation churn.
     pub quorum_timeout: Duration,
     /// How long a recovery read quorum waits before falling back to local state
     /// (§7.5, read-your-leader) or reporting `Unavailable` (spec §8, §11).
@@ -108,12 +105,11 @@ pub struct EntityConfig {
     /// The cache is what keeps a repeat call off the serial gateway, so it wants to
     /// be large; it is also per *name*, and a long-lived client (the gateway fronts
     /// every tenant) would otherwise grow one entry for every name it has ever
-    /// addressed. A miss is not an error, only one gateway round-trip, which is
-    /// precisely the resource this deployment is short of, so the bound is set by what
-    /// the entries cost (a handle and a name, tens of megabytes at this size) rather
-    /// than by how many are expected to be live (`docs/hardware-envelope.md` §3.1,
-    /// §3.2). The cache holds up
-    /// to twice this many entries while an older generation ages out.
+    /// addressed. A miss is not an error, only one gateway round-trip, so the bound is
+    /// set by what the entries cost (a handle and a name, tens of megabytes at this
+    /// size) rather than by how many are expected to be live
+    /// (`docs/hardware-envelope.md` §3.1, §3.2). The cache holds up to twice this many
+    /// entries while an older generation ages out.
     pub host_cache_capacity: usize,
     /// The node-local scratch directory a **physical facet** materializes under
     /// (spec §7.12/§7.14): the SQL facet's database files live here, keyed by
@@ -139,12 +135,10 @@ impl Default for EntityConfig {
             shards: 4,
             replication_factor: 3,
             shard_target_bytes: 0, // auto-split off by default; opt in per type
-            // Five minutes, not the ten seconds Durable Objects evicts at: this node's
-            // memory is not the resource under pressure, and each eviction cycle costs
-            // a recovery round trip and possibly a full-state snapshot broadcast.
+            // Five minutes, not the ten seconds Durable Objects evicts at: memory is
+            // not the resource under pressure here (see the field docs).
             idle_after: Duration::from_secs(300),
-            // A snapshot is O(state) on the wire to every replica; a replay is local.
-            // Bias hard toward replaying (see the field docs).
+            // Bias hard toward replaying: a replay is local (see the field docs).
             snapshot_every: 4096,
             entity_store: None,
             failure_domains: None,
@@ -153,8 +147,7 @@ impl Default for EntityConfig {
             // pinning the host's serial executor.
             quorum_timeout: Duration::from_secs(2),
             recover_timeout: Duration::from_secs(2),
-            // Sized by what the entries cost, not by the working set: a miss is a
-            // gateway round trip, and round trips are the scarce resource here.
+            // Sized by what the entries cost, not by the working set (field docs).
             host_cache_capacity: 65536,
             data_dir: None,
         }

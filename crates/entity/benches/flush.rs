@@ -2,10 +2,9 @@
 //!
 //! [`ThreadPoolIo`] is justified in `blocking.rs` by **tail** isolation: a stalled
 //! device must not block the async worker that is also driving Raft heartbeats and
-//! other shards' quorum waits. That argument is about the tail and is right. But the
-//! pool's *width*: `sized_for_host`'s `clamp(2, 8)`; was set from the median, and no
-//! measurement of that median existed. It matters because the two devices a deployment
-//! might be on differ by more than an order of magnitude:
+//! other shards' quorum waits. The pool's *width*, `sized_for_host`'s `clamp(2, 8)`, is
+//! a separate question, set from the median flush cost. It matters because the two
+//! devices a deployment might be on differ by more than an order of magnitude:
 //!
 //! - NVMe **with** power-loss protection: the flush is acknowledged out of a
 //!   capacitor-backed write cache, ~30 µs.
@@ -14,8 +13,7 @@
 //! At 30 µs a couple of threads clear far more work than a node generates and the
 //! width is irrelevant; at 500 µs the queue in front of the pool is sixteen times
 //! deeper for the same offered load, and the width is the difference between a bounded
-//! wait and an unbounded one. So the number decides whether the clamp is right, and
-//! nothing in the tree recorded it.
+//! wait and an unbounded one. The number decides whether the clamp is right.
 //!
 //! Two measurements, because they answer different halves:
 //!
@@ -29,9 +27,8 @@
 //!    throughput that flattens at 2 says the extra threads are only queueing.
 //!
 //! Run with `cargo bench -p entity --bench flush`. It writes to a temp directory, so
-//! it measures **that** filesystem: point `TMPDIR` at the volume a deployment will
-//! actually use, because a laptop's internal SSD and a server's NVMe are exactly the
-//! comparison this file exists to stop people from assuming away.
+//! it measures **that** filesystem: point `TMPDIR` at the volume a deployment will use,
+//! because a laptop's internal SSD and a server's NVMe are not the same device.
 
 use std::sync::Arc;
 use std::sync::Barrier;
@@ -44,9 +41,9 @@ fn main() {
     divan::main();
 }
 
-/// The payload size. Deliberately small: this measures the *flush*, not the transfer,
-/// and a large write would fold the device's bandwidth into a number that is supposed
-/// to be about its acknowledgement latency.
+/// The payload size, small on purpose: this measures the *flush*, not the transfer,
+/// and a large write would fold the device's bandwidth into a number about its
+/// acknowledgement latency.
 const PAYLOAD: usize = 4096;
 
 /// One durable write through the same primitive the stores use.
@@ -70,9 +67,9 @@ fn one_flush(bencher: Bencher) {
 /// `threads` durable writes in flight at once, each on its own file.
 ///
 /// Swept across `sized_for_host`'s clamp and past both ends of it. Read the counter
-/// (items per second), not the wall time: the per-iteration time necessarily grows
-/// with the thread count, and what the sizing question asks is whether *aggregate*
-/// durable writes per second are still improving at a given width.
+/// (items per second), not the wall time: per-iteration time grows with the thread
+/// count by construction, and the sizing question is whether *aggregate* durable writes
+/// per second are still improving at a given width.
 #[divan::bench(args = [1, 2, 4, 8, 16, 32])]
 fn concurrent_flushes(bencher: Bencher, threads: usize) {
     let dir = tempfile::tempdir().expect("scratch dir");
@@ -80,9 +77,9 @@ fn concurrent_flushes(bencher: Bencher, threads: usize) {
     let seq = std::sync::atomic::AtomicU64::new(0);
 
     bencher.counter(ItemsCount::new(threads)).bench(|| {
-        // The barrier makes the flushes actually concurrent rather than merely
-        // spawned: without it the first thread can finish before the last starts,
-        // and the bench would report the serial cost at every width.
+        // The barrier makes the flushes concurrent rather than merely spawned:
+        // without it the first thread can finish before the last starts, and the
+        // bench would report the serial cost at every width.
         let start = Arc::new(Barrier::new(threads));
         std::thread::scope(|scope| {
             for _ in 0..threads {

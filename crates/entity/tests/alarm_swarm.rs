@@ -8,13 +8,13 @@
 //!
 //! **What makes E21 observable here.** Each entity is armed exactly once and
 //! receives no other mutating command for the rest of the run, so `TimerState`'s
-//! `fired` (folded from committed `Fired` events, never from handler
-//! invocations) can only end at 0 or 1. That *is* E21's statement for this
-//! fixture, so the run reads it back per entity and checks it. An entity that never
-//! fired is not a violation: the bound is from above, and under faults a deadline
-//! may simply not be reached. An entity the nemesis leaves unreachable at the end
-//! yields no observation at all, which costs coverage rather than correctness:
-//! `observations()` guards against a sweep that quietly observes nothing.
+//! `fired` (folded from committed `Fired` events, never from handler invocations)
+//! can only end at 0 or 1, which is E21's statement for this fixture. The run
+//! reads it back per entity. An entity that never fired is not a violation: the
+//! bound is from above, and under faults a deadline may simply not be reached. An
+//! entity the nemesis leaves unreachable at the end yields no observation, which
+//! costs coverage rather than correctness: `observations()` guards against a sweep
+//! that quietly observes nothing.
 //!
 //! **Why the read-back and not the event stream.** `EntityEvent::Committed`
 //! carries a seq but not what was in the batch, so the obvious continuous check
@@ -23,29 +23,25 @@
 //! at-most-once atomic), so an armed-once entity should stop at 3. That bound was
 //! written, and it failed: heads reach 4 under faults on entities whose `fired` is
 //! 1, because a re-activation can commit a single record of its own without
-//! firing. The head is not a proxy for the fire count, and only the folded state
-//! is. This is recorded because the wrong version looked more rigorous than the
-//! right one.
+//! firing. The head is no proxy for the fire count; only the folded state is.
 //!
 //! **Why `no-silent-loss` is dropped.** The alarm driver polls its shard's index
 //! every 500 ms for as long as its node lives (`ALARM_DRIVE_INTERVAL`), so an
-//! alarm-wired entity has an ask in flight a fixed fraction of the time and
-//! never reaches ask-quiescence; the checker reports whatever is outstanding when
-//! the runner stops, which is one seed in ten. That is the check meeting a
-//! subsystem it was not written for, not a leak: those asks carry the 5 s
-//! `DEFAULT_ASK_TIMEOUT` and do resolve. `blob-store`'s swarm drops it for the
-//! same structural reason and writes down the same caveat: the move is honest
-//! only while the workload awaits every op it issues to an outcome, which is what
-//! leaves the data path's no-loss covered with the checker gone. Every ask below
-//! is an `ask_timeout` that is awaited, so it is.
+//! alarm-wired entity has an ask in flight a fixed fraction of the time and never
+//! reaches ask-quiescence; the checker reports whatever is outstanding when the
+//! runner stops, which is one seed in ten. Those asks carry the 5 s
+//! `DEFAULT_ASK_TIMEOUT` and do resolve, so this is the check meeting a subsystem
+//! it was not written for, not a leak. `blob-store`'s swarm drops it for the same
+//! reason, with the same caveat: the move is honest only while the workload awaits
+//! every op it issues to an outcome, which is what leaves the data path's no-loss
+//! covered with the checker gone. Every ask below is an awaited `ask_timeout`.
 //!
-//! `serial-execution` needed the same treatment for the same reason, but not the
+//! `serial-execution` needed the same treatment for the same reason but not the
 //! same remedy; see [`NotReentrant`]: it makes two claims at once, and only the
 //! quiescence half is dropped.
 //!
 //! **Width.** The declared corpus is 24 seeds, matching `alarm_cluster.rs`; the
-//! sweep was additionally run clean across 200, which is what the entry this
-//! closes asked for: every seed, not nine in ten.
+//! sweep was also run clean across 200.
 
 mod support;
 
@@ -112,17 +108,16 @@ const FIRE_WINDOW: Duration = Duration::from_secs(10);
 /// The safety half of `serial-execution`, without its quiescence half.
 ///
 /// That checker makes two claims at once. `observe` asserts **no reentrant
-/// dispatch** (one handler never runs twice at once on an actor) which is a
-/// real safety property and holds here. `at_quiescence` additionally asserts no
-/// dispatch is left *open* when the runner stops, and that is the same
-/// structural claim `no-silent-loss` makes, failing for the same reason: the
-/// alarm driver re-activates entities forever, so at any arbitrary stopping point
-/// some dispatch it started is in flight. Seed 11 of this sweep is that.
+/// dispatch** (one handler never runs twice at once on an actor), a real safety
+/// property that holds here. `at_quiescence` also asserts no dispatch is left
+/// *open* when the runner stops, the same structural claim `no-silent-loss`
+/// makes, failing for the same reason: the alarm driver re-activates entities
+/// forever, so at any stopping point some dispatch it started is in flight. Seed
+/// 11 of this sweep is that.
 ///
 /// Dropping the checker outright would take the reentrancy claim with it, so this
 /// wraps the real one and returns `Ok` from the final check alone. A hung run is
-/// still caught: the runner's own liveness budget fails a `drive` that does not
-/// finish.
+/// still caught by the runner's own liveness budget.
 struct NotReentrant(Box<dyn Invariant>);
 
 impl Invariant for NotReentrant {
@@ -205,8 +200,8 @@ fn config() -> EntityConfig {
     EntityConfig {
         shards: SHARDS,
         // Long enough that an entity does not hibernate between its arm and its
-        // deadline on a calm seed. The pending-alarm veto would hold it resident
-        // anyway (§7.16); this keeps the intent local to the workload.
+        // deadline, though the pending-alarm veto would hold it resident anyway
+        // (§7.16).
         idle_after: Duration::from_secs(600),
         snapshot_every: 8,
         ..EntityConfig::default()
@@ -255,15 +250,14 @@ impl ClusterWorkload for AlarmSwarm {
             // Let the control-plane and shard groups elect before traffic.
             clock.sleep(Duration::from_secs(3)).await;
 
-            // Arm each entity exactly once (the shape the check reads), and do
-            // it concurrently, because the whole drive shares one 30 s virtual-time
+            // Arm each entity exactly once (the shape the check reads), and do it
+            // concurrently, because the whole drive shares one 30 s virtual-time
             // budget with the wait and the read-back below. An arm the faults
             // refuse is left refused rather than retried: a retry could land a
             // *second* arm on an entity whose first one committed invisibly (the
             // reply lost after the commit), and an entity armed twice may
-            // legitimately fire twice, which would turn the check into a false
-            // alarm. A run where some arms fail is a run with fewer observations,
-            // not a wrong one.
+            // legitimately fire twice. A run where some arms fail has fewer
+            // observations, not wrong ones.
             let arms = (0..ENTITIES).map(|g| {
                 let timer = timers[g % timers.len()].entity(format!("t/{g}"));
                 async move {
@@ -287,8 +281,8 @@ impl ClusterWorkload for AlarmSwarm {
 
             // Read each entity's folded fire count, concurrently and on a budget. A
             // read the faults refuse is simply not an observation (retried, then
-            // dropped) because E21 is a claim about what committed, and an entity
-            // this node cannot reach committed whatever it committed either way.
+            // dropped): E21 is a claim about what committed, and an unreachable
+            // entity committed whatever it committed either way.
             let reads = (0..ENTITIES).map(|g| {
                 let key = format!("t/{g}");
                 let timers = timers.clone();
@@ -363,11 +357,10 @@ fn alarms_fire_at_most_once_under_the_cluster_swarm() {
 }
 
 /// The reproducibility half of the pair (docs/simulation-testing.md): the same
-/// seed replays to a byte-identical event stream. The alarm path is the one
-/// with the most self-driven timing (the host's idle and alarm timers, the
-/// driver's 500 ms sweep, the index registration round trips), and every one of
-/// those rides the Clock/Entropy/Spawner seams, which is what this checks. A
-/// divergence names the seed to replay.
+/// seed replays to a byte-identical event stream. The alarm path carries the most
+/// self-driven timing (the host's idle and alarm timers, the driver's 500 ms
+/// sweep, the index registration round trips), and every one of those rides the
+/// Clock/Entropy/Spawner seams.
 #[test]
 fn the_alarm_swarm_is_reproducible() {
     let workload = AlarmSwarm {
@@ -380,9 +373,9 @@ fn the_alarm_swarm_is_reproducible() {
 }
 
 /// The other half of the swarm's claim, on a clean cluster: an armed alarm
-/// actually *does* fire. Without this, `fired <= 1` would be satisfied just as
-/// well by a fixture that never fires at all: the swarm would be green and
-/// asserting nothing, which is the failure mode the whole §2.1 entry is about.
+/// actually *does* fire. Without this, `fired <= 1` would be satisfied by a
+/// fixture that never fires at all, and the swarm would be green while asserting
+/// nothing, the failure mode §2.1 is about.
 #[test]
 fn one_arm_fires_exactly_once_without_faults() {
     use actor_simulation::SimNetwork;

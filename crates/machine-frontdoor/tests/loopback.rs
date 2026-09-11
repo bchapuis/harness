@@ -101,8 +101,7 @@ impl ChannelBackend for FakeBackend {
 }
 
 /// A backend whose guest end vanishes the moment the channel opens: a killed
-/// VM, a crashed agent, a severed vsock. It reports no exit status, because
-/// there is no longer anything there to report one.
+/// VM, a crashed agent, a severed vsock. It reports no exit status.
 struct DeadBackend;
 
 impl ChannelBackend for DeadBackend {
@@ -258,8 +257,8 @@ async fn an_authorized_key_attaches_and_bridges_an_exec_channel() {
 
 /// A guest that dies without reporting must not leave the client waiting. The
 /// exit status is the guest's to send, so when the guest is gone the door owes
-/// the client the close itself: otherwise an exec whose agent vanished hangs
-/// until some unrelated timeout severs the connection.
+/// the client the close: otherwise an exec whose agent vanished hangs until
+/// some unrelated timeout severs the connection.
 #[tokio::test]
 async fn a_guest_that_dies_without_a_status_closes_the_channel() {
     let authority = authority();

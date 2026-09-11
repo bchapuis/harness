@@ -25,7 +25,7 @@ pub enum NodeRuntimeProvider {
     /// deterministic stream of block writes into the image. Every durable
     /// property is exercised (provision, capture, hibernate, fail over), and
     /// nothing that needs a live guest is: an SSH channel has nothing to
-    /// bridge to. What a machine with no way to hold a guest can honestly show.
+    /// bridge to.
     Fake(FakeRuntimeProvider<TcpCluster>),
     /// A real guest, held by whichever mechanism this node was configured with
     /// (`--machine firecracker` or `--machine docker`).

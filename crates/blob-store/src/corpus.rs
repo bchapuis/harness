@@ -5,10 +5,10 @@
 //! test beside the format that decodes them with the current build.
 //!
 //! The corpus matters more here than the size of the format suggests, because this
-//! crate has no in-tree consumer: nothing else in the workspace depends on it, so a
-//! format break has nothing downstream to fail. Every other boundary in the tree
-//! would eventually surface a mistake as an entity that would not activate or a node
-//! that could not rejoin. Here the fixture is the only thing that would notice.
+//! crate has no in-tree consumer: a format break has nothing downstream to fail.
+//! Every other boundary in the tree would surface a mistake as an entity that
+//! would not activate or a node that could not rejoin; here the fixture is the
+//! only thing that would notice.
 //!
 //! **The files are evidence, not output.** A fixture for a revision that has
 //! shipped records what those bytes meant; regenerating it destroys the only thing

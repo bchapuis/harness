@@ -29,8 +29,8 @@
 //! # Where the boundaries are
 //!
 //! - **Not in entity.** This crate depends on entity's public API and never the
-//!   reverse; the storage core stays tenant-blind. The directory is an ordinary
-//!   entity: it introduces no new transport, journal, or consensus.
+//!   reverse. The directory is an ordinary entity: it introduces no new
+//!   transport, journal, or consensus.
 //! - **Not the auth boundary.** *Who* may read or mutate a principal's directory is
 //!   decided at each consumer's authenticating edge, where the principal is actually
 //!   known, never here. An `EntityRef<Directory>` is an in-cluster capability among
@@ -64,16 +64,16 @@ use serde::Serialize;
 
 /// The listing metadata of one owned entity: the attributes a listing page renders.
 ///
-/// Every field describes the *ownership entry*, is caller-supplied (the fold reads
-/// no clock, entity §4.1), and is the directory's own data, never a copy of the
-/// target entity's live state (see the crate docs).
+/// Every field is caller-supplied (the fold reads no clock, entity §4.1) and
+/// belongs to the directory, never a copy of the target entity's live state
+/// (see the crate docs).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meta {
     /// A human display name for the entry: the listing's title column. Distinct
     /// from the [`EntityName`] key, which is the durable address.
     pub label: Option<String>,
-    /// When the principal recorded the entity, as a caller-supplied epoch (the unit
-    /// is the caller's; the directory never interprets or compares it to a clock).
+    /// When the principal recorded the entity, as a caller-supplied epoch. The
+    /// unit is the caller's; the directory never interprets it.
     pub created_at: Option<u64>,
     /// Free-form attributes for the long tail of listing columns (status, icon,
     /// owner-defined tags). Caller-defined keys and values.
@@ -256,7 +256,7 @@ impl Message for Record {
 /// commits nothing and replies `false`. Replies `true` when a name was removed.
 ///
 /// This forgets the *index entry* only, it does not delete the entity `name`
-/// addresses (see the crate docs: physical teardown is the consumer's job).
+/// addresses: physical teardown is the consumer's job (see the crate docs).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Forget {
     pub name: EntityName,

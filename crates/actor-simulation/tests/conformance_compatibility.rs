@@ -99,8 +99,8 @@ fn the_association_rises_only_once_both_ends_have_moved() {
 
 #[test]
 fn a_peer_with_no_shared_revision_reports_no_association() {
-    // Disjoint ranges are a refused association (**V2**). To a caller that is not
-    // a lower revision to fall back to: it is no association at all, the same
+    // Disjoint ranges are a refused association (**V2**). The caller gets no
+    // lower revision to fall back to: it gets no association at all, the same
     // answer an unreachable peer gives.
     let sim = Simulation::new(1);
     let net = SimNetwork::new(&sim);

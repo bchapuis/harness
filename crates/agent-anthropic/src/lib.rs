@@ -3,17 +3,16 @@
 //!
 //! This crate is the single place the Messages API protocol exists: the
 //! request and response JSON, the transcript encoding, and the error
-//! taxonomy. Everything that is not protocol: the socket, the key, the
-//! `Clock`/`Entropy` seams, the bounded retry engine (§4.2 rule 1); is the
+//! taxonomy. Everything that is not protocol (the socket, the key, the
+//! `Clock`/`Entropy` seams, the bounded retry engine, §4.2 rule 1) is the
 //! shared [`ProtocolModel`] shell from `agent::http`, held there once for
 //! every sibling adapter.
 //!
-//! The socket is a seam: [`HttpPost`] (from `agent::http`, shared with
-//! every sibling adapter) is the one operation the client needs from its host;
-//! POST these bytes to this path with these headers (the same move the core
-//! makes with `Transport`, core spec §7). The deployment supplies it once over
-//! its HTTP stack of choice, and this crate is only the protocol. The
-//! simulator's scripted model replaces this crate entirely (§12.1).
+//! The socket is a seam: [`HttpPost`] is the one operation the client needs
+//! from its host, POST these bytes to this path with these headers (the same
+//! move the core makes with `Transport`, core spec §7), supplied once by the
+//! deployment over its HTTP stack of choice. The simulator's scripted model
+//! replaces this crate entirely (§12.1).
 
 use agent::Entry;
 use agent::HttpResponse;
@@ -35,9 +34,7 @@ pub const MESSAGES_PATH: &str = "/v1/messages";
 /// The API version header this client speaks.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// The Messages API protocol: the wire-specific four this crate owns. The
-/// shell around it (socket, key, seams, retry) is the shared
-/// [`ProtocolModel`].
+/// The Messages API protocol: the wire-specific four this crate owns.
 pub struct Messages;
 
 impl Protocol for Messages {
@@ -236,9 +233,9 @@ fn classify(response: &HttpResponse) -> Result<ModelResponse, ModelError> {
     Err(match (response.status, detail.kind.as_str()) {
         (429, _) => ModelError::RateLimited,
         (529, _) | (_, "overloaded_error") => ModelError::Overloaded,
-        // The API reports an over-long prompt as an invalid request; the
-        // the agent runtime distinguishes it because the run must fail explicitly on
-        // it (§1.1, §4.3).
+        // The API reports an over-long prompt as an invalid request; the agent
+        // runtime distinguishes it because the run must fail explicitly on it
+        // (§1.1, §4.3).
         (400, _) if detail.message.contains("prompt is too long") => ModelError::ContextOverflow,
         (400, _) | (_, "invalid_request_error") => ModelError::InvalidRequest(detail.message),
         _ => ModelError::Api(format!("{}: {}", detail.kind, detail.message)),

@@ -2,11 +2,11 @@
 //!
 //! The specs address each other by section: `entity §7.12`, `actor §18.5`, a bare
 //! `§9` inside the document that owns it. There are two thousand-odd such
-//! citations across fourteen documents and nothing has ever checked one. A
-//! renumbered section is the ordinary way they break: the edit is local, the
-//! citations are not, and prose fails silently. The specs are layered precisely so
-//! that each cites the ones beneath it, which makes the citation the load-bearing
-//! part of the layering rather than a convenience.
+//! citations across fourteen documents. A renumbered section is the ordinary way
+//! they break: the edit is local, the citations are not, and prose fails
+//! silently. The specs are layered precisely so that each cites the ones beneath
+//! it, which makes the citation the load-bearing part of the layering rather than
+//! a convenience.
 //!
 //! This module resolves every citation against the document it names and reports
 //! the ones that land nowhere. It is the `docs/` analogue of the per-crate
@@ -36,7 +36,7 @@
 //!
 //! A citation is a `§` and a dotted number. What comes before it decides which
 //! document it addresses, and the prose says so in four different ways, all four
-//! are read here rather than pushed back onto the writing:
+//! read here rather than pushed back onto the writing:
 //!
 //! - **A prefix is a word that names a registered document, and nothing else**
 //!   ([`DocSpec::aliases`]). The alternative (treat whatever word precedes the `§`
@@ -52,7 +52,7 @@
 //!   spec twice and only the first says so. The inheritance is this crate's
 //!   inference, but it binds like a written prefix, which means a citation that
 //!   changes document mid-list has to say so. One did: `entity §6, §6.2`, where
-//!   the second is the agent runtime's own, and saying so was the cheaper fix.
+//!   the second is the agent runtime's own.
 //! - **An unprefixed citation follows the citing document's own convention**,
 //!   declared per document as [`Unprefixed`]. Most specs number their own sections
 //!   and mean themselves. Some number nothing and mean one particular spec

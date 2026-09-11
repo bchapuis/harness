@@ -57,8 +57,8 @@ fn greet() -> Greet {
 }
 
 /// Run `future` to completion under modes whose background loops never quiesce
-/// (gossip detector/anti-entropy), where `block_on` would run forever: spawn
-/// it, advance virtual time, take the result.
+/// (gossip detector/anti-entropy, so `block_on` would run forever): launch it
+/// and advance a bounded `settle` span.
 fn drive<T: Send + 'static>(
     sim: &Simulation,
     settle: Duration,

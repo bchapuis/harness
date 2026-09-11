@@ -179,7 +179,7 @@ pub fn agent_invariants() -> Vec<Box<dyn Invariant>> {
     invariants
 }
 
-/// Which A-invariant each agent checker enforces, as `(checker name, H
+/// Which A-invariant each agent checker enforces, as `(checker name, A
 /// number)`: the pairing §11's "Verified by" column asserts, stated from the
 /// checker's side.
 ///
@@ -187,15 +187,13 @@ pub fn agent_invariants() -> Vec<Box<dyn Invariant>> {
 /// `observe` body falsifies: stop watching `ModelCompleted` outside an
 /// activation and the row saying [`AgentEventGrammar`] carries A6 is what
 /// became false. `conformance_catalogue` holds these pairs equal to the
-/// catalogue's, **per pair** and in both directions.
+/// catalogue's, **per pair** and in both directions: two names cover six
+/// invariants here, and a set of names cannot see A6 dropping its
+/// `Verify::Checker` while A8 still names the same checker.
 ///
-/// Two names cover six invariants here, which is why the pairing has to be
-/// compared rather than the two sets of checker *names*: a name set cannot see
-/// A6 dropping its `Verify::Checker` while A8 still names the same checker.
-///
-/// A bare `(name, number)` rather than `actor_simulation::CheckerCoverage`
-/// because that type carries which of *its* two catalogues a number belongs to,
-/// and every number here is an H.
+/// A bare `(name, number)` rather than `actor_simulation::CheckerCoverage`,
+/// which also records which of *its* two catalogues a number belongs to; every
+/// number here is an A.
 pub fn checker_coverage() -> &'static [(&'static str, u8)] {
     &[
         ("agent-event-grammar", 6),

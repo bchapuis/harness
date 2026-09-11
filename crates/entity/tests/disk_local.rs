@@ -321,11 +321,10 @@ fn import_capture_and_hibernation_round_trip_byte_identically() {
             vec![(42u64 / 7) as u8],
         );
 
-        // An uncaptured scribble made before this hibernation would have been
-        // lost, prove the inverse: a fresh scribble reads back live but is
-        // absent from durable state until captured. (The crash-rewind variant
-        // is the swarm's job; here hibernation refuses no capture because the
-        // consumer (this test entity) declares no `can_hibernate` guard.)
+        // Nothing was scribbled since the last capture, so this one stages
+        // nothing. (The crash-rewind variant is the swarm's job; hibernation
+        // refuses no capture here because this test entity declares no
+        // `can_hibernate` guard.)
         let second = reread.ask(CaptureNow).await.expect("ask").expect("capture");
         assert_eq!(
             second,

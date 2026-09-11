@@ -285,7 +285,7 @@ pub enum Frame {
     ///
     /// Coalescing costs nothing in semantics: each beat is dispatched to its own
     /// group exactly as a lone `RaftAppend` would be, so every group's state machine
-    /// sees the identical sequence. Only the framing changes.
+    /// sees the identical sequence.
     RaftHeartbeats { beats: Vec<RaftBeat> },
     /// The replies to a [`RaftHeartbeats`](Frame::RaftHeartbeats), batched the same
     /// way and for the same reason: one reply per beat would undo half the saving.
@@ -439,11 +439,11 @@ mod tests {
     /// `wire_bytes.rs` proves the *shape* is neutral; this proves **this module** still
     /// has that shape.
     ///
-    /// The distinction is the point. That file compares two types it declares itself,
-    /// so it would keep passing if `reply_bytes` drifted: it is a statement about
-    /// serde, not about us. This one encodes through the real module and compares
-    /// against what serde does with a real `Result`, so a renamed variant or a swapped
-    /// order fails here, which is where the wire break would actually be.
+    /// That file compares two types it declares itself, so it would keep passing if
+    /// `reply_bytes` drifted: it is a statement about serde, not about us. This one
+    /// encodes through the real module and compares against what serde does with a
+    /// real `Result`, so a renamed variant or a swapped order fails here, which is
+    /// where the wire break would actually be.
     #[test]
     fn the_reply_module_writes_what_serde_writes_for_a_plain_result() {
         for (name, codec) in CODECS {
@@ -506,12 +506,10 @@ mod tests {
         // encoding is *positional*: a variant inserted anywhere but the end
         // shifts every discriminant after it, so a peer one release behind reads
         // every subsequent frame as a different one; a `RaftAppend` arriving as
-        // a `Watch`. It compiles, it round-trips against itself, and both ends
-        // agree right up until they are not the same build. No round-trip test
-        // can see it, because a round-trip only ever asks one build to agree
-        // with itself; and the `actor.wire` golden corpus does not cover it,
-        // because that fixture pins the `Hello` preamble rather than the frames
-        // (compatibility §3, §4).
+        // a `Watch`. No round-trip test can see it, because a round-trip only
+        // ever asks one build to agree with itself; and the `actor.wire` golden
+        // corpus does not cover it, because that fixture pins the `Hello`
+        // preamble rather than the frames (compatibility §3, §4).
         //
         // Appending is the safe growth (spec §7.1), and it is what these numbers
         // permit: a new variant takes the next free index and moves none of

@@ -120,8 +120,7 @@ pub struct Lineage {
 }
 
 /// A run's successful terminal outcome (agent spec §3.1): the final
-/// assistant message, with the run's journaled token spend; own usage plus
-/// carve-outs (§9.1), for the caller's accounting.
+/// assistant message, with the run's journaled token spend (§9.1).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Completion {
     content: String,
@@ -260,9 +259,9 @@ pub enum RecordBody {
     /// surfaced to the model with that request.
     ///
     /// The workspace's durable subtree is the agent's own facet (entity §7.11)
-    /// and always survives: a routine reactivation never resets. What this
-    /// record narrows to is the activation's working state: regenerable excluded
-    /// trees (`target/`, `node_modules/`), running processes, and held tiers.
+    /// and always survives: a routine reactivation never resets. This record
+    /// narrows to the activation's working state: regenerable excluded trees
+    /// (`target/`, `node_modules/`), running processes, and held tiers.
     WorkspaceReset,
     /// The activation's first call at `tier` is about to execute (§5.6): the
     /// write-ahead discipline (§6.4) applied to capability acquisition, intent

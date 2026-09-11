@@ -8,15 +8,13 @@
 //! directory), because [`perform`](workflow::Workflow::perform) is handed no
 //! state and must not want any.
 //!
-//! Two things follow from purity rather than from taste.
-//!
-//! A call the fold can already answer is an [`Effect::Fail`] and not a special
-//! case: an unknown tool and a malformed input are decidable from the kind and
-//! the journal, so they are *work* whose performance is synthesizing an outcome
-//! (§5.4). A delegation whose `ChildRun` is not yet journaled, by contrast, is
-//! **omitted**: `child.is_none()` is fold state too, and a set that offered an
-//! unlaunchable member would ask the engine to honor a gate it cannot see. The
-//! record comes first and the effect appears behind it (§8.1).
+//! A call the fold can already answer is an [`Effect::Fail`]: an unknown tool
+//! and a malformed input are decidable from the kind and the journal, so they
+//! are *work* whose performance is synthesizing an outcome (§5.4). A delegation
+//! whose `ChildRun` is not yet journaled, by contrast, is **omitted**:
+//! `child.is_none()` is fold state too, and a set that offered an unlaunchable
+//! member would ask the engine to honor a gate it cannot see. The record comes
+//! first and the effect appears behind it (§8.1).
 //!
 //! What stays outside is the activation's environment (a held tier, a bound
 //! sandbox, a lost workspace), which no fold records. `Agent::reconcile` settles

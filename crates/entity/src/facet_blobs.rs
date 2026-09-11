@@ -43,15 +43,14 @@ impl RootSet {
 
 /// How many chunk transfers a facet keeps in flight at once.
 ///
-/// The transfers are not free-floating work: each is a quorum round carrying a whole
-/// chunk to every replica, so the bytes in flight are roughly
-/// `IN_FLIGHT_CHUNKS × chunk size × replicas`. Unbounded, a large artifact issues one
-/// per chunk (a 16 GiB disk image at 1 MiB blocks is over sixteen thousand
-/// concurrent quorum puts), and the resulting buffers and sockets are what fails,
-/// long before the device does. The point of a bound is that past the width that
-/// keeps the link busy, more concurrency adds queueing rather than throughput, so
-/// this costs nothing on small artifacts and is the difference between working and
-/// OOM on large ones.
+/// Each transfer is a quorum round carrying a whole chunk to every replica, so the
+/// bytes in flight are roughly `IN_FLIGHT_CHUNKS × chunk size × replicas`.
+/// Unbounded, a large artifact issues one per chunk (a 16 GiB disk image at 1 MiB
+/// blocks is over sixteen thousand concurrent quorum puts), and the resulting
+/// buffers and sockets are what fails, long before the device does. Past the width
+/// that keeps the link busy, more concurrency adds queueing rather than throughput,
+/// so the bound costs nothing on small artifacts and is the difference between
+/// working and OOM on large ones.
 const IN_FLIGHT_CHUNKS: usize = 16;
 
 /// Await every future in `work` with at most [`IN_FLIGHT_CHUNKS`] outstanding,
@@ -110,14 +109,13 @@ pub(crate) async fn put_chunked(
 /// reads from a file paces itself against the puts instead of racing ahead of them.
 /// That is what lets the disk facet (§7.15) pipeline a 16 GiB image's blocks without
 /// materializing it: the alternative (collect every block, then hand the vector to
-/// [`put_chunked`]) trades the serialized round trips for an allocation the facet's
-/// whole point is to avoid.
+/// [`put_chunked`]) needs the whole image in memory.
 ///
 /// A chunk the source fails to produce ends the pull: the error is returned, and no
-/// *further* chunk is asked for. That is the same discipline [`bounded_in_order`]
-/// applies to the transfers themselves, read from the other side, declining to
-/// start work is allowed, abandoning work already issued is not, so the transfers
-/// already in flight still run to completion.
+/// *further* chunk is asked for. That is the discipline [`bounded_in_order`] applies
+/// to the transfers themselves, read from the other side: declining to start work is
+/// allowed, abandoning work already issued is not, so the transfers already in
+/// flight still run to completion.
 pub(crate) async fn put_pulled<I>(
     blobs: &EntityBlobs,
     chunks: I,

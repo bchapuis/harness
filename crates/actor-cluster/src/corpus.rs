@@ -6,8 +6,8 @@
 //! notices a tag renumbered or a field widened: both compile, both round-trip
 //! against themselves, and both make a build read every transition its peers
 //! committed as a *different* transition. That is a member set diverging silently,
-//! which is the one failure the control plane exists to prevent, so the checked-in
-//! bytes are what stands between the encoding and a change nobody meant to make.
+//! the one failure the control plane exists to prevent, so the checked-in bytes
+//! are what catches a change nobody meant to make.
 //!
 //! **The files are evidence, not output.** A fixture for a revision that has
 //! shipped records what those bytes meant; regenerating it destroys the only thing

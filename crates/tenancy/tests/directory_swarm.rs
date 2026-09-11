@@ -23,17 +23,10 @@
 //!
 //! That is the framework's contract rather than a defect in it: spec §7.2 puts
 //! exactly-once out of scope, "built atop this layer with explicit idempotency
-//! keys", and it is the same shape the `linearizable-remote-register` corpus
-//! entries record, where the resolution was to give the object the key the spec
-//! prescribes rather than to weaken the wire. It is also the same trap: the first
-//! version of this sweep tracked every acknowledged name and demanded it be
-//! present at the end, and failed within a handful of seeds on a claim the layer
-//! never made.
+//! keys".
 //!
-//! (The second version failed for a duller reason worth recording: it kept those
-//! names on the *workload*, which a sweep shares across every seed, so each run
-//! was judged against its predecessors' names too. Expectations are per run and
-//! live in `drive`; see "A workload outlives its runs" in
+//! (Expectations are per run and live in `drive`, never on the *workload*, which
+//! a sweep shares across every seed; see "A workload outlives its runs" in
 //! `docs/simulation-testing.md`.)
 //!
 //! So the names are split by what can be claimed about them:
@@ -96,8 +89,8 @@ const IDLE_FOR: Duration = Duration::from_millis(500);
 /// budget multiplies by however many names the run acknowledged: enough, on a
 /// cluster still recovering, to overrun the driver's own time budget and fail the
 /// seed for liveness rather than for anything it observed. When this runs out the
-/// remaining names go unchecked, which is the right trade: a seed that makes no
-/// claim is better than a seed that makes a false one.
+/// remaining names go unchecked: a seed that makes no claim is better than one
+/// that makes a false one.
 const VERIFY_BUDGET: Duration = Duration::from_secs(30);
 
 fn config() -> EntityConfig {
@@ -213,7 +206,6 @@ impl ClusterWorkload for DirectorySwarm {
             // Per **run**, not per workload. A sweep drives every seed through the
             // same `&self`, so a field here would carry seed N's acknowledged names
             // into seed N+1's freshly empty entities and report them as lost writes.
-            // (It did: that is what made this sweep look like a E14 defect.)
             let acked: Arc<Mutex<Acked>> = Arc::new(Mutex::new(Acked::default()));
             let hosts: Vec<_> = nodes
                 .iter()

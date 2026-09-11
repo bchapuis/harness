@@ -57,9 +57,8 @@ where
 }
 
 /// One unit of work queued on a mailbox: the message's manifest (for the
-/// `Dispatch` event) plus the runner that executes it. This is the **local,
-/// by-value** envelope (spec §6), holding a live closure rather than serialized
-/// bytes; the remote path rebuilds an equivalent `Envelope` after deserializing.
+/// `Dispatch` event) plus the runner that executes it. The **local, by-value**
+/// envelope (spec §6): a live closure, not serialized bytes.
 pub(crate) struct Envelope<A: Actor> {
     pub(crate) manifest: Manifest,
     pub(crate) run: Runner<A>,
@@ -261,18 +260,17 @@ impl<A: Actor> Mailbox<A> {
     /// (invariant #13).
     ///
     /// A `Terminated` MUST reach its watcher exactly once for *any* cause
-    /// (invariant #11), so unlike a best-effort send this applies the §6 default
-    /// backpressure policy: it **awaits** until the mailbox has room rather than
-    /// dropping the signal when the queue is full. Only a *closed* mailbox lets
-    /// it give up: that means the watcher itself is already gone, so there is no
-    /// one left to notify.
+    /// (invariant #11), so this applies the §6 default backpressure policy: it
+    /// **awaits** until the mailbox has room rather than dropping the signal.
+    /// Only a *closed* mailbox lets it give up: the watcher itself is already
+    /// gone, so there is no one left to notify.
     pub(crate) async fn enqueue_signal(&self, signal: Terminated)
     where
         A: Handler<Terminated>,
     {
         let manifest = Terminated::MANIFEST;
-        // Capture the signal's facts before it moves into the handler closure, so
-        // we can mark the delivery on the event stream once it lands.
+        // Capture the signal's facts before it moves into the handler closure,
+        // to mark the delivery on the event stream once it lands.
         let target = signal.id.clone();
         let reason = signal.reason;
         let run: Runner<A> = Box::new(move |actor, ctx| {

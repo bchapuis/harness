@@ -26,8 +26,7 @@
 //! A tombstone file is a stamped durable format, `blob.tombstone` (compatibility
 //! §3), and the reader also accepts the unstamped predecessor. The blob files
 //! themselves are not stamped and must not be: their name *is* the BLAKE3 hash of
-//! their bytes, so a prefix would make every path a lie and `verify` would refuse
-//! what it wrote. There the stamp is the name.
+//! their bytes, so a prefix would make `verify` refuse what it wrote.
 
 use std::fs;
 use std::future::Future;
@@ -181,10 +180,10 @@ impl LocalBlobStore {
     ///
     /// This is what the replica actor's `FetchBlob` handler returns (spec §6): the
     /// *caller* re-hashes after the network transfer (spec §4, §5.2, **B1**), so
-    /// an owner that returned non-verifying bytes is distinguishable from one that
-    /// had none; the distinction `get` needs to choose [`BlobError::Corrupt`] over
-    /// [`BlobError::Unavailable`]. Contrast [`fetch`](Self::fetch), which verifies
-    /// for the single-node `Local` tier.
+    /// `get` can tell an owner that returned non-verifying bytes
+    /// ([`BlobError::Corrupt`]) from one that had none
+    /// ([`BlobError::Unavailable`]). Contrast [`fetch`](Self::fetch), which
+    /// verifies for the single-node `Local` tier.
     pub fn read_raw(&self, ns: &Namespace, id: &BlobId) -> Option<Vec<u8>> {
         if self.is_tombstoned(ns) {
             return None;
@@ -217,9 +216,9 @@ impl LocalBlobStore {
     ///
     /// Deliberately not a decode: **presence**, not the record's contents, is what
     /// makes a namespace gone (spec §5.3), so a namespace stays deleted even if a
-    /// build cannot read the stamp inside. What such a build loses is the stamp,
+    /// build cannot read the stamp inside. Such a build loses only the stamp,
     /// which [`tombstoned_at`](Self::tombstoned_at) reports and which is
-    /// informational, never the deletion itself.
+    /// informational.
     pub fn is_tombstoned(&self, ns: &Namespace) -> bool {
         self.inner.tombstones.join(ns.to_string()).exists()
     }
@@ -601,7 +600,6 @@ mod tests {
         let first = block_on(store.put(&ns, bytes.clone())).expect("first put");
         let second = block_on(store.put(&ns, bytes.clone())).expect("second put");
         assert_eq!(first, second, "equal content must re-acknowledge one id");
-        // Exactly one file exists under the fan-out directory.
         let hh_dir = store.blob_path(&ns, &first).parent().unwrap().to_path_buf();
         let count = fs::read_dir(&hh_dir).unwrap().count();
         assert_eq!(count, 1, "the same content must occupy one file, not two");

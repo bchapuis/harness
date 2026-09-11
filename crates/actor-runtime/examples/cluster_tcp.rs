@@ -2,10 +2,10 @@
 //!
 //! Brings up three nodes on loopback, wired with the tokio seam
 //! ([`TokioClock`]/[`OsEntropy`]/[`TokioSpawner`]) and a mutual-TLS
-//! [`TcpTransport`], with SWIM failure detection enabled. It registers a greeter
-//! on one node and `ask`s it from another over the encrypted wire, then leaves a
-//! configured-but-absent fourth peer down so the failure detector is seen moving
-//! it to `unreachable`.
+//! [`TcpTransport`], with SWIM failure detection enabled. A greeter registered
+//! on one node is asked from another over the encrypted wire; a
+//! configured-but-absent fourth peer shows the failure detector moving it to
+//! `unreachable`.
 //!
 //! Run with: `cargo run -p actor-runtime --example cluster_tcp`
 

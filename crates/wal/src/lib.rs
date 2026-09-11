@@ -82,19 +82,16 @@ use serde::de::DeserializeOwned;
 /// `[value][checksum]` gives a reader no way to ask which digest wrote it (it can only
 /// recompute and compare), so changing what this returns would make every such sidecar
 /// silently read as missing, and a durable fence coming back as *no fence* is a safety
-/// property lost, not a compatibility inconvenience.
+/// property lost.
 ///
 /// Giving a sidecar a header is what lifts that, and entity's fence and seal have since
 /// taken it: `entity.store.fence` and `entity.store.seal` carry a magic and a revision
 /// (compatibility §3), so a digest change there becomes an ordinary revision bump, and a
-/// mismatch is a *refusal naming the file* rather than an absence. What remains frozen is
-/// the case this paragraph describes, and the reason to reach for a header before
-/// reaching for a faster digest.
+/// mismatch is a *refusal naming the file* rather than an absence.
 ///
 /// The log's own frames do not use this. They carry a checksum-kind field in the header
 /// naming which digest closed them, so they are free to move to a faster one and still be
-/// read, and that field is exactly what a sidecar lacks. A digest behind a version field
-/// may change; a digest without one may not.
+/// read. A digest behind a version field may change; a digest without one may not.
 pub fn checksum(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &byte in bytes {
@@ -108,10 +105,9 @@ pub fn checksum(bytes: &[u8]) -> u64 {
 ///
 /// A file records which digest wrote it, so a build that computes a different one can
 /// still read it: the scan uses the digest the header names, never the one this build
-/// prefers. That is the whole point of reserving the field, and it is what makes moving to
-/// a faster digest an upgrade rather than a migration: a log written before the move
-/// opens and replays untouched, and appends to it stay in its own digest so a file is
-/// never a mix of two.
+/// prefers. That is what makes moving to a faster digest an upgrade rather than a
+/// migration: a log written before the move opens and replays untouched, and appends to
+/// it stay in its own digest so a file is never a mix of two.
 ///
 /// Private, and deliberately so: nothing outside may depend on what these return, because
 /// the set may grow again. A caller framing its own bytes wants [`checksum`], which is
@@ -178,13 +174,13 @@ static REPLACE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The scratch name [`atomic_replace`] writes before renaming: `<name>.<pid>.<n>.tmp`.
 ///
-/// Unique per call, and that is the whole point. A fixed `<name>.tmp` is safe only
-/// while one caller at a time replaces a given name, and that is not a property this
-/// crate can promise on the caller's behalf: entity's blob store puts concurrently
-/// through a thread pool, and content addressing means two puts landing on *the same*
-/// name is the normal case, not a rare one; an image full of identical blocks hashes
-/// every one of them to a single id. Two calls sharing a scratch path corrupt each
-/// other in both directions: the second `File::create` truncates the first's
+/// Unique per call. A fixed `<name>.tmp` is safe only while one caller at a time
+/// replaces a given name, and that is not a property this crate can promise on the
+/// caller's behalf: entity's blob store puts concurrently through a thread pool, and
+/// content addressing means two puts landing on *the same* name is the normal case,
+/// not a rare one; an image full of identical blocks hashes every one of them to a
+/// single id. Two calls sharing a scratch path corrupt each other in both
+/// directions: the second `File::create` truncates the first's
 /// half-written bytes, and whichever renames second finds the path already gone and
 /// fails with `ENOENT`. Callers that treat an I/O error as unrecoverable (the entity
 /// store poisons itself) turn that into a node that has stopped accepting writes.
@@ -286,10 +282,9 @@ const FRAME: compat::Stamp =
 ///
 /// Reserving the field is what made adding [`Digest::Xxh3`] beside [`Digest::Fnv1a`] a
 /// header change rather than a layout one: both are 64 bits wide, so the frame layout
-/// never had to mention which filled the field. And because a file says which digest wrote
-/// it, both are *read*: a log stamped kind 1 opens and replays on a build that prefers
-/// kind 2. The alternative, refusing it, would have made a routine upgrade unreadable for
-/// every Raft log, entity segment, and blob log at once.
+/// never had to mention which filled the field. Both are accepted, so a log stamped kind 1
+/// opens and replays on a build that prefers kind 2; refusing it would have made a routine
+/// upgrade unreadable for every Raft log, entity segment, and blob log at once.
 const ACCEPTED_CHECKSUMS: compat::Accepted =
     compat::Accepted::new(Digest::Fnv1a.kind(), Digest::Xxh3.kind());
 
@@ -438,9 +433,8 @@ impl std::error::Error for OpenError {}
 /// Panics if the payload exceeds `max_record`. The scan that recovers the log treats a
 /// length above `max_record` as corruption and drops it (and everything after it), so a
 /// record that scan would reject must never be written: it would be acknowledged here
-/// and silently lost on the next open. Failing loudly at the write keeps that asymmetry
-/// from becoming silent data loss. The half-framed record is discarded with `buf`, which
-/// the panic unwinds past before any of it reaches the file.
+/// and silently lost on the next open. The half-framed record is discarded with `buf`,
+/// which the panic unwinds past before any of it reaches the file.
 fn frame_onto<T: Serialize>(
     mut buf: Vec<u8>,
     value: &T,
@@ -1075,9 +1069,7 @@ mod tests {
     #[test]
     fn a_log_at_an_older_digest_still_opens_and_keeps_its_digest() {
         // The reserved field earning its keep. A log stamped kind 1 was written by a build
-        // that computed FNV-1a; this build prefers XXH3 and must still read it, because
-        // refusing would make an ordinary upgrade unreadable for every Raft log, entity
-        // segment, and blob log on a node at once.
+        // that computed FNV-1a; this build prefers XXH3 and must still read it.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log");
 
@@ -1112,9 +1104,7 @@ mod tests {
         // Pinned against literals, not against a second implementation, because the point
         // is the *value*: a sidecar carries no header, so a reader can only recompute and
         // compare, and a caller reads a mismatch as "torn or absent". If this ever changes,
-        // entity's durable fence silently reads back as *no fence* (E15). The log's frames
-        // are free to move digests precisely because their header names which one wrote
-        // them; these bytes have nowhere to record that, so they cannot.
+        // entity's durable fence silently reads back as *no fence* (E15).
         assert_eq!(checksum(b""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(checksum(&0u64.to_le_bytes()), 0xa8c7_f832_281a_39c5);
         assert_eq!(checksum(b"harness"), 0x211f_cbba_fe53_31ab);

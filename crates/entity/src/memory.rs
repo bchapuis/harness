@@ -7,10 +7,9 @@
 //!
 //! It never returns `NotLeader` or `Unavailable`: with a single store there is always
 //! a leader and always a quorum (those outcomes arise on the clustered `Quorum`
-//! tier, `EntityJournal for Arc<QuorumReplicator>` in replicator.rs). Every method here is the
-//! whole of what this tier does: it writes and reads the [`EntityStore`] seam it
-//! shares with the clustered tier, and there is no durability machinery under it to
-//! hold apart.
+//! tier, `EntityJournal for Arc<QuorumReplicator>` in replicator.rs). Every method
+//! here writes and reads the [`EntityStore`] seam this tier shares with the clustered
+//! one; there is no durability machinery under it.
 
 use std::sync::Arc;
 
@@ -52,10 +51,10 @@ impl LocalEntityJournal {
     }
 
     /// A journal over `store`, keying its records under shard index `shard` (so a
-    /// single node can back several shards from one store, §7.6).
-    /// `io` is where the store's blocking writes run (§7.4): the single-node tier's
-    /// fsync IS its commit, so it is the whole latency of an append and the worst
-    /// thing to run on an async worker (see [`crate::blocking`]).
+    /// single node can back several shards from one store, §7.6). `io` is where the
+    /// store's blocking writes run (§7.4), which on this tier is the whole latency of
+    /// an append and the worst thing to run on an async worker (see
+    /// [`crate::blocking`]).
     pub(crate) fn over(
         store: Arc<dyn EntityStore>,
         shard: u32,

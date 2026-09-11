@@ -58,9 +58,9 @@ impl From<actor_serialization::CodecError> for CallError {
 ///
 /// `try_join_all` returns the moment one future fails and **drops** the rest.
 /// That is fine for pure computation and wrong for anything that has issued an
-/// [`ask`](crate::ActorRef::ask): dropping the future abandons the call, which then
-/// never reaches a reply or a definite [`CallError`]; exactly what no-silent-
-/// loss forbids (spec §7.2, §18.5 #1).
+/// [`ask`](crate::ActorRef::ask): dropping the future abandons the call, which
+/// then never reaches a reply or a definite [`CallError`], exactly what
+/// no-silent-loss forbids (spec §7.2, §18.5 #1).
 ///
 /// ```ignore
 /// // not `try_join_all`: a failing chunk would drop its siblings' asks

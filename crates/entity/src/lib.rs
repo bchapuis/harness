@@ -74,7 +74,7 @@
 //! an explicit request, and two adjacent shards **merge** the reverse way,
 //! reclaiming a leader-election group (E7). A split (or merge) seals the moving
 //! range on a quorum of stores (from which no append to it can reach a write
-//! quorum at any term) transfers each moved entity's committed prefix, snapshot,
+//! quorum at any term), transfers each moved entity's committed prefix, snapshot,
 //! and blobs to the destination keys, and only then commits the new mapping, so an
 //! entity is writable in exactly one shard at any time and no write is lost or
 //! duplicated across the boundary (E15).
@@ -90,14 +90,11 @@
 pub mod testing;
 
 // The crate's three deep modules, beside a root that keeps the authoring
-// surface. The split follows what the code already is: a durable-object
-// programming model (root), a family of composable storage features
-// ([`facet`]), the durable substrate a deployment wires ([`store`]), and the
-// sharding and replication that make it clustered ([`cluster`]). The root is not
-// a fourth namespace, because it is the interface: `Entity`, `EntityCtx`,
-// `EntityHandler` and their neighbours are what authoring an entity is written
-// in, and putting them behind a module every consumer would open in full would
-// add a name to say nothing.
+// surface: a durable-object programming model (root), a family of composable
+// storage features ([`facet`]), the durable substrate a deployment wires
+// ([`store`]), and the sharding and replication that make it clustered
+// ([`cluster`]). `Entity`, `EntityCtx`, `EntityHandler` and their neighbours
+// stay at the root because they are the interface, not a fourth namespace.
 pub mod cluster;
 pub mod facet;
 pub mod store;
@@ -135,8 +132,7 @@ mod subscription;
 mod system;
 mod ws;
 
-// The authoring surface: what writing an entity is written in. Everything else
-// lives in one of the three modules above.
+// The authoring surface: what writing an entity is written in.
 pub use config::EntityConfig;
 pub use entity::Entity;
 pub use entity::EntityCtx;
@@ -152,8 +148,8 @@ pub use entity_ref::EntityExt;
 pub use entity_ref::EntityRef;
 pub use error::EntityError;
 pub use event::EntityEvent;
-// The journal position an `EntityRef` read reports and a caller waits on: part of
-// the authoring surface rather than the store's, which is why it alone of the
-// journal vocabulary sits here.
+// The journal position an `EntityRef` read reports and a caller waits on:
+// authoring vocabulary, not store vocabulary, so it alone of the journal names
+// sits here.
 pub use journal::Seq;
 pub use system::EntitySystem;

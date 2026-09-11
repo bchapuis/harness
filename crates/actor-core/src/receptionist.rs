@@ -9,8 +9,8 @@
 //! Registrations are an OR-set keyed by the registering node, so concurrent
 //! registrations merge. **Pruning rides on death watch** (spec §12, §13): the
 //! receptionist watches each registered actor, so when one stops, or its node
-//! is declared `down` (spec §8.1 step 5); the corresponding registration is
-//! removed and subscribers see a fresh listing.
+//! is declared `down` (spec §8.1 step 5), its registration is removed and
+//! subscribers see a fresh listing.
 //!
 //! Only [`ActorId`]s travel and are stored; a typed [`ActorRef`] is
 //! reconstructed at the lookup site (where the actor type is known) via
@@ -217,9 +217,9 @@ impl<S: ActorSystem> Receptionist<S> {
     }
 
     /// The current listing for `key` (spec §13). Actors on a node that is not
-    /// currently serving, drained for maintenance, or down (spec §9.4), are
-    /// routed around: they stay registered but are omitted here, so a
-    /// caller never discovers a cordoned node, and a later `resume` restores them.
+    /// serving, drained for maintenance or down (spec §9.4), stay registered but
+    /// are omitted here, so a caller never discovers a cordoned node and a later
+    /// `resume` restores them.
     pub fn lookup<A: Actor<System = S>>(&self, key: Key<A>) -> Listing<A> {
         listing(&self.system, self.state.snapshot(key.id()))
     }

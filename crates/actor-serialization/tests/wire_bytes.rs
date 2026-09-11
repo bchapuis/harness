@@ -13,14 +13,13 @@
 //! 1, and a change that altered the encoding would have to be a bump: two releases,
 //! the first widening what a build accepts and the second moving what it writes, with
 //! every send to a peer that settled lower gated down in between (compatibility spec
-//! §3.1, **V4**). That is a release cycle, not an edit. The reason this change is not
-//! one:
+//! §3.1, **V4**). That is a release cycle, not an edit. This change is not one:
 //!
 //! - **postcard** has a byte-string form, and it is encoded exactly as its sequence
 //!   form: a varint length then the payload. Same bytes, different code path.
 //! - **`serde_json`** has *no* byte form, so `serialize_bytes` falls back to
-//!   `collect_seq` and emits the same array of decimal numbers. (It is still ~2.5x
-//!   faster, which is a surprise the bench records; the bytes are what matter here.)
+//!   `collect_seq` and emits the same array of decimal numbers. (Still ~2.5x faster,
+//!   which the bench records; the bytes are what matter here.)
 //!
 //! **This is a property of these two codecs, not of serde.** A codec with a distinct
 //! byte representation (CBOR, MessagePack, bincode's variable encodings) would make
@@ -390,19 +389,17 @@ fn each_result_form_decodes_what_the_other_wrote() {
     }
 }
 
-/// The negative control, and it is per-codec because the two codecs constrain
-/// *different halves* of the mirror. This is the reason the property is stated as two
-/// clauses (variant names and variant order) rather than one:
+/// The negative control, per-codec because the two codecs constrain *different halves*
+/// of the mirror, which is why the property is stated as two clauses:
 ///
 /// - **postcard** writes a variant index, so reordering is a wire change and renaming
 ///   is invisible to it;
 /// - **`serde_json`** writes the variant name, so renaming is a wire change and
 ///   reordering is invisible to it.
 ///
-/// Neither codec alone would catch a mirror that drifted the other way, so a tree with
-/// only one of them would be asserting half of what it looks like it asserts. A third
-/// codec that is neither (one writing, say, a hash of the name) needs its own clause
-/// here rather than inheriting these.
+/// Neither alone would catch a mirror that drifted the other way. A third codec that is
+/// neither (one writing, say, a hash of the name) needs its own clause here rather than
+/// inheriting these.
 #[test]
 fn getting_the_mirror_wrong_is_visible_on_the_wire() {
     let payload = vec![0x5a; 64];

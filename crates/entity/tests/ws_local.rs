@@ -311,7 +311,6 @@ fn excluded_trees_are_never_captured() {
 
     let entity = studios.entity("studio/2");
     sim.block_on(async move {
-        // A write landing only under an excluded tree stages nothing.
         assert_eq!(
             entity
                 .ask(Put {

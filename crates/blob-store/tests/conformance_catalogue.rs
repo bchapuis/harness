@@ -2,9 +2,9 @@
 //! stays complete, every file it points at still exists, and B4's structural claim
 //! still holds.
 //!
-//! The gate this crate did not have. Its §9 "Verified by" column had drifted to
-//! name seven tests that no longer existed (each property still real, each
-//! pointer dead), and nothing failed. A renamed or deleted suite now fails here.
+//! The gate this crate did not have: its §9 "Verified by" column had drifted to
+//! name seven tests that no longer existed, and nothing failed. A renamed or
+//! deleted suite now fails here.
 
 mod support;
 
@@ -128,9 +128,8 @@ fn crate_sources() -> String {
 /// `entity` is the tree's consensus-bearing crate (per-shard Raft leadership, the
 /// term fence). The blob store deliberately sits beside it on `actor-cluster`
 /// alone: content addressing makes concurrent writers of equal content converge
-/// without ordering, so nothing needs a term. If a `entity` dependency ever
-/// appears here, B4 stops being free and has to be re-argued: this test is where
-/// that conversation starts.
+/// without ordering, so nothing needs a term. If an `entity` dependency ever
+/// appears here, B4 stops being free and has to be re-argued.
 #[test]
 fn the_data_path_has_no_consensus_engine_to_run() {
     let manifest =
@@ -177,12 +176,12 @@ fn no_entry_claims_a_continuous_checker() {
 ///
 /// The rest of this file holds the Rust copy internally consistent. This holds it
 /// equal to the prose one, which is the copy a reader trusts: an invariant added
-/// to one, or a defining section moved in one, is caught here rather than left to
-/// be noticed.
+/// to one, or a defining section moved in one, is caught here.
 ///
-/// The suite axis is not compared here: the spec's column names test functions where this table names the files that hold them. So this
-/// gate covers the numbering and the defining sections, and the "Verified by"
-/// column stays a human's to keep true.
+/// The suite axis is not compared here: the spec's column names test functions
+/// where this table names the files that hold them. This gate covers the
+/// numbering and the defining sections; the "Verified by" column stays a human's
+/// to keep true.
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("blob");

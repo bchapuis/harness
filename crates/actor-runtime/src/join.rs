@@ -1,13 +1,12 @@
 //! The composed production node bring-up: [`join`], the counterpart of the
 //! simulator's `SimNetwork::join` (spec §18.2). One call takes a deployment's
-//! genuine choices and absorbs the assembly the simulator already absorbs on
-//! its side; the dial map, the allowlist, the bind, the transport, the
-//! system, and the membership seeding.
+//! genuine choices and absorbs the assembly the simulator absorbs on its side:
+//! the dial map, the allowlist, the bind, the transport, the system, and the
+//! membership seeding.
 //!
-//! Before this existed every deployment binary hand-copied that recipe, and
-//! the roster was stated twice (once for Raft's voters, once for the
-//! `add_member` loop). Here the roster is computed once and handed to the
-//! caller's [`JoinOptions::membership`] closure, so the two can never drift.
+//! The roster is computed once and handed to the caller's
+//! [`JoinOptions::membership`] closure, so Raft's voters and the `add_member`
+//! loop cannot drift apart.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -199,9 +198,9 @@ pub async fn join(opts: JoinOptions) -> Result<TcpCluster, String> {
 /// rather than a wall-clock deadline: reading the host clock directly is what
 /// the `Clock` seam exists to prevent (spec §4.6), and the elapsed figure is
 /// derived from the count. Size `budget` to cover peer discovery plus the
-/// first election; exhausting it then means something is actually wrong (a
-/// peer that never appeared, or a group that cannot elect) reported with the
-/// member and leader state, and the node serves anyway.
+/// first election; exhausting it then means a peer never appeared or a group
+/// cannot elect, which is reported with the member and leader state, and the
+/// node serves anyway.
 pub async fn wait_for_cluster(system: &TcpCluster, expected: usize, budget: Duration) {
     const POLL: Duration = Duration::from_millis(100);
     let peers = expected.saturating_sub(1);

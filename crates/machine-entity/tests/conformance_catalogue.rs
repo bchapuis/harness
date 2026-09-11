@@ -116,9 +116,6 @@ fn the_ingress_and_egress_invariants_are_verified_outside_the_entity_suites() {
     // crate, and the egress rules are a pure generator with no entity in the loop.
     // Pinning that here keeps a future edit from "simplifying" them into an
     // entity-only pointer that no longer covers what the invariant claims.
-    // Asked of where the named tests actually live rather than of how the pointer
-    // is spelled: the catalogue names functions, and a function says nothing about
-    // its file until you go and find it.
     for invariant in [4u8, 6] {
         let entry = m_catalogue()
             .iter()
@@ -138,17 +135,16 @@ fn the_ingress_and_egress_invariants_are_verified_outside_the_entity_suites() {
     }
 }
 
-/// The table above and the machine spec's §7 copy of it are the same
-/// table.
+/// The table above and the machine spec's §7 copy of it are the same table.
 ///
-/// The rest of this file holds the Rust copy internally consistent. This holds it
-/// equal to the prose one, which is the copy a reader trusts: an invariant added
-/// to one, or a defining section moved in one, is caught here rather than left to
-/// be noticed.
+/// The rest of this file holds the Rust copy internally consistent. This holds
+/// it equal to the prose one, which is the copy a reader trusts: an invariant
+/// added to one, or a defining section moved in one, is caught here.
 ///
-/// The suite axis is not compared here: the spec's column names test functions where this table names the files that hold them. So this
-/// gate covers the numbering and the defining sections, and the "Verified by"
-/// column stays a human's to keep true.
+/// The suite axis is not compared: the spec's column names test functions where
+/// this table names the files that hold them. So this gate covers the numbering
+/// and the defining sections, and the "Verified by" column stays a human's to
+/// keep true.
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("machine");

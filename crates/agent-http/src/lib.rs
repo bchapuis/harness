@@ -2,10 +2,10 @@
 //! binaries: the TUI's gateway client and the standalone node's model-seam
 //! socket. Deliberately minimal (no `reqwest`/`hyper`): one connection per
 //! request with `connection: close`, TLS from rustls with webpki trust
-//! anchors, and one opening; [`Origin::exchange`] connects, sends, and
-//! parses the response head, handing back an incremental [`Reader`] that
-//! serves both shapes of call; read the whole reply (unary), or pull a
-//! live chunked stream (SSE).
+//! anchors, and one opening. [`Origin::exchange`] connects, sends, and parses
+//! the response head, handing back an incremental [`Reader`] that serves both
+//! shapes of call: read the whole reply (unary), or pull a live chunked stream
+//! (SSE).
 //!
 //! This is plumbing, not a seam: the model adapters' seam is
 //! `agent::http::HttpPost`, and one implementation of it (the standalone's)

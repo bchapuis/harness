@@ -60,8 +60,7 @@ where
 }
 
 /// Maps a manifest to its dispatch entry for one actor type (spec §4.4). The
-/// typed builder behind [`Actor::register`](crate::Actor::register); also the
-/// deserialization allowlist.
+/// typed builder behind [`Actor::register`](crate::Actor::register).
 pub struct HandlerRegistry<A: Actor> {
     entries: BTreeMap<Manifest, DispatchFn<A>>,
 }
@@ -84,8 +83,8 @@ impl<A: Actor> Clone for HandlerRegistry<A> {
 }
 
 impl<A: Actor> HandlerRegistry<A> {
-    /// Accept message type `M` over the network (spec §4.4), capturing the
-    /// monomorphized dispatch entry for `(A, M)`.
+    /// Accept message type `M` over the network, capturing its dispatch entry
+    /// for `(A, M)` (spec §4.4).
     pub fn accept<M>(&mut self)
     where
         A: Handler<M>,

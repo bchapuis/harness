@@ -77,8 +77,7 @@ pub(crate) const MAP_SHARD_INDEX: u32 = u32::MAX;
 /// weak high-bit avalanche on short, similar keys (each multiply lifts a
 /// final-byte difference by only ~40 bits), so sequential keys like `user/1`,
 /// `user/2` would pile into one range; the finalizer avalanches every input bit
-/// into every output bit, restoring a uniform spread. Deterministic, so every
-/// node and every run agrees (§14).
+/// into every output bit, restoring a uniform spread.
 pub(crate) fn name_hash(entity_type: &str, key: &str) -> u64 {
     let mixed =
         fnv1a(entity_type.as_bytes()).wrapping_mul(0x0000_0100_0000_01b3) ^ fnv1a(key.as_bytes());
@@ -103,7 +102,7 @@ pub(crate) fn name_at_or_above(entity: &crate::entity::EntityName, from: u64) ->
 /// A contiguous, inclusive range of the 64-bit name-hash space (spec §7.1): the
 /// keys a shard owns. The founding partition slices the space into `shards` equal
 /// ranges (`initial_ranges`); a split divides a range in two and a merge fuses
-/// two adjacent ranges (§7.7), the only operations that change the partition.
+/// two adjacent ranges (§7.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyRange {
     /// The lowest hash this range owns.
@@ -220,9 +219,8 @@ fn select_spread(
             voters.push(node);
         }
     }
-    // The caps can leave us short when domains are lopsided (say four nodes in one
-    // zone and one in another, R=3). Fill in rendezvous order rather than leave the
-    // shard under-replicated.
+    // Lopsided domains (four nodes in one zone and one in another, R=3) can leave
+    // the caps short. Fill from what is left, in rendezvous order.
     if voters.len() < voter_count {
         for &node in &ranked {
             if voters.len() == voter_count {
@@ -243,7 +241,7 @@ fn select_spread(
 /// selection strategies choose from, and the one place the score is computed.
 ///
 /// Every node must derive the same order for the allocation to converge (§7.6), so a
-/// second copy of this scoring is a convergence hazard, not merely duplication.
+/// second copy of this scoring is a convergence hazard.
 ///
 /// The group id MUST be hashed, not XORed in raw: `group_id_for` derives a type's
 /// shard groups as `BASE ^ (index+1)`, so consecutive shards' ids differ only in the

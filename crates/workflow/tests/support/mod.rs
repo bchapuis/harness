@@ -2,9 +2,9 @@
 //!
 //! `Fanout` is the workflow spec's Appendix A worked example, made real: an entity
 //! that fans a job out to N workers, collects their results, and finishes. It
-//! journals its own records, holds no memo, and (this is the point) writes no
-//! dispatch loop, no in-flight table, no "did I already launch this", no
-//! recovery pass, no straggler check, and no `can_hibernate` body of its own.
+//! journals its own records, holds no memo, and writes no dispatch loop, no
+//! in-flight table, no "did I already launch this", no recovery pass, no
+//! straggler check, and no `can_hibernate` body of its own.
 //!
 //! `Script` is the workflow spec §10 simulation seam: the one row the workflow adds to
 //! the table the entity already virtualizes. A scripted effect is a deterministic

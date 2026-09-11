@@ -5,7 +5,7 @@
 //! reaches a terminal outcome. The entity model is decide/apply: [`Entity::apply`]
 //! folds records into [`SessionState`], and each [`EntityHandler`] is a *pure
 //! decision* returning the records to journal plus a reply (entity §4.2). The
-//! loop rides three entity seams, none of which the agent runtime re-implements:
+//! loop rides three entity seams:
 //!
 //! - **The output gate** (entity §6): a handler's records commit before its
 //!   reply releases, so "intent before effect" (§6.4) is free; a handler that
@@ -105,10 +105,10 @@ use crate::tool::ToolError;
 
 /// How many *consecutive* times an unreachable peer is retried before a
 /// delegation/cancel gives up (§8.1, §9.2): past it the child surfaces as a
-/// tool failure (§5.4) rather than looping forever; the child's budget is the
-/// ultimate backstop (§9.2 item 3). A transport bound, backed off between
-/// tries; any successful contact resets it. Distinct from the wait on a
-/// reachable-but-slow child, which is budget-scaled config
+/// tool failure (§5.4), with the child's budget as the backstop (§9.2 item 3).
+/// A transport bound, backed off between tries; any successful contact resets
+/// it. Distinct from the wait on a reachable-but-slow child, which is
+/// budget-scaled config
 /// ([`HarnessConfig::child_wait`](crate::HarnessConfig::child_wait), §8.1).
 const TRANSPORT_RETRIES: u32 = 32;
 /// Backoff cap for the transport-retry loop.
@@ -294,13 +294,12 @@ enum Reconciled {
 struct SandboxState {
     /// The sandbox handle's lifecycle slot: at most one live sandbox per
     /// activation (invariant A8). This is the workflow's activation-scoped
-    /// binding (workflow §6) at its motivating case: opened once on demand,
-    /// vetoing hibernation while the open is in flight, released on every
-    /// deactivation, and never journaled. The opened handle is not
-    /// serializable, so the open task fills the binding directly under the
-    /// [`Mutex`] (the one place a task touches activation state off the command
-    /// path) rather than carrying it in a message; the task then re-enters the
-    /// cycle with a [`Tick`].
+    /// binding (workflow §6): opened once on demand, vetoing hibernation while
+    /// the open is in flight, released on every deactivation, and never
+    /// journaled. The opened handle is not serializable, so the open task fills
+    /// the binding directly under the [`Mutex`] (the one place a task touches
+    /// activation state off the command path) rather than carrying it in a
+    /// message; the task then re-enters the cycle with a [`Tick`].
     slot: Binding<Arc<dyn Sandbox>>,
     /// `SandboxBound` was emitted and not yet paired (A8).
     bound: bool,
@@ -395,7 +394,7 @@ impl<S: HarnessSystem> Activation<S> {
 }
 
 // Hand-written rather than `#[derive(Default)]`: deriving would impose a
-// spurious `S: Default` bound on the type parameter, which never needs it.
+// spurious `S: Default` bound.
 impl<S: HarnessSystem> Default for Activation<S> {
     fn default() -> Self {
         Activation {
@@ -422,9 +421,8 @@ pub struct Agent<S: HarnessSystem> {
     /// the factory.
     seams: Seams,
     /// The workflow's reconciliation engine (workflow §2.1): the claims, the
-    /// orphan classification, and the launch cycle this runtime no longer keeps
-    /// of its own. Internally synchronized, so it sits beside the activation
-    /// mutex rather than inside it.
+    /// orphan classification, and the launch cycle. Internally synchronized, so
+    /// it sits beside the activation mutex rather than inside it.
     engine: Engine<Agent<S>>,
     act: Arc<Mutex<Activation<S>>>,
 }
@@ -462,9 +460,9 @@ impl<S: HarnessSystem> Agent<S> {
     /// Resolve `call` with a failure outcome the fold decided rather than an
     /// effect produced (§5.4): the `ToolOutcome` record to journal.
     ///
-    /// The record is the whole of it. Committing it takes the call out of the
-    /// desired set, which is what stops the relaunch; there is no second place
-    /// to mark, and so no way for the two to disagree.
+    /// Committing it takes the call out of the desired set, which is what stops
+    /// the relaunch; there is no second place to mark, and so no way for the two
+    /// to disagree.
     fn fail_call(
         &self,
         ctx: &EntityCtx<Agent<S>>,
@@ -682,8 +680,7 @@ impl<S: HarnessSystem> Agent<S> {
     /// No straggler test of its own. A response for a step the journal has
     /// already answered, or for a run that ended while the call was in flight,
     /// arrives under a [`StepKey`] that has left the desired set, and the engine
-    /// discards it before this is reached (workflow §4.5). What remains is the
-    /// decision.
+    /// discards it before this is reached (workflow §4.5).
     fn settle_model(
         &self,
         state: &SessionState,
@@ -854,16 +851,10 @@ impl<S: HarnessSystem> Agent<S> {
     /// member of the desired set is launchable as it stands, with no gate left
     /// between it and its launch.
     ///
-    /// This is the direction that matters. Soundness, that nothing launches
-    /// outside the set, is structural: the engine launches the set and nothing
-    /// else. The converse is what a gate kept back would quietly break, and the
-    /// engine cannot check it, because the environment a gate reads is the
-    /// consumer's and invisible from below.
-    ///
-    /// Run by every suite in the crate, including the seeded swarm and cluster
-    /// runs where a resumed activation recomputes the set from a journal it did
-    /// not write. Debug-only: it re-walks the set per round and proves a
-    /// property of the code rather than guarding the production path.
+    /// The engine cannot check this direction itself: the environment a gate
+    /// reads is the consumer's and invisible from below. Debug-only, since it
+    /// re-walks the set per round to prove a property of the code rather than
+    /// guard the production path.
     #[cfg(debug_assertions)]
     fn debug_assert_launchable(&self, act: &Activation<S>, desired: &[Pending<StepKey, Effect>]) {
         for p in desired {
@@ -967,10 +958,10 @@ impl<S: HarnessSystem> Agent<S> {
     /// turn (§10.4); the tick that commit brings dispatches the new run's first
     /// model call.
     ///
-    /// There is nothing to sweep before it any more. The claims are the
-    /// engine's, released as their keys leave the desired set (workflow §3.2),
-    /// and a key names its turn ([`StepKey`]), so no leftover of the ended run
-    /// can suppress a call of the next one.
+    /// No sweep is needed first: the claims are the engine's, released as their
+    /// keys leave the desired set (workflow §3.2), and a key names its turn
+    /// ([`StepKey`]), so no leftover of the ended run can suppress a call of the
+    /// next one.
     fn start_next_turn(
         &self,
         state: &SessionState,
@@ -1366,9 +1357,9 @@ impl<S: HarnessSystem> Agent<S> {
                             }
                             // Give up for this attempt only, and re-arm the
                             // launch-once guard: the fold keeps owing, so the
-                            // next message that drives the session; the §7.5
-                            // resume nudge, a re-sent `Cancel`; re-launches
-                            // the send even on this same activation (A5); the
+                            // next message that drives the session (the §7.5
+                            // resume nudge, a re-sent `Cancel`) re-launches the
+                            // send even on this same activation (A5); the
                             // child's budget bounds the meantime (§9.2 item 3).
                             Err(_) => {
                                 launched
@@ -1470,9 +1461,9 @@ impl<S: HarnessSystem> Entity for Agent<S> {
     fn register(registry: &mut EntityRegistry<Self>) {
         // The network allowlist: only the wire commands (§7.3). The internal
         // self-tells (the workflow's `Tick` and `Settled`, and `CancelDone`)
-        // are local-only, so no peer can inject them. Reading a run is not here: `tail` rides entity's
-        // gateway-level event read (entity §7.5), a framework built-in that
-        // never touches the activation (§10.2).
+        // are local-only, so no peer can inject them. Reading a run is not here:
+        // `tail` rides entity's gateway-level event read (entity §7.5), a
+        // framework built-in that never touches the activation (§10.2).
         registry.accept::<Submit<S>>();
         registry.accept::<Cancel>();
     }
@@ -1595,8 +1586,7 @@ impl<S: HarnessSystem> Workflow for Agent<S> {
     /// future exists, because the future runs outside the activation and holds
     /// no borrow of it. The sandbox handle is read the same way: the pre-pass
     /// has already established that a desired tool call has one
-    /// (`debug_assert_launchable`), so this reads it rather than deciding
-    /// anything about it.
+    /// (`debug_assert_launchable`), so this only reads it.
     fn perform(
         &self,
         effect: Effect,

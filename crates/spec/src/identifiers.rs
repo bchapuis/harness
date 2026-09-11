@@ -230,7 +230,7 @@ impl Index {
     ///
     /// This crate is skipped. It is the tooling that reads the specifications
     /// rather than anything they describe, and its fixtures name things precisely
-    /// because the tree does *not* have them, indexing itself would answer its
+    /// because the tree does *not* have them, so indexing itself would answer its
     /// own questions.
     pub fn build(root: &Path) -> io::Result<Self> {
         let mut names = BTreeSet::new();

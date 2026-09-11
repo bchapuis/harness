@@ -1,20 +1,20 @@
 //! The transport's protocol decisions, socket-free (spec §9.3): the runtime
 //! **address book** and the per-peer **association slots**.
 //!
-//! `TcpTransport` interleaves two very different things: sockets (dial,
-//! handshake, read, write, all asynchronous and timing-dependent), and
-//! *decisions* about them: whose address is believed, which live association
-//! serves a peer, who wins a concurrent dial, when an entry is evicted, who
-//! gossip goes to. The simulator exercises none of this file's caller (it
-//! routes by `NodeId` with no addresses), so the decisions used to be testable
-//! only through non-deterministic loopback runs. Here they are synchronous
-//! functions over plain data: every race the transport can experience (two
-//! dials completing in either order, an eviction against a replaced entry)
-//! is a deterministic sequence of calls a unit test can spell out.
+//! `TcpTransport` interleaves two different things: sockets (dial, handshake,
+//! read, write, all asynchronous and timing-dependent), and *decisions* about
+//! them: whose address is believed, which live association serves a peer, who
+//! wins a concurrent dial, when an entry is evicted, who gossip goes to. The
+//! simulator exercises none of this file's caller (it routes by `NodeId` with
+//! no addresses), so without this split the decisions would be testable only
+//! through non-deterministic loopback runs. Here they are synchronous functions
+//! over plain data: every race the transport can experience (two dials
+//! completing in either order, an eviction against a replaced entry) is a
+//! deterministic sequence of calls a unit test can spell out.
 //!
-//! The split of duties: this module decides, the transport executes. Nothing
-//! here blocks, sleeps, or touches a socket; [`Slots`] is generic over the
-//! association handle precisely so a test can drive it with a toy.
+//! This module decides, the transport executes. Nothing here blocks, sleeps, or
+//! touches a socket; [`Slots`] is generic over the association handle so a test
+//! can drive it with a toy.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;

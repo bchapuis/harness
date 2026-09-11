@@ -2,14 +2,13 @@
 //! (blob-store spec).
 //!
 //! The crate sits beside entity, not above it (spec §1): a blob store is built
-//! from plain cluster actors and needs none of the entity machinery, no virtual
-//! identity, no journal, no single-activation lease. A blob is an immutable byte
-//! string named by the BLAKE3 hash of its content **within a consumer-chosen
-//! namespace** (spec §2). A content hash names exactly one byte sequence for all
-//! time, so durability and deletion need no consensus: there is nothing to order
-//! and nothing to agree on (spec §4). The namespace is the unit of deletion
-//! (spec §5.3), so storage is reclaimed by deleting a namespace, not by
-//! reference-tracking individual blobs.
+//! from plain cluster actors and needs no virtual identity, no journal, and no
+//! single-activation lease. A blob is an immutable byte string named by the
+//! BLAKE3 hash of its content **within a consumer-chosen namespace** (spec §2).
+//! A content hash names exactly one byte sequence for all time, so durability
+//! and deletion need no consensus (spec §4). The namespace is the unit of
+//! deletion (spec §5.3), so storage is reclaimed by deleting a namespace, not
+//! by reference-tracking individual blobs.
 //!
 //! Two tiers sit behind one [`BlobStore`] seam (or its object-safe
 //! [`DynBlobStore`] mirror): a single-node on-disk store (`Local`) and a

@@ -26,29 +26,26 @@
 //!   node's store. The cost: an entity owns a file, so a node's file count tracks its
 //!   entity count, and no two entities' appends can share an fsync.
 //!
-//!   That second cost is the classic objection to file-per-object, and on this
-//!   deployment's storage it is **not** the binding one: an fsync of a small append is
-//!   tens of microseconds against a quorum round trip in the hundreds, so amortizing
-//!   flushes across entities buys nothing worth a shared-log redesign
-//!   (`docs/hardware-envelope.md` §3.1, §3.5, and I3 for the arithmetic; the
-//!   group-commit proposal this retired is in the history). What *does* bind is
-//!   filesystem metadata: inodes, directory size, and the descriptor budget below.
-//!   Network-attached storage would reverse this (hw §6).
+//!   That second cost is not the binding one on this deployment's storage: an fsync of
+//!   a small append is tens of microseconds against a quorum round trip in the
+//!   hundreds, so amortizing flushes across entities buys nothing worth a shared-log
+//!   redesign (`docs/hardware-envelope.md` §3.1, §3.5, and I3 for the arithmetic).
+//!   What *does* bind is filesystem metadata: inodes, directory size, and the
+//!   descriptor budget below. Network-attached storage would reverse this (hw §6).
 //! - `manifest`: an append-only map from `(shard, EntityName)` to a small integer
 //!   segment **id**, so segment filenames are collision-free whatever an entity's key
 //!   contains. An entity's segment is opened and replayed **lazily**, on first access,
-//!   so a node holding millions of entities does not scan them all at startup: though
-//!   the manifest itself is replayed and held whole, and only ever grows: an id
-//!   assignment outlives the entity it names, which is why *presence* is the files',
-//!   not the manifest's, to answer ([`entities`](EntityStore::entities)).
+//!   so a node holding millions of entities does not scan them all at startup. The
+//!   manifest itself is replayed and held whole, and only ever grows: an id assignment
+//!   outlives the entity it names, which is why *presence* is the files', not the
+//!   manifest's, to answer ([`entities`](EntityStore::entities)).
 //!
 //!   Held whole, and deliberately not compacted. An entry is a shard, a name, and a
 //!   `u64`, on the order of 64 bytes resident, so ten million entities is a few hundred
 //!   megabytes against a node sized in the hundreds of gigabytes, and the file itself
 //!   replays at read plus digest throughput (hw §3.2). **Revisit past roughly a million
-//!   entities on one node**, where the growth starts to mean something and entity §7.8's
-//!   *"limited only by the shards' storage"* stops being a rounding error; until then a
-//!   compaction pass would add a second format and a rewrite path for nothing.
+//!   entities on one node**; until then a compaction pass would add a second format and
+//!   a rewrite path for nothing.
 //! - `fences/<shard>`, the per-shard **fence**: the highest shard term this node has
 //!   acknowledged (§8), the one piece of state shared across a shard's entities. It is
 //!   rewritten (atomically) only when the term advances (on failover and recovery
@@ -92,14 +89,12 @@
 //!
 //! Poisoning is store-wide and one-way. Store-wide because the failures it catches (a
 //! full volume, a lost mount, a failing device) belong to the directory rather than to
-//! the entity whose write happened to notice first, and because a store that answered
-//! for one area while unable to serve another would be lying by omission. One-way
-//! because nothing here can establish that the volume recovered; a poisoned store is a
-//! node to replace.
+//! the entity whose write happened to notice first. One-way because nothing here can
+//! establish that the volume recovered; a poisoned store is a node to replace.
 //!
-//! The alternative, panicking, is what this replaced: it converts one bad volume into
-//! the loss of every shard the node leads, all of which then re-elect and rehydrate
-//! elsewhere; a cluster-wide event caused by a local fault. Only [`open`](
+//! Panicking, the alternative this replaced, converts one bad volume into the loss of
+//! every shard the node leads, all of which then re-elect and rehydrate elsewhere: a
+//! cluster-wide event caused by a local fault. Only [`open`](
 //! FileEntityStore::open) failure is still fatal at the [`factory`](
 //! FileEntityStore::factory), because a replica with no storage at all has nothing to
 //! degrade *from*.
@@ -115,9 +110,9 @@
 //!
 //! **Durability reporting.** The guard, the in-memory apply, and the fsync all happen
 //! under the entity's segment lock before a mutating call returns, so the outcome it
-//! reports is already durable. What keeps it that way is the seam being *synchronous*:
-//! a store shaped as an `async fn` would run its body at first poll, moving the
-//! fencing-critical apply out from under the lock (§8).
+//! reports is already durable. The seam is *synchronous* to keep it that way: an
+//! `async fn` store would run its body at first poll, moving the fencing-critical
+//! apply out from under the lock (§8).
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -160,25 +155,25 @@ const MAX_RECORD: u32 = 1 << 30;
 
 /// How many entity segments a store keeps open by default.
 ///
-/// Each is an open file descriptor, so this is really a descriptor budget. The number
-/// is derived from the deployment's own limits, not inherited: a current Linux host
-/// caps `fs.nr_open` at 1,048,576 and a service unit routinely raises `LimitNOFILE`
-/// into the same range, and a descriptor costs a few hundred bytes of kernel memory,
-/// so 65536 of them is tens of megabytes on a node sized in the hundreds of gigabytes
+/// Each is an open file descriptor, so this is really a descriptor budget, derived
+/// from the deployment's own limits: a current Linux host caps `fs.nr_open` at
+/// 1,048,576 and a service unit routinely raises `LimitNOFILE` into the same range,
+/// and a descriptor costs a few hundred bytes of kernel memory, so 65536 of them is
+/// tens of megabytes on a node sized in the hundreds of gigabytes
 /// (`docs/hardware-envelope.md` §3.2, §3.6). It leaves room for the transport's
 /// connections and the blob area's transient opens, and stays far above the entities a
 /// node has *active* at once, which hibernation keeps to the working set (§10).
 ///
 /// **A deployment MUST raise `LimitNOFILE` to at least ~70000.** This budget bounds
-/// what the store keeps; it cannot bound what the kernel allows, and against the
-/// traditional 1024 or 65536 default the process would hit the kernel's limit (as an
-/// `EMFILE` on some unrelated open) before this cap ever evicted anything. See
+/// what the store keeps, not what the kernel allows, and against the traditional 1024
+/// or 65536 default the process would hit the kernel's limit (as an `EMFILE` on some
+/// unrelated open) before this cap ever evicted anything. See
 /// `docs/standalone-deployment.md`.
 ///
-/// The cap itself is not an optimization but a bound (hw §5): it is what keeps a node
-/// that has *served* millions of entities from holding a descriptor for each. A miss
-/// costs a reopen and replay of one entity's segment, bounded by compaction to a
-/// checkpoint plus the records above it (§9).
+/// The cap is a bound, not an optimization (hw §5): it keeps a node that has *served*
+/// millions of entities from holding a descriptor for each. A miss costs a reopen and
+/// replay of one entity's segment, bounded by compaction to a checkpoint plus the
+/// records above it (§9).
 const DEFAULT_SEGMENT_CAPACITY: usize = 65536;
 
 /// A [`factory`](FileEntityStore::factory)'s open stores, keyed by the pair that names
@@ -333,13 +328,9 @@ impl FileEntityStore {
     /// Record that this store's storage is unusable, and return `()` so a caller can
     /// tail-call it from an error arm.
     ///
-    /// Poisoning is **one-way and store-wide**. A replica that cannot make a write
-    /// durable cannot honestly acknowledge it (the module's failure policy), but the
-    /// honest answer is [`StoreAck::Failed`], not a panic: panicking converts one bad
-    /// volume into the loss of every shard this node leads, and those shards then
-    /// re-elect and rehydrate elsewhere; a cluster event caused by a local fault.
-    /// Refusing instead leaves the node running, dropping out of its quorums, where
-    /// its peers' existing majority logic already covers it.
+    /// Poisoning is **one-way and store-wide** (the module's failure policy): a
+    /// replica that cannot make a write durable answers [`StoreAck::Failed`] rather
+    /// than panicking, dropping out of its quorums while the node keeps running.
     ///
     /// The first cause is kept and later ones ignored: the first is the one that
     /// explains the rest.
@@ -452,24 +443,21 @@ impl FileEntityStore {
     /// `capacity`.
     ///
     /// Every loaded segment holds an **open file descriptor** (a `Wal` owns its
-    /// `File`), and until this existed nothing ever closed one: a segment entered the
-    /// map on first access and left only when its entity was explicitly deleted. An
-    /// entity hibernating (§10) does not touch the store, so a node accumulated one fd
-    /// per distinct entity it had *ever* served, for its whole lifetime: a hard
-    /// ceiling at the process's descriptor limit, reached at an entity count far below
-    /// anything else here is sized for, and with no back pressure before it.
+    /// `File`), and a hibernating entity (§10) does not touch the store, so without
+    /// eviction a node accumulates one fd per distinct entity it has *ever* served: a
+    /// hard ceiling at the process's descriptor limit, reached at an entity count far
+    /// below anything else here is sized for, and with no back pressure before it.
     ///
     /// Closing one costs only a reopen-and-replay on the next access, which
     /// compaction bounds to a checkpoint plus the records above it (§9).
     ///
     /// **Only entries the map alone holds are evicted.** A `Segment` handed to a
-    /// caller is an `Arc`, and dropping the map's copy would not close the file, but
-    /// it would let the next access open a *second* `Wal` on the same path, and two
+    /// caller is an `Arc`: dropping the map's copy would not close the file, but it
+    /// would let the next access open a *second* `Wal` on the same path, and two
     /// appending handles on one file interleave into corruption. `strong_count == 1`
-    /// under the map lock is exactly the condition that cannot happen, since the lock
-    /// is the only way to obtain a clone. If every entry is in use the map is left
-    /// over capacity rather than made unsafe; the callers are transient, so the next
-    /// insert finds them idle.
+    /// under the map lock rules that out, since the lock is the only way to obtain a
+    /// clone. If every entry is in use the map is left over capacity rather than made
+    /// unsafe; the callers are transient, so the next insert finds them idle.
     fn evict_idle_segments(
         segments: &mut HashMap<(u32, EntityName), Arc<Segment>>,
         capacity: usize,
@@ -534,8 +522,8 @@ impl FileEntityStore {
     /// one gate every area of the store passes through: records, snapshots, and the
     /// blob area alike. A poisoned store must not answer for the blob area either just
     /// because that subtree happens to still be writable: the failure it saw belongs
-    /// to the volume, and a replica that cannot serve an entity's records has no
-    /// business acknowledging its blobs.
+    /// to the volume, not to one area of it.
+    ///
     /// **The manifest lock spans an fsync, and that is the node's cold-create serial
     /// point.** The `create` branch below appends to the manifest log (a durable
     /// write) while holding the mutex, so every entity whose segment is being created
@@ -546,13 +534,12 @@ impl FileEntityStore {
     /// and about 2x is on the table, on the path a failover walks when it brings up
     /// every entity it just inherited.
     ///
-    /// Left as it stands because the obvious fix is the wrong one and the right one is
-    /// not a cleanup. Sharding the map does not help: the serialization is the flush,
-    /// not the hash lookup. Releasing the lock across the flush breaks what the comment
-    /// below is protecting: an id must not be published before the entry naming it is
-    /// durable, or a restart uses an id its manifest never recorded. What would work is
-    /// group-commit: reserve ids under the lock, batch the entries, and one flush
-    /// publishes them all. That is a durability-path change and wants its own review.
+    /// Left as it stands. Sharding the map does not help: the serialization is the
+    /// flush, not the hash lookup. Releasing the lock across the flush would publish an
+    /// id before the entry naming it is durable, and a restart would then use an id its
+    /// manifest never recorded. What would work is group-commit: reserve ids under the
+    /// lock, batch the entries, and one flush publishes them all. That is a
+    /// durability-path change and wants its own review.
     ///
     /// The steady-state path is unaffected: an id already in the map returns from the
     /// hash hit above the flush, which is why `store_warm_read` is four orders faster.
@@ -700,19 +687,18 @@ const STORE_EXT_KNOWN: &[u16] = &[];
 
 /// The stamp on a `fences/<shard>` file (compatibility §3, `entity.store.fence`).
 ///
-/// A per-file stamp rather than a field of [`STORE`]'s, though the coarser one
-/// would be free in bytes. A fence file is a durable byte sequence in its own right
-/// (restored from a backup, copied between directories, left behind by a
-/// half-finished upgrade), and delegating its identity to a neighbouring file is
-/// what a stamp exists to stop (**V1**). It would also couple two formats that
-/// evolve apart (**V6**), and `admit_store_stamp` adopts an unstamped directory
-/// without inspecting anything, so the store's revision would end up asserting a
-/// fence layout nothing had looked at, on the one boundary whose misread costs a
-/// safety property rather than a decode.
+/// A per-file stamp rather than a field of [`STORE`]'s. A fence file is a durable
+/// byte sequence in its own right (restored from a backup, copied between
+/// directories, left behind by a half-finished upgrade), and delegating its identity
+/// to a neighbouring file is what a stamp exists to stop (**V1**). It would also
+/// couple two formats that evolve apart (**V6**), and `admit_store_stamp` adopts an
+/// unstamped directory without inspecting anything, so the store's revision would
+/// end up asserting a fence layout nothing had looked at, on the one boundary whose
+/// misread costs a safety property rather than a decode.
 ///
-/// The cost the granularity rule prices is per *item*, and here it rounds to
-/// nothing: one file per shard, rewritten only when the term actually advances, on
-/// a write whose real expense is the fsync of a block it already occupies.
+/// The granularity rule prices this per *item*, and here it rounds to nothing: one
+/// file per shard, rewritten only when the term advances, on a write whose real
+/// expense is the fsync of a block it already occupies.
 ///
 /// `GRFNCE` cannot be confused with the unstamped predecessor, whose leading eight
 /// bytes are a term: aliasing it needs term 0x45434E465247, some 7.6e13 elections
@@ -755,13 +741,12 @@ const SIDECAR_LEGACY_BYTES: usize = 16;
 /// Confirm `dir` holds records `codec` can read, stamping it if it is not stamped.
 ///
 /// **An unstamped directory is adopted, not refused.** Refusing would make this
-/// check a migration for every store that predates it, which is the opposite of
-/// what a stamp is for; adoption records the codec running now. The limitation is
-/// worth stating plainly: adoption cannot verify the claim it writes down, so a
-/// store whose codec was *already* swapped is stamped with the wrong answer and
-/// its records still fail one entity at a time. The stamp protects every swap after
-/// it, and cannot retroactively protect one that already happened, which is why
-/// the compatibility spec files this as worth having *before* a codec change.
+/// check a migration for every store that predates it; adoption records the codec
+/// running now. Adoption cannot verify the claim it writes down, so a store whose
+/// codec was *already* swapped is stamped with the wrong answer and its records
+/// still fail one entity at a time. The stamp protects every swap after it, never
+/// one that already happened, which is why the compatibility spec files this as
+/// worth having *before* a codec change.
 fn admit_store_stamp(dir: &Path, codec: &str) -> io::Result<()> {
     let invalid = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
     let path = dir.join(STORE_FILE);
@@ -921,17 +906,13 @@ fn read_fence(path: &Path) -> io::Result<Option<Term>> {
 /// Read one fence or seal, accepting the stamped form and the unstamped
 /// predecessor. `None` means one thing only: **the file is absent**.
 ///
-/// That is the whole point of giving these files a header. Every other way of
-/// getting one wrong used to return `None` too (a short file, a long file, a
-/// checksum mismatch), and `load_fences` reads `None` as *no fence for this shard*,
-/// so bit-rot or a build skew silently withdrew **E1**'s single-writer guarantee
-/// with no diagnostic anywhere. "There is no fence here" and "this is a fence and
-/// something is wrong with it" are different sentences, and only the first is safe
-/// to act on. A magic is what lets the reader tell them apart.
-///
-/// So a malformed sidecar now fails [`FileEntityStore::open`] rather than opening a
-/// store with a fence quietly missing: the same direction the Raft term file
-/// already fails in, and for the same reason: guessing risks a safety property.
+/// That is what the header buys. `load_fences` reads `None` as *no fence for this
+/// shard*, so while a short file, a long file, or a checksum mismatch also answered
+/// `None`, bit-rot or a build skew silently withdrew **E1**'s single-writer
+/// guarantee with no diagnostic anywhere. A malformed sidecar now fails
+/// [`FileEntityStore::open`] rather than opening a store with a fence quietly
+/// missing, the same direction the Raft term file already fails in: guessing risks
+/// a safety property.
 ///
 /// The order is the contract: bytes carrying the magic are *this* format, so their
 /// revision is admitted before any field is read (**V2**) and a revision this build
@@ -1159,8 +1140,7 @@ impl EntityStore for FileEntityStore {
         // on disk shrinks a committed write's durability below its quorum (**E14**).
         // Framed once and taken apart again, rather than cloned for the frame: `append`
         // only borrows the op, and the in-memory apply below wants the same batch by
-        // value. The batch is an entity's whole write (a mebibyte for a disk block), so
-        // cloning it here allocated and copied one per append for the frame's sake.
+        // value. The batch is an entity's whole write, a mebibyte for a disk block.
         let op = SegOp::Record {
             after,
             term,
@@ -1309,12 +1289,11 @@ impl EntityStore for FileEntityStore {
         // leader could assemble a majority for the moved range afterward (E15).
         let bound = seals.get(&shard).map_or(from, |&cur| cur.min(from));
         if seals.get(&shard) != Some(&bound) {
-            // In memory only after the file: a bound this replica forgets on restart
-            // would let a stale leader assemble a majority for the moved range (E15).
-            // `seal_range` has no refusal to report, but the seal's majority stays
-            // sound anyway: poisoning makes this store answer `Failed` to *every*
-            // subsequent append, which refuses strictly more than the bound would, so
-            // counting it toward the seal cannot let a moved-range write through.
+            // In memory only after the file. `seal_range` has no refusal to report,
+            // but the seal's majority stays sound anyway: poisoning makes this store
+            // answer `Failed` to *every* subsequent append, which refuses strictly
+            // more than the bound would, so counting it toward the seal cannot let a
+            // moved-range write through.
             if let Err(err) = write_seal(&self.dir, shard, bound) {
                 self.fail(format!(
                     "entity store seal persistence failed at {}: {err}; a replica \
@@ -1391,8 +1370,7 @@ impl EntityStore for FileEntityStore {
         // every SPLIT_TRIGGER_INTERVAL (30 s) on a node with cores to spare
         // (`docs/hardware-envelope.md` §3.3). A maintained counter would be a number
         // that can drift from the filesystem, on the one path whose job is to describe
-        // it. **Revisit when a sweep exceeds a second**, which is the point where the
-        // trade turns.
+        // it. **Revisit when a sweep exceeds a second.**
         let ids: Vec<u64> = {
             let manifest = self
                 .manifest
@@ -1711,8 +1689,7 @@ mod tests {
 
     /// A stamped fence or seal, encoded the way this build reads one. Written here
     /// rather than taken from the store so the fixture cannot move with the writer:
-    /// bytes generated by the code under test pin nothing, and the corpus exists to
-    /// hold this build to what an earlier one wrote. That the writers agree is
+    /// bytes generated by the code under test pin nothing. That the writers agree is
     /// asserted separately, by `a_fence_and_a_seal_are_written_stamped`.
     fn stamped_sidecar(stamp: &compat::Stamp, value: u64) -> Vec<u8> {
         let body = postcard::to_allocvec(&SidecarBody {
@@ -1778,10 +1755,9 @@ mod tests {
     }
 
     /// **The load-bearing one.** Every representable way of getting a fence file
-    /// wrong used to return `Ok(None)`, which `load_fences` reads as *no fence for
-    /// this shard*, so bit-rot or a build skew silently withdrew **E1** with no
-    /// diagnostic. Each of these must now fail `open` by name instead, and the
-    /// store must not come up with the fence quietly missing.
+    /// wrong must fail `open` by name, not read as *no fence for this shard*, which
+    /// would withdraw **E1** with no diagnostic. The store must not come up with the
+    /// fence quietly missing.
     #[test]
     fn a_fence_this_build_cannot_read_is_refused_rather_than_read_as_no_fence() {
         let mut future = stamped_sidecar(&FENCE, 7);
@@ -2493,10 +2469,8 @@ mod tests {
     /// The descriptor bound: serving unboundedly many distinct entities must not leave
     /// unboundedly many segments (and so file descriptors) open.
     ///
-    /// Before this, a segment entered the loaded set on first access and left only
-    /// when its entity was deleted, so a long-lived node accumulated one open fd per
-    /// entity it had ever touched. Hibernation does not help: it stops the entity's
-    /// host, which never touches the store.
+    /// Without eviction a long-lived node holds one open fd per entity it has ever
+    /// touched: hibernation stops the entity's host, which never touches the store.
     #[test]
     fn the_loaded_segment_set_stays_bounded_across_many_entities() {
         let dir = tempfile::tempdir().unwrap();
@@ -2613,11 +2587,9 @@ mod tests {
     }
 
     /// The failure policy: a store that cannot write **refuses**, and keeps refusing.
-    ///
-    /// The alternative this replaced was a panic, which took the whole process (and
-    /// with it every other shard the node led) down for one bad volume. Refusing
-    /// leaves the node up and simply outside its shards' quorums, which the peers'
-    /// majority logic already handles.
+    /// Refusing leaves the node up and simply outside its shards' quorums, where the
+    /// peers' majority logic already covers it; a panic would take the whole process
+    /// down for one bad volume.
     #[test]
     fn a_store_that_cannot_write_refuses_instead_of_panicking() {
         let dir = tempfile::tempdir().unwrap();
@@ -2658,8 +2630,6 @@ mod tests {
 
     /// Poisoning is store-wide and one-way: after the first failure the store stops
     /// claiming anything, including for entities it had already served successfully.
-    /// A store that answered `Stored` again here would be acknowledging writes it can
-    /// no longer persist.
     #[test]
     fn a_poisoned_store_refuses_every_later_operation() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,6 +1,6 @@
 //! Compile-fail conformance for invariant **E10** (spec §15): a command an entity
-//! has no `EntityHandler` for must not compile. A property no runtime test can
-//! express: the call simply must not type-check.
+//! has no `EntityHandler` for must not compile, a property no runtime test can
+//! express.
 
 #[test]
 fn invalid_entity_calls_do_not_compile() {

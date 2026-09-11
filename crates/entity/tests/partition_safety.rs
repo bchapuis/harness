@@ -6,10 +6,10 @@
 //! quorum. That proves the *easy* half of CP. The dangerous half is a partition
 //! that **heals**: the isolated old leader stays *alive*, still believes it leads
 //! (there is no check-quorum lease today; entity-vv-findings), and the majority
-//! side elects a *second* leader that commits in parallel. A naive system forks
-//! here. These tests partition the shard leader into a minority, drive committed
-//! writes on the majority side and rejected writes on the minority side, then
-//! `heal()` and prove the log neither forked nor lost an acknowledged write.
+//! side elects a *second* leader that commits in parallel. These tests partition
+//! the shard leader into a minority, drive committed writes on the majority side
+//! and rejected writes on the minority side, then `heal()` and prove the log
+//! neither forked nor lost an acknowledged write.
 //!
 //! - **E11/E1 (no fork).** A minority leader's writes never commit; after heal the
 //!   reconciled balance is *exactly* the sum of acknowledged writes: the minority
@@ -205,13 +205,13 @@ fn leader_and_majority(
     (leader_idx, majority)
 }
 
-// --- The crown jewel: a heal-able partition must not fork or lose writes -------
+// --- A heal-able partition must not fork or lose writes -----------------------
 
 #[test]
 fn split_brain_partition_neither_forks_nor_loses() {
     // E1/E11/E14 under a partition that HEALS (not a crash). The shard leader L is
     // isolated into a minority while still believing it leads; the two survivors
-    // elect a competing leader and commit. We drive each phase to completion (no
+    // elect a competing leader and commit. Each phase is driven to completion (no
     // in-flight ambiguity at a transition), so the arithmetic is exact:
     //
     //   * a write the MAJORITY acknowledged MUST appear in the final balance (E14);
@@ -362,9 +362,9 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
     );
 
     // A READ on the deposed leader, served from its in-memory activation, returns
-    // the STALE pre-partition value (100), not the new committed 150. This is the
-    // documented §7.5 gap: reads can be stale on the minority side. It is NEVER the
-    // linearized-current value while partitioned: that is the property to assert.
+    // the STALE pre-partition value (100), not the new committed 150. Reads can be
+    // stale on the minority side (the documented §7.5 gap), but they are NEVER the
+    // linearized-current value while partitioned.
     let minority_read = {
         let g = hosts[leader_idx].clone();
         drive(&sim, Duration::from_secs(4), async move {
@@ -408,9 +408,8 @@ fn minority_leader_serves_stale_reads_but_never_commits() {
 #[test]
 fn cluster_reconverges_after_a_partition_heals() {
     // CP buys safety at the cost of minority availability *during* the partition;
-    // the contract is that availability returns once it heals. Partition, let the
-    // majority serve, heal, then prove every node (the formerly isolated one
-    // included) serves the durable value and accepts a fresh write that all see.
+    // the contract is that availability returns once it heals, on every node
+    // including the formerly isolated one.
     let sim = Simulation::new(2);
     let (net, systems, hosts) = cluster(&sim);
     let key = "account/live";
@@ -481,8 +480,7 @@ fn tell_under_quorum_loss_never_surfaces_unavailable() {
     // but the commit can never land; the caller is not notified (at-most-once,
     // §2.2). This is asserted single-node elsewhere; here it must hold on a cluster
     // whose shard has lost its quorum: the exact case where the equivalent `ask`
-    // returns `Unavailable`. A `tell` that surfaced `Unavailable` (or blocked on the
-    // commit) would violate the fire-and-forget contract.
+    // returns `Unavailable`.
     let sim = Simulation::new(6);
     let (net, systems, hosts) = cluster(&sim);
     let key = "account/tell";
@@ -513,11 +511,10 @@ fn tell_under_quorum_loss_never_surfaces_unavailable() {
     sim.run_for(Duration::from_secs(1));
 
     // The `tell` hits the cached host and is accepted at enqueue: Ok(()), never
-    // Unavailable; even though the deposit can never commit.
-    // The `tell` is accepted and returns Ok(()), never Unavailable. (It is not
-    // instant under quorum loss: with the map group also lacking a quorum, host
-    // resolution is slow, but the *result* is the contract, and it never reports
-    // the durability outcome.)
+    // Unavailable, even though the deposit can never commit. (It is not instant
+    // under quorum loss: with the map group also lacking a quorum, host resolution
+    // is slow, but the *result* is the contract, and it never reports the
+    // durability outcome.)
     let told = {
         let g = hosts[leader_idx].clone();
         drive(&sim, Duration::from_secs(15), async move {
@@ -636,12 +633,11 @@ fn counter_entity_is_linearizable_across_a_partition_and_heal() {
     //
     // The minority-side client only ADDS (writes), deliberately: a minority WRITE
     // that committed would fork the log and surface as a value with no valid serial
-    // placement; caught here. (A minority *read* would return a stale value the
-    // checker would flag as a non-linearizable `ok`, but that is the documented
-    // §7.5 read gap, not a fork; the dedicated test above pins it, so the minority
-    // client here writes only.) A fenced write returns an error -> recorded `info`
-    // (pending), which the checker may place or drop, so it is sound. The majority
-    // client reads and writes against the live leader.
+    // placement. (A minority *read* would return a stale value the checker would
+    // flag as a non-linearizable `ok`, but that is the documented §7.5 read gap, not
+    // a fork, and the dedicated test above pins it.) A fenced write returns an error
+    // -> recorded `info` (pending), which the checker may place or drop, so it is
+    // sound. The majority client reads and writes against the live leader.
     scenario_sweep(
         "partition-safety/counter-heal",
         sweep_seeds(0..16),

@@ -375,11 +375,10 @@ impl Simulation {
     ///
     /// Returns at the poll that completes the future: whatever else is ready or
     /// timed at that point stays in the scheduler for the next [`run`],
-    /// [`run_for`], or `block_on`. Draining the world is a separate operation,
-    /// and deliberately so: a workload that never quiesces (an entity whose idle
-    /// check re-arms while it vetoes hibernation, a failure detector) would
-    /// otherwise turn an awaited reply into a loop that never returns and
-    /// records events without bound.
+    /// [`run_for`], or `block_on`. Draining the world is a separate operation: a
+    /// workload that never quiesces (an entity whose idle check re-arms while it
+    /// vetoes hibernation, a failure detector) would otherwise turn an awaited
+    /// reply into a loop that never returns and records events without bound.
     ///
     /// Panics if the runtime quiesces (nothing ready, no timer left) before
     /// the future completes: the future was waiting on something nobody will

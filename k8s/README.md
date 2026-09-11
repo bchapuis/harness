@@ -1,7 +1,7 @@
 # agent-standalone on Kubernetes
 
 A three-node `agent-standalone` cluster (silos) as a **StatefulSet**, fronted
-by a **`agent-gateway` StatefulSet** that joins the same cluster as a
+by an **`agent-gateway` StatefulSet** that joins the same cluster as a
 non-voting, non-hosting **client** (the Orleans cluster-client pattern). Each pod
 has its own data volume and stable DNS name. Unlike the single-host `demo-agent.sh`,
 the nodes run on separate pods, and so potentially separate machines. As there,
@@ -25,11 +25,11 @@ then addresses the session's entity **directly** over the actor transport: no
 control protocol, no forwarding hop. Because it holds `EntityRef`s and rides the
 receptionist gossip, the gateway sits **inside** the cluster's trust boundary
 (it presents the cluster secret); untrusted callers reach it only over HTTP with
-a bearer token. The session-key scope is what keeps tenants isolated.
+a bearer token. The session-key scope keeps tenants isolated.
 
 The gateway is a StatefulSet, not a Deployment, because a cluster client needs a
 stable transport identity: gateway pod *N* takes the non-voting node id `100+N`
-at the stable DNS name `agent-gw-N.agent-gw`, which the nodes admit with
+at the DNS name `agent-gw-N.agent-gw`, which the nodes admit with
 `--client <id>=<host>`.
 
 ## Prerequisites
@@ -168,8 +168,8 @@ it rejoins as the same node and new sessions place onto it again.
 
 The manifest runs `--sandbox durable`: the `Workspace` tier is backed by a
 durable filesystem entity (entity §7.10), so a session's files survive
-hibernation, migration, and node loss. It needs no extra in-cluster runtime,
-the right starter default, but it offers the typed file tools
+hibernation, migration, and node loss. It needs no extra in-cluster runtime, so
+it is the right starter default, but it offers the typed file tools
 (`read_file`/`write_file`/`edit_file`/`list_dir`/`remove`) only: **no `shell`
 and no `run_js`**.
 
@@ -185,8 +185,8 @@ plumbing this starter manifest leaves out:
   privileged context. Best on bare-metal node pools.
 
 Keep `durable` unless the model needs a shell; once it does, and especially
-once you are feeding it untrusted input, a per-session container or microVM is
-the right boundary.
+once you feed it untrusted input, a per-session container or microVM is the
+right boundary.
 
 ## Scaling and limits
 
@@ -206,9 +206,9 @@ the right boundary.
   there.
 - **The transport is plaintext, guarded by the cluster secret** (`agent-cluster`).
   The gateway joins it inside the trust boundary, so it must be a trusted
-  component, which it is, being where tenant auth terminates. Fine within a
-  trusted cluster network; provision transport TLS (`TlsConfig`, on both the
-  nodes and the gateways) before crossing untrusted links.
+  component, which it is: tenant auth terminates there. Fine within a trusted
+  cluster network; provision transport TLS (`TlsConfig`, on both the nodes and
+  the gateways) before crossing untrusted links.
 - **`storage: 1Gi` per pod** is arbitrary; size it to your sessions.
 
 ## Tear down

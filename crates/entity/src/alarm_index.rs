@@ -9,15 +9,15 @@
 //! time. The gap is every **deactivation**: a failover deactivates a shard's entities
 //! (a forced step-down, §13), and idle hibernation would otherwise pin an alarmed
 //! entity resident forever, in either case an alarm with no caller would sleep
-//! until the entity is next touched. This index closes that gap. Each
-//! [`Host`](crate::Host) registers its entity's pending deadline here on every alarm
-//! change; the alarm **driver** reads the index for the shards its node leads and
-//! re-activates each pending entity, whose [`on_activate`](crate::Entity::on_activate)
-//! re-arms its own timer (**E3**). The index is a *hint* (the entity's own alarm
-//! facet is the source of truth), so a stale entry is reconciled on the next
-//! activation, never a lost or double fire. The one place a *missing* entry would
-//! be unrecoverable is a voluntarily hibernated entity, which is why the host
-//! hibernates an alarmed entity only after its registration is **acked** (host.rs).
+//! until the entity is next touched. Each [`Host`](crate::Host) registers its
+//! entity's pending deadline here on every alarm change; the alarm **driver** reads
+//! the index for the shards its node leads and re-activates each pending entity,
+//! whose [`on_activate`](crate::Entity::on_activate) re-arms its own timer (**E3**).
+//! The index is a *hint* (the entity's own alarm facet is the source of truth), so a
+//! stale entry is reconciled on the next activation, never a lost or double fire. The
+//! one place a *missing* entry would be unrecoverable is a voluntarily hibernated
+//! entity, which is why the host hibernates an alarmed entity only after its
+//! registration is **acked** (host.rs).
 //!
 //! # Shape
 //!

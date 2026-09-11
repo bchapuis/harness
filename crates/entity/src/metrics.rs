@@ -9,9 +9,9 @@
 //! This is the operator's interface: a fixed, small set of aggregates that cost O(1)
 //! per operation and answer the questions an on-call engineer actually has; are
 //! commits landing, how long are they taking, what does a cold access cost, how much
-//! is resident. The two are complementary and neither replaces the other.
+//! is resident.
 //!
-//! What is *not* here is as deliberate. Leadership changes, splits and merges are
+//! Leadership changes, splits and merges are deliberately absent. They are
 //! transitions, not rates: the event stream carries each exactly once, with the term
 //! or the boundary attached, and a counter beside it would restate the same fact less
 //! precisely.
@@ -158,11 +158,9 @@ impl Histogram {
 /// One histogram in Prometheus exposition form: the cumulative `le` buckets, then the
 /// `_sum` and `_count` lines.
 ///
-/// One copy, because the exposition format is a contract with the scraper and the
-/// microsecond-to-second conversion is easy to get subtly wrong: two copies means a
-/// fix that lands on one of them. `labels` is the label set every line carries, already
-/// formatted and without braces (`entity_type="x",outcome="y"`); `le` is appended last,
-/// so the caller's labels and the bucket label compose in the order they always had.
+/// `labels` is the label set every line carries, already formatted and without braces
+/// (`entity_type="x",outcome="y"`); `le` is appended last, so the caller's labels and
+/// the bucket label compose in the order they always had.
 fn render_histogram(out: &mut String, metric: &str, labels: &str, hist: &Histogram) {
     let (points, sum_us, count) = hist.snapshot();
     for (le, cumulative) in points {
@@ -198,12 +196,10 @@ struct TypeMetrics {
 /// which keeps the build offline-clean and costs one relaxed add per operation once
 /// the type's entry is in hand.
 ///
-/// **Getting that entry is the part worth being careful about.** Every commit,
-/// rehydrate and activation on the node looks its entity type up here, and there is one
-/// of these per *node*, shared across every type it hosts, so this lookup is on the
-/// hot path of the whole process, taken from as many threads as the box has cores. The
-/// map it looks in is effectively fixed: a type's entry is created by its first metric
-/// and then never changes, so after the first commit of each type every subsequent
+/// **Getting that entry is the part worth being careful about.** There is one of these
+/// per *node*, and every commit, rehydrate and activation looks its entity type up
+/// here, from as many threads as the box has cores. The map is effectively fixed: a
+/// type's entry is created by its first metric and never changes, so after that every
 /// lookup is a pure read. An [`RwLock`](std::sync::RwLock) is what makes that read
 /// shared; a `Mutex` would serialize every core through one lock to read a map that is
 /// no longer being written.
@@ -415,20 +411,17 @@ mod tests {
         // miss, so several threads reporting an entity type's *first* metric can all
         // miss the read and all reach the write. If the miss path replaced the entry
         // instead of re-checking, every thread but the last would increment an `Arc`
-        // no longer in the map and its commits would vanish: a race that only shows
-        // on the first touch of a type, which is exactly when a node is starting and
-        // nobody is looking at the numbers.
+        // no longer in the map and its commits would vanish: a race that only shows on
+        // the first touch of a type, which is when a node is starting and nobody is
+        // looking at the numbers.
         //
-        // Two things make this a test rather than a coin flip. The barrier, because
-        // otherwise the first thread spawned wins the write and installs the entry
-        // before the others start, leaving every later lookup an uncontended read hit
-        // and the miss path never raced. And the repetition, because even barriered
-        // the threads only collide inside the miss window some of the time, against a
-        // deliberately broken `entry` a single round catches it only a few percent of
-        // the time, which is a detector nobody should rely on. Measured against that
-        // broken version, 64 rounds caught it in five runs out of six and 512 in every
-        // run; correct code passes every round, so the repetition costs a quarter of a
-        // second and is not a source of flakiness in the direction that matters.
+        // The barrier and the repetition are what make this a test rather than a coin
+        // flip. Without the barrier the first thread spawned installs the entry before
+        // the others start and the miss path never races. Even barriered, a single
+        // round catches a deliberately broken `entry` only a few percent of the time;
+        // against that broken version 64 rounds caught it in five runs out of six and
+        // 512 in every run, while correct code passes every round in a quarter of a
+        // second.
         const ROUNDS: usize = 512;
         const THREADS: u64 = 8;
         const EACH: u64 = 50;

@@ -1,6 +1,6 @@
 //! Harness observability events (agent spec §10.4): checker-facing,
 //! ephemeral, describing the *machinery around* sessions (run pairing, model
-//! spend, the sandbox bind/release pair), so the A-invariant are checkable over
+//! spend, the sandbox bind/release pair), so the A-invariants are checkable over
 //! a run's stream. They carry nothing about a session's content: records are the
 //! durable, user-facing account (§10.1). Activation, deactivation, and the
 //! single-writer fence are the entity's events (`Activated`/`Deactivated`/

@@ -1,10 +1,10 @@
 //! Coverage accounting for the faults the transport cannot see.
 //!
 //! `run_cluster_swarm_coverage` proves a sweep injected loss, duplication,
-//! delay, and blocking, because those are the wire's and `FaultStats` counts
-//! them. The two faults that matter most to a hibernating sweep are not the
-//! wire's: whether an activation actually hibernated and came back, and whether
-//! the nemesis actually killed a process. A sweep that configures a short
+//! delay, and blocking: those are the wire's, and `FaultStats` counts them. The
+//! two faults that matter most to a hibernating sweep are not the wire's:
+//! whether an activation actually hibernated and came back, and whether the
+//! nemesis actually killed a process. A sweep that configures a short
 //! `idle_after` but whose entities all stay resident, or one whose vocabulary
 //! includes a restart it never draws, is a green run that proves nothing.
 //!
@@ -19,20 +19,17 @@
 //! run rather than the workload. Most hibernating workloads earn that by
 //! *driving* these paths rather than sampling them: they idle past `idle_after`
 //! on a fixed cadence rather than a seeded coin, and snapshot often enough that an
-//! entity has a checkpoint to return from before it first hibernates. What stays
-//! seeded is everything the nemesis and the wire do around that.
+//! entity has a checkpoint to return from before it first hibernates.
 //!
 //! A workload that cannot drive them has to say so, and one cannot: the disk
 //! swarm's entities must import a multi-megabyte image before they can commit
-//! anything, and under a nemesis that kills processes there are seeds where the
-//! cluster never gives them a window; seeds on which nothing hibernates at all.
-//! Its totals are therefore an aggregate over the seed range rather than a
-//! per-seed property, so they are asserted on a sweep sized by `coverage_seeds`,
-//! which never narrows. See
-//! `disk_swarm.rs::disk_hibernation_actually_deactivates_and_restores_from_a_snapshot`,
-//! which records how that was found out. Before assuming a new workload drives
-//! these paths, check it at width 1 across the declared range rather than at the
-//! one seed a local run happens to draw.
+//! anything, and under a nemesis that kills processes some seeds never give them
+//! a window, so nothing hibernates at all. Its totals are therefore an aggregate
+//! over the seed range rather than a per-seed property, so they are asserted on a
+//! sweep sized by `coverage_seeds`, which never narrows. See
+//! `disk_swarm.rs::disk_hibernation_actually_deactivates_and_restores_from_a_snapshot`.
+//! Before assuming a new workload drives these paths, check it at width 1 across
+//! the declared range rather than at the one seed a local run happens to draw.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -68,8 +65,8 @@ impl Exercised {
         self.restarted.load(Ordering::Relaxed)
     }
 
-    /// Assert this sweep really hibernated: the shape every hibernating sweep
-    /// wants, so the four of them state it once.
+    /// Assert this sweep really hibernated: the check every hibernating sweep
+    /// wants, stated once for the four of them.
     ///
     /// Deliberately *not* including [`restarted`](Self::restarted). Whether an
     /// entity hibernates and returns is something the workload drives, so it holds
@@ -77,8 +74,7 @@ impl Exercised {
     /// property of the seed range, which at `slow_seeds`' single local seed is a
     /// coin it loses about two runs in five. That claim belongs on a sweep sized
     /// by `coverage_seeds`, which never narrows; see
-    /// `entity_swarm.rs::the_nemesis_actually_restarts_a_node`, where it is stated
-    /// once for the nemesis rather than four times for four facets.
+    /// `entity_swarm.rs::the_nemesis_actually_restarts_a_node`.
     pub fn assert_hibernated(&self) {
         assert!(
             self.hibernated() > 0,

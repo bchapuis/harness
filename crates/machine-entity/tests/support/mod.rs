@@ -11,7 +11,7 @@
 //! names test functions, and the drift test resolves a name to its file by
 //! searching for the function's definition across `machine-entity`,
 //! `machine-frontdoor`, and `machine-host`. Without that, M4 and M6 would have to
-//! be recorded as prose, which is the form that rots.
+//! be recorded as prose.
 
 #![allow(dead_code)]
 

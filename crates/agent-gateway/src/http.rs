@@ -328,15 +328,13 @@ fn sse_response<S: HarnessSystem>(follower: Follower<S>, turn: String, tail: Tai
 
 /// The terminal step after a [`SessionStream`]'s watched turn ends: the observe-only
 /// `stream` emits a payload-less `end`; the streaming `prompt` awaits its background
-/// task and emits the run's `outcome`. The record-forwarding half before it is
-/// shared by both endpoints.
+/// task and emits the run's `outcome`.
 enum Tail {
     End,
     Outcome(JoinHandle<Result<RunOutcome, EntityError>>),
 }
 
-/// A server-sent-event stream over a session's records: forward record batches off a
-/// [`Follower`] until the watched turn ends, then run the [`Tail`].
+/// The SSE stream's state: forwarding records, then the [`Tail`], then done.
 enum SessionStream<S: HarnessSystem> {
     Streaming {
         follower: Follower<S>,

@@ -1,9 +1,8 @@
 //! Spike (§5.3/§5.4): an Orleans-style cluster **client** (a member that hosts
-//! no entities and is not a Raft voter) addresses and calls an entity hosted on the
-//! cluster, via `entities_client`. This is the linchpin of the gateway-as-client
-//! architecture: it proves a non-hosting participant discovers a host's gateway
-//! through the receptionist gossip and routes an `ask` to the shard leader,
-//! getting the same reply a host would.
+//! no entities and is not a Raft voter) addresses and calls an entity hosted on
+//! the cluster, via `entities_client`. It proves a non-hosting participant
+//! discovers a host's gateway through the receptionist gossip and routes an `ask`
+//! to the shard leader, getting the same reply a host would.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -153,8 +152,8 @@ fn a_non_hosting_client_routes_to_a_cluster_entity() {
     // Raft voter roster {A,B,C} and never a host (it never calls `entity`).
     let client: SimNode = net.join(CLIENT);
 
-    // Poll until the hosts' gateway has gossiped into the client's receptionist:
-    // exactly as a node waits for its peers before serving.
+    // Poll until the hosts' gateway has gossiped into the client's receptionist,
+    // as a node waits for its peers before serving.
     let client_entities = {
         let mut found = None;
         for _ in 0..20 {
@@ -167,9 +166,9 @@ fn a_non_hosting_client_routes_to_a_cluster_entity() {
         found.expect("the client discovered a host gateway via the receptionist gossip")
     };
 
-    // Route an Add (a write that must reach the shard leader and commit), a
-    // Read, and a gateway-level event read (§7.5) (the last never touching the
-    // activation) from the non-hosting client.
+    // From the non-hosting client: an Add (a write that must reach the shard
+    // leader and commit), a Read, and a gateway-level event read (§7.5) that
+    // never touches the activation.
     let (after_add, after_read, tailed) = drive(&sim, Duration::from_secs(8), async move {
         let counter = client_entities.entity("counter/1");
         let added = counter.ask(Add(7)).await;
@@ -195,8 +194,8 @@ fn a_non_hosting_client_routes_to_a_cluster_entity() {
 fn ask_timeout_is_bounded_by_its_deadline_even_while_the_shard_cannot_elect() {
     // One node of a three-voter roster: no quorum, so neither the map group nor
     // any shard ever elects, and every resolution redirect-loops. The declared
-    // deadline must bound the WHOLE call (resolution and ask, across both
-    // dispatch attempts share one budget) never a per-step window that stacks.
+    // deadline must bound the whole call, resolution and ask sharing one budget,
+    // never a per-step window that stacks.
     let sim = Simulation::new(3);
     let net = SimNetwork::new(&sim).with_leader(
         swim_config(),

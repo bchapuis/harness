@@ -11,7 +11,7 @@
 //! cannot be enumerated (docs/simulation-testing.md). Here it can: a log of a few
 //! records is a few hundred bytes, so "the recovered records are always a prefix
 //! of what was appended" is *decided*, not estimated, and there is no seed to
-//! record if it fails. A sweep would be strictly weaker and slower.
+//! record if it fails.
 //!
 //! The property, at every crash point:
 //!

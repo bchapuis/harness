@@ -16,7 +16,7 @@
 //! entity's `Status` on a fixed cadence. Each poll is at once the touch that
 //! re-activates a cold entity (whose first tick is the orphan set, §4.4), the
 //! wake for an entity that hibernated at quiescence under the short idle window,
-//! and an observation. A poll the faults refuse is simply not an observation.
+//! and an observation. A poll the faults refuse is not an observation.
 //!
 //! **What it cannot promise per seed.** Whether a leader dies with an effect in
 //! flight is the nemesis's to decide, so the coverage claims (some entity finished,

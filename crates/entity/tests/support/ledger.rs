@@ -2,9 +2,7 @@
 //!
 //! An entity whose durable state is entirely its SQLite database, plus the three
 //! messages both SQL suites drive it with. Shared by `sql.rs` (scenarios) and
-//! `sql_swarm.rs` (sweeps) so the two exercise the *same* entity: a fixture that
-//! drifted between them would make the sweep stop covering what the scenarios
-//! specify.
+//! `sql_swarm.rs` (sweeps).
 //!
 //! Suite-specific messages stay with their suite; only what both need lives here.
 

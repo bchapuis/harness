@@ -1,9 +1,9 @@
 //! The persistent machine's SSH front door (machine spec §5.1).
 //!
-//! A front door is a cluster member: the ingress analogue of the agent runtime
-//! gateway (agent §7.3); that **terminates SSH in-process** (`russh`) and
-//! bridges each authenticated channel to the machine's guest agent.
-//! It authenticates the client by public key against the machine's journaled
+//! A front door is a cluster member, the ingress analogue of the agent runtime
+//! gateway (agent §7.3), that **terminates SSH in-process** (`russh`) and
+//! bridges each authenticated channel to the machine's guest agent. It
+//! authenticates the client by public key against the machine's journaled
 //! authorized-key set, presents the machine's own journaled host key so one SSH
 //! identity survives hibernation/migration/failover, and never lets guest-side
 //! material govern what it bridges: possession of the channel *is* the host's
@@ -49,11 +49,9 @@ impl std::fmt::Display for FrontDoorError {
 impl std::error::Error for FrontDoorError {}
 
 /// Expand the machine's journaled host-key material into the SSH host key
-/// presented at KEX (machine §3, §5.1). The material: `MachineState::
-/// host_key`, read through the machine's `DoorPolicy` command before any
-/// principal exists to attach ([`MachineAuthority::host_key`]); is the raw
-/// 32-byte ed25519 seed the machine drew from system entropy at provisioning;
-/// expanding it here
+/// presented at KEX (machine §3, §5.1). The material is the raw 32-byte ed25519
+/// seed the machine drew from system entropy at provisioning, read through its
+/// `DoorPolicy` command ([`MachineAuthority::host_key`]); expanding it here
 /// keeps russh out of the machine crate. Pure: the same seed always yields the
 /// same key, so the client's `known_hosts` pin survives hibernation,
 /// migration, and failover.

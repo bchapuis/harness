@@ -165,8 +165,7 @@ impl ClusterWorkload for BlobSwarm {
             // Per **run**, not per workload. A sweep drives every seed through the
             // same `&self`, so a field here would carry seed N's acknowledged blobs
             // into seed N+1's fresh, empty stores and report them as lost to
-            // re-replication. (It did: that is what made this check look like a B6
-            // defect.)
+            // re-replication.
             let durable: Arc<Mutex<Durable>> = Arc::new(Mutex::new(BTreeMap::new()));
             let touched_by_delete: Arc<Mutex<BTreeSet<Vec<u8>>>> =
                 Arc::new(Mutex::new(BTreeSet::new()));
@@ -231,12 +230,11 @@ impl ClusterWorkload for BlobSwarm {
             }
             futures::future::join_all(tasks).await;
 
-            // **B6, the half the sweep never asserted.** The reconcile loop has been
-            // re-replicating throughout, but nothing checked it achieved anything:
-            // the drive read each blob back immediately after its put, while every
-            // replica still held it. Heal and quiesce, give reconcile time to
-            // restore the copies the crashes and partitions cost, then read every
-            // still-live blob again. `quiesce` matters as much as `heal` here: a
+            // **B6.** The traffic above reads each blob back right after its put,
+            // while every replica still holds it, so it says nothing about
+            // re-replication. Heal and quiesce, give reconcile time to restore the
+            // copies the crashes and partitions cost, then read every still-live
+            // blob again. `quiesce` matters as much as `heal` here: a
             // wire still dropping frames keeps the owner set churning, and a `get`
             // that fails then says nothing about re-replication
             // (docs/simulation-testing.md, "Asserting at quiescence").
@@ -286,7 +284,7 @@ impl ClusterWorkload for BlobSwarm {
         // run's end has such an ask frozen (a paused caller's timeout timer is
         // paused too); it would resolve on heal, so it is not a silent loss. The
         // data path's no-loss is covered anyway: clients await every op to an
-        // outcome. (Entities's swarm keeps the checker because it issues no
+        // outcome. (The entity swarm keeps the checker because it issues no
         // continuous background asks.)
         let mut invariants: Vec<Box<dyn Invariant>> = default_invariants()
             .into_iter()
@@ -312,9 +310,7 @@ fn blob_invariants_hold_under_the_cluster_swarm() {
 
 /// **B6.** A blob whose `put` was acknowledged, in a namespace no client ever
 /// tried to delete, must read back through *another* node once the cluster has
-/// healed: the reconcile loop's whole job. Kept as its own test because the end
-/// check needs a healed, quiesced cluster and a settle, which the other sweeps
-/// have no reason to pay for.
+/// healed: the reconcile loop's whole job.
 #[test]
 fn acknowledged_blobs_are_re_replicated_after_a_heal() {
     let workload = BlobSwarm::checking_rereplication(3, 3, 6);

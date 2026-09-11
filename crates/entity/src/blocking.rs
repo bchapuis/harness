@@ -2,8 +2,8 @@
 //!
 //! An [`EntityStore`](crate::store::EntityStore) call is synchronous by contract: when it
 //! returns, its outcome is settled, and for the file-backed store that means the
-//! bytes have been written and fsynced. Someone has to block for that. The question
-//! this module answers is *which thread*.
+//! bytes have been written and fsynced. Something has to block for that; this module
+//! decides which thread.
 //!
 //! Run inline, an fsync blocks the async worker that happened to be driving the
 //! append. That worker is also driving Raft heartbeats, election timers, and every
@@ -28,8 +28,7 @@
 //! So the blocking call is submitted here instead, and the caller awaits the result.
 //! The store's own lock discipline is untouched: the guard, the fence promise, and
 //! the in-memory apply still happen under the entity's segment lock, in the same
-//! order, just on a different thread. Two concurrent appends contend for that lock
-//! exactly as they do today.
+//! order, just on a different thread.
 //!
 //! **Which calls come through here.** Everything that writes the device:
 //! `store_record`, `store_snapshot`, `prepare` (it rewrites the shard's fence file
@@ -38,19 +37,16 @@
 //! unlinks one file per reclaimed blob, so an entity that has churned a large disk
 //! image makes thousands of synchronous unlinks against the device the durability
 //! path needs. Reads do not (`head`, `read`, `snapshot`, `get_blob`, `has_blob`,
-//! `blob_ids`, `entities`), and that is a deliberate line rather than an omission. The argument above is about a device
-//! stalling *while a durability barrier is open*; a read has no barrier to hold, is
-//! usually served from the store's loaded segment without touching the device at all,
-//! and sits on the activation-latency path where an extra hop between threads is a
-//! cost with nothing to buy. A deployment that finds its reads stalling should move
-//! them across too, but that is a decision to take on evidence, not a gap to close on
-//! symmetry.
+//! `blob_ids`, `entities`), and that is a deliberate line rather than an omission:
+//! the argument above is about a device stalling *while a durability barrier is
+//! open*; a read has no barrier to hold, is usually served from the store's loaded
+//! segment without touching the device at all, and sits on the activation-latency
+//! path where an extra hop between threads is a cost with nothing to buy. A
+//! deployment that finds its reads stalling should move them across too, but that is
+//! a decision to take on evidence, not a gap to close on symmetry.
 //!
 //! Call it through [`on_store`] rather than `offload` directly, so the line above is
-//! one a reader can check by grep instead of by reading every call site. It has not
-//! always been checkable: `put_blob` on the leader's own quorum path was inline until
-//! the disk facet's capture path was measured, which meant a machine create fsynced
-//! five hundred blobs on the async worker, one per block, with the heartbeats.
+//! one a reader can check by grep instead of by reading every call site.
 //!
 //! **Why a seam and not just a thread pool.** The deterministic simulator (§14) runs
 //! the *production* store: `raft_journal.rs` cold-restarts a real
@@ -112,13 +108,11 @@ where
 /// Run one [`EntityStore`] call on `io` and await its outcome: `offload` in the
 /// shape every replication seam wants, and **the** way a store call reaches the pool.
 ///
-/// The `Arc::clone` is here rather than at each call site because it is not a choice:
-/// the job must own everything it touches to be `'static`, so every caller was
-/// writing the same two lines ahead of the same `offload`. Collapsing them matters
-/// less for the lines saved than for what the name does: a reader can now tell, at a
-/// glance and by grep, which store calls run on the pool and which run inline, which
-/// is a policy question (see the module docs) rather than an accident of how each
-/// site happened to be written.
+/// The `Arc::clone` is here rather than at each call site: the job must own
+/// everything it touches to be `'static`, so every caller wrote the same two lines
+/// ahead of the same `offload`. Naming the pattern also makes it greppable: which
+/// store calls run on the pool is a policy question (see the module docs), not an
+/// accident of how each site was written.
 ///
 /// The outcome comes back as whatever the call returns, unexamined: a store call's
 /// ack is the caller's to read where it means something (**E14**), and a helper that
@@ -138,11 +132,8 @@ where
 }
 
 /// Run the job on the calling thread: the default, and the only implementation the
-/// deterministic simulation may use (see the module docs).
-///
-/// This is not a degenerate case to be tolerated: it is the behaviour the store had
-/// before there was a seam here, so a deployment that has not opted into a pool
-/// behaves exactly as it always did.
+/// deterministic simulation may use (see the module docs). A deployment that has not
+/// opted into a pool gets it.
 pub struct InlineIo;
 
 impl BlockingIo for InlineIo {
@@ -196,8 +187,7 @@ impl ThreadPoolIo {
     ///
     /// The **floor** is set by how many writes must keep making progress *while the
     /// device is stalled* (see the module docs), not by throughput: it keeps a stalled
-    /// write from blocking an unrelated one. That argument is about the tail and does
-    /// not depend on the median.
+    /// write from blocking an unrelated one.
     ///
     /// The **ceiling** is a throughput claim, and it is measured: `benches/flush.rs`
     /// sweeps concurrent `atomic_replace`s across this clamp and past both ends of it.
@@ -208,12 +198,12 @@ impl ThreadPoolIo {
     /// ceiling belongs, and past it the extra threads only queue.
     ///
     /// One caveat this must not lose: that host's median flush is **9.4 ms**, not the
-    /// tens of microseconds an earlier version of this comment assumed. The assumption
-    /// came from Linux `fsync` on enterprise NVMe (~30 µs with power-loss protection,
-    /// ~500 µs without); a full drive-cache flush on a consumer SSD is two orders away
-    /// from it. The deployment's own figure is still unmeasured, and the shape of the
-    /// curve (not its height) is what licenses the ceiling. Re-run the bench with
-    /// `TMPDIR` on the deployment volume before treating either end as settled.
+    /// tens of microseconds Linux `fsync` costs on enterprise NVMe (~30 µs with
+    /// power-loss protection, ~500 µs without); a full drive-cache flush on a consumer
+    /// SSD is two orders away from it. The deployment's own figure is still unmeasured,
+    /// and the shape of the curve (not its height) is what licenses the ceiling. Re-run
+    /// the bench with `TMPDIR` on the deployment volume before treating either end as
+    /// settled.
     pub fn sized_for_host() -> ThreadPoolIo {
         let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
         ThreadPoolIo::new(cores.clamp(2, 8))

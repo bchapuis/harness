@@ -1,9 +1,8 @@
 //! Whether the node's shared locks show under many-core concurrency.
 //!
-//! Two structures in this crate take one mutex on a path that every entity on the node
-//! goes through, and both were left alone deliberately: sharding a lock is easy, and
-//! doing it without a number is how a codebase accumulates complexity that never paid
-//! for itself. This file produces the numbers.
+//! Two structures in this crate take one mutex on a path every entity on the node goes
+//! through, and both stay unsharded until a number says otherwise. This file produces
+//! the numbers.
 //!
 //! 1. **[`HostCache`]'s handle map.** One `Mutex<Generations<..>>` per entity type,
 //!    taken on *every* call including a cache hit. The deployment that would feel it
@@ -13,12 +12,11 @@
 //!    lock itself becomes the serial point.
 //!
 //! 2. **[`FileEntityStore`]'s manifest and segment maps.** The manifest lock is the
-//!    interesting one, and reading the code says why: `segment_id` appends to the
-//!    manifest's log; an fsync; *while holding the mutex*, so every entity whose
-//!    segment is being created for the first time serializes behind every other one's
-//!    flush. On the host `benches/flush.rs` measured, that flush is ~9.4 ms. Whether
-//!    that matters depends on how often a node creates entities it has never seen, which
-//!    is exactly what a create storm does.
+//!    interesting one: `segment_id` appends to the manifest's log and fsyncs *while
+//!    holding the mutex*, so every entity whose segment is being created for the first
+//!    time serializes behind every other one's flush. On the host `benches/flush.rs`
+//!    measured, that flush is ~9.4 ms. What it costs depends on how often a node
+//!    creates entities it has never seen, which is what a create storm does.
 //!
 //! Read the **item/s counters**, not the wall times: per-iteration time grows with the
 //! thread count by construction, and the question is whether aggregate throughput
@@ -69,12 +67,12 @@ const NAMES: usize = 4096;
 
 /// Lookups each thread performs inside one timed iteration.
 ///
-/// Not a tuning knob: a correctness requirement for the measurement. Spawning a
-/// thread costs ~20 µs on this host and a locked hash lookup costs tens of
-/// *nanoseconds*, so a bench that spawned a thread per operation would report thread
-/// creation under a lock's name and would show contention that is not there (and hide
-/// contention that is). Batching puts three orders of magnitude of real work between
-/// the barrier and the join, leaving spawn cost as rounding error.
+/// Not a tuning knob but a requirement of the measurement. Spawning a thread costs
+/// ~20 µs on this host and a locked hash lookup costs tens of *nanoseconds*, so one
+/// thread per operation would report thread creation under a lock's name, showing
+/// contention that is not there and hiding contention that is. Batching puts three
+/// orders of magnitude of real work between the barrier and the join, leaving spawn
+/// cost as rounding error.
 const OPS: usize = 20_000;
 
 // --- 1. The host cache's handle map ------------------------------------------------
@@ -99,9 +97,8 @@ impl Entity for Cached {
 /// Concurrent lookups through the real [`HostCache`] mutex.
 ///
 /// `is_cached` is the narrowest public path that takes it: a hash lookup under the
-/// lock and nothing else. That is deliberate: a wider call would fold the shard-map
-/// read and the leader check into the number, and those sit behind *different* locks.
-/// What is wanted here is the cost of this one.
+/// lock and nothing else. A wider call would fold the shard-map read and the leader
+/// check into the number, and those sit behind *different* locks.
 #[divan::bench(args = THREADS)]
 fn host_cache_lookup(bencher: Bencher, threads: usize) {
     let runtime = tokio::runtime::Builder::new_multi_thread()

@@ -26,10 +26,9 @@ use crate::raft::GroupId;
 /// the methods are inert (no group, no leader).
 ///
 /// [`sleep`](RaftConsensus::sleep) and [`launch`](RaftConsensus::launch)
-/// re-expose the system's clock and executor. That widening is deliberate: a
-/// consumer's driving loops can then be generic over one `R: RaftConsensus`
-/// bound instead of threading separate clock and spawner parameters through
-/// every loop.
+/// re-expose the system's clock and executor, so a consumer's driving loops can
+/// be generic over one `R: RaftConsensus` bound instead of threading separate
+/// clock and spawner parameters through every loop.
 pub trait RaftConsensus: Clone + Send + Sync + 'static {
     /// This node's identity (the `NotLeader` fallback when no leader is known).
     fn node(&self) -> NodeId;

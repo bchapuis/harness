@@ -537,9 +537,6 @@ async fn exec_channel(cli: &str, name: &str, port: u32) -> std::io::Result<ExecC
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        // Captured, not inherited: a failed relay's complaint belongs in the
-        // error the caller reports (`ExecChannel::stderr_tail`), never raw on
-        // the node's stderr.
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
@@ -580,8 +577,7 @@ impl ExecChannel {
     /// Whatever the relay said, as a message fragment: empty when it said
     /// nothing, so a caller can always append it.
     async fn stderr_tail(&mut self) -> String {
-        /// Enough for the daemon's one-line refusals; a relay that says more
-        /// than this is not saying anything more useful.
+        /// Enough for the daemon's one-line refusals.
         const CAP: usize = 512;
         let Some(stderr) = self.stderr.take() else {
             return String::new();

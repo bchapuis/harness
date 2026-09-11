@@ -96,11 +96,11 @@ pub enum AppendOutcome {
 
 /// One [`load`](EntityJournal::load) page (spec §7.3): up to `limit` records
 /// after `from`, plus the store's compaction **base** at the moment of the read
-/// (§9); read together under one segment lock, so the base always explains
-/// this page's missing prefix. Slots at `Seq <= base` are compacted: subsumed
-/// by the entity's snapshot and gone from every read path. Without the base a
-/// reader below it cannot tell truncated history from the interleaved slots a
-/// projection legally skips (§7.12), so every read reply carries it (§7.5).
+/// (§9), both read under one segment lock. Slots at `Seq <= base` are compacted:
+/// subsumed by the entity's snapshot and gone from every read path. Without the
+/// base a reader below it cannot tell truncated history from the interleaved
+/// slots a projection legally skips (§7.12), so every read reply carries it
+/// (§7.5).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RecordPage {
     /// The compaction base: records at `Seq <= base` are no longer readable.

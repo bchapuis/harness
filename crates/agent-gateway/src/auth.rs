@@ -52,12 +52,11 @@ impl std::fmt::Display for PrincipalId {
 ///
 /// Cross-tenant isolation does not depend on this: the principal prefix already
 /// confines a client to its own namespace, whatever it sends ([`scoped_session`]).
-/// What the rule protects is the namespace *inside* a tenant. A delegated sub-agent
-/// is named `"{session}/{turn}/{child}"` (multi-tenant-edge design), and those
-/// segments are minted by the agent, never supplied by a client. A client free to
-/// send `"demo/t-1/c-2"` could therefore address (or pre-create) one of its own
-/// sub-agents' entities, which is not a boundary break but is a name collision the
-/// caller was never meant to be able to cause.
+/// The rule protects the namespace *inside* a tenant. A delegated sub-agent is
+/// named `"{session}/{turn}/{child}"` (multi-tenant-edge design) from segments the
+/// agent mints, so a client free to send `"demo/t-1/c-2"` could address (or
+/// pre-create) one of its own sub-agents' entities: a name collision the caller
+/// was never meant to be able to cause.
 ///
 /// Only the client-supplied segment is checked; the internally-minted child ids that
 /// legitimately contain `/` never pass through here.

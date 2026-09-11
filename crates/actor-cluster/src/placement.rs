@@ -92,7 +92,6 @@ pub fn top(nodes: &[NodeId], key: &[u8], n: usize) -> Vec<NodeId> {
         .iter()
         .map(|&node| (weight(&node_tag(node), key), node))
         .collect();
-    // Descending weight; within a tie, the lower NodeId first.
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     ranked.into_iter().take(n).map(|(_, node)| node).collect()
 }

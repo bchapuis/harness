@@ -11,7 +11,7 @@ Written down once so a review can do arithmetic instead of arguing, and so a num
 - **CPU.** AMD EPYC/Ryzen or Ampere Altra ARM: tens to low hundreds of physical cores. Cores are plentiful; the interconnect between them is the scarce part.
 - **Memory.** 128–256 GB DDR5, ECC. Comparable to a node's whole durable footprint, not just its working set.
 - **Storage.** Directly-attached NVMe, typically software RAID. **Power-loss protection varies by drive model and must be verified**: without it a flush costs fifteen times more (two rows in §2, not one).
-- **Network. A 1 Gbps uplink**, 10 Gbps available at extra cost. Replication and public serving share that one 125 MB/s port, and private traffic between nodes rides the same interface. This is the constraint everything below is downstream of.
+- **Network. A 1 Gbps uplink**, 10 Gbps available at extra cost. Replication and public serving share that one 125 MB/s port, and private traffic between nodes rides the same interface. Everything below is downstream of this constraint.
 
 Two structural consequences: there are **no availability zones** (failure domains are racks and datacenter sites, which is what `EntityConfig::failure_domains` must be given) and **no managed block storage**, so a lost node is a lost replica.
 
@@ -19,7 +19,7 @@ Two structural consequences: there are **no availability zones** (failure domain
 
 ## 2. The numbers
 
-After Jeff Dean and Peter Norvig, updated to this envelope. LLM rows included because this tree hosts an agentic system and they sit on the same axis, which turns out to be the most useful thing in the table.
+After Jeff Dean and Peter Norvig, updated to this envelope. LLM rows are included because this tree hosts an agentic system and they sit on the same axis.
 
 ```
 Uncontended mutex lock/unlock                 15   ns
@@ -46,7 +46,7 @@ Frontier LLM, short response                           3,000 ms   ~100 output to
 Frontier LLM, reasoning response                      30,000 ms   single call with thinking
 ```
 
-Four inversions fall out of it. They are the content of this document.
+Four inversions fall out of it.
 
 **I1: The uplink is the only row that did not move.** Since 2012 sequential reads improved ~50×, random reads ~100×, a durable flush ~300×. Sending 1 KB over a 1 Gbps port takes the same 8 µs it always did. The network here is not the fast part of the machine.
 
@@ -56,7 +56,7 @@ Four inversions fall out of it. They are the content of this document.
 
 **I4: The session's clock is the model's, not the machine's.** A quorum append at ~1 ms is 0.003% of an agent turn. Everything in the storage and consensus layers is, from the session's point of view, free. What *is* visible is measured in seconds: a failover window, a cold rehydrate that ships megabytes, a capture that takes minutes.
 
-Two facts that moved as everyone expects: **memory holds the set, not a slice** (128 GB against entities measured in kilobytes), and **cores are abundant while coordination between them is not** (a shared mutex on a hot path is this decade's disk seek).
+Two facts moved as everyone expects: **memory holds the set, not a slice** (128 GB against entities measured in kilobytes), and **cores are abundant while coordination between them is not** (a shared mutex on a hot path is this decade's disk seek).
 
 ## 3. What follows
 
@@ -66,11 +66,11 @@ Defaults, each overridable by a measurement.
 
 **hw §3.2: Prefer holding to tiering.** If it fits, hold it: no spill path, no second format, no promotion policy.
 
-**hw §3.3: Spend CPU to buy simplicity, and to buy bytes.** Verify every frame on open rather than trusting a checkpoint pointer; re-hash rather than track what was verified; recompute rather than cache-and-invalidate. Each is a rounding error at 5–20 GB/s and deletes a piece of state that could be wrong. And against a 125 MB/s port, LZ4 buys forty bytes of link per byte of CPU: compression on the replication path is earned here as it is not on a fast fabric.
+**hw §3.3: Spend CPU to buy simplicity, and to buy bytes.** Verify every frame on open rather than trusting a checkpoint pointer; re-hash rather than track what was verified; recompute rather than cache-and-invalidate. Each is a rounding error at 5–20 GB/s and deletes a piece of state that could be wrong. Against a 125 MB/s port, LZ4 buys forty bytes of link per byte of CPU: compression on the replication path earns its keep here as it would not on a fast fabric.
 
 **hw §3.4: Find the serial resource; it is not the device.** Suspects in order: the uplink, a chain of round trips, a shared lock, a single control loop. The NVMe device is last.
 
-**hw §3.5: File-per-object is limited by metadata, not throughput.** The cost of one file per entity is inodes, directory size, and descriptors, not the un-shared fsync, which is what the classic objection is about.
+**hw §3.5: File-per-object is limited by metadata, not throughput.** The cost of one file per entity is inodes, directory size, and descriptors, not the un-shared fsync the classic objection is about.
 
 **hw §3.6: A number copied from another system is not a default.** Durable Objects evicts at ten seconds because it prices multi-tenant memory. `RLIMIT_NOFILE` is 65536 because a 2010 distribution said so. SQLite pages are 4 KiB because that was a disk sector. Re-derive the number here, or write down that it was inherited.
 
@@ -82,7 +82,7 @@ Defaults, each overridable by a measurement.
 
 ## 4. Where this already decided something
 
-The decisions this envelope settled (group commit withdrawn, `sync_all` over `sync_data`, whole-log verification on open, XXH3 and BLAKE3, chunked content-addressed blobs, the manifest held whole, local replay reads) each carry their reasoning in the code that implements them, as do the ones it has *not* settled: compression on the replication path is measured and argued in entity's `benches/compress.rs` (a bench-only `lz4_flex`; nothing on the wire compresses), and the entity store's manifest flush at `FileEntityStore::segment_id`. The reviews that produced all of them are in the history.
+The decisions this envelope settled (group commit withdrawn, `sync_all` over `sync_data`, whole-log verification on open, XXH3 and BLAKE3, chunked content-addressed blobs, the manifest held whole, local replay reads) each carry their reasoning in the code that implements them, as do the ones it has *not* settled: compression on the replication path, measured and argued in entity's `benches/compress.rs` (a bench-only `lz4_flex`; nothing on the wire compresses), and the entity store's manifest flush at `FileEntityStore::segment_id`. The reviews that produced all of them are in the history.
 
 ## 5. What this does not license
 
@@ -96,7 +96,7 @@ The decisions this envelope settled (group commit withdrawn, `sync_all` over `sy
 
 ## 6. When this stops being true
 
-- **A 10 Gbps uplink**: the most likely change, the cheapest, and the one that buys the most: I2 goes from 50× to 5×, and replicated ingest from ~60 MB/s to ~600 MB/s. Price the port before optimizing the replication path.
+- **A 10 Gbps uplink**: the most likely change, the cheapest, and the one that buys the most. I2 goes from 50× to 5×, and replicated ingest from ~60 MB/s to ~600 MB/s. Price the port before optimizing the replication path.
 - **A drive line without PLP**: the flush row moves to ~500 µs, I3's margin closes, group commit becomes arguable again.
 - **Network-attached block storage**: flush returns to ~1 ms and I3 reverses outright.
 - **A memory-limited container**: every "just hold it" decision becomes an OOM.

@@ -23,8 +23,8 @@
 //!
 //! A durable boundary that predates its own stamp needs one move more:
 //! **adoption**. Bytes already on disk carry no magic, so a reader accepts both
-//! forms: [`Stamp::is_stamped`] asks which one it is holding; reads a legacy file
-//! with the legacy decoder, and lets the next ordinary write rewrite it stamped.
+//! forms: [`Stamp::is_stamped`] asks which one it is holding, the legacy decoder
+//! reads a legacy file, and the next ordinary write rewrites it stamped.
 //! What adoption must not do is treat "no magic" and "a revision I refuse" alike:
 //! the first is a predecessor and the second is a skew, and answering the second
 //! with the old decoder is exactly the misparse the stamp was added to stop.
@@ -257,10 +257,9 @@ impl Stamp {
     /// are the predecessor, which its own decoder reads exactly as it always did.
     ///
     /// Asking the two questions the other way round, or answering
-    /// [`Incompatible::Version`] by trying the old decoder: turns a refusal into
-    /// the misparse the stamp was added to stop, which is why every durable
-    /// boundary in the tree adopts through this one method rather than writing the
-    /// sequence out again.
+    /// [`Incompatible::Version`] by trying the old decoder, turns a refusal into a
+    /// misparse, which is why every durable boundary in the tree adopts through
+    /// this one method rather than writing the sequence out again.
     ///
     /// # Errors
     ///

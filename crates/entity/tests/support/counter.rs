@@ -2,9 +2,7 @@
 //! linearizability `Counter` model (entity §14).
 //!
 //! Shared by `entities.rs` (single-node scenarios) and `entity_swarm.rs` (the
-//! sweeps), so the sweep exercises the *same* entity the scenarios specify: a
-//! fixture that drifted between them would make the sweep stop covering what
-//! the scenarios pin down.
+//! sweeps), so the sweep exercises the *same* entity the scenarios specify.
 
 use actor_core::Manifest;
 use actor_core::Message;

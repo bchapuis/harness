@@ -2,11 +2,10 @@
 //! catalogues they name.
 //!
 //! `entity §N` (its invariants as **E1–E20**) is a citation: it points at entity's
-//! catalogue and says how far it runs. Nothing resolved it until now, and a
-//! catalogue that grows leaves every sibling stating its old extent describing a
-//! shorter document than the one on disk: each sentence still reading exactly
-//! right. `spec::ranges` documents why the two checks below are the pair that
-//! holds, and why the two more obvious ones do not.
+//! catalogue and says how far it runs. A catalogue that grows leaves every sibling
+//! stating its old extent describing a shorter document than the one on disk, each
+//! sentence still reading exactly right. `spec::ranges` documents why the two
+//! checks below are the pair that holds, and why the two more obvious ones do not.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -30,7 +29,7 @@ fn root() -> PathBuf {
 /// Every label a document writes is one `LABELS` knows.
 ///
 /// A new catalogue whose ranges resolve nowhere would otherwise be skipped in
-/// silence, which is the state this gate exists to end.
+/// silence.
 #[test]
 fn every_range_names_a_known_catalogue() {
     let scanned = scan(&root()).expect("scanning the document set");

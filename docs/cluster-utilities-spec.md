@@ -17,7 +17,7 @@ Everything in this document is built **on top of** the core abstractions and mod
 - the **receptionist** (core §13) supplies replicated, eventually consistent service listings;
 - the **event stream** (core §16) carries the utilities' observability events: they extend the single `Event` enum, which is extensible by design.
 
-The core non-goals (core §1.2) hold unchanged. In particular: every utility is **data-plane** machinery and therefore **eventually consistent**: none of them places a quorum on any path or acquires a lease; and none of them masks failure, since a utility that cannot route fails the call immediately rather than buffering or retrying (core §14.2).
+The core non-goals (core §1.2) hold unchanged. Every utility is **data-plane** machinery and therefore **eventually consistent**: none places a quorum on any path or acquires a lease, and none masks failure, since a utility that cannot route fails the call immediately rather than buffering or retrying (core §14.2).
 
 A utility's behavior MUST be a deterministic function of the virtualized runtime (core §18.1, §18.2): membership views, seeded entropy, and the virtual clock. No utility may consult wall-clock time or unseeded randomness.
 
@@ -25,11 +25,11 @@ A utility's behavior MUST be a deterministic function of the virtualized runtime
 
 ## 2. Placement (rendezvous hashing)
 
-Placement answers one question deterministically on every node: *given a key, which member owns it?* It is the primitive the singleton (§4) anchors on, through `owner`, and that the blob store places its `R` replicas and its namespace tombstone anchors with, through `top` over the serving set (blob §5.2, §5.3). The entity layer's sharding uses a placement of its own (§7).
+Placement answers one question deterministically on every node: *given a key, which member owns it?* It is the primitive the singleton (§4) anchors on, through `owner`, and the one the blob store places its `R` replicas and namespace tombstone anchors with, through `top` over the serving set (blob §5.2, §5.3). The entity layer's sharding uses a placement of its own (§7).
 
 ### 2.1 The serving set
 
-1. Placement candidates MUST be derived from the local membership view as the **serving set**: every member whose status is `up` and whose reachability is not confirmed `unreachable`, **including the local node** iff its own status is `up`. Members that are `joining`, `draining`, `leaving`, `down`, `removed`, or confirmed `unreachable` are excluded. A member that is merely **`suspect`** MUST remain in the set: suspicion is refutable detector noise (core §10), and excluding it would move ownership on every dropped probe.
+1. Placement candidates MUST be derived from the local membership view as the **serving set**: every member whose status is `up` and whose reachability is not confirmed `unreachable`, **including the local node** iff its own status is `up`. Members that are `joining`, `draining`, `leaving`, `down`, `removed`, or confirmed `unreachable` are excluded. A merely **`suspect`** member MUST remain in the set: suspicion is refutable detector noise (core §10), and excluding it would move ownership on every dropped probe.
 
 This is deliberately stricter than the receptionist's listing filter (core §13 req 4, which only MUST exclude `draining`/`down`): placement assigns *ownership*, so it routes around a confirmed-unreachable member rather than assigning keys to a node nobody can reach.
 

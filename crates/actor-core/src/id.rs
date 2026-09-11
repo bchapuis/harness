@@ -33,15 +33,15 @@ impl std::fmt::Display for NodeId {
 
 /// A hierarchical actor name, e.g. `/user/greeter` (spec §3.6).
 ///
-/// The string is refcounted rather than owned because [`ActorId`] is cloned several times
-/// per message (once to resolve the target's mailbox, then once more for each event the
-/// send emits), and the path is the only part of an id that is not `Copy`. Sharing it
-/// makes those clones an atomic increment instead of an allocation and a copy.
+/// The string is refcounted because [`ActorId`] is cloned several times per message
+/// (once to resolve the target's mailbox, then once per event the send emits) and the
+/// path is the only part of an id that is not `Copy`; sharing it makes those clones an
+/// atomic increment.
 ///
-/// `Arc<str>` and not `Arc<String>`: one pointer to one allocation, no second indirection.
-/// Every derived trait below forwards to `str`, so ordering and hashing are exactly what
-/// they were when this held a `String`, which matters, because ids are `BTreeMap` keys in
-/// the host registry and the map's iteration order is observable in the event stream.
+/// `Arc<str>` and not `Arc<String>`: one pointer to one allocation, no second
+/// indirection. Every derived trait below forwards to `str`, so ordering and hashing
+/// are what a `String` gave, which matters because ids are `BTreeMap` keys in the host
+/// registry and the map's iteration order is observable in the event stream.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Path(std::sync::Arc<str>);
 
@@ -50,9 +50,8 @@ impl Path {
     /// `"/user/greeter"`.
     ///
     /// Takes anything that becomes an `Arc<str>` rather than anything that becomes a
-    /// `String`: the latter would allocate a `String` for a `&'static str` caller and then
-    /// allocate again to copy it into the `Arc`. `&str` converts in one allocation, and an
-    /// owned `String` still converts, so no caller has to change.
+    /// `String`: the latter would allocate twice for a `&'static str` caller. An owned
+    /// `String` still converts, so no caller has to change.
     pub fn new(path: impl Into<std::sync::Arc<str>>) -> Path {
         Path(path.into())
     }
@@ -68,7 +67,7 @@ impl Path {
 // `Arc`/`Rc` impls across every crate in the tree for the sake of this one field.
 //
 // Deserializing shares nothing between ids: two that arrive with equal paths get separate
-// allocations. The sharing this type exists for is within a process, where ids are cloned.
+// allocations.
 impl Serialize for Path {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)
@@ -79,8 +78,8 @@ impl<'de> Deserialize<'de> for Path {
     // A visitor rather than `String::deserialize(..).map(Path::new)`: every remote envelope
     // carries an `ActorId`, so this is the one per-message path that builds a `Path`, and
     // going through `String` would allocate it only to copy it into the `Arc` and free it.
-    // Formats that can hand over a borrowed `&str` (postcard and serde_json both do)
-    // reach `visit_str` and allocate once.
+    // Formats that hand over a borrowed `&str` (postcard and serde_json both do) reach
+    // `visit_str` and allocate once.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Path, D::Error> {
         struct PathVisitor;
 
@@ -168,11 +167,10 @@ mod tests {
 
     #[test]
     fn a_path_serializes_as_the_plain_string_it_wraps() {
-        // How `Path` stores its bytes is an in-process decision (it is refcounted so
-        // that cloning an id is an atomic increment), and this is what keeps that
-        // decision from reaching the wire. An id crosses nodes inside every remote
-        // envelope, so a representation change that altered its encoding would be a
-        // silent compatibility break between builds rather than a local optimization.
+        // How `Path` stores its bytes is an in-process decision, and this keeps it from
+        // reaching the wire. An id crosses nodes inside every remote envelope, so a
+        // representation change that altered its encoding would be a silent
+        // compatibility break between builds rather than a local optimization.
         let path = Path::new("/user/greeter");
         assert_eq!(
             encode(&JsonCodec as &dyn Codec, &path).expect("encodes"),
@@ -196,8 +194,8 @@ mod tests {
     #[test]
     fn cloning_a_path_shares_its_bytes_rather_than_copying_them() {
         // The property the refcount buys, stated where it can regress: two clones of one
-        // path point at one allocation. A `Path` rebuilt from the same text does not,
-        // sharing comes from cloning, which is what the message path actually does.
+        // path point at one allocation. A `Path` rebuilt from the same text does not;
+        // sharing comes from cloning, which is what the message path does.
         let path = Path::new("/user/greeter");
         let clone = path.clone();
         assert_eq!(path.as_str().as_ptr(), clone.as_str().as_ptr());

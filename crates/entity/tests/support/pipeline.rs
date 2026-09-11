@@ -3,23 +3,22 @@
 //!
 //! A self-driving re-entrant workflow: fetch → (sleep) → double → `Finished`, the
 //! reference shape a linear DSL would generate. Two things about it are load-
-//! bearing for what the suites assert, and both were chosen after the obvious
-//! version failed to observe anything.
+//! bearing, and both were chosen after the obvious version observed nothing.
 //!
 //! **The effect's value differs on every launch.** `fetch` returns a fresh
 //! ordinal drawn from [`Effects`] rather than a constant, and the ordinals are
-//! unique across every entity in a run. That is what makes the memo's **write-once**
-//! property observable at all: `complete_step` records only a step that is not
-//! already done, so the first committed result wins and every later drive resolves
-//! from it, but a fixture whose effect always returns `21` cannot tell a memo that
-//! was preserved from one that was overwritten with an identical value. This is the
-//! property worth asserting, rather than "the effect ran once": [`LaunchGuard`] is
-//! per-activation and never journaled, so a re-activation legitimately re-launches
-//! an unresolved step and the effect may run many times.
+//! unique across every entity in a run. That is what makes the memo's
+//! **write-once** property observable: `complete_step` records only a step that is
+//! not already done, so the first committed result wins, and a fixture whose effect
+//! always returns `21` cannot tell a preserved memo from one overwritten with an
+//! identical value. Write-once, not "the effect ran once", is the property worth
+//! asserting: [`LaunchGuard`] is per-activation and never journaled, so a
+//! re-activation legitimately re-launches an unresolved step and the effect may run
+//! many times.
 //!
 //! **Nothing has to succeed before the workflow commits.** The entity drives from
 //! `on_activate`, so *any* touch (including the read that observes it) starts the
-//! workflow. An earlier version opened with a `Start` ask, which put a round trip
+//! workflow. An earlier version opened with a `Start` ask, putting a round trip
 //! that had to succeed in front of the first commit; under a nemesis that is the
 //! difference between a seed that observes the property and one that observes
 //! nothing.
@@ -66,11 +65,11 @@ pub const STEP_DOUBLE: StepId = 2;
 /// times each entity launched each step.
 ///
 /// Reset at the start of every run ([`Effects::reset`]) rather than accumulated
-/// across a sweep, for two reasons. The ordinals must be a function of the seed
+/// across a sweep, for two reasons: the ordinals must be a function of the seed
 /// alone, or a reproducibility replay would hand the same run different step values
 /// than its first pass; and "did this entity re-launch" is a claim about one run,
-/// which is exactly the distinction `docs/simulation-testing.md` draws between a
-/// sweep-scoped tally and a run-scoped expectation.
+/// the distinction `docs/simulation-testing.md` draws between a sweep-scoped tally
+/// and a run-scoped expectation.
 #[derive(Default)]
 struct Runs {
     /// The next launch ordinal. Every launched effect in a run draws a distinct
@@ -149,30 +148,29 @@ pub struct PipelineConfig {
     /// fetch → double, with no alarm at all.
     ///
     /// The sweep takes `None`. A `sleep` needs a hosted `AlarmIndex` and its
-    /// per-shard driver, which never quiesces: a real cost in checkers dropped
-    /// (`alarm_swarm.rs` carries that argument) and one that buys the memo check
-    /// nothing, since the property is decided by `fetch`'s *first* commit and
-    /// everything after it is a longer chain to the same claim.
+    /// per-shard driver, which never quiesces, so it costs checkers
+    /// (`alarm_swarm.rs` carries that argument) and buys the memo check nothing:
+    /// the property is decided by `fetch`'s *first* commit.
     pub sleep: Option<Duration>,
     /// Whether the entity may hibernate with a step still in flight.
     ///
     /// `true` is half of what makes a re-launch something the *workload* drives
-    /// rather than something it waits for the nemesis to produce; the other half is
+    /// rather than waits for the nemesis to produce; the other half is
     /// [`effect_latency`](PipelineConfig::effect_latency). Together they open a
-    /// window in which the activation that launched `fetch` hibernates while its
-    /// effect is still outstanding, so the next touch re-activates the entity, finds
-    /// the step unresolved, and launches it again, with a different value.
-    /// Write-once is what then decides which one the memo keeps.
+    /// window in which the activation that launched `fetch` hibernates with its
+    /// effect outstanding, so the next touch re-activates the entity, finds the step
+    /// unresolved, and launches it again with a different value. Write-once then
+    /// decides which one the memo keeps.
     pub hibernate_mid_workflow: bool,
     /// How long an effect takes before it self-`tell`s its result back, or `None`
     /// for one that resolves within the same burst as its launch.
     ///
-    /// An effect that returns immediately never leaves a window to be interrupted
-    /// in: the `StepDone` is already in the mailbox when the re-activation happens,
-    /// so it is handled before the drive that would re-launch, and the second
-    /// launch never occurs. That is the shape an earlier fixture had, and it is why
-    /// its re-launches only ever came from the nemesis, on the seeds calm enough
-    /// to observe a memo, never.
+    /// An effect that returns immediately leaves no window to interrupt: the
+    /// `StepDone` is already in the mailbox when the re-activation happens, so it is
+    /// handled before the drive that would re-launch, and the second launch never
+    /// occurs. That was an earlier fixture's shape, and it is why its re-launches
+    /// only ever came from the nemesis, never on the seeds calm enough to observe a
+    /// memo.
     pub effect_latency: Option<Duration>,
 }
 
@@ -336,8 +334,8 @@ impl<S: EntitySystem> Entity for Pipeline<S> {
     async fn on_activate(&mut self, ctx: &EntityCtx<Self>) -> Result<(), actor_core::BoxError> {
         self.eph.lock().unwrap().guard.reset();
         // Regression net: activation has no command stage armed, so this read
-        // must answer from the committed form, not panic about command scope
-        // (workflow reads are valid anywhere, entity §7.17).
+        // must answer from the committed form rather than panic about command
+        // scope (entity §7.17).
         let _ = ctx.steps().is_done(STEP_FETCH);
         // Resume an in-flight workflow after a (re)activation, and start one on the
         // first, so the workflow needs no message of its own to begin.

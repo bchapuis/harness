@@ -2,7 +2,7 @@
 
 Agentic sessions as journaled actors on a distributed cluster. The journal is
 the session. Everything else (the agent's actor, its sandbox, the node it runs
-on) is disposable, replaceable while the session lives.
+on) is replaceable while the session lives.
 
 ## Two minutes
 
@@ -29,12 +29,12 @@ event: records   …the transcript, one committed record at a time…
 event: outcome    {"Ok":{"content":"…Their sum is 55.","tokens":1843}}
 ```
 
-Now the part that matters. The script printed each node's pid. Kill the one
-hosting the session, then re-issue the **same** prompt (same `turn` id):
-within seconds the survivors detect the death, placement routes around it, the
-new owner recovers the journal's head from a quorum of its replicas, folds the
-session back out of it, and the run finishes as if nothing happened. No
-coordinator, no session server, no state lost. That is the prototype.
+The script printed each node's pid. Kill the one hosting the session, then
+re-issue the **same** prompt (same `turn` id): within seconds the survivors
+detect the death, placement routes around it, the new owner recovers the
+journal's head from a quorum of its replicas, folds the session back out of it,
+and the run finishes as if nothing happened. No coordinator, no session server,
+no state lost.
 
 `GET /v1/assistant/demo/records` shows what exists: the journal, one record per
 line. Sessions are durable and named. Quit, reboot everything, and prompt
@@ -58,10 +58,10 @@ authenticated form with opaque per-tenant tokens.
 - A **standalone deployment** (`crates/agent-standalone`): the binary the demo
   runs. A file-backed, replicated journal fenced by a per-shard term written
   beside it (`fences/<shard>`), tokio/rustls HTTP to the Messages API, and
-  per-session workspaces behind an explicit `--sandbox` choice, required and
-  never defaulted: a `docker` container, a
-  `firecracker` microVM (Linux/KVM), or `durable`, the typed file tools over
-  the same durable workspace, with no shell at all. There is no unconfined mode.
+  per-session workspaces behind an explicit `--sandbox` choice: a `docker`
+  container, a `firecracker` microVM (Linux/KVM), or `durable`, the typed file
+  tools over the same durable workspace, with no shell at all. There is no
+  unconfined mode.
 - A **gateway-as-cluster-client edge** (`crates/agent-gateway`): an `axum`
   HTTP/SSE tier that is the single public boundary. It joins the actor transport
   as a non-voting, non-hosting member (the Orleans cluster-client pattern),
@@ -99,20 +99,21 @@ running on. The front door authenticates your key against the machine's
 *journaled* key set and presents the machine's own journaled host key, so your
 `known_hosts` pin survives every move the machine makes.
 
-The failure drill is the same shape as the agent runtime's: kill the node holding your
-session, reconnect through another node's door, and find your files where you
-left them, rewound at most to the last capture, never forked.
+The failure drill is the same shape as the agent runtime's: kill the node
+holding your session, reconnect through another node's door, and find your
+files where you left them, rewound at most to the last capture, never forked.
 
-Which mechanism holds the guest is the node's `--machine` flag, and the script
-fills it in (set `MACHINE_KIND` to choose yourself). A microVM per machine needs
-Linux with `/dev/kvm` and the assets `guest/machine-rootfs/build.sh` produces;
-elsewhere, macOS included, `--machine docker` holds the machine's *own* rootfs
-in a privileged container that loop-mounts the disk image and chroots into it,
-so the shell and the whole-rootfs persistence are real. It gives shared-kernel
-isolation rather than the microVM boundary, it runs no init inside the rootfs,
-and it has no network: a development mechanism, not the one to put untrusted
-guests behind. With neither available the script picks `--machine fake` and says
-so: everything durable still runs, and only the shell is missing.
+The node's `--machine` flag picks the mechanism that holds the guest, and the
+script fills it in (set `MACHINE_KIND` to choose yourself). A microVM per
+machine needs Linux with `/dev/kvm` and the assets
+`guest/machine-rootfs/build.sh` produces; elsewhere, macOS included,
+`--machine docker` holds the machine's *own* rootfs in a privileged container
+that loop-mounts the disk image and chroots into it, so the shell and the
+whole-rootfs persistence are real. It gives shared-kernel isolation rather than
+the microVM boundary, runs no init inside the rootfs, and has no network: a
+development mechanism, not one to put untrusted guests behind. With neither
+available the script picks `--machine fake` and says so: everything durable
+still runs, and only the shell is missing.
 
 ## Going deeper
 
@@ -122,9 +123,9 @@ the guides, and the testing conventions. The paths worth taking first:
 - [docs/standalone-deployment.md](docs/standalone-deployment.md): the full
   deployment guide, with configuration, the failure drill step by step, and
   limits.
-- [docs/multi-tenant-edge.md](docs/multi-tenant-edge.md): the
-  multi-tenant edge, covering bearer-token auth, per-tenant isolation, the
-  tenancy directory, and the gateway-as-cluster-client trust model.
+- [docs/multi-tenant-edge.md](docs/multi-tenant-edge.md): bearer-token auth,
+  per-tenant isolation, the tenancy directory, and the
+  gateway-as-cluster-client trust model.
 - [k8s/README.md](k8s/README.md): the cluster as a Kubernetes StatefulSet of
   silos, with the gateway joining it as a cluster client.
 - [docs/agent-spec.md](docs/agent-spec.md): why the journal

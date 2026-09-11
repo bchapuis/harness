@@ -21,11 +21,6 @@ pub use crate::system::shard_for;
 /// The alarm index's runtime vocabulary (spec §7.16): the per-shard entity that
 /// lets an alarmed entity hibernate without losing its deadline, and the commands
 /// its driver speaks to it.
-///
-/// Public rather than hidden. These were six `#[doc(hidden)]` root exports
-/// "published for the crate's own integration tests", which is a hole punched in
-/// the interface for a reason the interface does not state. An alarm index that is
-/// reachable at all has a command vocabulary, and this is it.
 pub mod alarm_index {
     pub use crate::alarm_index::ALARM_INDEX_TYPE;
     pub use crate::alarm_index::AllPending;

@@ -200,9 +200,7 @@ fn timeout_passes_through_fast_future() {
 
 // === Event-stream reproducibility over the real system (spec §18.1 #1) =======
 //
-// The foundational guarantee of deterministic simulation is that a seed
-// reproduces an entire run exactly. Here it is checked the strong way: a
-// workload is run twice under one seed and the two recorded *event streams*
+// A workload is run twice under one seed and the two recorded *event streams*
 // (spec §16) must be byte-identical; swept across many seeds, for both a
 // single-node and a multi-node-under-faults workload. A `negative` test then
 // proves the check has teeth: a workload with a deliberate determinism leak
@@ -643,7 +641,7 @@ impl Workload for NonDeterministic {
 
 #[test]
 fn the_checker_catches_a_determinism_leak() {
-    // Mirrors `harness_detects_a_silently_lost_ask`: prove the agent runtime fails on a
+    // Mirrors `harness_detects_a_silently_lost_ask`: prove the harness fails on a
     // genuinely non-reproducible run rather than passing everything.
     let divergence = check_reproducible(&NonDeterministic, 1)
         .expect_err("ambient nondeterminism must be caught");

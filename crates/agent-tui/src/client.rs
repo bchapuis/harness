@@ -49,7 +49,7 @@ pub enum Event {
 }
 
 /// Bound on a whole request-response exchange. The streaming prompt is *not*
-/// bound by this (a run can take minutes) only the unary calls are.
+/// bound by it: a run can take minutes.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An HTTP/1.1 client pinned to one gateway base URL, carrying the tenant token

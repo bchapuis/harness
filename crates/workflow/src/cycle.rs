@@ -194,8 +194,8 @@ impl<D: Workflow> Engine<D> {
     /// A caller-driven tick also **wakes every at-rest key** (§3.4, §6). This is
     /// the line between the engine's own timer re-entering the cycle and someone
     /// asking: a key the engine gave up driving unattended is waiting for exactly
-    /// this message, and the agent runtime draws the same line today (agent §9.2 item
-    /// 3, where the next message to drive the session re-launches an abandoned
+    /// this message, and the agent runtime draws the same line (agent §9.2 item 3,
+    /// where the next message to drive the session re-launches an abandoned
     /// propagation).
     pub fn tick(&self, workflow: &D, state: &D::State, ctx: &EntityCtx<D>) {
         let mut scope = self.lock();
@@ -349,8 +349,8 @@ impl<D: Workflow> Engine<D> {
             // The straggler test is the desired set itself, which is why it is
             // exact and needs no separate bookkeeping: a key is in the set
             // exactly while its outcome is not yet journaled. Exactness rests on
-            // keys being unique over the entity's whole journal (§3.1), with a
-            // key reused across occurrences the test would decide presence, not
+            // keys being unique over the entity's whole journal (§3.1): with a
+            // key reused across occurrences, the test would decide presence, not
             // identity.
             let straggler = !desired.iter().any(|p| p.key == key);
             if straggler {
@@ -422,10 +422,9 @@ impl<D: Workflow> Engine<D> {
             }));
         } else {
             // Either the records commit and every commit re-enters the cycle
-            // (§3.2 item 1) (the tell is launched, so it runs after this
-            // handler's records commit, and a consumer wires nothing beyond
-            // forwarding the two commands), or the key just came to rest, which
-            // may have been the last thing holding the activation resident, and
+            // (§3.2 item 1), the tell being launched so it runs after this
+            // handler's records commit, or the key just came to rest, which may
+            // have been the last thing holding the activation resident, and
             // nothing else would re-enter the cycle to conclude quiescence.
             self.tick_only(ctx);
         }

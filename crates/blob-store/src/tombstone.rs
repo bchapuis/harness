@@ -3,9 +3,9 @@
 //!
 //! `delete_namespace` reclaims a whole namespace without reference tracking. The
 //! mechanism is a **tombstone**: a tiny `(ns, deleted_at)` record meaning "no
-//! blob of `ns` may exist or be (re-)created", not a sweep of known-live roots.
-//! Because a namespace's blobs scatter across the whole cluster (owner selection
-//! hashes `(ns, id)`, spec §5.2), a tombstone has two homes:
+//! blob of `ns` may exist or be (re-)created". Because a namespace's blobs
+//! scatter across the whole cluster (owner selection hashes `(ns, id)`, spec
+//! §5.2), a tombstone has two homes:
 //!
 //! - **cluster-wide awareness** ([`TombstoneSet`]): every serving node holds the
 //!   set so it can refuse a `StoreBlob`, short-circuit a `get`, and skip a
@@ -374,7 +374,6 @@ mod tests {
         assert!(tracker.tracked().is_empty());
         // Reclaiming an untracked namespace is a harmless no-op.
         assert!(!tracker.reclaim(&a));
-        // An untracked namespace is not reclaimable (nothing to reclaim).
         assert!(!tracker.reclaimable(&a, |_| true));
     }
 }

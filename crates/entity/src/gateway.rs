@@ -10,7 +10,7 @@
 //! **exactly-once per node by construction**, with no lock (invariant **E6**).
 //!
 //! The gateway is also the **router** (§5.4), but **single-shot**: resolving a
-//! name is two levels; name→shard by the committed key-range partition (the
+//! name is two levels: name→shard by the committed key-range partition (the
 //! shard map, §5.1; the founding [`shard_for`](crate::system::shard_for) while it
 //! bootstraps), shard→leader from the system (`leads_shard`/`shard_leader`). When
 //! this node leads the shard it activates the host locally and returns the handle;
@@ -109,7 +109,7 @@ impl<G: Entity> Message for Activate<G> {
 /// Server-side bound on one [`ReadEvents`] page (spec §7.5): the most journal
 /// **records** one ask scans. It caps both the reply and the time the serial
 /// gateway spends serving a read, so no caller can hold activations behind one
-/// huge scan; a caller wanting more pages by re-asking from the returned cursor.
+/// huge scan; a caller wanting more re-asks from the returned cursor.
 pub(crate) const READ_PAGE: usize = 1024;
 
 /// Read one page of an entity's committed events straight from the shard's
@@ -170,11 +170,9 @@ pub(crate) enum ReadReply {
 /// or its committed-head floor), the explicit form of the "short page only at
 /// head" contract a filtered page cannot carry on its own. `base` is the
 /// store's compaction base when the page was served (§9): slots at
-/// `Seq <= base` are subsumed by the entity's snapshot and no longer readable,
-/// so a caller whose ask began below it is looking at truncated history, not
-/// at the facet slots the projection legally skips (§7.12). Every page carries
-/// it because compaction is not bounded by any reader's cursor: a snapshot at
-/// the head can outrun a slow pager mid-read.
+/// `Seq <= base` are subsumed by the entity's snapshot and no longer readable.
+/// Every page carries it because compaction is not bounded by any reader's
+/// cursor: a snapshot at the head can outrun a slow pager mid-read.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EventPage {
     pub(crate) events: Vec<(Seq, Vec<u8>)>,
@@ -229,11 +227,11 @@ pub(crate) struct Gateway<G: Entity> {
     /// recovery, not one each: each carrying the token its recovery was
     /// spawned with. Cleared when its [`Recovered`] lands. **Per-name**
     /// invalidation: [`get_or_activate`](Gateway::get_or_activate) for the name
-    /// rotates the token, so a [`Recovered`] carrying the old one is discarded
-    /// (closing the window where an activation is created), and appends, and
-    /// even hibernates, while that name's floor recovery is still in flight,
-    /// without discarding recoveries of unrelated names (an activation of B
-    /// cannot move A's head, so it must not starve A's read).
+    /// rotates the token, so a [`Recovered`] carrying the old one is discarded.
+    /// That closes the window where an activation is created, appends, and even
+    /// hibernates again while the name's floor recovery is still in flight,
+    /// without discarding recoveries of unrelated names: an activation of B
+    /// cannot move A's head, so it must not starve A's read.
     warming: HashMap<EntityName, u64>,
     /// Allocator for the per-name `warming` tokens: bumped once per spawn and
     /// once per invalidation, never compared globally.
@@ -422,7 +420,7 @@ impl<G: Entity> Handler<ReadEvents<G>> for Gateway<G> {
     /// activation's published head, or, for a hibernated name, a floor recovered
     /// once per leadership by [`warm`](Gateway::warm), which also backfills the
     /// local store, making the read below complete. Records above the floor are
-    /// simply not served yet; no observer sees an unacknowledged write (**E5**).
+    /// not served yet; no observer sees an unacknowledged write (**E5**).
     ///
     /// The await below never leaves this node: `load` is a local, fence-free
     /// read of the leader's own store (§7.3), resolved from memory on both
@@ -480,8 +478,7 @@ impl<G: Entity> Handler<ReadEvents<G>> for Gateway<G> {
         // contract this encodes).
         let (base, records, at_head) = crate::entity::committed_prefix(page, floor, limit);
         let cursor = records.last().map(|(seq, _)| *seq).unwrap_or(msg.from);
-        // The projection consumes the page in place: the serial gateway pays
-        // one bounded local copy from the store, never a second allocation.
+        // The projection consumes the page in place (see `events_in_page`).
         let events =
             events_in_page(records).map_err(|e| EntityError::Unavailable(e.to_string()))?;
         Ok(ReadReply::Page(EventPage {

@@ -44,10 +44,10 @@ and one node's agent runtime, its host actor, its session actors, and the three 
   `--data/workspaces/<node-id>/`, keyed by the entity, where the `shell` tool
   runs.
 
-Sessions are placed by rendezvous hashing over the members every node
-currently considers serving. The gateway holds an `EntityRef` per session and the
-transport routes each `ask` to the session's current owner, so the gateway
-addresses any session regardless of which node hosts it.
+Sessions are placed by rendezvous hashing over the members every node currently
+considers serving. The gateway holds an `EntityRef` per session and the transport
+routes each `ask` to the session's current owner, so the gateway addresses any
+session whichever node hosts it.
 
 Two agent kinds are registered on every node:
 
@@ -88,9 +88,9 @@ Or run uninstalled with `cargo run -p agent-standalone --` in place of
 
 ## Start the cluster
 
-One terminal per node, each with its own `--data` directory. `--sandbox`
-is required, and with a real API key the confined mode is the right one (a
-real model composes the shell commands these nodes will run):
+One terminal per node, each with its own `--data` directory. `--sandbox` is
+required, and with a live API key the confined mode is the right one (a real
+model composes the shell commands these nodes will run):
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-…
@@ -111,9 +111,9 @@ the receptionist gossip.
 
 ### Across machines
 
-The roster spans hosts once each node binds a reachable interface and learns
-its peers by name instead of loopback. Two flags do it, the same on every
-node except `--id`:
+The roster spans hosts once each node binds a reachable interface and learns its
+peers by name instead of loopback. Two flags do it, the same on every node except
+`--id`:
 
 - `--bind-host 0.0.0.0`: bind every interface, not just loopback.
 - `--peer <id>=<host>`: the reachable host of each node in the roster; repeat
@@ -133,14 +133,13 @@ A hostname resolves through the system resolver, so container or pod DNS names
 plaintext, guarded by `--secret`; keep the roster on a trusted network, or
 provision TLS, before crossing untrusted links (see Limitations).
 
-Any image works; the choice is just what `shell` finds on its `PATH`.
-`python:3.12-slim` carries python3, bash, and coreutils, enough for the
-model to actually run things. `alpine:3.20` is leaner (sh + awk only) if you
-only need file and text tasks.
+Any image works; the choice is what `shell` finds on its `PATH`.
+`python:3.12-slim` carries python3, bash, and coreutils, enough for the model to
+run real work. `alpine:3.20` is leaner (sh + awk only) for file and text tasks.
 
 Without docker (or `/dev/kvm` for firecracker), run `--sandbox durable`: an
-entity-backed durable workspace with the typed file tools and no shell, and no
-container runtime required.
+entity-backed durable workspace with the typed file tools, no shell, and no
+container runtime.
 
 Each node logs its bootstrap and then the cluster's life on stderr:
 
@@ -152,9 +151,9 @@ Each node logs its bootstrap and then the cluster's life on stderr:
 
 ## Start the gateway
 
-The gateway is the public edge. It joins the same cluster as a non-voting
-client (node id 100, the one the nodes admitted with `--client`) and serves
-HTTP/SSE on `127.0.0.1:8080`:
+The gateway is the public edge. It joins the same cluster as a non-voting client
+(node id 100, the one the nodes admitted with `--client`) and serves HTTP/SSE on
+`127.0.0.1:8080`:
 
 ```sh
 # terminal 4  (build with `cargo build -p agent-gateway`, or `cargo run -p agent-gateway --`)
@@ -198,9 +197,9 @@ returns its recorded outcome, a live run re-attaches, never run twice (A7).
 
 The records *are* the session: each is a line in that session's own segment under
 `./agent-data/entities/<entity_type>/<node>/segments/`, and folding them back is how
-any node reconstructs the session; there is no other session state. The entity type
-comes first because a store is per hosted type: its fence is keyed by shard index,
-and the same index is a different leader-election group under each type (entity
+any node reconstructs it; there is no other session state. The entity type comes
+first because a store is per hosted type: its fence is keyed by shard index, and
+the same index is a different leader-election group under each type (entity
 §8.2).
 
 Sessions are durable and named: prompt `demo` again days later (any gateway
@@ -259,8 +258,8 @@ caches segment handles and resolved host handles by the thousand, so memory is
 consumed by entity *count* rather than by concurrency; and the replication path
 is the uplink, so a node's sustainable ingest of new data is roughly
 `link ÷ (replication_factor − 1)`, about 60 MB/s at 1 Gbps and R=3, against a
-device that would take gigabytes per second. If replication throughput is the
-constraint you hit, the 10 Gbps uplink upgrade buys more than any tuning here.
+device that would take gigabytes per second. If replication throughput is your
+constraint, the 10 Gbps uplink upgrade buys more than any tuning here.
 
 **Descriptors.** The entity store keeps up to 65536 segment files open
 (`DEFAULT_SEGMENT_CAPACITY`), plus transport connections and transient blob
@@ -281,8 +280,7 @@ and which parts of it are rebuildable.
 **Storage.** One filesystem per node, not shared, on local NVMe. Network
 attached block storage (EBS, Persistent Disk, Ceph) puts a durable flush back
 near a millisecond and reverses an assumption the storage layer is built on
-(hardware-envelope §6); it will work and it will be slower than the design
-expects.
+(hardware-envelope §6); it works, and it is slower than the design expects.
 
 ### Timeouts by topology
 
@@ -384,9 +382,9 @@ The **gateway** (`agent-gateway`) takes its own set:
 
 SIGTERM and SIGINT drain it gracefully.
 
-`scripts/smoke-agent.sh` scripts the whole walkthrough (three
-nodes plus the gateway against a canned fake API, prompt, records, kill, resume
-over HTTP) and needs no API key.
+`scripts/smoke-agent.sh` runs the whole walkthrough (three nodes plus the
+gateway against a canned fake API, prompt, records, kill, resume over HTTP) and
+needs no API key.
 
 ## How it maps to the spec
 
@@ -408,9 +406,9 @@ over HTTP) and needs no API key.
   untrusted networks.
 - **`--sandbox` must be chosen explicitly; there is no unconfined mode.** Pass
   `--sandbox docker --sandbox-image <ref>` (e.g. `alpine:3.20`) to run `shell`
-  inside a per-session OCI container, via `agent-sandbox`'s `Native` tier:
-  the workspace bind-mounted, no network: shared-kernel confinement (sandbox
-  spec §3.4's SHOULD grade), still not the microVM grade. Pre-pull the image:
+  inside a per-session OCI container, via `agent-sandbox`'s `Native` tier: the
+  workspace bind-mounted, no network, shared-kernel confinement (sandbox spec
+  §3.4's SHOULD grade), still not the microVM grade. Pre-pull the image:
   the first call otherwise pulls it inside the 120s tool timeout. On Linux with
   `/dev/kvm`, pass `--sandbox firecracker --fc-kernel <vmlinux> --fc-rootfs
   <ext4>` (both built by `guest/fc-rootfs/build.sh`) for the microVM grade

@@ -30,8 +30,7 @@
 //! the abstraction. The data they carry ([`GuestSpec`], [`GuestKey`],
 //! [`GuestError`]) is unambiguous inside a crate called `machine-host`, and a
 //! type belonging to *one* mechanism keeps its own name: [`microvm::MicroVm`],
-//! [`container::ContainerGuest`], because the contrast is the point:
-//! `Machine…` is the abstraction, `MicroVm…`/`Container…` is one realization.
+//! [`container::ContainerGuest`].
 //!
 //! What is *not* here is anything protocol-shaped. Each consumer ships its own
 //! guest agent and speaks its own framed protocol over [`MachineGuest::connect`]:
@@ -42,8 +41,7 @@
 //! Running a command is likewise absent from [`MachineGuest`]: a microVM has no
 //! host-side exec (it is reachable only through its agent), so
 //! [`container::ContainerGuest::exec`] lives on the mechanism that can honor
-//! it, and the one consumer that needs it holds that type directly. A trait
-//! whose implementations must fake half their methods hides nothing.
+//! it, and the one consumer that needs it holds that type directly.
 
 use std::path::PathBuf;
 use std::sync::Arc;

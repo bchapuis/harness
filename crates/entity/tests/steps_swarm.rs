@@ -17,34 +17,34 @@
 //! reads differently from one that was kept; a constant-valued effect cannot tell
 //! the two apart. The check is therefore over *observations*: two reads of one
 //! entity's memo that both answer `Some` must answer the same `Some`. That needs no
-//! knowledge of which launch won, which is what makes it decidable under faults:
-//! a read the nemesis refuses is simply not an observation.
+//! knowledge of which launch won, so it stays decidable under faults: a read the
+//! nemesis refuses is simply not an observation.
 //!
 //! **What makes it reachable.** The property needs a chain (commit a step, be
 //! interrupted, re-launch, still be readable), and the seeds that get furthest are
 //! the calm ones, which are exactly the seeds that never re-launch. So the
 //! interruption is **driven rather than waited for**: the entity may hibernate with
-//! a step in flight, the effect takes longer than the idle window, and the read
-//! rounds below both observe the memo and re-activate a cold entity whose step is
-//! still outstanding, which is what re-launches it. The nemesis then adds
-//! failovers and process deaths on top. An earlier attempt left the interruption to
-//! the nemesis alone and measured roughly two seeds in twenty-four observing a memo
-//! at all, none of which had re-launched; that workload was never committed.
+//! a step in flight, the effect outlasts the idle window, and the read rounds below
+//! both observe the memo and re-activate a cold entity whose step is still
+//! outstanding, re-launching it. The nemesis adds failovers and process deaths on
+//! top. An earlier attempt left the interruption to the nemesis alone and measured
+//! roughly two seeds in twenty-four observing a memo at all, none of which had
+//! re-launched.
 //!
 //! **What it still cannot reach, measured rather than assumed.** Driving the chain
 //! does not make every seed usable: on roughly two seeds in five the nemesis leaves
 //! the shard without a leader this node can route to for the whole run, every read
-//! comes back `NotLeader`, and the run observes nothing at all. That is why the
-//! coverage assertions sit on their own `coverage_seeds` sweep below rather than on
-//! the invariant sweep, which narrows to 8 seeds locally. Both are green across the
-//! declared 24, and the invariant sweep was additionally run clean across 200.
+//! comes back `NotLeader`, and the run observes nothing. The coverage assertions
+//! therefore sit on their own `coverage_seeds` sweep below rather than on the
+//! invariant sweep, which narrows to 8 seeds locally. Both are green across the
+//! declared 24, and the invariant sweep was also run clean across 200.
 //!
 //! **Why there is no `sleep` step.** The fixture's alarm-backed sleep is switched
 //! off here (`PipelineConfig::sleep: None`). A sleep needs a hosted `AlarmIndex`
 //! whose per-shard driver never quiesces, which costs two default checkers
 //! (`alarm_swarm.rs` carries that argument) and buys this check nothing: write-once
 //! is decided by `fetch`'s first commit, and everything after it is a longer chain
-//! to the same claim. Shortening the chain is what got this sweep landed.
+//! to the same claim.
 
 mod support;
 
@@ -122,8 +122,7 @@ const ROUND_GAP: Duration = Duration::from_millis(500);
 struct Memos {
     /// This run's `entity key → observed memo values`, in the order they were read.
     /// Cleared at the start of each `drive`, so a check sees one run's observations
-    /// rather than the sweep's: the run-scoped *expectation* the shared
-    /// `Exercised` tallies below are deliberately not.
+    /// rather than the sweep's, unlike the shared `Exercised` tallies below.
     run: Arc<Mutex<BTreeMap<String, Vec<u32>>>>,
     /// Entities whose memo was read at least once, across the whole sweep: the guard
     /// against a green run that observed nothing.
@@ -279,15 +278,15 @@ impl ClusterWorkload for StepsSwarm {
             // re-activation that re-launches a step left outstanding by a
             // hibernation, and the observation the check is made of. A read the
             // faults refuse is simply not an observation: write-once is a claim
-            // about what committed, and an entity this node cannot reach committed
-            // whatever it committed either way.
+            // about what committed, and an unreachable entity committed whatever it
+            // committed either way.
             //
             // **The cadence must not depend on the reads.** Awaiting a round before
             // starting the next one lets a refused read stretch a [`ROUND_GAP`]
             // round into a [`CALL_DEADLINE`] one, and the whole drive shares one 30 s
-            // virtual-time budget, so on exactly the faulty seeds this sweep is
-            // for, the later rounds would never be issued at all. Sleeping to the
-            // round's offset instead keeps the schedule the workload's own.
+            // virtual-time budget, so on exactly the faulty seeds this sweep is for,
+            // the later rounds would never be issued. Sleeping to the round's offset
+            // instead keeps the schedule the workload's own.
             let rounds = (0..ROUNDS).map(|round| {
                 let reads = (0..ENTITIES).map(|g| {
                     let key = format!("p/{g}");
@@ -356,8 +355,7 @@ fn workload() -> StepsSwarm {
 #[test]
 fn a_step_memo_is_write_once_under_the_cluster_swarm() {
     // The safety claim, and only it. What this sweep *observed* is asserted
-    // separately below, on a range that never narrows; see there for why it
-    // cannot ride here.
+    // separately below, on a range that never narrows.
     let workload = workload();
     if let Err(failure) = run_cluster_swarm(&workload, sweep_seeds(0..24)) {
         panic!("{failure}");
@@ -379,7 +377,7 @@ fn a_step_memo_is_write_once_under_the_cluster_swarm() {
 /// nemesis leaves the cluster without one for the whole run: every read comes back
 /// `NotLeader` and the run observes nothing. That is a property of the seed range,
 /// not of the workload, so it belongs on `coverage_seeds`, which never narrows; the
-/// same assertion on the invariant sweep would not be stricter, only flaky at its
+/// same assertion on the invariant sweep would be no stricter, only flaky at its
 /// local width of 8 (docs/simulation-testing.md, *Adding a sweep*, and
 /// `Exercised`'s own note, which `disk_swarm.rs` reached the same way).
 #[test]
@@ -414,8 +412,7 @@ fn the_steps_swarm_observes_a_memo_something_tried_to_overwrite() {
 /// The determinism contract over this workload (actor §18.1 #1): the same seed
 /// twice, byte-identical event streams. It is what makes the launch ordinals
 /// meaningful: a step value that varied run to run would be nondeterminism the
-/// check itself introduced, and the memo values the check reads are drawn from
-/// them.
+/// check itself introduced.
 #[test]
 fn the_steps_swarm_replays_identically() {
     if let Err(divergence) = replay_cluster_swarm(&workload(), sweep_seeds(0..8)) {

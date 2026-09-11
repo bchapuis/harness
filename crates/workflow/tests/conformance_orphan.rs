@@ -47,10 +47,6 @@ const CALL: Duration = Duration::from_secs(8);
 /// a scenario once relaunched.
 const SLOW: Duration = Duration::from_secs(20);
 
-/// The workflow's grammar, held over the whole recorded stream at the end of a
-/// scenario: the clustered checker, because every scenario here deposes a
-/// leader with claims open, which is legal (§6).
-
 #[test]
 fn a_crash_between_launch_and_settle_relaunches_a_reexecute_effect_once() {
     // W6 for `Reexecute`, and W3's admission: across activations an effect MAY run

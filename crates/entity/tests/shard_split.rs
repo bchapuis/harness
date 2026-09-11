@@ -1,14 +1,15 @@
 //! Shard split under deterministic simulation (spec §7.7, invariant **E15**).
 //!
-//! A shard that grows too large or too hot splits: the parent keeps the low half
-//! of its key range in place, a fresh child shard takes the high half on the same
-//! replicas, and the committed shard map flips before either side serves the
-//! moved range. These tests drive the whole protocol (seal, transfer, commit,
-//! re-route) through the public API on a 3-node cluster and check the E15
-//! contract from the event stream: an entity is writable in exactly one shard at
-//! any time, and a split loses or duplicates no write. This includes the
-//! §14-mandated fault case, a split under concurrent writes, plus the
-//! crash-the-driver re-drive, compacted (snapshot-only) entities, and blob areas.
+//! A shard that grows too large or too hot splits: the parent keeps the low
+//! half of its key range in place, a fresh child shard takes the high half on
+//! the same replicas, and the committed shard map flips before either side
+//! serves the moved range. These tests drive the whole protocol (seal,
+//! transfer, commit, re-route) through the public API on a 3-node cluster and
+//! check the E15 contract from the event stream: an entity is writable in
+//! exactly one shard at any time, and a split loses or duplicates no write.
+//! The cases: the §14-mandated split under concurrent writes, the
+//! crash-the-driver re-drive, compacted (snapshot-only) entities, and blob
+//! areas.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -196,8 +197,8 @@ impl EntityHandler<ReadCount> for CounterEntity {
     }
 }
 
-/// An entity that stores bulk bytes in its colocated blob area (§7.10): the split
-/// must move the blob area with the entity.
+/// Stores bulk bytes in its colocated blob area (§7.10): the split must move
+/// the blob area with the entity.
 #[derive(Default)]
 struct BlobEntity;
 
@@ -370,17 +371,17 @@ fn await_split(sim: &Simulation, recorder: &Recorder) -> (u32, u32, u64) {
     panic!("no committed split observed within the deadline");
 }
 
-/// The **E15 continuous checker** over the recorded stream: per entity name, the
-/// committed seq is strictly increasing across its whole life, regardless of
-/// which shard the commit came from. An entity moves parent → child on a split and
-/// right → left on a merge; at each such move the new owner recovers the
-/// committed head and continues, so the seq only ever advances. A *duplicated*
-/// write (e.g. a moved-range append that committed on both sides) repeats a seq,
-/// and a *lost* acknowledged write leaves the next activation recovering a lower
-/// head: both surface here as a non-increasing seq. Covers every entity type on
-/// the stream. (The "writable in exactly one shard at a time" half is exercised
-/// by the linearizability tests, where two concurrent write streams for one
-/// entity could not produce a linearizable history.)
+/// The **E15 continuous checker** over the recorded stream: per entity name,
+/// the committed seq is strictly increasing across its whole life, whichever
+/// shard the commit came from. An entity moves parent → child on a split and
+/// right → left on a merge; at each move the new owner recovers the committed
+/// head and continues, so the seq only advances. A *duplicated* write (e.g. a
+/// moved-range append that committed on both sides) repeats a seq, and a
+/// *lost* acknowledged write leaves the next activation recovering a lower
+/// head: both surface here as a non-increasing seq. Covers every entity type
+/// on the stream. (The "writable in exactly one shard at a time" half is
+/// exercised by the linearizability tests, where two concurrent write streams
+/// for one entity could not produce a linearizable history.)
 fn assert_split_safety(recorder: &Recorder) {
     let mut per_entity: std::collections::BTreeMap<String, Vec<(u32, u64)>> =
         std::collections::BTreeMap::new();
@@ -516,14 +517,14 @@ fn a_split_moves_entities_to_a_child_and_loses_no_write() {
 
 #[test]
 fn a_split_under_concurrent_writes_is_linearizable() {
-    // The §14-mandated fault case: a shard split under concurrent writes. Three
-    // counter entities span the boundary; clients on two nodes keep writing and
-    // reading through the whole seal → transfer → commit window. Every observed
-    // history must stay linearizable: an append that slipped through the seal
-    // and was then dropped (lost write) or retried onto the child after
-    // committing on the parent (double apply) is exactly what the checker
-    // catches. Ops that fail in the split window are recorded pending, which
-    // the checker may place or drop: the §2.2 ambiguity contract.
+    // The §14-mandated fault case: a shard split under concurrent writes.
+    // Three counter entities span the boundary; clients on two nodes keep
+    // writing and reading through the whole seal → transfer → commit window.
+    // Every observed history must stay linearizable: the checker catches an
+    // append that slipped through the seal and was then dropped (lost write),
+    // or retried onto the child after committing on the parent (double apply).
+    // Ops that fail in the split window are recorded pending, which the
+    // checker may place or drop: the §2.2 ambiguity contract.
     scenario_sweep("shard-split/split-writes", sweep_seeds(0..8), |seed| {
         let sim = Simulation::new(seed);
         let (_net, recorder, systems, hosts) =
@@ -596,10 +597,10 @@ fn a_crashed_parent_leader_re_drives_the_split() {
     // back from the survivors.
     let sim = Simulation::new(23);
     let (net, recorder, _systems, hosts) = cluster_of::<Account>(&sim, one_shard_config());
-    // A handful of entities: after the crash the re-drive fans every recovery and
-    // transfer to the isolated node too, and each such op waits out its quorum
-    // timeout, so keep the moved set small enough that the re-drive fits the
-    // deadline while still exercising real data movement.
+    // A handful of entities: after the crash the re-drive fans every recovery
+    // and transfer to the isolated node too, and each op waits out its quorum
+    // timeout, so the moved set stays small enough that the re-drive fits the
+    // deadline while still moving real data.
     let keys: Vec<String> = (0..4).map(|i| format!("account/{i}")).collect();
 
     for key in &keys {
@@ -805,7 +806,6 @@ fn a_merge_folds_a_shard_into_its_neighbour_and_loses_no_write() {
         .collect();
     assert!(before.is_empty(), "every entity has a committed allocation");
 
-    // Merge shard 0 with its right neighbour.
     hosts[0].merge_shards(0);
     let (left, right) = await_merge(&sim, &recorder);
     assert_eq!(left, 0, "shard 0 absorbs its neighbour");
@@ -868,7 +868,6 @@ fn split_then_merge_round_trips_the_partition() {
         assert_eq!(committed, Ok(200), "{key} deposit committed");
     }
 
-    // Split shard 0 → child.
     hosts[0].split_shard(0);
     let (parent, child, _boundary) = await_split(&sim, &recorder);
     assert_eq!(parent, 0);
@@ -887,7 +886,6 @@ fn split_then_merge_round_trips_the_partition() {
         assert_eq!(bal, Ok(250), "{key} committed on the post-split owner");
     }
 
-    // Merge the child back into shard 0.
     hosts[0].merge_shards(0);
     let (left, _right) = await_merge(&sim, &recorder);
     assert_eq!(left, 0);

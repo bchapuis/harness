@@ -672,14 +672,12 @@ where
             // a prefix of the committed log but a gap in it, while remaining a full
             // voting member of the cluster whose membership it has stopped tracking.
             //
-            // The blast radius is smaller than the shard map's, and worth stating
-            // precisely rather than overstating: every transition this build *knows*
-            // also travels in gossip, stamped with its commit index, so a peer that
+            // The blast radius is bounded: every transition this build *knows* also
+            // travels in gossip, stamped with its commit index, so a peer that
             // applied the entry can still deliver the outcome here
-            // (`Membership::merge`). That repair is what makes stopping cheap. It is
-            // also exactly what does not cover the case that gets here: a tag from
-            // a later build is a transition this one cannot name, in gossip no more
-            // than in the log.
+            // (`Membership::merge`). That repair is what makes stopping cheap. It
+            // does not cover the case that gets here: a tag from a later build is a
+            // transition this one cannot name, in gossip no more than in the log.
             //
             // So the node stops applying, keeps gossiping (the repair path is
             // strictly better left running), keeps acknowledging the group's appends
@@ -689,15 +687,11 @@ where
             //
             // `admit` rather than `decode`, so the reason an operator reads names a
             // *revision* where there is one (`actor.membership`, compatibility §3).
-            // A version skew and a damaged entry have opposite fixes: run the node
-            // on a build that accepts the entry, or repair a log.
             //
-            // Two `admit`s meet here, one word from each spec's vocabulary:
-            // *this* one admits a payload's revision (compatibility §2, bytes
-            // at rest), while `ClusterSystem::admit`, whose committed
-            // `MembershipCommand::Admit` this decodes, admits a *member*
-            // (§9.3). Neither yields its name: each is the term of art in its
-            // own spec.
+            // Two `admit`s meet here, one word from each spec's vocabulary: this
+            // one admits a payload's revision (compatibility §2, bytes at rest),
+            // while `ClusterSystem::admit`, whose committed
+            // `MembershipCommand::Admit` this decodes, admits a *member* (§9.3).
             let command = match MembershipCommand::admit(&command) {
                 Ok(command) => command,
                 Err(why) => {

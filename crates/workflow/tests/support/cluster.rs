@@ -36,8 +36,6 @@ pub const A: NodeId = NodeId::new(1);
 pub const B: NodeId = NodeId::new(2);
 pub const C: NodeId = NodeId::new(3);
 
-/// The shard groups' Raft timings, shared by the scenario cluster and the
-/// swarm's `ClusterModeSpec` so the two tiers cannot drift apart.
 /// Two shards, no idle hibernation within a scenario, and no snapshots: every
 /// rehydration replays the journal, and `conformance_resume.rs`'s offline fold
 /// reads every record through the public read path, which a snapshot would
@@ -145,8 +143,7 @@ impl Cluster {
     /// against that envelope, and a restart that lands a few seconds earlier in
     /// a shard group's life can leave the survivors disagreeing about its leader
     /// (see `conformance_orphan.rs` on seed 101). That is the cluster's to
-    /// resolve, not the workflow's; the fixed step keeps the scenarios on the side of
-    /// it they were written for.
+    /// resolve, not the workflow's.
     ///
     /// Retrying a write after an ambiguous failure may commit it twice, which is
     /// why `Fanout::apply` folds a repeated `Requested` idempotently (entity
@@ -174,7 +171,7 @@ impl Cluster {
     }
 }
 
-/// Engine a call for exactly `settle` of virtual time under the perpetually-running
+/// Drive a call for exactly `settle` of virtual time under the perpetually-running
 /// cluster loops, then read it back. Unlike `Simulation::block_on` it does not
 /// return early, which is what gives every step of a scenario the same envelope.
 pub fn drive<T: Send + 'static>(

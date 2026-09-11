@@ -115,10 +115,10 @@ impl Message for DeleteNamespace {
 /// Ask a replica for its whole tombstone awareness set (spec §5.3): the
 /// **anti-entropy pull** the reconcile loop runs each pass so a node that was
 /// partitioned or down across a `delete_namespace` learns the tombstones it
-/// missed (**B7**). The pull runs after the pass's re-replication push, so it is
-/// not what stops a stale copy from being re-pushed: the receiving owner's
-/// `StoreAck::Deleted` is, but without it a healed holder never sweeps its copy
-/// and keeps serving the namespace the fan-out never reached it with.
+/// missed (**B7**). The pull runs after the pass's re-replication push, so what
+/// stops a stale copy from being re-pushed is the receiving owner's
+/// `StoreAck::Deleted`; without the pull, a healed holder never sweeps its own
+/// copy and keeps serving a namespace the fan-out never reached it with.
 #[derive(Serialize, Deserialize)]
 pub struct SyncTombstones;
 

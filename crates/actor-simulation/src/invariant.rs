@@ -72,11 +72,10 @@ pub fn default_invariants() -> Vec<Box<dyn Invariant>> {
 /// the same pairing from the other side, and the `conformance_catalogue` test
 /// holds the two equal **per pair**, in both directions.
 ///
-/// Comparing the pairs rather than the two sets of checker *names* is the
-/// point. A name set cannot see one entry dropping its `Verify::Checker` while
-/// a sibling entry still names the same checker, which is exactly how a
-/// "Verified by" column drifts: quietly, one row at a time, with the totals
-/// still matching.
+/// Comparing the pairs rather than the two sets of checker *names* matters: a
+/// name set cannot see one entry dropping its `Verify::Checker` while a sibling
+/// entry still names the same checker, which is how a "Verified by" column
+/// drifts, one row at a time with the totals still matching.
 pub fn checker_coverage() -> &'static [CheckerCoverage] {
     CHECKER_COVERAGE
 }

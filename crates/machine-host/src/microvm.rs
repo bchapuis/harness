@@ -370,8 +370,7 @@ impl MicroVm {
 }
 
 /// The last bytes of `control/console.log`, or `None` when the guest wrote
-/// nothing: absence stated as absence, so a caller folds it into a message only
-/// when it says something.
+/// nothing, so a caller folds it into a message only when it says something.
 fn console_tail(control: &Path) -> Option<String> {
     const TAIL: usize = 2048;
     match std::fs::read(control.join("console.log")) {

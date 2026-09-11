@@ -1,10 +1,10 @@
 //! The SQL facet under the cluster fault swarm (spec §7.14, §14; V&V checklist
 //! #4, #5, #7).
 //!
-//! `tests/sql.rs` proves the facet's contract on the `Local` tier; this file
+//! `tests/sql.rs` proves the facet's contract on the `Local` tier. This file
 //! hosts a SQL-only entity on the leader-based clustered system and sweeps it
 //! across seeds while the nemesis injects partitions, crashes, heals, loss,
-//! duplication, and delay (spec §18.3). What that uniquely exercises:
+//! duplication, and delay (spec §18.3). What that adds:
 //!
 //! - **Failover rematerialization.** A leader crash moves the activation to
 //!   another node, whose materialization is rebuilt from the composite-snapshot
@@ -16,8 +16,8 @@
 //! - **Seed-reproducibility (#7).** The same seed replays to a byte-identical
 //!   event stream even though every run materializes real SQLite files.
 //!
-//! Fault *coverage* (#8) for this cluster configuration is already asserted by
-//! `tests/entity_swarm.rs` over the same transport; it is not repeated here.
+//! Fault *coverage* (#8) for this cluster configuration is asserted by
+//! `tests/entity_swarm.rs` over the same transport, not repeated here.
 #![cfg(feature = "sql")]
 
 use std::path::PathBuf;
@@ -159,18 +159,16 @@ impl EntityHandler<ReadTotal> for SqlAccount {
     }
 }
 
-// --- Entity-specific continuous safety checkers (as in entity_swarm.rs) ----------
-
 // --- The workload ---------------------------------------------------------------
 
 /// Deposit-and-read SQL traffic against a handful of entities under the nemesis,
-/// driven through the public `EntityRef` API only (spec §18.4). A faulted call is
-/// recorded as nothing and the client moves on, so the drive future always
-/// completes and the invariants are checked over whatever the run produced.
+/// driven through the public `EntityRef` API only (spec §18.4). A faulted call
+/// records nothing and the client moves on, so the drive future always completes
+/// and the invariants run over whatever the run produced.
 ///
-/// One scratch directory serves every run and every simulated node (the facet
-/// keys materializations by node and entity, and restore discards stale files:
-/// they are a cache, never truth, §1).
+/// One scratch directory serves every run and every simulated node: the facet
+/// keys materializations by node and entity, and restore discards stale files
+/// (a cache, never truth, §1).
 struct SqlAccountSwarm {
     nodes: usize,
     clients: usize,
@@ -205,9 +203,8 @@ impl SqlAccountSwarm {
     /// content (E17), frame records after the snapshot seq replayed on top
     /// (byte-deterministic, F1).
     ///
-    /// `sql_swarm.rs`'s single-node `SqlSwarm` already hibernates, but with no
-    /// transport and no nemesis; this is the same restore path with a cluster and
-    /// faults around it.
+    /// `sql_swarm.rs`'s single-node `SqlSwarm` hibernates too, but with no
+    /// transport and no nemesis; this is the same restore path under faults.
     fn hibernating(nodes: usize, clients: usize, ops: u64, dir: PathBuf) -> SqlAccountSwarm {
         SqlAccountSwarm {
             hibernating: true,
@@ -227,8 +224,8 @@ impl SqlAccountSwarm {
             },
             // Checkpoint often: the manifest + blob-chunk path runs under faults,
             // and failover rematerializes from it plus the later frame records.
-            // Oftener when hibernating, so an entity has a checkpoint to come back
-            // from before it first hibernates.
+            // Oftener when hibernating, so an entity has a checkpoint before it
+            // first hibernates.
             snapshot_every: if self.hibernating { 2 } else { 4 },
             data_dir: Some(self.dir.clone()),
             ..EntityConfig::default()
@@ -240,8 +237,8 @@ impl SqlAccountSwarm {
 const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
-/// How long a hibernating client idles when it idles: comfortably past
-/// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
+/// How long a hibernating client idles: past [`IDLE_AFTER`], so the host really
+/// hibernates.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
 impl ClusterWorkload for SqlAccountSwarm {
@@ -268,10 +265,9 @@ impl ClusterWorkload for SqlAccountSwarm {
             return None;
         }
         // A restarted node comes up empty and would otherwise stop hosting
-        // `SqlAccount`. The config carries the same scratch root: restore
-        // discards stale local files (a cache, never truth; §1), so a fresh
-        // process rebuilding over its predecessor's leftover database file is
-        // exactly the case worth covering.
+        // `SqlAccount`. The config carries the same scratch root, so a fresh
+        // process rebuilds over its predecessor's leftover database file:
+        // restore discards stale local files (a cache, never truth; §1).
         let config = self.config();
         Some(Arc::new(move |node: &SimNode| {
             node.entities::<SqlAccount>(config.clone());
@@ -301,8 +297,7 @@ impl ClusterWorkload for SqlAccountSwarm {
             for c in 0..clients {
                 // Under restarts every client goes through node 1's gateway, the
                 // one node the nemesis leaves alone; location transparency (E13)
-                // keeps the coverage, since the call still lands on the shard's
-                // leader.
+                // still lands the call on the shard's leader.
                 let entities = if restarting {
                     hosts[0].clone()
                 } else {
@@ -389,10 +384,9 @@ fn sql_hibernating_cluster_swarm_is_reproducible() {
 
 #[test]
 fn sql_cluster_swarm_actually_fires_each_fault_type() {
-    // #8: the SQL facet's clustered sweeps configure faults, so something must
-    // prove they fire. A narrow declared range keeps the cost honest: the claim
-    // is "each fault type fired somewhere across these seeds", and 8 of them
-    // carry it as well as 32 would while a seed here materializes real SQLite
+    // #8: the clustered sweeps configure faults, so something must prove they
+    // fire. Eight seeds carry the claim "each fault type fired somewhere across
+    // these seeds" as well as 32 would, and a seed here materializes real SQLite
     // files on three nodes.
     let dir = tempfile::tempdir().expect("tempdir");
     let workload = SqlAccountSwarm::new(3, 3, 6, dir.path().to_path_buf());
@@ -433,13 +427,13 @@ fn sql_cluster_swarm_is_reproducible() {
 /// SQL traffic under the seeded swarm (spec §18.4): randomized writes and reads
 /// across a small key space, with sleeps past `idle_after` so activations
 /// hibernate, checkpoint into blobs, and rematerialize mid-run. One scratch
-/// directory serves every run: the facet's restore discards stale local files
-/// (they are a cache, never truth; §1), which this sharing exercises for free.
+/// directory serves every run, so the facet's restore has to discard stale
+/// local files (a cache, never truth; §1).
 ///
 /// `random` gates the `AddRandom` traffic (SQLite's own `random()`, OS-seeded).
 /// It is off for reproducibility sweeps: physical replication makes the value
-/// safe for durability (asserted elsewhere), but the §18.1 repro contract is
-/// kept strict, no unseeded randomness anywhere in a replayed run.
+/// safe for durability (asserted elsewhere), but the §18.1 repro contract stays
+/// strict, no unseeded randomness in a replayed run.
 struct SqlSwarm {
     clients: usize,
     ops: u64,

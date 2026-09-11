@@ -64,9 +64,8 @@ fn registry_cluster(sim: &Simulation, nodes: &[NodeId]) -> (SimRegistry, SimNetw
 }
 
 /// Drive an async system call (an operator command, an `ask`) to completion
-/// under a running detector. `Simulation::block_on` runs to *quiescence*, which
-/// a SWIM cluster never reaches (the detector probes forever), so instead we
-/// launch the future and advance a bounded `settle` span for it to finish in.
+/// under a running detector (a SWIM cluster never quiesces, so `block_on` would
+/// never return): launch the future and advance a bounded `settle` span.
 fn drive<T: Send + 'static>(
     sim: &Simulation,
     settle: Duration,

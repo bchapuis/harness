@@ -2,32 +2,31 @@
 //!
 //! **What this settled.** A commit on this branch, `932ebca`, recorded that an
 //! alarm-wired entity does not commit *at all* under plain frame loss (no
-//! partition, no crash) the entity activating, never committing, being
-//! hibernated, while the caller hangs to its own deadline. `557ad1a` reverted
-//! that prose with no reason written down, and the workload behind it was never
-//! committed, so the claim survived as an assertion nobody could check. This file
-//! is the check. **It does not reproduce**, under the conditions the commit named
-//! or under harsher ones: at one-in-six, one-in-three, and one-in-two frame loss,
-//! with hibernation on and off, and with the settle window removed entirely, the
-//! alarm-wired arm committed on every configuration; more often than the plain
-//! arm on four of the six, never categorically less.
+//! partition, no crash): the entity activates, never commits, and is hibernated
+//! while the caller hangs to its own deadline. `557ad1a` reverted that prose with
+//! no reason written down, and the workload behind it was never committed, so the
+//! claim survived as an assertion nobody could check. This file is the check.
+//! **It does not reproduce**, under the conditions the commit named or under
+//! harsher ones: at one-in-six, one-in-three, and one-in-two frame loss, with
+//! hibernation on and off, and with the settle window removed entirely, the
+//! alarm-wired arm committed on every configuration, more often than the plain
+//! arm on four of the six and never categorically less.
 //!
-//! It stays as a regression guard rather than being deleted with the question,
-//! because the property it now asserts is worth holding: adding the alarm index
-//! and its driver to an entity type must not cost that type its ability to commit.
+//! It stays as a regression guard because the property it now asserts is worth
+//! holding: adding the alarm index and its driver to an entity type must not cost
+//! that type its ability to commit.
 //!
-//! **The differential is controlled.** Both arms host the `AlarmIndex` entity,
-//! so the Raft group count is identical and neither carries a group the other
-//! lacks; both run the same `Timer`, the same seeds, and the same
-//! [`FaultPolicy`]. Only the timer's wiring differs: `entities_with_alarms`
-//! against plain `entity`, which is exactly `Some(index)` to the host plus the
-//! driver loop.
+//! **The differential is controlled.** Both arms host the `AlarmIndex` entity, so
+//! the Raft group count is identical; both run the same `Timer`, the same seeds,
+//! and the same [`FaultPolicy`]. Only the timer's wiring differs:
+//! `entities_with_alarms` against plain `entity`, which is `Some(index)` to the
+//! host plus the driver loop.
 //!
 //! **What is asserted is the relationship, not a rate.** Frame loss makes any
 //! given `ask` failable in both arms, so "the alarm arm committed less often" is
 //! not a defect and a threshold on it would be a flake. The defect described was
-//! categorical (the alarm arm commits nothing while the plain arm commits), so
-//! that is what this checks.
+//! categorical, so that is what this checks: the alarm arm commits nothing while
+//! the plain arm commits.
 
 mod support;
 
@@ -61,9 +60,8 @@ const C: NodeId = NodeId::new(3);
 const SHARDS: usize = 2;
 
 /// The loss rates swept. One-in-six needs a retry on most quorum round trips;
-/// one-in-three is where the plain arm starts failing most of its calls, which is
-/// the band where a wiring-induced stall would be easiest to mistake for the
-/// network, and so the band worth covering.
+/// one-in-three is where the plain arm starts failing most of its calls, the band
+/// where a wiring-induced stall would be easiest to mistake for the network.
 const LOSS_RATES: [u64; 2] = [6, 3];
 
 /// How many arms one run issues.
@@ -75,7 +73,7 @@ const CALL_DEADLINE: Duration = Duration::from_secs(10);
 
 /// How long the cluster settles before traffic. Longer than the no-loss harness
 /// needs: under loss the shard groups take several election rounds, and starting
-/// traffic before they have measures the bootstrap rather than the steady state.
+/// traffic before they finish measures the bootstrap rather than the steady state.
 const SETTLE: Duration = Duration::from_secs(10);
 
 // --- Harness (mirrors alarm_cluster.rs) ---------------------------------------
@@ -205,9 +203,8 @@ fn alarm_wiring_costs_no_commit_progress_under_frame_loss() {
          932ebca. Replay one with `commits(<seed>, Wiring::Alarms, <loss>)`.\n{summary}",
     );
 
-    // The differential only means something if the plain arm committed at all;
-    // if loss made *both* arms dry, the run measured an unusable network and says
-    // nothing about alarm wiring.
+    // The differential only means something if the plain arm committed at all: if
+    // loss made *both* arms dry, the run measured an unusable network.
     assert!(
         plain_ever_committed,
         "no seed committed anything even without alarm wiring, so this run compared \

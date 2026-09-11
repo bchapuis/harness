@@ -2,8 +2,8 @@
 //!
 //! A consumer frequently holds something for the life of an activation: the
 //! agent runtime's sandbox (agent §5.3), the machine's runtime binding (machine
-//! §2.1), with an open-once lifecycle, a release on every deactivation, and a
-//! hibernation veto while the open is in flight.
+//! §2.1). Each has an open-once lifecycle, a release on every deactivation, and
+//! a hibernation veto while the open is in flight.
 //!
 //! The workflow supplies this as a **component rather than a trait method**,
 //! because the resource's type and its open path are the consumer's: the workflow

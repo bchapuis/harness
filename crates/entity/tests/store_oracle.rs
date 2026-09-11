@@ -3,12 +3,12 @@
 //! `MemoryEntityStore` mirror, reopening the file store from disk as it goes, and
 //! require that the two agree on **every return value** at every step.
 //!
-//! `MemoryEntityStore` is the reference implementation, so this is the check that the
-//! durable store means the same thing the reference does, including across a
-//! restart, which is the half no in-process test reaches. It exists to make a
-//! storage-engine replacement reviewable: a rewrite that preserves the seam's meaning
-//! passes unchanged, and one that does not fails here rather than in a swarm suite
-//! three layers up, where the symptom would be a lost commit with no obvious cause.
+//! `MemoryEntityStore` is the reference implementation, so this checks that the
+//! durable store means what the reference means, including across a restart, the
+//! half no in-process test reaches. It makes a storage-engine replacement
+//! reviewable: a rewrite that preserves the seam's meaning passes unchanged, and one
+//! that does not fails here rather than in a swarm suite three layers up, where the
+//! symptom would be a lost commit with no obvious cause.
 //!
 //! **Why the returns and not just the final state.** A store that answered `Stale`
 //! where the reference answered `Stored` would leave identical records on disk and
@@ -47,8 +47,8 @@ const STEPS: usize = 80;
 /// suspected divergence, at roughly half a second per seed.
 const SEEDS: u64 = 100;
 
-/// splitmix64: a seeded stream in twenty lines, so this suite needs no `rand`
-/// dependency and replays identically from a seed.
+/// splitmix64: a seeded stream that needs no `rand` dependency and replays
+/// identically from a seed.
 struct Rng(u64);
 
 impl Rng {
@@ -69,8 +69,7 @@ impl Rng {
     }
 }
 
-/// Read a store call's durable outcome. The seam completes the write before it
-/// returns, so this only unwraps the value the store already made stable.
+/// One of the entities this oracle drives, named by index.
 fn entity(i: u64) -> EntityName {
     EntityName::new("test.Entity", format!("g{i}"))
 }
@@ -87,7 +86,7 @@ fn blob_bytes(i: u64) -> Vec<u8> {
 }
 
 /// One step's operation. Named rather than inlined so a failure reports which
-/// operation diverged, which is most of the work of diagnosing one.
+/// operation diverged.
 #[derive(Debug)]
 enum Op {
     StoreRecord {
@@ -142,10 +141,9 @@ enum Op {
 }
 
 /// Draw an operation. `head` and `base` come from the mirror, so `after` can be aimed
-/// at the boundaries where the two stores could plausibly disagree: the current
-/// head (the ordinary append), one below it (a re-delivery, which must be idempotent
-/// per slot), one above (a gap), zero, and just under the compacted base (a write the
-/// snapshot already subsumes).
+/// at the boundaries where the two stores could disagree: the current head (the
+/// ordinary append), one below it (a re-delivery, idempotent per slot), one above (a
+/// gap), zero, and just under the compacted base (a write the snapshot subsumes).
 fn draw(rng: &mut Rng, head: Seq, base: Seq) -> Op {
     let term = Term::new(rng.below(4));
     let after = match rng.below(5) {
@@ -270,8 +268,7 @@ fn apply(
             let bytes = blob_bytes(*which);
             let id = BlobId::of(&bytes);
             // The acks are compared like every other op's result: a store that
-            // refuses a put the other accepted has diverged, and the two stores
-            // agreeing on *outcomes* is what this oracle is for (**E18**).
+            // refuses a put the other accepted has diverged (**E18**).
             let f = file.put_blob(shard, g, id, bytes.clone());
             let m = mem.put_blob(shard, g, id, bytes);
             assert_eq!(f, m, "{where_}: put_blob diverged ({op:?})");
@@ -365,8 +362,8 @@ fn compare_all(
         fg.sort();
         mg.sort();
         if fg != mg {
-            // The listing is derived from what is on disk, so a divergence is most
-            // quickly read there.
+            // The listing is derived from what is on disk, where a divergence
+            // reads fastest.
             eprintln!("--- on disk under {} ---", root.display());
             for sub in ["segments", "blobs"] {
                 if let Ok(entries) = std::fs::read_dir(root.join(sub)) {
@@ -381,9 +378,9 @@ fn compare_all(
         // `shard_bytes` is an estimate by contract (`EntityStore::shard_bytes`), and
         // the two stores measure different things: the mirror sums payload lengths,
         // the file store sums file sizes, which carry framing and a log header. So
-        // the assertion is the relation that must hold rather than equality: the
-        // durable footprint is never below the bytes it stores. Do not strengthen
-        // this to `assert_eq!`; it would fail on the header alone.
+        // the assertion is a relation, not equality: the durable footprint is never
+        // below the bytes it stores. Do not strengthen it to `assert_eq!`; the
+        // header alone would fail it.
         assert!(
             file.shard_bytes(shard) >= mem.shard_bytes(shard),
             "{where_}: file shard_bytes {} below mirror {} for shard {shard}",
@@ -498,21 +495,19 @@ fn truncating_an_unseen_entity_does_not_create_it() {
     );
 }
 
-/// Named regression for the third divergence, and the only one the oracle above
-/// structurally cannot reach: it drives the store from one thread, and this one needs
-/// two.
+/// Named regression for the third divergence, the one the oracle above cannot reach:
+/// it drives the store from one thread, and this needs two.
 ///
 /// A blob is named by its content, so two puts of the same bytes are two puts at one
 /// path, and once the disk facet started pipelining its block puts, that stopped
-/// being rare. An image of identical blocks (an all-zero base image is the ordinary
-/// case, not a contrived one) hashes every block to a single id and issues a wave of
-/// them at once. They collided on a shared scratch file: one truncated another's
-/// half-written bytes, and every rename after the first found the path already gone.
-/// `put_blob` reports that as `Failed`, which poisons the store store-wide and
-/// one-way, so a create of a zero-filled image left a live node refusing every
-/// subsequent write, for the rest of its life.
+/// being rare. An image of identical blocks (an all-zero base image, the ordinary
+/// case) hashes every block to a single id and issues a wave of them at once. They
+/// collided on a shared scratch file: one truncated another's half-written bytes, and
+/// every rename after the first found the path already gone. `put_blob` reports that
+/// as `Failed`, which poisons the store store-wide and one-way, so a create of a
+/// zero-filled image left a live node refusing every subsequent write.
 ///
-/// Asserting on `failure()` and not just the acks is the point: a store that answered
+/// Asserting on `failure()` and not just the acks matters: a store that answered
 /// `Stored` while quietly poisoning itself would pass on the return values alone and
 /// fail the next unrelated write.
 #[test]

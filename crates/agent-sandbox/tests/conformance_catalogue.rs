@@ -13,10 +13,9 @@ use support::s_catalogue;
 
 /// Every suite the catalogue names still exists.
 ///
-/// The sibling catalogues have had this gate all along; this one could not, because
-/// its pointers were prose with the file names buried in them and nothing could tell
-/// a renamed suite from a reworded sentence. Now that they are file lists, a rename
-/// that misses this table fails the build here, as it does everywhere else.
+/// The pointers are file lists rather than prose, so a renamed suite is
+/// distinguishable from a reworded sentence: a rename that misses this table
+/// fails the build here, as it does in the sibling catalogues.
 ///
 /// A bare name is a file under this crate's `tests/`; a name with a slash is
 /// relative to `crates/`, which is how S4 reaches the agent runtime suite that owns it.

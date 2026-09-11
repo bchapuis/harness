@@ -262,8 +262,8 @@ fn the_cluster_elects_a_new_leader_when_the_leader_crashes() {
     let nodes = [&a, &b, &c];
     let old_leader = elected_leader(&nodes).node();
 
-    // Commit a drain of D... no D here: drain one of the survivors? Drain must
-    // target a member; pick a survivor and verify the state outlives failover.
+    // A drain must target a member, so drain one survivor and check the
+    // committed state outlives the failover.
     let survivor: Vec<&&SimNode> = nodes.iter().filter(|n| n.node() != old_leader).collect();
     let (first, second) = (survivor[0], survivor[1]);
     let target = second.node();
@@ -795,19 +795,15 @@ fn a_paused_leader_wakes_already_deposed_and_does_not_disrupt() {
     // new leader and keep committing; the frozen leader commits nothing. On resume
     // it drains the backlog, hears the newer term, and steps down, already deposed.
     //
-    // NOTE (an honest result of writing this): for a *leader*, this is observably
-    // the same as a partition, and deliberately so; a Raft leader does NOT climb
-    // its term while merely isolated (it stays leader-in-its-own-view until it hears
-    // a higher term), so freeze and partition both give a clean, non-disruptive
-    // deposition. The "regardless of clock skew" robustness is *structural*: this
-    // Raft never grants or holds leadership on a clock (no lease), so a leader whose
-    // clock froze cannot wrongly believe it still leads; there is no clock-based
-    // fence to fool. (Swapping `pause`/`resume` here for `partition`/`heal` keeps the
-    // test green, confirming the property is robust across both fault kinds, not a
-    // knife-edge of the freeze.) The freeze primitive earns its keep as a distinct
-    // *fault* (state preserved, inbound replayed, no self-progress) for future
-    // liveness work; it does not, for this clock-free design, open a new *safety*
-    // surface beyond what partition already covers.
+    // NOTE: for a *leader* this is observably the same as a partition, and
+    // deliberately so; a Raft leader does NOT climb its term while merely isolated
+    // (it stays leader-in-its-own-view until it hears a higher term), so freeze and
+    // partition both give a clean, non-disruptive deposition. The "regardless of
+    // clock skew" robustness is *structural*: this Raft never grants or holds
+    // leadership on a clock (no lease), so a leader whose clock froze cannot wrongly
+    // believe it still leads; there is no clock-based fence to fool. The freeze
+    // primitive earns its keep as a distinct *fault* (state preserved, inbound
+    // replayed, no self-progress) for future liveness work.
     let sim = Simulation::new(33);
     let recorder = Recorder::new();
     let net = leader_net(&sim, DowningPolicy::Conservative).with_events(Arc::new(recorder.clone()));

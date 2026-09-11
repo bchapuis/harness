@@ -61,8 +61,6 @@ impl Actor for DoorStub {
     type System = SimNode;
 }
 
-// --- Entity-specific continuous safety checkers (as in the disk/sql swarms) -----
-
 // --- The workload ---------------------------------------------------------------
 
 /// Attach/dwell/detach sessions against a handful of machines under the

@@ -10,7 +10,7 @@ should be visible first:
 ```
 
 Everything else lives here, named `<verb>-<subject>.sh` so the verb sorts first
-and the family is obvious at a glance:
+and the family is obvious:
 
 - [`smoke-agent.sh`](smoke-agent.sh): the `demo-agent.sh` story against a canned fake Messages API. No API key, no docker: three nodes, a prompt over the gateway, a records read, then a node kill and a same-turn resume.
 - [`bench-machine-cost.sh`](bench-machine-cost.sh): what a machine `create` costs, decomposed into the cold cluster's fixed cost and the path itself. Sweep image sizes to separate the two.

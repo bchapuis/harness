@@ -6,10 +6,8 @@
 //! `invariant: n` reads as "Bn".
 //!
 //! This crate is why the pattern exists. Its §9 column was prose, and prose rots
-//! silently: seven of its cited test names had drifted from the suites they named
-//! (every one of them still describing a real property, none of them still
-//! naming a real test), and nothing failed, because nothing was checking. The
-//! pointers below are checked.
+//! silently: seven of its cited test names had drifted from the suites they
+//! named, and nothing failed. The pointers below are checked.
 //!
 //! Verification is split between this crate's `tests/` and the unit tests beside
 //! the code in `src/` (address integrity, dedup, placement, and tombstone

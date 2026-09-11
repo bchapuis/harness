@@ -2,18 +2,14 @@
 //! §13), as distinct from the per-type settings in [`EntityConfig`].
 //!
 //! Two things in this crate are scoped to the node rather than to an entity type: the
-//! blocking-I/O pool, which exists to bound *this node's* concurrent device work, and
-//! the metrics registry, which an operator reads to judge *this node's* health. Both
-//! once lived in [`EntityConfig`], which is per entity type, and that placement was
-//! wrong in a way that showed up at every call site: a node hosting three types wrote
-//! the same two handles into three configs, and a config that omitted one silently got
-//! a *second* pool (an inline one) rather than the node's. Neither mistake is
-//! visible in a type signature, and the second is invisible at runtime too, right up
-//! until a stalled device blocks the executor the pool was added to protect.
+//! blocking-I/O pool, which bounds *this node's* concurrent device work, and the
+//! metrics registry, which an operator reads to judge *this node's* health. Per-type
+//! copies would give a node hosting three types three pools, and a type that omitted
+//! one an inline pool rather than the node's, which stays invisible until a stalled
+//! device blocks the executor the pool was added to protect.
 //!
-//! So they hang here instead. A deployment builds one [`EntityNode`], sets what it
-//! has, and hosts every type through it; the handles are resolved once, when the node
-//! is built, rather than rebuilt per call.
+//! A deployment builds one [`EntityNode`], sets what it has, and hosts every type
+//! through it; the handles are resolved once, when the node is built.
 
 use std::sync::Arc;
 

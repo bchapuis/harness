@@ -29,11 +29,10 @@ pub enum Verify {
     /// owning crate.
     ///
     /// The alternative to [`SimTest`](Verify::SimTest) for a catalogue whose spec
-    /// names its verification the same way: blob §9 and machine §7 both do, and
-    /// so does wal §7, which pointed at functions before this variant existed. A
-    /// function name states the property; a file name says where to look. Where a
-    /// suite is a whole file the file is the better pointer, and where it is one
-    /// case among many in `src/lib.rs` only the function is worth anything.
+    /// names its verification the same way: blob §9, machine §7, and wal §7 all
+    /// do. A function name states the property; a file name says where to look.
+    /// Where a suite is a whole file the file is the better pointer, and where it
+    /// is one case among many in `src/lib.rs` only the function is worth anything.
     ///
     /// Its `conformance_catalogue` test scans the crate for `fn <name>(`, so a
     /// renamed case fails the build the way a renamed file does.
@@ -47,13 +46,11 @@ pub enum Verify {
     CompileTime(&'static str),
     /// Nothing verifies this yet, and the string says why not.
     ///
-    /// Distinct from the others because it is the one entry that names no test,
-    /// no checker, and no guarantee. It was a `SimTest` whose payload was a
-    /// sentence beginning "future:", which reads as verification to anything that
-    /// does not parse the prose, including the drift tests, which found a file
-    /// list with no files in it and had nothing to say. A deferral is a real state
-    /// for an invariant to be in (sandbox §7 keeps a list of them); it just has to
-    /// be able to announce itself.
+    /// Distinct from the others because it names no test, no checker, and no
+    /// guarantee. Recorded as a `SimTest` whose payload began "future:", it read
+    /// as verification to anything that does not parse the prose, the drift tests
+    /// included. A deferral is a real state for an invariant to be in (sandbox §7
+    /// keeps a list of them); it just has to announce itself.
     Deferred(&'static str),
 }
 

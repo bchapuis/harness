@@ -97,14 +97,13 @@ pub enum StoreAck {
     /// failing disk, a lost mount) means it cannot make the write durable, so it
     /// cannot honestly acknowledge it.
     ///
-    /// Distinct from every other refusal above, which are decisions this replica
-    /// *made*; this one is a decision it could not make. The caller counts it like
-    /// an unreachable replica: it does not satisfy a quorum, it carries no term or
-    /// head worth believing, and it must never be read as a commit. A store that
-    /// answers `Failed` once answers it for everything afterwards
-    /// ([`FileEntityStore`](crate::file_store::FileEntityStore) poisons itself), so the node
-    /// simply stops counting toward its shards' quorums instead of crashing and
-    /// failing over every shard it happened to lead.
+    /// Every other refusal above is a decision this replica *made*; this one is a
+    /// decision it could not make. The caller counts it like an unreachable replica:
+    /// it does not satisfy a quorum, it carries no term or head worth believing, and
+    /// it must never be read as a commit. A store that answers `Failed` once answers
+    /// it for everything afterwards
+    /// ([`FileEntityStore`](crate::file_store::FileEntityStore) poisons itself), so
+    /// the node stops counting toward its shards' quorums.
     Failed,
 }
 
@@ -310,10 +309,10 @@ pub trait EntityStore: EntityBlobStore {
 
     /// An entity's head alone (§7.3): what activation needs before it can serve.
     ///
-    /// Separate from [`read`](EntityStore::read) because the two differ by everything the
-    /// entity holds: `read` clones every occupied slot's bytes, and a caller after the head
-    /// then discards all of them to keep one integer. An entity with a long uncompacted tail
-    /// paid that on every activation, growing with its history.
+    /// Separate from [`read`](EntityStore::read), which clones every occupied slot's
+    /// bytes only for a caller after the head to discard them all and keep one integer.
+    /// An entity with a long uncompacted tail paid that on every activation, growing
+    /// with its history.
     ///
     /// The default answers through `read` and is always correct; a store that can reach
     /// its head without materializing the records overrides it. Defaulted rather than
@@ -327,8 +326,8 @@ pub trait EntityStore: EntityBlobStore {
     /// An entity's latest snapshot as `(seq, state)`, without its records.
     ///
     /// The [`head`](EntityStore::head) argument applies unchanged: rehydration asks for
-    /// this immediately after the head, and through `read` it cloned the whole record set
-    /// a second time to reach one field.
+    /// this immediately after the head, and through `read` it cloned the whole record
+    /// set a second time to reach one field.
     #[must_use = "the answer is the whole point of the call"]
     fn snapshot(&self, shard: u32, entity: &EntityName) -> Option<(Seq, Vec<u8>)> {
         self.read(shard, entity)
@@ -351,10 +350,10 @@ pub trait EntityStore: EntityBlobStore {
     /// has read it), then return this replica's slots and snapshot. Refuses with
     /// `Fenced(higher)` if it has already promised a higher term.
     /// The promise is made under the entity's segment lock, before the call returns,
-    /// so it fences a concurrent append either way, and the returned view is stable by
-    /// the time the call returns. Both halves matter: a promise made late would let a
-    /// deposed leader commit, and a view released early would let a recovering leader
-    /// adopt a head no replica has on disk (**E14**).
+    /// so it fences a concurrent append either way and the returned view is stable.
+    /// Both halves matter: a promise made late would let a deposed leader commit, and
+    /// a view released early would let a recovering leader adopt a head no replica has
+    /// on disk (**E14**).
     #[must_use = "a store call can refuse to write (Fenced/Stale/Sealed/Failed); read the outcome (E14)"]
     fn prepare(&self, shard: u32, entity: &EntityName, term: Term) -> ReadOutcome;
 
@@ -451,7 +450,7 @@ pub trait EntityStore: EntityBlobStore {
 /// entity's records survive a full-cluster cold restart. The default is a fresh
 /// ephemeral [`MemoryEntityStore`] per store (lost on restart).
 ///
-/// The `entity_type` is not decoration: a store's fence and append bound are keyed by
+/// The `entity_type` carries weight: a store's fence and append bound are keyed by
 /// shard *index*, while a shard's identity (and the leader-election group whose term
 /// the fence holds) is `(entity_type, index)` (§8.2). Two types are two independent
 /// groups whose terms advance independently, so one store shared across types would
@@ -613,9 +612,7 @@ impl EntityRecords {
         // encode identically), so a byte-only check would read a *different* append
         // onto a stale head as a duplicate, store it over the record that slot already
         // committed, and ack: two leaders report their write durable while one record
-        // exists, an acknowledged write lost (**E14**). A genuine re-delivery carries
-        // the term of the append that made it; a stale-head append from a newer leader
-        // never can.
+        // exists, an acknowledged write lost (**E14**).
         if kind == WriteKind::Append {
             if after.value() < base {
                 return StoreAck::Stale(self.head());
@@ -1001,11 +998,10 @@ impl EntityStore for MemoryEntityStore {
             .unwrap_or_default()
     }
 
-    // `head` and `snapshot` read the segment directly rather than through `read`, whose
-    // reply would clone every record the entity holds only for the caller to drop them.
-    // `EntityRecords::head` counts the same leading gap-free run over the snapshot's seq
-    // that `ReadReply::head` folds (`base` equals that seq whenever a snapshot exists),
-    // so the answer is unchanged and nothing is copied to reach it.
+    // `head` and `snapshot` read the segment directly rather than through `read` (see
+    // the trait). `EntityRecords::head` counts the same leading gap-free run over the
+    // snapshot's seq that `ReadReply::head` folds (`base` equals that seq whenever a
+    // snapshot exists), so the answer is unchanged and nothing is copied to reach it.
 
     fn head(&self, shard: u32, entity: &EntityName) -> Seq {
         self.with_records(shard, entity, EntityRecords::head)
@@ -1201,9 +1197,7 @@ mod tests {
 
     /// The property the synchronous seam exists to enforce: the write happens at
     /// **call** time, under the entity's segment lock, not when the caller gets around
-    /// to reading the outcome. An `async fn` store would run its body at first poll,
-    /// and a caller that never polled would silently not write, which is why the seam
-    /// returns a settled value rather than a future (§8, §18.1).
+    /// to reading the outcome (§8, §18.1).
     #[test]
     fn the_write_happens_when_the_call_is_made_not_when_its_outcome_is_read() {
         let store = MemoryEntityStore::new();

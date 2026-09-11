@@ -2,7 +2,7 @@
 //!
 //! Layout is the sessions list (left), the transcript (right), the input line,
 //! and a status/hints bar. The transcript is word-wrapped *here* into physical
-//! rows so the scroll offset is exact, when "following", the view parks at the
+//! rows so the scroll offset is exact. When "following", the view parks at the
 //! bottom; scrolling up detaches until the user pages back down. A `?` overlay
 //! maps every key to the gateway endpoint it drives.
 
@@ -123,8 +123,8 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let viewport = area.height.saturating_sub(2) as usize;
 
-    // Project the records to logical lines, then word-wrap into physical rows here
-    // (see `wrap_line`). Rendering the pre-wrapped slice means no widget
+    // Project the records to logical lines, then word-wrap into physical rows
+    // here (see `wrap_line`): rendering the pre-wrapped slice means no widget
     // re-wrapping can disagree with our offset and clip the final record.
     let logical = if app.records.is_empty() {
         vec![Line::styled(

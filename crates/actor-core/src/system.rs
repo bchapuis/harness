@@ -74,8 +74,8 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     }
 
     /// Spawn a root actor from a `factory` so a `Restart` directive can
-    /// re-create it (spec §11.2). The value-based [`spawn`](ActorSystem::spawn)
-    /// cannot reconstruct its actor, so a restart there degrades to `Stop`.
+    /// re-create it (spec §11.2), unlike the value-based
+    /// [`spawn`](ActorSystem::spawn).
     fn spawn_with<A, F>(&self, mut factory: F) -> ActorRef<A>
     where
         A: Actor<System = Self>,
@@ -85,9 +85,8 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     }
 
     /// Spawn a child from a `factory` so a `Restart` directive can re-create it
-    /// (spec §11.2), parented to `parent`. The value-based [`spawn_child`] cannot
-    /// reconstruct its actor, so a restart there degrades to `Stop`. Used by
-    /// [`Ctx::spawn_with`].
+    /// (spec §11.2), parented to `parent`, unlike the value-based
+    /// [`spawn_child`]. Used by [`Ctx::spawn_with`].
     ///
     /// [`spawn_child`]: ActorSystem::spawn_child
     /// [`Ctx::spawn_with`]: crate::Ctx::spawn_with
@@ -135,7 +134,7 @@ pub trait ActorSystem: Clone + Send + Sync + 'static {
     /// with [`Event::AskIssued`] before dispatch and exactly one
     /// [`Event::AskOutcome`] when it resolves (success or [`CallError`] alike)
     /// mirroring the bracket [`Mailbox::ask`] emits on the local path. The
-    /// checker proves no ask is silently lost from those pairs; an
+    /// checker proves no ask is silently lost from those pairs, so an
     /// implementation that skips them hides exactly the losses the invariant
     /// exists to catch.
     fn remote_ask(
@@ -377,11 +376,10 @@ impl<C: Clock, E: Entropy, S: Spawner> ActorSystem for LocalSystem<C, E, S> {
     }
 
     fn watch(&self, target: ActorId, watcher: ActorId, deliver: WatchDelivery) {
-        // An already-terminated target is the host's case to judge (it holds the
-        // termination record, invariant #12); the immediate delivery it hands
-        // back is launched rather than run inline: delivery applies mailbox
-        // backpressure, and a watcher calling `watch` from inside its own
-        // handler must not block on (or deadlock against) its own mailbox.
+        // The host judges an already-terminated target (invariant #12). Launch
+        // the immediate delivery it hands back rather than running it inline: a
+        // watcher calling `watch` from its own handler must not deadlock
+        // against its own mailbox.
         if let Some(immediate) = self.inner.host.watch(target, watcher, deliver) {
             self.inner.spawner.launch(immediate);
         }

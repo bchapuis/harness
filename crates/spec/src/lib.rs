@@ -98,7 +98,7 @@ pub struct DocSpec {
 /// of the prose, and the specs the catalogues live in.
 ///
 /// A spec absent from this table is checked by nothing, so `tests/citations.rs`
-/// asserts the table covers all of `docs/`, adding a spec without registering it
+/// asserts the table covers all of `docs/`: adding a spec without registering it
 /// fails the build, the way adding an invariant without cataloguing it does.
 pub const DOCUMENTS: &[DocSpec] = &[
     DocSpec {
@@ -131,8 +131,8 @@ pub const DOCUMENTS: &[DocSpec] = &[
         aliases: &["blob", "blob-store"],
         unprefixed: Unprefixed::Own,
     },
-    // The autonomous entity (the `workflow` crate). Cites the agent runtime above it: the
-    // harness is the layer it generalizes and does not yet sit on it.
+    // The autonomous entity (the `workflow` crate). Cites the agent runtime: the
+    // layer it generalizes, and the one that now sits on it.
     DocSpec {
         id: "workflow",
         path: "docs/workflow-spec.md",
@@ -181,7 +181,7 @@ pub const DOCUMENTS: &[DocSpec] = &[
         aliases: &["simulation-testing"],
         unprefixed: Unprefixed::Other(&["actor"]),
     },
-    // A deployment guide for the agent runtime; its bare `spec §6.1` is the agent runtime spec.
+    // A deployment guide for the agent runtime; its bare `spec §6.1` is the agent spec.
     DocSpec {
         id: "standalone",
         path: "docs/standalone-deployment.md",

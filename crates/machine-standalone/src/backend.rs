@@ -81,9 +81,8 @@ impl ChannelBackend for LocalBackend {
     }
 }
 
-/// A node with no guest to bridge to at all: `--machine fake`, or a build without
-/// the binding. Distinct from a machine led by another node: durability works
-/// here, sessions never will.
+/// A node with no guest to bridge to at all: `--machine fake`, or a build
+/// without the binding. Distinct from a machine led by another node.
 fn no_guest_here(machine: &EntityName) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::NotFound,

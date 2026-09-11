@@ -6,11 +6,11 @@
 //! not seed-reproducible, so they poll until converged rather than assuming
 //! timing.
 //!
-//! What no longer depends on this file's luck: the transport's *decisions*
-//! (the address book's rules, dial-race arbitration, ABA-safe eviction) live
-//! socket-free in `src/association.rs`, where unit tests spell each race out
-//! deterministically. What remains here is what only real sockets can show:
-//! the I/O ordering, teardown, and liveness around those decisions.
+//! The transport's *decisions* (the address book's rules, dial-race
+//! arbitration, ABA-safe eviction) live socket-free in `src/association.rs`,
+//! where unit tests spell each race out deterministically. What remains here is
+//! what only real sockets can show: the I/O ordering, teardown, and liveness
+//! around those decisions.
 
 mod support;
 

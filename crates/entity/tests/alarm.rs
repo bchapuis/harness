@@ -69,8 +69,8 @@ impl Entity for AlarmEntity {
     }
 
     // Regression net: activation has no command stage armed, so this read must
-    // answer from the committed form, not panic about command scope (alarm
-    // reads are valid anywhere the form is folded, entity §7.16).
+    // answer from the committed form rather than panic about command scope
+    // (entity §7.16).
     fn on_activate(
         &mut self,
         ctx: &EntityCtx<Self>,
@@ -190,8 +190,8 @@ fn activated(recorder: &Recorder) -> bool {
 
 #[test]
 fn alarm_fires_once_past_due() {
-    // A generous idle window so the entity does not hibernate before the alarm; the
-    // veto would prevent it anyway, but this keeps the intent local to the test.
+    // A generous idle window so the entity does not hibernate before the alarm,
+    // though the veto would prevent it anyway.
     let (sim, _rec, entities) = rig(1, Duration::from_secs(10));
     let g = entities.entity("a/0");
     sim.block_on(async move {
@@ -256,9 +256,8 @@ fn pending_alarm_vetoes_hibernation() {
     // Aggressive idle window, far-future alarm, and NO alarm index wired: with
     // nothing to wake it, the entity must stay resident so the in-activation timer
     // survives to fire it (the unconditional half of the veto, spec §7.16). Drive
-    // with `launch` + `run_for`, not `block_on`: a vetoing entity never quiesces, so
-    // `block_on` (which runs to quiescence) would advance all the way to the
-    // deadline instead of stopping at the bound.
+    // with `launch` + `run_for`, not `block_on`: a vetoing entity never quiesces,
+    // so `block_on` would run to the deadline instead of stopping at the bound.
     let (sim, recorder, entities) = rig(4, Duration::from_millis(10));
     sim.spawner().launch(Box::pin(async move {
         let _ = entities.entity("a/0").ask(Arm { after_ms: 10_000 }).await;

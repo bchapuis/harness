@@ -1,7 +1,7 @@
-//! The agent runtime gateway: the public HTTP/SSE edge, an Orleans-style cluster
-//! **client** of the agent runtime cluster.
+//! The agent runtime gateway: the public multi-tenant HTTP/SSE edge, an
+//! Orleans-style cluster **client** of the agent runtime cluster (design:
+//! `docs/multi-tenant-edge.md`).
 //!
-//! It is the public multi-tenant edge (design: `docs/multi-tenant-edge.md`).
 //! A caller presents a bearer token; the gateway verifies it to a [`PrincipalId`]
 //! (it **terminates** tenant auth), scopes the caller's session key under that
 //! principal, and drives the session by addressing its entity **directly**, no

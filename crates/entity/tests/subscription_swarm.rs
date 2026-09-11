@@ -2,14 +2,13 @@
 //! invariant **E16**).
 //!
 //! `tests/subscription_faults.rs` scripts the §14 subscription cases one at a
-//! time (a leader crash mid-stream, a burst that overflows the sink's buffer)
-//! each as a narrative you can read. This file makes the same claim the other
-//! way round: sweep seeds while the nemesis partitions, freezes, crashes, and
-//! restarts nodes underneath a live subscription, and check E16 on whatever
+//! time (a leader crash mid-stream, a burst that overflows the sink's buffer).
+//! This file sweeps seeds while the nemesis partitions, freezes, crashes, and
+//! restarts nodes underneath a live subscription, and checks E16 on whatever
 //! history each seed produced.
 //!
-//! The spec (§14) requires fault injection to produce four cases. Here they are
-//! not scripted but *induced*, and the workload is arranged so each is reachable:
+//! The spec (§14) requires fault injection to produce four cases; the workload
+//! induces rather than scripts them:
 //!
 //! - **A leader move mid-stream.** The nemesis partitions and crashes; a shard
 //!   whose leader is cut off elects another, and push stops without notice. The
@@ -25,10 +24,9 @@
 //!   shorter than a faulted quorum round, so some return `Unavailable` and land
 //!   afterwards: delivered or backfilled once, at their slot.
 //!
-//! The claim is the spec's own wording: the sink's seq-reconciled sequence equals
-//! what `load` to the head returns. It is checked against the journal at the end
-//! of every seed, so a run where faults happened to be mild still proves
-//! something, and one where they were savage proves the same thing.
+//! The claim is the spec's own wording: the sink's seq-reconciled sequence
+//! equals what `load` to the head returns, checked against the journal at the
+//! end of every seed.
 
 mod support;
 
@@ -95,11 +93,10 @@ struct SubscriptionSwarm {
     writers: usize,
     ops: u64,
     /// What the sweep actually compared, accumulated across seeds. Two escape
-    /// hatches below would otherwise let a green run mean nothing: a seed whose
-    /// shard never became readable returns without comparing, and a seed whose
-    /// sink reconstructed nothing compares two empty slices. Neither is wrong on
-    /// its own, but a sweep where *every* seed took one of them has asserted
-    /// E16 against no evidence.
+    /// hatches would otherwise let a green run mean nothing: a seed whose shard
+    /// never became readable returns without comparing, and a seed whose sink
+    /// reconstructed nothing compares two empty slices. A sweep where *every*
+    /// seed took one has asserted E16 against no evidence.
     compared: Arc<AtomicUsize>,
     records: Arc<AtomicUsize>,
 }
@@ -118,9 +115,8 @@ impl ClusterWorkload for SubscriptionSwarm {
     }
 
     fn rehost(&self) -> Option<Rehost> {
-        // Process death is the sharpest way to move a shard's leader mid-stream,
-        // which is the first case §14 asks for; a re-hosted successor is what
-        // keeps the shard servable afterwards.
+        // Process death moves a shard's leader mid-stream, the first case §14
+        // asks for; the re-hosted successor keeps the shard servable afterwards.
         Some(Arc::new(|node: &SimNode| {
             node.entities::<LogEntity>(config());
         }))
@@ -150,9 +146,9 @@ impl ClusterWorkload for SubscriptionSwarm {
             let entities = hosts[0].clone();
             let entity = entities.entity("log/subscribed");
 
-            // The subscriber, running for the whole drive. It stops on a deadline
-            // rather than a record count: under faults, how many records will ever
-            // commit is not knowable up front.
+            // The subscriber runs for the whole drive. It stops on a deadline
+            // rather than a record count: under faults, how many records will
+            // ever commit is not knowable up front.
             let deadline = clock.now() + DRAIN;
             let collector = {
                 let node = nodes[0].clone();
@@ -197,9 +193,9 @@ impl ClusterWorkload for SubscriptionSwarm {
 
             let (reconstructed, ()) = futures::future::join(collector, writes).await;
 
-            // E16, in the spec's own words: what the sink reconstructed equals
-            // what `load` to the head returns. Read the journal until it answers:
-            // a read that fails mid-election says nothing about the subscription.
+            // E16: what the sink reconstructed equals what `load` to the head
+            // returns. Read the journal until it answers: a read that fails
+            // mid-election says nothing about the subscription.
             let mut journal = None;
             for _ in 0..40 {
                 match entity
@@ -214,9 +210,9 @@ impl ClusterWorkload for SubscriptionSwarm {
                 }
             }
             let Some(journal) = journal else {
-                // The shard never became readable again in the window. That is a
-                // liveness observation about the cluster, not a E16 counterexample,
-                // and the safety core is still checked over the run.
+                // The shard never became readable again in the window: a liveness
+                // observation about the cluster, not an E16 counterexample, and
+                // the safety core is still checked over the run.
                 return;
             };
             compared.fetch_add(1, Ordering::Relaxed);

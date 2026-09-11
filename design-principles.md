@@ -4,18 +4,17 @@ Distilled from John Ousterhout, *A Philosophy of Software Design*. Use these as 
 when writing or reviewing code anywhere in this tree. The actor framework's
 [specification](docs/distributed-actor-spec.md) was written against them, so the examples
 below are drawn from the framework itself and cite the spec section that embodies the
-principle: read them as both guidance and a map of why the design is shaped the way it
-is. Bare **§N** citations throughout refer to that specification; the layers above it
-([docs/README.md](docs/README.md)) were written against the same defaults.
+principle. Bare **§N** citations throughout refer to that specification; the layers above
+it ([docs/README.md](docs/README.md)) were written against the same defaults.
 
 Project conventions are part of "obvious code": edition 2024, `unsafe_code = "forbid"`,
 `clippy::all = "warn"`, and no framework macros of its own (serde derives only, §1.1).
 
 ## Manage complexity
 
-Complexity makes software hard to understand and change. It is the enemy. It appears as
-change amplification (one change forces many edits), cognitive load (you must know too
-much), and unknown unknowns (you cannot tell what to change). Its two causes are
+Complexity makes software hard to understand and change. It appears as change
+amplification (one change forces many edits), cognitive load (you must know too much),
+and unknown unknowns (you cannot tell what to change). Its two causes are
 **dependencies** and **obscurity**.
 
 Complexity accumulates one small compromise at a time. Tolerate none.
@@ -26,7 +25,7 @@ Working code is not the goal; a good design is. Spend a steady fraction of effor
 improving structure rather than bolting on the smallest patch that works. The spec's
 design stance is this principle in the large: hand-written manifests and `register` lists
 (§1.1, §4.4) cost the user boilerplate now to keep the wire contract explicit and the
-framework simple, a deliberate investment, not the smallest thing that compiles.
+framework simple.
 
 ```rust
 // ✗ Each new failure mode bolted onto the call site.
@@ -87,7 +86,7 @@ pub trait Spawner: Send + Sync + 'static { fn launch(&self, task: BoxFuture<'sta
 
 Each layer should offer a different abstraction. Delete layers that only relay. Remove
 pass-through methods and pass-through variables; carry cross-cutting values in a context.
-The typed `ActorRef` layer and the byte-level `ActorSystem` trait are genuinely different
+The typed `ActorRef` layer and the byte-level `ActorSystem` trait are different
 abstractions (types and locality above, serialized payloads and transport below, §4.1),
 not one forwarding to the other.
 
@@ -113,8 +112,8 @@ fn spawn<A: Actor<System = Self>>(&self, actor: A) -> ActorRef<A>;
 ```
 
 Pull down complexity about *how* the module works. Leave up choices about *what* the
-caller wants. A purely local actor inherits an empty `register` default and never thinks
-about the wire (§4.4); a remote one overrides it; one spawn path serves both.
+caller wants. A local actor inherits an empty `register` default and never thinks about
+the wire (§4.4); a remote one overrides it; one spawn path serves both.
 
 ## Define errors out of existence
 
@@ -130,7 +129,7 @@ fn resolve<A: Actor<System = Self>>(&self, id: ActorId) -> ActorRef<A>;
 ```
 
 This is design, not `unwrap()`. Keep `Result`/`CallError` for genuine transport failures;
-eliminate the fake ones. And keep the two kinds apart: an application failure is a *value*
+eliminate the fake ones. Keep the two kinds apart: an application failure is a *value*
 inside `M::Reply` (e.g. `Result<T, E>`), distinct from a transport `CallError` (§3.2, §14).
 The type system then forces the caller to handle the real ones.
 
@@ -189,11 +188,10 @@ and remove work there, which usually simplifies the code. Know what the critical
 costs before deciding: [docs/hardware-envelope.md](docs/hardware-envelope.md) states the
 machine this tree targets and the arithmetic that follows, so a technique inherited from
 slower storage has to re-earn its complexity against the numbers rather than against
-habit. The local fast path is design,
-not micro-optimization: a local send enqueues by value and skips serialization entirely
-(§4.3), yet its observable result is identical to the remote path. And the framework ships
-no macros of its own (§1.1), resisting the derive-everything trend except where an
-*optional* derive genuinely lowers boilerplate.
+habit. The local fast path is design, not micro-optimization: a local send enqueues by
+value and skips serialization entirely (§4.3), yet its observable result is identical to
+the remote path. The framework ships no macros of its own (§1.1), resisting the
+derive-everything trend except where an *optional* derive lowers boilerplate.
 
 ## Checklist
 

@@ -4,7 +4,7 @@
 //! same pattern guarding the core and utilities catalogues.
 //!
 //! The agreement is checked **per (checker, invariant) pair**, not over the two
-//! sets of checker names. Two names carry six A-invariant here, so a name set
+//! sets of checker names. Two names carry six A-invariants here, so a name set
 //! is blind to the drift that actually happens: one entry quietly dropping its
 //! `Verify::Checker` while a sibling entry still names the same checker. That is
 //! how §11's A6 row came to understate its verification with every test green.
@@ -133,9 +133,10 @@ fn the_catalogue_covers_the_live_a_invariants() {
 /// to one, or a defining section moved in one, is caught here rather than left to
 /// be noticed.
 ///
-/// The suite axis is not compared here: the spec's column describes the verification in prose, naming no suite a build could resolve. So this
-/// gate covers the numbering and the defining sections, and the "Verified by"
-/// column stays a human's to keep true.
+/// The suite axis is not compared here: the spec's column describes the
+/// verification in prose, naming no suite a build could resolve. This gate
+/// covers the numbering and the defining sections; the "Verified by" column
+/// stays a human's to keep true.
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("agent");

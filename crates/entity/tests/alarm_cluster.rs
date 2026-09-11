@@ -1,15 +1,13 @@
 //! Durable alarms across a **real node failover** on the clustered `Quorum` tier
-//! (entity §16): the end-to-end proof that an alarm fires with no caller present
-//! after the leader that armed it has crashed.
+//! (entity §16): an alarm fires with no caller present after the leader that armed
+//! it has crashed.
 //!
-//! The Local-tier tests (`alarm_index.rs`) prove each mechanism: the index entity,
-//! the host registering as it arms, the driver re-activating an indexed entity. This
-//! test composes them under an actual shard-leader crash: arm an alarm, crash the
-//! entity's leader before the deadline, then advance time **without touching the
-//! entity**. The new leader's driver must re-activate it from the index and let it
-//! fire. The proof is observed through the *index* (a different entity, so reading it
-//! never re-activates the timer): a fired alarm consumes itself and the host clears
-//! its index entry, so the entry's disappearance means the entity fired callerlessly.
+//! The Local-tier tests (`alarm_index.rs`) prove each mechanism on its own: the
+//! index entity, the host registering as it arms, the driver re-activating an
+//! indexed entity. This test composes them under an actual shard-leader crash and
+//! observes the result through the *index* (a different entity, so reading it never
+//! re-activates the timer): a fired alarm consumes itself and the host clears its
+//! index entry, so the entry's disappearance means the entity fired callerlessly.
 
 mod support;
 
@@ -82,8 +80,7 @@ fn drive<T: Send + 'static>(
 type Indexes = Vec<Entities<AlarmIndex<SimNode>>>;
 
 /// Bring up a 3-node leader cluster hosting the shared `AlarmIndex` and the `Timer`
-/// type wired to it (`entities_with_alarms`) on every node. Returns the network (for
-/// the crash), the per-node timer handles, and the per-node index handles.
+/// type wired to it (`entities_with_alarms`) on every node.
 fn cluster(sim: &Simulation) -> (SimNetwork, Vec<Entities<Timer>>, Indexes) {
     let net = SimNetwork::new(sim).with_leader(
         swim_config(),
@@ -119,12 +116,10 @@ fn index_for(
 
 #[test]
 fn alarm_fires_callerlessly_after_a_leader_crash() {
-    // Several seeds: different leader placement and failover timing, one generous
-    // post-crash window absorbing them all. Widened from four because four is a
-    // sample of leader placements, not a cover of them: which node leads the
-    // shard, which survivor wins the re-election, and how the deadline falls
-    // relative to the driver's sweep are all seed-dependent, and the callerless
-    // re-activation has to hold for every combination.
+    // Several seeds, with one generous post-crash window absorbing them all: which
+    // node leads the shard, which survivor wins the re-election, and how the
+    // deadline falls relative to the driver's sweep are all seed-dependent, and
+    // the callerless re-activation has to hold for every combination.
     scenario_sweep("alarm-cluster/leader-crash", sweep_seeds(0..24), |seed| {
         run_failover(seed);
     });
@@ -200,14 +195,13 @@ fn run_failover(seed: u64) {
 
 #[test]
 fn an_alarm_fires_after_a_split_moves_its_entity() {
-    // §7.16 across §7.7: arm alarms on many entities of one shard, split it so
-    // roughly half move to a fresh child, then advance past the deadline with NO
-    // caller touching any timer. Each moved entity's alarm must still fire: the
-    // child's driver picks it up from the child's index (the entity re-registered
-    // there on the split's re-activation), and the parent's driver must clear
-    // the stale entries it inherited rather than churn on them forever. A
-    // recorder observes the committed `ShardSplit` so the test proves the split
-    // actually happened (else the alarms would fire trivially from shard 0).
+    // §7.16 across §7.7: alarms armed on one shard's entities must still fire after
+    // a split moves roughly half of them to a fresh child, with no caller touching
+    // any timer. The child's driver picks a moved entity up from the child's index
+    // (it re-registered there on the split's re-activation), and the parent's
+    // driver must clear the stale entries it inherited rather than churn on them
+    // forever. A recorder observes the committed `ShardSplit`, so a green run
+    // cannot come from alarms firing trivially on shard 0.
     use actor_core::EventSink;
     use actor_simulation::Recorder;
     use entity::EntityEvent;

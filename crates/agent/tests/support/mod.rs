@@ -3,9 +3,9 @@
 //! The agent runtime adds **two** rows to the table entity already virtualizes
 //! (§12.1): the **scripted model** (a deterministic function of the request) and
 //! the **scripted sandbox** (deterministic outcomes per call). The journal is
-//! the entity's, so the agent runtime tests drive the real entity host, gateway, and
-//! rehydration code under the same seed, simulating the agent runtime *runs the real
-//! consensus path*, with the agent's loop the only new code on it.
+//! the entity's, so the agent runtime tests drive the real entity host, gateway,
+//! and rehydration code under the same seed: a simulated agent run takes the
+//! real consensus path, with the agent's loop the only new code on it.
 //!
 //! Plus the continuous A-invariant checkers (§11) and the machine-readable
 //! [`a_catalogue`], guarded by the same drift-test pattern as the core and
@@ -519,8 +519,8 @@ pub use agent::testing::agent_invariants;
 /// `TierAcquired` at that tier with no `WorkspaceReset` in between, and every
 /// acquired or executed tier lies within the kind's cap.
 ///
-/// Synthesized outcomes: an unknown name, malformed arguments (§5.4), or an
-/// orphaned call resolved as `Interrupted` on resume (§5.5); carry no effect and
+/// Synthesized outcomes (an unknown name, malformed arguments, §5.4, or an
+/// orphaned call resolved as `Interrupted` on resume, §5.5) carry no effect and
 /// are exempt.
 pub fn audit_tier_acquisition(records: &[agent::Record], kind: &agent::Kind) {
     let cap = kind.tier_cap();
@@ -579,7 +579,7 @@ pub fn audit_tier_acquisition(records: &[agent::Record], kind: &agent::Kind) {
 /// alongside the conformance suite, guarded by the drift test in
 /// `conformance_catalogue.rs`. `invariant: n` reads as "An". **A2 is retired**
 /// (§11): the single-writer fence is wholly the entity's (E1), so it has no
-/// harness invariant; the numbers A3–A8 are kept stable rather than renumbered.
+/// agent invariant; the numbers A3–A8 are kept stable rather than renumbered.
 pub fn a_catalogue() -> &'static [CatalogueEntry] {
     A_CATALOGUE
 }

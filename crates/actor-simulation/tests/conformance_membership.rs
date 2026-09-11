@@ -71,14 +71,12 @@ fn fast_swim() -> SwimConfig {
 
 /// SWIM timings for the gossip tests: these exercise gossip dissemination,
 /// refutation, and downing (invariants #14–#17), which need a *direct*-probe
-/// suspicion to actually form, so indirect probing is disabled here.
+/// suspicion to actually form, so indirect probing is disabled here; it has its
+/// own test.
 fn gossip_swim() -> SwimConfig {
     SwimConfig {
         probe_interval: Duration::from_millis(100),
         rtt: Duration::from_millis(50),
-        // These tests exercise gossip dissemination, refutation, and downing
-        // (invariants #14–#17), which need a *direct*-probe suspicion to actually
-        // form, so indirect probing is disabled here; it has its own test.
         suspect_timeout: Duration::from_millis(500),
         indirect_count: 0,
     }

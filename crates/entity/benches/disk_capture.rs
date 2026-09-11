@@ -1,23 +1,16 @@
 //! What a disk-facet capture costs, block by block.
 //!
-//! Creating a 512 MB machine was observed to take roughly four minutes. Every
-//! constant anyone reached for said it should not: the uplink floor for 512 MB is ~8
-//! seconds and assumes nothing deduplicates, while a fresh image is mostly zeros that
-//! all hash to one blob, and local BLAKE3 over 512 MB is ~170 ms. Almost all of that
-//! four minutes was unexplained, and until it was attributed there was no honest way
-//! to choose a block size or an in-flight bound: either would have been tuned
-//! against a cost nobody had located.
+//! Creating a 512 MB machine was observed to take roughly four minutes, and no
+//! constant accounts for it: the uplink floor for 512 MB is ~8 seconds and assumes
+//! nothing deduplicates, a fresh image is mostly zeros that all hash to one blob, and
+//! local BLAKE3 over 512 MB is ~170 ms. The time went to two things, neither of them
+//! the fan-out: a mebibyte through serde's element-at-a-time path at each of two
+//! encoding layers, and a cold start where a Raft group waits out an election timeout
+//! for a failure that has not happened. Keep these numbers honest; they are the floor
+//! every later claim is checked against.
 //!
-//! It has since been attributed, and this file is the layer that did it: what these
-//! numbers established is that the single-node path costs what its parts cost and no
-//! more, which is what made the rest of the time findable elsewhere. It was two things,
-//! and neither was the fan-out: a mebibyte going through serde's element-at-a-time
-//! path at each of two encoding layers, and a cold-start cost that was a Raft group
-//! waiting out an election timeout built to detect a failure that had not happened.
-//! Keep these numbers honest; they are the floor every later claim is checked against.
-//!
-//! So this file does not benchmark a knob. It measures the capture path in three
-//! layers, cheapest first, so the layer that holds the time can be named:
+//! The capture path is measured in three layers, cheapest first, so the layer that
+//! holds the time can be named:
 //!
 //! 1. **The constants**, every per-byte term the path has: hashing a block, reading
 //!    one off the source, writing one into the image. Nothing above them can be
@@ -28,25 +21,23 @@
 //!    store (what the store layer itself adds), the file store on content it has
 //!    never seen (an `atomic_replace`; write, fsync, rename, fsync the directory),
 //!    and the file store on content it already holds (the dedup hit; one `exists`).
-//!    A fresh image is mostly the third, which is why the third is measured.
+//!    A fresh image is mostly the third.
 //! 3. **The whole path**, through a real entity with the [`Disk`] facet on the `Local`
 //!    tier: `import` for provisioning, a clean `capture` for the scan, and `puts` as
 //!    their control; the same number of trips through the same seam carrying four
-//!    bytes each instead of a mebibyte. The control is what separates a cost paid per
-//!    `await` from one paid per byte, and those two have opposite fixes: the first is
+//!    bytes each instead of a mebibyte. The control separates a cost paid per `await`
+//!    from one paid per byte, and those two have opposite fixes: the first is
 //!    answered by concurrency, the second only by moving fewer bytes.
 //!
-//! Read them together, not separately. Layer 3 divided by the block count, against
-//! layer 1 plus layer 2, is the number this file exists to produce: what the facet,
-//! the journal seam, and the staging cost *per block* over and above the bytes.
-//! Whatever is left after that is above the store (the quorum fan-out and its
-//! transport), and is not measurable here, because the `Local` tier has no peers.
-//! Bounding the local side is what makes the remainder attributable to the far side.
+//! Read them together. Layer 3 divided by the block count, against layer 1 plus layer
+//! 2, gives what the facet, the journal seam, and the staging cost *per block* over
+//! and above the bytes. Whatever is left is above the store (the quorum fan-out and
+//! its transport), and is not measurable here, because the `Local` tier has no peers.
 //!
-//! The sizes are deliberately smaller than the 512 MB that prompted this. The path
-//! is per-block and the interesting quantity is per-block cost, which a 64 MiB image
-//! measures as well as a 512 MiB one and sixteen times faster; a cost that appears
-//! only at 512 MB would show as a slope across the sweep.
+//! The sizes are smaller than the 512 MB that prompted this. The path is per-block,
+//! and a 64 MiB image measures per-block cost as well as a 512 MiB one and sixteen
+//! times faster; a cost that appears only at 512 MB would show as a slope across the
+//! sweep.
 
 use actor_serialization::Codec;
 use actor_serialization::JsonCodec;
@@ -94,9 +85,9 @@ fn main() {
 const BLOCK: usize = 1 << 20;
 
 /// The shard and entity every store-level benchmark writes under. Which ones is
-/// immaterial: a blob is keyed by `(shard, entity, id)` and none of the paths here
-/// branch on the first two, but holding them fixed keeps the segment lookup on its
-/// hit path, which is the steady state a capture runs in.
+/// immaterial: a blob is keyed by `(shard, entity, id)` and no path here branches on
+/// the first two. Holding them fixed keeps the segment lookup on its hit path, the
+/// steady state a capture runs in.
 const SHARD: u32 = 0;
 
 fn name() -> EntityName {
@@ -105,10 +96,9 @@ fn name() -> EntityName {
 
 /// One block whose content is unique to `stamp`.
 ///
-/// Uniqueness is the point, not the pattern: a `BlobId` is BLAKE3 of the whole
-/// block, so changing one byte makes the block content the store has never seen and
-/// forces the cold put. A benchmark that reused one block would measure the dedup
-/// hit and report it as the write.
+/// Uniqueness is the point: a `BlobId` is BLAKE3 of the whole block, so one changed
+/// byte makes content the store has never seen and forces the cold put. Reusing one
+/// block would measure the dedup hit and report it as the write.
 fn block(stamp: u64) -> Vec<u8> {
     let mut bytes = vec![0x5a; BLOCK];
     bytes[..8].copy_from_slice(&stamp.to_le_bytes());
@@ -121,9 +111,8 @@ fn block(stamp: u64) -> Vec<u8> {
 /// pays for a block that turns out to be clean.
 ///
 /// This is the ~170 ms per 512 MB claim, stated per block so it can be multiplied
-/// out. If a capture's per-block cost is anywhere near this, the scan is the path
-/// and the puts are noise; the observed four minutes says it is not, which is what
-/// makes the rest of this file necessary.
+/// out. If a capture's per-block cost is anywhere near this, the scan is the path and
+/// the puts are noise; the observed four minutes says it is not.
 #[divan::bench]
 fn hash(bencher: Bencher) {
     let bytes = block(0);
@@ -135,10 +124,10 @@ fn hash(bencher: Bencher) {
 /// Reading one block out of the image file, as `capture`'s scan does: an unbuffered
 /// `read_exact` into a freshly allocated block.
 ///
-/// Freshly allocated because that is what the facet does (it allocates a block per
-/// iteration of the scan rather than reusing one buffer), so the allocation belongs
-/// in the measurement. The file is small enough to sit in the page cache, which is
-/// the honest case for a capture: the guest has just written the image.
+/// Freshly allocated because that is what the facet does (a block per iteration of
+/// the scan rather than one reused buffer), so the allocation belongs in the
+/// measurement. The file is small enough to sit in the page cache, the honest case
+/// for a capture: the guest has just written the image.
 #[divan::bench]
 fn read(bencher: Bencher) {
     use std::io::Read;
@@ -160,10 +149,10 @@ fn read(bencher: Bencher) {
 /// Writing one block into the activation-local image, as `import`'s copy does: an
 /// unbuffered `write_all` into a file already sized to its final length.
 ///
-/// The last per-byte term in the path, and the only one not otherwise accounted for.
-/// `set_len` first, because that is what `import` does: the image is fixed-size, so
-/// every block after the first lands in a hole the filesystem has to allocate, and a
-/// write into a hole is not the same cost as a write over allocated extents.
+/// The last per-byte term in the path. `set_len` first, because that is what `import`
+/// does: the image is fixed-size, so every block after the first lands in a hole the
+/// filesystem has to allocate, and a write into a hole is not the same cost as a
+/// write over allocated extents.
 #[divan::bench]
 fn write(bencher: Bencher) {
     use std::io::Write;
@@ -189,10 +178,9 @@ fn write(bencher: Bencher) {
 /// pays the whole atomic write and a memory store pays an insert.
 ///
 /// `with_inputs` builds each iteration's block *and its id* outside the timed region.
-/// Both are the benchmark's setup rather than the store's work, and both would
-/// otherwise be double-counted: a 1 MiB allocation and fill would swamp the memory
-/// store entirely, and the hash is already layer 1's subject, leaving it here would
-/// make every store look like it costs at least one BLAKE3.
+/// Both are setup rather than the store's work: a 1 MiB allocation and fill would
+/// swamp the memory store, and leaving the hash in would make every store look like
+/// it costs at least one BLAKE3, which is layer 1's subject.
 fn put_cold(bencher: Bencher, store: impl EntityBlobStore) {
     let entity = name();
     let mut stamp = 0u64;
@@ -210,8 +198,8 @@ fn put_cold(bencher: Bencher, store: impl EntityBlobStore) {
 
 /// The in-memory store: hash, lock, insert. No disk.
 ///
-/// The floor `put_file` is read against, everything here is cost the store layer
-/// adds regardless of durability, and a capture pays it once per dirty block.
+/// The floor `put_file` is read against: cost the store layer adds regardless of
+/// durability, paid once per dirty block.
 #[divan::bench]
 fn put_memory(bencher: Bencher) {
     put_cold(bencher, MemoryEntityStore::new());
@@ -221,11 +209,10 @@ fn put_memory(bencher: Bencher) {
 /// write a temp file, fsync it, rename, fsync the directory.
 ///
 /// Two fsyncs per dirty block is the durability the acknowledgement stands for
-/// (**E18**), so this number is not a defect to be optimized away; it is the price
-/// of the path, and knowing it is what says whether a capture is fsync-bound. Being
-/// fsync-bound makes it a property of the filesystem and the device; see
-/// `docs/hardware-envelope.md` §3.3 on power-loss protection, which moves this by an
-/// order of magnitude.
+/// (**E18**), not a defect to optimize away. Knowing the number says whether a
+/// capture is fsync-bound, which makes it a property of the filesystem and the
+/// device; see `docs/hardware-envelope.md` §3.3 on power-loss protection, which moves
+/// this by an order of magnitude.
 #[divan::bench]
 fn put_file(bencher: Bencher) {
     let dir = tempfile::tempdir().expect("scratch dir");
@@ -238,13 +225,12 @@ fn put_file(bencher: Bencher) {
 /// The file store on content it already holds, the dedup hit: a path join and one
 /// `exists`, then `Stored`.
 ///
-/// This is the common case on a fresh image, and the reason a 512 MB create was
-/// expected to be cheap: an image that is mostly zeros is one distinct block put
-/// once and re-recognized five hundred times. It is measured because "recognized" is
-/// not free at the *caller*: the bytes still had to be read and hashed (layer 1),
-/// and on the `Quorum` tier they are still sent to every peer, since `put_blob` does
-/// not negotiate. What this benchmark shows is only that the store side of a
-/// recognized block is negligible, which localizes the cost elsewhere.
+/// The common case on a fresh image: an image that is mostly zeros is one distinct
+/// block put once and re-recognized five hundred times. "Recognized" is not free at
+/// the *caller*, though: the bytes still had to be read and hashed (layer 1), and on
+/// the `Quorum` tier they are still sent to every peer, since `put_blob` does not
+/// negotiate. The store side of a recognized block is negligible, which localizes the
+/// cost elsewhere.
 #[divan::bench]
 fn put_file_present(bencher: Bencher) {
     let dir = tempfile::tempdir().expect("scratch dir");
@@ -306,10 +292,10 @@ impl EntityHandler<ImportFrom> for DiskBox {
 /// Put `0` tiny blobs from inside one command handler: the same `await` the disk
 /// facet performs per block, with the block taken away.
 ///
-/// The control for `import`: identical seam, identical number of round trips through
-/// it, one byte of payload instead of a mebibyte. If the two agree per put, the cost
-/// is paid per `await` and the block size is irrelevant to it; if they differ by the
-/// bytes, it is paid per byte and the block size is the whole lever.
+/// The control for `import`: same seam, same number of round trips through it, one
+/// byte of payload instead of a mebibyte. If the two agree per put, the cost is paid
+/// per `await` and the block size is irrelevant to it; if they differ by the bytes,
+/// the block size is the whole lever.
 #[derive(Clone, Serialize, Deserialize)]
 struct TinyPuts(u32);
 impl Message for TinyPuts {
@@ -363,9 +349,9 @@ fn sim_system(sim: &Simulation, recorder: &Recorder) -> SimSystem {
 /// A config that hibernates nothing and snapshots nothing for the length of a run.
 ///
 /// Both would otherwise land inside the measurement at an interval decided by how
-/// many iterations divan chose, which is the one thing a benchmark must not let
-/// vary. What is being measured is the capture path, not the hibernation policy;
-/// what a checkpoint costs is `benches/store.rs`'s subject.
+/// many iterations divan chose, which is the one thing a benchmark must not let vary.
+/// The subject here is the capture path, not the hibernation policy; a checkpoint's
+/// cost belongs to `benches/store.rs`.
 fn config(
     scratch: &std::path::Path,
     store: Option<entity::store::EntityStoreFactory>,
@@ -393,10 +379,10 @@ fn write_source(path: &std::path::Path, mib: usize) {
 /// byte per block.
 ///
 /// A generation byte per block is enough: the id is BLAKE3 of the whole block, so a
-/// single differing byte makes all `mib` of them cold puts. That matters because the
-/// alternative (re-importing the same file) measures the dedup hit path and would
-/// report a create as far cheaper than the first one actually is. It is also cheap
-/// enough to sit in untimed setup: `mib` one-byte writes, not `mib` MiB of them.
+/// single differing byte makes all `mib` of them cold puts. Re-importing the same
+/// file instead would measure the dedup hit path and report a create as far cheaper
+/// than the first one is. It is also cheap enough to sit in untimed setup: `mib`
+/// one-byte writes, not `mib` MiB of them.
 fn refresh_source(path: &std::path::Path, mib: usize, stamp: u8) {
     use std::io::Seek;
     use std::io::SeekFrom;
@@ -417,22 +403,21 @@ fn refresh_source(path: &std::path::Path, mib: usize, stamp: u8) {
 /// write it into the activation-local image, hash it, put it, and (once) stage and
 /// commit one full-coverage manifest.
 ///
-/// The per-block counter is the number to read. Divided into the iteration time it
-/// gives what one block costs end to end, which is directly comparable with layers 1
-/// and 2 above; the byte counter is there so the same run can be read as a
-/// throughput against the ~125 MB/s uplink the four-minute observation was measured
-/// against.
+/// The per-block counter is the number to read: divided into the iteration time it
+/// gives what one block costs end to end, comparable with layers 1 and 2. The byte
+/// counter reads the same run as a throughput against the ~125 MB/s uplink the
+/// four-minute observation was measured against.
 ///
 /// Every iteration re-imports into the *same* entity, which is what `import` is for
 /// (it replaces the image wholesale). Only the content is made fresh, so the
-/// activation, the journal, and the segment stay warm across iterations: a create
-/// on a live node, not a cold start.
+/// activation, the journal, and the segment stay warm across iterations: a create on
+/// a live node, not a cold start.
 ///
 /// **Keep the sample count small.** An import roots every block it puts and nothing
 /// sweeps them inside one activation (a `RootSet` is union-kept, F3), so each sample
-/// leaves a whole image behind in the store. Enough samples and the numbers stop
-/// describing the path and start describing allocator pressure or a filling disk:
-/// the two callers below hold the retained total to a few hundred megabytes.
+/// leaves a whole image behind in the store. Enough samples and the numbers describe
+/// allocator pressure or a filling disk instead of the path: the two callers below
+/// hold the retained total to a few hundred megabytes.
 fn import(bencher: Bencher, mib: usize, store: Option<entity::store::EntityStoreFactory>) {
     let scratch = tempfile::tempdir().expect("scratch dir");
     let src = scratch.path().join("base.img");
@@ -496,8 +481,8 @@ fn import_file(bencher: Bencher, mib: usize) {
 ///
 /// Read this against `import_memory` at the matching size. Both make the same number
 /// of trips through `EntityBlobs::put` into the same in-memory store from inside one
-/// handler; the only difference is that these carry four bytes and those carry a
-/// mebibyte. Whatever the two have in common is not the bytes.
+/// handler; these carry four bytes, those carry a mebibyte. Whatever the two have in
+/// common is not the bytes.
 #[divan::bench(args = [4, 16, 64])]
 fn puts(bencher: Bencher, count: usize) {
     let scratch = tempfile::tempdir().expect("scratch dir");
@@ -518,11 +503,10 @@ fn puts(bencher: Bencher, count: usize) {
 /// A capture of an untouched image: the full scan, every block clean, nothing put
 /// and nothing staged (§7.5; the command rides the read path).
 ///
-/// This is the floor under *every* capture, and the one a checkpointing machine pays
-/// on each quiescent point whether or not the guest wrote anything. It should come
-/// out at layer 1's read plus hash times the block count; a gap means the scan
-/// itself carries per-block cost the facet added, and that gap is the thing a block
-/// size would be tuned against.
+/// The floor under *every* capture, paid by a checkpointing machine at each quiescent
+/// point whether or not the guest wrote anything. It should come out at layer 1's
+/// read plus hash times the block count; a gap is per-block cost the facet added, and
+/// that gap is what a block size would be tuned against.
 #[divan::bench(args = [4, 16, 64])]
 fn scan(bencher: Bencher, mib: usize) {
     let scratch = tempfile::tempdir().expect("scratch dir");

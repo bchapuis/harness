@@ -9,22 +9,22 @@ testing conventions.
 Normative, RFC 2119, each carrying its own invariant catalogue, and all but one
 a drift test that keeps the catalogue mechanically true. The exception is
 compatibility, whose table names neither a defining section nor a verifying
-suite, so there is no Rust copy to hold it against (its V3 is asserted at compile
-time and its V4/V5 by the golden corpus instead, compatibility §4). They layer
-bottom-up: every spec cites the ones beneath it by a short prefix (`core §N`,
-`entity §N`, and so on), citations the build resolves rather than trusts (the
-`spec` crate, under Testing). A spec may still *name* a layer above it where that
-is what explains a choice: actor §9.4.3 cites entity's group-per-shard count to
-motivate heartbeat coalescing, cluster-utilities §4 and §7 cite entity to
-disclaim a sharding utility, and entity §7.17 names the agent as the steps
-facet's reference consumer. The workflow is the one whose *argument* runs upward:
-it cites the agent runtime as its motivation, its worked example, and its
-measure, because the agent is the layer it generalizes. The crate dependency runs
-the other way, `agent` on `workflow`, and the agent implements `Workflow` rather
-than re-deriving it, so what those citations point at is a worked consumer. What
-the agent keeps beside the cycle is the environment reconciliation of agent §5.4,
-§5.5 and §5.6, which is activation state and so no function of any fold; it runs
-as a pre-pass ahead of every tick.
+suite, so there is no Rust copy to hold it against (its V3 is asserted at
+compile time and its V4/V5 by the golden corpus instead, compatibility §4).
+They layer bottom-up: every spec cites the ones beneath it by a short prefix
+(`core §N`, `entity §N`, and so on), citations the build resolves rather than
+trusts (the `spec` crate, under Testing). A spec may still *name* a layer above
+it where that explains a choice: actor §9.4.3 cites entity's group-per-shard
+count to motivate heartbeat coalescing, cluster-utilities §4 and §7 cite entity
+to disclaim a sharding utility, and entity §7.17 names the agent as the steps
+facet's reference consumer. The workflow spec's *argument* runs upward: it cites
+the agent runtime as its motivation, its worked example, and its measure,
+because the agent is the layer it generalizes. The crate dependency runs the
+other way, `agent` on `workflow`, and the agent implements `Workflow` rather
+than re-deriving it, so those citations point at a worked consumer. Beside the
+cycle the agent keeps the environment reconciliation of agent §5.4, §5.5 and
+§5.6, activation state and so no function of any fold, run as a pre-pass ahead
+of every tick.
 
 | | Spec | Owns | Invariants |
 |---|---|---|---|
@@ -72,9 +72,9 @@ One layer has a design note rather than a spec:
 - [`../crates/spec/`](../crates/spec/): the drift gate for this directory.
   The layering above is made of citations, two thousand-odd of them, and
   `cargo test -p spec` resolves every one against a section that exists. It is
-  the `docs/` analogue of a crate's `conformance_catalogue.rs`, and it is there
-  for the same reason: renumbering a section is a local edit whose citations are
-  not local, so prose that points at nothing fails nothing. A document missing
+  the `docs/` analogue of a crate's `conformance_catalogue.rs`, there for the
+  same reason: renumbering a section is a local edit whose citations are not
+  local, so prose that points at nothing fails nothing. A document missing
   from its `DOCUMENTS` table is checked by nothing, so a new spec is registered
   there (with the convention its own unprefixed `§N` follows) as part of
   adding it.
@@ -86,18 +86,18 @@ One layer has a design note rather than a spec:
   import. All nine are compared on which invariants exist and which sections
   define them, and eight on their "Verified by" column as well: by file for
   entity, utilities, workflow, agent, and sandbox, by test function for wal, blob,
-  and machine, whichever the spec itself names. The one that is not says why at
-  the site: the core catalogue is a numbered list and names no suites at all
-  (actor §18.6 carries that).
+  and machine, whichever the spec itself names. The ninth says why at the site:
+  the core catalogue is a numbered list and names no suites at all (actor §18.6
+  carries that).
 
   Its third gate is the **ranges**. A spec names a sibling's catalogue by its
-  extent, as in `entity §N` (its invariants as `E1–E21`), and that is a citation like
-  any other, pointing at a catalogue and saying how far it runs. Two checks pin
-  it from both sides: no range reaches past the catalogue it names, and across
-  the whole set some range reaches its last invariant. Neither is the obvious
-  rule, and the module says why both obvious ones are wrong: `A1–A8` spans an A2
-  that agent §11 deliberately retires, and `M1–M3` is a true claim about three
-  of six. The pair is what catches a catalogue that *grows*: `E21` was added at
+  extent, as in `entity §N` (its invariants as `E1–E21`): a citation like any
+  other, pointing at a catalogue and saying how far it runs. Two checks pin it
+  from both sides: no range reaches past the catalogue it names, and across the
+  whole set some range reaches its last invariant. Neither is the obvious rule,
+  and the module says why both obvious ones are wrong: `A1–A8` spans an A2 that
+  agent §11 deliberately retires, and `M1–M3` is a true claim about three of
+  six. The pair catches a catalogue that *grows*: `E21` was added at
   entity §7.16 and six citations across four documents went on describing
   entity as ending at E20, each of them resolving, parsing, and passing every
   other gate.
@@ -108,23 +108,23 @@ One layer has a design note rather than a spec:
   token of a shape the tree would own is checked against an index of every name
   declared under `crates/`. The index is a scan rather than rustdoc, because
   rustdoc's JSON needs nightly and the toolchain is pinned; it knows a name
-  exists somewhere, not where or what it is, which is the whole of what the
-  check claims. Names that are right and absent (std's, another system's, a
-  table column, and the ones a spec writes to say the tree has no such thing)
-  are listed with their reasons, and the list is checked in that direction too:
-  an exemption the tree starts defining fails the build, so it cannot outlive
-  its reason.
+  exists somewhere, not where or what it is, and that is all the check claims.
+  Names that are right and absent (std's, another system's, a table column, and
+  the ones a spec writes to say the tree has no such thing) are listed with
+  their reasons, and the list is checked in that direction too: an exemption the
+  tree starts defining fails the build, so it cannot outlive its reason.
 - [simulation-testing](simulation-testing.md), the whole verification story:
   why the simulator is owned rather than imported, the primitives, the
   strategies, the four shapes a test can take, seed sizing, the regression
   corpus, and the gaps the sweeps do not yet reach.
-- [`../scripts/bench-machine-cost.sh`](../scripts/bench-machine-cost.sh), the wall-clock counterpart, where the
-  simulator's virtual time cannot price anything: it boots a real cluster and times
-  two machine creates against it, the first paying every cold-start cost and the
-  second pricing the path. Its header carries the figures it last produced, and
-  several code comments cite it as the source of an end-to-end number. Read cold and
-  warm as two different measurements, and read per-block cost as the *slope* between
-  two image sizes; a total divided by its block count measures the intercept.
+- [`../scripts/bench-machine-cost.sh`](../scripts/bench-machine-cost.sh), the
+  wall-clock counterpart, where the simulator's virtual time cannot price
+  anything: it boots a real cluster and times two machine creates against it,
+  the first paying every cold-start cost and the second pricing the path. Its
+  header carries the figures it last produced, and several code comments cite it
+  as the source of an end-to-end number. Read cold and warm as two different
+  measurements, and per-block cost as the *slope* between two image sizes; a
+  total divided by its block count measures the intercept.
 
 ## Unfinished work
 
@@ -136,8 +136,8 @@ being changed, and the identifier gate's own list of words that look like names
 the tree would own and are not. That is deliberate. Unfinished work is
 **declared in the spec that owns it**, where a reader sees its cost and its
 blast radius, rather than dropped as a comment beside the code that would have
-to change. The consequence is that "what is left here?" cannot be answered by
-grepping the code, and is answered by reading these sections instead:
+to change. So "what is left here?" is answered by reading these sections rather
+than by grepping the code:
 
 - [compatibility §5](compatibility-spec.md), the format machinery that waits on
   a boundary having a second revision. Every format in the tree is stamped, and

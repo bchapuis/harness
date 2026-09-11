@@ -1,13 +1,13 @@
 # Multi-tenant edge: the gateway as a cluster client
 
-This is the design for making `agent-standalone` multi-tenant, built on the
-`tenancy` directory entity (`crates/tenancy`) and a single public edge: the
-**`agent-gateway`**, an Orleans-style cluster *client*.
+`agent-standalone` becomes multi-tenant through the `tenancy` directory entity
+(`crates/tenancy`) and a single public edge: the **`agent-gateway`**, an
+Orleans-style cluster *client*.
 
 The trust boundary is the **gateway**; a request proves its principal with a
-**bearer token**; and the gateway reaches the cluster by joining the actor
-transport as a non-voting, non-hosting member and addressing session entities
-directly, with no control protocol in between.
+**bearer token**; the gateway reaches the cluster by joining the actor transport
+as a non-voting, non-hosting member and addressing session entities directly,
+with no control protocol in between.
 
 ## The shape of the problem
 
@@ -22,15 +22,15 @@ What is missing lives entirely at the network edge:
    the caller sends. Nothing stops one caller from naming another's session
    unless the edge prevents it.
 
-## The key insight: isolation and enumeration are different jobs
+## Isolation and enumeration are different jobs
 
 Only one of them is security-critical.
 
 - **Isolation comes from edge-side key prefixing.** If the gateway prepends the
   *authenticated* principal to the session key
   (`SessionId::new(format!("{principal}/{session}"))`, via `auth::scoped_session`),
-  a client can only ever name entities inside its own namespace, because it never
-  supplies the prefix; the gateway does. This is the load-bearing isolation.
+  a client can name only entities inside its own namespace: it never supplies the
+  prefix, the gateway does.
 - **Enumeration and lifecycle come from the `Directory`.** "List my sessions",
   "drop my whole index when I leave": the parts a client cannot derive from a
   key.
@@ -63,14 +63,13 @@ over HTTP with a bearer token; the nodes have no client-facing listener.
 | `agent-gateway/src/lib.rs` | `Harness::client` (routing-only, no model/sandbox seams) + a client `Entity<Directory>`; `connect` polls until discovery, then assembles the `Gateway`. |
 | `agent-standalone/src/node.rs` | The node hosts the Agent kinds and the `Directory` entity and admits the gateway with `--client <id>=<host>` (a non-voting id outside the Raft roster). No client-facing listener. |
 
-## Delegation falls out for free
+## Delegation inherits the prefix
 
 Delegated children get ids like `parent/t-1/tu_42`. Because the parent session is
-already `P/session`, a child becomes `P/session/t-1/tu_42`: the principal prefix
-is inherited with no extra logic, so worker entities stay in-tenant. Only **root**
-sessions (the ones the client names) get a `Directory` `Record`; children are
-addressed internally by the agent, never by the client, so they never reach the
-authorization gate.
+already `P/session`, a child becomes `P/session/t-1/tu_42`, so worker entities
+stay in-tenant with no extra logic. Only **root** sessions (the ones the client
+names) get a `Directory` `Record`; children are addressed internally by the
+agent, never by the client, so they never reach the authorization gate.
 
 ## Directory enforcement (the feature layer)
 
@@ -85,7 +84,7 @@ authorization gate.
   security.
 - **Later**: `session/delete` -> forget the entry and retire the entity.
 
-## Security properties to bake in, not bolt on
+## Security properties
 
 - **Public TLS terminates at the edge.** Bearer tokens over plaintext are
   sniffable; terminate TLS at an ingress/LoadBalancer in front of the gateway.
@@ -111,7 +110,7 @@ authorization gate.
 - **Gateway-as-cluster-client edge**: `agent-gateway` joins the transport as a
   non-voting member (`Harness::client` + `entities_client`), terminates tenant
   auth, and addresses session entities directly. SSE carries the live record stream.
-- **Clients of the edge**: two, both HTTP/SSE clients of the gateway and
+- **Clients of the edge**: two, both speaking HTTP/SSE to the gateway and
   nothing else: `agent-tui` (`crates/agent-tui`), a terminal chat UI that
   authenticates as a tenant, lists its sessions, and streams a run's records; and
   the VS Code extension in `clients/agent-vscode`, on the same endpoints.

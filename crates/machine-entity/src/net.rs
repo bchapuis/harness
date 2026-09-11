@@ -263,7 +263,6 @@ pub mod apply {
         run(Command::new("ip").args(["tuntap", "add", "dev", &tap, "mode", "tap"]))?;
         run(Command::new("ip").args(["addr", "add", guest_cidr, "dev", &tap]))?;
         run(Command::new("ip").args(["link", "set", &tap, "up"]))?;
-        // `nft -f -` reads the ruleset from stdin.
         use std::io::Write;
         let mut child = Command::new("nft")
             .args(["-f", "-"])

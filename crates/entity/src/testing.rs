@@ -1,7 +1,7 @@
 //! Shared simulation invariants over entity events (entity spec §7, spec §18.5).
 //!
 //! These are safety predicates every entity-backed swarm wants: commits advance,
-//! and an entity is live at most once per node. They are claims about *entity's*
+//! and an entity is live at most once per node. They are claims about the entity
 //! contract, not about any one suite, so they live here rather than in each test
 //! binary.
 //!
@@ -391,8 +391,8 @@ impl crate::store::EntityStore for SnapshotAheadOfHeadStore {
             .store_record(shard, entity, after, term, records, kind)
     }
 
-    /// Forwarded whole. `read` feeds recovery and the `ReadReply::head` computation,
-    /// which the snapshot's seq participates in, overstating it here would move the
+    /// Forwarded whole: `read` feeds recovery and the `ReadReply::head` computation,
+    /// which the snapshot's seq participates in. Overstating it here would move the
     /// head too, and the disagreement being modelled would vanish.
     fn read(&self, shard: u32, entity: &EntityName) -> crate::store::ReadReply {
         self.inner.read(shard, entity)

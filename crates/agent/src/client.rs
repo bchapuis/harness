@@ -7,10 +7,6 @@
 //! entity per kind via `entities_named` (each `KindId` is its own entity type,
 //! §2.2), injecting the node's model and sandbox seams into every activation
 //! through the factory.
-//!
-//! [`HarnessSystem`] is the agent runtime's name for the system it runs on: exactly
-//! an [`EntitySystem`]; its §10.4 events ride the core `emit` seam onto the
-//! same observability stream the entity's events use.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -326,9 +322,8 @@ pub struct HasRoutes;
 /// the receptionist). See [`Harness::builder`].
 pub struct HarnessBuilder<S: HarnessSystem, R = NoRoutes> {
     system: S,
-    /// The node-scoped entity capabilities every hosted kind's entity type shares
-    /// (entity §7.4, §13). One per node, not per kind: a node hosting five kinds
-    /// wants one I/O pool and one metrics registry, not five.
+    /// The node-scoped entity capabilities every hosted kind's entity type
+    /// shares (entity §7.4, §13): one per node, not per kind.
     entity_node: EntityNode<S>,
     kinds: Kinds,
     config: HarnessConfig,
@@ -393,11 +388,8 @@ impl<S: HarnessSystem, R> HarnessBuilder<S, R> {
     /// Route to a host of the kind named `kind` instead of hosting it (the
     /// Orleans cluster-client path). `shards` is the kind's `EntityConfig.shards`
     /// on the hosting nodes, so a session name hashes to the same shard here as
-    /// there. A routing tier addresses sessions (it never activates an entity), so
-    /// a kind's name and shard count are the only two facts it takes, and the
-    /// only two it may know: prompts, tools, and model params stay the hosts'
-    /// concern. Moves the builder to the `HasRoutes` type-state, so `build`
-    /// then returns `Option`.
+    /// there. Moves the builder to the `HasRoutes` type-state, so `build` then
+    /// returns `Option`.
     pub fn route_kind(self, kind: &str, shards: usize) -> HarnessBuilder<S, HasRoutes> {
         let mut builder = self.into_has_routes();
         builder.routed.push((KindId::new(kind), shards.max(1)));
@@ -622,9 +614,9 @@ impl<S: HarnessSystem> SessionRef<S> {
 
 /// One page bound for a caller's tail reads (§10.2): [`SessionRef::tail`]
 /// clamps `limit` to it, so no single call asks the journal for an unbounded
-/// reply. A caller wanting more pages by advancing `from` past the last `Seq`
-/// returned. (The gateway additionally bounds each wire page server-side,
-/// entity §7.5, so the clamp here is the API contract, not the safety.)
+/// reply. A caller wanting more pages advances `from` past the last `Seq`
+/// returned. (The gateway also bounds each wire page server-side, entity §7.5,
+/// so the clamp here is the API contract, not the safety.)
 pub const TAIL_PAGE: u32 = 1024;
 
 /// Journal page size for a follower's backfill reads.

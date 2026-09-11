@@ -129,19 +129,16 @@ impl Default for NodeOptions {
 /// How long a front-door command waits on the machine's leader.
 const DOOR_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The Raft election timeout every group on this node inherits.
-///
-/// This was 20 s, and the reason was not network latency: the disk facet's capture and
-/// import scanned a whole image *on the async worker*, so a node served no heartbeat
-/// for the 7-14 s that took. A 4 s timeout sailed past that, and the resulting election
-/// deposed the activation owning the guest, killing a live SSH session by way of a
-/// checkpoint. The timeout was covering for that stall.
-///
-/// The stall is gone: both scans now run on the node's blocking-I/O pool (entity
-/// §7.4, `disk.rs`), so a capture no longer costs the node its heartbeats. What remains
-/// to cover is ordinary scheduling jitter on a laptop running three debug nodes, which
-/// is what the library's own defaults are sized for. Every group inherits this
+/// The Raft election timeout every group on this node inherits
 /// (`RaftEngine::create_group`), shard groups included.
+///
+/// A spurious election deposes the activation owning the guest and kills a live
+/// SSH session, so this may only be as short as the node's own stalls allow. The
+/// disk facet's capture and import scans run on the blocking-I/O pool (entity
+/// §7.4, `disk.rs`) rather than the async worker, so a capture no longer costs
+/// the node its heartbeats. What remains to cover is ordinary scheduling jitter
+/// on a laptop running three debug nodes, which is what the library's own
+/// defaults are sized for.
 const RAFT_ELECTION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How often a leader heartbeats, and (because the driver checks election deadlines on
@@ -154,18 +151,11 @@ const RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(250);
 /// How long [`actor_runtime::wait_for_cluster`] waits for the cluster to be
 /// ready before serving anyway.
 ///
-/// Derived, not chosen. This was a flat 15 s against a 20 s election timeout, so a cold
-/// start could not possibly satisfy it: every boot printed "cluster not ready after
-/// 15s", opened its door on a cluster that had no leader, and left the first caller to
-/// absorb the rest of the wait. The warning was not describing a fault, it was
-/// describing the constant sitting below the one it was racing.
-///
-/// Readiness waits on two things, so the budget has to cover both: SWIM has to discover
-/// the peers (`probe_interval` below), and the control group has to elect (a pristine
-/// group campaigns a fraction of [`RAFT_ELECTION_TIMEOUT`] after it is built, actor
-/// §9.4.3). Several times the larger of the two, so a slow start is absorbed rather
-/// than reported, and derived so retuning either does not silently reintroduce a
-/// warning that describes the constant rather than the cluster.
+/// Readiness waits on two things, so the budget has to cover both: SWIM has to
+/// discover the peers (`probe_interval` below), and the control group has to
+/// elect (a pristine group campaigns a fraction of [`RAFT_ELECTION_TIMEOUT`]
+/// after it is built, actor §9.4.3). Several times the larger of the two, so a
+/// slow start is absorbed rather than reported as a fault.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The most a stop waits on the shard handoff. The handoff is bounded on its
@@ -206,7 +196,6 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
     // the frame field carrying it. Under JSON that pair costs ~10.7 MiB and over
     // a second of CPU per copy, so a block's replication misses the quorum
     // timeout on an unremarkable host and provisioning fails as `Unavailable`.
-    // Nothing on this system's wire needs a self-describing format.
     let codec: Arc<dyn Codec> = Arc::new(PostcardCodec);
     let raft_dir = opts.data.join("raft");
     let system: TcpCluster = actor_runtime::join(JoinOptions {
@@ -237,12 +226,9 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
                 // sharing one host's CPU miss the tighter ones often enough to
                 // churn membership.
                 //
-                // The Raft side is *not* patient any more, and the difference is
-                // worth reading: it used to be an order of magnitude slower than
-                // the defaults, but only to survive a capture that blocked the
-                // executor. That stall is gone (the scans run on the blocking-I/O
-                // pool, entity §7.4), so the timings answer to the network again.
-                // Failure detection stays well inside the machine's lease (M5).
+                // The Raft side is not: its timings answer to the network (see
+                // the constants above), and failure detection stays well inside
+                // the machine's lease (M5).
                 swim: SwimConfig {
                     probe_interval: Duration::from_secs(2),
                     rtt: Duration::from_millis(500),
@@ -252,9 +238,7 @@ pub async fn run(opts: NodeOptions) -> Result<(), String> {
                 raft: {
                     let mut raft = RaftConfig::new(roster.to_vec());
                     raft.storage = FileRaftWAL::factory(raft_dir);
-                    // See the constants: these were an order of magnitude more
-                    // patient to survive a capture that blocked the executor,
-                    // which it no longer does.
+                    // See the constants above.
                     raft.election_timeout = RAFT_ELECTION_TIMEOUT;
                     raft.heartbeat_interval = RAFT_HEARTBEAT_INTERVAL;
                     raft

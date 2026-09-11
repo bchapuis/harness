@@ -3,14 +3,14 @@
 //! Every remote actor message crosses this boundary twice over: the sender encodes its
 //! message with the codec, and the result is carried as bytes inside a [`Frame`] that
 //! is *itself* codec-encoded onto the socket. The inner encode is
-//! `actor-serialization/benches/codec.rs`'s subject. This file is the outer one, which
-//! is the layer that was missed: entity's blob messages were told they held bytes
-//! long before the frame wrapping them was, so a replicated mebibyte still went
-//! through serde's element-at-a-time sequence path once in each direction and it cost
-//! ~11 ms a block on real nodes.
+//! `actor-serialization/benches/codec.rs`'s subject. This file is the outer one, the
+//! layer that was missed: entity's blob messages were told they held bytes long before
+//! the frame wrapping them was, so a replicated mebibyte still went through serde's
+//! element-at-a-time sequence path once in each direction, at ~11 ms a block on real
+//! nodes.
 //!
-//! Two variants carry bulk bytes and they are measured separately because they are
-//! fixed differently and were fixed at different times:
+//! Two variants carry bulk bytes, measured separately because they are fixed
+//! differently:
 //!
 //! - [`Frame::Envelope`] is the **request** direction: a blob being replicated to a
 //!   peer, an entity record being appended. Its `payload` takes
@@ -19,17 +19,17 @@
 //!   that lacks it, an entity read returning its records. Its outcome is `ReplyResult`,
 //!   a `Result<Vec<u8>, CallError>` *type alias* with no field to hang an attribute
 //!   on, so `protocol::reply_bytes` mirrors serde's `Result` representation instead.
-//!   That mirror is the thing this bench exists to keep honest about cost, and
-//!   `protocol`'s own tests keep it honest about bytes.
+//!   This bench keeps that mirror honest about cost; `protocol`'s own tests keep it
+//!   honest about bytes.
 //!
 //! The two should read the same. If `Reply` is slower than `Envelope` at the same
 //! payload, the mirror has stopped reaching `serialize_bytes`, which is a performance
 //! regression the byte-identity tests cannot see, because the bytes would still be
 //! right.
 //!
-//! Sizes span three orders of magnitude because the defect this measures is invisible
-//! at small ones: a per-element loop over 1 KiB is nothing, and over a mebibyte it is
-//! the whole cost of the operation.
+//! Sizes span three orders of magnitude because the defect is invisible at small ones:
+//! a per-element loop over 1 KiB is nothing, and over a mebibyte it is the whole cost
+//! of the operation.
 
 use actor_cluster::CallId;
 use actor_cluster::Frame;
@@ -114,10 +114,10 @@ fn reply_decode<const N: usize>(bencher: Bencher) {
 
 /// A failed reply, which carries no bytes at all.
 ///
-/// Here to keep the mirror's *other* arm in the measurement: `Err` is the common case
-/// under partition, it goes through the same hand-written module, and a mirror that
-/// somehow made the error path expensive would be paid on exactly the frames a
-/// struggling cluster sends most.
+/// Keeps the mirror's *other* arm in the measurement: `Err` is the common case under
+/// partition and goes through the same hand-written module, so a mirror that made the
+/// error path expensive would charge exactly the frames a struggling cluster sends
+/// most.
 #[divan::bench]
 fn reply_err_encode(bencher: Bencher) {
     let frame = Frame::Reply {

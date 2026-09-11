@@ -579,9 +579,9 @@ fn a_tampered_replica_copy_falls_through_to_a_good_one() {
 fn a_tampered_local_copy_is_healed_in_place_from_a_peer() {
     // Beyond falling through (above): the corrupt local copy is *repaired* in place
     // from the verifying peer, restoring this replica's durability margin (§7.10
-    // self-heal). Without it, a content-addressed re-put of an id already on disk is
-    // a no-op, so the bad copy would persist and every read would re-fetch over the
-    // wire, and a later loss of the good peers would lose a blob that looked present.
+    // self-heal). Without it the bad copy persists (a content-addressed re-put of an
+    // id already on disk is a no-op), every read re-fetches over the wire, and a
+    // later loss of the good peers loses a blob that looked present.
     let sim = Simulation::new(1);
     let dir = tempfile::tempdir().unwrap();
     let cfg = EntityConfig {

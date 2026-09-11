@@ -5,17 +5,17 @@
 //! crash, one partition, then repair). This file sweeps a [`ClusterWorkload`] of
 //! write/read/overwrite traffic across many seeds while a seeded nemesis injects
 //! partitions, crashes, heals, loss, duplication, and delay (core spec §18.3),
-//! so the end-to-end product path: captured delta records on the record quorum,
-//! checkpoint chunks on the blob quorum (§7.10); is exercised together under
-//! the full fault matrix. A [`Checker`] watches the §13 event stream live.
+//! so delta records on the record quorum and checkpoint chunks on the blob
+//! quorum (§7.10) are exercised together under the full fault matrix. A
+//! [`Checker`] watches the §13 event stream live.
 //!
 //! - **Read integrity under faults (#4, the safety property).** Each client owns
-//!   a private path subtree, so there are no cross-client overwrite races; a
-//!   read of a path this client wrote returns the *exact* bytes of its last
-//!   committed write to that path, or an error, never stale, partial, or
-//!   another path's bytes. This asserts capture/replay byte-determinism (F1) and
-//!   lossless failover (E14): an acknowledged capture is never lost or shadowed
-//!   across a leadership change. Asserted in-workload over a shared flag.
+//!   a private path subtree, so no cross-client overwrite races; a read of a
+//!   path this client wrote returns the *exact* bytes of its last committed
+//!   write there, or an error, never stale, partial, or another path's bytes.
+//!   That is capture/replay byte-determinism (F1) plus lossless failover (E14):
+//!   an acknowledged capture is never lost or shadowed across a leadership
+//!   change.
 //! - **Safety core under faults (#4).** [`default_invariants`] hold on every run.
 //! - **Seed-reproducibility (#7).** The same seed replays byte-identically.
 //! - **Fault coverage (#8).** Each transport fault type actually fired.
@@ -95,9 +95,8 @@ impl<S: EntitySystem> Entity for Studio<S> {
         &mut self,
         ctx: &EntityCtx<Self>,
     ) -> impl Future<Output = Result<(), BoxError>> + Send {
-        // Root-driven blob repair off the activation path (§7.10 B6), the
-        // harness agent's conduct, so the swarm exercises the repair path
-        // under faults too.
+        // Root-driven blob repair off the activation path (§7.10 B6), as the
+        // agent runtime does, so the swarm exercises repair under faults too.
         let blobs = ctx.blobs();
         let system = ctx.system().clone();
         async move {
@@ -173,7 +172,7 @@ impl<S: EntitySystem> EntityHandler<Get> for Studio<S> {
 // --- The swarm workload --------------------------------------------------------
 
 /// Content that varies in length and bytes with `n`. Kept small so a run stays
-/// cheap; larger trees are covered by the targeted `ws_local` tests.
+/// cheap; `ws_local` covers larger trees.
 fn content(n: u64) -> Vec<u8> {
     let len = 1 + (n % 200) as usize;
     (0..len)
@@ -186,11 +185,9 @@ fn content(n: u64) -> Vec<u8> {
 /// A committed `Put` pins the value. A `Put` whose outcome was **ambiguous** does
 /// not: `Unavailable` means the quorum was not observed, not that the record was
 /// refused (entity §7.2, §11); a replica minority may hold it, and the next
-/// activation's quorum recovery can find it on a majority and adopt it. So the
-/// bytes of an ambiguous write are admissible from then on, and the check is
-/// that a read returns *some value this client actually wrote and that nothing
-/// has superseded*, which is still what F1/E14 claim, stated over the outcomes
-/// the spec actually gives.
+/// activation's quorum recovery can find it on a majority and adopt it. So an
+/// ambiguous write's bytes are admissible from then on, and the check is that a
+/// read returns *some value this client wrote and nothing has superseded*.
 ///
 /// Reads never narrow the set: the read path is read-your-leader, not
 /// linearizable (§7.5), so a deposed-but-unfenced activation may serve an older
@@ -224,10 +221,9 @@ impl PathState {
 
 /// Write/read/overwrite traffic against a handful of workspace entities, driven
 /// through the public `EntityRef` API only (§18.4). Each client writes only paths
-/// in its own subtree (`c{client}/...`), so a read of a path it wrote has a
-/// well-defined set of admissible values with no cross-client race. A faulted
-/// call is recorded per [`PathState`] and the client moves on, so the drive
-/// future always completes.
+/// in its own subtree (`c{client}/...`), so no cross-client race. A faulted call
+/// is recorded per [`PathState`] and the client moves on, so the drive future
+/// always completes.
 ///
 /// `stale` is shared across every seeded run: a client sets it if a read of one
 /// of its own paths ever returns bytes it cannot account for (an F1/E14
@@ -302,8 +298,8 @@ impl WsSwarm {
 const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
-/// How long a hibernating client idles when it idles: comfortably past
-/// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
+/// How long a hibernating client idles: past [`IDLE_AFTER`], so the host really
+/// hibernates rather than nearly.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
 impl ClusterWorkload for WsSwarm {
@@ -330,10 +326,9 @@ impl ClusterWorkload for WsSwarm {
         // A restarted node comes up empty and would otherwise stop hosting
         // `Studio`, no gateway, no shard leadership, no replica for the write
         // quorum. Re-host it, or the run shrinks the cluster rather than faulting
-        // it. The config carries the same scratch root, which is right: the
-        // facet's restore discards stale local files, they are a cache and never
-        // truth (§1), and a fresh process rebuilding over its predecessor's
-        // leftovers is exactly the case worth covering.
+        // it. The config carries the same scratch root: the facet's restore
+        // discards stale local files, which are a cache and never truth (§1), so
+        // a fresh process rebuilds over its predecessor's leftovers.
         let config = self.config();
         Some(Arc::new(move |node: &SimNode| {
             node.entities::<Studio<SimNode>>(config.clone());
@@ -366,7 +361,7 @@ impl ClusterWorkload for WsSwarm {
                 // one node the nemesis leaves alone: a handle for a restarted node
                 // points at a system that has been shut down. Location
                 // transparency (E13) keeps the coverage: the call still lands on
-                // whichever node leads the entity's shard.
+                // the entity's shard leader.
                 let entities = if restarting {
                     hosts[0].clone()
                 } else {
@@ -401,10 +396,10 @@ impl ClusterWorkload for WsSwarm {
                                 .await;
                             let state = paths.entry((key, path)).or_default();
                             match outcome {
-                                // Committed: this is the value, and it supersedes
-                                // every earlier attempt; a late-landing ambiguous
-                                // record occupies an *earlier* `Seq` slot, so it can
-                                // never shadow a commit that came after it.
+                                // Committed: it supersedes every earlier attempt;
+                                // a late-landing ambiguous record occupies an
+                                // *earlier* `Seq` slot, so it can never shadow a
+                                // commit that came after it.
                                 Ok(Ok(_)) => state.committed(bytes),
                                 // `NotLeader` survived the bounded redirect: the
                                 // append was refused before any store, and a fenced
@@ -418,19 +413,18 @@ impl ClusterWorkload for WsSwarm {
                                 Err(EntityError::Unavailable(_) | EntityError::Call(_)) => {
                                     state.may_have_landed(bytes)
                                 }
-                                // The handler ran and its capture failed. Nothing
-                                // committed, but this entity writes the file before
-                                // capturing it, so the bytes sit in the live
-                                // materialization until the next activation wipes it
-                                // and rebuilds from the committed records.
+                                // The capture failed, so nothing committed, but
+                                // this entity writes the file before capturing it:
+                                // the bytes sit in the live materialization until
+                                // the next activation wipes it and rebuilds from
+                                // the committed records.
                                 Ok(Err(_)) => state.may_have_landed(bytes),
                             }
                         } else if let Some(state) = paths.get(&(key.clone(), path.clone())) {
-                            // READ a path this client has written: the bytes must be
-                            // one this client is entitled to see there, or the call
-                            // must fail (under a fault), never another path's bytes,
-                            // never a value it never wrote, never one a later commit
-                            // superseded.
+                            // READ a path this client wrote: the bytes must be one
+                            // it is entitled to see there, or the call must fail,
+                            // never another path's bytes, never a value it never
+                            // wrote, never one a later commit superseded.
                             if let Ok(Ok(got)) = entity
                                 .ask_timeout(Get { path: path.clone() }, Duration::from_secs(2))
                                 .await
@@ -483,11 +477,11 @@ fn workspace_reads_never_go_stale_under_the_cluster_swarm() {
 // --- The same claim across hibernation and process death ---------------------
 //
 // The sweep above holds every activation resident, so a read is served from the
-// live directory the write landed in, the materialization is never rebuilt. This
-// one tears it down: the entity hibernates, its directory goes, and the next read
-// is served from a tree the new activation reconstructed by applying the captured
-// bytes over a composite snapshot (F1 holds on the bytes, never on re-execution),
-// possibly in a process that did not exist when the write committed.
+// live directory the write landed in. This one tears it down: the entity
+// hibernates, its directory goes, and the next read is served from a tree the
+// new activation rebuilt by applying the captured bytes over a composite
+// snapshot (F1 holds on the bytes, never on re-execution), possibly in a process
+// that did not exist when the write committed.
 
 #[test]
 fn workspace_reads_never_go_stale_across_hibernation_and_restarts() {

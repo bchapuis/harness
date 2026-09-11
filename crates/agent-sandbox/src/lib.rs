@@ -64,10 +64,9 @@ mod compute;
 #[cfg(feature = "firecracker")]
 mod firecracker;
 // Gated on `native`, not `workspace`: the container's name is the only thing that
-// needs a filesystem-safe session id, and `native` implies `workspace` anyway. On
-// the default feature set the wider gate compiled the module with nothing calling
-// it, which `-D warnings` reads as dead code: true, and only on the builds no CI
-// job runs.
+// needs a filesystem-safe session id, and `native` implies `workspace` anyway. The
+// wider gate left the module compiled with no caller on the default feature set,
+// which `-D warnings` rejects as dead code.
 #[cfg(feature = "native")]
 mod ids;
 #[cfg(feature = "native")]

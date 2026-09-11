@@ -386,12 +386,11 @@ impl LocalHost {
     /// Register a death-watch subscription (spec §12), or, when `target` has
     /// already terminated, hand back the immediate `Terminated` delivery
     /// (invariant #12) carrying the true recorded reason (`Failed` vs
-    /// `Stopped`; the graceful default once evicted). Judging the already-dead
-    /// case is the host's job (it owns the termination record), so every
-    /// system reports the same reason instead of each re-deriving it. The
-    /// caller launches the returned future rather than awaiting it inline:
-    /// delivery applies mailbox backpressure, and a watcher calling `watch`
-    /// from inside its own handler must not block on its own mailbox.
+    /// `Stopped`; the graceful default once evicted). The host judges that case
+    /// because it owns the termination record, so every system reports the same
+    /// reason. The caller launches the returned future rather than awaiting it
+    /// inline: delivery applies mailbox backpressure, and a watcher calling
+    /// `watch` from inside its own handler must not block on its own mailbox.
     #[must_use = "launch the immediate delivery, or the watcher never learns the target is gone"]
     pub fn watch(
         &self,
@@ -496,8 +495,8 @@ impl LocalHost {
     /// Deliver `Terminated` to every watcher of `target`, then forget them, so
     /// each watcher is notified exactly once (invariant #11).
     async fn notify_terminated(&self, target: &ActorId, reason: TerminationReason) {
-        // Drop the lock before awaiting delivery: the guard is released at the
-        // end of this statement, so no lock is held across the `.await` below.
+        // Release the lock before awaiting delivery: the guard ends with this
+        // statement, so none is held across the `.await` below.
         let entries = self
             .state
             .watchers
@@ -583,8 +582,7 @@ enum Step<A> {
 
 /// The serial executor + supervisor for one actor (spec §6, §11): the
 /// loop-invariant state of one actor's whole life (host, context, factory,
-/// supervision, clock) bundled once, so each step below reads as a method
-/// instead of a ten-parameter call.
+/// supervision, clock) bundled once, so each step below reads as a method.
 struct Executor<A: Actor, C: Clock> {
     host: LocalHost,
     ctx: Ctx<A>,
@@ -760,12 +758,10 @@ impl<A: Actor, C: Clock> Executor<A, C> {
         inbox: &Inbox<A>,
         escalation: &async_channel::Receiver<ActorId>,
     ) -> Outcome {
-        // Built once and polled across every iteration, rather than rebuilt per message.
-        // Awaiting a channel registers a listener on it; a fresh future each time round
-        // meant registering and deregistering on the escalation channel for every message
-        // an actor handled, to watch for something that arrives at most once, and when it
-        // does arrive, this loop returns rather than coming back for another. Holding one
-        // future keeps that registration in place instead of churning it.
+        // Built once and polled across every iteration rather than rebuilt per message.
+        // Awaiting a channel registers a listener on it, so a fresh future each time
+        // round would register and deregister on the escalation channel for every
+        // message handled, to watch for something that arrives at most once.
         let escalated = escalation.recv();
         futures::pin_mut!(escalated);
         loop {

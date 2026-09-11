@@ -6,7 +6,7 @@
 //! `conformance_catalogue.rs` drift test already guards: it holds the numbering
 //! complete and every test file it points at real.
 //!
-//! What nothing guarded until now is that the *two tables agree*. They are two
+//! What neither table guards on its own is that the *two agree*. They are two
 //! hand-maintained copies of one fact, and an invariant added to one, a section
 //! moved in one, or a suite renamed in one leaves the other quietly wrong: the
 //! failure the Rust table was introduced to prevent, reappearing one level up.
@@ -24,12 +24,12 @@
 //! catalogue (actor §18.5) is a numbered list instead ([`Shape`]).
 //!
 //! The `Verified by` columns are not written alike, which is worth knowing before
-//! trusting one: entity, utilities, sandbox, and harness name test **files**,
-//! wal names test **functions**, and blob and machine name functions where their
-//! Rust catalogues name files. Only matching vocabularies can be compared, and
-//! [`Pointers`] records which is which per site, so where the suite axis is
-//! skipped, it is skipped by a declaration naming the reason rather than by a
-//! comparison that finds nothing.
+//! trusting one: entity, utilities, sandbox, workflow, and agent name test
+//! **files**, wal names test **functions**, and blob and machine name functions
+//! where their Rust catalogues name files. Only matching vocabularies can be
+//! compared, and [`Pointers`] records which is which per site, so where the suite
+//! axis is skipped, it is skipped by a declaration naming the reason rather than
+//! by a comparison that finds nothing.
 //!
 //! # What is compared, and what is not
 //!
@@ -491,7 +491,7 @@ fn cells(line: &str) -> Vec<&str> {
         .collect()
 }
 
-/// `**E7**` with label `G` → `7`; `1` with an empty label → `1`.
+/// `**E7**` with label `E` → `7`; `1` with an empty label → `1`.
 fn label_number(cell: &str, label: &str) -> Option<u8> {
     let bare = cell.trim_matches(|c| c == '*' || c == '`' || c == ' ');
     bare.strip_prefix(label)?.parse().ok()

@@ -93,10 +93,9 @@ pub trait ShardMapSource: Send + Sync + 'static {
     ///
     /// The graceful half of a planned departure. Without it, a node that leads N
     /// shards simply stops, and each of those shards waits a full election timeout
-    /// before its replicas notice and elect, then every entity on them rehydrates.
-    /// For a rolling restart, which is the most common production operation there is,
-    /// that turns a routine action into N simultaneous failovers. With it, each shard
-    /// is handed to a replica that is already caught up, so the gap is a round trip
+    /// before its replicas notice and elect, then every entity on them rehydrates,
+    /// so a rolling restart becomes N simultaneous failovers. With it, each shard is
+    /// handed to a replica that is already caught up, so the gap is a round trip
     /// rather than a timeout.
     ///
     /// Best-effort by construction: a handoff can only go to a caught-up voter, and a
@@ -285,9 +284,7 @@ impl Allocation {
 ///
 /// `GRSMAP` cannot be confused with the unstamped predecessor, which is bare
 /// `serde_json` and so begins with `{`: the one byte a JSON object must open
-/// with, and one this magic does not. The confusion the magic has to rule out is
-/// therefore ruled out by construction rather than by arithmetic, which is the
-/// easier half of the job `wal`'s header does the hard way.
+/// with, and one this magic does not.
 pub(crate) const SHARDMAP: compat::Stamp =
     compat::Stamp::new(b"GRSMAP", compat::Window::at("entity.shardmap", 1));
 
@@ -295,18 +292,17 @@ pub(crate) const SHARDMAP: compat::Stamp =
 ///
 /// **V4's two-release ordering does not apply to a boundary's introduction here**,
 /// because the thing it protects does not exist. Read-new-first buys one release in
-/// which every peer learns to read a form before any peer writes it, and it is worth
-/// its cost exactly when there are peers in the field on the older build: a
-/// deployment mid-rollout, whose oldest node halts on `GRSMAP…` or, older still,
-/// skips the entry and diverges. This tree has no such deployment: a build of it
-/// meets only its own peers. So the boundary lands in one step, and V4 becomes live
-/// again the moment there is a fleet to roll.
+/// which every peer learns to read a form before any peer writes it, and it pays
+/// exactly when there are peers in the field on the older build, whose oldest node
+/// halts on `GRSMAP…` or, older still, skips the entry and diverges. This tree has
+/// no such deployment: a build of it meets only its own peers. So the boundary lands
+/// in one step, and V4 becomes live again the moment there is a fleet to roll.
 ///
-/// What that does **not** change is `admit`'s adoption of the unstamped
-/// predecessor. That obligation is **V5**'s and it is about bytes at rest, not about
-/// release cadence: commands committed by any earlier build of this tree are still
-/// in the map group's log on disk, and a build that refused them would refuse its
-/// own history on the next replay.
+/// That does not change `admit`'s adoption of the unstamped predecessor. That
+/// obligation is **V5**'s and is about bytes at rest, not release cadence: commands
+/// committed by any earlier build of this tree are still in the map group's log on
+/// disk, and a build that refused them would refuse its own history on the next
+/// replay.
 fn encode(command: &ShardMapCommand) -> Vec<u8> {
     SHARDMAP.stamp(&serde_json::to_vec(command).expect("a ShardMapCommand always serializes"))
 }
@@ -462,10 +458,10 @@ struct Inner {
     /// The allocator's job is to notice when a shard's committed replica set differs
     /// from its rendezvous choice, and that can only change when either the
     /// allocation or the cluster's voters change. Without a way to detect "neither
-    /// did", it recomputed the choice for **every** shard on **every** tick: an
-    /// O(shards) rendezvous sort ten times a second, forever, whose answer is
-    /// identical each time. The generation makes the common case a single integer
-    /// comparison, which is what keeps the control plane's cost proportional to
+    /// did", the allocator would recompute the choice for **every** shard on
+    /// **every** tick: an O(shards) rendezvous sort ten times a second, forever,
+    /// whose answer is identical each time. The generation makes the common case a
+    /// single integer comparison, keeping the control plane's cost proportional to
     /// cluster events rather than to wall-clock time (§7.8).
     allocation_generation: u64,
     /// Why this node stopped applying the map's committed log, or `None` while
@@ -477,9 +473,8 @@ struct Inner {
 impl Inner {
     /// Stop tracking the committed allocation, permanently, and say why.
     ///
-    /// The first reason wins. There is one writer today (the apply loop poisons
-    /// and immediately returns), but keeping the flag one-way is what makes the
-    /// reason an operator reads the *cause* rather than whatever happened last.
+    /// The first reason wins: one-way is what makes the reason an operator reads
+    /// the *cause* rather than whatever happened last.
     fn poison(&mut self, why: String) {
         self.poison.get_or_insert(why);
     }
@@ -706,9 +701,9 @@ async fn hand_off_all<R: RaftConsensus>(
         if remaining == 0 {
             return 0;
         }
-        // A handoff is an invitation, not a completed election: even the ones we
-        // started need a moment to land, and the ones we could not start need
-        // replication to catch a peer up. Both are what this wait is for.
+        // A handoff is an invitation, not a completed election: the ones we started
+        // need a moment to land, and the ones we could not start need replication to
+        // catch a peer up.
         consensus.sleep(HANDOFF_ROUND_WAIT).await;
     }
     // Final count, after the last round's elections have had their wait.
@@ -795,11 +790,9 @@ impl ShardMapSource for RaftShardMap {
 /// The node-local half of the map group's committed commands (spec §7.6, §7.7),
 /// and the state performing them takes.
 ///
-/// One value rather than a parameter list per command: the consensus handle, the
-/// entity type, this node, the map, the per-shard handles, the local store, the
-/// replica transport, the blocking pool, the deadlines, and the event sink are the
-/// *same ten* whichever command committed, so threading them into each method
-/// would be ten pass-through parameters written out six times.
+/// One value rather than a parameter list per command: the same ten handles serve
+/// whichever command committed, so threading them into each method would be ten
+/// pass-through parameters written out six times.
 ///
 /// Each method is one committed command's local effect: creating and retiring
 /// shard groups, building and dropping shard journals, and flipping the
@@ -1226,29 +1219,27 @@ async fn apply_loop<R: RaftConsensus>(apply: ShardApply<R>, commits: Receiver<Co
             Ok(None) => continue, // no allocation in it (see `admit`)
             Err(why) => {
                 // **Fail closed on a committed entry** (compatibility **V2**, spec
-                // §7.6). Skipping it and applying the next is what left this node's
+                // §7.6). Skipping it and applying the next would leave this node's
                 // allocation a gap rather than a prefix; `admit` has the divergence
                 // that follows. So the loop stops here, for good.
                 //
-                // Stopping is safe in a way that skipping was not, and the reason is
-                // worth stating: a frozen prefix is exactly the state of a node that
-                // is merely *behind* on the log, which every path here already
-                // tolerates. A stale leader cannot serve a moved range from it
-                // either: its peers sealed their durable append bound before the
-                // move, and that bound, not the map, is the authoritative barrier
-                // (§7.7, `QuorumReplicator::seal_shard`).
+                // Stopping is safe where skipping was not: a frozen prefix is exactly
+                // the state of a node that is merely *behind* on the log, which every
+                // path here already tolerates. A stale leader cannot serve a moved
+                // range from it either: its peers sealed their durable append bound
+                // before the move, and that bound, not the map, is the authoritative
+                // barrier (§7.7, `QuorumReplicator::seal_shard`).
                 //
                 // It does not crash, for the reason `RaftGroup::wal_failed` gives
                 // one boundary over: an unwind takes down a task and leaves the node
-                // up, still leading shards, with nothing behind it. So it does what
-                // that does and steps out of the way: every shard this node leads
-                // goes to a replica whose map is still advancing.
+                // up, still leading shards, with nothing behind it. So it steps out
+                // of the way instead: every shard this node leads goes to a replica
+                // whose map is still advancing.
                 //
                 // It stays in the map group and keeps acknowledging its appends.
                 // Quorum there is about the log being *durable*, not about this
                 // build having applied it: the entries are on disk, and a restart
-                // onto a build that can read them applies them. Dropping out would
-                // cost availability and buy no safety.
+                // onto a build that can read them applies them.
                 apply
                     .inner
                     .lock()
@@ -1266,9 +1257,8 @@ async fn apply_loop<R: RaftConsensus>(apply: ShardApply<R>, commits: Receiver<Co
         // Bumped once here rather than at each of the arms that touch `allocation`:
         // every allocation change is the result of applying a committed command, so
         // this is the one place that provably covers them all. Over-counting (a
-        // command that changes nothing still bumps) only costs the allocator one
-        // redundant sweep, while under-counting would leave a real drift unnoticed,
-        // so the safe direction is to bump unconditionally.
+        // command that changes nothing still bumps) costs the allocator one redundant
+        // sweep; under-counting would leave a real drift unnoticed.
         apply
             .inner
             .lock()
@@ -1353,10 +1343,8 @@ async fn allocator_loop<R: RaftConsensus>(
     let consensus = &consensus;
     // Borrowed, not moved: the tick closure is `FnMut` and runs every interval.
     let domains = domains.as_ref();
-    // What the last sweep was computed against. The rendezvous choice is a pure
-    // function of the voters and the group, and whether it *differs* from the
-    // committed set additionally depends on the allocation, so if neither has
-    // changed since the last sweep, every shard's answer is the one already
+    // What the last sweep was computed against: the voters and the allocation
+    // generation. If neither changed since, every shard's answer is the one already
     // committed and the whole O(shards) pass is dead work.
     let last: Mutex<Option<(Vec<NodeId>, u64)>> = Mutex::new(None);
     let last = &last;
@@ -1447,13 +1435,10 @@ async fn allocator_loop<R: RaftConsensus>(
                 }
             }
             // The watermark is recorded ONLY for a sweep that found nothing to do.
-            //
             // Recording it after a sweep that proposed something would be a liveness
-            // bug: a proposal is not a commit (it can be dropped, lose leadership,
-            // or fail), and a failed one bumps no generation, so the loop would skip
-            // from then on and the drift would never be reallocated. Requiring a
-            // quiet sweep means the loop keeps working until the cluster actually
-            // converged, and only then goes idle.
+            // bug: a proposal is not a commit (it can be dropped, lose leadership, or
+            // fail), and a failed one bumps no generation, so the loop would skip from
+            // then on and the drift would never be reallocated.
             if !proposed {
                 *last.lock().expect("allocator watermark poisoned") = Some((voters, generation));
             }
@@ -1931,14 +1916,13 @@ async fn merge_loop<R: RaftConsensus>(
 /// Much slower than the allocator's cadence, because the measurement is not cheap:
 /// [`EntityStore::shard_bytes`](crate::store::EntityStore::shard_bytes) walks every entity in
 /// the shard, stat-ing its segment and enumerating its blob directory, so its cost is
-/// O(entities), not O(shards). At half a second that walk was the dominant steady-state
-/// I/O of a large node: repeated to learn a number that moves slowly and gates an
-/// operation (a split) that takes far longer than the interval.
+/// O(entities), not O(shards). At a sub-second cadence that walk is the dominant
+/// steady-state I/O of a large node, repeated to learn a number that moves slowly and
+/// gates an operation (a split) that takes far longer than the interval.
 ///
-/// Thirty seconds costs a split at most that much delay, which is nothing against the
-/// cost of the split itself, and makes the trigger's overhead negligible. The
-/// remaining structural cost is the walk: a store that maintained a running total
-/// would make this O(1) and is the real fix.
+/// Thirty seconds delays a split by at most that much, which is nothing against the
+/// cost of the split itself. The remaining structural cost is the walk: a store that
+/// maintained a running total would make this O(1) and is the real fix.
 const SPLIT_TRIGGER_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The size-based split trigger (spec §7.7): for each shard this node **leads**,

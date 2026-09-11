@@ -6,8 +6,9 @@
 //! as a straggler), and no activation hibernates or announces quiescence with a
 //! claim still open.
 //!
-//! Test support behind the `testing` feature, not part of the workflow's API, and
-//! mountable by any consumer's swarm as entity and the agent runtime both ship theirs.
+//! Test support behind the `testing` feature, not part of the workflow's API,
+//! and mountable by any consumer's swarm, as entity's and the agent runtime's
+//! own checkers are.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

@@ -5,7 +5,7 @@
 //! the same pattern guarding the core, entity, and agent catalogue.
 //!
 //! The checker agreement is checked **per (checker, invariant) pair**, as the
-//! harness's is: one name carries four W-invariant here, so a name set would be
+//! agent's is: one name carries four W-invariants here, so a name set would be
 //! blind to one row quietly dropping its `Verify::Checker` while a sibling row
 //! still names the same checker.
 

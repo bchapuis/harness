@@ -2,11 +2,10 @@
 //!
 //! The three benchmarks here split the log's work along the line that matters when
 //! reading a result: [`checksum`](wal::checksum) and the replay are pure CPU, while an
-//! append is dominated by the fsync it ends with. That fsync is the point of the call
-//! (it is not overhead to be benchmarked away), so `append` is measured *with* it, and the
-//! framing work underneath is watched through the allocation counter instead, which the
-//! fsync cannot drown out. A framing change that removes allocations shows up in
-//! `alloc` even on a machine whose fsync costs a millisecond.
+//! append is dominated by the fsync it ends with. That fsync is the point of the call,
+//! so `append` is measured *with* it, and the framing work underneath is watched through
+//! the allocation counter, which the fsync cannot drown out: a framing change that
+//! removes allocations shows up in `alloc` even where an fsync costs a millisecond.
 //!
 //! Replay is where the checksum's throughput reaches the product: `Wal::open` verifies
 //! every frame in the file before the first entity activates.
@@ -58,8 +57,8 @@ const RECORDS: compat::Window = compat::Window::at("bench.records", 1);
 /// digest wrote it, so its value cannot change without every existing one reading back as
 /// missing. It is benchmarked at eight bytes because that is the only size anything calls
 /// it with (a fence term, a seal bound, a tombstone timestamp), and at that width a
-/// byte-at-a-time loop is already a handful of cycles. Speed is not the interesting
-/// property here; the number is here so a future change to this function is visible.
+/// byte-at-a-time loop is already a handful of cycles. The number is here so a future
+/// change to this function is visible.
 ///
 /// The frame digest is a different function and is deliberately private. Its throughput
 /// reaches the product through `replay`, below, which is where it is measured.
@@ -73,10 +72,10 @@ fn sidecar_checksum(bencher: Bencher) {
 
 /// One `append_batch` (framing plus one write plus one fsync) against a real file.
 ///
-/// The fsync is included because it is what the call promises; the timing is therefore a
-/// property of the filesystem as much as of this crate, and the number to watch across a
-/// framing change is `alloc`, not `median`. Sweeping the batch width also shows the
-/// batch's own value: the fsync is paid once per call, not once per record.
+/// The fsync is what the call promises, so the timing is a property of the filesystem as
+/// much as of this crate and the number to watch across a framing change is `alloc`, not
+/// `median`. The batch sweep shows the batch's own value: the fsync is paid once per
+/// call, not once per record.
 #[divan::bench(args = [1, 8, 64, 1024])]
 fn append(bencher: Bencher, records: usize) {
     let dir = tempfile::tempdir().expect("scratch dir");
@@ -90,8 +89,8 @@ fn append(bencher: Bencher, records: usize) {
 
 /// Recovery: read the file, verify every frame's checksum, and decode every record.
 ///
-/// No fsync is on this path, so the timing is the checksum and postcard decode directly,
-/// and it is the latency a node pays before its first entity can serve a request.
+/// No fsync is on this path, so the timing is the checksum and the postcard decode: the
+/// latency a node pays before its first entity can serve a request.
 #[divan::bench(args = [1_000, 10_000, 100_000])]
 fn replay(bencher: Bencher, records: usize) {
     let dir = tempfile::tempdir().expect("scratch dir");

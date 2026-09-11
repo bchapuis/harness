@@ -174,9 +174,8 @@ impl EntityHandler<CountNamed> for Ledger {
 }
 
 /// Probe the [`MAX_QUERY_ROWS`] cap (spec §7.14): bulk-insert one row past the
-/// cap, then reply with (the over-cap `select` error, the row count `select`
-/// returns at exactly the cap, the over-cap `query` error; `query` enforces
-/// the same cap).
+/// cap, then reply with the over-cap `select` error, the row count `select`
+/// returns at exactly the cap, and the over-cap `query` error.
 #[derive(Clone, Serialize, Deserialize)]
 struct BulkSelect;
 impl Message for BulkSelect {
@@ -451,8 +450,7 @@ fn the_authorizer_denies_every_escape_verb_and_the_transaction_survives() {
             misbehaviors.join("\n")
         );
         // Both writes (before and after the denials) committed with the batch:
-        // the denials neither rolled back nor poisoned the transaction, and the
-        // `Restricted` guard restored the authorizer for the facet's own COMMIT.
+        // the denials neither rolled back nor poisoned the transaction.
         assert_eq!(
             reader
                 .ask(CountNamed("deny".into()))

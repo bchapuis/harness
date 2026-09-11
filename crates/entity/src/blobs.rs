@@ -13,21 +13,21 @@
 //! mark-from-roots sweep** ([`EntityBlobs::gc`]) plus a whole-area drop on destroy
 //! ([`EntityBlobs::destroy`]).
 //!
-//! **Dedup is a bandwidth mechanism, not only a space one.** Content addressing was
-//! adopted so an unchanged region of a checkpointed facet hashes to something already
-//! stored (§7.10); on this deployment its larger effect is that the region is not
+//! **Dedup saves bandwidth, not only space.** Content addressing was adopted so an
+//! unchanged region of a checkpointed facet hashes to something already stored
+//! (§7.10); on this deployment its larger effect is that the region is not
 //! *sent*. A byte costs roughly fifty times more to move to a replica than to write
 //! locally, and a replicated byte is billed once per peer, so a chunk that dedups is
 //! the cheapest byte in the system (`docs/hardware-envelope.md` §3.9, I2).
 //!
-//! Note where that saving actually comes from: [`put`](EntityBlobs::put) itself does
-//! **not** negotiate; it sends the bytes to every peer, and a holder simply writes
-//! nothing new. The bandwidth is saved by the *caller* declining to put at all,
-//! having recognized the content as one it already holds. Every writer into this
-//! area is built that way: the workspace facet caches each file's chunk ids, the
-//! disk facet captures only dirty blocks, and facet 0's state checks its own root
-//! set before putting a chunk (§7.12). A future writer that skips that check gets
-//! the space saving and none of the bandwidth one.
+//! The saving does not come from [`put`](EntityBlobs::put), which does **not**
+//! negotiate: it sends the bytes to every peer, and a holder writes nothing new. The
+//! bandwidth is saved by the *caller* declining to put at all, having recognized the
+//! content as one it already holds. Every writer into this area is built that way:
+//! the workspace facet caches each file's chunk ids, the disk facet captures only
+//! dirty blocks, and facet 0's state checks its own root set before putting a chunk
+//! (§7.12). A future writer that skips that check gets the space saving and none of
+//! the bandwidth one.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -164,10 +164,10 @@ impl EntityBlobs {
     /// Store `bytes` and return their content id. Idempotent and dedup'd: storing
     /// content already present re-acknowledges and writes nothing new (the id is a
     /// pure function of the bytes). On the `Quorum` tier the bytes are durable on a
-    /// write quorum of the entity's replicas: always including this leader, so a
-    /// later [`get`](EntityBlobs::get) reads locally; before this returns; if a
-    /// quorum is unreachable it is [`EntityError::Unavailable`] and the caller
-    /// retries (a retry carries no double-write risk).
+    /// write quorum of the entity's replicas before this returns, always including
+    /// this leader, so a later [`get`](EntityBlobs::get) reads locally; if a quorum
+    /// is unreachable it is [`EntityError::Unavailable`] and the caller retries (a
+    /// retry carries no double-write risk).
     pub async fn put(&self, bytes: Vec<u8>) -> Result<BlobId, EntityError> {
         let id = BlobId::of(&bytes);
         self.journal
@@ -224,7 +224,7 @@ impl EntityBlobs {
     }
 
     /// Drop **all** of this entity's blobs: the entity-scoped reclamation on destroy
-    /// (§ no namespace tombstone, no membership gating: the area lives only on the
+    /// (no namespace tombstone, no membership gating; the area lives only on the
     /// entity's known replicas). Best-effort and idempotent (so it cannot fail).
     pub async fn destroy(&self) {
         self.journal.delete_blobs(&self.entity).await;

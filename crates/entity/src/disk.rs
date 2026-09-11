@@ -503,9 +503,8 @@ where
         // The copy itself runs on the node's blocking-I/O pool, a wave at a time, for
         // the reason [`capture`](DiskHandle::capture) does: reading and writing a whole
         // image is seconds of device work, and inline it stalls the async worker that
-        // is also driving this node's Raft heartbeats. On the create path that is the
-        // most visible form of the problem, provisioning a machine is exactly when the
-        // node must not look dead to its peers.
+        // is also driving this node's Raft heartbeats. Provisioning a machine is
+        // exactly when the node must not look dead to its peers.
         let mut reader = fs::File::open(src).map_err(io_disk_err)?;
         let mut writer = fs::OpenOptions::new()
             .write(true)
@@ -599,16 +598,15 @@ where
         // The scan runs on the node's blocking-I/O pool, a wave at a time, never on the
         // async worker. Reading and hashing a whole image is seconds of work (512 MiB
         // at ~600 µs a block is most of a minute), and inline it stalls the worker that
-        // is also driving this node's Raft heartbeats. That is not a slow capture, it
-        // is an election: the shard whose machine is being captured deposes the
+        // is also driving this node's Raft heartbeats. The result is an election, not
+        // just a slow capture: the shard whose machine is being captured deposes the
         // activation that owns the guest, which is the failure the deployment's
         // deliberately patient election timeout was covering for.
         //
         // The scan is still sequential and the clean blocks still never leave it: a
         // block whose hash matches the committed index is the dedup case the facet
-        // exists to get for free, so it is discarded on the pool thread and never
-        // crosses back. Only the dirty ones return, and only a wave of them at a time,
-        // which is the same bound `put_pulled` holds them under anyway.
+        // exists to get for free, so it is discarded on the pool thread. Only the dirty
+        // ones return, a wave at a time, the same bound `put_pulled` holds them under.
         let io = Arc::clone(self.ctx.blocking_io());
         let index = Arc::new(index);
         let total = block_count(image_bytes) as u32;

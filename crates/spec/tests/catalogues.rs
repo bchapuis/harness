@@ -57,9 +57,8 @@ fn every_catalogue_parses_into_rows() {
     }
 }
 
-/// Numbering is per catalogue and starts at one. The agent runtime catalogue has no A2
-/// (agent §11), so this asserts a contiguous run only up to that documented gap
-/// rather than assuming one.
+/// Numbering is per catalogue, unique, and starts at one. Contiguity is not
+/// asserted: the agent catalogue has no A2 (agent §11).
 #[test]
 fn every_catalogue_numbers_its_rows_uniquely() {
     for site in CATALOGUES {

@@ -6,11 +6,11 @@
 //! deployment wired in any other mode (Static, Registry, Gossip) reports no
 //! configured voters, so no shard ever elects: the gateway's redirect then hints
 //! the receiving node back at itself and every entity call loops on `NotLeader`.
-//! That was the exact symptom of the standalone harness booting in `Static` mode.
+//! That was the standalone harness's symptom when it booted in `Static` mode.
 //!
-//! The guard lives in `RaftShardMap::new` (the cluster shard-map path), so it
-//! catches the whole class regardless of the deployment on top: here through the
-//! public `entities()` entry point, the same call the standalone node makes.
+//! The guard lives in `RaftShardMap::new`, so it catches the whole class whatever
+//! the deployment on top; here through the public `entities()` entry point, the
+//! same call the standalone node makes.
 
 use std::time::Duration;
 
@@ -49,8 +49,7 @@ impl Entity for Probe {
 
 /// A clustered system left in the default `Static` membership mode (no
 /// `.with_leader(...)`) has no Raft engine. Hosting an entity on it must panic at
-/// `entities()` with a message that names the fix, rather than returning a handle
-/// whose every call would loop on `NotLeader`.
+/// `entities()` with a message that names the fix.
 #[test]
 #[should_panic(expected = "leader-based consensus")]
 fn hosting_a_entity_without_consensus_panics_at_construction() {
@@ -62,7 +61,7 @@ fn hosting_a_entity_without_consensus_panics_at_construction() {
         idle_after: Duration::from_secs(60),
         ..EntityConfig::default()
     };
-    // Eager: `entities()` builds the shard map synchronously, so the guard fires
-    // here; before any turn, any sim step, any network traffic.
+    // `entities()` builds the shard map synchronously, so the guard fires here,
+    // before any turn, sim step, or network traffic.
     let _ = system.entities::<Probe>(config);
 }

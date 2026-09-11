@@ -48,7 +48,7 @@ A store is per hosted **entity type** (`entities/<type>/…`), never shared acro
 types: the fence under it is keyed by shard index, and the same index is a
 different leader-election group under each type (entity spec §8.2).
 
-**`entities/` and `raft/` are the source of truth. `workspaces/` is a rebuildable cache** (entity spec §1), keyed by node and entity, and safe to wipe between runs. A node that lost only that rematerializes it from the committed state on next activation. A node that lost `entities/` or `raft/` has lost its replica: do not restart it on the empty directory, because it will be re-replicated to as if it were healthy. Restore the directory from the machine's own backup, or rebuild it as "Replacing a node" describes.
+**`entities/` and `raft/` are the source of truth. `workspaces/` is a rebuildable cache** (entity spec §1), keyed by node and entity, and safe to wipe between runs. A node that lost only `workspaces/` rematerializes it from the committed state on next activation. A node that lost `entities/` or `raft/` has lost its replica: do not restart it on the empty directory, because it will be re-replicated to as if it were healthy. Restore the directory from the machine's own backup, or rebuild it as "Replacing a node" describes.
 
 Sizing per node: eight or more cores, 32 GB and up, local NVMe. Memory is consumed by entity *count* rather than concurrency (the manifest is held whole and segments and host handles are cached by the thousand), so undershooting shows up as an OOM under entity growth, not under load. `docs/standalone-deployment.md` carries the full sizing note and the `link ÷ (replication_factor − 1)` ingest ceiling.
 
@@ -107,7 +107,7 @@ Shortening `TimeoutStopSec` below the worst handoff means systemd SIGKILLs the n
 The voter roster is fixed at boot: the binary accepts `--id` only in `1..=AGENT_NODES`, the voter set is exactly that range, and nothing in it adds or removes a voter at runtime. So a replacement machine **keeps the dead node's id**:
 
 1. Stop the old machine for good. The cluster runs on the remaining quorum meanwhile: the node never auto-downs a peer (`DowningPolicy::Conservative`), so an absent voter stays `unreachable` until something answers under its id again.
-2. Restore `/var/lib/agent/node` on the replacement from the old machine's own backup. That directory holds the id's Raft term and vote, which is what makes reusing the id safe (actor spec §9.4.3 item 2). Starting the same id on an **empty** directory instead forfeits that state: the node can vote again in a term it already voted in, and it rejoins as a replica with everything to re-replicate; accept that only with the cluster quiescent and the alternative being no third voter at all.
+2. Restore `/var/lib/agent/node` on the replacement from the old machine's own backup. That directory holds the id's Raft term and vote, what makes reusing the id safe (actor spec §9.4.3 item 2). Starting the same id on an **empty** directory instead forfeits that state: the node can vote again in a term it already voted in, and it rejoins as a replica with everything to re-replicate; accept that only with the cluster quiescent and the alternative being no third voter at all.
 3. If the replacement is not reachable at the old machine's address, point the id's entry in every `AGENT_PEERS` at it and restart the peers one at a time ("Rolling restart"): a node resolves the roster's hosts to addresses at boot.
 
 The same procedure applies to a node whose Raft WAL has poisoned: it stopped voting because it could not persist (actor spec §9.4.3 item 2), and it will not recover on its own. `journalctl -u agent-node | grep '\[raft\]'` shows the reason.
@@ -120,6 +120,6 @@ The actor spec's rule for a voter declared `down`, remove it by a committed memb
 
 ## TLS
 
-`agent-gateway` serves plain HTTP: it has no TLS flag and binds a bare listener on `AGENT_HTTP_BIND`. That is the only tenant-facing port in the deployment, and the bearer tokens in `/etc/agent/tenants` are credentials that must not cross a plaintext link, so terminate public TLS in front of it, with a reverse proxy on the gateway machine, with the gateway bound to loopback or a private address behind it.
+`agent-gateway` serves plain HTTP: it has no TLS flag and binds a bare listener on `AGENT_HTTP_BIND`. That is the only tenant-facing port in the deployment, and the bearer tokens in `/etc/agent/tenants` are credentials that must not cross a plaintext link, so terminate public TLS in front of it: a reverse proxy on the gateway machine, with the gateway bound to loopback or a private address behind it.
 
 The actor transport between nodes and gateways is plaintext as well, guarded by the cluster secret, and expected to run on a private network. The transport itself supports mutual TLS (`Encryption::MutualTls`), but neither binary exposes a flag for it: both name `Encryption::PlaintextTrusted` in code, and a deployment crossing untrusted links has to provision certificates there and rebuild.

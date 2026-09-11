@@ -1,20 +1,21 @@
 //! Entities under the cluster fault swarm (entity §14, V&V checklist #4, #7, #8).
 //!
-//! `tests/clustered_entities.rs` drives the `Quorum`-tier paths through *scripted* faults
-//! (a crash here, a quorum loss there). This file applies the V&V doctrine the
-//! other way round: a [`ClusterWorkload`] is swept across many seeds while a
-//! seeded nemesis injects partitions, crashes, heals, loss, duplication, and
-//! delay (spec §18.3) and a [`Checker`] watches the §13 event stream live. Three
-//! properties are asserted the way the actor framework asserts its own:
+//! `tests/clustered_entities.rs` drives the `Quorum`-tier paths through
+//! *scripted* faults. This file works the other way round: a
+//! [`ClusterWorkload`] is swept across many seeds while a seeded nemesis
+//! injects partitions, crashes, heals, loss, duplication, and delay (spec
+//! §18.3) and a [`Checker`] watches the §13 event stream live. Three
+//! properties are asserted:
 //!
 //! - **Continuous invariants under faults (#4).** The safety core
-//!   ([`default_invariants`]) plus the entity-specific `CommitMonotonic` (E3/E5)
-//!   hold on every run; a violation is reported with the `(seed)` to replay it.
-//! - **Seed-reproducibility (#7).** The same seed yields a byte-identical event
-//!   stream, entity `App` events included ([`check_cluster_reproducible`]).
+//!   ([`default_invariants`]) plus `CommitMonotonic` (E3/E5) hold on every
+//!   run; a violation is reported with the `(seed)` to replay it.
+//! - **Seed-reproducibility (#7).** The same seed yields a byte-identical
+//!   event stream, entity `App` events included
+//!   ([`check_cluster_reproducible`]).
 //! - **Fault coverage (#8).** Across the sweep, each transport fault type
-//!   actually fired ([`run_cluster_swarm_coverage`]), so a green run is provably
-//!   not a silent happy-path run.
+//!   actually fired ([`run_cluster_swarm_coverage`]), so a green run is not a
+//!   silent happy-path run.
 //!
 //! The entity is the Appendix A `Account`, hosted on the leader-based clustered
 //! system the shard map requires (§7.6).
@@ -146,22 +147,20 @@ impl EntityHandler<ReadBalance> for Account {
     }
 }
 
-// --- An entity-specific continuous safety checker -------------------------------
-
 // --- The workload -------------------------------------------------------------
 
 /// `hibernating` picks the activation lifetime: `false` keeps every activation
-/// resident for the whole run, `true` gives it a lifetime short enough that
-/// clients can idle past it, so entities hibernate and rehydrate from a quorum
-/// while the nemesis is still running. The snapshot cadence follows, because a
-/// hibernating entity that never snapshotted comes back by replaying from an
-/// empty base and never exercises the snapshot-plus-tail restore.
+/// resident for the whole run, `true` shortens it enough that clients can idle
+/// past it, so entities hibernate and rehydrate from a quorum while the
+/// nemesis runs. The snapshot cadence follows: a hibernating entity that never
+/// snapshotted comes back by replaying from an empty base and never exercises
+/// the snapshot-plus-tail restore.
 ///
 /// The hibernating cadence is `1` (a snapshot at every commit) because idle
-/// eviction takes one only when §9's threshold has been crossed, exactly as the
-/// write path does (`host.rs::hibernate`). A faulted client here often lands
-/// fewer than two commits on an entity before idling past `idle_after`, so any
-/// higher cadence leaves the restore path unexercised, which
+/// eviction takes one only once §9's threshold has been crossed, as the write
+/// path does (`host.rs::hibernate`). A faulted client often lands fewer than
+/// two commits on an entity before idling past `idle_after`, so any higher
+/// cadence leaves the restore path unexercised, which
 /// `Exercised::assert_hibernated` then reports.
 fn config(hibernating: bool) -> EntityConfig {
     EntityConfig {
@@ -178,15 +177,15 @@ fn config(hibernating: bool) -> EntityConfig {
 const RESIDENT: Duration = Duration::from_secs(60);
 /// Activation lifetime for the hibernating sweep.
 const IDLE_AFTER: Duration = Duration::from_millis(200);
-/// How long a hibernating client idles when it idles: comfortably past
-/// [`IDLE_AFTER`], so the host really does hibernate rather than nearly.
+/// How long a hibernating client idles: past [`IDLE_AFTER`], so the host
+/// really does hibernate.
 const IDLE_FOR: Duration = Duration::from_millis(500);
 
-/// Deposit-and-read traffic against a handful of entities, hosted on a leader-based
+/// Deposit-and-read traffic against a handful of entities on a leader-based
 /// cluster, driven through the public `EntityRef` API only (spec §18.4). Every
-/// call is faulted by the nemesis and the transport; a failed call is recorded as
-/// nothing and the client moves on, so the drive future always completes and the
-/// invariants are checked over whatever the run produced.
+/// call is faulted by the nemesis and the transport; a failed call records
+/// nothing and the client moves on, so the drive future always completes and
+/// the invariants are checked over whatever the run produced.
 struct AccountSwarm {
     nodes: usize,
     clients: usize,
@@ -230,8 +229,9 @@ impl ClusterWorkload for AccountSwarm {
     }
 
     fn mode(&self) -> ClusterModeSpec {
-        // The entity layer requires the leader-based control plane to host the shard map
-        // (§7.6); every node is a control voter so the map group can form.
+        // The entity layer requires the leader-based control plane to host the
+        // shard map (§7.6); every node is a control voter so the map group can
+        // form.
         ClusterModeSpec::leader(self.swim(), self.nodes, DowningPolicy::Conservative)
     }
 
@@ -244,9 +244,9 @@ impl ClusterWorkload for AccountSwarm {
         let hibernating = self.hibernating;
         let restarting = self.restarting;
         Box::pin(async move {
-            // Host the type on every node: each starts its gateway and joins/leads
-            // its shards (§5.3). Done at drive start; the bounded redirect absorbs
-            // the bootstrap window.
+            // Host the type on every node: each starts its gateway and
+            // joins/leads its shards (§5.3). Done at drive start; the bounded
+            // redirect absorbs the bootstrap window.
             let hosts: Vec<_> = nodes
                 .iter()
                 .map(|s| s.entities::<Account>(config(hibernating)))
@@ -258,13 +258,13 @@ impl ClusterWorkload for AccountSwarm {
 
             let mut tasks = Vec::new();
             for c in 0..clients {
-                // Spread the clients across the nodes' gateways: except under
-                // restarts, where every client goes through node 1, the one node
-                // the nemesis leaves alone. A handle for a restarted node points
-                // at a system that has been shut down, and location transparency
-                // (E13) means routing through one gateway costs no coverage: the
+                // Spread the clients across the nodes' gateways, except under
+                // restarts, where every client goes through node 1, the one
+                // node the nemesis leaves alone. A handle for a restarted node
+                // points at a system that has been shut down, and location
+                // transparency (E13) means one gateway costs no coverage: the
                 // call still lands on whichever node leads the entity's shard,
-                // which is exactly the set being restarted.
+                // which is the set being restarted.
                 let entities = if restarting {
                     hosts[0].clone()
                 } else {
@@ -286,10 +286,10 @@ impl ClusterWorkload for AccountSwarm {
                         } else {
                             let _ = acct.ask_timeout(ReadBalance, Duration::from_secs(2)).await;
                         }
-                        // Idle past the activation lifetime often enough that the
-                        // next call to this entity rehydrates it, from a snapshot
-                        // plus a replayed tail, recovered from a write quorum, on
-                        // whichever node leads the shard by then (§8, §9).
+                        // Idle past the activation lifetime often enough that
+                        // the next call rehydrates the entity from a snapshot
+                        // plus a replayed tail, recovered from a write quorum
+                        // on whichever node leads the shard by then (§8, §9).
                         if hibernating && op % 2 == 1 {
                             clock.sleep(IDLE_FOR).await;
                         }
@@ -331,11 +331,11 @@ fn resident(clients: usize, ops: u64) -> AccountSwarm {
 /// The hibernating sweeps' workload: short activation lifetime, clients that
 /// idle past it, and a nemesis allowed to kill node processes outright.
 ///
-/// Restarts matter most to *this* workload. A crash only isolates a process that
-/// keeps running, so the entities it hosts stay activated behind the partition and
-/// a heal finds them warm; killing the process is what forces the next call to
-/// rebuild the entity's head and tail from a write quorum on a node that holds
-/// none of it in memory.
+/// Restarts matter most here. A crash only isolates a process that keeps
+/// running, so the entities it hosts stay activated behind the partition and a
+/// heal finds them warm; killing the process forces the next call to rebuild
+/// the entity's head and tail from a write quorum on a node that holds none of
+/// it in memory.
 fn hibernating(clients: usize, ops: u64) -> AccountSwarm {
     AccountSwarm {
         nodes: 3,
@@ -367,49 +367,50 @@ fn entity_swarm_is_reproducible() {
 
 // --- The account as a linearizable object under faults (E2/E14) ---------------
 //
-// `CommitMonotonic` is a claim about the *journal*: seqs advance, nothing lands
-// twice on a slot. It caught the stale-head bug in `corpus.txt` only indirectly:
-// what actually went wrong there was an acknowledged deposit that no later read
-// could see, and monotonicity happened to notice the slot collision underneath.
-// A reference model says the thing directly (V&V checklist #3): every read must
-// be explicable by *some* sequential order of the deposits, so a lost or
+// `CommitMonotonic` is a claim about the *journal*: seqs advance, nothing
+// lands twice on a slot. It caught the stale-head bug in `corpus.txt` only
+// indirectly: the real fault was an acknowledged deposit no later read could
+// see, and monotonicity happened to notice the slot collision underneath. A
+// reference model says it directly (V&V checklist #3): every read must be
+// explicable by *some* sequential order of the deposits, so a lost or
 // double-applied write is named as what it is.
 //
-// Deliberately small, and one entity rather than four. A linearizability check is
-// exponential in the number of *pending* operations, and under this nemesis a
-// large share of calls end unknown: each one an op the checker may place
-// anywhere or drop. Few ops keep that search bounded; the breadth comes from the
-// seeds, not from any one history.
+// Deliberately small, and one entity rather than four. A linearizability check
+// is exponential in the number of *pending* operations, and under this nemesis
+// many calls end unknown: each is an op the checker may place anywhere or
+// drop. Few ops keep the search bounded; the breadth comes from the seeds, not
+// from any one history.
 
 /// The account this sweep decides, whose deposit carries an **idempotency key**.
 ///
-/// The Appendix A `Account` above cannot be held to a linearizable history over
-/// this wire, and that is the framework's contract rather than a defect in it.
-/// Delivery is at-most-once *at the caller* (§7.2): a duplicated request frame is
-/// handled twice, so a bare `Deposit { cents: 1 }` lands twice for one logical
-/// operation and no sequential order explains the balance that follows. The spec
-/// names the remedy in the same section (higher guarantees are "built atop this
-/// layer with explicit idempotency keys"), and `tests/support/mod.rs` in
+/// The Appendix A `Account` above cannot be held to a linearizable history
+/// over this wire, by contract rather than by defect. Delivery is at-most-once
+/// *at the caller* (§7.2): a duplicated request frame is handled twice, so a
+/// bare `Deposit { cents: 1 }` lands twice for one logical operation and no
+/// sequential order explains the balance that follows. The spec names the
+/// remedy in the same section (higher guarantees are "built atop this layer
+/// with explicit idempotency keys"), and `tests/support/mod.rs` in
 /// `actor-simulation` is the same construction for the register, recorded in
 /// `corpus.txt` after the identical mistake.
 ///
-/// The key lives in the *event*, so the applied set is folded from the journal
-/// and survives deactivation and failover: a duplicate that arrives after a
-/// rehydration is still recognized. A read needs no key: it changes nothing, and
-/// a duplicate's reply is the value at its own instant, which falls inside the
-/// caller's window and linearizes there.
+/// The key lives in the *event*, so the applied set folds from the journal and
+/// survives deactivation and failover: a duplicate arriving after a
+/// rehydration is still recognized. A read needs no key: it changes nothing,
+/// and a duplicate's reply is the value at its own instant, which falls inside
+/// the caller's window and linearizes there.
 ///
 /// Its **read** is a writing command, for the other half of the same reason. A
-/// query commits nothing and is served from the activation, and §7.5 is explicit
-/// that this is "read-your-leader (relaxed), not linearizable under partition":
-/// a deposed-but-unfenced leader MAY serve a stale value, and a quorum-less
-/// recovery may even seed that state with an uncommitted record. Linearizable
-/// reads are a deferred upgrade (§16). The spec names the interim construction in
-/// the same paragraph: "a caller that needs a linearizable read in the meantime
-/// issues a trivial *writing* command (one that emits an event): it rides the §6
-/// output gate, so it commits through the shard leader and reflects committed
-/// state, or fails". `Probed` is that event: the fold ignores it, so the reply is
-/// the committed balance at the seq the read itself commits at.
+/// query commits nothing and is served from the activation, and §7.5 is
+/// explicit that this is "read-your-leader (relaxed), not linearizable under
+/// partition": a deposed-but-unfenced leader MAY serve a stale value, and a
+/// quorum-less recovery may even seed that state with an uncommitted record.
+/// Linearizable reads are a deferred upgrade (§16), and the spec names the
+/// interim construction in the same paragraph: "a caller that needs a
+/// linearizable read in the meantime issues a trivial *writing* command (one
+/// that emits an event): it rides the §6 output gate, so it commits through
+/// the shard leader and reflects committed state, or fails". `Probed` is that
+/// event: the fold ignores it, so the reply is the committed balance at the
+/// seq the read commits at.
 #[derive(Default)]
 struct KeyedAccount;
 
@@ -473,8 +474,8 @@ impl EntityHandler<KeyedDeposit> for KeyedAccount {
         _ctx: &EntityCtx<Self>,
     ) -> (Vec<KeyedLedger>, i64) {
         // A re-delivery journals nothing and answers from the state it already
-        // produced; the history records `AddOk` either way, so the balance the
-        // duplicate reports is not what the model is deciding.
+        // produced; the history records `AddOk` either way, so the balance a
+        // duplicate reports is not what the model decides.
         if state.applied.contains(&msg.req) {
             return (vec![], state.cents);
         }
@@ -502,17 +503,18 @@ impl EntityHandler<ReadKeyedBalance> for KeyedAccount {
         _msg: ReadKeyedBalance,
         _ctx: &EntityCtx<Self>,
     ) -> (Vec<KeyedLedger>, i64) {
-        // Emitting an event is the whole point (see the type's doc): it puts this
-        // read behind the output gate, so the balance returned is the committed one
-        // and a deposed leader fails the call instead of answering staler.
+        // Emitting an event is the point (see the type's doc): it puts this
+        // read behind the output gate, so the balance returned is the
+        // committed one and a deposed leader fails the call instead of
+        // answering staler.
         (vec![KeyedLedger::Probed], state.cents)
     }
 }
 
 /// Deposits and reads against a single account, recorded as a [`Counter`]
-/// history. A deposit is `Add`, a read is `Read`, and a call that fails is left
-/// pending (`info`): its effect may or may not have landed, which is exactly
-/// what the checker is entitled to decide either way.
+/// history. A deposit is `Add`, a read is `Read`, and a call that fails is
+/// left pending (`info`): its effect may or may not have landed, and the
+/// checker may decide either way.
 struct LinearizableAccountSwarm {
     nodes: usize,
     clients: usize,
@@ -639,20 +641,19 @@ fn the_linearizable_account_sweep_is_reproducible() {
 
 // --- Hibernation crossed with the nemesis (E12 × E14) -------------------------
 //
-// The sweep above keeps every activation resident for the whole run, so it never
-// reaches the path where an entity is evicted and the *next* call has to rebuild it:
-// head and tail recovered from a write quorum, on whatever node leads the shard
-// by then (§8, §9). That path is where the acknowledged-write-lost bug in
-// `corpus.txt` lived, and until now E12 (hibernation round-trip) and E14
-// (lossless failover) were each exercised alone: `sql_swarm.rs`'s single-node
-// workload hibernates with no faults at all, and every clustered workload faults
-// without ever hibernating.
+// The sweep above keeps every activation resident, so it never reaches the
+// path where an entity is evicted and the *next* call has to rebuild it: head
+// and tail recovered from a write quorum, on whatever node leads the shard by
+// then (§8, §9). That path is where the acknowledged-write-lost bug in
+// `corpus.txt` lived, and E12 (hibernation round-trip) and E14 (lossless
+// failover) are otherwise exercised alone: `sql_swarm.rs`'s single-node
+// workload hibernates with no faults, and every clustered workload faults
+// without hibernating.
 //
 // This one crosses them: entities hibernate and snapshot mid-run, and the next
 // call rehydrates through the quorum barrier while the nemesis partitions,
-// freezes, and kills the processes around it. `CommitMonotonic` is the checker
-// that would name a write the recovery dropped or replayed onto an occupied
-// slot.
+// freezes, and kills the processes around it. `CommitMonotonic` names a write
+// the recovery dropped or replayed onto an occupied slot.
 
 #[test]
 fn hibernating_entity_invariants_hold_under_restarts() {
@@ -667,14 +668,14 @@ fn hibernating_entity_invariants_hold_under_restarts() {
 #[test]
 fn the_nemesis_actually_restarts_a_node() {
     // #8 for the fault the wire cannot see. Stated once, here, for every
-    // hibernating sweep in the crate: whether the nemesis *draws* a restart is a
-    // property of its vocabulary and the seed range, not of any one facet's
+    // hibernating sweep in the crate: whether the nemesis *draws* a restart
+    // depends on its vocabulary and the seed range, not on any one facet's
     // traffic, and this is the cheapest workload to ask it of.
     //
-    // `coverage_seeds`, not `sweep_seeds`, because the claim is about the whole
-    // declared range. One seed runs six nemesis rounds against a seven-action
-    // vocabulary, so it draws no restart about two runs in five, narrowing this
-    // would not weaken the assertion, it would make it flaky.
+    // `coverage_seeds`, not `sweep_seeds`, because the claim is about the
+    // whole declared range. One seed runs six nemesis rounds against a
+    // seven-action vocabulary, so it draws no restart about two runs in five;
+    // narrowing the range would not tighten the assertion, only make it flaky.
     let workload = hibernating(3, 6);
     if let Err(failure) = run_cluster_swarm(&workload, coverage_seeds(0..16)) {
         panic!("{failure}");
@@ -740,8 +741,8 @@ fn entity_swarm_actually_fires_each_fault_type() {
 /// The entity safety core for these single-node suites: E3/E5 commit
 /// monotonicity and E6 per-node exactly-once activation, both taken from
 /// [`entity::testing`] rather than restated here. `ActivationSingletonPerNode`
-/// additionally clears a node's live set on `NodeDown`, which is inert in the
-/// no-fault runs below and correct in the faulted ones.
+/// also clears a node's live set on `NodeDown`, inert in the no-fault runs
+/// below and correct in the faulted ones.
 fn entity_invariants() -> Vec<Box<dyn Invariant>> {
     let mut invariants = default_invariants();
     invariants.push(Box::new(ActivationSingletonPerNode::new(

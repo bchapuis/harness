@@ -9,10 +9,9 @@
 //!   what the store layer itself adds.
 //! - `file` is that plus a framed, checksummed, fsynced append.
 //!
-//! The difference between them is durability. The *allocations* each performs, though,
-//! are the store layer's own doing, and those are worth watching independently: the file
-//! store's per-commit allocation count should not exceed the memory store's by more than
-//! the framing genuinely needs.
+//! The difference between them is durability. The *allocations* are the store layer's
+//! own doing: the file store's per-commit allocation count should not exceed the memory
+//! store's by more than the framing needs.
 //!
 //! `read_head` is here because activating an entity asks its store for the head sequence
 //! number, and how much work that costs decides part of a session's time-to-first-token.
@@ -53,15 +52,14 @@ fn name() -> EntityName {
 /// One commit against `store`, with the batch built outside the measured region.
 ///
 /// `store_record` takes its events by value, so a loop that reuses one batch has to clone
-/// it. That clone is the benchmark's cost, not the store's, and leaving it inside the
-/// timed closure would roughly double the reported allocation count of the memory store:
-/// the very number this file exists to report. `with_inputs` hands each iteration its own
-/// batch and excludes building it from the measurement.
+/// it. That clone is the benchmark's cost, not the store's, and inside the timed closure
+/// it would roughly double the reported allocation count of the memory store.
+/// `with_inputs` hands each iteration its own batch, built outside the measurement.
 ///
 /// The ack is bound and dropped rather than checked. `store_record` is `#[must_use]` so
-/// a real caller cannot let a refusal fall on the floor (**E14**), but this bench is
-/// measuring the write itself: both stores settle synchronously, so by the time the call
-/// returns there is nothing left to wait for and nothing a check would change.
+/// a real caller cannot let a refusal fall on the floor (**E14**), but both stores settle
+/// synchronously: by the time the call returns there is nothing left to wait for and
+/// nothing a check would change.
 fn commit(bencher: Bencher, store: impl EntityStore, records: usize) {
     let entity = name();
     let events = batch(records, 256);
@@ -84,8 +82,8 @@ fn commit(bencher: Bencher, store: impl EntityStore, records: usize) {
 
 /// The in-memory store: slot map, name lookup, and the ack. No disk.
 ///
-/// This is the floor `file` is measured against, everything here is cost the store layer
-/// adds regardless of durability.
+/// The floor `file` is measured against: cost the store layer adds regardless of
+/// durability.
 #[divan::bench(args = [1, 8, 64])]
 fn memory(bencher: Bencher, records: usize) {
     commit(bencher, MemoryEntityStore::new(), records);
@@ -126,10 +124,9 @@ fn seeded(history: usize) -> (MemoryEntityStore, EntityName) {
 /// Asking an entity for its head, swept over how much history it has.
 ///
 /// Activation asks this before the entity can serve anything, so its shape is part of a
-/// session's time-to-first-token. The sweep is the whole point: a flat line means the
-/// answer is reached directly, a climbing one means the store materializes the journal to
-/// find it. Compare against `read_full` below, which is the same question asked the
-/// expensive way.
+/// session's time-to-first-token. The sweep is the point: a flat line means the answer is
+/// reached directly, a climbing one means the store materializes the journal to find it.
+/// Compare against `read_full` below, the same question asked the expensive way.
 #[divan::bench(args = [1, 100, 1_000])]
 fn head(bencher: Bencher, history: usize) {
     let (store, entity) = seeded(history);
@@ -138,10 +135,9 @@ fn head(bencher: Bencher, history: usize) {
 
 /// The same entity read in full, every occupied slot's bytes plus the snapshot.
 ///
-/// Not a straw man: a recovering leader genuinely needs all of it to merge a write quorum
-/// by highest-term-per-slot (**E14**), so this cost is real and stays. It is here as the
-/// baseline that shows what asking only for the head saves, and what activation used to
-/// pay to learn one integer.
+/// A recovering leader needs all of it to merge a write quorum by highest-term-per-slot
+/// (**E14**), so this cost is real and stays. It is the baseline that shows what asking
+/// only for the head saves.
 #[divan::bench(args = [1, 100, 1_000])]
 fn read_full(bencher: Bencher, history: usize) {
     let (store, entity) = seeded(history);

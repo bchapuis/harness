@@ -1,12 +1,11 @@
 //! Catalogue drift test (entity spec §15): the machine-readable E1–E21 table
 //! stays complete, and every file it points at still exists.
 //!
-//! This is the spec↔code drift gate for entity, the same pattern that guards the
-//! core, utilities, agent, and sandbox catalogues. It fails the build if a
-//! E-number is missing or duplicated, if an entry claims no verification method,
-//! or if a `SimTest`/`CompileFail` pointer names a file that no longer exists,
-//! which is what makes §15's "Verified by" column mechanically true rather than
-//! merely written down.
+//! The spec↔code drift gate for entity, the same pattern that guards the core,
+//! utilities, agent, and sandbox catalogues. It fails the build if an E-number is
+//! missing or duplicated, if an entry claims no verification method, or if a
+//! `SimTest`/`CompileFail` pointer names a file that no longer exists, which is
+//! what makes §15's "Verified by" column mechanically true.
 
 mod support;
 
@@ -19,10 +18,9 @@ use support::catalogue::e_catalogue;
 
 /// The table above and the spec's §15 copy of it are the same table.
 ///
-/// The rest of this file holds the Rust copy internally consistent. This holds it
-/// equal to the prose one, which is the copy a reader trusts: an invariant added
-/// to one, a defining section moved in one, or a suite renamed in one is caught
-/// here rather than left to be noticed.
+/// The rest of this file holds the Rust copy internally consistent; this holds it
+/// equal to the prose one a reader trusts. An invariant added to one, a defining
+/// section moved in one, or a suite renamed in one is caught here.
 #[test]
 fn the_specification_and_this_catalogue_agree() {
     let site = catalogue::site("entity");
@@ -82,7 +80,7 @@ fn every_entry_has_spec_property_and_a_verification_method() {
 /// Every `SimTest` pointer names a comma-separated list of `*.rs` files under this
 /// crate's `tests/`; a `CompileFail` pointer is a path relative to `crates/`. A
 /// renamed or deleted suite must fail here rather than drift out from under the
-/// catalogue unnoticed.
+/// catalogue.
 #[test]
 fn every_file_pointer_references_a_real_file() {
     let tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
@@ -129,8 +127,8 @@ fn no_entry_claims_a_continuous_checker() {
     // with the label its own suite reports under, so there is no fixed global name
     // for this table to cross-check against the way `default_invariants()` gives
     // the core catalogue one. Anyone adding a `Verify::Checker` here must first
-    // give entity a named, discoverable checker set, and then this assertion
-    // becomes the drift test between the two, as it is in the sandbox catalogue.
+    // give entity a named, discoverable checker set; this assertion then becomes
+    // the drift test between the two, as in the sandbox catalogue.
     for e in e_catalogue() {
         assert!(
             !e.verify.iter().any(|v| matches!(v, Verify::Checker(_))),

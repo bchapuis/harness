@@ -76,8 +76,8 @@ pub use actor_cluster::WIRE;
 /// arithmetic is how one of them ends up dialing a port nobody is listening on,
 /// with a plain `Unreachable` as the only symptom.
 ///
-/// `host` may be an IP literal, used as-is, or a name: a container or pod DNS
-/// name like `agent-0.agent`; resolved through the system resolver, which is
+/// `host` may be an IP literal, used as-is, or a name (a container or pod DNS
+/// name like `agent-0.agent`) resolved through the system resolver, which is
 /// what lets a roster span machines instead of loopback.
 ///
 /// An id whose port would not fit is an error, not a panic: ids reach here from an
@@ -121,10 +121,9 @@ pub struct TlsConfig {
 
 impl TlsConfig {
     /// Assemble the mutual-TLS material from one CA, this node's leaf `cert`
-    /// and `key`, and the cluster's shared `server_name`, the one rustls
-    /// ritual every deployment would otherwise copy: the CA becomes both the
-    /// client-auth verifier and the dial-side root store, and the leaf serves
-    /// both directions.
+    /// and `key`, and the cluster's shared `server_name`: the CA becomes both
+    /// the client-auth verifier and the dial-side root store, and the leaf
+    /// serves both directions.
     pub fn mutual(
         ca: CertificateDer<'static>,
         cert: CertificateDer<'static>,
@@ -194,8 +193,7 @@ pub struct TcpConfig {
     /// Deliberately not an `Option<TlsConfig>` defaulting to `None`: the plaintext
     /// choice is a security decision every deployment must make on purpose, and an
     /// `Option` lets it be made by omission. The [`Encryption`] enum has no default,
-    /// so a construction site has to name which it wants and a reader can see the
-    /// answer without going to look for it.
+    /// so a construction site has to name which it wants.
     pub encryption: Encryption,
 }
 
@@ -204,10 +202,9 @@ impl TcpConfig {
     /// sane default (the timeouts, the queue capacity, the gossip cadence, no
     /// allowlist) filled in. The required arguments are the ones no default may
     /// choose: identity and addressing, the codec both ends must agree on, and
-    /// the two security decisions (the secret, and [`Encryption`], which
-    /// deliberately has no default; see the field's docs). The fields stay
-    /// public, so a caller that needs a different timing overrides the one field
-    /// it means to change.
+    /// the two security decisions (the secret, and [`Encryption`]; see the
+    /// field's docs). The fields stay public, so a caller that needs a different
+    /// timing overrides the one field it means to change.
     pub fn new(
         node: NodeId,
         advertised: SocketAddr,
@@ -234,19 +231,18 @@ impl TcpConfig {
 
 /// How a transport association is protected (spec §15).
 ///
-/// The stakes: the `cluster_secret` is what authorizes membership, and it crosses
-/// the wire in the association handshake. Under [`Encryption::PlaintextTrusted`]
-/// anyone who can observe one handshake learns it and can join the cluster as a
-/// replica. That is acceptable on loopback or a genuinely private network and
-/// nowhere else, which is why the variant says so in its name.
+/// The `cluster_secret` is what authorizes membership, and it crosses the wire in
+/// the association handshake. Under [`Encryption::PlaintextTrusted`] anyone who can
+/// observe one handshake learns it and can join the cluster as a replica. That is
+/// acceptable on loopback or a genuinely private network and nowhere else, which is
+/// why the variant says so in its name.
 #[derive(Clone)]
 pub enum Encryption {
     /// Mutual TLS: both ends present certificates and the association runs
     /// encrypted. The production choice for any link that leaves a trusted network.
     MutualTls(Box<TlsConfig>),
     /// Plaintext, on a network the operator asserts is trusted: loopback, a private
-    /// cluster network, or a test. The cluster secret is exposed to anyone who can
-    /// see the traffic.
+    /// cluster network, or a test.
     PlaintextTrusted,
 }
 
@@ -431,8 +427,7 @@ impl TcpTransport {
         // Wrap in TLS if configured, then run the application handshake over the
         // (possibly encrypted) stream, all under one handshake deadline. The
         // stream type is erased first, so the deadline/handshake/registration
-        // sequence exists once for both encryption modes; a per-connection box
-        // is noise next to the TCP (and TLS) work on this path.
+        // sequence exists once for both encryption modes.
         let handshake = async {
             let stream: Box<dyn Duplex> = match &self.shared.config.encryption {
                 Encryption::MutualTls(tls) => {
@@ -695,10 +690,9 @@ where
 /// then announce ourselves. Returns the verified peer identity and learns its
 /// advertised address (spec §9.3).
 ///
-/// The negotiated revision is dropped here, and only here. An accepted connection
-/// is receive-only (§7) (replies and gossip go back over this node's own dialed
-/// connection), so there is nothing on it to gate, and the revision that governs
-/// what we write to this peer is the one that connection settles for itself.
+/// The negotiated revision is dropped here, and only here: an accepted connection
+/// is receive-only (§7), so there is nothing on it to gate. What we write to this
+/// peer is governed by the connection we dial it over.
 async fn server_handshake<S>(mut stream: S, shared: &Arc<Shared>) -> io::Result<(S, NodeId)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,

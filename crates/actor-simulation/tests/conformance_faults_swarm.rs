@@ -38,14 +38,10 @@ use serde::Serialize;
 
 // --- §18.3: fault-injection coverage across a seed sweep ---------------------
 //
-// A swarm that *configures* faults but, by seed luck, never *triggers* one gives
-// false confidence: a green sweep that secretly only ever ran the happy path
-// proves much less than it appears to. So the cluster swarm tallies the faults
-// it actually exercised across its seed range, and these tests assert that every
-// fault type fired at least once. If a future change to the fault sampling or
-// the network silently stopped injecting (say) duplication, these tests go red
-// even though no invariant was violated, surfacing a coverage regression that
-// the invariant checks alone could never see.
+// If a future change to the fault sampling or the network silently stopped
+// injecting (say) duplication, these tests go red even though no invariant was
+// violated, surfacing a coverage regression the invariant checks alone could
+// never see.
 
 struct CovGreeter;
 

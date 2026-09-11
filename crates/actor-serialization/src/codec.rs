@@ -109,10 +109,11 @@ impl Codec for JsonCodec {
 ///
 /// Not self-describing: `postcard` writes no field names or type tags, so it
 /// decodes only against the same type definition that encoded it. A message
-/// type that needs `deserialize_any`: `serde_json::Value`, `#[serde(untagged)]`
-/// or `#[serde(flatten)]`; cannot travel over it, and a system carrying one
-/// wants [`JsonCodec`]. Both ends of an association must agree either way; the
-/// handshake compares [`Codec::name`] and refuses a mismatch (spec §7.1).
+/// type that needs `deserialize_any` (`serde_json::Value`,
+/// `#[serde(untagged)]`, `#[serde(flatten)]`) cannot travel over it, and a
+/// system carrying one wants [`JsonCodec`]. Both ends of an association must
+/// agree either way; the handshake compares [`Codec::name`] and refuses a
+/// mismatch (spec §7.1).
 #[derive(Clone, Copy, Default)]
 pub struct PostcardCodec;
 
@@ -161,10 +162,9 @@ mod tests {
     #[test]
     fn json_inflates_a_byte_vector_by_roughly_the_documented_multiple() {
         // [`JsonCodec`]'s doc warns that a `Vec<u8>` costs about 3.6 characters per byte
-        // because JSON has no byte-string form. The warning steers a deployment's codec
-        // choice, so the number is pinned here rather than left as prose that could
-        // quietly stop being true. Bounded loosely: the claim is an order of magnitude,
-        // not a constant, and the exact ratio moves with the byte values chosen.
+        // because JSON has no byte-string form. That number steers a deployment's codec
+        // choice, so it is pinned here. Bounded loosely: the claim is an order of
+        // magnitude, and the exact ratio moves with the byte values chosen.
         let value = vec![0x5a_u8; 1024];
         let json = encode(&JsonCodec, &value).unwrap();
         let postcard = encode(&PostcardCodec, &value).unwrap();
@@ -202,8 +202,7 @@ mod tests {
 
     /// The property the blob path depends on: bulk bytes cross at their own
     /// size, so an envelope that encodes a payload and then frames it does not
-    /// multiply it. The same value under [`JsonCodec`] is an array of decimal
-    /// numbers, and framing it multiplies that again.
+    /// multiply it.
     #[test]
     fn postcard_keeps_bulk_bytes_at_their_own_size() {
         let block: Vec<u8> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();

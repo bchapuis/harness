@@ -3,7 +3,7 @@
 //! Two claims over the same faulted workload. **Determinism:** the same
 //! `(workload, seed)` reproduces the full event stream byte-for-byte
 //! (agent *and* entity events) with model and sandbox faults firing under seed
-//! control. **Invariants:** the A-invariant hold across a seed sweep while
+//! control. **Invariants:** the A-invariants hold across a seed sweep while
 //! those faults flow. The journal, the fence, and resume are the entity's, so
 //! simulating the agent runtime runs entity's real consensus/rehydration code.
 //!
@@ -141,7 +141,7 @@ impl Workload for FaultyWorkload {
 
 #[test]
 fn the_event_stream_reproduces_byte_for_byte_per_seed() {
-    // The determinism contract over the real stream (core spec §18.1 #1), harness
+    // The determinism contract over the real stream (core spec §18.1 #1), agent
     // and entity events included: one leak (a wall clock, an OS thread, an
     // unseeded draw) breaks this, which is the point.
     for seed in [3, 17, 5151] {

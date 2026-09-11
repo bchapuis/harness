@@ -24,15 +24,14 @@
 //!     --join --ask "world"
 //! ```
 //!
-//! The joiner prints that it is `joining`, then that it was `admitted … as Up`
-//! (the leader, node 1, admitted it on convergence, spec §9.3), then
-//! `Hello, world!`; obtained from the greeter in the other process over a
-//! TLS-encrypted TCP association. Drop `--join` to start as a founding member
-//! instead.
+//! The joiner prints `joining`, then `admitted … as Up` (node 1, the leader,
+//! admits it on convergence, spec §9.3), then `Hello, world!` from the greeter
+//! in the other process, over a TLS-encrypted TCP association. Drop `--join` to
+//! start as a founding member.
 
-// A production-runtime demo: it legitimately reads the wall clock for its own
-// run deadline (it is not part of the deterministic simulation build). The
-// workspace determinism lint (§18.1) is allowed here for that reason.
+// A production-runtime demo, outside the deterministic simulation build: it
+// reads the wall clock for its own run deadline, so the workspace determinism
+// lint (§18.1) is allowed here.
 #![allow(clippy::disallowed_methods)]
 
 use std::collections::BTreeMap;
@@ -231,9 +230,8 @@ async fn run(args: &[String]) {
 }
 
 /// Host a greeter, register it once, and stay alive serving requests until
-/// killed. A single registration is enough: the receptionist's anti-entropy
-/// (spec §13) pushes it to peers that join later or missed the initial
-/// broadcast, so no periodic re-registration is needed.
+/// killed. One registration is enough: the receptionist's anti-entropy (spec
+/// §13) pushes it to peers that join later or missed the initial broadcast.
 async fn serve(system: TcpCluster, greeting: String) -> ! {
     let greeter = system.spawn(Greeter::<TcpCluster>::new(greeting));
     system.receptionist().register(GREETERS, &greeter);

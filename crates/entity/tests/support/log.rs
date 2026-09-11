@@ -3,8 +3,8 @@
 //! Shared because two suites drive the same object and the same reconciliation
 //! rule: `subscription_faults.rs` scripts individual §14 fault cases against it,
 //! and `subscription_swarm.rs` sweeps it under the nemesis. An independently
-//! maintained second copy of a reconciler is exactly the thing that drifts into
-//! agreeing with whatever the code does (docs/simulation-testing.md).
+//! maintained second copy of a reconciler drifts into agreeing with whatever the
+//! code does (docs/simulation-testing.md).
 //!
 //! [`collect`] is the contract `agent::Follower` implements: subscribe,
 //! backfill the gap by `load`, take live batches, and re-check the journal when

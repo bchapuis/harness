@@ -2,15 +2,14 @@
 //! (docs/simulation-testing.md).
 //!
 //! One durable deadline, one callerless `on_alarm` that journals a `Fired` event
-//! and stops. Its whole job is to make a fire *countable*: `fired` is folded from
-//! committed events, so a caller asking [`ReadFired`] learns how many times the
-//! alarm's effect actually committed, not how many times the host invoked the
-//! handler, which under faults is a different and much larger number (§7.16).
+//! and stops. It makes a fire countable: `fired` is folded from committed events,
+//! so a caller asking [`ReadFired`] learns how many times the alarm's effect
+//! actually committed, not how many times the host invoked the handler, which
+//! under faults is a different and much larger number (§7.16).
 //!
 //! Generic over the hosting system, like [`entity::cluster::AlarmIndex`] itself, so the
 //! same entity runs on the `Local` tier in `alarm_index.rs` and on the clustered
-//! `Quorum` tier in `alarm_cluster.rs` and `alarm_loss.rs`. Before it moved here
-//! the first two carried byte-identical copies differing only in `type System`.
+//! `Quorum` tier in `alarm_cluster.rs` and `alarm_loss.rs`.
 
 use std::marker::PhantomData;
 use std::time::Duration;

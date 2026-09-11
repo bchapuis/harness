@@ -1,8 +1,8 @@
 //! Adversarial conformance tests for the `Clustered` tier (blob-store spec §8, §9).
 //!
 //! These probe the failure paths the happy-path cluster tests do not reach, and
-//! they assert the **spec-mandated** outcome rather than the current behaviour, so
-//! a gap surfaces as a failing test:
+//! they assert the **spec-mandated** outcome, so a gap surfaces as a failing
+//! test:
 //!
 //! - **B7 / §8 resurrection-by-rejoin.** The spec's §8 fault matrix explicitly
 //!   names "a merely `unreachable` node returning with its disk, whose tombstone
@@ -12,7 +12,7 @@
 //!   spec gives the tier to bound a blob ("an implementation SHOULD bound a blob's
 //!   size"). A `put` past the bound must be rejected, not silently accepted.
 //!
-//! The agent runtime mirrors `tests/clustered.rs` (SWIM gossip membership).
+//! The harness mirrors `tests/clustered.rs` (SWIM gossip membership).
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -131,9 +131,8 @@ fn a_rejoining_unaware_holder_does_not_resurrect_a_deleted_namespace() {
     net.heal();
     sim.run_for(Duration::from_secs(5)); // SWIM reconverges; reconcile runs on C
 
-    // C must now resolve the deleted namespace nowhere. Today it does not know the
-    // tombstone (no gossip/re-sync is wired), so it still serves its own copy: a
-    // B7 resurrection.
+    // C must now resolve the deleted namespace nowhere: the reconcile pass's
+    // anti-entropy pull hands it the tombstone it missed (spec §5.3).
     let got = drive(&sim, Duration::from_secs(5), {
         let (s, ns) = (store_of(C).unwrap(), ns.clone());
         async move { s.get(&ns, &id, None).await }
@@ -158,7 +157,7 @@ fn a_rejoining_unaware_holder_does_not_resurrect_a_deleted_namespace() {
 #[test]
 fn a_put_past_the_size_bound_is_refused() {
     // Spec §2/§5.2: max_blob_bytes is the tier's one size lever. A blob past the
-    // bound must be refused (today it is silently accepted, so the knob is inert).
+    // bound must be refused.
     let sim = Simulation::new(8);
     let (_net, stores, _dirs) = cluster(&sim);
     let store = stores[0].1.clone();

@@ -2,7 +2,7 @@
 //! §8): re-replication after a departure (**B6**) and tombstone reclamation
 //! (**B7** liveness).
 //!
-//! The agent runtime mirrors `tests/clustered.rs` (SWIM gossip membership), sized to
+//! The harness mirrors `tests/clustered.rs` (SWIM gossip membership), sized to
 //! whatever node set a test needs.
 
 use std::sync::Arc;
@@ -146,7 +146,7 @@ fn a_departed_owner_is_re_replicated() {
 fn rebalancing_never_deletes() {
     // B6 (additive): reconcile only restores copies, it never drops them. A blob
     // put on its owners stays present across many reconcile passes with no
-    // membership change, rebalancing is additive and tolerates over-replication.
+    // membership change.
     let sim = Simulation::new(2);
     let nodes = [A, B, C, D];
     let (_net, stores, _dirs) = cluster(&sim, &nodes);
@@ -198,11 +198,6 @@ fn a_delete_with_all_nodes_swept_releases_the_anchor() {
     .expect("delete acked");
     sim.run_for(Duration::from_secs(1)); // a reconcile pass runs reclamation
 
-    // The delete anchored cluster-wide (the awareness flag is set), and because all
-    // three serving nodes swept synchronously during the fan-out, the anchor's
-    // per-namespace sweep bookkeeping was reclaimable and the reconcile loop
-    // released it, bounding tombstone retention without a timer (B7 liveness). The
-    // tiny awareness flag is retained, so the namespace still resolves nowhere.
     assert!(
         anchor.tombstones().contains(&ns),
         "the namespace is tombstoned (the delete anchored and propagated)",
@@ -212,7 +207,6 @@ fn a_delete_with_all_nodes_swept_releases_the_anchor() {
         "reconcile released the anchor's sweep bookkeeping once every member swept",
     );
 
-    // The namespace still resolves nowhere from the anchor node.
     let got = drive(&sim, Duration::from_secs(5), {
         let (s, ns) = (anchor.clone(), ns.clone());
         async move { s.get(&ns, &BlobId::of(b"x"), None).await }

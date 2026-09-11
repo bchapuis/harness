@@ -4,11 +4,11 @@
 //! Covers the mechanisms that compose it: the [`AlarmIndex`] entity's
 //! register/clear/query behaviour, a host **registering** its pending deadline in
 //! the index as it arms (`entities_with_alarms`), the per-type **driver**
-//! re-activating an indexed entity that is no longer resident (the reactivation a
-//! new leader performs after a failover, exercised here on the `Local` tier by
-//! letting an entity hibernate and driving the sweep), and **alarm hibernation**:
-//! an alarmed entity hibernates once (and only once) the index has acknowledged
-//! its deadline, the driver waking it when the alarm falls due.
+//! re-activating an indexed entity that is no longer resident (what a new leader
+//! does after a failover, exercised here on the `Local` tier by letting an entity
+//! hibernate and driving the sweep), and **alarm hibernation**: an alarmed entity
+//! hibernates only once the index has acknowledged its deadline, and the driver
+//! wakes it when the alarm falls due.
 
 mod support;
 
@@ -94,7 +94,7 @@ impl EntityHandler<Touch> for Poke {
 
 /// Ask an entity off the main thread and drain the short chain of ready work, so a
 /// query completes without running the whole sim to quiescence (which a pending
-/// alarm's hibernation veto would forbid). Returns the reply.
+/// alarm's hibernation veto would forbid).
 fn ask<G, M>(sim: &Simulation, g: entity::EntityRef<G>, msg: M) -> M::Reply
 where
     G: Entity<System = SimSystem> + EntityHandler<M>,
@@ -277,11 +277,11 @@ fn driver_reactivates_an_indexed_entity() {
 
 #[test]
 fn acked_registration_lets_an_alarmed_entity_hibernate_and_the_driver_fires_it() {
-    // The alarm-hibernation half of §7.16: once the index has ACKED the deadline
-    // (the registration ask returned from the index entity's commit), the standing
-    // alarm no longer pins the entity resident. The entity hibernates well before
-    // its deadline; the driver's sweep re-activates it when the alarm falls due,
-    // and its own re-armed timer fires it, no caller at any point.
+    // The alarm-hibernation half of §7.16: once the index acks the deadline (the
+    // registration ask returns from its commit), the standing alarm no longer pins
+    // the entity resident. It hibernates well before the deadline; the driver's
+    // sweep re-activates it when the alarm falls due, and its re-armed timer fires
+    // it with no caller present.
     let sim = Simulation::new(4);
     let recorder = Recorder::new();
     let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());
@@ -330,11 +330,11 @@ fn acked_registration_lets_an_alarmed_entity_hibernate_and_the_driver_fires_it()
 
 #[test]
 fn unacked_registration_keeps_an_alarmed_entity_resident() {
-    // The safety half: with the index's every commit refused, no registration ask
-    // can ever ack, so the host has no evidence the driver would wake the entity;
-    // the veto must hold and the entity stay resident (where its own timer covers
-    // the fire), however long it idles. The idle tick retries the registration;
-    // each retry fails the same way, and none of that reaches the command path.
+    // The safety half: with every index commit refused, no registration can ack, so
+    // the host has no evidence the driver would wake the entity; the veto must hold
+    // and the entity stay resident, where its own timer covers the fire, however
+    // long it idles. The idle tick retries the registration, each retry fails the
+    // same way, and none of it reaches the command path.
     let sim = Simulation::new(5);
     let recorder = Recorder::new();
     let sink: Arc<dyn EventSink> = Arc::new(recorder.clone());

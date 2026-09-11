@@ -528,8 +528,7 @@ fn overlay_delete_shadows_the_committed_map_in_command() {
             .await
             .expect("set");
         // Delete stages; the read after commit sees it gone, and `keys` through
-        // the overlay agreed within the deleting command (exercised implicitly
-        // by the staged-op path).
+        // the overlay agrees within the deleting command.
         entity.ask(DelKey("a".into())).await.expect("del");
         assert_eq!(entity.ask(GetKey("a".into())).await.expect("get"), None);
         assert_eq!(

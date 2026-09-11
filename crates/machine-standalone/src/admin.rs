@@ -7,9 +7,8 @@
 //! command. A member that short never survives long enough for the failure
 //! detector to probe it alive, so after the first invocation its id sits
 //! unreachable, gossip stops flowing to it, and the next process to claim the
-//! id discovers no hosts at all. Nothing there is a bug to fix: a detector
-//! that believes an absent member is absent is correct. The mismatch is the
-//! shape, so the CLI stops being a member.
+//! id discovers no hosts at all. A detector that believes an absent member is
+//! absent is correct: the mismatch is the shape.
 //!
 //! Instead each node offers a loopback admin socket, and the node (already a
 //! member, already routing) issues the entity command. One JSON request per

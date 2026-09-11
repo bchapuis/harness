@@ -6,17 +6,13 @@
 //!
 //! It exists because the spec's "Verified by" column is prose, and prose rots
 //! silently: a renamed or deleted suite leaves the column pointing at nothing, and
-//! nothing fails. That is exactly how the blob-store spec came to cite seven test
-//! names that no longer existed. Recording the pointers here instead makes the
-//! column mechanically true: a rename that misses this table fails the build.
+//! nothing fails. That is how the blob-store spec came to cite seven test names
+//! that no longer existed. Recording the pointers here makes the column
+//! mechanically true: a rename that misses this table fails the build.
 //!
 //! `SimTest` pointers name files under this crate's `tests/` directory;
 //! `CompileFail` names a path relative to `crates/`, as the core catalogue does.
-//! No entry claims a `Verify::Checker`: entity ships continuous checkers in
-//! `entity::testing`, but they are constructed per-suite with the label that suite
-//! reports under (`machine-commit-monotonic`, `disk-entity-commit-monotonic`, …),
-//! so there is no fixed global name for this table to cross-check against, the way
-//! `default_invariants()` gives the core one.
+//! No entry claims a `Verify::Checker`; `conformance_catalogue.rs` says why.
 
 #![allow(dead_code)]
 

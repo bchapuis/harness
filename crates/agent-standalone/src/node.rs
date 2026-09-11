@@ -393,8 +393,7 @@ fn kinds(opts: &NodeOptions, sandbox_mode: &SandboxMode, entity_store: EntitySto
                     .tool(agent_sandbox::run_js_tool())
                     .sandbox(agent::SandboxProfile::image(rootfs)),
             ),
-            // No guest shell or compute: the typed file tools alone, over the
-            // workspace facet's directory (entity §7.11).
+            // No guest shell or compute: the typed file tools alone.
             SandboxMode::Durable => with_file_tools(kind),
         }
     };

@@ -10,10 +10,9 @@
 //!
 //! So every clustered suite in the tree runs the same tightened numbers. They were
 //! written out once per suite (forty-odd copies of two struct literals) until one
-//! of them silently lost its `heartbeat_interval` and nothing noticed, which is the
-//! failure mode of a constant kept in forty places. They live here now, beside the
-//! seams they configure, so tuning them is one edit and a suite that needs its own
-//! numbers says so by not calling these.
+//! of them silently lost its `heartbeat_interval` and nothing noticed. They live
+//! here now, beside the seams they configure, so tuning them is one edit and a
+//! suite that needs its own numbers says so by not calling these.
 //!
 //! These are the *floor*, not a guarantee: a debug build is slow enough that a
 //! cluster under load still flaps if a suite pushes the timings lower.

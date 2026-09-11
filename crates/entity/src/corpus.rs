@@ -21,8 +21,7 @@
 //!
 //! The tests deliberately do **not** assert that this build re-encodes a fixture
 //! byte-for-byte. Under **V4** a build reads revisions it no longer writes, so
-//! byte equality would fail on exactly the upgrade the policy prescribes. Decoding
-//! old bytes to the right *value* is the property; reproducing them is not.
+//! byte equality would fail on exactly the upgrade the policy prescribes.
 
 use std::path::Path;
 use std::path::PathBuf;

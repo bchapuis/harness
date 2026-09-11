@@ -151,8 +151,8 @@ fn every_named_test_exists() {
 ///
 /// Only `crash_points.rs` is held to this. `src/lib.rs` legitimately carries tests
 /// that pin no numbered invariant (the frozen sidecar digest, the header
-/// re-stamping rule, the `max_record`/magic aliasing assert), and requiring a
-/// W-number for each would push those numbers into the spec to satisfy a test,
+/// re-stamping rule, the `max_record`/magic aliasing assert), and requiring an
+/// L-number for each would push those numbers into the spec to satisfy a test,
 /// which is backwards. The crash-point suite has no such cases: it exists solely
 /// to decide L1 and L2.
 #[test]

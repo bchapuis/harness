@@ -1,16 +1,15 @@
 //! Facet 0's state through the blob area (entity §7.12).
 //!
 //! A composite snapshot used to carry the entity's whole encoded `State` inline, so
-//! a snapshot cost what the entity had *accumulated*, on the `Quorum` tier, that
-//! whole payload broadcast to every replica each time the threshold came round
+//! a snapshot cost what the entity had accumulated, and on the `Quorum` tier that
+//! whole payload went to every replica each time the threshold came round
 //! (`docs/hardware-envelope.md` §3.9). Past a threshold the state now goes through
 //! the same content-addressed chunking the checkpointing facets use, and the record
 //! carries a manifest of ids.
 //!
-//! These tests assert the three things that has to be true for that to be a win
-//! rather than a rearrangement: the round trip is lossless, the snapshot *record*
-//! stops growing with the state, and a snapshot after a small append stores only
-//! the chunks the append touched.
+//! These tests assert what makes that a win rather than a rearrangement: the round
+//! trip is lossless, the snapshot *record* stops growing with the state, and a
+//! snapshot after a small append stores only the chunks the append touched.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,8 +118,8 @@ impl EntityHandler<Len> for Transcript {
 /// `bytes` of deterministic, high-entropy filler, distinct for each `nth`.
 ///
 /// Entropy matters: the rolling hash finds boundaries in varied content, and a run
-/// of one repeated byte would cut only at the maximum chunk size, which is the
-/// degenerate case rather than the one under test.
+/// of one repeated byte would cut only at the maximum chunk size, the degenerate
+/// case rather than the one under test.
 fn filler(nth: usize, bytes: usize) -> String {
     let mut out = String::with_capacity(bytes);
     let mut z = (nth as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
@@ -227,8 +226,8 @@ fn a_large_state_survives_the_blob_round_trip() {
 
 #[test]
 fn a_small_state_stays_inline_and_touches_no_blob() {
-    // Under the threshold the old carriage is still the right one: no chunk puts,
-    // no roots to keep, no blobs to fetch on the way back.
+    // Under the threshold the state still rides inline: no chunk puts, no roots
+    // to keep, no blobs to fetch on the way back.
     let f = fixture(4);
     for nth in 0..8 {
         f.append("t/1", nth, 512);
@@ -247,10 +246,10 @@ fn a_small_state_stays_inline_and_touches_no_blob() {
 
 #[test]
 fn the_snapshot_record_stops_growing_with_the_state() {
-    // The property the change exists for. The record is what a `Quorum` snapshot
-    // broadcasts to every replica, so its size is the per-snapshot wire cost. Once
-    // the state is chunked, the record holds a manifest: it grows with the *number
-    // of chunks*, at 32 bytes an id, not with the state.
+    // The record is what a `Quorum` snapshot broadcasts to every replica, so its
+    // size is the per-snapshot wire cost. Once the state is chunked, the record
+    // holds a manifest: it grows with the *number of chunks*, at 32 bytes an id,
+    // not with the state.
     let f = fixture(4);
     for nth in 0..64 {
         f.append("t/2", nth, 32 * 1024);
@@ -272,10 +271,10 @@ fn the_snapshot_record_stops_growing_with_the_state() {
 
 #[test]
 fn a_small_append_stores_only_the_chunks_it_disturbed() {
-    // The bandwidth claim, measured where it lands: a snapshot after one more entry
-    // must add a couple of blobs, not re-store the whole transcript. Content-defined
-    // boundaries are what make this true: cut at fixed offsets, the length prefix
-    // ahead of the appended entry would shift every chunk after it.
+    // A snapshot after one more entry must add a couple of blobs, not re-store the
+    // whole transcript. Content-defined boundaries make this true: cut at fixed
+    // offsets, the length prefix ahead of the appended entry would shift every
+    // chunk after it.
     let f = fixture(1);
     for nth in 0..48 {
         f.append("t/3", nth, 32 * 1024);

@@ -1,7 +1,6 @@
 //! The Appendix A `Greeter`, run locally on a `LocalSystem` under the
-//! deterministic simulator. Mirrors the spec's end-to-end example minus the
-//! cluster: the call site `greeter.ask(Greet { .. })` is identical to what it
-//! will be for a remote target.
+//! deterministic simulator: the spec's end-to-end example minus the cluster. The
+//! call site `greeter.ask(Greet { .. })` is the same one a remote target takes.
 //!
 //! Run with: `cargo run --example greeter -p actor-simulation`
 
@@ -30,7 +29,7 @@ impl Actor for Greeter {
         actor_simulation::SimSpawner,
     >;
 
-    // --- List the messages Greeter accepts over the network (macro-free) ---
+    // --- List the messages Greeter accepts over the network ---
     fn register(r: &mut HandlerRegistry<Self>) {
         r.accept::<Greet>();
     }

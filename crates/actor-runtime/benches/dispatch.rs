@@ -3,8 +3,8 @@
 //! The agent loop is built from actor sends (a run step journals, dispatches tools, and
 //! collects outcomes by telling and asking), so the per-message floor here is the floor
 //! under everything above it. The benchmark lives in this crate rather than in
-//! `actor-core` because the numbers only mean something through the production runtime
-//! seam: `TokioClock`, `OsEntropy`, `TokioSpawner`. Those are what a deployed node runs.
+//! `actor-core` because the numbers only mean something through the seam a deployed node
+//! runs: `TokioClock`, `OsEntropy`, `TokioSpawner`.
 //!
 //! Three costs are separated:
 //!
@@ -14,9 +14,9 @@
 //!   lookup walks a map keyed by actor id.
 //! - `spawn` covers actor creation, which the agent runtime pays per delegation.
 //!
-//! Allocation counts are reported beside the timings and are the steadier number of the
-//! two: a send is short enough that scheduler noise moves the median more than a removed
-//! allocation does, but the allocation count does not move at all unless the code did.
+//! Allocation counts are reported beside the timings and are the steadier of the two: a
+//! send is short enough that scheduler noise moves the median more than a removed
+//! allocation does, while the allocation count moves only when the code does.
 
 use std::hint::black_box;
 
@@ -88,8 +88,8 @@ impl Handler<Read> for Counter {
 type Sys = LocalSystem<TokioClock, OsEntropy, TokioSpawner>;
 
 /// A system on a current-thread runtime. Single-threaded on purpose: it keeps the
-/// measurement to the send path rather than to how a work-stealing scheduler happened to
-/// place two tasks, which on a benchmark this short is most of the variance.
+/// measurement to the send path rather than to where a work-stealing scheduler placed two
+/// tasks, which on a benchmark this short is most of the variance.
 fn system(runtime: &tokio::runtime::Runtime) -> Sys {
     let _guard = runtime.enter();
     LocalSystemBuilder::new(
@@ -111,10 +111,9 @@ fn runtime() -> tokio::runtime::Runtime {
 /// Run every already-spawned task up to its first await.
 ///
 /// `spawn` only queues the actor's task; on a current-thread runtime it does not start
-/// until something drives the runtime. Without this, a benchmark that spawns during
-/// setup pays for those startups inside its first measured iteration, at ten thousand
-/// actors that showed up as a single sample eighty thousand allocations heavier than its
-/// neighbours. Settling first is what makes the measurement steady-state.
+/// until something drives the runtime. Without this, a benchmark that spawns during setup
+/// pays for those startups inside its first measured iteration: at ten thousand actors,
+/// one sample came out eighty thousand allocations heavier than its neighbours.
 fn settle(rt: &tokio::runtime::Runtime, actor: &ActorRef<Counter>) {
     rt.block_on(async { actor.ask(Read).await })
         .expect("the target actor is alive");
@@ -123,11 +122,11 @@ fn settle(rt: &tokio::runtime::Runtime, actor: &ActorRef<Counter>) {
 /// How many messages one `tell` iteration sends.
 ///
 /// A `tell` returns once the message is queued, so a single one measures the sender's
-/// half and leaves the handler to run whenever the executor next gets the thread, which
-/// is what made a one-message loop swing between two and eight allocations depending on
-/// where the mailbox's bounded queue happened to be. Sending a batch and then draining it
-/// with one `ask` puts the whole cost, both halves, inside the iteration. The batch stays
-/// under the default mailbox capacity of 64 so the send never blocks on a full queue.
+/// half and leaves the handler to run whenever the executor next gets the thread: a
+/// one-message loop swung between two and eight allocations depending on where the
+/// mailbox's bounded queue stood. Sending a batch and draining it with one `ask` puts
+/// both halves inside the iteration. The batch stays under the default mailbox capacity
+/// of 64 so the send never blocks on a full queue.
 const BATCH: usize = 32;
 
 /// The full per-message cost: enqueue, dispatch, and handler, amortized over a batch.
@@ -167,18 +166,18 @@ fn ask(bencher: Bencher) {
 
 /// The same round trip as `ask`, swept over how many actors share the node.
 ///
-/// Named for what it is measuring *across* the sweep, not for an isolated operation: the
-/// body is `ask`'s, and the question is whether the number moves as the host's registry
-/// fills. Every send looks its target up in a map keyed by actor id, so a rising line
-/// would mean that lookup is worth attacking and a flat one means it is not. The absolute
-/// value at any single point is just `ask`.
+/// Named for what the sweep measures, not for an isolated operation: the body is `ask`'s,
+/// and the question is whether the number moves as the host's registry fills. Every send
+/// looks its target up in a map keyed by actor id, so a rising line means that lookup is
+/// worth attacking and a flat one means it is not. The value at any single point is just
+/// `ask`.
 #[divan::bench(args = [100, 10_000])]
 fn resolve(bencher: Bencher, live: usize) {
     let rt = runtime();
     let sys = system(&rt);
-    // Fill the registry, then measure against one target among them. The other actors are
-    // held to the end of the benchmark, dropping an `ActorRef` does not retire the actor,
-    // but letting the vector fall out of scope early would still be misleading to read.
+    // Fill the registry, then measure against one target among them. The other refs are
+    // held to the end: dropping an `ActorRef` does not retire the actor, but a vector
+    // falling out of scope early would read as if it did.
     let others: Vec<ActorRef<Counter>> = (0..live.saturating_sub(1))
         .map(|_| sys.spawn(Counter { count: 0 }))
         .collect();
@@ -191,15 +190,14 @@ fn resolve(bencher: Bencher, live: usize) {
 }
 
 /// Actor creation: id assignment, the mailbox channel, the registry insert, and the task
-/// launch. The agent runtime pays this per delegation, so it is on the loop's path, not only at
-/// startup.
+/// launch. The agent runtime pays this per delegation, so it is on the loop's path, not
+/// only at startup.
 ///
 /// Each iteration gets a fresh system, built in `with_inputs` so its construction is
-/// outside the measurement. Spawning into one shared system instead would insert into a
-/// registry that grows for the whole run and is never swept: the id map's lookup cost
-/// climbs with it, so the benchmark would measure a moving target and retain a mailbox
-/// and a queued task per iteration. That growth is `resolve`'s subject, deliberately, and
-/// does not belong in this one.
+/// outside the measurement. Spawning into one shared system would insert into a registry
+/// that grows for the whole run and is never swept: the id map's lookup cost climbs with
+/// it, so the benchmark would measure a moving target and retain a mailbox and a queued
+/// task per iteration. That growth is `resolve`'s subject.
 #[divan::bench]
 fn spawn(bencher: Bencher) {
     let rt = runtime();

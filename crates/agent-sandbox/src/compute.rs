@@ -174,8 +174,7 @@ impl ComputeTier {
         stats: TierStats,
     ) -> Result<ComputeTier, ToolError> {
         let mut config = Config::new();
-        // The deterministic CPU bound (§3.2). No epoch interruption: fuel is
-        // the bound, and it reproduces under the simulator.
+        // The deterministic CPU bound (§3.2).
         config.consume_fuel(true);
         config.cranelift_nan_canonicalization(true);
         config.relaxed_simd_deterministic(true);

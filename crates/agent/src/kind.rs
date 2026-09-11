@@ -142,9 +142,8 @@ impl Kind {
     /// config.
     ///
     /// The canonical form is length-prefixed (netstring-style) with a count
-    /// before each variable-length list, so no concatenation of two distinct
-    /// definitions can collide, which bare juxtaposition cannot promise
-    /// ("fo"+"obar" reads as "foo"+"bar").
+    /// before each variable-length list, so no two distinct definitions collide
+    /// the way bare juxtaposition allows ("fo"+"obar" reads as "foo"+"bar").
     pub fn digest(&self) -> u64 {
         let mut canon = String::new();
         let mut frame = |field: &str| crate::session::frame_field(&mut canon, field);

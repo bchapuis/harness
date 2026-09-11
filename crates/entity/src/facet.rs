@@ -242,10 +242,9 @@ struct SnapshotParts {
 ///
 /// **Critical.** A reader that skipped it would find [`SnapshotParts::state`]
 /// empty and rebuild the entity with a default `State`: a silent, total misread of
-/// an entity's history, which is precisely the case the criticality bit exists for
-/// (compatibility spec §2.1). It is an extension rather than a revision because it
-/// reinterprets no byte already defined: a snapshot without the entry means what it
-/// has always meant.
+/// an entity's history, the case the criticality bit exists for (compatibility spec
+/// §2.1). It is an extension rather than a revision because it reinterprets no byte
+/// already defined: a snapshot without the entry means what it has always meant.
 const EXT_STATE_CHUNKS: u16 = compat::Extensions::CRITICAL | 0x0001;
 
 /// The critical extension keys this build implements.
@@ -282,11 +281,10 @@ pub(crate) struct StateManifest {
 /// Below this many bytes facet 0's state stays inline.
 ///
 /// The chunked form trades bytes for round trips: the chunk puts are one quorum
-/// round of their own, ahead of the snapshot record's. That is the right trade only
-/// when the bytes are worth a round trip. Under 64 KiB they are not: a state that
-/// size costs about half a millisecond of a 125 MB/s uplink even re-sent whole
-/// (hw §3.3), and staying inline also keeps a small entity's snapshot free of blobs
-/// to root, fetch, and sweep.
+/// round of their own, ahead of the snapshot record's. Under 64 KiB the bytes are
+/// not worth that round trip: a state that size costs about half a millisecond of a
+/// 125 MB/s uplink even re-sent whole (hw §3.3), and staying inline also keeps a
+/// small entity's snapshot free of blobs to root, fetch, and sweep.
 const SNAPSHOT_INLINE_MAX: usize = 64 * 1024;
 
 impl StatePayload {
@@ -472,9 +470,9 @@ pub(crate) mod sealed {
 }
 
 /// One durable storage feature of an entity (spec §7.12). **Sealed**: the built-in
-/// facets; the KV map (§7.13), the workspace filesystem (§7.11), the SQL
-/// database (§7.14), the disk image (§7.15); are the only implementations;
-/// third-party facets are a deferred policy decision (§16).
+/// facets are the only implementations (the KV map §7.13, the workspace filesystem
+/// §7.11, the SQL database §7.14, the disk image §7.15); third-party facets are a
+/// deferred policy decision (§16).
 ///
 /// The obligations are the facet contract (§7.12): [`fold`](Facet::fold) is
 /// deterministic (**F1**), [`restore`](Facet::restore)-then-replay equals the full
@@ -1058,7 +1056,7 @@ impl<FS: FacetSet> FacetCell<FS> {
     /// Run `write` against `F`'s committed form and its armed stage together (a
     /// facet whose stage derives from the form, e.g. a scratch overlay cloned on
     /// first write). Panics outside a command handler, exactly as
-    /// [`with_stage`](FacetCell::with_stage), staging is command-scoped (§4.2).
+    /// [`with_stage`](FacetCell::with_stage) does: staging is command-scoped (§4.2).
     pub(crate) fn with_form_and_stage<F, I, R>(
         &self,
         write: impl FnOnce(&F::Form, &mut F::Stage) -> R,

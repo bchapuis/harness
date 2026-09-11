@@ -2,10 +2,9 @@
 //!
 //! A shard's placement is a small Raft group of its *R* replicas (the
 //! **leader-election group**) that elects one leader per term and records the
-//! replica set. It holds **no entity data** (§7.1): entity never proposes an entity's
-//! records to it. Its only role is to answer "who may write this shard's entities, and
-//! under which term," and that term is the single-writer fencing token every
-//! per-entity append carries (§8).
+//! replica set. It holds **no entity data** (§7.1). Its only role is to answer "who
+//! may write this shard's entities, and under which term," and that term is the
+//! single-writer fencing token every per-entity append carries (§8).
 //!
 //! [`LeaderElection`] is the thin wrapper the journal sees over that group, built on
 //! the same `actor-cluster` Raft the control plane uses (actor §9.4.3). The group is

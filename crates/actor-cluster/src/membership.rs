@@ -254,10 +254,8 @@ impl MembershipCommand {
     /// moment there is a fleet to roll.
     ///
     /// What that does **not** change is [`admit`](MembershipCommand::admit)'s
-    /// adoption of the unstamped predecessor. That obligation is **V5**'s and it is
-    /// about bytes at rest, not about release cadence: transitions committed by any
-    /// earlier build of this tree are still in the control group's log on disk, and
-    /// a build that refused them would refuse its own history on the next replay.
+    /// adoption of the unstamped predecessor: **V5**'s obligation, about bytes at
+    /// rest rather than release cadence.
     pub fn encode(self) -> Vec<u8> {
         MEMBERSHIP.stamp(&self.body())
     }
@@ -341,19 +339,16 @@ impl MembershipCommand {
 ///
 /// `ACMEMB` cannot be confused with the unstamped predecessor, whose first byte is
 /// a transition tag in `0..=4`. `A` is `0x41`, so the confusion the magic has to
-/// rule out is ruled out by construction rather than by arithmetic: the same
-/// easier half of the job that `entity.shardmap`'s `GRSMAP` gets from JSON's
-/// leading `{`, and that `wal`'s header has to do the hard way.
+/// rule out is ruled out by construction rather than by arithmetic.
 ///
 /// **The nine bytes are the argument against, and they lose.** A magic and a
-/// revision more than double the payload, which is the widest relative cost of any
-/// stamp in the tree. In absolute terms it is eight bytes on a record written once
-/// per join, drain, resume, leave, or downing (a few thousand over a cluster's
-/// life) against a refusal an operator can act on at the one boundary whose
-/// misread costs a member set. And a stamp is not a thing that can wait for the
-/// revision that needs it: it goes on bytes that outlive the build that wrote them,
-/// so a transition committed today is one a later build reads, and the stamp has to
-/// already be there.
+/// revision more than double the payload, the widest relative cost of any stamp in
+/// the tree. In absolute terms it is eight bytes on a record written once per join,
+/// drain, resume, leave, or downing (a few thousand over a cluster's life) against
+/// a refusal an operator can act on at the one boundary whose misread costs a
+/// member set. And a stamp cannot wait for the revision that needs it: it goes on
+/// bytes that outlive the build that wrote them, so a transition committed today is
+/// one a later build reads.
 pub(crate) const MEMBERSHIP: compat::Stamp =
     compat::Stamp::new(b"ACMEMB", compat::Window::at("actor.membership", 1));
 
@@ -549,13 +544,12 @@ impl Membership {
     /// while healthy: the operator-facing half of [`stop_applying`](
     /// Membership::stop_applying), for a deployment's health probe.
     ///
-    /// A node in this state is **still a member and still gossiping**, and that is
-    /// deliberate: gossip carries each member's status with the deciding commit
-    /// index as its stamp, so a peer that applied the entry can still deliver the
-    /// *outcome* here (`merge_peer`), even though the log no longer can. What it
-    /// cannot deliver is a transition this build has no concept of (the case that
-    /// made the node stop in the first place), so this is a node to replace, not
-    /// one that heals.
+    /// A node in this state is **still a member and still gossiping**: gossip
+    /// carries each member's status with the deciding commit index as its stamp,
+    /// so a peer that applied the entry can still deliver the *outcome* here
+    /// (`merge_peer`), even though the log no longer can. What it cannot deliver
+    /// is a transition this build has no concept of (the case that made the node
+    /// stop in the first place), so this is a node to replace, not one that heals.
     pub fn failure(&self) -> Option<String> {
         self.stopped.lock().expect("stopped mutex poisoned").clone()
     }
@@ -1496,8 +1490,7 @@ mod tests {
         // A node that stopped applying the log can still be *told* what the log
         // decided, because every transition it knows also travels in gossip
         // stamped with the commit index that decided it. This is what bounds the
-        // damage of stopping, and pinning it here is what keeps that claim from
-        // being prose alone.
+        // damage of stopping.
         let membership = roster();
         membership.stop_applying("stopped at entry 9".into());
 

@@ -3,19 +3,17 @@
 //! shared adapter shell that drives a protocol through the bounded retry
 //! engine.
 //!
-//! An adapter crate owns its **protocol**, the [`Protocol`] four: path,
-//! headers, the wire JSON, and the `classify` taxonomy mapping a response
-//! onto [`ModelError`], and nothing else. The plumbing that is not protocol
-//! lives here, once: a deployment implements [`HttpPost`] over its HTTP stack
-//! of choice (hyper, reqwest, raw rustls) and the same value serves every
-//! adapter; [`ProtocolModel`] holds the socket, the key, the seams, and the
-//! retry policy for all of them. Backoff and jitter draw from the injected
-//! [`Clock`] and [`Entropy`] (§4.2 rule 1), never the wall clock or an OS
-//! RNG, so a simulated run reproduces the schedule. A completion request is
-//! side-effect-free, so these internal retries do not violate the core
-//! no-transparent-retry rule (core spec §1.2, §4.3); a failure that survives
-//! the policy surfaces as [`ModelError`] for the run to end on, never
-//! silently.
+//! An adapter crate owns its **protocol** ([`Protocol`]) and nothing else. The
+//! plumbing that is not protocol lives here, once: a deployment implements
+//! [`HttpPost`] over its HTTP stack of choice (hyper, reqwest, raw rustls) and
+//! the same value serves every adapter; [`ProtocolModel`] holds the socket, the
+//! key, the seams, and the retry policy for all of them. Backoff and jitter
+//! draw from the injected [`Clock`] and [`Entropy`] (§4.2 rule 1), never the
+//! wall clock or an OS RNG, so a simulated run reproduces the schedule. A
+//! completion request is side-effect-free, so these internal retries do not
+//! violate the core no-transparent-retry rule (core spec §1.2, §4.3); a failure
+//! that survives the policy surfaces as [`ModelError`] for the run to end on,
+//! never silently.
 
 use std::marker::PhantomData;
 use std::sync::Arc;

@@ -5,8 +5,8 @@
 //! request and response JSON, the transcript encoding, and the error
 //! taxonomy (OpenAI's `context_length_exceeded` and friends). It is the
 //! sibling of `agent-anthropic`: same seam, a different wire protocol.
-//! Everything that is not protocol: the socket, the key, the
-//! `Clock`/`Entropy` seams, the bounded retry engine (§4.2 rule 1); is the
+//! Everything that is not protocol (the socket, the key, the
+//! `Clock`/`Entropy` seams, the bounded retry engine, §4.2 rule 1) is the
 //! shared [`ProtocolModel`] shell from `agent::http`, held there once for
 //! every sibling adapter.
 //!
@@ -52,9 +52,7 @@ pub mod base_url {
     pub const GROQ: &str = "https://api.groq.com/openai";
 }
 
-/// The Chat Completions protocol: the wire-specific four this crate owns. The
-/// shell around it (socket, key, seams, retry) is the shared
-/// [`ProtocolModel`].
+/// The Chat Completions protocol: the wire-specific four this crate owns.
 pub struct ChatCompletions;
 
 impl Protocol for ChatCompletions {

@@ -9,7 +9,7 @@ It talks to the gateway and nothing else. There is no cluster membership here, n
 actor transport, and no durable state: the gateway does the cluster work and this
 is the edge UI in front of it. That is the same boundary the VS Code extension in
 `clients/agent-vscode` sits on, over the same REST + Server-Sent-Events
-protocol, one client in the terminal, one in an editor.
+protocol.
 
 The one shared dependency is `agent` itself, for the record and outcome types
 the gateway serializes onto the wire. Sharing them keeps the client in lockstep
@@ -46,8 +46,7 @@ Two shapes of call live in `client.rs`. **Request-response** (`list_sessions`,
 `fetch_records`, `cancel`) sends, reads the whole reply, and parses the JSON, one
 connection per request. **Streaming** (`open_prompt`) submits a turn with
 `Accept: text/event-stream` and hands back an iterator yielding the run's records
-live off the chunked SSE body, which is what lets the transcript render as the
-agent works.
+live off the chunked SSE body, so the transcript renders as the agent works.
 
 The HTTP client is hand-rolled rather than `reqwest`, the same choice the
 standalone deployment's model seam makes, but it reads the response as a live
@@ -73,10 +72,10 @@ cargo run -p agent-tui
 | `--kind <k>` | `assistant` | Agent kind to address |
 | `--session <s>` | `demo` | Session to open on start |
 
-The defaults match the loopback demo, so the default `--token anonymous` simply
-acts as tenant "anonymous". Against an authenticated gateway, pass the opaque API
-token instead; it is the tenant identity, and the gateway is where auth
-terminates (`docs/multi-tenant-edge.md`).
+The defaults match the loopback demo, so `--token anonymous` acts as tenant
+"anonymous". Against an authenticated gateway, pass the opaque API token
+instead; it is the tenant identity, and the gateway is where auth terminates
+(`docs/multi-tenant-edge.md`).
 
 ## Caveats
 

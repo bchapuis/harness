@@ -203,8 +203,8 @@ pub struct Host<G: Entity> {
     /// composite snapshot plus tagged records on rehydration (**E3**).
     facets: Arc<FacetCell<G::Facets>>,
     /// The durable-alarm arm generation (spec §7.16). Bumped on every (re)arm so a
-    /// stale timer task's [`AlarmDue`] is ignored: a cancellation without a
-    /// channel. Ephemeral activation state, reset per activation (**E3**).
+    /// stale timer task's [`AlarmDue`] is ignored. Ephemeral activation state, reset
+    /// per activation (**E3**).
     alarm_epoch: u64,
     /// The per-shard alarm index this host registers its pending deadline with
     /// (spec §7.16), so a new leader can re-activate this entity after a failover.
@@ -357,12 +357,11 @@ impl<G: Entity> Host<G> {
             // The second case is defence in depth, not a live path: a head *is* the
             // best snapshot's seq plus the contiguous run above it (`ReadReply::head`
             // on `Local`, the recovery merge's base on `Quorum`), so `s_seq > head`
-            // cannot arise from either tier. It is also not a recovery: a compacted
-            // prefix exists only in the snapshot, so replaying from `ZERO` after
-            // discarding one yields a truncated state. It is simply the safe direction
-            // to fail in, and `entities.rs` pins that direction with a store double.
-            // Restore still runs: a physical facet materializes its empty form
-            // here (§7.14).
+            // cannot arise from either tier. Nor is it a recovery: a compacted prefix
+            // exists only in the snapshot, so replaying from `ZERO` after discarding
+            // one yields a truncated state. It is the safe direction to fail in, and
+            // `entities.rs` pins it with a store double. Restore still runs: a
+            // physical facet materializes its empty form here (§7.14).
             _ => {
                 self.state = G::State::default();
                 let forms = G::Facets::restore(&[], &self.facet_env(ctx))
@@ -450,8 +449,8 @@ impl<G: Entity> Host<G> {
             node,
             name: self.name.clone(),
         });
-        // What a cold access cost, and one more entity resident (§13). The pair with
-        // the `Deactivated` decrement below is what makes the gauge track the working
+        // What a cold access cost, and one more entity resident (§13); the
+        // `Deactivated` decrement is the pair that makes the gauge track the working
         // set hibernation is meant to bound (§10).
         self.metrics.rehydrated(
             self.entity_type,
@@ -594,8 +593,7 @@ impl<G: Entity> Host<G> {
 
         // The commit measurement (§13): the latency the caller actually waited and the
         // outcome it actually got, recorded on every arm below. Kept here rather than
-        // in the journal because this is the only place that sees both, and because a
-        // latency without its outcome averages a fast failure into the good samples.
+        // in the journal because this is the only place that sees both.
         let started = ctx.system().now();
         let appended = self.journal.append(&self.name, self.head, encoded).await;
         self.metrics.commit(
@@ -769,18 +767,16 @@ impl<G: Entity> Host<G> {
     /// watch, and the next message reactivates and rehydrates (invariant **E12**).
     ///
     /// The snapshot goes through the **same** threshold as the write path
-    /// ([`maybe_snapshot`](Host::maybe_snapshot)), not unconditionally. One policy
-    /// decides when a snapshot is worth taking, and the reason it must be a policy
-    /// rather than a reflex is what a snapshot costs on the `Quorum` tier: it goes
-    /// to every replica (§7.3), so an unconditional snapshot here would replicate
-    /// something for every entity that is written once and then left alone, every
-    /// idle window, billed R−1 times to the uplink (`docs/hardware-envelope.md`
-    /// §3.9, I2). Chunking facet 0's state (§7.12) makes that *something*
-    /// proportional to what changed rather than to the whole state, which lowers the
+    /// ([`maybe_snapshot`](Host::maybe_snapshot)), not unconditionally, because of
+    /// what a snapshot costs on the `Quorum` tier: it goes to every replica (§7.3),
+    /// so an unconditional one here would replicate something for every entity that
+    /// is written once and then left alone, every idle window, billed R−1 times to
+    /// the uplink (`docs/hardware-envelope.md` §3.9, I2). Chunking facet 0's state
+    /// (§7.12) makes that *something* proportional to what changed, which lowers the
     /// cost without removing it: an idle window still buys a round of puts and a
     /// record. Skipping it costs a longer replay on the next activation, and replay
-    /// reads come from the *local* store (§9), so that cost stays on the side of the
-    /// machine with capacity to spare (hw §3.1).
+    /// reads come from the *local* store (§9), where there is capacity to spare
+    /// (hw §3.1).
     async fn hibernate(&mut self, ctx: &Ctx<Host<G>>) {
         let ectx = self.entity_ctx(ctx);
         self.entity.on_deactivate(&ectx).await;
@@ -805,10 +801,9 @@ impl<G: Entity> Host<G> {
 
     /// Arm the durable-alarm timer (spec §7.16) from the folded [`Alarm`](crate::alarm::Alarm)
     /// form. Every call supersedes any prior timer: it bumps [`alarm_epoch`], so a
-    /// still-sleeping earlier timer's [`AlarmDue`] is ignored; a cancellation
-    /// without a channel, and the sole disarm when the form carries no deadline.
-    /// Called after every commit and at the end of rehydration, so the timer always
-    /// reflects the durable form (**E3**).
+    /// still-sleeping earlier timer's [`AlarmDue`] is ignored, and it is the sole
+    /// disarm when the form carries no deadline. Called after every commit and at the
+    /// end of rehydration, so the timer always reflects the durable form (**E3**).
     fn arm_alarm(&mut self, ctx: &Ctx<Host<G>>) {
         // Keep the per-shard index current before (re)arming the local timer (§7.16).
         self.sync_alarm_index(ctx);
@@ -938,8 +933,8 @@ impl<G: Entity> Handler<Subscribe<G>> for Host<G> {
             // alone would end only this task: the sink, spawned on the
             // subscriber's node, would keep the subscriber's stream open and
             // silent. So the close is told to the sink explicitly, and the
-            // subscriber observes its stream end, re-subscribes, and backfills
-            // (§7.9). A sink already gone dead-letters the close, which is fine.
+            // subscriber re-subscribes and backfills (§7.9). A sink already gone
+            // dead-letters the close, which is fine.
             while let Ok(batch) = rx.recv().await {
                 if sink.tell((*batch).clone()).await.is_err() {
                     return;

@@ -1,8 +1,7 @@
 //! Shared fixtures for entity's test binaries (docs/simulation-testing.md).
 //!
 //! A fixture lives here when more than one suite in this crate drives it, so a
-//! sweep covers the same entity its scenarios specify. Each fixture is its own
-//! module; `mod.rs` only wires them up.
+//! sweep covers the same entity its scenarios specify.
 //!
 //! - [`counter`]: the event-sourced `CounterEntity`, shared by `entities.rs`
 //!   (scenarios) and `entity_swarm.rs` (sweeps).
@@ -15,16 +14,15 @@
 //!   `subscription_swarm.rs` (the same object under the nemesis).
 //! - [`timer`]: the alarm-bearing `Timer`, generic over the hosting system, so
 //!   `alarm_index.rs` drives it on the `Local` tier and `alarm_cluster.rs` and
-//!   `alarm_loss.rs` drive the same entity on the clustered one.
+//!   `alarm_loss.rs` on the clustered one.
 //! - [`pipeline`]: the steps-facet `Pipeline`, likewise generic over the
-//!   system, shared by `steps.rs` (scenarios) and `steps_swarm.rs` (the
-//!   sweep). Its shape varies by `PipelineConfig` rather than by a second entity,
-//!   so the sweep asserts against the object the scenarios specify.
+//!   system, shared by `steps.rs` (scenarios) and `steps_swarm.rs` (the sweep).
+//!   Its shape varies by `PipelineConfig` rather than by a second entity.
 //!
 //! `counter` is re-exported flat; `ledger` is not. Both define an `Add`, so two
-//! globs would make the name ambiguous, and because `ledger` is feature-gated,
-//! that break only appeared once `--features sql` was on, which nothing in CI or
-//! `soak.yml` turns on. The `sql` suites name their module instead.
+//! globs would make the name ambiguous, and since `ledger` is feature-gated the
+//! break appeared only under `--features sql`, which neither CI nor `soak.yml`
+//! turns on. The `sql` suites name their module instead.
 
 // Every test binary compiles this module in full but uses only the fixtures it
 // drives, so unused items and re-exports here are the normal case, not a smell.

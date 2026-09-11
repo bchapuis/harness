@@ -18,8 +18,8 @@
 //!   over whichever mechanism the node's `machine_host::MachineHost` is; a
 //!   microVM or a container (machine §2.1, sandbox §3.5).
 //!
-//! The network seam: the SSH front door (machine §5.1, M4) and policy-bound
-//! egress (machine §5.2, M6); lives in its own crates; this one defines the
+//! The network seam, the SSH front door (machine §5.1, M4) and policy-bound
+//! egress (machine §5.2, M6), lives in its own crates; this one defines the
 //! journaled state both read (authorized keys, host key, egress policy,
 //! attachments).
 
